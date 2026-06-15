@@ -151,8 +151,12 @@ def test_write_desktop_provider_config_strips_metadata_secrets(
 
     metadata_path = tmp_path / "providers.json"
     runtime_path = tmp_path / "providers.runtime.json"
-    monkeypatch.setattr(providers, "desktop_provider_metadata_path", lambda: metadata_path)
-    monkeypatch.setattr(providers, "desktop_provider_runtime_file", lambda: runtime_path)
+    monkeypatch.setattr(
+        providers, "desktop_provider_metadata_path", lambda: metadata_path
+    )
+    monkeypatch.setattr(
+        providers, "desktop_provider_runtime_file", lambda: runtime_path
+    )
 
     providers._write_desktop_provider_config(
         [
@@ -189,8 +193,14 @@ async def test_manual_provider_probe_calls_responses_model(
 ) -> None:
     from app.routes import providers
 
+    captured: dict[str, Any] = {}
     client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
-    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    def fake_client(**kwargs: Any) -> _StubAsyncClient:
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", fake_client)
 
     ok, _latency, err = await providers._probe_one(
         "https://upstream.example", "sk-test"
@@ -203,6 +213,8 @@ async def test_manual_provider_probe_calls_responses_model(
     assert client.posts[0]["json"]["instructions"]
     assert "99 times 99" in client.posts[0]["json"]["input"][0]["content"][0]["text"]
     assert client.posts[0]["json"]["stream"] is False
+    assert captured["follow_redirects"] is False
+    assert captured["trust_env"] is False
 
 
 @pytest.mark.asyncio
@@ -468,9 +480,7 @@ async def test_manual_provider_probe_reports_upstream_error_message(
     )
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.ok is False
     assert outcome.error == "HTTP 400: model gpt-x is unavailable"
@@ -483,9 +493,9 @@ async def test_manual_provider_probe_extracts_sse_text(
     from app.routes import providers
 
     raw = (
-        'event: response.output_text.delta\n'
+        "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"9801"}\n\n'
-        'event: response.completed\n'
+        "event: response.completed\n"
         'data: {"type":"response.completed"}\n\n'
     )
     client = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
@@ -539,9 +549,7 @@ async def test_probe_outcome_404_signals_unsupported(
     client = _StubAsyncClient(_StubResponse(404, {"error": "not found"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.ok is False
     assert outcome.http_status == 404
@@ -557,9 +565,7 @@ async def test_probe_outcome_405_signals_unsupported(
     client = _StubAsyncClient(_StubResponse(405, {"error": "method not allowed"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.capability_signal == "unsupported"
 
@@ -574,9 +580,7 @@ async def test_probe_outcome_401_signals_auth_not_unsupported(
     client = _StubAsyncClient(_StubResponse(401, {"error": "unauthorized"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.capability_signal == "auth"
     assert outcome.http_status == 401
@@ -592,9 +596,7 @@ async def test_probe_outcome_500_signals_transient_not_unsupported(
     client = _StubAsyncClient(_StubResponse(503, {"error": "service unavailable"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.capability_signal == "transient"
 
@@ -608,9 +610,7 @@ async def test_probe_outcome_429_signals_transient(
     client = _StubAsyncClient(_StubResponse(429, {"error": "rate limited"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.capability_signal == "transient"
 
@@ -624,9 +624,7 @@ async def test_probe_outcome_200_correct_signals_supported(
     client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.ok is True
     assert outcome.capability_signal == "supported"
@@ -650,9 +648,7 @@ async def test_probe_outcome_timeout_signals_transient(
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: _TimeoutClient())
 
-    outcome = await providers._probe_one(
-        "https://upstream.example", "sk-test"
-    )
+    outcome = await providers._probe_one("https://upstream.example", "sk-test")
 
     assert outcome.capability_signal == "transient"
 

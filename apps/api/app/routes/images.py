@@ -14,9 +14,10 @@ import io
 import logging
 import os
 import secrets
+import shutil
 import stat
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, BinaryIO, Iterator
 
 from fastapi import (
@@ -97,6 +98,7 @@ MAX_IMAGE_PIXELS = 64_000_000
 PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/webp"}
 EXT_BY_MIME = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+MIN_STORAGE_FREE_BYTES = 512 * 1024 * 1024
 
 DISPLAY_VARIANT = "display2048"
 PREVIEW_VARIANT = "preview1024"
@@ -107,10 +109,14 @@ VARIANT_MEDIA_TYPE = {
     PREVIEW_VARIANT: "image/webp",
     THUMB_VARIANT: "image/jpeg",
 }
+VARIANT_LOCK_TTL_SECONDS = 60
+VARIANT_LOCK_WAIT_SECONDS = 5.0
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
+    return HTTPException(
+        status_code=http, detail={"error": {"code": code, "message": msg}}
+    )
 
 
 def _too_many_pixels() -> HTTPException:
@@ -261,6 +267,176 @@ def _fs_path(storage_key: str) -> Path:
     return p
 
 
+def _storage_usage_path(root: Path) -> Path:
+    current = root
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _minimum_storage_free_bytes() -> int:
+    raw = os.environ.get("LUMEN_MIN_STORAGE_FREE_BYTES", "").strip()
+    if not raw:
+        return MIN_STORAGE_FREE_BYTES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("invalid LUMEN_MIN_STORAGE_FREE_BYTES=%r; using default", raw)
+        return MIN_STORAGE_FREE_BYTES
+
+
+def _ensure_storage_free_space(incoming_bytes: int) -> None:
+    root = Path(settings.storage_root).resolve()
+    usage = shutil.disk_usage(_storage_usage_path(root))
+    required = max(0, incoming_bytes) + _minimum_storage_free_bytes()
+    if usage.free < required:
+        raise _http(
+            "storage_insufficient_space",
+            "not enough free storage to accept this upload",
+            507,
+        )
+
+
+def _variant_lock_key(image_id: str, kind: str) -> str:
+    return f"image_variant_lock:{image_id}:{kind}"
+
+
+async def _acquire_variant_generation_lock(
+    image_id: str,
+    kind: str,
+    *,
+    ttl_seconds: int = VARIANT_LOCK_TTL_SECONDS,
+) -> str | None:
+    token = secrets.token_urlsafe(24)
+    try:
+        ok = await get_redis().set(
+            _variant_lock_key(image_id, kind),
+            token,
+            nx=True,
+            ex=ttl_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("variant generation lock unavailable", exc_info=True)
+        return token
+    return token if ok else None
+
+
+async def _release_variant_generation_lock(
+    image_id: str,
+    kind: str,
+    token: str,
+) -> None:
+    script = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) else return 0 end"
+    )
+    try:
+        await get_redis().eval(script, 1, _variant_lock_key(image_id, kind), token)
+    except Exception:  # noqa: BLE001
+        logger.warning("variant generation lock release failed", exc_info=True)
+
+
+async def _wait_for_variant(
+    db: AsyncSession,
+    image_id: str,
+    kind: str,
+    *,
+    timeout_seconds: float = VARIANT_LOCK_WAIT_SECONDS,
+) -> ImageVariant | None:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.2)
+        variant = (
+            await db.execute(
+                select(ImageVariant).where(
+                    ImageVariant.image_id == image_id,
+                    ImageVariant.kind == kind,
+                )
+            )
+        ).scalar_one_or_none()
+        if variant is not None:
+            return variant
+    return None
+
+
+def _metadata_storage_keys(metadata: Any) -> Iterator[str]:
+    if not isinstance(metadata, dict):
+        return
+    normalized_ref = metadata.get("normalized_ref")
+    if isinstance(normalized_ref, dict):
+        storage_key = normalized_ref.get("storage_key")
+        if isinstance(storage_key, str) and storage_key:
+            yield storage_key
+
+
+def _is_image_file_storage_key(key: str) -> bool:
+    parts = PurePosixPath(key).parts
+    if len(parts) < 4 or parts[0] != "u" or not parts[1]:
+        return False
+    if parts[2] == "uploads":
+        return len(parts) == 4 and bool(parts[3])
+    if parts[2] == "g":
+        return len(parts) == 5 and bool(parts[3]) and bool(parts[4])
+    return False
+
+
+async def _known_storage_keys(db: AsyncSession) -> set[str]:
+    keys: set[str] = set()
+    image_rows = (
+        await db.execute(select(Image.storage_key, Image.metadata_jsonb))
+    ).all()
+    for row in image_rows:
+        storage_key = row[0]
+        metadata = row[1]
+        if isinstance(storage_key, str) and storage_key:
+            keys.add(storage_key)
+        keys.update(_metadata_storage_keys(metadata))
+    variant_keys = (await db.execute(select(ImageVariant.storage_key))).scalars().all()
+    keys.update(key for key in variant_keys if isinstance(key, str) and key)
+    return keys
+
+
+async def sweep_orphan_image_files(
+    db: AsyncSession,
+    *,
+    storage_root: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    root = Path(storage_root or settings.storage_root).resolve()
+    known_keys = await _known_storage_keys(db)
+    scanned = 0
+    deleted = 0
+    orphan_keys: list[str] = []
+    if not root.exists():
+        return {
+            "dry_run": dry_run,
+            "storage_root": str(root),
+            "scanned": 0,
+            "orphans": [],
+            "deleted": 0,
+        }
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        scanned += 1
+        rel = path.relative_to(root).as_posix()
+        if not _is_image_file_storage_key(rel):
+            continue
+        if rel in known_keys:
+            continue
+        orphan_keys.append(rel)
+        if not dry_run:
+            await asyncio.to_thread(path.unlink)
+            deleted += 1
+    return {
+        "dry_run": dry_run,
+        "storage_root": str(root),
+        "scanned": scanned,
+        "orphans": orphan_keys,
+        "deleted": deleted,
+    }
+
+
 def _image_url(image_id: str) -> str:
     # 相对路径：前端同源请求，反代 /api/* → 后端 /*。
     # 不拼 public_base_url：避免把 dev/prod host 焊进 API 响应，导致
@@ -303,11 +479,13 @@ async def _ensure_display_variant(
 ) -> ImageVariant:
     locked_img = (
         await db.execute(
-            select(Image).where(
+            select(Image)
+            .where(
                 Image.id == img.id,
                 Image.user_id == img.user_id,
                 Image.deleted_at.is_(None),
-            ).with_for_update()
+            )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if locked_img is None:
@@ -386,7 +564,9 @@ async def _ensure_display_variant(
         logger.error(
             "display variant DB flush failed (orphan file left at %s) "
             "image_id=%s key=%s",
-            dst_path, img.id, key,
+            dst_path,
+            img.id,
+            key,
         )
         raise
     return variant
@@ -394,10 +574,10 @@ async def _ensure_display_variant(
 
 async def _image_out(db: AsyncSession, img: Image) -> ImageOut:
     variants = (
-        await db.execute(
-            select(ImageVariant).where(ImageVariant.image_id == img.id)
-        )
-    ).scalars().all()
+        (await db.execute(select(ImageVariant).where(ImageVariant.image_id == img.id)))
+        .scalars()
+        .all()
+    )
     kinds = {v.kind for v in variants}
     return ImageOut(
         id=img.id,
@@ -413,7 +593,9 @@ async def _image_out(db: AsyncSession, img: Image) -> ImageOut:
         preview_url=(
             _variant_url(img.id, PREVIEW_VARIANT) if PREVIEW_VARIANT in kinds else None
         ),
-        thumb_url=_variant_url(img.id, THUMB_VARIANT) if THUMB_VARIANT in kinds else None,
+        thumb_url=_variant_url(img.id, THUMB_VARIANT)
+        if THUMB_VARIANT in kinds
+        else None,
         metadata_jsonb=img.metadata_jsonb or {},
     )
 
@@ -425,9 +607,7 @@ async def _check_upload_rate_limit(user_id: str) -> None:
 
 async def _check_public_image_lookup_rate_limit(request: Request) -> None:
     redis = get_redis()
-    await PUBLIC_IMAGE_LIMITER.check(
-        redis, f"rl:image-key:{client_ip(request)}"
-    )
+    await PUBLIC_IMAGE_LIMITER.check(redis, f"rl:image-key:{client_ip(request)}")
 
 
 async def _check_signed_image_rate_limit(request: Request) -> None:
@@ -493,7 +673,9 @@ def _unlink_file_if_exists(path: Path) -> None:
         path.unlink(missing_ok=True)
         _fsync_directory(path.parent)
     except OSError:
-        logger.warning("failed to remove orphan upload file path=%s", path, exc_info=True)
+        logger.warning(
+            "failed to remove orphan upload file path=%s", path, exc_info=True
+        )
 
 
 def _open_regular_file_no_symlink(path: Path) -> tuple[BinaryIO, int]:
@@ -507,7 +689,9 @@ def _open_regular_file_no_symlink(path: Path) -> tuple[BinaryIO, int]:
         if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
             raise _http("not_found", "binary missing", 404) from exc
         if exc.errno == errno.ELOOP:
-            raise _http("invalid_path", "symlink storage paths are not allowed", 400) from exc
+            raise _http(
+                "invalid_path", "symlink storage paths are not allowed", 400
+            ) from exc
         raise
     try:
         st = os.fstat(fd)
@@ -648,26 +832,36 @@ async def upload_image(
             break
         buf.extend(chunk)
         if len(buf) > MAX_BYTES:
-            raise _http("too_large", f"file exceeds {MAX_BYTES // (1024*1024)}MB", 413)
+            raise _http(
+                "too_large", f"file exceeds {MAX_BYTES // (1024 * 1024)}MB", 413
+            )
 
     if not buf:
         raise _http("empty_file", "empty file", 400)
 
     data = bytes(buf)
+    _ensure_storage_free_space(len(data))
     reference_size = (
         (reference_width, reference_height)
         if reference_width is not None and reference_height is not None
         else None
     )
-    data, mime, width, height, upload_metadata, normalized_ref, normalized_ref_meta = (
-        await asyncio.to_thread(
-            _prepare_upload_image,
-            data,
-            file.filename,
-            mask_requested=_upload_requests_mask_preflight(purpose, file.filename),
-            reference_size=reference_size,
-        )
+    (
+        data,
+        mime,
+        width,
+        height,
+        upload_metadata,
+        normalized_ref,
+        normalized_ref_meta,
+    ) = await asyncio.to_thread(
+        _prepare_upload_image,
+        data,
+        file.filename,
+        mask_requested=_upload_requests_mask_preflight(purpose, file.filename),
+        reference_size=reference_size,
     )
+    _ensure_storage_free_space(len(data) + len(normalized_ref))
     buf = bytearray(data)
 
     # hash
@@ -726,7 +920,9 @@ async def upload_image(
         await db.rollback()
         for written_path in reversed(written_paths):
             await asyncio.to_thread(_unlink_file_if_exists, written_path)
-        raise _http("storage_conflict", "image storage key already exists", 409) from exc
+        raise _http(
+            "storage_conflict", "image storage key already exists", 409
+        ) from exc
     except Exception:
         await db.rollback()
         for written_path in reversed(written_paths):
@@ -819,11 +1015,18 @@ async def get_image_variant(
     if not variant:
         if kind != DISPLAY_VARIANT:
             raise _http("not_found", "variant not found", 404)
+        lock_token = await _acquire_variant_generation_lock(img.id, kind)
+        if lock_token is None:
+            variant = await _wait_for_variant(db, img.id, kind)
         try:
-            variant = await _ensure_display_variant(db, img)
-            await db.commit()
+            if variant is None:
+                variant = await _ensure_display_variant(db, img)
+                await db.commit()
         except PILImage.DecompressionBombError as exc:
             raise _too_many_pixels() from exc
+        finally:
+            if lock_token is not None:
+                await _release_variant_generation_lock(img.id, kind, lock_token)
     path = _fs_path(variant.storage_key)
 
     media_type = VARIANT_MEDIA_TYPE[kind]
@@ -862,9 +1065,7 @@ async def get_image_signed(
     if variant not in SIGNED_ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
     await _check_signed_image_rate_limit(request)
-    if not verify_image_sig(
-        image_id, variant, exp, sig, secret_str.encode("utf-8")
-    ):
+    if not verify_image_sig(image_id, variant, exp, sig, secret_str.encode("utf-8")):
         # 不区分"签名错"和"过期"——攻击者无需区分，错误码统一收敛
         raise _http("forbidden", "invalid or expired image signature", 403)
 
@@ -888,14 +1089,16 @@ async def get_image_signed(
     now = datetime.now(timezone.utc)
     share_hit = (
         await db.execute(
-            select(Share.id).where(
+            select(Share.id)
+            .where(
                 or_(
                     Share.image_id == img.id,
                     Share.image_ids.contains([img.id]),
                 ),
                 Share.revoked_at.is_(None),
                 or_(Share.expires_at.is_(None), Share.expires_at > now),
-            ).limit(1)
+            )
+            .limit(1)
         )
     ).scalar_one_or_none()
     if not share_hit:

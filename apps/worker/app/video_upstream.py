@@ -576,7 +576,8 @@ async def _fetch_video_url_bytes(video_url: str) -> bytes:
             write=settings.upstream_write_timeout_s,
             pool=30.0,
         ),
-        follow_redirects=True,
+        follow_redirects=False,
+        trust_env=False,
     ) as client:
         async with client.stream("GET", video_url) as response:
             if response.status_code >= 400:
@@ -614,7 +615,9 @@ async def _fetch_video_url_bytes(video_url: str) -> bytes:
                     error_code="fetch_failed",
                     status_code=response.status_code,
                 )
-            _validate_video_response_bytes(data, response.headers.get("content-type", ""))
+            _validate_video_response_bytes(
+                data, response.headers.get("content-type", "")
+            )
             return data
 
 
@@ -803,7 +806,8 @@ class VolcanoSeedanceAdapter:
         kwargs: dict[str, Any] = {
             "base_url": self._client_base_url(),
             "timeout": timeout,
-            "follow_redirects": True,
+            "follow_redirects": False,
+            "trust_env": False,
             "headers": {"Authorization": f"Bearer {self.provider.api_key}"},
         }
         if proxy_url:
@@ -1043,7 +1047,9 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             fallback_mime=fallback_mime,
         )
 
-    def _reference_image_refs(self, req: VideoSubmitRequest) -> list[VideoReferenceMedia]:
+    def _reference_image_refs(
+        self, req: VideoSubmitRequest
+    ) -> list[VideoReferenceMedia]:
         image_refs = [item for item in req.reference_media if item.kind == "image"]
         if len(image_refs) != len(req.reference_media):
             raise VideoUpstreamError(
@@ -1294,7 +1300,8 @@ class DashScopeHappyHorseAdapter:
         kwargs: dict[str, Any] = {
             "base_url": self.provider.base_url,
             "timeout": timeout,
-            "follow_redirects": True,
+            "follow_redirects": False,
+            "trust_env": False,
             "headers": {
                 "Authorization": f"Bearer {self.provider.api_key}",
                 "X-DashScope-Async": "enable",

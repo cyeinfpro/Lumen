@@ -76,6 +76,43 @@ def test_dev_allows_missing_password_reset_smtp() -> None:
     assert settings.smtp_host == ""
 
 
+def test_dev_rejects_public_base_url_without_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LUMEN_ALLOW_PUBLIC_DEV", raising=False)
+
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="dev",
+            public_base_url="https://lumen.example.com",
+            _env_file=None,
+        )
+
+
+def test_dev_allows_public_base_url_when_explicitly_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUMEN_ALLOW_PUBLIC_DEV", "1")
+
+    settings = Settings(
+        app_env="dev",
+        public_base_url="https://lumen.example.com",
+        _env_file=None,
+    )
+
+    assert settings.public_base_url == "https://lumen.example.com"
+
+
+def test_dev_allows_local_public_base_url() -> None:
+    settings = Settings(
+        app_env="dev",
+        public_base_url="http://127.0.0.1:3000",
+        _env_file=None,
+    )
+
+    assert settings.public_base_url == "http://127.0.0.1:3000"
+
+
 def test_smtp_password_is_stripped_before_runtime_use() -> None:
     kwargs = _prod_kwargs()
     kwargs["smtp_username"] = "smtp-user"

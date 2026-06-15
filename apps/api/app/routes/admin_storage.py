@@ -28,7 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.runtime_settings import get_spec
@@ -46,6 +46,8 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from ..config import settings
+from .images import sweep_orphan_image_files
 from ..runtime_settings import get_setting, update_settings
 
 
@@ -163,7 +165,9 @@ def _read_json(path: Path) -> dict | None:
 
 async def _load_config(db: AsyncSession) -> StorageConfigOut:
     backend = await get_setting(db, _spec("storage.backend")) or ""
-    local_root = await get_setting(db, _spec("storage.local.root")) or DEFAULT_LOCAL_ROOT
+    local_root = (
+        await get_setting(db, _spec("storage.local.root")) or DEFAULT_LOCAL_ROOT
+    )
     smb_host = await get_setting(db, _spec("storage.smb.host")) or ""
     smb_port_raw = await get_setting(db, _spec("storage.smb.port")) or ""
     try:
@@ -268,17 +272,19 @@ def _ensure_state_dir() -> None:
 
 
 def _build_storage_conf(cfg: StorageConfigOut, smb_password: str) -> str:
-    return _format_kv_file({
-        "MODE": cfg.backend or "local",
-        "LOCAL_ROOT": cfg.local.root,
-        "SMB_HOST": cfg.smb.host,
-        # 0 / 空 → 让 mount.cifs 走默认 445；其余值由脚本拼到 -o port=
-        "SMB_PORT": str(cfg.smb.port) if cfg.smb.port else "",
-        "SMB_SHARE": cfg.smb.share,
-        "SMB_SUBPATH": cfg.smb.subpath or "/",
-        "SMB_USERNAME": cfg.smb.username,
-        "SMB_PASSWORD": smb_password,
-    })
+    return _format_kv_file(
+        {
+            "MODE": cfg.backend or "local",
+            "LOCAL_ROOT": cfg.local.root,
+            "SMB_HOST": cfg.smb.host,
+            # 0 / 空 → 让 mount.cifs 走默认 445；其余值由脚本拼到 -o port=
+            "SMB_PORT": str(cfg.smb.port) if cfg.smb.port else "",
+            "SMB_SHARE": cfg.smb.share,
+            "SMB_SUBPATH": cfg.smb.subpath or "/",
+            "SMB_USERNAME": cfg.smb.username,
+            "SMB_PASSWORD": smb_password,
+        }
+    )
 
 
 async def _wait_for_call(path: Path, call_id: str, timeout: float) -> dict | None:
@@ -374,6 +380,35 @@ async def test_storage_endpoint(
     )
 
 
+@router.post("/image-orphans", dependencies=[Depends(verify_csrf)])
+async def sweep_image_orphans_endpoint(
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    dry_run: bool = Query(default=True),
+) -> dict:
+    result = await sweep_orphan_image_files(
+        db,
+        storage_root=settings.storage_root,
+        dry_run=dry_run,
+    )
+    await write_audit(
+        db,
+        event_type="admin.storage.image_orphans",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "dry_run": dry_run,
+            "scanned": result.get("scanned", 0),
+            "orphan_count": len(result.get("orphans", [])),
+            "deleted": result.get("deleted", 0),
+        },
+    )
+    await db.commit()
+    return result
+
+
 @router.put(
     "",
     response_model=StorageApplyResponseOut,
@@ -392,7 +427,9 @@ async def put_storage_endpoint(
     pairs: list[tuple[str, str]] = [("storage.backend", body.backend)]
     if body.backend == "local":
         if body.local is None:
-            raise _http("missing_local", "local config is required when backend=local", 422)
+            raise _http(
+                "missing_local", "local config is required when backend=local", 422
+            )
         root = _normalize_local_root(body.local.root)
         pairs.append(("storage.local.root", root))
     else:
@@ -406,14 +443,16 @@ async def put_storage_endpoint(
         username = smb.username.strip()
         if not username:
             raise _http("invalid_smb_username", "username 不能为空", 422)
-        pairs.extend([
-            ("storage.smb.host", host),
-            # smb.port == 0 表示用默认 445，存空字符串
-            ("storage.smb.port", str(smb.port) if smb.port else ""),
-            ("storage.smb.share", share),
-            ("storage.smb.subpath", subpath),
-            ("storage.smb.username", username),
-        ])
+        pairs.extend(
+            [
+                ("storage.smb.host", host),
+                # smb.port == 0 表示用默认 445，存空字符串
+                ("storage.smb.port", str(smb.port) if smb.port else ""),
+                ("storage.smb.share", share),
+                ("storage.smb.subpath", subpath),
+                ("storage.smb.username", username),
+            ]
+        )
         if smb.password != "":
             pairs.append(("storage.smb.password", smb.password))
         else:

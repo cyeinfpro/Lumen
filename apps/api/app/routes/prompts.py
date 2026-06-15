@@ -398,10 +398,7 @@ def _append_input_image_with_budget(
     next_payload_bytes = media_payload_bytes
     if image_url.startswith("data:image/"):
         payload_bytes = len(image_url.encode("utf-8"))
-        if (
-            media_payload_bytes + payload_bytes
-            > _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES
-        ):
+        if media_payload_bytes + payload_bytes > _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES:
             return False, media_payload_bytes
         next_payload_bytes += payload_bytes
     content.append({"type": "input_image", "image_url": image_url})
@@ -500,9 +497,7 @@ async def _build_video_enhance_content(
             "时间推进/节奏/连续性/参考素材一致性。"
         )
 
-    content: list[dict[str, Any]] = [
-        {"type": "input_text", "text": "\n".join(lines)}
-    ]
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": "\n".join(lines)}]
     token_changed = False
     media_payload_bytes = 0
 
@@ -1111,6 +1106,8 @@ async def _stream_enhance_one(
                 pool=_PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS,
             ),
             proxy=proxy_url,
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             async with client.stream(
                 "POST",
@@ -1264,7 +1261,9 @@ async def _stream_enhance(
                     yield "data: [DONE]\n\n"
                     return
                 except _EnhanceProviderError as exc:
-                    last_error = "timeout" if str(exc) == "timeout" else "upstream_error"
+                    last_error = (
+                        "timeout" if str(exc) == "timeout" else "upstream_error"
+                    )
                     logger.warning(
                         (
                             "enhance provider failed provider=%s attempt=%s "

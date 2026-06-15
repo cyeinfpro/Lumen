@@ -214,7 +214,16 @@ class _DesktopLocalTokenMiddleware:
             return
         expected = settings.lumen_local_token.strip()
         if not expected:
-            await self.app(scope, receive, send)
+            response = JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "desktop_token_misconfigured",
+                        "message": "desktop local token is not configured",
+                    }
+                },
+            )
+            await response(scope, receive, send)
             return
         provided = ""
         header_name = DESKTOP_TOKEN_HEADER.lower().encode("latin-1")
@@ -327,8 +336,8 @@ async def lifespan(app: FastAPI):
     if _is_prod_env() and not is_rl_enabled:
         logger.warning(
             "PRODUCTION MODE: user_rate_limit_enabled=False; "
-            "non-always_on rate limiters are DISABLED. API is unprotected "
-            "against brute-force on user-scoped endpoints.",
+            "per-user chat/upload throttles are disabled. Always-on security "
+            "limiters for auth, reset, public previews, and bot tokens remain enforced.",
         )
     else:
         logger.info(

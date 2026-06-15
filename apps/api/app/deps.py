@@ -155,6 +155,8 @@ async def _record_failed_session_validation(request: Request) -> None:
         await SESSION_VALIDATION_FAILURE_LIMITER.check(
             get_redis(), f"rl:session:failed:{ip}"
         )
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("session validation limiter unavailable: %s", exc)
 
@@ -223,6 +225,8 @@ async def _record_bot_auth_failure(request: Request) -> None:
 
     try:
         await BOT_TOKEN_FAILURE_LIMITER.check(get_redis(), f"rl:botauth:failed:{ip}")
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("bot-token failure limiter unavailable: %s", exc)
 

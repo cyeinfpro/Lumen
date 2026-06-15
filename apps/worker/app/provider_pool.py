@@ -1363,6 +1363,8 @@ class ProviderPool:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(_PROBE_TIMEOUT_S),
                 proxy=proxy_url,
+                follow_redirects=False,
+                trust_env=False,
             ) as client:
                 resp = await client.post(url, json=body, headers=headers)
             if resp.status_code >= 500:

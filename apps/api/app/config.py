@@ -45,6 +45,7 @@ _DEFAULT_PUBLIC_BASE_URL = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_CORS_ALLOW_ORIGINS = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _workspace_env_file() -> Path | None:
@@ -70,6 +71,33 @@ def _settings_env_files() -> tuple[str | Path, ...]:
     if explicit_env:
         env_files.append(Path(explicit_env).expanduser())
     return tuple(env_files)
+
+
+def _host_is_localish(host: str) -> bool:
+    value = host.strip().strip("[]").lower()
+    if not value:
+        return False
+    if value == "localhost" or value.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _origin_looks_public(origin: str) -> bool:
+    parsed = urlsplit(origin.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = parsed.hostname or ""
+    return bool(host and not _host_is_localish(host))
 
 
 class Settings(BaseSettings):
@@ -215,6 +243,20 @@ class Settings(BaseSettings):
             if len(self.byok_api_key_master_secret.strip()) < 16:
                 self.byok_api_key_master_secret = BYOK_DEV_MASTER_SECRET
             return self
+        allow_public_dev = (
+            os.environ.get("LUMEN_ALLOW_PUBLIC_DEV", "").strip().lower()
+            in _TRUE_ENV_VALUES
+        )
+        if (
+            is_dev
+            and _origin_looks_public(self.public_base_url)
+            and not allow_public_dev
+        ):
+            raise ValueError(
+                "APP_ENV=dev cannot be used with a public PUBLIC_BASE_URL; "
+                "set APP_ENV=prod for deployments or set LUMEN_ALLOW_PUBLIC_DEV=1 "
+                "only for an intentional temporary test"
+            )
         # Why: BYOK_API_KEY_MASTER_SECRET is required *in production* — without
         # it AES-GCM encryption can't deterministically derive a key and every
         # restart would silently invalidate stored credentials. In dev/test we

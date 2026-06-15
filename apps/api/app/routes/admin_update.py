@@ -114,7 +114,9 @@ _SSE_MAX_DURATION_SEC = 60 * 60  # 1h hard cap to prevent leaks
 _SSE_LOG_POLL_SEC = 0.3  # tail-F poll interval
 _SSE_LOG_BATCH_WINDOW_SEC = 0.2  # coalesce raw log lines into bursts
 _TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC = 15.0
-_SEMVER_UPDATE_TAG_RE = re.compile(r"^v(?P<version>[0-9]+(?:\.[0-9]+){2}(?:-[0-9A-Za-z.-]+)?)$")
+_SEMVER_UPDATE_TAG_RE = re.compile(
+    r"^v(?P<version>[0-9]+(?:\.[0-9]+){2}(?:-[0-9A-Za-z.-]+)?)$"
+)
 
 
 @dataclass(frozen=True)
@@ -1202,6 +1204,8 @@ class UpdateTriggerIn(BaseModel):
     target_tag: str | None = None
     force_redeploy: bool = False
     channel: str | None = None
+    confirm_update: bool = False
+    confirmed_target_tag: str | None = None
 
 
 class UpdateStatusOut(BaseModel):
@@ -1230,7 +1234,9 @@ async def _update_channel(db: AsyncSession) -> str:
         return "stable"
     raw = await get_setting(db, spec)
     value = (raw or "stable").strip().lower()
-    return value if value in {"stable", "main", "pinned", "minor", "major"} else "stable"
+    return (
+        value if value in {"stable", "main", "pinned", "minor", "major"} else "stable"
+    )
 
 
 async def _update_check_ttl(db: AsyncSession) -> int:
@@ -1680,14 +1686,35 @@ async def trigger_update(
         )
         target_tag = check_out.resolved_image_tag
 
+    confirmed_target_tag = (body.confirmed_target_tag or "").strip()
+    if not body.confirm_update or confirmed_target_tag != target_tag:
+        await write_admin_audit_isolated(
+            request,
+            admin,
+            event_type="admin.update.confirmation_required",
+            details={
+                "target_tag": target_tag,
+                "confirmed_target_tag": confirmed_target_tag or None,
+                "force_redeploy": body.force_redeploy,
+                "channel": channel,
+            },
+        )
+        raise _http(
+            "update_confirmation_required",
+            "confirm_update=true with matching confirmed_target_tag is required to start an update",
+            403,
+        )
+
     idempotency_key = request.headers.get("Idempotency-Key") or derive_idempotency_key(
         admin.id,
         request.url.path,
         json.dumps(
             {
                 "target_tag": target_tag,
+                "confirmed_target_tag": confirmed_target_tag,
                 "force_redeploy": body.force_redeploy,
                 "channel": channel,
+                "confirm_update": body.confirm_update,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1708,6 +1735,7 @@ async def trigger_update(
                 "target_tag": replayed.target_tag,
                 "idempotency_key": idempotency_key,
                 "cache_hit": True,
+                "confirmed": True,
             },
         )
         return replayed
@@ -1739,9 +1767,15 @@ async def trigger_update(
             "\n=== update trigger "
             f"at={started_at.isoformat()} user={admin.id} proxy={proxy.name if proxy else 'none'} ===\n"
         )
-        log_fh.write(f"::lumen-info:: phase=check key=idempotency_key value={idempotency_key}\n")
-        log_fh.write(f"::lumen-info:: phase=check key=resolved_tag_source value={body.target_tag and 'override' or 'resolved'}\n")
-        log_fh.write(f"::lumen-info:: phase=check key=resolved_tag value={target_tag}\n")
+        log_fh.write(
+            f"::lumen-info:: phase=check key=idempotency_key value={idempotency_key}\n"
+        )
+        log_fh.write(
+            f"::lumen-info:: phase=check key=resolved_tag_source value={body.target_tag and 'override' or 'resolved'}\n"
+        )
+        log_fh.write(
+            f"::lumen-info:: phase=check key=resolved_tag value={target_tag}\n"
+        )
         if proxy_url:
             log_fh.write(f"proxy_url={_mask_proxy_url(proxy_url)}\n")
         log_fh.flush()
@@ -1823,9 +1857,7 @@ async def trigger_update(
     finally:
         log_fh.close()
         if lock is not None:
-            await lock_service.release(
-                lock, succeeded=launched, reason=release_reason
-            )
+            await lock_service.release(lock, succeeded=launched, reason=release_reason)
 
     response = UpdateTriggerOut(
         accepted=True,
@@ -1851,6 +1883,7 @@ async def trigger_update(
             "target_tag": target_tag,
             "idempotency_key": idempotency_key,
             "cache_hit": False,
+            "confirmed": True,
         },
     )
 

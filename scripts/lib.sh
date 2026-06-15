@@ -45,6 +45,13 @@ log_step() {
         "${LUMEN_C_BOLD}" "$*" "${LUMEN_C_RESET}"
 }
 
+lumen_env_truthy() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 默认运维路径与 Compose project name（§11.4 死规则：project name 必须固定）。
 # 调用方可通过环境变量覆盖；fallback 全部走 /opt/lumendata 与 /opt/lumen 约定。
 # LUMEN_DB_ROOT 只承载 postgres / redis，便于把数据库放在本机盘，
@@ -2274,18 +2281,54 @@ lumen_compose_in() {
 # layer 进度混在一起刷屏。
 # 用法：lumen_compose_pull_per_image <compose_dir>
 # 枚举失败兜底回退 `lumen_compose_in <dir> pull`，保证最差也能 work。
+lumen_verify_image_signature_if_required() {
+    local image="$1"
+    if ! lumen_env_truthy "${LUMEN_VERIFY_IMAGE_SIGNATURES:-0}"; then
+        return 0
+    fi
+    if ! command -v cosign >/dev/null 2>&1; then
+        log_error "LUMEN_VERIFY_IMAGE_SIGNATURES=1 但未找到 cosign，无法校验镜像签名。"
+        return 1
+    fi
+    cosign verify \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
+        "${image}" >/dev/null
+}
+
+lumen_record_image_digest() {
+    local image="$1"
+    local digest lock_file
+    digest="$(lumen_docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}" 2>/dev/null | head -n1 || true)"
+    if [ -z "${digest}" ]; then
+        log_warn "未能读取镜像 digest：${image}"
+        return 0
+    fi
+    log_info "镜像 digest：${digest}"
+    lock_file="${LUMEN_IMAGE_DIGEST_LOCK_FILE:-}"
+    if [ -n "${lock_file}" ]; then
+        mkdir -p "$(dirname "${lock_file}")"
+        printf '%s %s\n' "${image}" "${digest}" >> "${lock_file}"
+    fi
+}
+
 lumen_compose_pull_per_image() {
     local compose_dir="$1"
     if [ -z "${compose_dir}" ]; then
         log_error "lumen_compose_pull_per_image: compose_dir 参数缺失"
         return 1
     fi
-    local images
-    if ! images="$(lumen_compose_in "${compose_dir}" config --images 2>/dev/null | sort -u)"; then
+    local images raw_images
+    if ! raw_images="$(lumen_compose_in "${compose_dir}" config --images 2>/dev/null)"; then
+        if lumen_env_truthy "${LUMEN_VERIFY_IMAGE_SIGNATURES:-0}"; then
+            log_error "LUMEN_VERIFY_IMAGE_SIGNATURES=1 时无法枚举 compose 镜像列表，拒绝执行未校验的 docker compose pull。"
+            return 1
+        fi
         log_warn "无法枚举 compose 镜像列表（${compose_dir}），回退到默认 docker compose pull。"
         lumen_compose_in "${compose_dir}" pull
         return $?
     fi
+    images="$(printf '%s\n' "${raw_images}" | sort -u)"
     if [ -z "${images}" ]; then
         log_warn "compose 镜像列表为空（${compose_dir}），跳过 pull。"
         return 0
@@ -2302,6 +2345,11 @@ lumen_compose_pull_per_image() {
         if ! lumen_docker pull "${img}"; then
             failed+=("${img}")
             rc=1
+        elif ! lumen_verify_image_signature_if_required "${img}"; then
+            failed+=("${img}")
+            rc=1
+        else
+            lumen_record_image_digest "${img}"
         fi
     done <<< "${images}"
 

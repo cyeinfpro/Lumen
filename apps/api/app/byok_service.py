@@ -62,6 +62,7 @@ _MODEL_UNAVAILABLE_MARKERS = (
     "model_not_found",
 )
 
+
 @dataclass(frozen=True)
 class ValidationOutcome:
     ok: bool

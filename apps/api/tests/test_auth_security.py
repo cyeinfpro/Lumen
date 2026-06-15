@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from fastapi import BackgroundTasks, Request
+from fastapi import BackgroundTasks, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
 from app import security
+from app import deps
 from app.deps import SESSION_COOKIE, get_current_user
 from app.routes import auth
 from app.security import make_session_cookie
@@ -162,7 +163,16 @@ def test_clear_auth_cookies_matches_cookie_attributes(
 
 
 @pytest.mark.asyncio
-async def test_get_current_user_rejects_soft_deleted_user() -> None:
+async def test_get_current_user_rejects_soft_deleted_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def allow_failed_session_record(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        deps.SESSION_VALIDATION_FAILURE_LIMITER, "check", allow_failed_session_record
+    )
+
     session = SimpleNamespace(
         revoked_at=None,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
@@ -659,7 +669,7 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
 
 
 @pytest.mark.asyncio
-async def test_password_reset_confirm_consumes_token_before_user_rate_limit(
+async def test_password_reset_confirm_does_not_consume_token_before_user_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Redis:
@@ -691,7 +701,80 @@ async def test_password_reset_confirm_consumes_token_before_user_rate_limit(
         )
 
     assert getattr(excinfo.value, "status_code", None) == 429
-    assert redis.deleted == [auth._password_reset_key("reset-token")]
+    assert redis.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_token_limiter_runs_before_redis_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.reads = 0
+            self.deleted = []
+
+        async def eval(self, *_args):
+            return [1, 0]
+
+        async def get(self, _key: str) -> str:
+            self.reads += 1
+            return "user-1"
+
+        async def getdel(self, key: str) -> str:
+            self.deleted.append(key)
+            return "user-1"
+
+    async def reject_token(_redis, _key):
+        raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
+
+    redis = Redis()
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        auth._PASSWORD_RESET_CONFIRM_TOKEN_LIMITER, "check", reject_token
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            _Db(),  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 429
+    assert redis.reads == 0
+    assert redis.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_failed_session_validation_limiter_propagates_http_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_429(*_args, **_kwargs):
+        raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
+
+    monkeypatch.setattr(deps.SESSION_VALIDATION_FAILURE_LIMITER, "check", raise_429)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await deps._record_failed_session_validation(_request())
+
+    assert excinfo.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_bot_auth_failure_limiter_propagates_http_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_429(*_args, **_kwargs):
+        raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
+
+    monkeypatch.setattr(deps.BOT_TOKEN_FAILURE_LIMITER, "check", raise_429)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await deps._record_bot_auth_failure(_request())
+
+    assert excinfo.value.status_code == 429
 
 
 @pytest.mark.asyncio

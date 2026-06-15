@@ -667,6 +667,8 @@ def _build_client(
         timeout=timeout_config.to_httpx(),
         headers={"content-type": "application/json"},
         proxy=proxy_url,
+        follow_redirects=False,
+        trust_env=False,
     )
 
 
@@ -681,7 +683,12 @@ def _build_images_client(
         read=settings.upstream_read_timeout_s,
         write=settings.upstream_write_timeout_s,
     )
-    return _TrackedAsyncClient(timeout=timeout_config.to_httpx(), proxy=proxy_url)
+    return _TrackedAsyncClient(
+        timeout=timeout_config.to_httpx(),
+        proxy=proxy_url,
+        follow_redirects=False,
+        trust_env=False,
+    )
 
 
 def _cache_proxied_client(
@@ -3469,7 +3476,8 @@ async def _reference_url_is_live(url: str) -> bool:
         return False
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=False,
+            trust_env=False,
             timeout=httpx.Timeout(_REFERENCE_CACHE_HEAD_TIMEOUT_S),
         ) as client:
             resp = await client.head(url)
@@ -3541,7 +3549,9 @@ async def _push_reference_to_image_job(
     }
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_REFERENCE_PUSH_TIMEOUT_S)
+            timeout=httpx.Timeout(_REFERENCE_PUSH_TIMEOUT_S),
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             resp = await client.post(url, content=raw, headers=headers)
         if resp.status_code != 200:
@@ -5117,8 +5127,9 @@ async def _image_job_with_failover(
                 )
             except ValueError:
                 endpoint_locked = False
-            endpoint_locked = (
-                endpoint_locked and configured_endpoint in ("generations", "responses")
+            endpoint_locked = endpoint_locked and configured_endpoint in (
+                "generations",
+                "responses",
             )
 
             # lock 防御层：override / preference 任一与本号 lock 冲突都视为本号

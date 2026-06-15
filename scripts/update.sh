@@ -201,6 +201,13 @@ shared_app_env_is_development() {
     return 1
 }
 
+lumen_env_truthy() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 sed_replacement_escape() {
     printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
 }
@@ -778,20 +785,32 @@ fi
 
 CONFIG_CHANGED=0
 CURRENT_WEB_BIND_HOST="$(lumen_env_value WEB_BIND_HOST "${SHARED_ENV}" 2>/dev/null || echo "")"
+CURRENT_EXPOSE_WEB_DIRECTLY="$(lumen_env_value LUMEN_EXPOSE_WEB_DIRECTLY "${SHARED_ENV}" 2>/dev/null || echo "")"
 if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
     if [ "${CURRENT_WEB_BIND_HOST}" != "${LUMEN_WEB_BIND_HOST}" ]; then
         lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
         CURRENT_WEB_BIND_HOST="${LUMEN_WEB_BIND_HOST}"
         CONFIG_CHANGED=1
     fi
-elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
-    if [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
-        log_warn "[check] WEB_BIND_HOST 是旧默认 127.0.0.1，改为 0.0.0.0；如需反代-only，请设置 LUMEN_WEB_BIND_HOST=127.0.0.1。"
-    else
-        log_info "[check] WEB_BIND_HOST 未设置，使用默认 0.0.0.0，Web 将监听所有网卡 3000。"
+elif lumen_env_truthy "${LUMEN_EXPOSE_WEB_DIRECTLY:-}" || lumen_env_truthy "${CURRENT_EXPOSE_WEB_DIRECTLY}"; then
+    if [ "${CURRENT_WEB_BIND_HOST}" != "0.0.0.0" ]; then
+        lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"
+        CURRENT_WEB_BIND_HOST="0.0.0.0"
+        CONFIG_CHANGED=1
     fi
-    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"
-    CURRENT_WEB_BIND_HOST="0.0.0.0"
+    if [ "${CURRENT_EXPOSE_WEB_DIRECTLY}" != "1" ]; then
+        lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_EXPOSE_WEB_DIRECTLY "1"
+        CONFIG_CHANGED=1
+    fi
+    log_warn "[check] LUMEN_EXPOSE_WEB_DIRECTLY=1：Web 将监听所有网卡 3000，请确认防火墙与生产 APP_ENV。"
+elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "0.0.0.0" ]; then
+    if [ "${CURRENT_WEB_BIND_HOST}" = "0.0.0.0" ]; then
+        log_warn "[check] WEB_BIND_HOST 是旧公开默认值 0.0.0.0，改为 127.0.0.1；如需直连公网，请设置 LUMEN_EXPOSE_WEB_DIRECTLY=1。"
+    else
+        log_info "[check] WEB_BIND_HOST 未设置，使用默认 127.0.0.1，Web 仅监听本机回环。"
+    fi
+    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"
+    CURRENT_WEB_BIND_HOST="127.0.0.1"
     CONFIG_CHANGED=1
 fi
 
