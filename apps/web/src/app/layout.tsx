@@ -1,22 +1,11 @@
 import type { Metadata, Viewport } from "next";
+import type { ReactNode } from "react";
 import { cookies, headers } from "next/headers";
 import localFont from "next/font/local";
+
 import "./globals.css";
-import { Lightbox } from "@/components/ui/Lightbox";
-import { LazyInpaintModal as InpaintModal } from "@/components/ui/inpaint/LazyInpaintModal";
-import { GlobalTaskTray } from "@/components/ui/GlobalTaskTray";
-import { SSEProvider } from "@/components/SSEProvider";
-import { QueryProvider } from "@/components/QueryProvider";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { OfflineBanner } from "@/components/OfflineBanner";
-import { SystemUpgradeBanner } from "@/components/SystemUpgradeBanner";
-import { ToastViewport } from "@/components/ui/primitives";
-import { MobileToastViewport } from "@/components/ui/primitives/mobile/Toast";
-import { PageTransitions } from "@/components/ui/shell/PageTransitions";
-import { CommandPalette } from "@/components/ui/CommandPalette";
-import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
-import { RuntimeDefaultsBootstrap } from "@/components/RuntimeDefaultsBootstrap";
-import { DesktopBootstrapGate } from "@/components/desktop/DesktopBootstrapGate";
+import { LumenAppShell } from "@/components/LumenAppShell";
+import type { RuntimeDefaults } from "@/components/RuntimeDefaultsBootstrap";
 
 // Self-hosted to keep `next build` offline. Google Fonts fetch fails behind
 // region-blocked / proxied production networks; switching to next/font/local
@@ -79,11 +68,30 @@ export const viewport: Viewport = {
 
 type ThemePreference = "light" | "dark" | "system";
 
+const RUNTIME_DEFAULTS_COOKIE = "lumen_runtime_defaults_v1";
+const DEFAULT_RUNTIME_DEFAULTS: RuntimeDefaults = { fast: true };
+
 // 无 cookie / 未知值时交给系统主题；显式 light/dark 时固定。
 function normalizeTheme(value: string | undefined): ThemePreference {
   return value === "light" || value === "dark" || value === "system"
     ? value
     : "system";
+}
+
+function normalizeRuntimeDefaults(value: unknown): RuntimeDefaults {
+  if (!value || typeof value !== "object") return DEFAULT_RUNTIME_DEFAULTS;
+  const raw = value as RuntimeDefaults;
+  const next: RuntimeDefaults = {
+    fast: typeof raw.fast === "boolean" ? raw.fast : true,
+  };
+  if (
+    typeof raw.upload_max_source_bytes === "number" &&
+    Number.isFinite(raw.upload_max_source_bytes) &&
+    raw.upload_max_source_bytes > 0
+  ) {
+    next.upload_max_source_bytes = raw.upload_max_source_bytes;
+  }
+  return next;
 }
 
 async function readInitialTheme(): Promise<ThemePreference> {
@@ -104,47 +112,14 @@ async function readRequestPathname(): Promise<string> {
   }
 }
 
-async function readRuntimeDefaults(): Promise<{
-  fast: boolean;
-  upload_max_source_bytes?: number;
-}> {
+async function readRuntimeDefaultsCookie(): Promise<RuntimeDefaults> {
   try {
     const cookieStore = await cookies();
-    const cookie = cookieStore.toString();
-    if (!cookie) return { fast: true };
-
-    const backendUrl = (
-      process.env.LUMEN_BACKEND_URL ?? "http://127.0.0.1:8000"
-    ).replace(/\/+$/, "");
-    const requestHeaders: HeadersInit = { cookie };
-    const localToken = process.env.LUMEN_LOCAL_TOKEN?.trim();
-    if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" && localToken) {
-      requestHeaders["x-lumen-local-token"] = localToken;
-    }
-    const res = await fetch(`${backendUrl}/auth/me`, {
-      headers: requestHeaders,
-      cache: "no-store",
-    });
-    if (!res.ok) return { fast: true };
-    const data = (await res.json().catch(() => null)) as
-      | {
-          runtime_defaults?: {
-            fast?: unknown;
-            upload_max_source_bytes?: unknown;
-          };
-        }
-      | null;
-    const fast =
-      typeof data?.runtime_defaults?.fast === "boolean"
-        ? data.runtime_defaults.fast
-        : true;
-    const uploadMaxSourceBytes =
-      typeof data?.runtime_defaults?.upload_max_source_bytes === "number"
-        ? data.runtime_defaults.upload_max_source_bytes
-        : undefined;
-    return { fast, upload_max_source_bytes: uploadMaxSourceBytes };
+    const raw = cookieStore.get(RUNTIME_DEFAULTS_COOKIE)?.value;
+    if (!raw || raw.length > 512) return DEFAULT_RUNTIME_DEFAULTS;
+    return normalizeRuntimeDefaults(JSON.parse(decodeURIComponent(raw)));
   } catch {
-    return { fast: true };
+    return DEFAULT_RUNTIME_DEFAULTS;
   }
 }
 
@@ -155,13 +130,14 @@ async function readRuntimeDefaults(): Promise<{
 export default async function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: ReactNode;
 }>) {
   const [theme, pathname, runtimeDefaults] = await Promise.all([
     readInitialTheme(),
     readRequestPathname(),
-    readRuntimeDefaults(),
+    readRuntimeDefaultsCookie(),
   ]);
+
   const themeClass = theme === "system" ? undefined : `theme-${theme}`;
   const isPublicShareRoute = pathname.startsWith("/share/");
 
@@ -179,32 +155,9 @@ export default async function RootLayout({
         {isPublicShareRoute ? (
           children
         ) : (
-          <QueryProvider>
-            <RuntimeDefaultsBootstrap defaults={runtimeDefaults} />
-            <DesktopBootstrapGate />
-            <SSEProvider>
-              <ErrorBoundary>
-                <PageTransitions>{children}</PageTransitions>
-              </ErrorBoundary>
-            </SSEProvider>
-            <ErrorBoundary fallback={null}>
-              <Lightbox />
-            </ErrorBoundary>
-            <ErrorBoundary fallback={null}>
-              <InpaintModal />
-            </ErrorBoundary>
-            <ErrorBoundary fallback={null}>
-              <GlobalTaskTray />
-            </ErrorBoundary>
-            <SystemUpgradeBanner />
-            <OfflineBanner />
-            <ToastViewport />
-            <MobileToastViewport />
-            <ErrorBoundary fallback={null}>
-              <CommandPalette />
-            </ErrorBoundary>
-            <ServiceWorkerRegister />
-          </QueryProvider>
+          <LumenAppShell initialRuntimeDefaults={runtimeDefaults}>
+            {children}
+          </LumenAppShell>
         )}
       </body>
     </html>

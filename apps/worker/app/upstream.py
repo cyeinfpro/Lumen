@@ -39,6 +39,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import signal
@@ -1015,6 +1016,103 @@ def _auth_headers(
     return headers
 
 
+def _json_dumps_stable(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _image_file_fingerprints(
+    files: list[tuple[str, tuple[str, bytes, str]]] | None,
+) -> list[dict[str, Any]]:
+    if not files:
+        return []
+    result: list[dict[str, Any]] = []
+    for field, file_tuple in files:
+        try:
+            filename, raw, content_type = file_tuple
+        except Exception:  # noqa: BLE001
+            continue
+        raw_bytes = raw if isinstance(raw, bytes | bytearray) else bytes(raw)
+        result.append(
+            {
+                "field": field,
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(raw_bytes),
+                "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            }
+        )
+    return result
+
+
+def _image_idempotency_key(
+    *,
+    trace_id: str,
+    endpoint: str,
+    body: dict[str, Any] | None = None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+) -> str:
+    seed = {
+        "trace_id": trace_id,
+        "endpoint": endpoint,
+        "body": body or {},
+        "files": _image_file_fingerprints(files),
+    }
+    digest = hashlib.sha256(_json_dumps_stable(seed).encode("utf-8")).hexdigest()
+    return f"lumen-image2-{digest[:32]}"
+
+
+def _attach_image_idempotency_key(
+    headers: dict[str, str],
+    *,
+    trace_id: str,
+    endpoint: str,
+    body: dict[str, Any] | None = None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+) -> None:
+    headers.setdefault(
+        "Idempotency-Key",
+        _image_idempotency_key(
+            trace_id=trace_id,
+            endpoint=endpoint,
+            body=body,
+            files=files,
+        ),
+    )
+
+
+def _parse_retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, 15.0)
+
+
+def _transient_retry_sleep_seconds(
+    *,
+    attempt: int,
+    backoff_base_s: float,
+    response: httpx.Response | None = None,
+) -> float:
+    retry_after = _parse_retry_after_seconds(
+        response.headers.get("retry-after") if response is not None else None
+    )
+    if retry_after is not None:
+        return retry_after
+    base = min(8.0, backoff_base_s * (2 ** max(0, attempt - 1)))
+    return max(0.05, base * random.uniform(0.6, 1.4))
+
+
 def _extract_response_meta_headers(
     response_headers: Any,
 ) -> dict[str, Any]:
@@ -1547,7 +1645,13 @@ async def _post_with_retry(
     last_resp: httpx.Response | None = None
     for attempt in range(max_attempts):
         if attempt > 0:
-            await asyncio.sleep(backoff_base_s * (2 ** (attempt - 1)))
+            await asyncio.sleep(
+                _transient_retry_sleep_seconds(
+                    attempt=attempt,
+                    backoff_base_s=backoff_base_s,
+                    response=last_resp,
+                )
+            )
         try:
             if json_body is not None:
                 resp = await client.post(url, json=json_body, headers=headers)
@@ -1626,6 +1730,12 @@ async def _direct_generate_image_once(
     )
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key_override, trace_id=trace_id)
+    _attach_image_idempotency_key(
+        headers,
+        trace_id=trace_id,
+        endpoint="images/generations",
+        body=body,
+    )
     started = time.monotonic()
     try:
         resp = await _post_with_retry(
@@ -1784,6 +1894,13 @@ async def _direct_edit_image_once(
 
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key_override, trace_id=trace_id)
+    _attach_image_idempotency_key(
+        headers,
+        trace_id=trace_id,
+        endpoint="images/edits",
+        body=data,
+        files=files,
+    )
     timeout_config = await _resolve_timeout_config()
     proxy_url = await resolve_provider_proxy_url(proxy_override)
     started = time.monotonic()

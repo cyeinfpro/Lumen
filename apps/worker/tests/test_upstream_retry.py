@@ -91,6 +91,111 @@ def test_max_attempts_for_5xx_is_three() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_with_retry_honors_retry_after_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            if self.calls == 1:
+                return httpx.Response(503, headers={"retry-after": "2.5"})
+            return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(upstream.asyncio, "sleep", fake_sleep)
+
+    resp = await upstream._post_with_retry(
+        client=_Client(),  # type: ignore[arg-type]
+        url="https://example.invalid/v1/images/generations",
+        headers={},
+        json_body={"prompt": "test"},
+    )
+
+    assert resp.status_code == 200
+    assert sleeps == [2.5]
+
+
+def test_image_idempotency_key_uses_stable_file_fingerprints() -> None:
+    files = [
+        ("image[]", ("ref.png", b"secret-image-bytes", "image/png")),
+        ("mask", ("mask.png", b"mask-bytes", "image/png")),
+    ]
+    key_a = upstream._image_idempotency_key(
+        trace_id="gen-fixed",
+        endpoint="images/edits",
+        body={"size": "1024x1024", "prompt": "edit"},
+        files=files,
+    )
+    key_b = upstream._image_idempotency_key(
+        trace_id="gen-fixed",
+        endpoint="images/edits",
+        body={"prompt": "edit", "size": "1024x1024"},
+        files=files,
+    )
+    fingerprints = upstream._image_file_fingerprints(files)
+    serialized = upstream._json_dumps_stable({"files": fingerprints})
+
+    assert key_a == key_b
+    assert "secret-image-bytes" not in serialized
+    assert fingerprints[0]["size"] == len(b"secret-image-bytes")
+    assert len(fingerprints[0]["sha256"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_post_with_retry(**kwargs: Any) -> httpx.Response:
+        seen["headers"] = dict(kwargs["headers"])
+        seen["json_body"] = dict(kwargs["json_body"])
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": "ZmFrZQ==", "revised_prompt": "ok"}]},
+        )
+
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+    monkeypatch.setattr(upstream, "_post_with_retry", fake_post_with_retry)
+
+    token = upstream.push_image_trace_id("gen-fixed")
+    try:
+        result = await upstream._direct_generate_image_once(
+            prompt="test",
+            size="1024x1024",
+            n=1,
+            quality="high",
+            output_format="png",
+            output_compression=None,
+            background="auto",
+            moderation="auto",
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+    finally:
+        upstream.pop_image_trace_id(token)
+
+    assert result == ("ZmFrZQ==", "ok")
+    headers = seen["headers"]
+    expected_key = upstream._image_idempotency_key(
+        trace_id="gen-fixed",
+        endpoint="images/generations",
+        body=seen["json_body"],
+    )
+    assert headers["x-trace-id"] == "gen-fixed"
+    assert headers["Idempotency-Key"] == expected_key
+
+
+@pytest.mark.asyncio
 async def test_responses_image_retry_honors_429_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

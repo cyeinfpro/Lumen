@@ -505,6 +505,38 @@ async def test_redis_semaphore_does_not_fallback_to_non_atomic_incr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_redis_semaphore_sets_ttl_and_releases_with_lua() -> None:
+    class _Redis:
+        def __init__(self) -> None:
+            self.eval_calls: list[tuple[Any, ...]] = []
+
+        async def eval(self, *args: Any) -> int:
+            self.eval_calls.append(args)
+            if args[0] == generation._ACQUIRE_LUA:
+                return 1
+            if args[0] == generation._RELEASE_LUA:
+                return 0
+            raise AssertionError("unexpected lua script")
+
+        async def decr(self, *_args: Any) -> int:
+            raise AssertionError("release must use lua")
+
+    redis = _Redis()
+
+    async with generation._RedisSemaphore(redis, "sem:test", 2, wait_s=0):
+        pass
+
+    assert redis.eval_calls[0] == (
+        generation._ACQUIRE_LUA,
+        1,
+        "sem:test",
+        2,
+        generation._IMAGE_SEMAPHORE_KEY_TTL_S,
+    )
+    assert redis.eval_calls[1] == (generation._RELEASE_LUA, 1, "sem:test")
+
+
+@pytest.mark.asyncio
 async def test_image_queue_kick_skips_not_before_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
