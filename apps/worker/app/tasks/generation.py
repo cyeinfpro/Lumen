@@ -422,10 +422,24 @@ async def _cancel_renewer_task(renewer: asyncio.Task[None] | None) -> None:
 # 各自 DECR 之间的窗口让其他 worker 误以为还有名额。Lua 在 Redis 单线程里执行。
 _ACQUIRE_LUA = """
 local v = redis.call('INCR', KEYS[1])
-if v <= tonumber(ARGV[1]) then return 1 end
+if v <= tonumber(ARGV[1]) then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+  return 1
+end
 redis.call('DECR', KEYS[1])
 return 0
 """
+
+_RELEASE_LUA = """
+local v = tonumber(redis.call('GET', KEYS[1]) or '0')
+if v <= 1 then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+return redis.call('DECR', KEYS[1])
+"""
+
+_IMAGE_SEMAPHORE_KEY_TTL_S = max(_LEASE_TTL_S * 4, 120)
 
 
 class _RedisSemaphore:
@@ -455,7 +469,13 @@ class _RedisSemaphore:
         notified = False
         while True:
             try:
-                got = await self.redis.eval(_ACQUIRE_LUA, 1, self.key, self.capacity)
+                got = await self.redis.eval(
+                    _ACQUIRE_LUA,
+                    1,
+                    self.key,
+                    self.capacity,
+                    _IMAGE_SEMAPHORE_KEY_TTL_S,
+                )
             except Exception as exc:  # noqa: BLE001
                 # 不退化到 INCR/DECR：那条路径在并发下会短暂超过 capacity。
                 raise UpstreamError(
@@ -485,12 +505,12 @@ class _RedisSemaphore:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._acquired:
             try:
-                await self.redis.decr(self.key)
+                await self.redis.eval(_RELEASE_LUA, 1, self.key)
             except Exception as exc:  # noqa: BLE001
                 # 不能 raise（aexit 链路），但必须看得见——否则 redis 抖动期间名额会持续
                 # 漏算（DECR 没成功）让后续 task 永远拿不到名额。
                 logger.warning(
-                    "redis sem decr failed key=%s err=%s",
+                    "redis sem release failed key=%s err=%s",
                     self.key,
                     exc,
                 )
