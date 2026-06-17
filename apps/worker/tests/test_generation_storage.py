@@ -354,6 +354,17 @@ def test_validate_resolved_size_can_skip_aspect_drift_for_fixed_size() -> None:
     ) == (1024, 1024)
 
 
+def test_prompt_with_aspect_ratio_constraint_adds_square_guard() -> None:
+    prompt = generation._prompt_with_aspect_ratio_constraint(
+        "画一张活动分享图",
+        "1:1",
+    )
+
+    assert "strict 1:1 ratio" in prompt
+    assert "square canvas" in prompt
+    assert "poster" in prompt
+
+
 def test_retry_delay_adds_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(generation.random, "uniform", lambda low, high: high)
 

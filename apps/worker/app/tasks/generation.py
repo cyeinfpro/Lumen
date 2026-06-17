@@ -2305,6 +2305,41 @@ def _validate_resolved_size(
     return width, height
 
 
+def _parse_aspect_ratio_value(aspect_ratio: str) -> tuple[int, int] | None:
+    if not isinstance(aspect_ratio, str) or ":" not in aspect_ratio:
+        return None
+    raw_rw, raw_rh = aspect_ratio.split(":", 1)
+    if not raw_rw.isdigit() or not raw_rh.isdigit():
+        return None
+    ratio_w = int(raw_rw)
+    ratio_h = int(raw_rh)
+    if ratio_w <= 0 or ratio_h <= 0:
+        return None
+    return ratio_w, ratio_h
+
+
+def _aspect_ratio_prompt_constraint(aspect_ratio: str) -> str:
+    parsed = _parse_aspect_ratio_value(aspect_ratio)
+    if parsed is None:
+        return ""
+    shape_hint = " This means a square canvas." if parsed[0] == parsed[1] else ""
+    return (
+        "\n\nAspect ratio constraint: the final image canvas must be a strict "
+        f"{aspect_ratio} ratio.{shape_hint} Do not reinterpret this as a poster, "
+        "portrait, landscape, social cover, or any other ratio."
+    )
+
+
+def _prompt_with_aspect_ratio_constraint(prompt: str, aspect_ratio: str) -> str:
+    constraint = _aspect_ratio_prompt_constraint(aspect_ratio)
+    if not constraint:
+        return prompt
+    normalized_prompt = prompt.rstrip()
+    if constraint.strip() in normalized_prompt:
+        return normalized_prompt
+    return f"{normalized_prompt}{constraint}"
+
+
 def _base_retry_backoff_seconds(attempt: int) -> float:
     idx = max(0, int(attempt) - 1)
     if idx < len(RETRY_BACKOFF_SECONDS):
@@ -4838,6 +4873,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             gen.upstream_request,
             size=resolved.size,
         )
+        prompt_for_upstream = _prompt_with_aspect_ratio_constraint(
+            prompt,
+            aspect_ratio,
+        )
 
         async with SessionLocal() as session:
             references = await _load_reference_images(session, input_image_ids)
@@ -5175,7 +5214,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                     status_code=400,
                                 )
                             image_iter = edit_image(
-                                prompt=prompt,
+                                prompt=prompt_for_upstream,
                                 # mask 不为 None 时优先用对齐到参考图尺寸的 inpaint
                                 # override；否则走 user resolved.size（普通 i2i 行为）。
                                 size=inpaint_size_override or resolved.size,
@@ -5199,7 +5238,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             )
                         else:
                             image_iter = generate_image(
-                                prompt=prompt,
+                                prompt=prompt_for_upstream,
                                 size=resolved.size,
                                 quality=str(image_request_options["render_quality"]),
                                 output_format=str(
