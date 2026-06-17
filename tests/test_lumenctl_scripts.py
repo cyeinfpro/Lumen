@@ -2273,6 +2273,11 @@ def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     assert "cosign sign --yes" in workflow
     assert "id-token: write" in workflow
     assert "cp .env.example .env" in workflow
+    assert 'image_proxy_secret="$(openssl rand -hex 32)"' in workflow
+    assert (
+        '-e "s|^IMAGE_PROXY_SECRET=.*|IMAGE_PROXY_SECRET=${image_proxy_secret}|"'
+        in workflow
+    )
     assert "Compose config" in workflow
     assert "Image start smoke" in workflow
 
