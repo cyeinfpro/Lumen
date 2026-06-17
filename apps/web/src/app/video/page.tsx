@@ -1293,11 +1293,11 @@ export default function VideoPage() {
   ];
 
   return (
-    <div className="min-h-[100dvh] bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="min-h-[100dvh] overflow-x-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col gap-3 px-3 pb-32 pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-4 pt-2 md:h-[calc(100dvh-3rem)] md:overflow-hidden md:px-5 md:pb-4">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1335,13 +1335,13 @@ export default function VideoPage() {
                     ))}
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-[var(--fg-2)]">
-                    <span>{MODE_COPY[action].description}</span>
-                    <span className="font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
+                    <span className="min-w-0 flex-1">{MODE_COPY[action].description}</span>
+                    <span className="shrink-0 font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
                   </div>
                 </div>
 
-                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)] xl:items-start">
-                  <div className="space-y-3">
+                <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)] xl:items-start">
+                  <div className="min-w-0 space-y-3">
                     {action === "i2v" && (
                       <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-2.5 shadow-[var(--shadow-1)]">
                         <input
@@ -1514,7 +1514,7 @@ export default function VideoPage() {
                         maxLength={10000}
                         placeholder="写清主体、动作、镜头运动、节奏、参考素材怎么使用，以及不要出现的内容。"
                         className={cn(
-                          "min-h-[190px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
+                          "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
                           isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                         )}
                       />
@@ -1530,7 +1530,7 @@ export default function VideoPage() {
                           onDismiss={clearPromptEnhanceChoices}
                         />
                       )}
-                      <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+                      <div className="flex flex-wrap gap-2 pb-1">
                         {PROMPT_CHIPS.map((chip) => (
                           <button
                             key={chip}
@@ -1547,7 +1547,7 @@ export default function VideoPage() {
                   </div>
 
                   <VideoParameterPanel
-                    className="order-first xl:sticky xl:top-4 xl:order-none"
+                    className="xl:sticky xl:top-4"
                     selectedModel={selectedModel}
                     modelOptions={modelOptionValues}
                     durationS={effectiveDurationS}
@@ -1765,12 +1765,12 @@ function SelectField({
   renderOption?: (value: string) => string;
 }) {
   return (
-    <label className="space-y-1.5">
+    <label className="block min-w-0 space-y-1.5">
       <span className="type-caption text-[var(--fg-2)]">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+        className="h-10 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
       >
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
@@ -1834,7 +1834,7 @@ function VideoParameterPanel({
   return (
     <aside
       className={cn(
-        "space-y-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/88 p-3 shadow-[var(--shadow-2)] backdrop-blur-xl",
+        "min-w-0 space-y-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/88 p-2.5 shadow-[var(--shadow-2)] backdrop-blur-xl sm:p-3",
         className,
       )}
     >
@@ -1854,7 +1854,7 @@ function VideoParameterPanel({
         </div>
         <span
           className={cn(
-            "rounded-full border px-2 py-1 text-xs",
+            "shrink-0 whitespace-nowrap rounded-full border px-2 py-1 text-xs",
             canSubmit
               ? "border-success-border bg-success-soft text-success"
               : sourceReady
@@ -1866,14 +1866,14 @@ function VideoParameterPanel({
         </span>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+      <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-1">
         <SelectField
           label="模型"
           value={selectedModel}
           onChange={onModelChange}
           options={modelOptions}
         />
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
           <SelectField
             label="分辨率"
             value={resolution}
@@ -1887,7 +1887,7 @@ function VideoParameterPanel({
             options={aspectRatioOptions}
           />
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
           <SelectField
             label="时长"
             value={String(durationS)}
@@ -1895,18 +1895,18 @@ function VideoParameterPanel({
             options={durationOptions}
             renderOption={(value) => formatDurationLabel(Number(value))}
           />
-          <label className="space-y-1.5">
+          <label className="block min-w-0 space-y-1.5">
             <span className="type-caption text-[var(--fg-2)]">Seed</span>
             <input
               value={seed}
               onChange={(event) => onSeedChange(event.target.value)}
               inputMode="numeric"
               placeholder="随机"
-              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+              className="h-10 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
             />
           </label>
         </div>
-        <label className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
+        <label className="flex min-h-10 min-w-0 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
           <span className="font-medium text-[var(--fg-0)]">生成音频</span>
           <input
             type="checkbox"
@@ -1917,16 +1917,16 @@ function VideoParameterPanel({
       </div>
 
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3">
-        <div className="grid grid-cols-2 gap-2">
-          <div>
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+          <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">预扣</p>
-            <p className="mt-1 text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="mt-1 truncate text-base font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
             </p>
           </div>
-          <div>
+          <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">Token 上限</p>
-            <p className="mt-1 text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="mt-1 truncate text-base font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? estimate.tokens.toLocaleString() : "-"}
             </p>
           </div>
