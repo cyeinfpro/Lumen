@@ -78,6 +78,7 @@ RUN apt-get update \
         ca-certificates \
         openssh-client \
         sshpass \
+        ffmpeg \
         libvips42 \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
