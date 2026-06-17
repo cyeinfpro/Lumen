@@ -32,7 +32,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from PIL import Image as PILImage, UnidentifiedImageError
+from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,6 +98,7 @@ MAX_IMAGE_PIXELS = 64_000_000
 PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/webp"}
 EXT_BY_MIME = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+NORMALIZABLE_UPLOAD_MIME = {"image/mpo", "image/x-mpo"}
 MIN_STORAGE_FREE_BYTES = 512 * 1024 * 1024
 
 DISPLAY_VARIANT = "display2048"
@@ -166,12 +167,21 @@ def _prepare_upload_image(
 
     with _open_image_bytes(data) as im:
         mime = (im.get_format_mimetype() or "").lower()
-        if mime not in ALLOWED_MIME:
-            raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
-
+        source_mime = mime
         uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
-        width, height = im.size
-        _enforce_pixel_limit((width, height))
+        if mime in ALLOWED_MIME:
+            width, height = im.size
+            _enforce_pixel_limit((width, height))
+        elif mime in NORMALIZABLE_UPLOAD_MIME:
+            data, width, height = _normalize_upload_image_to_jpeg(im)
+            mime = "image/jpeg"
+            uploaded_model_metadata["upload_normalized"] = {
+                "source_mime": source_mime,
+                "target_mime": mime,
+                "reason": "unsupported_upload_mime",
+            }
+        else:
+            raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
     try:
         normalized_ref = make_reference_variant(
             data,
@@ -206,6 +216,32 @@ def _prepare_upload_image(
         normalized_ref.data,
         normalized_ref_meta,
     )
+
+
+def _normalize_upload_image_to_jpeg(im: PILImage.Image) -> tuple[bytes, int, int]:
+    try:
+        normalized = ImageOps.exif_transpose(im)
+        width, height = normalized.size
+        _enforce_pixel_limit((width, height))
+        if "A" in normalized.getbands() or "transparency" in getattr(
+            normalized, "info", {}
+        ):
+            rgba = normalized.convert("RGBA")
+            flattened = PILImage.new("RGB", rgba.size, (255, 255, 255))
+            flattened.paste(rgba, mask=rgba.getchannel("A"))
+            normalized = flattened
+        elif normalized.mode != "RGB":
+            normalized = normalized.convert("RGB")
+        out = io.BytesIO()
+        normalized.save(out, format="JPEG", quality=95)
+        data = out.getvalue()
+    except PILImage.DecompressionBombError as exc:
+        raise _too_many_pixels() from exc
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise _http("invalid_image", "unreadable image", 400) from exc
+    if len(data) > MAX_BYTES:
+        raise _http("too_large", f"file exceeds {MAX_BYTES // (1024 * 1024)}MB", 413)
+    return data, width, height
 
 
 def _model_metadata_json_from_upload(
