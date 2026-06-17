@@ -1307,7 +1307,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-4 pt-2 md:h-[calc(100dvh-3rem)] md:overflow-hidden md:px-5 md:pb-4">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-4 pt-2 md:h-[calc(100dvh-3rem)] md:overflow-y-auto md:px-5 md:pb-4 xl:overflow-hidden">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1320,7 +1320,7 @@ export default function VideoPage() {
           submitState={submitDisabledReason}
         />
 
-        <div className="grid min-h-0 flex-1 gap-3 2xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] 2xl:items-stretch">
+        <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] xl:items-stretch">
           <section className="min-w-0">
             <Card
               variant="subtle"
@@ -1599,12 +1599,12 @@ export default function VideoPage() {
             </Card>
           </section>
 
-          <section className="min-w-0 space-y-4 2xl:sticky 2xl:top-4">
+          <section className="min-w-0 space-y-4 xl:sticky xl:top-4">
             <Card
               variant="subtle"
               elevation={2}
               padding="none"
-              className="flex max-h-[720px] min-h-[420px] flex-col overflow-hidden border-[var(--border)] 2xl:max-h-[calc(100dvh-5rem)]"
+              className="flex max-h-[720px] min-h-[420px] flex-col overflow-hidden border-[var(--border)] xl:max-h-[calc(100dvh-5rem)]"
             >
               <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3 sm:p-4">
                 <span aria-hidden="true" className="absolute left-0 top-3 h-7 w-1 rounded-r-full bg-[var(--accent)]" />
