@@ -31,6 +31,29 @@ class CorsMiddlewareTests(unittest.TestCase):
             response.headers.get("access-control-allow-credentials"), "true"
         )
 
+    def test_preflight_allows_idempotency_key_header_for_put(self) -> None:
+        original = settings.cors_allow_origins
+        settings.cors_allow_origins = "http://198.51.100.10:3000"
+        try:
+            client = TestClient(build_app())
+            response = client.options(
+                "/healthz",
+                headers={
+                    "Origin": "http://198.51.100.10:3000",
+                    "Access-Control-Request-Method": "PUT",
+                    "Access-Control-Request-Headers": "Idempotency-Key",
+                },
+            )
+        finally:
+            settings.cors_allow_origins = original
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("PUT", response.headers["access-control-allow-methods"])
+        self.assertIn(
+            "Idempotency-Key",
+            response.headers["access-control-allow-headers"],
+        )
+
     def test_empty_cors_origins_fail_startup(self) -> None:
         original = settings.cors_allow_origins
         settings.cors_allow_origins = ""

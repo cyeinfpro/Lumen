@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -100,6 +101,41 @@ def test_share_image_ids_dedupes_and_falls_back_to_single_image() -> None:
     assert shares._share_image_ids(SimpleNamespace(image_id="img-1", image_ids=[])) == [
         "img-1"
     ]
+
+
+def test_public_share_binary_response_requires_revalidation() -> None:
+    response = shares._share_image_response(
+        BytesIO(b"image"),
+        5,
+        media_type="image/png",
+        etag='"image-1"',
+    )
+
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_share_storage_path_keeps_final_symlink_visible_to_safe_open(
+    tmp_path: Path,
+) -> None:
+    old = shares.settings.storage_root
+    root = tmp_path / "storage"
+    target = root / "u" / "victim" / "uploads" / "secret.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"secret")
+    link = root / "u" / "attacker" / "uploads" / "alias.png"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    shares.settings.storage_root = str(root)
+    try:
+        with pytest.raises(Exception) as excinfo:
+            shares._open_storage_file_safe("u/attacker/uploads/alias.png")
+    finally:
+        shares.settings.storage_root = old
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_path"
 
 
 @pytest.mark.asyncio

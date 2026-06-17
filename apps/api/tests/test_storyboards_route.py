@@ -84,6 +84,22 @@ def test_shot_source_hash_changes_when_asset_reference_changes() -> None:
     assert image_changed != original
 
 
+def test_clear_shot_video_output_removes_stale_video_fields() -> None:
+    cleaned = storyboards._clear_shot_video_output(  # noqa: SLF001
+        {
+            "video_generation_id": "video-gen-1",
+            "video_id": "video-1",
+            "video_status": "running",
+            "video_progress_stage": "fetching",
+            "video_progress_pct": 80,
+            "keyframe_image_id": "image-1",
+            "notes": "keep",
+        }
+    )
+
+    assert cleaned == {"keyframe_image_id": "image-1", "notes": "keep"}
+
+
 def test_storyboard_image_task_helper_does_not_commit_before_step_link() -> None:
     source = inspect.getsource(storyboards._create_storyboard_image_task)  # noqa: SLF001
 

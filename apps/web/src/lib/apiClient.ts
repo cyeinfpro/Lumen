@@ -3,8 +3,9 @@ import {
   ApiError,
   apiFetch,
   apiFetchNoContent,
+  ensureCsrfToken,
   handle401,
-  readCookie,
+  refreshCsrfToken,
 } from "./api/http";
 import type { NoContent } from "./api/http";
 import type {
@@ -2117,8 +2118,9 @@ export function listMyActiveTasks(
 
 // —— SSE URL 构造（供 useSSE 使用） ——
 
-export function sseUrl(channels: string[]): string {
+export function sseUrl(channels: string[], lastEventId?: string | null): string {
   const q = new URLSearchParams({ channels: [...channels].sort().join(",") });
+  if (lastEventId) q.set("last_event_id", lastEventId);
   return `${API_BASE.replace(/\/$/, "")}/events?${q.toString()}`;
 }
 
@@ -2304,10 +2306,8 @@ async function streamPromptEnhancement(
   signal?: AbortSignal,
 ): Promise<void> {
   const url = `${API_BASE.replace(/\/$/, "")}${path}`;
-  const csrf = readCookie("csrf");
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  const doFetch = async (csrf: string | null): Promise<Response> =>
+    fetch(url, {
       method: "POST",
       credentials: "include",
       headers: {
@@ -2317,6 +2317,9 @@ async function streamPromptEnhancement(
       body: JSON.stringify(body),
       signal,
     });
+  let res: Response;
+  try {
+    res = await doFetch(await ensureCsrfToken());
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new ApiError({
@@ -2328,6 +2331,26 @@ async function streamPromptEnhancement(
   if (res.status === 401) {
     handle401();
     throw new ApiError({ code: "unauthorized", message: "未登录", status: 401 });
+  }
+  if (res.status === 403) {
+    const err = await streamApiErrorFromResponse(res, "enhance_failed");
+    if (err.code !== "csrf_failed") throw err;
+    const fresh = await refreshCsrfToken().catch(() => null);
+    if (!fresh) throw err;
+    try {
+      res = await doFetch(fresh);
+    } catch (retryErr) {
+      if (signal?.aborted) throw retryErr;
+      throw new ApiError({
+        code: "network_error",
+        message: retryErr instanceof Error ? retryErr.message : "network error",
+        status: 0,
+      });
+    }
+    if (res.status === 401) {
+      handle401();
+      throw new ApiError({ code: "unauthorized", message: "未登录", status: 401 });
+    }
   }
   if (!res.ok) {
     throw await streamApiErrorFromResponse(res, "enhance_failed");
@@ -3729,26 +3752,66 @@ export function deleteMyAccount(): Promise<NoContent> {
   return apiFetchNoContent("/me", { method: "DELETE" });
 }
 
+async function exportApiErrorFromResponse(res: Response): Promise<ApiError> {
+  let code = "http_error";
+  let message = `HTTP ${res.status}`;
+  const ct = res.headers.get("content-type") ?? "";
+  if (ct.includes("application/json")) {
+    const data = (await res.json().catch(() => null)) as unknown;
+    if (
+      data &&
+      typeof data === "object" &&
+      data !== null &&
+      "error" in data &&
+      typeof (data as { error: unknown }).error === "object"
+    ) {
+      const e = (data as { error: { code?: string; message?: string } }).error;
+      if (e.code) code = e.code;
+      if (e.message) message = e.message;
+    }
+    return new ApiError({ code, message, status: res.status, payload: data });
+  }
+  return new ApiError({ code, message, status: res.status });
+}
+
 // /me/export 返回 zip 流，apiFetch 默认按 JSON 解析无法处理，所以自己写。
 export async function exportMyData(): Promise<Blob> {
   const url = `${API_BASE.replace(/\/$/, "")}/me/export`;
-  const headers = new Headers();
-  const csrf = readCookie("csrf");
-  if (csrf) headers.set("x-csrf-token", csrf);
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  const doFetch = async (csrf: string | null): Promise<Response> => {
+    const headers = new Headers();
+    if (csrf) headers.set("x-csrf-token", csrf);
+    return fetch(url, {
       method: "POST",
       headers,
       credentials: "include",
     });
+  };
+
+  let res: Response;
+  try {
+    res = await doFetch(await ensureCsrfToken());
   } catch (err) {
     throw new ApiError({
       code: "network_error",
       message: err instanceof Error ? err.message : "network error",
       status: 0,
     });
+  }
+
+  if (res.status === 403) {
+    const err = await exportApiErrorFromResponse(res);
+    if (err.code !== "csrf_failed") throw err;
+    const fresh = await refreshCsrfToken().catch(() => null);
+    if (!fresh) throw err;
+    try {
+      res = await doFetch(fresh);
+    } catch (retryErr) {
+      throw new ApiError({
+        code: "network_error",
+        message: retryErr instanceof Error ? retryErr.message : "network error",
+        status: 0,
+      });
+    }
   }
 
   if (res.status === 401) {
@@ -3761,26 +3824,7 @@ export async function exportMyData(): Promise<Blob> {
   }
 
   if (!res.ok) {
-    let code = "http_error";
-    let message = `HTTP ${res.status}`;
-    const ct = res.headers.get("content-type") ?? "";
-    if (ct.includes("application/json")) {
-      const data = (await res.json().catch(() => null)) as unknown;
-      if (
-        data &&
-        typeof data === "object" &&
-        data !== null &&
-        "error" in data &&
-        typeof (data as { error: unknown }).error === "object"
-      ) {
-        const e = (data as { error: { code?: string; message?: string } })
-          .error;
-        if (e.code) code = e.code;
-        if (e.message) message = e.message;
-      }
-      throw new ApiError({ code, message, status: res.status, payload: data });
-    }
-    throw new ApiError({ code, message, status: res.status });
+    throw await exportApiErrorFromResponse(res);
   }
 
   return res.blob();

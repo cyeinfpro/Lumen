@@ -16,6 +16,7 @@ def _prod_kwargs() -> dict[str, str]:
         "database_url": "postgresql+asyncpg://lumen_prod:secret@localhost:5432/lumen",
         "redis_url": "redis://:redis-prod-password@localhost:6379/0",
         "image_job_base_url": "https://image-jobs.example.net",
+        "image_proxy_secret": "i" * 32,
         "smtp_host": "smtp.example.com",
         "smtp_from_email": "noreply@example.com",
     }
@@ -174,6 +175,22 @@ def test_non_dev_rejects_default_redis_password() -> None:
 def test_non_dev_rejects_placeholder_image_job_base_url() -> None:
     kwargs = _prod_kwargs()
     kwargs["image_job_base_url"] = "https://image-job.example.com"
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_requires_image_proxy_secret() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_proxy_secret"] = ""
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_rejects_short_image_proxy_secret() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_proxy_secret"] = "short"
 
     with pytest.raises(ValidationError):
         Settings(**kwargs)

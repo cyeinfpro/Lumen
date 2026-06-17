@@ -569,6 +569,14 @@ def _validate_video_response_bytes(data: bytes, content_type: str) -> None:
 
 
 async def _fetch_video_url_bytes(video_url: str) -> bytes:
+    try:
+        target = await resolve_public_http_target(video_url, allow_http=True)
+    except ValueError as exc:
+        raise VideoUpstreamError(
+            "video result URL must be public HTTP(S)",
+            error_code="invalid_input",
+            status_code=422,
+        ) from exc
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=settings.upstream_connect_timeout_s,
@@ -579,7 +587,7 @@ async def _fetch_video_url_bytes(video_url: str) -> bytes:
         follow_redirects=False,
         trust_env=False,
     ) as client:
-        async with client.stream("GET", video_url) as response:
+        async with client.stream("GET", target.url) as response:
             if response.status_code >= 400:
                 raise VideoUpstreamError(
                     f"video fetch failed status={response.status_code}",
@@ -943,12 +951,26 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("poll", response.status_code, raw)
-        status = _status(_nested_get(raw, ("data", "status"), ("status",)))
+        status = _status(
+            _nested_get(
+                raw,
+                ("data", "status"),
+                ("data", "data", "status"),
+                ("data", "data", "data", "status"),
+                ("status",),
+            )
+        )
         upstream_billable = _billable(raw)
         return PollResult(
             status=status,
             progress=_int_or_none(
-                _nested_get(raw, ("data", "progress"), ("progress",))
+                _nested_get(
+                    raw,
+                    ("data", "progress"),
+                    ("data", "data", "progress"),
+                    ("data", "data", "data", "progress"),
+                    ("progress",),
+                )
             ),
             video_url=_absolute_url(_video_url(raw), self._client_base_url()),
             failure_class=_failure_class(raw),
@@ -989,7 +1011,13 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             return False
         messages = [
             str(exc),
-            _nested_get(exc.raw, ("error", "message"), ("message",), ("text",)),
+            _nested_get(
+                exc.raw,
+                ("error", "message"),
+                ("error",),
+                ("message",),
+                ("text",),
+            ),
         ]
         return any(
             isinstance(message, str) and "invalid url" in message.lower()
@@ -1495,7 +1523,13 @@ def _http_error(
     phase: str, status_code: int, raw: dict[str, Any]
 ) -> VideoUpstreamError:
     code = "upstream_unknown"
-    message = _nested_get(raw, ("error", "message"), ("message",), ("text",))
+    message = _nested_get(
+        raw,
+        ("error", "message"),
+        ("error",),
+        ("message",),
+        ("text",),
+    )
     if not isinstance(message, str) or not message:
         message = f"video upstream {phase} failed status={status_code}"
     if status_code in {401, 403}:

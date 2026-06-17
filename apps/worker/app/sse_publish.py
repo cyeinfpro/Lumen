@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # 24h 粗略上限——redis 的 MAXLEN ~ 是近似修剪
 _EVENTS_DLQ_MAXLEN = 1000
 _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
+_DEDUPE_RESERVATION_PENDING_ERROR = "sse dedupe reservation has no stream id"
+_DEDUPE_RESERVATION_WAIT_SECONDS = 0.25
+_DEDUPE_RESERVATION_POLL_SECONDS = 0.025
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
 _XADD_IDEMPOTENT_LUA = """
 local existing = redis.call('GET', KEYS[2])
@@ -107,11 +110,14 @@ def _has_stream_id(value: Any) -> bool:
     return str(value) != ""
 
 
+def _is_dedupe_reservation_pending(exc: Exception) -> bool:
+    return _DEDUPE_RESERVATION_PENDING_ERROR in str(exc).lower()
+
+
 def _is_lua_xadd_unsupported(exc: Exception) -> bool:
     message = str(exc).lower()
     return (
         "unknown redis command called from script" in message
-        or "sse dedupe reservation has no stream id" in message
         or (
             "xadd" in message
             and "script" in message
@@ -149,6 +155,32 @@ async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
     return _decode_redis_value(existing)
 
 
+async def _wait_for_dedupe_stream_id(
+    redis: Any,
+    dedupe_key: str,
+    *,
+    timeout_s: float = _DEDUPE_RESERVATION_WAIT_SECONDS,
+) -> str | None:
+    """Wait briefly for another publisher to fill an in-flight dedupe reservation.
+
+    Redis fallback mode cannot atomically reserve, XADD, and store the resulting
+    stream id. Seeing an existing dedupe key with an empty value therefore means
+    another worker may already be between reserve and XADD. Deleting that key
+    immediately can duplicate stream entries; a short bounded wait keeps the
+    fallback path idempotent without adding user-visible latency in the common
+    Lua-capable Redis path.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        existing = await _read_dedupe_stream_id(redis, dedupe_key)
+        if existing is not None:
+            return existing
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(_DEDUPE_RESERVATION_POLL_SECONDS, remaining))
+
+
 async def _reserve_dedupe_key(redis: Any, dedupe_key: str) -> bool:
     set_fn = getattr(redis, "set", None)
     if not callable(set_fn):
@@ -178,6 +210,16 @@ async def _store_dedupe_stream_id(
         )
     except TypeError:
         await set_fn(dedupe_key, stream_id)
+        expire_fn = getattr(redis, "expire", None)
+        if callable(expire_fn):
+            try:
+                await expire_fn(dedupe_key, _EVENTS_DEDUPE_TTL_SECONDS)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "publish_event: dedupe expire fallback failed key=%s err=%s",
+                    dedupe_key,
+                    exc,
+                )
 
 
 async def _xadd_event_without_lua(
@@ -187,6 +229,7 @@ async def _xadd_event_without_lua(
     event_name: str,
     event_id: str,
     payload_json: str,
+    reclaim_empty_reservation: bool = False,
 ) -> str:
     dedupe_key = f"{stream_key}:dedupe:{event_id}"
     existing = await _read_dedupe_stream_id(redis, dedupe_key)
@@ -195,15 +238,20 @@ async def _xadd_event_without_lua(
 
     reserved = await _reserve_dedupe_key(redis, dedupe_key)
     if not reserved:
-        existing = await _read_dedupe_stream_id(redis, dedupe_key)
+        existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
         if existing is not None:
             return existing
+        if not reclaim_empty_reservation:
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
         delete_fn = getattr(redis, "delete", None)
         if callable(delete_fn):
             await delete_fn(dedupe_key)
             reserved = await _reserve_dedupe_key(redis, dedupe_key)
         if not reserved:
-            raise RuntimeError("sse dedupe reservation has no stream id")
+            existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
+            if existing is not None:
+                return existing
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
 
     try:
         stream_id = await redis.xadd(
@@ -237,7 +285,7 @@ async def _xadd_event_once(
 ) -> str:
     event_id = str(envelope["event_id"])
     eval_fn = getattr(redis, "eval", None)
-    if eval_fn is None:
+    if not callable(eval_fn):
         return await _xadd_event_without_lua(
             redis,
             stream_key=stream_key,
@@ -258,6 +306,14 @@ async def _xadd_event_once(
             str(_EVENTS_DEDUPE_TTL_SECONDS),
         )
     except Exception as exc:  # noqa: BLE001
+        if _is_dedupe_reservation_pending(exc):
+            existing = await _wait_for_dedupe_stream_id(
+                redis,
+                f"{stream_key}:dedupe:{event_id}",
+            )
+            if existing is not None:
+                return existing
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR) from exc
         if not _is_lua_xadd_unsupported(exc):
             raise
         return await _xadd_event_without_lua(
@@ -266,6 +322,7 @@ async def _xadd_event_once(
             event_name=event_name,
             event_id=event_id,
             payload_json=payload_json,
+            reclaim_empty_reservation=True,
         )
     if isinstance(stream_id, bytes):
         return stream_id.decode("ascii", errors="replace")

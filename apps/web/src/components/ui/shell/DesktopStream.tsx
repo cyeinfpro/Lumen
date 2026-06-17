@@ -1,8 +1,6 @@
 "use client";
 
 import {
-  type Dispatch,
-  type SetStateAction,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -130,20 +128,20 @@ export function DesktopStream() {
   const isWide = useMediaQuery("(min-width: 1180px)");
   const desktopCols = isWide ? 4 : 3;
 
-  const initialFilters = useMemo(
-    () => parseFilters(new URLSearchParams(searchParams.toString())),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+  const queryString = searchParams.toString();
+  const queryFilters = useMemo(
+    () => parseFilters(new URLSearchParams(queryString)),
+    [queryString],
   );
-  const [filters, setFilters] =
-    useState<StreamFeedFilters>(initialFilters);
+  const highlightId = useMemo(
+    () => new URLSearchParams(queryString).get("highlight")?.trim() ?? "",
+    [queryString],
+  );
+  const filters = queryFilters;
+  const [filterOpen, setFilterOpen] = useState(() => hasAnyFilter(queryFilters));
 
   const applyFilters = useCallback(
-    (
-      next: StreamFeedFilters,
-      setter: Dispatch<SetStateAction<StreamFeedFilters>> = setFilters,
-    ) => {
-      setter(next);
+    (next: StreamFeedFilters) => {
       const qs = filtersToQueryString(next);
       router.replace(`${pathname || "/stream"}${qs}`, { scroll: false });
     },
@@ -162,7 +160,6 @@ export function DesktopStream() {
   const total = feedTotal(query.data);
 
   const [searchOpen, setSearchOpen] = useState(false);
-  const [filterOpen, setFilterOpen] = useState(() => hasAnyFilter(initialFilters));
   const [q, setQ] = useState("");
   const deferredQ = useDeferredValue(q);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -348,7 +345,7 @@ export function DesktopStream() {
             }}
           />
           <FilterBar
-            open={filterOpen}
+            open={filterOpen || hasAnyFilter(filters)}
             filters={filters}
             onChange={(next) => applyFilters(next)}
             onClear={clearFilters}
@@ -401,6 +398,7 @@ export function DesktopStream() {
               selectionMode={selectionActive}
               selectedIds={selectedIds}
               onToggleSelect={toggleSelectedImage}
+              highlightId={highlightId}
             />
           )}
 

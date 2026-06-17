@@ -106,7 +106,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
         Boolean, default=False, nullable=False, server_default=text("false")
     )
     extraction_threshold: Mapped[float] = mapped_column(
-        Float, default=0.85, nullable=False, server_default=text("0.85")
+        Float, default=0.80, nullable=False, server_default=text("0.80")
     )
     onboarding_seen: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False, server_default="0"

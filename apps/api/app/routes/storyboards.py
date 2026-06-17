@@ -161,6 +161,19 @@ def _video_poster_url(video_id: str | None, poster_storage_key: str | None) -> s
     return f"/api/videos/{video_id}/poster" if video_id and poster_storage_key else None
 
 
+def _clear_shot_video_output(out_json: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(out_json)
+    for key in (
+        "video_generation_id",
+        "video_id",
+        "video_status",
+        "video_progress_stage",
+        "video_progress_pct",
+    ):
+        cleaned.pop(key, None)
+    return cleaned
+
+
 def _run_metadata(run: WorkflowRun) -> dict[str, Any]:
     return dict(run.metadata_jsonb or {})
 
@@ -1777,7 +1790,7 @@ async def patch_shot(
     step.input_json = data
     if before_hash != after_hash and step.status in {"keyframe_ready", "keyframe_approved", "generating", "done"}:
         step.status = "approved"
-        out_json = dict(step.output_json or {})
+        out_json = _clear_shot_video_output(dict(step.output_json or {}))
         out_json.pop("keyframe_approved_at", None)
         step.output_json = out_json
     out = await _build_run_out(db, run)
@@ -1848,7 +1861,7 @@ async def generate_shot_keyframe(
     step.status = "keyframe_generating"
     step.task_ids = [task.generation_id]
     step.output_json = {
-        **(step.output_json or {}),
+        **_clear_shot_video_output(dict(step.output_json or {})),
         "keyframe_generation_id": task.generation_id,
         "keyframe_image_id": None,
         "keyframe_approved_at": None,
@@ -1923,7 +1936,7 @@ async def generate_all_keyframes(
         shot.status = "keyframe_generating"
         shot.task_ids = [task.generation_id]
         shot.output_json = {
-            **(shot.output_json or {}),
+            **_clear_shot_video_output(dict(shot.output_json or {})),
             "keyframe_generation_id": task.generation_id,
             "keyframe_image_id": None,
             "keyframe_approved_at": None,

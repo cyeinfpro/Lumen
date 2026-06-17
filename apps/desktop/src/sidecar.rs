@@ -1072,7 +1072,8 @@ fn write_private_atomic(path: &Path, payload: &[u8]) -> Result<()> {
             .and_then(|value| value.to_str())
             .unwrap_or("json")
     ));
-    fs::write(&tmp_path, payload)
+    let _ = fs::remove_file(&tmp_path);
+    crate::secrets::write_private_file(&tmp_path, payload)
         .with_context(|| format!("write temporary private file {}", tmp_path.display()))?;
     #[cfg(unix)]
     {

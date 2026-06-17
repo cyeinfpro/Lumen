@@ -24,6 +24,14 @@ def test_user_email_unique_only_for_active_users():
     assert str(index.dialect_options["sqlite"]["where"]) == "deleted_at IS NULL"
 
 
+def test_user_extraction_threshold_default_matches_latest_migration():
+    column = User.__table__.c.extraction_threshold
+
+    assert column.default is not None
+    assert column.default.arg == 0.80
+    assert str(column.server_default.arg) == "0.80"
+
+
 def test_video_generation_has_idempotency_and_provider_task_guards():
     constraint_names = {
         constraint.name for constraint in VideoGeneration.__table__.constraints

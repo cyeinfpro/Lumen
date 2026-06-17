@@ -297,7 +297,9 @@ class Settings(BaseSettings):
                     "SESSION_SECRET must be at least 32 characters outside development"
                 )
             img_secret = self.image_proxy_secret.strip()
-            if img_secret and len(img_secret) < 32:
+            if not img_secret:
+                raise ValueError("IMAGE_PROXY_SECRET must be set outside development")
+            if len(img_secret) < 32:
                 raise ValueError(
                     "IMAGE_PROXY_SECRET must be at least 32 characters outside development"
                 )

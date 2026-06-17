@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,13 +14,9 @@ from typing import Any
 import tiktoken
 from PIL import Image as PILImage
 
-import sys
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from apps.worker.app import upstream
 
 
 BASE_URL = "https://api.example.com/v1"
@@ -57,6 +54,12 @@ def encoder() -> Any:
 
 def token_count(text: str) -> int:
     return len(encoder().encode(text))
+
+
+def load_upstream() -> Any:
+    from apps.worker.app import upstream
+
+    return upstream
 
 
 def build_prompt(target_tokens: int) -> str:
@@ -110,6 +113,7 @@ async def run_one(
     api_key: str,
     out_dir: Path,
 ) -> ProbeResult:
+    upstream = load_upstream()
     prompt_tokens = token_count(prompt)
     started = time.monotonic()
     try:
@@ -231,7 +235,7 @@ async def main() -> None:
             if args.stop_after_errors and consecutive_errors >= args.stop_after_errors:
                 break
     finally:
-        await upstream.close_client()
+        await load_upstream().close_client()
 
 
 if __name__ == "__main__":

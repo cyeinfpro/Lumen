@@ -721,6 +721,10 @@ ensure_required_env_secrets() {
         2) generated+=("SESSION_SECRET") ;;
         *) return 1 ;;
     esac
+    ensure_env_secret "${file}" IMAGE_PROXY_SECRET 32 || case "$?" in
+        2) generated+=("IMAGE_PROXY_SECRET") ;;
+        *) return 1 ;;
+    esac
     ensure_env_secret "${file}" BYOK_API_KEY_MASTER_SECRET 48 || case "$?" in
         2) generated+=("BYOK_API_KEY_MASTER_SECRET") ;;
         *) return 1 ;;
@@ -1456,7 +1460,7 @@ prepare_env_file() {
         cp "${example}" "${shared_env}"
         chmod 600 "${shared_env}"
         ensure_required_env_secrets "${shared_env}" || exit 1
-        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET/BYOK_API_KEY_MASTER_SECRET/TELEGRAM_BOT_SHARED_SECRET）。"
+        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET/IMAGE_PROXY_SECRET/BYOK_API_KEY_MASTER_SECRET/TELEGRAM_BOT_SHARED_SECRET）。"
     else
         log_info "shared/.env 已存在，跳过密钥生成。"
         ensure_required_env_secrets "${shared_env}" || exit 1

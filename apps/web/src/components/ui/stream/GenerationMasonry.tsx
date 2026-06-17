@@ -13,6 +13,7 @@ export interface GenerationMasonryProps {
   selectionMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (imageId: string) => void;
+  highlightId?: string | null;
 }
 
 type Bucket = "today" | "yesterday" | "week" | "older";
@@ -86,6 +87,7 @@ function GenerationMasonryComponent({
   selectionMode = false,
   selectedIds,
   onToggleSelect,
+  highlightId,
 }: GenerationMasonryProps) {
   const columnCount = Math.max(1, Math.floor(columns));
   const gap = columnCount > 2 ? 16 : 12;
@@ -94,10 +96,22 @@ function GenerationMasonryComponent({
     [feed],
   );
   const lightboxItemsRef = useRef(orderedFeed);
+  const tileRefs = useRef(new Map<string, HTMLDivElement>());
 
   useEffect(() => {
     lightboxItemsRef.current = orderedFeed;
   }, [orderedFeed]);
+
+  useEffect(() => {
+    const target = highlightId?.trim();
+    if (!target) return;
+    const node = tileRefs.current.get(target);
+    if (!node) return;
+    const timer = window.setTimeout(() => {
+      node.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [highlightId, items]);
 
   const onOpenItem = useCallback((itemId: string, rect: DOMRect) => {
     openStreamLightbox(lightboxItemsRef.current, itemId, rect);
@@ -152,25 +166,44 @@ function GenerationMasonryComponent({
                   className="flex min-w-0 flex-col"
                   style={{ gap }}
                 >
-                  {col.map(({ item, index, estimatedHeight }) => (
-                    <div
-                      key={item.id}
-                      className="stream-tile-shell animate-stream-tile-in"
-                      style={{
-                        animationDelay: `${Math.min(index * 26, 360)}ms`,
-                        contentVisibility: "auto",
-                        containIntrinsicSize: `1px ${Math.max(240, Math.min(760, estimatedHeight / 2))}px`,
-                      }}
-                    >
-                      <GenerationTile
-                        item={item}
-                        onOpen={onOpenItem}
-                        selectionMode={selectionMode}
-                        selected={Boolean(selectedIds?.has(item.image.id))}
-                        onToggleSelect={onToggleSelect}
-                      />
-                    </div>
-                  ))}
+                  {col.map(({ item, index, estimatedHeight }) => {
+                    const highlighted = Boolean(
+                      highlightId &&
+                        (item.id === highlightId || item.image.id === highlightId),
+                    );
+                    return (
+                      <div
+                        key={item.id}
+                        ref={(node) => {
+                          const keys = [item.id, item.image.id];
+                          for (const key of keys) {
+                            if (node) tileRefs.current.set(key, node);
+                            else tileRefs.current.delete(key);
+                          }
+                        }}
+                        data-highlighted={highlighted ? "true" : undefined}
+                        className={[
+                          "stream-tile-shell animate-stream-tile-in",
+                          highlighted
+                            ? "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--bg-0)]"
+                            : "",
+                        ].join(" ")}
+                        style={{
+                          animationDelay: `${Math.min(index * 26, 360)}ms`,
+                          contentVisibility: "auto",
+                          containIntrinsicSize: `1px ${Math.max(240, Math.min(760, estimatedHeight / 2))}px`,
+                        }}
+                      >
+                        <GenerationTile
+                          item={item}
+                          onOpen={onOpenItem}
+                          selectionMode={selectionMode}
+                          selected={Boolean(selectedIds?.has(item.image.id))}
+                          onToggleSelect={onToggleSelect}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </div>

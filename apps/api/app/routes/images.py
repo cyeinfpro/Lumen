@@ -130,8 +130,12 @@ def _too_many_pixels() -> HTTPException:
 
 def _enforce_pixel_limit(size: tuple[int, int]) -> None:
     width, height = size
+    if width <= 0 or height <= 0:
+        raise _http("invalid_image", "invalid image size", 400)
     if width * height > MAX_IMAGE_PIXELS:
         raise _too_many_pixels()
+    if max(width, height) > MAX_LONG_SIDE:
+        raise _http("too_large", f"image long side exceeds {MAX_LONG_SIDE}px", 413)
 
 
 def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
@@ -292,15 +296,21 @@ def _fs_path(storage_key: str) -> Path:
     root = Path(settings.storage_root).resolve()
     if not storage_key or "\x00" in storage_key:
         raise _http("invalid_path", "invalid storage path", 400)
-    key_path = Path(storage_key)
+    key_path = PurePosixPath(storage_key)
     if key_path.is_absolute():
         raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    p = (root / key_path).resolve()
-    try:
-        p.relative_to(root)
-    except ValueError:
+    parts = key_path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
         raise _http("invalid_path", "storage path escapes root", 400)
-    return p
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise _http("invalid_path", "symlink storage paths are not allowed", 400)
+        except OSError as exc:
+            raise _http("invalid_path", "invalid storage path", 400) from exc
+    return root.joinpath(*parts)
 
 
 def _storage_usage_path(root: Path) -> Path:

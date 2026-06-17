@@ -417,7 +417,7 @@ Provider 关键字段：
 | `APP_PORT` | `8000` | API 端口 |
 | `SESSION_SECRET` | 必填 | 生产必须显式设置，长度至少 32 字符 |
 | `SESSION_TTL_MIN` | `10080` | 会话有效期，5 分钟到 30 天 |
-| `IMAGE_PROXY_SECRET` | 空 | 分享页签名图片 URL 的 HMAC key，生产建议设置 >=32 字符 |
+| `IMAGE_PROXY_SECRET` | 必填 | 分享页签名图片 URL 的 HMAC key，生产必须设置 >=32 字符 |
 | `STORAGE_ROOT` | `/opt/lumendata/storage` | 原图和变体文件根目录 |
 | `BACKUP_ROOT` | `/opt/lumendata/backup` | 备份根目录 |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | API/分享链接生成 fallback |
@@ -427,9 +427,10 @@ Provider 关键字段：
 生产要求：
 
 - `SESSION_SECRET` 必须改成强随机值。
+- `IMAGE_PROXY_SECRET` 必须改成强随机值，长度至少 32 字符。
 - `CORS_ALLOW_ORIGINS` 应设置为真实 HTTPS 前端域名。
 - 非 dev 环境 cookie 会启用 `Secure`，请通过 HTTPS 访问。
-- 如果启用签名图片代理，`IMAGE_PROXY_SECRET` 轮换会立即作废未过期签名 URL。
+- `IMAGE_PROXY_SECRET` 轮换会立即作废未过期签名图片 URL。
 
 ### 上游与图片运行时
 

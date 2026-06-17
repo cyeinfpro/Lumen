@@ -245,6 +245,13 @@ pub fn apply_pending_restore(
 }
 
 pub fn clear_failed_restore_marker(data_root: &Path) -> Result<()> {
+    if let Some(path) = failed_restore_pending_path(data_root) {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("clear failed restore payload"),
+        }
+    }
     match fs::remove_file(failed_restore_json_path(data_root)) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -285,6 +292,18 @@ pub fn mark_pending_restore_failed(data_root: &Path, error: &str) -> Result<()> 
     write_json_private(&failed_restore_json_path(data_root), &failed)?;
     let _ = fs::remove_file(pending_json);
     Ok(())
+}
+
+fn failed_restore_pending_path(data_root: &Path) -> Option<PathBuf> {
+    let failed_json = failed_restore_json_path(data_root);
+    let raw = fs::read_to_string(failed_json).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    value
+        .get("pending")
+        .and_then(|v| v.get("pending_path"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .filter(|path| path.starts_with(data_root.join("data/tmp")))
 }
 
 fn create_desktop_backup_inner(

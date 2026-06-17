@@ -3,7 +3,8 @@
 // DESIGN 附录 B：前端 SSE hook
 // - 同一 channels key 复用一个模块级 EventSource；订阅者 ref-count 归零后关闭
 // - 带 withCredentials（browser 自动带 cookie；服务端 CORS 需 Access-Control-Allow-Credentials: true）
-// - 断线自动重连（指数退避 1s→2s→4s，上限 30s）。浏览器原生 EventSource 会在重连时带 Last-Event-ID
+// - 断线自动重连（指数退避 1s→2s→4s，上限 30s）。手动重建 EventSource 时用 last_event_id
+//   查询参数恢复浏览器原生 Last-Event-ID 的 replay 语义。
 // - 页面 visibilitychange：hidden 延迟 close，visible → open（节流）
 // - 调用方自己在 handlers 里 dispatch（不在 hook 里耦合 store）
 
@@ -122,6 +123,7 @@ class SharedSSEConnection {
   private disposed = false;
   private connectionSeq = 0;
   private status: SSEStatus = "connecting";
+  private lastEventId: string | null = null;
   private readonly channelList: string[];
   private readonly onVisibility = () => {
     if (document.visibilityState === "hidden") {
@@ -289,7 +291,7 @@ class SharedSSEConnection {
     const seq = this.connectionSeq;
     this.notifyStatus("connecting");
     try {
-      this.es = new EventSource(sseUrl(this.channelList), {
+      this.es = new EventSource(sseUrl(this.channelList, this.lastEventId), {
         withCredentials: true,
       });
     } catch (err) {
@@ -359,6 +361,7 @@ class SharedSSEConnection {
 
   private dispatchNamed(ev: MessageEvent): void {
     const name = ev.type;
+    if (ev.lastEventId) this.lastEventId = ev.lastEventId;
     const globalSet = globalSSEHandlers.get(name);
     let delivered = false;
 

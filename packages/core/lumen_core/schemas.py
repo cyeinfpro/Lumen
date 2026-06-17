@@ -56,14 +56,14 @@ class BaseOut(BaseModel):
 class SignupIn(BaseModel):
     # EmailStr 依赖 pydantic[email]（apps/api 已声明）；触发 422 而非 500，比手写正则更严格。
     email: EmailStr
-    password: str
+    password: str = Field(max_length=128)
     display_name: str = ""
     invite_token: str | None = None
 
 
 class LoginIn(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=128)
 
 
 class RuntimeDefaultsOut(BaseModel):

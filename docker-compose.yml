@@ -34,6 +34,7 @@ x-app-runtime-env: &app-runtime-env
   <<: *redis-url-env
   DATABASE_URL: "${DATABASE_URL:-postgresql+asyncpg://${DB_USER:?Set DB_USER in .env}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${DB_NAME:?Set DB_NAME in .env}}"
   SESSION_SECRET: "${SESSION_SECRET:?Set SESSION_SECRET in .env}"
+  IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:?Set IMAGE_PROXY_SECRET in .env}"
   BYOK_API_KEY_MASTER_SECRET: "${BYOK_API_KEY_MASTER_SECRET:?Set BYOK_API_KEY_MASTER_SECRET in .env}"
 
 services:
@@ -353,7 +354,6 @@ services:
     environment:
       <<: *app-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
-      IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
     restart: "no"
     profiles: ["migrate"]
@@ -378,7 +378,6 @@ services:
     environment:
       <<: *app-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
-      IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       LUMEN_ADMIN_EMAIL: "${LUMEN_ADMIN_EMAIL:-}"
       LUMEN_ADMIN_PASSWORD: "${LUMEN_ADMIN_PASSWORD:-}"

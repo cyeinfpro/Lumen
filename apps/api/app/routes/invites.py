@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -86,6 +86,12 @@ class _CreateInviteIn(BaseModel):
     email: EmailStr | None = None
     expires_in_days: int = Field(default=7, ge=1, le=365)
     role: Literal["admin", "member"] = "member"
+
+    @model_validator(mode="after")
+    def _admin_invites_must_be_email_bound(self) -> "_CreateInviteIn":
+        if self.role == "admin" and self.email is None:
+            raise ValueError("admin invite links must be bound to an email")
+        return self
 
 
 @router_authed.post(
