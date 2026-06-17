@@ -18,6 +18,7 @@ from app.video_upstream import (
     VolcanoThirdPartySeedanceAdapter,
     _billable,
     _duration_usage_total_tokens,
+    _fetch_video_url_bytes,
     _http_error,
     _usage_total_tokens,
     adapter_for_provider,
@@ -502,6 +503,41 @@ async def test_volcano_third_party_poll_reads_live_moyu_wrapped_result_shape() -
 
 
 @pytest.mark.asyncio
+async def test_volcano_third_party_poll_reads_nested_status_with_video_url() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {
+                "data": {
+                    "status": "succeeded",
+                    "progress": "100%",
+                    "content": {
+                        "video_url": "https://cdn.example/deep-output.mp4",
+                    },
+                    "usage": {"completion_tokens": 12345},
+                }
+            },
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("moyu-task-1")
+
+    assert result.status == "succeeded"
+    assert result.progress == 100
+    assert result.video_url == "https://cdn.example/deep-output.mp4"
+    assert result.usage_total_tokens == 12345
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("payload", "expected_url"),
     [
@@ -674,6 +710,62 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
     assert client.requests[1]["body"]["images"] == [
         "data:image/jpeg;base64,aW1hZ2U="
     ]
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_retries_string_invalid_url_error() -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:reference": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = SequentialThirdPartyCaptureClient(
+        [
+            httpx.Response(400, json={"error": "Invalid URL"}),
+            httpx.Response(200, json={"data": {"task_id": "omni-task-1"}}),
+        ]
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="omni-flash",
+            upstream_model="gemini_omni_flash",
+            prompt="keep these references consistent",
+            duration_s=6,
+            resolution="720p",
+            aspect_ratio="16:9",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url="https://lumen.example/api/images/reference/image-1/binary",
+                    data=b"image",
+                    mime="image/jpeg",
+                )
+            ],
+        )
+    )
+
+    assert result.provider_task_id == "omni-task-1"
+    assert len(client.requests) == 2
+    assert client.requests[1]["body"]["images"] == [
+        "data:image/jpeg;base64,aW1hZ2U="
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_video_url_rejects_private_targets_before_fetch() -> None:
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await _fetch_video_url_bytes("http://127.0.0.1/internal.mp4")
+
+    assert excinfo.value.error_code == "invalid_input"
+    assert excinfo.value.status_code == 422
 
 
 @pytest.mark.asyncio

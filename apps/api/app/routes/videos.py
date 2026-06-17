@@ -1955,7 +1955,7 @@ async def list_video_generations(
         .all()
     )
     page = rows[:limit]
-    next_cursor = _encode_cursor(rows[limit]) if len(rows) > limit else None
+    next_cursor = _encode_cursor(page[-1]) if len(rows) > limit and page else None
     generation_ids = [row.id for row in page]
     videos_by_generation_id: dict[str, Video] = {}
     if generation_ids:

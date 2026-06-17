@@ -85,6 +85,11 @@ def test_desktop_baseline_migration_creates_sqlite_schema(
             ).fetchall()
         }
         assert {"users", "conversations", "messages", "generations", "images"} <= tables
+        user_columns = {
+            str(row[1]): row
+            for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        assert str(user_columns["extraction_threshold"][4]).strip("'\"") == "0.80"
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
         conn.close()

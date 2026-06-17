@@ -26,7 +26,12 @@ from .arq_pool import close_arq_pool, get_arq_pool
 from .config import settings
 from .db import SessionLocal, engine
 from .desktop_migrations import run_desktop_migrations
-from .observability import init_otel, init_sentry, setup_prometheus
+from .observability import (
+    http_errors_total,
+    init_otel,
+    init_sentry,
+    setup_prometheus,
+)
 from .ratelimit import _is_trusted_proxy
 from .redis_client import get_redis
 from .runtime_settings import migrate_image_primary_route, migrate_provider_purposes
@@ -418,11 +423,12 @@ def build_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=_cors_allow_origins(),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
             "X-CSRF-Token",
             "Authorization",
+            "Idempotency-Key",
             "Last-Event-ID",
             DESKTOP_TOKEN_HEADER,
         ],
@@ -447,6 +453,10 @@ def _wrap_error(
     retry_after_ms: int | None = None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    try:
+        http_errors_total.labels(code=code).inc()
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to increment http error metric", exc_info=True)
     body: dict[str, Any] = {"error": {"code": code, "message": message}}
     if details:
         body["error"]["details"] = details

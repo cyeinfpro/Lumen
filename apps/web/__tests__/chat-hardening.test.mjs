@@ -56,8 +56,10 @@ test("runtime upload limit falls back locally but accepts server defaults", () =
 
   match(limits, /FALLBACK_UPLOAD_SOURCE_BYTES = 50 \* 1024 \* 1024/);
   match(limits, /setMaxUploadSourceBytes\(bytes: number \| null \| undefined\)/);
-  match(bootstrap, /runtime_defaults\?\.upload_max_source_bytes/);
-  match(layout, /upload_max_source_bytes\?: unknown/);
+  match(bootstrap, /serverRuntimeDefaults\?\.upload_max_source_bytes/);
+  match(layout, /import type \{ RuntimeDefaults \}/);
+  match(layout, /function normalizeRuntimeDefaults\(value: unknown\): RuntimeDefaults/);
+  match(layout, /raw\.upload_max_source_bytes > 0/);
   match(store, /setMaxUploadSourceBytes\(defaults\.upload_max_source_bytes\)/);
 });
 

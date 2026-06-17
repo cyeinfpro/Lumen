@@ -14,7 +14,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Annotated, AsyncIterator
+from typing import Annotated, Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
@@ -60,7 +60,7 @@ _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
 _LAST_EVENT_ID_MAX_AGE_MS = 24 * 60 * 60 * 1000  # 24h replay window cap
 
 
-def _sanitize_last_event_id(raw: str | None) -> str | None:
+def _sanitize_last_event_id(raw: Any) -> str | None:
     """Validate a client-provided ``Last-Event-ID`` against Redis Stream IDs.
 
     Why: the value is an attacker-controlled HTTP header. Forwarding a
@@ -68,7 +68,7 @@ def _sanitize_last_event_id(raw: str | None) -> str | None:
     real backlog, silently dropping events for the legitimate user.
     """
 
-    if raw is None:
+    if raw is None or not isinstance(raw, str):
         return None
     raw = raw.strip()
     if not raw:
@@ -603,6 +603,7 @@ async def events(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     channels: str = Query(default=""),
+    last_event_id_query: str | None = Query(default=None, alias="last_event_id"),
 ) -> EventSourceResponse:
     client_requested = list(
         dict.fromkeys(c.strip() for c in channels.split(",") if c.strip())
@@ -626,7 +627,7 @@ async def events(
         replay_requested_channels.discard(user_channel)
     include_user_channel = user_channel in replay_requested_channels
 
-    last_event_id = request.headers.get("Last-Event-ID")
+    last_event_id = request.headers.get("Last-Event-ID") or last_event_id_query
     # Why: Last-Event-ID is attacker-controlled; an unsanitised value can
     # advance XREAD's cursor past the entire backlog so the client silently
     # misses real events. Require strict `ms-seq` shape and a sane age window.

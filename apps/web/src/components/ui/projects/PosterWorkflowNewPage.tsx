@@ -32,7 +32,7 @@ import {
   type PosterAspectRatio,
   type PosterStyleItem,
 } from "@/lib/apiClient";
-import { readCookie } from "@/lib/api/http";
+import { ensureCsrfToken, refreshCsrfToken } from "@/lib/api/http";
 import { cn } from "@/lib/utils";
 import { OnlineBanner } from "./components/OnlineBanner";
 import {
@@ -63,65 +63,59 @@ async function uploadWithProgress(
   onProgress: (ratio: number) => void,
   signal: AbortSignal,
 ): Promise<UploadResult> {
-  let csrf = readCookie("csrf");
-  if (!csrf) {
-    try {
-      const res = await fetch(`${API_BASE.replace(/\/$/, "")}/auth/csrf`, {
-        method: "GET",
-        credentials: "include",
-        cache: "no-store",
-      });
-      if (res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { csrf_token?: unknown }
-          | null;
-        if (typeof data?.csrf_token === "string") csrf = data.csrf_token;
-      }
-    } catch {
-      // ignore
-    }
-    if (!csrf) csrf = readCookie("csrf");
-  }
+  const uploadOnce = (csrf: string | null): Promise<UploadResult> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE.replace(/\/$/, "")}/images/upload`);
+      xhr.withCredentials = true;
+      if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
 
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE.replace(/\/$/, "")}/images/upload`);
-    xhr.withCredentials = true;
-    if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
+      const fd = new FormData();
+      fd.append("file", file);
 
-    const fd = new FormData();
-    fd.append("file", file);
-
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress(event.loaded / event.total);
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          resolve(JSON.parse(xhr.responseText) as UploadResult);
-        } catch {
-          reject(new Error("响应解析失败"));
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded / event.total);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText) as UploadResult);
+          } catch {
+            reject(new Error("响应解析失败"));
+          }
+        } else if (xhr.status === 403 && xhr.responseText.includes("csrf_failed")) {
+          reject(new Error("csrf_failed"));
+        } else if (xhr.status === 401) {
+          reject(new Error("未登录或会话已失效"));
+        } else if (xhr.status === 413) {
+          reject(new Error("图片体积超过服务器限制"));
+        } else {
+          reject(new Error(`上传失败：HTTP ${xhr.status}`));
         }
-      } else if (xhr.status === 401) {
-        reject(new Error("未登录或会话已失效"));
-      } else if (xhr.status === 413) {
-        reject(new Error("图片体积超过服务器限制"));
-      } else {
-        reject(new Error(`上传失败：HTTP ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error("网络错误，请检查连接"));
+      xhr.onabort = () => reject(new DOMException("已取消", "AbortError"));
+
+      if (signal.aborted) {
+        xhr.abort();
+        reject(new DOMException("已取消", "AbortError"));
+        return;
       }
-    };
-    xhr.onerror = () => reject(new Error("网络错误，请检查连接"));
-    xhr.onabort = () => reject(new DOMException("已取消", "AbortError"));
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
 
-    if (signal.aborted) {
-      xhr.abort();
-      reject(new DOMException("已取消", "AbortError"));
-      return;
+      xhr.send(fd);
+    });
+
+  try {
+    return await uploadOnce(await ensureCsrfToken());
+  } catch (err) {
+    if (err instanceof Error && err.message === "csrf_failed") {
+      const fresh = await refreshCsrfToken().catch(() => null);
+      if (fresh) return uploadOnce(fresh);
+      throw new Error("请求校验失败，请刷新页面后再试");
     }
-    signal.addEventListener("abort", () => xhr.abort());
-
-    xhr.send(fd);
-  });
+    throw err;
+  }
 }
 
 interface BrandImageState {

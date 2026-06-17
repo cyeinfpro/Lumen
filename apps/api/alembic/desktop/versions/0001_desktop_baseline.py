@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column("memory_paused", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("memory_disabled", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column(
-            "extraction_threshold", sa.Float(), nullable=False, server_default="0.85"
+            "extraction_threshold", sa.Float(), nullable=False, server_default="0.80"
         ),
         sa.Column("onboarding_seen", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("account_mode", sa.String(16), nullable=False, server_default="byok"),

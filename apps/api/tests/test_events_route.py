@@ -576,6 +576,74 @@ async def test_live_pubsub_event_preserves_falsy_payload_event_id(
 
 
 @pytest.mark.asyncio
+async def test_events_replay_uses_last_event_id_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, str] = {}
+
+    class PubSub:
+        async def subscribe(self, *_channels: str) -> None:
+            return None
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        async def get_message(self, **_kwargs: Any) -> None:
+            return None
+
+    class Redis:
+        def pubsub(self) -> PubSub:
+            return PubSub()
+
+    class RequestWithoutHeader:
+        headers: dict[str, str] = {}
+
+        async def is_disconnected(self) -> bool:
+            return True
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_iter_replay_events(*_args: Any, **kwargs: Any):
+        seen["last_event_id"] = kwargs["last_event_id"]
+        if False:
+            yield {}
+
+    async def fake_acquire_sse_connection_slot(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    sane_event_id = f"{int(time.time() * 1000)}-0"
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(events, "_iter_replay_events", fake_iter_replay_events)
+    monkeypatch.setattr(
+        events,
+        "_acquire_sse_connection_slot",
+        fake_acquire_sse_connection_slot,
+    )
+    monkeypatch.setattr(events, "get_redis", lambda: Redis())
+
+    response = await events.events(
+        RequestWithoutHeader(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1",
+        last_event_id_query=sane_event_id,
+    )
+
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert seen == {"last_event_id": sane_event_id}
+
+
+@pytest.mark.asyncio
 async def test_sse_replay_does_not_block_when_cursor_is_latest() -> None:
     class Redis:
         def __init__(self) -> None:

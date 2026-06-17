@@ -485,9 +485,9 @@ function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
 function normalizeAssetUrl(value: string): string {
   const raw = value.trim().replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "").trim();
   if (!raw) return "";
-  const stripped = raw.replace(/^asset\s*:\s*\/\s*\//i, "");
-  const assetId = stripped.replace(/^[/\\]+/, "").trim();
-  return assetId ? `asset://${assetId.toLowerCase()}` : "";
+  const stripped = raw.replace(/^asset\s*:\s*\/\s*\//i, "").replace(/^[/\\]+/, "").trim();
+  const assetId = stripped.toLowerCase();
+  return /^asset-[a-z0-9][a-z0-9_-]*$/.test(assetId) ? `asset://${assetId}` : "";
 }
 
 function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
@@ -878,8 +878,13 @@ export default function VideoPage() {
     setSelectedPromptEnhanceCandidateId("");
   }, []);
 
+  const clearPromptEnhanceSelection = useCallback(() => {
+    setPromptEnhancePreview("");
+    setSelectedPromptEnhanceCandidateId("");
+  }, []);
+
   const insertPromptText = useCallback((text: string) => {
-    clearPromptEnhanceChoices();
+    clearPromptEnhanceSelection();
     const target = promptRef.current;
     if (!target) {
       setPrompt((prev) => `${prev}${prev.endsWith(" ") || !prev ? "" : " "}${text}`);
@@ -897,7 +902,7 @@ export default function VideoPage() {
       target.focus();
       target.setSelectionRange(pos, pos);
     });
-  }, [clearPromptEnhanceChoices, prompt]);
+  }, [clearPromptEnhanceSelection, prompt]);
 
   const insertReferenceTag = useCallback((label: string) => {
     insertPromptText(`[${label}]`);
@@ -975,7 +980,12 @@ export default function VideoPage() {
 
   const addAssetReference = useCallback(() => {
     const url = normalizeAssetUrl(assetUrlInput);
-    if (!url) return;
+    if (!url) {
+      if (assetUrlInput.trim()) {
+        toast.error("请输入 asset-* 或 asset://asset-* 官方素材 ID");
+      }
+      return;
+    }
     if (referenceMedia.filter((item) => item.kind === "image").length >= 9) {
       toast.error("参考图片最多 9 张");
       return;
@@ -1221,10 +1231,10 @@ export default function VideoPage() {
 
   const handlePromptChange = useCallback(
     (value: string) => {
-      clearPromptEnhanceChoices();
+      clearPromptEnhanceSelection();
       setPrompt(value);
     },
-    [clearPromptEnhanceChoices],
+    [clearPromptEnhanceSelection],
   );
 
   const submitDisabledReason = useMemo(() => {
@@ -1440,9 +1450,7 @@ export default function VideoPage() {
                               <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                               <input
                                 value={assetUrlInput}
-                                onChange={(event) =>
-                                  setAssetUrlInput(event.target.value.toLowerCase())
-                                }
+                                onChange={(event) => setAssetUrlInput(event.target.value)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter") {
                                     event.preventDefault();

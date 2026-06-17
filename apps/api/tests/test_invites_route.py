@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from fastapi import Request
+from pydantic import ValidationError
 
 from app.routes import invites
 
@@ -40,6 +41,11 @@ def _request() -> Request:
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+def test_admin_invite_requires_bound_email() -> None:
+    with pytest.raises(ValidationError):
+        invites._CreateInviteIn(role="admin")  # noqa: SLF001
 
 
 @pytest.mark.asyncio

@@ -1355,6 +1355,13 @@ def test_list_video_generations_batches_video_lookup() -> None:
     assert "videos_by_generation_id" in source
 
 
+def test_list_video_generations_next_cursor_uses_last_returned_row() -> None:
+    source = inspect.getsource(videos.list_video_generations)
+
+    assert "_encode_cursor(page[-1])" in source
+    assert "_encode_cursor(rows[limit])" not in source
+
+
 def test_events_task_ids_include_video_generation_id() -> None:
     assert events._task_ids_from_payload(  # noqa: SLF001
         {"video_generation_id": "video-1", "generation_id": "gen-1"}

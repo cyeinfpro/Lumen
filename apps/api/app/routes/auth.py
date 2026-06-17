@@ -91,6 +91,7 @@ _DUMMY_PASSWORD_HASH = (
     "$mmmttUtPlkaR5x78voo478doWSwYbHXVEUD9sfJkg9M"
 )
 _MIN_PASSWORD_LEN = 8
+_MAX_PASSWORD_LEN = 128
 # Why: the reset token sits in Redis from generation until the user clicks
 # the email link. Any leakage during that window (logs, mail relays, browser
 # history, screenshot) lets an attacker reset the account. Shortening the
@@ -141,6 +142,12 @@ def _validate_password_strength(password: str) -> None:
             "weak_password",
             f"password must be at least {_MIN_PASSWORD_LEN} characters",
             400,
+        )
+    if len(password) > _MAX_PASSWORD_LEN:
+        raise _bad(
+            "password_too_long",
+            f"password must be at most {_MAX_PASSWORD_LEN} characters",
+            422,
         )
 
 
@@ -227,7 +234,7 @@ class PasswordResetRequestIn(BaseModel):
 
 class PasswordResetConfirmIn(BaseModel):
     token: str = Field(min_length=1)
-    new_password: str
+    new_password: str = Field(max_length=_MAX_PASSWORD_LEN)
 
 
 class OkOut(BaseModel):
@@ -278,7 +285,9 @@ async def _create_session(
     return session, refresh
 
 
-def _invite_validity_reason(inv: InviteLink, now: datetime) -> str | None:
+def _invite_validity_reason(
+    inv: InviteLink, now: datetime, creator: User | None = None
+) -> str | None:
     """Return None if the invite is currently usable; else a short reason."""
     if inv.revoked_at is not None:
         return "revoked"
@@ -286,6 +295,8 @@ def _invite_validity_reason(inv: InviteLink, now: datetime) -> str | None:
         return "used"
     if inv.expires_at is not None and ensure_utc(inv.expires_at) <= now:
         return "expired"
+    if creator is None or creator.deleted_at is not None:
+        return "creator_deleted"
     return None
 
 
@@ -353,14 +364,17 @@ async def signup(
                 "this email is not on the invite allowlist",
                 403,
             )
-        invite = (
+        invite_row = (
             await db.execute(
-                select(InviteLink)
+                select(InviteLink, User)
+                .join(User, User.id == InviteLink.created_by, isouter=True)
                 .where(InviteLink.token == body.invite_token)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-        ).scalar_one_or_none()
+        ).first()
+        invite = invite_row[0] if invite_row is not None else None
+        invite_creator = invite_row[1] if invite_row is not None else None
         if invite is None:
             verify_password(_DUMMY_PASSWORD_HASH, body.password)
             logger.info(
@@ -375,7 +389,7 @@ async def signup(
             )
             raise _bad("invalid_invite", "invite token not found", 403)
         now = datetime.now(timezone.utc)
-        reason = _invite_validity_reason(invite, now)
+        reason = _invite_validity_reason(invite, now, invite_creator)
         if reason is not None:
             verify_password(_DUMMY_PASSWORD_HASH, body.password)
             logger.info(
@@ -561,14 +575,17 @@ async def signup_byok(
                 "this email is not on the invite allowlist",
                 403,
             )
-        invite = (
+        invite_row = (
             await db.execute(
-                select(InviteLink)
+                select(InviteLink, User)
+                .join(User, User.id == InviteLink.created_by, isouter=True)
                 .where(InviteLink.token == body.invite_token)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-        ).scalar_one_or_none()
+        ).first()
+        invite = invite_row[0] if invite_row is not None else None
+        invite_creator = invite_row[1] if invite_row is not None else None
         if invite is None:
             verify_password(_DUMMY_PASSWORD_HASH, body.password)
             await write_audit_isolated(
@@ -578,7 +595,7 @@ async def signup_byok(
                 details={"reason": "invalid_invite"},
             )
             raise _bad("invalid_invite", "invite token not found", 403)
-        reason = _invite_validity_reason(invite, now)
+        reason = _invite_validity_reason(invite, now, invite_creator)
         if reason is not None:
             verify_password(_DUMMY_PASSWORD_HASH, body.password)
             await write_audit_isolated(

@@ -17,6 +17,7 @@ provider = 一个账号。account_limiter 提供"该账号还有几次额度"的
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -96,6 +97,23 @@ def _daily_expire_at(now: float) -> int:
     midnight = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp()
     next_midnight = int(midnight + 86400.0)
     return max(next_midnight + 1, int(now) + 1)
+
+
+def _wall_clock_now(now: float | None = None) -> float:
+    """Return a valid wall-clock UNIX timestamp in seconds.
+
+    Quota keys are grouped by UTC calendar day and ZSET scores are wall-clock
+    timestamps. A monotonic timestamp accidentally passed by a caller would
+    otherwise create 1970-era day keys and corrupt quota accounting.
+    """
+    raw_now = now if now is not None else time.time()
+    try:
+        cur_now = float(raw_now)
+    except (TypeError, ValueError):
+        return time.time()
+    if not math.isfinite(cur_now) or cur_now < 1_000_000_000:
+        return time.time()
+    return cur_now
 
 
 def parse_rate_limit(s: str | None) -> tuple[int, int] | None:
@@ -271,9 +289,7 @@ async def check_quota(
     # P2-5: 防御式校验——如果调用方误传 monotonic（小数量级，比如 worker 启动后
     # 几十秒），会被识别为 1970 年附近时间戳，直接退回 wall clock 兜底。判断阈值
     # 取 2001-09-09（10^9）：所有合理 wall_clock 都远超此值。
-    cur_now = now if now is not None else time.time()
-    if cur_now < 1_000_000_000:
-        cur_now = time.time()
+    cur_now = _wall_clock_now(now)
 
     # 1) 当日上限（UTC day）
     if has_daily:
@@ -331,7 +347,7 @@ async def record_image_call(
     """
     if redis is None:
         return
-    cur_now = now if now is not None else time.time()
+    cur_now = _wall_clock_now(now)
     member = task_id or f"ts:{cur_now:.6f}"
     ts_key = _KEY_TS.format(name=account)
     day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))

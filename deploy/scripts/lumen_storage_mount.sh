@@ -221,7 +221,11 @@ mount_local() {
     log "target $TARGET already mounted, skipping bind"
     return 0
   fi
-  mount --bind "$LOCAL_ROOT" "$TARGET"
+  local rc=0
+  mount --bind "$LOCAL_ROOT" "$TARGET" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    return "$rc"
+  fi
   log "bind $LOCAL_ROOT -> $TARGET OK"
 }
 
@@ -273,12 +277,14 @@ umount_target_force() {
 
 cmd_up() {
   load_conf
+  local rc=0
   case "$MODE" in
-    local) mount_local ;;
-    smb)   mount_smb ;;
+    local) mount_local || rc=$? ;;
+    smb)   mount_smb || rc=$? ;;
     *)     log "unknown mode: $MODE"; write_status; return 2 ;;
   esac
   write_status
+  return "$rc"
 }
 
 cmd_down() {

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
@@ -17,12 +20,37 @@ def derive_idempotency_key(*parts: object) -> str:
     return f"derived:{digest}"
 
 
-def _dump(value: Any) -> str:
+def _jsonable(value: Any) -> Any:
+    """Convert nested values to JSON primitives accepted by Redis cache.
+
+    Pydantic models can appear nested inside dictionaries (for example billing
+    idempotency responses). Calling ``json.dumps`` on the outer dict would raise
+    ``TypeError`` and disable the cache silently, so normalise recursively.
+    """
     if isinstance(value, BaseModel):
-        data = value.model_dump(mode="json")
-    else:
-        data = value
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return value.model_dump(mode="json")
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(inner) for key, inner in value.items()}
+    if isinstance(value, (str, bytes, bytearray)):
+        if isinstance(value, str):
+            return value
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, Sequence):
+        return [_jsonable(inner) for inner in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def _dump(value: Any) -> str:
+    return json.dumps(
+        _jsonable(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 async def get_cached_json(namespace: str, key: str) -> dict[str, Any] | None:

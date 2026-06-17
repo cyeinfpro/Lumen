@@ -24,6 +24,14 @@ apps/web/.env
 apps/web/.env.*
 !apps/web/.env.example
 
+build/
+dist/
+apps/desktop/dist/
+apps/desktop/target/
+apps/desktop/gen/
+apps/desktop/binaries/
+scripts/*.bak.*
+
 var/
 apps/worker/var/
 

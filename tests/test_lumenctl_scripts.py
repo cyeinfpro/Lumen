@@ -263,6 +263,7 @@ def test_install_generates_all_required_compose_secrets() -> None:
         "DB_PASSWORD",
         "REDIS_PASSWORD",
         "SESSION_SECRET",
+        "IMAGE_PROXY_SECRET",
         "BYOK_API_KEY_MASTER_SECRET",
         "TELEGRAM_BOT_SHARED_SECRET",
     ):
@@ -276,7 +277,22 @@ def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
     assert 'lumen_env_value BYOK_API_KEY_MASTER_SECRET "${SHARED_ENV}"' in text
     assert 'emit_info preflight byok_secret "dev_fallback_backfilled"' in text
     assert 'lumen_set_env_value_in_file "${SHARED_ENV}" BYOK_API_KEY_MASTER_SECRET' in text
+    assert 'lumen_env_value IMAGE_PROXY_SECRET "${SHARED_ENV}"' in text
+    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" IMAGE_PROXY_SECRET' in text
+    assert 'emit_info preflight image_proxy_secret "generated"' in text
     assert "dev|development|local|test)" in text
+
+
+def test_image_proxy_secret_templates_match_prod_requirement() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert 'IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:?Set IMAGE_PROXY_SECRET in .env}"' in compose
+    assert 'IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"' not in compose
+    assert "IMAGE_PROXY_SECRET=" in env_example
+    assert "# 生成命令：openssl rand -hex 32" in env_example
+    assert "| `IMAGE_PROXY_SECRET` | 必填 |" in readme
 
 
 def test_web_port_defaults_to_loopback_and_public_bind_is_explicit_opt_in() -> (

@@ -129,6 +129,7 @@ function canRetryHttp(method: string, headers: Headers): boolean {
 async function fetchWithNetworkRetry(
   url: string,
   init: RequestInit,
+  retryable = true,
 ): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= NETWORK_RETRY_MAX; attempt++) {
@@ -140,6 +141,7 @@ async function fetchWithNetworkRetry(
       // 传入的 signal 已 aborted 也不重试
       const sig = (init as { signal?: AbortSignal }).signal;
       if (sig && sig.aborted) throw err;
+      if (!retryable) throw err;
       lastErr = err;
       if (attempt < NETWORK_RETRY_MAX) {
         await new Promise((r) =>
@@ -159,7 +161,7 @@ async function fetchWithRetryableHttp(
   let attempt = 0;
   let res: Response;
   while (true) {
-    res = await fetchWithNetworkRetry(url, init);
+    res = await fetchWithNetworkRetry(url, init, retryable);
     if (
       !retryable ||
       !RETRYABLE_HTTP_STATUSES.has(res.status) ||
@@ -181,7 +183,7 @@ async function fetchWithRetryableHttp(
   return res;
 }
 
-async function refreshCsrfToken(): Promise<string | null> {
+export async function refreshCsrfToken(): Promise<string | null> {
   if (typeof document === "undefined") return null;
   const url = `${API_BASE.replace(/\/$/, "")}/auth/csrf`;
   const res = await fetchWithNetworkRetry(url, {
@@ -196,6 +198,10 @@ async function refreshCsrfToken(): Promise<string | null> {
   return typeof data?.csrf_token === "string"
     ? data.csrf_token
     : readCookie("csrf");
+}
+
+export async function ensureCsrfToken(): Promise<string | null> {
+  return readCookie("csrf") ?? (await refreshCsrfToken().catch(() => null));
 }
 
 export async function apiFetch(
@@ -230,8 +236,7 @@ export async function apiFetch<T = unknown>(
     headers.set("content-type", "application/json");
   }
   if (WRITE_METHODS.has(method)) {
-    let csrf = readCookie("csrf");
-    if (!csrf) csrf = await refreshCsrfToken().catch(() => null);
+    const csrf = await ensureCsrfToken();
     if (csrf && !headers.has("x-csrf-token")) {
       headers.set("x-csrf-token", csrf);
     } else if (!csrf) {

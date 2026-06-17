@@ -154,9 +154,18 @@ async def _load_proxy_health_batch(redis, names: list[str]) -> dict[str, tuple[d
         logger.warning("batch proxy health load failed; falling back err=%s", exc)
         out: dict[str, tuple[dict[str, object], bool]] = {}
         for name in names:
+            try:
+                in_cooldown = bool(await redis.exists(cooldown_key(name)))
+            except Exception as cooldown_exc:  # noqa: BLE001
+                logger.warning(
+                    "proxy cooldown load failed name=%s err=%s",
+                    name,
+                    cooldown_exc,
+                )
+                in_cooldown = False
             out[name] = (
                 await get_health(redis, name),
-                bool(await redis.exists(cooldown_key(name))),
+                in_cooldown,
             )
         return out
     out = {}

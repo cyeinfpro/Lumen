@@ -319,6 +319,15 @@ pub fn apply_pending_docker_import(
 }
 
 pub fn clear_failed_docker_import_marker(data_root: &Path) -> Result<()> {
+    if let Some(paths) = failed_import_pending_paths(data_root) {
+        for path in paths {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err).context("clear failed Docker import payload"),
+            }
+        }
+    }
     match fs::remove_file(failed_import_json_path(data_root)) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -339,6 +348,25 @@ pub fn mark_pending_docker_import_failed(data_root: &Path, error: &str) -> Resul
     write_json_private(&failed_import_json_path(data_root), &failed)?;
     let _ = fs::remove_file(pending_json);
     Ok(())
+}
+
+fn failed_import_pending_paths(data_root: &Path) -> Option<Vec<PathBuf>> {
+    let raw = fs::read_to_string(failed_import_json_path(data_root)).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let pending = value.get("pending")?;
+    let tmp_root = data_root.join("data/tmp");
+    let mut paths = Vec::new();
+    for key in ["pending_dump_path", "pending_storage_tar_path"] {
+        if let Some(path) = pending
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .filter(|path| path.starts_with(&tmp_root))
+        {
+            paths.push(path);
+        }
+    }
+    Some(paths)
 }
 
 fn apply_pending_docker_import_inner(

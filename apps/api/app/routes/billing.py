@@ -269,7 +269,7 @@ async def _cache_redemption_out(
     await cache_json(
         _REDEMPTION_IDEMPOTENCY_NAMESPACE,
         _redemption_idempotency_cache_key(user_id, idempotency_key),
-        {"request_hash": request_hash, "response": response},
+        {"request_hash": request_hash, "response": response.model_dump(mode="json")},
         _REDEMPTION_IDEMPOTENCY_TTL_SECONDS,
     )
 

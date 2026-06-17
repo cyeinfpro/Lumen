@@ -86,6 +86,20 @@ const STAGES: Array<{
   { id: "assembly", label: "成片", description: "合成、预览和下载" },
 ];
 
+const STORYBOARD_SEED_MIN = -1;
+const STORYBOARD_SEED_MAX = 4_294_967_295;
+
+function parseStoryboardSeed(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) &&
+    parsed >= STORYBOARD_SEED_MIN &&
+    parsed <= STORYBOARD_SEED_MAX
+    ? parsed
+    : null;
+}
+
 const STATUS_TEXT: Record<string, string> = {
   draft: "草稿",
   in_progress: "进行中",
@@ -523,6 +537,8 @@ function SettingsPanel({ run }: { run: StoryboardRun }) {
   const [aspectRatio, setAspectRatio] = useState(run.aspect_ratio);
   const [generateAudio, setGenerateAudio] = useState(run.generate_audio);
   const [seed, setSeed] = useState(run.seed == null ? "" : String(run.seed));
+  const parsedSeed = parseStoryboardSeed(seed);
+  const seedInvalid = Boolean(seed.trim()) && parsedSeed === null;
 
   return (
     <aside className="hidden min-h-0 overflow-y-auto p-3 lg:block">
@@ -535,6 +551,11 @@ function SettingsPanel({ run }: { run: StoryboardRun }) {
         <LabeledInput label="分辨率" value={resolution} onChange={setResolution} />
         <LabeledInput label="比例" value={aspectRatio} onChange={setAspectRatio} />
         <LabeledInput label="Seed" value={seed} onChange={setSeed} />
+        {seedInvalid ? (
+          <p className="text-xs text-[var(--danger)]" role="alert">
+            Seed 需为 -1 到 4294967295 的整数
+          </p>
+        ) : null}
         <label className="flex min-h-10 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
           <span>生成音频</span>
           <input
@@ -545,16 +566,17 @@ function SettingsPanel({ run }: { run: StoryboardRun }) {
         </label>
         <button
           type="button"
+          disabled={patch.isPending || seedInvalid}
           onClick={() =>
             patch.mutate({
               model,
               resolution,
               aspect_ratio: aspectRatio,
               generate_audio: generateAudio,
-              seed: seed.trim() ? Number(seed) : null,
+              seed: parsedSeed,
             })
           }
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)]"
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)] disabled:cursor-not-allowed disabled:opacity-55"
         >
           {patch.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           保存参数
@@ -583,6 +605,7 @@ function IdeaStage({ run }: { run: StoryboardRun }) {
 function ScriptStage({ run }: { run: StoryboardRun }) {
   const patch = usePatchStoryboardMutation(run.id);
   const [script, setScript] = useState(run.script);
+  const scriptChanged = script !== run.script;
   return (
     <StageShell
       title="脚本"
@@ -591,7 +614,7 @@ function ScriptStage({ run }: { run: StoryboardRun }) {
       onAction={() =>
         patch.mutate({
           script,
-          script_confirmed: Boolean(script.trim()),
+          script_confirmed: run.script_confirmed && scriptChanged ? false : Boolean(script.trim()),
           current_stage: "script",
         })
       }
@@ -830,6 +853,10 @@ function VideosStage({ run }: { run: StoryboardRun }) {
 function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot }) {
   const submit = useSubmitStoryboardShotMutation(run.id, shot.id);
   const pct = shot.video_progress_pct ?? (shot.status === "done" ? 100 : 0);
+  const canSubmitVideo =
+    shot.status === "keyframe_approved" &&
+    Boolean(shot.keyframe_image_id) &&
+    !shot.keyframe_stale;
   return (
     <article className="grid gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-3 md:grid-cols-[88px_minmax(0,1fr)_auto] md:items-center">
       {shot.keyframe_display_url || shot.keyframe_image_url ? (
@@ -858,7 +885,7 @@ function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot
             预览
           </a>
         ) : null}
-        <IconAction icon={Film} label="提交" disabled={!shot.keyframe_approved_at || shot.keyframe_stale} loading={submit.isPending} onClick={() => submit.mutate()} />
+        <IconAction icon={Film} label="提交" disabled={!canSubmitVideo} loading={submit.isPending} onClick={() => submit.mutate()} />
       </div>
     </article>
   );

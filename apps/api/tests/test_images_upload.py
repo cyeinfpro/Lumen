@@ -242,6 +242,31 @@ def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
     assert excinfo.value.detail["error"]["code"] == "invalid_path"
 
 
+def test_storage_path_keeps_final_symlink_visible_to_binary_open(tmp_path: Path) -> None:
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("platform does not support O_NOFOLLOW")
+    old = settings.storage_root
+    root = tmp_path / "storage"
+    target = root / "u" / "victim" / "uploads" / "secret.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"secret")
+    link = root / "u" / "attacker" / "uploads" / "alias.png"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    settings.storage_root = str(root)
+    try:
+        path = images._fs_path("u/attacker/uploads/alias.png")
+        assert path == link
+        with pytest.raises(Exception) as excinfo:
+            images._open_regular_file_no_symlink(path)
+    finally:
+        settings.storage_root = old
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_path"
+
+
 def test_upload_limiter_is_always_on() -> None:
     assert images.UPLOADS_LIMITER.always_on is True
 
@@ -282,6 +307,16 @@ def test_prepare_upload_image_preserves_original_and_builds_normalized_ref() -> 
     assert normalized_meta["height"] == 1024
     assert normalized_meta["bytes"] == len(normalized_ref)
     assert len(normalized_meta["sha256"]) == 64
+
+
+def test_prepare_upload_image_rejects_long_side_over_limit() -> None:
+    original = _png_bytes("RGB", (images.MAX_LONG_SIDE + 1, 8), (30, 60, 90))
+
+    with pytest.raises(Exception) as excinfo:
+        images._prepare_upload_image(original, "wide.png")
+
+    assert getattr(excinfo.value, "status_code", None) == 413
+    assert excinfo.value.detail["error"]["code"] == "too_large"
 
 
 def test_prepare_upload_image_normalizes_mpo_to_jpeg(

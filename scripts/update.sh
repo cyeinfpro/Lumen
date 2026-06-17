@@ -952,6 +952,24 @@ elif [ -z "${BYOK_SECRET_VALUE}" ]; then
         ENV_MISSING=1
     fi
 fi
+IMAGE_PROXY_SECRET_VALUE="$(lumen_env_value IMAGE_PROXY_SECRET "${SHARED_ENV}" 2>/dev/null || true)"
+if [ -z "${IMAGE_PROXY_SECRET_VALUE}" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+        IMAGE_PROXY_SECRET_VALUE="$(openssl rand -hex 32)"
+    else
+        IMAGE_PROXY_SECRET_VALUE="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    fi
+    log_warn "[preflight] shared/.env 缺少 IMAGE_PROXY_SECRET；已生成随机值，避免新版 API 启动失败。"
+    if ! lumen_set_env_value_in_file "${SHARED_ENV}" IMAGE_PROXY_SECRET "${IMAGE_PROXY_SECRET_VALUE}"; then
+        log_error "[preflight] 写入 IMAGE_PROXY_SECRET 失败。"
+        ENV_MISSING=1
+    else
+        emit_info preflight image_proxy_secret "generated"
+    fi
+elif ! shared_app_env_is_development "${SHARED_ENV}" && [ "${#IMAGE_PROXY_SECRET_VALUE}" -lt 32 ]; then
+    log_error "[preflight] 非开发 APP_ENV 的 IMAGE_PROXY_SECRET 长度必须至少 32 字符。"
+    ENV_MISSING=1
+fi
 if [ "${ENV_MISSING}" -eq 1 ]; then
     emit_fail preflight 1
     exit 1

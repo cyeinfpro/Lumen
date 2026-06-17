@@ -73,6 +73,13 @@ uv run pytest tests "$@"
 ensure_web_deps
 
 echo
+echo "==> apps/web tests"
+(
+    cd apps/web
+    npm test
+)
+
+echo
 echo "==> apps/web lint"
 (
     cd apps/web

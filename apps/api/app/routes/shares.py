@@ -7,7 +7,7 @@ import ipaddress
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -116,15 +116,21 @@ def _fs_path(storage_key: str) -> Path:
     root = Path(settings.storage_root).resolve()
     if not storage_key or "\x00" in storage_key:
         raise _http("invalid_path", "invalid storage path", 400)
-    key_path = Path(storage_key)
+    key_path = PurePosixPath(storage_key)
     if key_path.is_absolute():
         raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    p = (root / key_path).resolve()
-    try:
-        p.relative_to(root)
-    except ValueError:
+    parts = key_path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
         raise _http("invalid_path", "storage path escapes root", 400)
-    return p
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise _http("invalid_path", "symlink storage paths are not allowed", 400)
+        except OSError as exc:
+            raise _http("invalid_path", "invalid storage path", 400) from exc
+    return root.joinpath(*parts)
 
 
 def _open_storage_file_safe(storage_key: str) -> tuple[BinaryIO, int]:
@@ -179,7 +185,7 @@ def _share_image_response(
     etag: str,
 ) -> StreamingResponse:
     headers = {
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "no-cache, must-revalidate",
         "Content-Length": str(size),
         "ETag": etag,
         "X-Content-Type-Options": "nosniff",

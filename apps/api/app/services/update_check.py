@@ -250,8 +250,22 @@ class UpdateCheckService:
         self.redis = redis
         self.ttl_sec = max(0, int(ttl_sec))
 
-    def _cache_key(self, channel: str, allow_prerelease: bool) -> str:
-        return f"lumen:update:check:v1:{channel}:{int(allow_prerelease)}"
+    def _cache_key(
+        self,
+        channel: str,
+        allow_prerelease: bool,
+        *,
+        current_version: str,
+        current_tag: str,
+        build_type: str,
+        release_id: str | None,
+    ) -> str:
+        release_part = release_id or "none"
+        return (
+            "lumen:update:check:v2:"
+            f"{channel}:{int(allow_prerelease)}:"
+            f"{current_version}:{current_tag}:{build_type}:{release_part}"
+        )
 
     async def _get_cache(self, key: str) -> UpdateCheckOut | None:
         try:
@@ -283,7 +297,18 @@ class UpdateCheckService:
         force: bool = False,
         proxy_url: str | None = None,
     ) -> UpdateCheckOut:
-        cache_key = self._cache_key(channel, allow_prerelease)
+        current_version = _current_version(self.root)
+        current_tag = _current_image_tag(self.root)
+        build_type = _build_type(self.root)
+        release_id, sha, _branch = _current_release_info(self.root)
+        cache_key = self._cache_key(
+            channel,
+            allow_prerelease,
+            current_version=current_version,
+            current_tag=current_tag,
+            build_type=build_type,
+            release_id=release_id,
+        )
         if not force:
             cached = await self._get_cache(cache_key)
             if cached is not None:
@@ -296,10 +321,6 @@ class UpdateCheckService:
                 )
                 return cached
 
-        current_version = _current_version(self.root)
-        current_tag = _current_image_tag(self.root)
-        build_type = _build_type(self.root)
-        release_id, sha, _branch = _current_release_info(self.root)
         client = GitHubReleasesClient(proxy_url=proxy_url)
         latest_release: GitHubRelease | None = None
         latest_version = current_tag
@@ -341,6 +362,8 @@ class UpdateCheckService:
             has_update = _compare_versions(current_version, latest_version)
             if has_update is None:
                 has_update = current_tag != target_tag
+            elif not has_update and current_tag != target_tag:
+                has_update = True
 
         result = UpdateCheckOut(
             current_version=current_version,
