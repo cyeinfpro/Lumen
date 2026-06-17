@@ -91,12 +91,14 @@ jobs:
           db_pass="$(openssl rand -hex 32)"
           redis_pass="$(openssl rand -hex 32)"
           session_secret="$(openssl rand -hex 64)"
+          image_proxy_secret="$(openssl rand -hex 32)"
           byok_secret="$(openssl rand -hex 48)"
           telegram_secret="$(openssl rand -hex 32)"
           sed -i \
             -e "s|^DB_PASSWORD=.*|DB_PASSWORD=${db_pass}|" \
             -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${redis_pass}|" \
             -e "s|^SESSION_SECRET=.*|SESSION_SECRET=${session_secret}|" \
+            -e "s|^IMAGE_PROXY_SECRET=.*|IMAGE_PROXY_SECRET=${image_proxy_secret}|" \
             -e "s|^BYOK_API_KEY_MASTER_SECRET=.*|BYOK_API_KEY_MASTER_SECRET=${byok_secret}|" \
             -e "s|^TELEGRAM_BOT_SHARED_SECRET=.*|TELEGRAM_BOT_SHARED_SECRET=${telegram_secret}|" \
             .env.ci
