@@ -67,6 +67,12 @@ def _png_bytes(
     return buf.getvalue()
 
 
+def _jpeg_bytes(size: tuple[int, int], color) -> bytes:
+    buf = io.BytesIO()
+    PILImage.new("RGB", size, color=color).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 def test_storage_path_rejects_traversal(tmp_path: Path) -> None:
     old = settings.storage_root
     settings.storage_root = str(tmp_path)
@@ -251,6 +257,7 @@ def test_upload_mime_constants_only_allow_images() -> None:
         "image/jpeg": "jpg",
         "image/webp": "webp",
     }
+    assert images.NORMALIZABLE_UPLOAD_MIME == {"image/mpo", "image/x-mpo"}
 
 
 def test_upload_limits_are_bounded() -> None:
@@ -275,6 +282,47 @@ def test_prepare_upload_image_preserves_original_and_builds_normalized_ref() -> 
     assert normalized_meta["height"] == 1024
     assert normalized_meta["bytes"] == len(normalized_ref)
     assert len(normalized_meta["sha256"]) == 64
+
+
+def test_prepare_upload_image_normalizes_mpo_to_jpeg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _jpeg_bytes((640, 480), (30, 60, 90))
+    with PILImage.open(io.BytesIO(original)) as sample:
+        image_cls = type(sample)
+        original_get_format_mimetype = image_cls.get_format_mimetype
+    calls = 0
+
+    def fake_get_format_mimetype(self) -> str | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "image/mpo"
+        return original_get_format_mimetype(self)
+
+    monkeypatch.setattr(
+        image_cls,
+        "get_format_mimetype",
+        fake_get_format_mimetype,
+    )
+
+    data, mime, width, height, metadata, normalized_ref, normalized_meta = (
+        images._prepare_upload_image(original, "iphone-photo.mpo")
+    )
+
+    assert mime == "image/jpeg"
+    assert (width, height) == (640, 480)
+    assert data != original
+    assert metadata["upload_normalized"] == {
+        "source_mime": "image/mpo",
+        "target_mime": "image/jpeg",
+        "reason": "unsupported_upload_mime",
+    }
+    with PILImage.open(io.BytesIO(data)) as im:
+        assert im.get_format_mimetype() == "image/jpeg"
+        assert im.size == (640, 480)
+    assert normalized_meta["mime"] == "image/webp"
+    assert normalized_meta["bytes"] == len(normalized_ref)
 
 
 def test_prepare_upload_image_rejects_no_alpha_mask() -> None:

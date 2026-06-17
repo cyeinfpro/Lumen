@@ -1347,7 +1347,7 @@ export default function VideoPage() {
                         <input
                           ref={fileRef}
                           type="file"
-                          accept="image/png,image/jpeg,image/webp"
+                          accept="image/png,image/jpeg,image/webp,image/mpo"
                           className="hidden"
                           onChange={(event) => {
                             const file = event.target.files?.[0];
@@ -1405,7 +1405,7 @@ export default function VideoPage() {
                         <input
                           ref={referenceFileRef}
                           type="file"
-                          accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime"
+                          accept="image/png,image/jpeg,image/webp,image/mpo,video/mp4,video/quicktime"
                           className="hidden"
                           onChange={(event) => {
                             const file = event.target.files?.[0];
