@@ -92,6 +92,13 @@ from ..video_reference_images import (
     VideoReferenceImageError,
     ensure_video_reference_image_variant,
 )
+from ..video_reference_videos import (
+    VIDEO_REFERENCE_VIDEO_KIND,
+    VIDEO_REFERENCE_VIDEO_MIME,
+    VideoReferenceVideoError,
+    ensure_video_reference_video_variant,
+    video_reference_variant_metadata,
+)
 
 
 router = APIRouter()
@@ -272,9 +279,17 @@ def _ensure_reference_video_access_token(video: Video) -> str:
     return token
 
 
-def _reference_video_public_url(video: Video, public_base_url: str) -> str:
+def _reference_video_public_url(
+    video: Video,
+    public_base_url: str,
+    *,
+    variant: str | None = None,
+) -> str:
     token = _ensure_reference_video_access_token(video)
-    query = urlencode({"token": token})
+    query_args = {"token": token}
+    if variant:
+        query_args["variant"] = variant
+    query = urlencode(query_args)
     return (
         f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}"
     )
@@ -369,6 +384,48 @@ async def _reference_image_upstream_public_url(
             "upstream_reference_mime": "image/jpeg",
             "upstream_reference_width": variant.width,
             "upstream_reference_height": variant.height,
+        },
+    )
+
+
+async def _reference_video_upstream_public_url(
+    db: AsyncSession,
+    video: Video,
+    public_base_url: str,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        variant = await ensure_video_reference_video_variant(
+            db,
+            video,
+            storage_root=settings.storage_root,
+        )
+    except VideoReferenceVideoError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "video reference video variant failed video_id=%s",
+            video.id,
+            exc_info=True,
+        )
+        raise _http(
+            "video_reference_variant_failed",
+            "video reference variant failed",
+            503,
+        ) from exc
+    return (
+        _reference_video_public_url(
+            video,
+            public_base_url,
+            variant=VIDEO_REFERENCE_VIDEO_KIND,
+        ),
+        {
+            "upstream_reference_variant": VIDEO_REFERENCE_VIDEO_KIND,
+            "upstream_reference_storage_key": variant["storage_key"],
+            "upstream_reference_mime": VIDEO_REFERENCE_VIDEO_MIME,
+            "upstream_reference_width": variant["width"],
+            "upstream_reference_height": variant["height"],
+            "upstream_reference_size_bytes": variant["size_bytes"],
+            "upstream_reference_sha256": variant["sha256"],
         },
     )
 
@@ -470,7 +527,9 @@ def _public_video_diagnostics(raw: Any) -> dict[str, Any]:
         "requested_model",
         "reference_media_count",
         "reference_image_public_variant",
+        "reference_video_public_variant",
         "reference_image_public_variant_error_count",
+        "reference_video_public_variant_error_count",
         "requires_public_media",
         "prefers_public_media_url",
         "reference_public_media_url_enabled",
@@ -1390,7 +1449,6 @@ async def _reference_media_snapshots(
                         snapshot.update(meta)
                 if (
                     snapshot.get("kind") == "video"
-                    and not isinstance(snapshot.get("url"), str)
                     and isinstance(snapshot.get("video_id"), str)
                 ):
                     video = (
@@ -1403,9 +1461,13 @@ async def _reference_media_snapshots(
                         )
                     ).scalar_one_or_none()
                     if video is not None:
-                        snapshot["url"] = _reference_video_public_url(
-                            video, reference_public_base_url
+                        url, meta = await _reference_video_upstream_public_url(
+                            db,
+                            video,
+                            reference_public_base_url,
                         )
+                        snapshot["url"] = url
+                        snapshot.update(meta)
         return snapshots
     snapshots: list[dict[str, Any]] = []
     image_index = 0
@@ -1487,12 +1549,19 @@ async def _reference_media_snapshots(
                     "storage_key": video.storage_key,
                     "sha256": video.sha256,
                     "mime": video.mime,
-                    "url": _reference_video_public_url(video, reference_public_base_url)
-                    if reference_public_base_url is not None
-                    else None,
                     "source": "video",
                 }
             )
+            if reference_public_base_url is not None:
+                url, upstream_meta = await _reference_video_upstream_public_url(
+                    db,
+                    video,
+                    reference_public_base_url,
+                )
+                snapshots[-1]["url"] = url
+                snapshots[-1].update(upstream_meta)
+            else:
+                snapshots[-1]["url"] = None
             continue
         raise _http("invalid_reference_media", "reference media is invalid", 422)
     return snapshots
@@ -1599,11 +1668,27 @@ async def _create_video_generation_record(
         for item in reference_snapshots
         if isinstance(item, dict) and item.get("kind") == "image"
     )
+    used_reference_video_public_variant = any(
+        item.get("upstream_reference_variant") == VIDEO_REFERENCE_VIDEO_KIND
+        or (
+            isinstance(item.get("url"), str)
+            and f"variant={VIDEO_REFERENCE_VIDEO_KIND}" in item["url"]
+        )
+        for item in reference_snapshots
+        if isinstance(item, dict) and item.get("kind") == "video"
+    )
     reference_image_variant_error_count = sum(
         1
         for item in reference_snapshots
         if isinstance(item, dict)
         and item.get("kind") == "image"
+        and isinstance(item.get("upstream_reference_variant_error"), dict)
+    )
+    reference_video_variant_error_count = sum(
+        1
+        for item in reference_snapshots
+        if isinstance(item, dict)
+        and item.get("kind") == "video"
         and isinstance(item.get("upstream_reference_variant_error"), dict)
     )
     try:
@@ -1671,8 +1756,16 @@ async def _create_video_generation_record(
                 if used_reference_image_public_variant
                 else None
             ),
+            "reference_video_public_variant": (
+                VIDEO_REFERENCE_VIDEO_KIND
+                if used_reference_video_public_variant
+                else None
+            ),
             "reference_image_public_variant_error_count": (
                 reference_image_variant_error_count
+            ),
+            "reference_video_public_variant_error_count": (
+                reference_video_variant_error_count
             ),
         },
         status=VideoGenerationStatus.QUEUED.value,
@@ -2296,6 +2389,7 @@ async def reference_video_binary(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     token: str = Query(min_length=16, max_length=256),
+    variant: str | None = Query(default=None, max_length=80),
 ) -> Response:
     video = (
         await db.execute(
@@ -2316,6 +2410,20 @@ async def reference_video_binary(
         updated_at=video.updated_at,
     ):
         raise _http("not_found", "video not found", 404)
+    if variant:
+        if variant != VIDEO_REFERENCE_VIDEO_KIND:
+            raise _http("not_found", "video not found", 404)
+        variant_meta = video_reference_variant_metadata(video)
+        if variant_meta is None:
+            raise _http("not_found", "video not found", 404)
+        return _media_response(
+            request,
+            _fs_path(str(variant_meta["storage_key"])),
+            media_type=VIDEO_REFERENCE_VIDEO_MIME,
+            etag=str(variant_meta["sha256"]),
+            last_modified=video.updated_at,
+            immutable=True,
+        )
     return _media_response(
         request,
         _fs_path(video.storage_key),

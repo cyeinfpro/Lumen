@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import inspect
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,11 @@ from app.video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VideoReferenceImageError,
     make_video_reference_jpeg,
+)
+from app.video_reference_videos import (
+    VIDEO_REFERENCE_VIDEO_KIND,
+    VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,
+    _fit_even_dimensions,
 )
 
 
@@ -95,6 +101,62 @@ def test_video_media_response_rejects_invalid_range(tmp_path: Path) -> None:
 
     assert response.status_code == 416
     assert response.headers["content-range"] == "bytes */10"
+
+
+@pytest.mark.asyncio
+async def test_reference_video_binary_serves_upstream_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = tmp_path / "u/user-1/vref/video-1/original.mov"
+    variant = tmp_path / "u/user-1/vref/video-1/video-1.safe.mp4"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+    variant.write_bytes(b"variant")
+    token = "token-1234567890"
+    video = SimpleNamespace(
+        id="video-1",
+        storage_key="u/user-1/vref/video-1/original.mov",
+        mime="video/quicktime",
+        etag="orig-etag",
+        sha256="orig-sha",
+        updated_at=datetime.now(timezone.utc),
+        deleted_at=None,
+        metadata_jsonb={
+            "reference_access_token": token,
+            "reference_access_token_expires_at": (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat(),
+            "upstream_reference_video_variant": {
+                "kind": VIDEO_REFERENCE_VIDEO_KIND,
+                "storage_key": "u/user-1/vref/video-1/video-1.safe.mp4",
+                "sha256": "variant-sha",
+            },
+        },
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return video
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    monkeypatch.setattr(videos.settings, "storage_root", str(tmp_path))
+
+    response = await videos.reference_video_binary(  # noqa: SLF001
+        "video-1",
+        _request(),
+        Db(),  # type: ignore[arg-type]
+        token=token,
+        variant=VIDEO_REFERENCE_VIDEO_KIND,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-length"] == "7"
+    assert response.headers["etag"] == '"variant-sha"'
+    assert await _body(response) == b"variant"
 
 
 @pytest.mark.asyncio
@@ -937,6 +999,19 @@ def test_reference_video_magic_requires_iso_bmff_file() -> None:
     assert not videos._looks_like_reference_video(b"not-a-video")  # noqa: SLF001
 
 
+def test_reference_video_fit_dimensions_stays_under_seedance_r2v_limit() -> None:
+    width, height = _fit_even_dimensions(3840, 2160)
+
+    assert width == 1920
+    assert height == 1080
+    assert width * height <= VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT
+
+    portrait_width, portrait_height = _fit_even_dimensions(2160, 3840)
+    assert portrait_width == 1080
+    assert portrait_height == 1920
+    assert portrait_width * portrait_height <= VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT
+
+
 def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
     assert (
         videos._validate_reference_url("https://example.com/ref.mp4")  # noqa: SLF001
@@ -965,7 +1040,9 @@ def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() -> None:
+async def test_reference_media_snapshots_adds_public_url_for_uploaded_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     video = SimpleNamespace(
         id="video-1",
         storage_key="u/user-1/vref/video-1/original.mp4",
@@ -983,6 +1060,19 @@ async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() ->
         async def execute(self, _statement):
             return Result()
 
+    async def fake_ensure(_db, video_arg, *, storage_root: str):
+        return {
+            "kind": VIDEO_REFERENCE_VIDEO_KIND,
+            "storage_key": "u/user-1/vref/video-1/video-1.ref.mp4",
+            "mime": "video/mp4",
+            "width": 1920,
+            "height": 1080,
+            "size_bytes": 123,
+            "sha256": "variant-sha",
+        }
+
+    monkeypatch.setattr(videos, "ensure_video_reference_video_variant", fake_ensure)
+
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
         user_id="user-1",
@@ -993,7 +1083,67 @@ async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() ->
     assert snapshots[0]["url"].startswith(
         "https://lumen.example/api/videos/reference/video-1/binary?token="
     )
+    assert f"variant={VIDEO_REFERENCE_VIDEO_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["upstream_reference_storage_key"].endswith("video-1.ref.mp4")
+    assert snapshots[0]["upstream_reference_width"] == 1920
+    assert snapshots[0]["upstream_reference_height"] == 1080
     assert "reference_access_token_expires_at" in video.metadata_jsonb
+
+
+@pytest.mark.asyncio
+async def test_reference_media_snapshots_refreshes_legacy_video_public_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = SimpleNamespace(
+        id="video-1",
+        storage_key="u/user-1/vref/video-1/original.mov",
+        sha256="sha",
+        mime="video/quicktime",
+        metadata_jsonb={},
+        deleted_at=None,
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return video
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    async def fake_ensure(_db, video_arg, *, storage_root: str):
+        return {
+            "kind": VIDEO_REFERENCE_VIDEO_KIND,
+            "storage_key": "u/user-1/vref/video-1/video-1.safe.mp4",
+            "mime": "video/mp4",
+            "width": 1080,
+            "height": 1920,
+            "size_bytes": 456,
+            "sha256": "safe-sha",
+        }
+
+    monkeypatch.setattr(videos, "ensure_video_reference_video_variant", fake_ensure)
+
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[],
+        fallback_snapshots=[
+            {
+                "kind": "video",
+                "video_id": "video-1",
+                "url": "https://old.example/api/videos/reference/video-1/binary?token=old",
+            }
+        ],
+        reference_public_base_url="https://lumen.example",
+    )
+
+    assert snapshots[0]["url"].startswith(
+        "https://lumen.example/api/videos/reference/video-1/binary?token="
+    )
+    assert "old.example" not in snapshots[0]["url"]
+    assert f"variant={VIDEO_REFERENCE_VIDEO_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["upstream_reference_storage_key"].endswith("video-1.safe.mp4")
 
 
 @pytest.mark.asyncio
