@@ -55,7 +55,8 @@ logger = logging.getLogger(__name__)
 
 _LEASE_TTL_S = 120
 _POLL_INTERVAL_S = 8
-_MAX_POLL_COUNT = 120
+_MAX_POLL_DURATION_S = 30 * 60
+_MAX_POLL_COUNT = max(1, _MAX_POLL_DURATION_S // _POLL_INTERVAL_S)
 _MAX_SUBMIT_ATTEMPTS = 4
 _SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
@@ -92,6 +93,15 @@ class _StoredVideo:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _poll_window_exhausted(generation: VideoGeneration, now: datetime) -> bool:
+    if generation.poll_count >= _MAX_POLL_COUNT:
+        return True
+    submitted_at = generation.submitted_at
+    if submitted_at is None:
+        return False
+    return submitted_at + timedelta(seconds=_MAX_POLL_DURATION_S) <= now
 
 
 def _video_exception_code(exc: Exception, *, default: str) -> str:
@@ -837,18 +847,24 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
             provider = await _provider_for_generation(generation)
             adapter = adapter_for_provider(provider)
             deadline_expired = generation.deadline_at <= _now()
-            if generation.cancel_requested_at is not None or deadline_expired:
+            should_commit_poll_state = False
+            if generation.cancel_requested_at is not None:
                 await _try_provider_cancel(adapter, generation)
-                if deadline_expired:
-                    diagnostics = _generation_diagnostics(generation)
-                    diagnostics["deadline_expired_at"] = _now().isoformat()
-                    diagnostics["deadline_expired_polling_continues"] = True
-                    generation.diagnostics = diagnostics
+                should_commit_poll_state = True
+            if deadline_expired:
+                diagnostics = _generation_diagnostics(generation)
+                diagnostics.setdefault("deadline_expired_at", _now().isoformat())
+                diagnostics["deadline_expired_polling_continues"] = True
+                generation.diagnostics = diagnostics
+                should_commit_poll_state = True
+            if should_commit_poll_state:
                 await session.commit()
 
         poll = await adapter.poll(generation.provider_task_id)
         await _apply_poll_result(redis, task_id, poll)
     except VideoUpstreamError as exc:
+        if await _finish_cancelled_after_provider_poll_error(redis, task_id, exc):
+            return
         if not await _schedule_poll_retry(redis, task_id, exc):
             await _apply_poll_result(
                 redis,
@@ -907,22 +923,19 @@ async def _schedule_poll_retry(
             return True
         now = _now()
         error_code = _video_exception_code(exc, default="upstream_unknown")
-        allow_after_deadline = error_code == "fetch_failed"
-        if (
-            (generation.deadline_at <= now and not allow_after_deadline)
-            or generation.poll_count >= _MAX_POLL_COUNT
-        ):
+        if _poll_window_exhausted(generation, now):
             return False
         remaining_s = int((generation.deadline_at - now).total_seconds())
-        if remaining_s <= 1 and not allow_after_deadline:
-            return False
         delay_s = (
             _POLL_RETRY_DELAY_S
-            if allow_after_deadline and remaining_s <= 1
+            if remaining_s <= 1
             else max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
         )
         error_message = _video_exception_message(exc, phase="poll")
         diagnostics = dict(generation.diagnostics or {})
+        if generation.deadline_at <= now:
+            diagnostics.setdefault("deadline_expired_at", now.isoformat())
+            diagnostics["deadline_expired_poll_retry_continues"] = True
         retry_item = {
             "at": now.isoformat(),
             "poll_count": generation.poll_count,
@@ -974,7 +987,50 @@ async def _schedule_poll_retry(
         except Exception:
             logger.warning(
                 "video poll retry enqueue failed task=%s", generation.id, exc_info=True
+        )
+        return True
+
+
+async def _finish_cancelled_after_provider_poll_error(
+    redis: Any,
+    task_id: str,
+    exc: VideoUpstreamError,
+) -> bool:
+    if _video_exception_code(exc, default="upstream_unknown") != "upstream_not_ready":
+        return False
+    async with SessionLocal() as session:
+        generation = (
+            await session.execute(
+                select(VideoGeneration)
+                .where(VideoGeneration.id == task_id)
+                .with_for_update()
             )
+        ).scalar_one_or_none()
+        if generation is None or generation.status in _TERMINAL_STATUSES:
+            return True
+        diagnostics = _generation_diagnostics(generation)
+        if generation.cancel_requested_at is None or not diagnostics.get(
+            "cancel_sent_at"
+        ):
+            return False
+        poll = PollResult(
+            status="cancelled",
+            failure_class="canceled",
+            upstream_billable=False,
+            raw=exc.raw
+            or {
+                "phase": "poll",
+                "error": _video_exception_message(exc, phase="poll"),
+                "error_code": "upstream_not_ready",
+            },
+        )
+        await _finish_terminal_failure(
+            session,
+            redis,
+            generation,
+            poll,
+            fallback_error_message="video task cancelled by user",
+        )
         return True
 
 
@@ -1017,23 +1073,42 @@ async def _apply_poll_result(
         if generation is None or generation.status in _TERMINAL_STATUSES:
             return
 
-        if (
-            poll.status in {"queued", "running"}
-            and generation.poll_count < _MAX_POLL_COUNT
-        ):
-            generation.status = VideoGenerationStatus.RUNNING.value
-            generation.progress_stage = VideoGenerationStage.RENDERING.value
-            generation.progress_pct = max(
-                generation.progress_pct,
-                min(95, int(poll.progress if poll.progress is not None else 20)),
+        if poll.status in {"queued", "running"}:
+            now = _now()
+            if not _poll_window_exhausted(generation, now):
+                generation.status = VideoGenerationStatus.RUNNING.value
+                generation.progress_stage = VideoGenerationStage.RENDERING.value
+                generation.progress_pct = max(
+                    generation.progress_pct,
+                    min(95, int(poll.progress if poll.progress is not None else 20)),
+                )
+                generation.poll_count += 1
+                generation.upstream_response = poll.raw
+                generation.next_poll_at = now + timedelta(seconds=_POLL_INTERVAL_S)
+                await session.commit()
+                await _publish(redis, generation, EV_VIDEO_PROGRESS)
+                await _enqueue_poll(redis, task_id)
+                return
+            submitted_at = generation.submitted_at
+            elapsed_s = (
+                int((now - submitted_at).total_seconds())
+                if submitted_at is not None
+                else None
             )
-            generation.poll_count += 1
-            generation.upstream_response = poll.raw
-            generation.next_poll_at = _now() + timedelta(seconds=_POLL_INTERVAL_S)
-            await session.commit()
-            await _publish(redis, generation, EV_VIDEO_PROGRESS)
-            await _enqueue_poll(redis, task_id)
-            return
+            poll = PollResult(
+                status="failed",
+                failure_class="poll_timeout",
+                usage_total_tokens=poll.usage_total_tokens,
+                upstream_billable=poll.upstream_billable,
+                raw={
+                    **(poll.raw or {}),
+                    "error": "video task exceeded maximum poll window",
+                    "poll_count": generation.poll_count,
+                    "max_poll_count": _MAX_POLL_COUNT,
+                    "max_poll_duration_s": _MAX_POLL_DURATION_S,
+                    "poll_elapsed_s": elapsed_s,
+                },
+            )
 
         if poll.status == "succeeded":
             if not poll.video_url:

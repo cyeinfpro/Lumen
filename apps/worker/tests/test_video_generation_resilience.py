@@ -5,6 +5,9 @@ import inspect
 import httpx
 
 from app.tasks.video_generation import (
+    _MAX_POLL_COUNT,
+    _MAX_POLL_DURATION_S,
+    _POLL_INTERVAL_S,
     _is_retryable_video_exception,
     _submit_retry_delay_s,
     _video_exception_code,
@@ -80,6 +83,46 @@ def test_video_poll_deadline_continues_polling_submitted_tasks() -> None:
 
     assert "deadline_expired_polling_continues" in source
     assert 'raw={"deadline_expired": True}' not in source
+    assert "generation.cancel_requested_at is not None or deadline_expired" not in source
+    assert "if generation.cancel_requested_at is not None:" in source
+    assert "if deadline_expired:" in source
+
+
+def test_video_poll_retry_is_bounded_by_poll_window_not_local_deadline() -> None:
+    source = inspect.getsource(video_generation._schedule_poll_retry)
+    window_source = inspect.getsource(video_generation._poll_window_exhausted)
+
+    assert _MAX_POLL_DURATION_S == 30 * 60
+    assert _MAX_POLL_COUNT == _MAX_POLL_DURATION_S // _POLL_INTERVAL_S
+    assert "generation.deadline_at <= now and" not in source
+    assert "_poll_window_exhausted(generation, now)" in source
+    assert "generation.poll_count >= _MAX_POLL_COUNT" in window_source
+    assert "_MAX_POLL_DURATION_S" in window_source
+    assert "deadline_expired_poll_retry_continues" in source
+
+
+def test_video_poll_reports_timeout_when_max_window_is_exhausted() -> None:
+    source = inspect.getsource(video_generation._apply_poll_result)
+
+    assert "_poll_window_exhausted(generation, now)" in source
+    assert "video task exceeded maximum poll window" in source
+    assert "poll_timeout" in source
+    assert "max_poll_duration_s" in source
+    assert "poll_elapsed_s" in source
+
+
+def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
+    source = inspect.getsource(video_generation.run_video_poll)
+    helper = inspect.getsource(video_generation._finish_cancelled_after_provider_poll_error)
+
+    assert "_finish_cancelled_after_provider_poll_error" in source
+    assert source.index("_finish_cancelled_after_provider_poll_error") < source.index(
+        "_schedule_poll_retry"
+    )
+    assert 'status="cancelled"' in helper
+    assert 'failure_class="canceled"' in helper
+    assert "upstream_billable=False" in helper
+    assert "cancel_sent_at" in helper
 
 
 def test_reconcile_expires_overdue_tasks_without_provider_task_id() -> None:
