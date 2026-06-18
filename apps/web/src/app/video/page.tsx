@@ -1604,7 +1604,7 @@ export default function VideoPage() {
               variant="subtle"
               elevation={2}
               padding="none"
-              className="flex max-h-[720px] min-h-[420px] flex-col overflow-hidden border-[var(--border)] xl:max-h-[calc(100dvh-5rem)]"
+              className="flex min-h-[420px] flex-col border-[var(--border)] xl:h-[min(720px,calc(100dvh-5rem))] xl:overflow-hidden"
             >
               <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3 sm:p-4">
                 <span aria-hidden="true" className="absolute left-0 top-3 h-7 w-1 rounded-r-full bg-[var(--accent)]" />
@@ -1636,7 +1636,7 @@ export default function VideoPage() {
                   </Button>
                 </div>
               </div>
-              <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain p-4 pr-3 sm:p-5 sm:pr-4">
+              <div className="space-y-5 p-4 pr-3 sm:p-5 sm:pr-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
                 {activeItems.length > 0 && (
                   <section className="space-y-3">
                     <div className="flex items-center justify-between gap-3">
