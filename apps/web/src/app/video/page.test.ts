@@ -16,3 +16,12 @@ test("video task list only becomes an internal scroller in xl side-panel layouts
   match(source, /xl:h-\[min\(720px,calc\(100dvh-5rem\)\)\] xl:overflow-hidden/);
   match(source, /xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain/);
 });
+
+test("video prompt enhancement panel remains reachable above mobile chrome", () => {
+  match(source, /promptEnhancePanelRef = useRef<HTMLDivElement \| null>\(null\)/);
+  match(source, /promptEnhancePanelRef\.current\?\.scrollIntoView\(\{/);
+  match(source, /block: "start"/);
+  match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
+  match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
+  match(source, /scroll-mt-4 md:scroll-mt-6/);
+});

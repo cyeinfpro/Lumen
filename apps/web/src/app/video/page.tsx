@@ -511,6 +511,7 @@ export default function VideoPage() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const referenceFileRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptEnhancePanelRef = useRef<HTMLDivElement | null>(null);
   const promptEnhanceAbortRef = useRef<AbortController | null>(null);
   const terminalHistorySyncedRef = useRef<Set<string>>(new Set());
   const refreshInFlightRef = useRef<Set<string>>(new Set());
@@ -542,6 +543,10 @@ export default function VideoPage() {
   const [selectedPromptEnhanceCandidateId, setSelectedPromptEnhanceCandidateId] =
     useState("");
   const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
+  const promptEnhancePanelVisible =
+    isEnhancingPrompt ||
+    Boolean(promptEnhancePreview.trim()) ||
+    promptEnhanceCandidates.length > 0;
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -836,6 +841,19 @@ export default function VideoPage() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!promptEnhancePanelVisible) return;
+
+    const scrollTimer = window.setTimeout(() => {
+      promptEnhancePanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 80);
+
+    return () => window.clearTimeout(scrollTimer);
+  }, [promptEnhanceCandidates.length, promptEnhancePanelVisible]);
 
   const availableModels = useMemo(
     () => options?.models.filter((item) => item.actions.includes(action)) ?? [],
@@ -1307,7 +1325,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-4 pt-2 md:h-[calc(100dvh-3rem)] md:overflow-y-auto md:px-5 md:pb-4 xl:overflow-hidden">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[calc(var(--mobile-tabbar-height)+1rem)] pt-2 md:h-[calc(100dvh-3rem)] md:overflow-y-auto md:px-5 md:pb-4 xl:overflow-hidden">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1328,7 +1346,7 @@ export default function VideoPage() {
               padding="none"
               className="flex h-full min-h-0 flex-col overflow-hidden border-[var(--border)]"
             >
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 sm:p-4">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 pb-[calc(var(--mobile-tabbar-height)+2rem)] sm:p-4 sm:pb-[calc(var(--mobile-tabbar-height)+2rem)] md:pb-4 xl:pb-6">
                 <div className="space-y-1.5">
                   <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
                     {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
@@ -1526,17 +1544,20 @@ export default function VideoPage() {
                           isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                         )}
                       />
-                      {(isEnhancingPrompt ||
-                        promptEnhancePreview.trim() ||
-                        promptEnhanceCandidates.length > 0) && (
-                        <PromptEnhanceChooser
-                          loading={isEnhancingPrompt}
-                          preview={promptEnhancePreview}
-                          candidates={promptEnhanceCandidates}
-                          selectedId={selectedPromptEnhanceCandidateId}
-                          onSelect={applyPromptEnhanceCandidate}
-                          onDismiss={clearPromptEnhanceChoices}
-                        />
+                      {promptEnhancePanelVisible && (
+                        <div
+                          ref={promptEnhancePanelRef}
+                          className="scroll-mt-4 md:scroll-mt-6"
+                        >
+                          <PromptEnhanceChooser
+                            loading={isEnhancingPrompt}
+                            preview={promptEnhancePreview}
+                            candidates={promptEnhanceCandidates}
+                            selectedId={selectedPromptEnhanceCandidateId}
+                            onSelect={applyPromptEnhanceCandidate}
+                            onDismiss={clearPromptEnhanceChoices}
+                          />
+                        </div>
                       )}
                       <div className="flex flex-wrap gap-2 pb-1">
                         {PROMPT_CHIPS.map((chip) => (
