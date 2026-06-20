@@ -42,8 +42,6 @@ from lumen_core.constants import (
     GenerationAction,
     GenerationStage,
     GenerationStatus,
-    IMAGE_MULTI_GEN_STAGGER_CAP_S,
-    IMAGE_MULTI_GEN_STAGGER_S,
     MAX_MESSAGE_ATTACHMENTS,
     Intent,
     MAX_PROMPT_CHARS,
@@ -1419,7 +1417,7 @@ async def _create_assistant_task(
         outbox_payloads.append(payload)
     else:
         # text_to_image / image_to_image
-        count = max(1, min(16, image_params.count))
+        count = max(1, min(10, image_params.count))
         action = (
             GenerationAction.EDIT.value
             if intent == Intent.IMAGE_TO_IMAGE
@@ -1445,6 +1443,7 @@ async def _create_assistant_task(
         )
         billing_tier = _requested_image_billing_tier(image_params)
         upstream_request = _merge_request_metadata(upstream_request, request_metadata)
+        upstream_request["n"] = count
         upstream_request.update(
             _image_queue_metadata(
                 image_params,
@@ -1464,13 +1463,13 @@ async def _create_assistant_task(
             ) = await billing_core.estimate_image_cost_for_tier(
                 db,
                 tier=billing_tier,
-                n=1,
+                n=count,
             )
         else:
             estimated_micro, estimated_tier = await billing_core.estimate_image_cost(
                 db,
                 size_px=size_px,
-                n=1,
+                n=count,
                 thresholds=billing_thresholds or None,
             )
         if credential_pin:
@@ -1484,92 +1483,74 @@ async def _create_assistant_task(
         if upstream_request.get("background") == "transparent":
             prompt_full += _transparent_background_prompt_suffix()
 
-        for i in range(count):
-            idem = (
-                stored_idempotency_key
-                if i == 0
-                else _stored_idempotency_key(conv.id, f"{idempotency_key}:{i}")
-            )
-            gen_upstream_request = dict(upstream_request)
-            gen_upstream_request.setdefault("trace_id", f"gen_{new_uuid7()}")
-            gen = Generation(
-                message_id=assistant_msg.id,
-                user_id=user_id,
-                action=action,
-                prompt=prompt_full,
-                size_requested=resolved_size.size,
-                aspect_ratio=image_params.aspect_ratio,
-                input_image_ids=attachment_ids,
-                primary_input_image_id=primary,
-                # mask 仅在 image_to_image 有意义；text_to_image 强制 None，
-                # 保险起见在主流程入口做了 422，这里再兜一层避免误传。
-                mask_image_id=(
-                    mask_image_id if intent == Intent.IMAGE_TO_IMAGE else None
-                ),
-                status=GenerationStatus.QUEUED.value,
-                progress_stage=GenerationStage.QUEUED.value,
-                attempt=0,
-                idempotency_key=idem,
-                upstream_request=gen_upstream_request,
-                user_api_credential_id=(
-                    credential_pin.credential_id if credential_pin else None
-                ),
-                upstream_supplier_id=(
-                    credential_pin.supplier_id if credential_pin else None
-                ),
-            )
-            db.add(gen)
-            await db.flush()
-            if billing_enabled and estimated_micro > 0:
-                try:
-                    tx = await billing_core.hold(
-                        db,
-                        user_id,
-                        estimated_micro,
-                        ref_type="generation",
-                        ref_id=gen.id,
-                        idempotency_key=f"hold:{gen.id}",
-                        allow_negative=await _billing_allow_negative(db),
-                        meta={
-                            "tier": estimated_tier,
-                            "size_requested": resolved_size.size,
-                            "pixels_estimated": size_px,
-                        },
-                    )
-                except billing_core.BillingError as exc:
-                    raise _billing_http_error(exc)
-                if tx is not None:
-                    await write_audit(
-                        db,
-                        event_type="wallet.hold.image",
-                        user_id=user_id,
-                        details={
-                            "generation_id": gen.id,
-                            "amount_micro": estimated_micro,
-                            "tier": estimated_tier,
-                            "balance_after": tx.balance_after,
-                            "hold_after": tx.hold_after,
-                        },
-                        autocommit=False,
-                    )
-            generation_ids.append(gen.id)
-            # Stagger 多张图入队：i=0 立即跑，i>=1 延迟 i*STAGGER 秒（cap CAP）。
-            # 实测同 prompt 同账号同时打 ChatGPT codex 会触发 OpenAI 内部 race（一败一成稳定模式）；
-            # 错开几秒让第二条到达时第一条已分配好 image_generation slot，避免碰撞。
-            defer_s = (
-                min(i * IMAGE_MULTI_GEN_STAGGER_S, IMAGE_MULTI_GEN_STAGGER_CAP_S)
-                if i > 0
-                else 0
-            )
-            payload: dict[str, Any] = {
-                "task_id": gen.id,
-                "user_id": user_id,
-                "kind": "generation",
-            }
-            payload.update(_task_payload_context(gen_upstream_request))
-            if defer_s > 0:
-                payload["defer_s"] = defer_s
-            outbox_payloads.append(payload)
+        gen_upstream_request = dict(upstream_request)
+        gen_upstream_request.setdefault("trace_id", f"gen_{new_uuid7()}")
+        gen = Generation(
+            message_id=assistant_msg.id,
+            user_id=user_id,
+            action=action,
+            prompt=prompt_full,
+            size_requested=resolved_size.size,
+            aspect_ratio=image_params.aspect_ratio,
+            input_image_ids=attachment_ids,
+            primary_input_image_id=primary,
+            # mask 仅在 image_to_image 有意义；text_to_image 强制 None，
+            # 保险起见在主流程入口做了 422，这里再兜一层避免误传。
+            mask_image_id=(mask_image_id if intent == Intent.IMAGE_TO_IMAGE else None),
+            status=GenerationStatus.QUEUED.value,
+            progress_stage=GenerationStage.QUEUED.value,
+            attempt=0,
+            idempotency_key=stored_idempotency_key,
+            upstream_request=gen_upstream_request,
+            user_api_credential_id=(
+                credential_pin.credential_id if credential_pin else None
+            ),
+            upstream_supplier_id=credential_pin.supplier_id if credential_pin else None,
+        )
+        db.add(gen)
+        await db.flush()
+        if billing_enabled and estimated_micro > 0:
+            try:
+                tx = await billing_core.hold(
+                    db,
+                    user_id,
+                    estimated_micro,
+                    ref_type="generation",
+                    ref_id=gen.id,
+                    idempotency_key=f"hold:{gen.id}",
+                    allow_negative=await _billing_allow_negative(db),
+                    meta={
+                        "tier": estimated_tier,
+                        "size_requested": resolved_size.size,
+                        "pixels_estimated": size_px,
+                        "image_count": count,
+                    },
+                )
+            except billing_core.BillingError as exc:
+                raise _billing_http_error(exc)
+            if tx is not None:
+                await write_audit(
+                    db,
+                    event_type="wallet.hold.image",
+                    user_id=user_id,
+                    details={
+                        "generation_id": gen.id,
+                        "amount_micro": estimated_micro,
+                        "tier": estimated_tier,
+                        "image_count": count,
+                        "balance_after": tx.balance_after,
+                        "hold_after": tx.hold_after,
+                    },
+                    autocommit=False,
+                )
+        generation_ids.append(gen.id)
+        payload = {
+            "task_id": gen.id,
+            "user_id": user_id,
+            "kind": "generation",
+        }
+        payload.update(_task_payload_context(gen_upstream_request))
+        outbox_payloads.append(payload)
 
     # outbox rows (same transaction)
     outbox_rows: list[OutboxEvent] = []

@@ -292,7 +292,8 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
 
     async def estimate_image_cost_for_tier(*_args: Any, **kwargs: Any) -> tuple[int, str]:
         assert kwargs["tier"] == "2k"
-        return 25_000, "2k"
+        assert kwargs["n"] == 3
+        return 75_000, "2k"
 
     async def hold(_db: _Db, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
         held.append(
@@ -334,7 +335,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
         started_at=None,
         finished_at=datetime.now(timezone.utc),
         size_requested="2048x2048",
-        upstream_request={"billing_tier": "2k"},
+        upstream_request={"billing_tier": "2k", "n": 3},
     )
     db = _Db([_Result(gen)])
 
@@ -350,7 +351,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
         {
             "committed": False,
             "user_id": "user-1",
-            "amount_micro": 25_000,
+            "amount_micro": 75_000,
             "ref_type": "generation",
             "ref_id": "gen-1:retry:1",
             "idempotency_key": "hold:gen-1:retry:1",
