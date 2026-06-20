@@ -19,9 +19,7 @@ from app import upstream
 from app.upstream import UpstreamCancelled, UpstreamError
 
 
-async def _first_image_result(
-    image_iter: Any,
-) -> tuple[str, str | None]:
+async def _first_image_result(image_iter: Any) -> tuple[str, str | None]:
     async for item in image_iter:
         return item
     raise AssertionError("image iterator yielded no result")
@@ -33,9 +31,9 @@ async def test_dual_race_image2_wins_cancels_responses(
 ) -> None:
     cancelled = asyncio.Event()
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
-        return ("img-from-image2", "https://x/image2.png")
+        return [("img-from-image2", "https://x/image2.png")]
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
         try:
@@ -75,7 +73,7 @@ async def test_dual_race_image2_wins_cancels_responses(
 async def test_dual_race_responses_wins_when_image2_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         raise UpstreamError("image2 server_error", error_code="server_error")
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
@@ -111,7 +109,7 @@ async def test_dual_race_responses_wins_when_image2_fails_fast(
 async def test_dual_race_both_lanes_fail_merges_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         raise UpstreamError(
             "direct edit boom", error_code="all_direct_image_providers_failed"
         )
@@ -188,13 +186,13 @@ async def test_dual_race_caller_cancel_propagates(
     image2_cancelled = asyncio.Event()
     responses_cancelled = asyncio.Event()
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         try:
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
             image2_cancelled.set()
             raise
-        return ("never", None)
+        return [("never", None)]
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
         # 第一路就抛 UpstreamCancelled（模拟调用方主动取消）
@@ -235,10 +233,10 @@ async def test_dual_race_provider_override_skips_race(
     """provider_override 给定时不进 race，直接走 responses 单路（原有语义）。"""
     image2_called = False
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         nonlocal image2_called
         image2_called = True
-        return ("never", None)
+        return [("never", None)]
 
     async def fake_responses(**kw: Any) -> tuple[str, str | None]:
         # 收到 provider_override 透传
@@ -384,10 +382,10 @@ async def test_dispatch_dual_race_uses_image_jobs_when_selected_provider_support
     """channel=auto + selected provider supports jobs → dual_race uses image-job race."""
     image2_called = False
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         nonlocal image2_called
         image2_called = True
-        return ("never", None)
+        return [("never", None)]
 
     async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
         # 每条 lane 给一个明显的 fingerprint 以便断言
@@ -428,9 +426,9 @@ async def test_dispatch_auto_dual_race_streams_when_provider_has_no_jobs(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
-        return ("img-from-image2", None)
+        return [("img-from-image2", None)]
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
         await asyncio.sleep(0.05)
@@ -476,9 +474,9 @@ async def test_dispatch_auto_dual_race_treats_string_false_jobs_as_disabled(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
-        return ("img-from-image2", None)
+        return [("img-from-image2", None)]
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
         await asyncio.sleep(0.05)
@@ -671,9 +669,9 @@ async def test_dispatch_stream_only_dual_race_ignores_jobs_enabled(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
-        return ("img-from-image2", None)
+        return [("img-from-image2", None)]
 
     async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
         await asyncio.sleep(0.05)

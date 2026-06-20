@@ -184,7 +184,7 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     finally:
         upstream.pop_image_trace_id(token)
 
-    assert result == ("ZmFrZQ==", "ok")
+    assert result == [("ZmFrZQ==", "ok")]
     headers = seen["headers"]
     expected_key = upstream._image_idempotency_key(
         trace_id="gen-fixed",
