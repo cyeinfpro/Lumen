@@ -327,6 +327,21 @@ class SuccessfulDirectClient(DummyClient):
         )
 
 
+class MultiDirectClient(DummyClient):
+    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
+        self.posts.append({"url": url, **kwargs})
+        return DummyResponse(
+            200,
+            {
+                "data": [
+                    {"b64_json": PNG_B64, "revised_prompt": "direct prompt 1"},
+                    {"b64_json": PNG_B64, "revised_prompt": "direct prompt 2"},
+                    {"b64_json": PNG_B64, "revised_prompt": "direct prompt 3"},
+                ]
+            },
+        )
+
+
 class ImageJobResponse:
     def __init__(
         self,
@@ -1014,6 +1029,44 @@ async def test_generate_image_can_use_image2_direct_route(
         "completed",
     ]
     assert {event["source"] for event in progress_events} == {"image2_direct"}
+
+
+@pytest.mark.asyncio
+async def test_generate_image_direct_image2_yields_all_n_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MultiDirectClient()
+
+    async def fake_resolve_runtime() -> tuple[str, str]:
+        return "https://upstream.example/v1", "test-key"
+
+    async def fake_get_images_client() -> MultiDirectClient:
+        return client
+
+    async def fake_resolve(key: str) -> str | None:
+        assert key == "image.primary_route"
+        return "image2"
+
+    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+    monkeypatch.setattr(upstream, "resolve", fake_resolve)
+
+    results = [
+        item
+        async for item in upstream.generate_image(
+            prompt="make three images",
+            size="1024x1024",
+            n=3,
+            quality="high",
+        )
+    ]
+
+    assert results == [
+        (PNG_B64, "direct prompt 1"),
+        (PNG_B64, "direct prompt 2"),
+        (PNG_B64, "direct prompt 3"),
+    ]
+    assert client.posts[0]["json"]["n"] == 3
 
 
 @pytest.mark.asyncio
@@ -1865,6 +1918,21 @@ async def test_extract_image_result_accepts_b64_json() -> None:
     b64, revised = await upstream._extract_image_result(payload, 200)
     assert b64 == PNG_B64
     assert revised == "rp"
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_accepts_multiple_b64_json() -> None:
+    payload = {
+        "data": [
+            {"b64_json": "aW1hZ2UtMQ==", "revised_prompt": "one"},
+            {"b64_json": "aW1hZ2UtMg==", "revised_prompt": "two"},
+        ]
+    }
+
+    assert await upstream._extract_image_results(payload, 200) == [
+        ("aW1hZ2UtMQ==", "one"),
+        ("aW1hZ2UtMg==", "two"),
+    ]
 
 
 @pytest.mark.asyncio

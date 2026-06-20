@@ -225,13 +225,13 @@ interface ChatState {
 const DEFAULT_PARAMS: ImageParams = {
   aspect_ratio: "16:9",
   size_mode: "fixed",
-  quality: "2k",
-  render_quality: "medium",
+  quality: "4k",
+  render_quality: "high",
   count: 1,
 };
 
 const IMAGE_COUNT_MIN = 1;
-const IMAGE_COUNT_MAX = 8;
+const IMAGE_COUNT_MAX = 10;
 const MESSAGE_PAGE_LIMIT = 50;
 const BASE64_EVICTION_DELAY_MS = 60_000;
 const BASE64_EVICTION_MIN_CHARS = 1024;
@@ -273,7 +273,7 @@ function normalizeRenderQuality(
 ): RenderQualityChoice {
   return value === "low" || value === "medium" || value === "high"
     ? value
-    : "medium";
+    : "high";
 }
 
 function qualityFromFixedSize(
@@ -2926,10 +2926,7 @@ function createChatStore() {
       // 1) 乐观插入 user msg + pending assistant msg
       const optimisticUserId = `opt-user-${uuid()}`;
       const optimisticAssistantId = `opt-asst-${uuid()}`;
-      const imageCount = isImage ? clampImageCount(params.count) : 0;
-      const optimisticGenIds = isImage
-        ? Array.from({ length: imageCount }, () => `opt-gen-${uuid()}`)
-        : [];
+      const optimisticGenIds = isImage ? [`opt-gen-${uuid()}`] : [];
       const optimisticGenId = optimisticGenIds[0];
       const now = Date.now();
 
@@ -3054,7 +3051,7 @@ function createChatStore() {
                 moderation: moderationOverride,
                 ...rest
               } = params;
-              const q = _q ?? "2k";
+              const q = _q ?? "4k";
               const resolved = qualityToFixedSize(q, params.aspect_ratio);
               const outputFormat = outputFormatOverride;
               const renderQuality = normalizeRenderQuality(renderQualityOverride);
@@ -3568,7 +3565,7 @@ function createChatStore() {
           quality: "4k",
           count: 1,
           fast: _runtimeFastDefault ?? false,
-          render_quality: "medium",
+          render_quality: "high",
           background: "auto",
           moderation: "low",
         },
@@ -3633,7 +3630,7 @@ function createChatStore() {
       const intent: "text_to_image" | "image_to_image" = hasInput
         ? "image_to_image"
         : "text_to_image";
-      const rerollRenderQuality = "medium";
+      const rerollRenderQuality = "high";
       const rerollQuality = qualityFromFixedSize(
         gen.size_requested,
         gen.aspect_ratio,

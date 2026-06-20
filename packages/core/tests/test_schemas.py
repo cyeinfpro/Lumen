@@ -114,12 +114,16 @@ def test_image_params_support_render_and_output_options():
     assert params.output_compression is None
     assert params.background == "transparent"
     assert params.moderation == "low"
-    assert ImageParamsIn().render_quality == "medium"
+    assert ImageParamsIn().quality == "4k"
+    assert ImageParamsIn().render_quality == "high"
+    assert ImageParamsIn().count == 1
+    assert ImageParamsIn(count=10).count == 10
     assert ImageParamsIn().output_format is None
     assert ImageParamsIn().fast is None
 
     for kwargs in (
         {"background": "checkerboard"},
+        {"count": 11},
         {"output_compression": 101},
     ):
         try:

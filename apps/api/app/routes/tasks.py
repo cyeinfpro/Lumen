@@ -164,12 +164,13 @@ async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int
     if not await _billing_enabled(db):
         return 0
     request = _json_dict(getattr(gen, "upstream_request", None))
+    image_count = _generation_request_image_count(gen)
     tier = _string_value(request.get("billing_tier"))
     if tier in {"1k", "2k", "4k"}:
         amount, _tier = await billing_core.estimate_image_cost_for_tier(
             db,
             tier=tier,
-            n=1,
+            n=image_count,
         )
         return int(amount or 0)
     pixels = (
@@ -187,7 +188,7 @@ async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int
     amount, _tier = await billing_core.estimate_image_cost(
         db,
         size_px=max(0, pixels),
-        n=1,
+        n=image_count,
         thresholds=billing_core.parse_thresholds(
             await _setting_raw(db, "billing.image_size_thresholds")
         ),
@@ -316,6 +317,16 @@ def _task_request_int(task: Generation | Completion, key: str) -> int | None:
 
 def _json_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _generation_request_image_count(gen: Generation) -> int:
+    request = _json_dict(getattr(gen, "upstream_request", None))
+    raw = request.get("n")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(10, value))
 
 
 def _string_value(value: Any) -> str | None:

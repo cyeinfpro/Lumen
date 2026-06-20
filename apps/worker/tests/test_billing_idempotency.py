@@ -133,6 +133,72 @@ async def test_settle_generation_uses_requested_billing_tier(
 
 
 @pytest.mark.asyncio
+async def test_settle_generation_uses_image_count_for_requested_billing_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="gen-3",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={"billing_tier": "4k"},
+    )
+    calls: dict[str, Any] = {}
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def existing_tx(*_args: Any) -> None:
+        return None
+
+    async def estimate_for_tier(*_args: Any, **kwargs: Any) -> tuple[int, str]:
+        calls["estimate"] = kwargs
+        return 1200, "4k"
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        calls["settle"] = kwargs
+        return SimpleNamespace(
+            id="tx-3",
+            amount_micro=-1200,
+            balance_after=600,
+            hold_after=0,
+            meta=kwargs["meta"],
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", existing_tx)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_image_cost_for_tier",
+        estimate_for_tier,
+    )
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=3840,
+        height=2160,
+        image_count=3,
+    )
+
+    assert calls["estimate"]["tier"] == "4k"
+    assert calls["estimate"]["n"] == 3
+    assert calls["settle"]["actual_micro"] == 1200
+    assert calls["settle"]["meta"]["image_count"] == 3
+    settle_audit = next(row for row in session.added if row.event_type == "wallet.settle.image")
+    assert settle_audit.details["image_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_settle_generation_uses_retry_billing_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

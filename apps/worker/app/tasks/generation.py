@@ -2914,7 +2914,18 @@ def _image_request_options(
         if options["output_compression"] is None:
             # OpenAI image_generation 默认 100(无压缩，最高画质)。0 实测画质损失明显。
             options["output_compression"] = 100
+    options["n"] = _image_requested_count(req)
     return options
+
+
+def _image_requested_count(upstream_request: dict[str, Any] | None) -> int:
+    req = upstream_request if isinstance(upstream_request, dict) else {}
+    raw = req.get("n")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(10, value))
 
 
 _DIAG_STRING_LIMIT = 500
@@ -3196,6 +3207,7 @@ def _image_requested_params_snapshot(
         "background",
         "moderation",
         "billing_tier",
+        "n",
     ):
         if key in req:
             out[key] = _compact_diag_value(req[key])
@@ -3828,7 +3840,12 @@ async def _handle_dual_race_bonus_image(
     upstream_actual_route: str | None = None,
     upstream_actual_source: str | None = None,
     upstream_actual_endpoint: str | None = None,
-) -> None:
+    billing_meta: dict[str, Any] | None = None,
+    idempotency_suffix: str = ":b",
+    extra_upstream_fields: dict[str, Any] | None = None,
+    record_model_library_candidate: bool = True,
+    log_label: str = "dual_race bonus",
+) -> bool:
     """处理 dual_race 的 bonus 图：建独立 generation row + 写盘 + 写 DB + publish。
 
     bonus 图作为同一条 assistant message 的另一条 generation；前端通过 EV_GEN_ATTACHED
@@ -3839,24 +3856,25 @@ async def _handle_dual_race_bonus_image(
     任何异常都不抛——bonus 是"锦上添花"，失败只 log warn，不影响 winner 已成功的状态。
     """
     if not b64_result:
-        return
+        return False
 
     # --- 1. 解码 + 校验 ---
     try:
         raw_image = _decode_upstream_image_b64(b64_result)
     except binascii.Error:
-        logger.warning("dual_race bonus base64 decode failed parent=%s", parent_task_id)
-        return
+        logger.warning("%s base64 decode failed parent=%s", log_label, parent_task_id)
+        return False
     sha = _sha256(raw_image)
 
     # SHA echo: bonus 不能是参考图本身（EDIT 时）
     if action == GenerationAction.EDIT.value:
         if any(sha == ref_sha for ref_sha, _ in references):
             logger.info(
-                "dual_race bonus sha echoed reference parent=%s; skip",
+                "%s sha echoed reference parent=%s; skip",
+                log_label,
                 parent_task_id,
             )
-            return
+            return False
 
     transparent_requested = image_request_options.get("background") == "transparent"
 
@@ -3868,11 +3886,12 @@ async def _handle_dual_race_bonus_image(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "dual_race bonus pillow decode failed parent=%s err=%r",
+            "%s pillow decode failed parent=%s err=%r",
+            log_label,
             parent_task_id,
             exc,
         )
-        return
+        return False
     raw_image = processed_image.raw_image
     sha = processed_image.sha256
     orig_format = processed_image.orig_format
@@ -3906,13 +3925,17 @@ async def _handle_dual_race_bonus_image(
         request=parent_upstream_request,
         prompt=prompt,
     )
-    bonus_billing_meta: dict[str, Any] = {
-        "is_dual_race_bonus": True,
-        "billing_free": True,
-        "billing_label": "free",
-        "billing_exempt_reason": "dual_race_loser",
-    }
-    image_metadata: dict[str, Any] = {**model_metadata, **bonus_billing_meta}
+    result_billing_meta: dict[str, Any] = (
+        dict(billing_meta)
+        if billing_meta is not None
+        else {
+            "is_dual_race_bonus": True,
+            "billing_free": True,
+            "billing_label": "free",
+            "billing_exempt_reason": "dual_race_loser",
+        }
+    )
+    image_metadata: dict[str, Any] = {**model_metadata, **result_billing_meta}
     if model_metadata:
         try:
             with PILImage.open(io.BytesIO(raw_image)) as im:
@@ -3926,7 +3949,8 @@ async def _handle_dual_race_bonus_image(
             sha = _sha256(raw_image)
         except Exception as exc:  # noqa: BLE001
             logger.info(
-                "dual_race bonus model metadata embed skipped parent=%s err=%s",
+                "%s model metadata embed skipped parent=%s err=%s",
+                log_label,
                 parent_task_id,
                 exc,
             )
@@ -3946,27 +3970,30 @@ async def _handle_dual_race_bonus_image(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "dual_race bonus storage write failed parent=%s err=%r",
+            "%s storage write failed parent=%s err=%r",
+            log_label,
             parent_task_id,
             exc,
         )
-        return
+        return False
 
     # --- 3. 写 DB ---
     try:
         async with _cleanup_storage_on_error(created_storage_keys):
             async with SessionLocal() as session:
-                # idempotency_key 长度上限 64：parent + ":b" 后缀截断
-                bonus_idem = f"{parent_idempotency_key[:62]}:b"
+                suffix = idempotency_suffix or ":b"
+                # idempotency_key 长度上限 64：parent + 后缀截断
+                bonus_idem = (
+                    f"{parent_idempotency_key[: max(1, 64 - len(suffix))]}{suffix}"
+                )
                 bonus_upstream_req: dict[str, Any] = dict(parent_upstream_request or {})
                 bonus_upstream_req.update(image_request_options)
                 bonus_upstream_req["size_actual"] = f"{width}x{height}"
                 bonus_upstream_req["mime"] = orig_mime
-                bonus_upstream_req["is_dual_race_bonus"] = True
-                bonus_upstream_req["billing_free"] = True
-                bonus_upstream_req["billing_label"] = "free"
-                bonus_upstream_req["billing_exempt_reason"] = "dual_race_loser"
+                bonus_upstream_req.update(result_billing_meta)
                 bonus_upstream_req["parent_generation_id"] = parent_task_id
+                if extra_upstream_fields:
+                    bonus_upstream_req.update(extra_upstream_fields)
                 if upstream_provider:
                     bonus_upstream_req["provider"] = upstream_provider
                     bonus_upstream_req["actual_provider"] = upstream_provider
@@ -4082,7 +4109,7 @@ async def _handle_dual_race_bonus_image(
                             "preview_url": f"/api/images/{image_id}/variants/preview1024",
                             "thumb_url": f"/api/images/{image_id}/variants/thumb256",
                             "filename": image_metadata.get("suggested_filename"),
-                            **bonus_billing_meta,
+                            **result_billing_meta,
                         }
                     )
                     content["images"] = images_list
@@ -4092,30 +4119,32 @@ async def _handle_dual_race_bonus_image(
                 # 模特库聚合视图需要看到 loser 候选图：把 bonus image_id 写回
                 # 同一 step 的 output_json.dual_race_bonus_image_ids（与 winner
                 # step.image_ids 物理隔离），共用同一 session 同一 commit。
-                try:
-                    await _maybe_record_model_library_candidate_image(
-                        session=session,
-                        user_id=user_id,
-                        parent_upstream_request=parent_upstream_request or {},
-                        bonus_image_id=image_id,
-                    )
-                except (TimeoutError, asyncio.CancelledError):
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "model_library candidate hook failed parent=%s err=%s",
-                        parent_task_id,
-                        exc,
-                    )
+                if record_model_library_candidate:
+                    try:
+                        await _maybe_record_model_library_candidate_image(
+                            session=session,
+                            user_id=user_id,
+                            parent_upstream_request=parent_upstream_request or {},
+                            bonus_image_id=image_id,
+                        )
+                    except (TimeoutError, asyncio.CancelledError):
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "model_library candidate hook failed parent=%s err=%s",
+                            parent_task_id,
+                            exc,
+                        )
 
                 await session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "dual_race bonus DB write failed parent=%s err=%r",
+            "%s DB write failed parent=%s err=%r",
+            log_label,
             parent_task_id,
             exc,
         )
-        return
+        return False
 
     # --- 4. Publish 事件 ---
     # 先 ATTACHED：让前端在 store 里建 generation placeholder 并把 id push 到
@@ -4136,7 +4165,7 @@ async def _handle_dual_race_bonus_image(
                 "aspect_ratio": aspect_ratio,
                 "input_image_ids": list(input_image_ids),
                 "primary_input_image_id": primary_input_image_id,
-                **bonus_billing_meta,
+                **result_billing_meta,
             },
         )
         await publish_event(
@@ -4158,24 +4187,26 @@ async def _handle_dual_race_bonus_image(
                         "preview_url": f"/api/images/{image_id}/variants/preview1024",
                         "thumb_url": f"/api/images/{image_id}/variants/thumb256",
                         "filename": image_metadata.get("suggested_filename"),
-                        **bonus_billing_meta,
+                        **result_billing_meta,
                     }
                 ],
                 "final_size": f"{width}x{height}",
-                **bonus_billing_meta,
+                **result_billing_meta,
             },
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "dual_race bonus publish failed parent=%s err=%r",
+            "%s publish failed parent=%s err=%r",
+            log_label,
             parent_task_id,
             exc,
         )
-        return
+        return False
 
     logger.info(
-        "dual_race bonus image done: parent=%s bonus=%s", parent_task_id, bonus_gen_id
+        "%s image done: parent=%s bonus=%s", log_label, parent_task_id, bonus_gen_id
     )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -4832,6 +4863,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     image_iter: AsyncIterator[tuple[str, str | None]] | None = None
     provider_attempt_log: list[dict[str, Any]] = []
     upstream_duration_ms: int | None = None
+    requested_image_count = _image_requested_count(gen_upstream_request_snapshot)
+    batch_extra_pairs: list[tuple[int, tuple[str, str | None]]] = []
     requested_params_for_diag = _image_requested_params_snapshot(
         gen_upstream_request_snapshot,
         size=size_requested,
@@ -5229,6 +5262,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 ),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
+                                n=requested_image_count,
                                 model=responses_model,
                                 progress_callback=publish_image_progress,
                                 provider_override=(
@@ -5249,6 +5283,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 ),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
+                                n=requested_image_count,
                                 model=responses_model,
                                 progress_callback=publish_image_progress,
                                 provider_override=(
@@ -5281,6 +5316,43 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     actual_upstream_route = winner_provider_event.get("route")
                     actual_upstream_source = winner_provider_event.get("source")
                     actual_upstream_endpoint = winner_provider_event.get("endpoint")
+                    if (
+                        requested_image_count > 1
+                        and image_iter is not None
+                        and actual_upstream_source
+                        in {"image2_direct", "image2_edit_direct"}
+                    ):
+                        for batch_index in range(2, requested_image_count + 1):
+                            try:
+                                extra_pair = await _anext_image_with_guards(
+                                    image_iter,
+                                    lease_lost,
+                                    redis=redis,
+                                    task_id=task_id,
+                                )
+                            except (
+                                _LeaseLost,
+                                _TaskCancelled,
+                                asyncio.CancelledError,
+                            ):
+                                raise
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "image2 n extra iter failed task=%s index=%s err=%r",
+                                    task_id,
+                                    batch_index,
+                                    exc,
+                                )
+                                break
+                            if extra_pair is None:
+                                logger.warning(
+                                    "image2 n returned fewer images task=%s requested=%s actual=%s",
+                                    task_id,
+                                    requested_image_count,
+                                    batch_index - 1,
+                                )
+                                break
+                            batch_extra_pairs.append((batch_index, extra_pair))
                     upstream_calls_total.labels(kind="generation", outcome="ok").inc()
                 except Exception:
                     upstream_calls_total.labels(
@@ -5361,6 +5433,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         orig_format = processed_image.orig_format
         width = processed_image.width
         height = processed_image.height
+        actual_image_count = 1 + len(batch_extra_pairs)
         blurhash_str = processed_image.blurhash
         display_bytes = processed_image.display.bytes
         display_size = processed_image.display.size
@@ -5544,6 +5617,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 upstream_req["upstream_route"] = image_route
                 upstream_req["requested_params"] = requested_params_for_diag
                 upstream_req["effective_params"] = effective_params_for_diag
+                upstream_req["image_count_requested"] = requested_image_count
+                upstream_req["image_count_actual"] = actual_image_count
                 upstream_req["generation_diagnostics"] = generation_diagnostics
                 if route_diagnostics:
                     upstream_req["route_diagnostics"] = route_diagnostics[:12]
@@ -5697,6 +5772,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     gen,
                     width=width,
                     height=height,
+                    image_count=actual_image_count,
                 )
                 await session.commit()
                 await worker_billing.flush_balance_cache_refreshes(session)
@@ -5729,6 +5805,59 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             },
         )
         _task_outcome = "succeeded"
+
+        if batch_extra_pairs:
+            for batch_index, (extra_b64, extra_revised) in batch_extra_pairs:
+                try:
+                    await _handle_dual_race_bonus_image(
+                        redis=redis,
+                        user_id=user_id,
+                        channel=channel,
+                        parent_task_id=task_id,
+                        parent_idempotency_key=gen_idempotency_key,
+                        parent_upstream_request=(
+                            parent_upstream_request_for_bonus
+                            or gen_upstream_request_snapshot
+                        ),
+                        message_id=message_id,
+                        action=str(action),
+                        model=gen_model,
+                        prompt=prompt,
+                        size_requested=size_requested,
+                        aspect_ratio=aspect_ratio,
+                        input_image_ids=input_image_ids,
+                        primary_input_image_id=primary_input_image_id,
+                        references=references,
+                        image_request_options=image_request_options,
+                        b64_result=extra_b64,
+                        revised_prompt=extra_revised,
+                        upstream_provider=actual_upstream_provider,
+                        upstream_actual_route=actual_upstream_route,
+                        upstream_actual_source=actual_upstream_source,
+                        upstream_actual_endpoint=actual_upstream_endpoint,
+                        billing_meta={},
+                        idempotency_suffix=f":n{batch_index}",
+                        extra_upstream_fields={
+                            "batch_parent_generation_id": task_id,
+                            "batch_index": batch_index,
+                            "batch_count": actual_image_count,
+                        },
+                        record_model_library_candidate=False,
+                        log_label="image2 n result",
+                    )
+                except (_LeaseLost, _TaskCancelled, asyncio.CancelledError):
+                    logger.info(
+                        "image2 n result finalize aborted by cancel/lease task=%s index=%s",
+                        task_id,
+                        batch_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "image2 n result finalize unexpected error task=%s index=%s err=%r",
+                        task_id,
+                        batch_index,
+                        exc,
+                    )
 
         # 自动起会话标题（第一轮生成完成后触发；内部幂等）
         if conversation_id_for_title:

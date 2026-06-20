@@ -972,7 +972,9 @@ async def test_post_message_pins_image_task_to_active_user_api_credential(
         db,  # type: ignore[arg-type]
     )
 
-    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    generations = [item for item in db.added if item.__class__.__name__ == "Generation"]
+    assert len(generations) == 1
+    gen = generations[0]
     assert gen.user_api_credential_id == "cred-1"
     assert gen.upstream_supplier_id == "supplier-1"
     assert gen.upstream_request["responses_model"] == "gpt-custom"
@@ -1253,6 +1255,7 @@ async def test_post_message_persists_image_render_options(
                 aspect_ratio="16:9",
                 size_mode="fixed",
                 fixed_size="2048x1152",
+                count=10,
                 fast=False,
                 render_quality="medium",
                 output_format="webp",
@@ -1275,11 +1278,17 @@ async def test_post_message_persists_image_render_options(
         "background": "opaque",
         "moderation": "auto",
         "output_compression": 88,
+        "billing_tier": "4k",
+        "billing_tier_source": "request_quality",
+        "n": 10,
     }
     for key, value in expected.items():
         assert gen.upstream_request[key] == value
     assert gen.upstream_request["trace_id"].startswith("gen_")
     assert gen.upstream_request["queue_lane"] == "image:interactive:medium"
+    outbox = next(item for item in db.added if item.__class__.__name__ == "OutboxEvent")
+    assert outbox.payload["task_id"] == gen.id
+    assert "defer_s" not in outbox.payload
 
 
 @pytest.mark.asyncio

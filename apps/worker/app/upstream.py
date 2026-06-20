@@ -1487,17 +1487,17 @@ async def _fetch_image_url_as_bytes(
     return raw
 
 
-async def _extract_image_result(
+async def _extract_image_results(
     payload: Any,
     status_code: int,
     *,
     proxy_url: str | None = None,
-) -> tuple[str, str | None]:
-    """从 images API 响应体里抽出 (b64_json, revised_prompt?)。缺失则抛 UpstreamError。
+) -> list[tuple[str, str | None]]:
+    """从 images API 响应体里抽出全部 (b64_json, revised_prompt?)。缺失则抛 UpstreamError。
 
     上游可能返回两种合法形态（OpenAI 协议都支持）：
-    - data[0].b64_json：直接 base64（response_format=b64_json，gpt-image-* 强制此项）
-    - data[0].url：CDN 链接（response_format=url，部分第三方兼容网关默认行为）
+    - data[].b64_json：直接 base64（response_format=b64_json，gpt-image-* 强制此项）
+    - data[].url：CDN 链接（response_format=url，部分第三方兼容网关默认行为）
     后者出现时下载并就地转 base64，调用方拿到的仍是 base64，不需要感知差异。
     """
     if not isinstance(payload, dict):
@@ -1514,26 +1514,25 @@ async def _extract_image_result(
             error_code=EC.NO_IMAGE_RETURNED.value,
             payload=payload,
         )
-    first = data[0]
-    if not isinstance(first, dict):
-        raise UpstreamError(
-            "upstream returned no image",
-            status_code=status_code,
-            error_code=EC.NO_IMAGE_RETURNED.value,
-            payload=payload,
-        )
-    revised = first.get("revised_prompt")
-    if not isinstance(revised, str):
-        revised = None
+    results: list[tuple[str, str | None]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        revised = item.get("revised_prompt")
+        if not isinstance(revised, str):
+            revised = None
 
-    b64 = first.get("b64_json")
-    if isinstance(b64, str) and b64:
-        return b64, revised
+        b64 = item.get("b64_json")
+        if isinstance(b64, str) and b64:
+            results.append((b64, revised))
+            continue
 
-    image_url = first.get("url")
-    if isinstance(image_url, str) and image_url:
-        raw = await _fetch_image_url_as_bytes(image_url, proxy_url=proxy_url)
-        return base64.b64encode(raw).decode("ascii"), revised
+        image_url = item.get("url")
+        if isinstance(image_url, str) and image_url:
+            raw = await _fetch_image_url_as_bytes(image_url, proxy_url=proxy_url)
+            results.append((base64.b64encode(raw).decode("ascii"), revised))
+    if results:
+        return results
 
     raise UpstreamError(
         "upstream returned no image",
@@ -1541,6 +1540,16 @@ async def _extract_image_result(
         error_code=EC.NO_IMAGE_RETURNED.value,
         payload=payload,
     )
+
+
+async def _extract_image_result(
+    payload: Any,
+    status_code: int,
+    *,
+    proxy_url: str | None = None,
+) -> tuple[str, str | None]:
+    """Compatibility wrapper for callers that expect the first image only."""
+    return (await _extract_image_results(payload, status_code, proxy_url=proxy_url))[0]
 
 
 def _api_base(base: str) -> str:
@@ -1697,7 +1706,7 @@ async def _direct_generate_image_once(
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
-) -> tuple[str, str | None]:
+) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
     proxy_url = await resolve_provider_proxy_url(proxy_override)
     client = await (
@@ -1801,7 +1810,7 @@ async def _direct_generate_image_once(
     # JSON 响应里的 usage（如有）也走标准埋点。
     if isinstance(payload, dict):
         _record_usage(payload.get("usage"))
-    return await _extract_image_result(payload, resp.status_code, proxy_url=proxy_url)
+    return await _extract_image_results(payload, resp.status_code, proxy_url=proxy_url)
 
 
 def _wrap_inpaint_prompt(user_intent: str) -> str:
@@ -1840,7 +1849,7 @@ async def _direct_edit_image_once(
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
-) -> tuple[str, str | None]:
+) -> list[tuple[str, str | None]]:
     """Image-to-image via direct `/v1/images/edits` (multipart) using gpt-image-2.
 
     image2 模式下 i2i 的单次调用。多个 ref 图通过 multipart 字段名 `image[]` 上传，
@@ -1954,7 +1963,7 @@ async def _direct_edit_image_once(
         )
     if isinstance(payload, dict):
         _record_usage(payload.get("usage"))
-    return await _extract_image_result(payload, status, proxy_url=proxy_url)
+    return await _extract_image_results(payload, status, proxy_url=proxy_url)
 
 
 def _image_job_body_base(
@@ -4872,7 +4881,7 @@ async def _direct_generate_image_with_failover(
     moderation: str | None = None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
-) -> tuple[str, str | None]:
+) -> list[tuple[str, str | None]]:
     """Layer 2 provider failover for direct gpt-image-2 text-to-image."""
     from .retry import is_retriable as classify_retriable
 
@@ -5502,7 +5511,7 @@ async def _direct_edit_image_with_failover(
     moderation: str | None = None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
-) -> tuple[str, str | None]:
+) -> list[tuple[str, str | None]]:
     """Layer 2 provider failover for direct gpt-image-2 image-to-image (/v1/images/edits).
 
     与 `_direct_generate_image_with_failover` 对称：复用同一个 image route 池
@@ -6157,7 +6166,7 @@ async def _dual_race_image_action(
             **extra,
         )
 
-    async def _lane_image2() -> tuple[str, str | None]:
+    async def _lane_image2() -> list[tuple[str, str | None]]:
         if action == "edit":
             if not images:
                 raise UpstreamError(
@@ -6192,23 +6201,25 @@ async def _dual_race_image_action(
             provider_override=provider_override,
         )
 
-    async def _lane_responses() -> tuple[str, str | None]:
-        return await _responses_image_stream_with_failover(
-            prompt=prompt,
-            size=size,
-            action=action,
-            images=images,
-            quality=quality,
-            output_format=output_format,
-            output_compression=output_compression,
-            background=background,
-            moderation=moderation,
-            model=model,
-            progress_callback=_metadata_only_progress,
-            use_httpx=False,
-            provider_override=provider_override,
-            user_id=user_id,
-        )
+    async def _lane_responses() -> list[tuple[str, str | None]]:
+        return [
+            await _responses_image_stream_with_failover(
+                prompt=prompt,
+                size=size,
+                action=action,
+                images=images,
+                quality=quality,
+                output_format=output_format,
+                output_compression=output_compression,
+                background=background,
+                moderation=moderation,
+                model=model,
+                progress_callback=_metadata_only_progress,
+                use_httpx=False,
+                provider_override=provider_override,
+                user_id=user_id,
+            )
+        ]
 
     pixels = _parse_size_pixels(size)
     grace_s = (
@@ -6217,7 +6228,7 @@ async def _dual_race_image_action(
         else _DUAL_RACE_BONUS_GRACE_S
     )
 
-    tasks: list[asyncio.Task[tuple[str, str | None]]] = [
+    tasks: list[asyncio.Task[list[tuple[str, str | None]]]] = [
         asyncio.create_task(_lane_image2(), name=f"{action}-dual-image2"),
         asyncio.create_task(_lane_responses(), name=f"{action}-dual-responses"),
     ]
@@ -6226,7 +6237,7 @@ async def _dual_race_image_action(
         tasks[1]: "responses",
     }
     errors: list[tuple[str, BaseException]] = []
-    pending: set[asyncio.Task[tuple[str, str | None]]] = set(tasks)
+    pending: set[asyncio.Task[list[tuple[str, str | None]]]] = set(tasks)
     winner_yielded = False
     try:
         # Phase 1：race 至有一路成功（不 cancel loser）；两路都失败则抛错。
@@ -6245,7 +6256,8 @@ async def _dual_race_image_action(
                         grace_s,
                     )
                     winner_yielded = True
-                    yield finished.result()
+                    for item in finished.result():
+                        yield item
                     break  # 跳出 for；while 由 winner_yielded 控制
                 if isinstance(exc, UpstreamCancelled):
                     # caller 取消 → finally 段会收割残余 lane
@@ -6296,7 +6308,8 @@ async def _dual_race_image_action(
                     logger.info(
                         "%s dual_race: bonus from %s succeeded", action, lane_name
                     )
-                    yield finished.result()
+                    for item in finished.result():
+                        yield item
                     return
                 if isinstance(exc, UpstreamCancelled):
                     # 极少见：loser 自己被上游取消；视同失败静默吞。
@@ -6740,7 +6753,7 @@ async def _run_image_once_for_provider(
                 user_id=user_id,
             )
             return
-        yield await _direct_edit_image_with_failover(
+        for item in await _direct_edit_image_with_failover(
             prompt=prompt,
             size=size,
             images=images,
@@ -6753,7 +6766,8 @@ async def _run_image_once_for_provider(
             moderation=moderation,
             progress_callback=progress_callback,
             provider_override=provider,
-        )
+        ):
+            yield item
         return
 
     if engine == _IMAGE_ROUTE_DUAL_RACE:
@@ -6828,7 +6842,7 @@ async def _run_image_once_for_provider(
                         error_code=EC.MISSING_INPUT_IMAGES.value,
                         status_code=400,
                     )
-                yield await _direct_edit_image_with_failover(
+                for item in await _direct_edit_image_with_failover(
                     prompt=prompt,
                     size=size,
                     images=images,
@@ -6841,9 +6855,10 @@ async def _run_image_once_for_provider(
                     moderation=moderation,
                     progress_callback=progress_callback,
                     provider_override=provider,
-                )
+                ):
+                    yield item
                 return
-            yield await _direct_generate_image_with_failover(
+            for item in await _direct_generate_image_with_failover(
                 prompt=prompt,
                 size=size,
                 n=n,
@@ -6854,7 +6869,8 @@ async def _run_image_once_for_provider(
                 moderation=moderation,
                 progress_callback=progress_callback,
                 provider_override=provider,
-            )
+            ):
+                yield item
             return
         except (asyncio.CancelledError, UpstreamCancelled):
             raise
@@ -6952,7 +6968,7 @@ async def _run_image_once_for_provider(
                     status_code=400,
                 ) from exc
             try:
-                yield await _direct_edit_image_with_failover(
+                for item in await _direct_edit_image_with_failover(
                     prompt=prompt,
                     size=size,
                     images=images,
@@ -6965,7 +6981,8 @@ async def _run_image_once_for_provider(
                     moderation=moderation,
                     progress_callback=progress_callback,
                     provider_override=provider,
-                )
+                ):
+                    yield item
             except (asyncio.CancelledError, UpstreamCancelled):
                 raise
             except Exception as fallback_exc:  # noqa: BLE001
@@ -6978,7 +6995,7 @@ async def _run_image_once_for_provider(
                 ) from fallback_exc
             return
         try:
-            yield await _direct_generate_image_with_failover(
+            for item in await _direct_generate_image_with_failover(
                 prompt=prompt,
                 size=size,
                 n=n,
@@ -6989,7 +7006,8 @@ async def _run_image_once_for_provider(
                 moderation=moderation,
                 progress_callback=progress_callback,
                 provider_override=provider,
-            )
+            ):
+                yield item
         except (asyncio.CancelledError, UpstreamCancelled):
             raise
         except Exception as fallback_exc:  # noqa: BLE001

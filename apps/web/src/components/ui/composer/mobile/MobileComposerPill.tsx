@@ -90,7 +90,7 @@ const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }
   { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
 ];
 
-const COUNT_OPTIONS = [1, 2, 4] as const;
+const COUNT_OPTIONS = [1, 2, 4, 8, 10] as const;
 
 const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
   { value: "1k", label: "1K" },
@@ -149,11 +149,11 @@ export function MobileComposerPill({
   const setCodeInterpreter = useChatStore((s) => s.setCodeInterpreter);
   const imageGeneration = useChatStore((s) => s.composer.imageGeneration);
   const setImageGeneration = useChatStore((s) => s.setImageGeneration);
-  const quality = useChatStore((s) => s.composer.params.quality ?? "2k");
+  const quality = useChatStore((s) => s.composer.params.quality ?? "4k");
   const setQuality = useChatStore((s) => s.setQuality);
   const renderQuality = useChatStore((s) => {
     const q = s.composer.params.render_quality;
-    return q === "low" || q === "medium" || q === "high" ? q : "medium";
+    return q === "low" || q === "medium" || q === "high" ? q : "high";
   });
   const setRenderQuality = useChatStore((s) => s.setRenderQuality);
   const composerError = useChatStore((s) => s.composerError);
@@ -1138,69 +1138,65 @@ export function MobileComposerPill({
                   />
 
                   {isImageMode && (
-                    <div
-                      role="group"
-                      aria-label="尺寸选择"
-                      className={cn(
-                        "shrink-0 inline-flex items-center h-8 p-px rounded-full",
-                        "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
-                      )}
-                    >
-                      {QUALITY_OPTIONS.map((o) => {
-                        const active = quality === o.value;
-                        return (
-                          <button
-                            key={o.value}
-                            type="button"
-                            data-inline
-                            onClick={() => setQuality(o.value)}
-                            className={cn(
-                              "inline-flex items-center justify-center h-7 min-w-8 px-2 rounded-full",
-                              "text-xs tabular-nums transition-colors",
-                              active
-                                ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
-                                : "text-[var(--fg-1)] active:text-[var(--fg-0)]",
-                            )}
-                            aria-pressed={active}
-                            style={{ fontFamily: "var(--font-mono)" }}
-                          >
+                    <div className="relative shrink-0">
+                      <select
+                        data-inline
+                        aria-label="尺寸选择"
+                        value={quality}
+                        onChange={(event) =>
+                          setQuality(event.target.value as Quality)
+                        }
+                        className={cn(
+                          "h-8 min-w-[70px] appearance-none rounded-full pl-3 pr-7",
+                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
+                          "text-xs text-[var(--fg-1)] tabular-nums",
+                          "active:text-[var(--fg-0)] focus-visible:outline-none",
+                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                        )}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        {QUALITY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
                             {o.label}
-                          </button>
-                        );
-                      })}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
+                        aria-hidden
+                      />
                     </div>
                   )}
 
                   {isImageMode && (
-                    <div
-                      role="group"
-                      aria-label="渲染质量"
-                      className={cn(
-                        "shrink-0 inline-flex items-center h-8 p-px rounded-full",
-                        "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
-                      )}
-                    >
-                      {RENDER_QUALITY_OPTIONS.map((o) => {
-                        const active = renderQuality === o.value;
-                        return (
-                          <button
-                            key={o.value}
-                            type="button"
-                            data-inline
-                            onClick={() => setRenderQuality(o.value)}
-                            className={cn(
-                              "inline-flex items-center justify-center h-7 min-w-7 px-2 rounded-full",
-                              "text-xs tabular-nums transition-colors",
-                              active
-                                ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
-                                : "text-[var(--fg-1)] active:text-[var(--fg-0)]",
-                            )}
-                            aria-pressed={active}
-                          >
+                    <div className="relative shrink-0">
+                      <select
+                        data-inline
+                        aria-label="渲染质量"
+                        value={renderQuality}
+                        onChange={(event) =>
+                          setRenderQuality(
+                            event.target.value as RenderQualityChoice,
+                          )
+                        }
+                        className={cn(
+                          "h-8 min-w-[68px] appearance-none rounded-full pl-3 pr-7",
+                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
+                          "text-xs text-[var(--fg-1)]",
+                          "active:text-[var(--fg-0)] focus-visible:outline-none",
+                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                        )}
+                      >
+                        {RENDER_QUALITY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
                             {o.label}
-                          </button>
-                        );
-                      })}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
+                        aria-hidden
+                      />
                     </div>
                   )}
 
@@ -1224,36 +1220,33 @@ export function MobileComposerPill({
                   )}
 
                   {isImageMode && (
-                    <div
-                      role="group"
-                      aria-label="图像数量"
-                      className={cn(
-                        "shrink-0 inline-flex items-center h-8 p-px rounded-full",
-                        "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
-                      )}
-                    >
-                      {COUNT_OPTIONS.map((n) => {
-                        const active = count === n;
-                        return (
-                          <button
-                            key={n}
-                            type="button"
-                            data-inline
-                            onClick={() => setImageCount(n)}
-                            className={cn(
-                              "inline-flex items-center justify-center h-7 min-w-8 px-2 rounded-full",
-                              "text-xs tabular-nums transition-colors",
-                              active
-                                ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
-                                : "text-[var(--fg-1)] active:text-[var(--fg-0)]",
-                            )}
-                            aria-pressed={active}
-                            style={{ fontFamily: "var(--font-mono)" }}
-                          >
+                    <div className="relative shrink-0">
+                      <select
+                        data-inline
+                        aria-label="图像数量"
+                        value={count}
+                        onChange={(event) =>
+                          setImageCount(Number(event.target.value))
+                        }
+                        className={cn(
+                          "h-8 min-w-[64px] appearance-none rounded-full pl-3 pr-7",
+                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
+                          "text-xs text-[var(--fg-1)] tabular-nums",
+                          "active:text-[var(--fg-0)] focus-visible:outline-none",
+                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                        )}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        {COUNT_OPTIONS.map((n) => (
+                          <option key={n} value={n}>
                             x{n}
-                          </button>
-                        );
-                      })}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
+                        aria-hidden
+                      />
                     </div>
                   )}
 

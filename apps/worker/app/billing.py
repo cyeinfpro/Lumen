@@ -298,6 +298,7 @@ async def settle_generation(
     *,
     width: int,
     height: int,
+    image_count: int = 1,
 ) -> None:
     billing_ref_id = _generation_billing_ref_id(generation)
     if not await _wallet_billing_applies(
@@ -320,18 +321,19 @@ async def settle_generation(
         )
         return
     requested_tier = _generation_billing_tier(generation)
+    billable_image_count = max(1, int(image_count or 1))
     if requested_tier is not None:
         cost, tier = await billing_core.estimate_image_cost_for_tier(
             session,
             tier=requested_tier,
-            n=1,
+            n=billable_image_count,
         )
         tier_source = "request"
     else:
         cost, tier = await billing_core.estimate_image_cost(
             session,
             size_px=max(0, int(width) * int(height)),
-            n=1,
+            n=billable_image_count,
             thresholds=await _thresholds(),
         )
         tier_source = "actual_pixels"
@@ -346,6 +348,7 @@ async def settle_generation(
                     "generation_id": generation.id,
                     "width": width,
                     "height": height,
+                    "image_count": billable_image_count,
                     "tier_source": tier_source,
                 },
             )
@@ -363,6 +366,7 @@ async def settle_generation(
             "tier": tier,
             "width": width,
             "height": height,
+            "image_count": billable_image_count,
             "tier_source": tier_source,
             "model": generation.model,
             "retry_count": int(getattr(generation, "retry_count", 0) or 0),
@@ -384,6 +388,7 @@ async def settle_generation(
                     "actual_micro": cost,
                     "tier": tier,
                     "tier_source": tier_source,
+                    "image_count": billable_image_count,
                     "balance_after": tx.balance_after,
                     "hold_after": tx.hold_after,
                 },

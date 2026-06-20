@@ -147,16 +147,16 @@ class ImageParamsIn(BaseModel):
     size_mode: Literal["auto", "fixed"] = "auto"
     fixed_size: str | None = None
     style_preset_id: str | None = None
-    count: int = Field(default=1, ge=1, le=16)
+    count: int = Field(default=1, ge=1, le=10)
     # UI resolution preset used for billing. fixed_size remains the actual
     # upstream dimensions, whose pixel count can be lower than the nominal tier
     # for wide/tall aspect ratios.
-    quality: Literal["1k", "2k", "4k"] | None = None
+    quality: Literal["1k", "2k", "4k"] | None = "4k"
     # Image Fast uses the lighter responses reasoning model for image_generation:
     # gpt-5.4-mini when enabled, gpt-5.4 when disabled.
     fast: bool | None = None
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
-    render_quality: Literal["auto", "low", "medium", "high"] = "medium"
+    render_quality: Literal["auto", "low", "medium", "high"] = "high"
     output_format: Literal["png", "jpeg", "webp"] | None = None
     # Only applies to jpeg/webp. None omits the provider compression option.
     output_compression: int | None = Field(default=None, ge=0, le=100)
