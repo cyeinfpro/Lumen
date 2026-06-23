@@ -57,6 +57,8 @@ _LEASE_TTL_S = 120
 _POLL_INTERVAL_S = 8
 _MAX_POLL_DURATION_S = 30 * 60
 _MAX_POLL_COUNT = max(1, _MAX_POLL_DURATION_S // _POLL_INTERVAL_S)
+_EXTENDED_POLL_INTERVAL_S = 60
+_MAX_PROVIDER_POLL_DURATION_S = 48 * 60 * 60
 _MAX_SUBMIT_ATTEMPTS = 4
 _SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
@@ -102,6 +104,22 @@ def _poll_window_exhausted(generation: VideoGeneration, now: datetime) -> bool:
     if submitted_at is None:
         return False
     return submitted_at + timedelta(seconds=_MAX_POLL_DURATION_S) <= now
+
+
+def _provider_tracking_window_exhausted(
+    generation: VideoGeneration, now: datetime
+) -> bool:
+    submitted_at = generation.submitted_at
+    if submitted_at is None:
+        return False
+    return submitted_at + timedelta(seconds=_MAX_PROVIDER_POLL_DURATION_S) <= now
+
+
+def _poll_elapsed_s(generation: VideoGeneration, now: datetime) -> int | None:
+    submitted_at = generation.submitted_at
+    if submitted_at is None:
+        return None
+    return int((now - submitted_at).total_seconds())
 
 
 def _video_exception_code(exc: Exception, *, default: str) -> str:
@@ -866,13 +884,14 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
         if await _finish_cancelled_after_provider_poll_error(redis, task_id, exc):
             return
         if not await _schedule_poll_retry(redis, task_id, exc):
+            retryable_poll_error = _is_retryable_video_exception(exc)
             await _apply_poll_result(
                 redis,
                 task_id,
                 PollResult(
-                    status="failed",
+                    status="expired" if retryable_poll_error else "failed",
                     failure_class=exc.error_code,
-                    upstream_billable=None,
+                    upstream_billable=False if retryable_poll_error else None,
                     raw=exc.raw
                     or {
                         "error": _video_exception_message(exc, phase="poll"),
@@ -923,19 +942,33 @@ async def _schedule_poll_retry(
             return True
         now = _now()
         error_code = _video_exception_code(exc, default="upstream_unknown")
-        if _poll_window_exhausted(generation, now):
+        if _provider_tracking_window_exhausted(generation, now):
             return False
-        remaining_s = int((generation.deadline_at - now).total_seconds())
-        delay_s = (
-            _POLL_RETRY_DELAY_S
-            if remaining_s <= 1
-            else max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
-        )
+        local_window_exhausted = _poll_window_exhausted(generation, now)
+        if local_window_exhausted:
+            delay_s = _EXTENDED_POLL_INTERVAL_S
+        else:
+            remaining_s = int((generation.deadline_at - now).total_seconds())
+            delay_s = (
+                _POLL_RETRY_DELAY_S
+                if remaining_s <= 1
+                else max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
+            )
         error_message = _video_exception_message(exc, phase="poll")
         diagnostics = dict(generation.diagnostics or {})
         if generation.deadline_at <= now:
             diagnostics.setdefault("deadline_expired_at", now.isoformat())
             diagnostics["deadline_expired_poll_retry_continues"] = True
+        if local_window_exhausted:
+            diagnostics.setdefault("poll_window_exhausted_at", now.isoformat())
+            diagnostics["extended_polling_continues"] = True
+            diagnostics["extended_poll_delay_s"] = delay_s
+            diagnostics["max_poll_count"] = _MAX_POLL_COUNT
+            diagnostics["max_poll_duration_s"] = _MAX_POLL_DURATION_S
+            diagnostics["max_provider_poll_duration_s"] = _MAX_PROVIDER_POLL_DURATION_S
+            elapsed_s = _poll_elapsed_s(generation, now)
+            if elapsed_s is not None:
+                diagnostics["poll_elapsed_s"] = elapsed_s
         retry_item = {
             "at": now.isoformat(),
             "poll_count": generation.poll_count,
@@ -1075,38 +1108,22 @@ async def _apply_poll_result(
 
         if poll.status in {"queued", "running"}:
             now = _now()
-            if not _poll_window_exhausted(generation, now):
-                generation.status = VideoGenerationStatus.RUNNING.value
-                generation.progress_stage = VideoGenerationStage.RENDERING.value
-                generation.progress_pct = max(
-                    generation.progress_pct,
-                    min(95, int(poll.progress if poll.progress is not None else 20)),
-                )
-                generation.poll_count += 1
-                generation.upstream_response = poll.raw
-                generation.next_poll_at = now + timedelta(seconds=_POLL_INTERVAL_S)
-                await session.commit()
-                await _publish(redis, generation, EV_VIDEO_PROGRESS)
-                await _enqueue_poll(redis, task_id)
+            if not _provider_tracking_window_exhausted(generation, now):
+                await _continue_running_poll(session, redis, generation, poll, now=now)
                 return
-            submitted_at = generation.submitted_at
-            elapsed_s = (
-                int((now - submitted_at).total_seconds())
-                if submitted_at is not None
-                else None
-            )
             poll = PollResult(
-                status="failed",
+                status="expired",
                 failure_class="poll_timeout",
                 usage_total_tokens=poll.usage_total_tokens,
-                upstream_billable=poll.upstream_billable,
+                upstream_billable=False,
                 raw={
                     **(poll.raw or {}),
-                    "error": "video task exceeded maximum poll window",
+                    "error": "video task exceeded maximum provider tracking window",
                     "poll_count": generation.poll_count,
                     "max_poll_count": _MAX_POLL_COUNT,
                     "max_poll_duration_s": _MAX_POLL_DURATION_S,
-                    "poll_elapsed_s": elapsed_s,
+                    "max_provider_poll_duration_s": _MAX_PROVIDER_POLL_DURATION_S,
+                    "poll_elapsed_s": _poll_elapsed_s(generation, now),
                 },
             )
 
@@ -1130,6 +1147,51 @@ async def _apply_poll_result(
             poll,
             fallback_error_message=fallback_error_message,
         )
+
+
+async def _continue_running_poll(
+    session,
+    redis: Any,
+    generation: VideoGeneration,
+    poll: PollResult,
+    *,
+    now: datetime,
+) -> None:
+    local_window_exhausted = _poll_window_exhausted(generation, now)
+    delay_s = _EXTENDED_POLL_INTERVAL_S if local_window_exhausted else _POLL_INTERVAL_S
+    diagnostics = _generation_diagnostics(generation)
+    if local_window_exhausted:
+        diagnostics.setdefault("poll_window_exhausted_at", now.isoformat())
+        diagnostics["extended_polling_continues"] = True
+        diagnostics["extended_poll_delay_s"] = delay_s
+        diagnostics["max_poll_count"] = _MAX_POLL_COUNT
+        diagnostics["max_poll_duration_s"] = _MAX_POLL_DURATION_S
+        diagnostics["max_provider_poll_duration_s"] = _MAX_PROVIDER_POLL_DURATION_S
+        elapsed_s = _poll_elapsed_s(generation, now)
+        if elapsed_s is not None:
+            diagnostics["poll_elapsed_s"] = elapsed_s
+
+    generation.status = VideoGenerationStatus.RUNNING.value
+    generation.progress_stage = VideoGenerationStage.RENDERING.value
+    generation.progress_pct = max(
+        generation.progress_pct,
+        min(95, int(poll.progress if poll.progress is not None else 20)),
+    )
+    generation.poll_count += 1
+    generation.upstream_response = poll.raw
+    generation.next_poll_at = now + timedelta(seconds=delay_s)
+    generation.error_code = None
+    generation.error_message = None
+    generation.diagnostics = diagnostics
+    await session.commit()
+    await _publish(
+        redis,
+        generation,
+        EV_VIDEO_PROGRESS,
+        extended_polling=local_window_exhausted,
+        retry_after_s=delay_s,
+    )
+    await _enqueue_poll(redis, generation.id, defer_s=delay_s)
 
 
 async def _finish_success(

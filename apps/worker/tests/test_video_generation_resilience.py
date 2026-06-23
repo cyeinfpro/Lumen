@@ -7,6 +7,7 @@ import httpx
 from app.tasks.video_generation import (
     _MAX_POLL_COUNT,
     _MAX_POLL_DURATION_S,
+    _MAX_PROVIDER_POLL_DURATION_S,
     _POLL_INTERVAL_S,
     _is_retryable_video_exception,
     _submit_retry_delay_s,
@@ -96,18 +97,29 @@ def test_video_poll_retry_is_bounded_by_poll_window_not_local_deadline() -> None
     assert _MAX_POLL_COUNT == _MAX_POLL_DURATION_S // _POLL_INTERVAL_S
     assert "generation.deadline_at <= now and" not in source
     assert "_poll_window_exhausted(generation, now)" in source
+    assert "_provider_tracking_window_exhausted(generation, now)" in source
+    assert "_EXTENDED_POLL_INTERVAL_S" in source
     assert "generation.poll_count >= _MAX_POLL_COUNT" in window_source
     assert "_MAX_POLL_DURATION_S" in window_source
     assert "deadline_expired_poll_retry_continues" in source
+    assert "extended_polling_continues" in source
 
 
-def test_video_poll_reports_timeout_when_max_window_is_exhausted() -> None:
+def test_video_poll_extends_running_provider_tasks_after_local_window() -> None:
     source = inspect.getsource(video_generation._apply_poll_result)
+    helper = inspect.getsource(video_generation._continue_running_poll)
 
-    assert "_poll_window_exhausted(generation, now)" in source
-    assert "video task exceeded maximum poll window" in source
+    assert "_poll_window_exhausted(generation, now)" in helper
+    assert "_provider_tracking_window_exhausted(generation, now)" in source
+    assert "_continue_running_poll(session, redis, generation, poll, now=now)" in source
+    assert "extended_polling_continues" in helper
+    assert "extended_poll_delay_s" in helper
+    assert "_EXTENDED_POLL_INTERVAL_S" in helper
+    assert "video task exceeded maximum provider tracking window" in source
     assert "poll_timeout" in source
     assert "max_poll_duration_s" in source
+    assert "_MAX_PROVIDER_POLL_DURATION_S" in source
+    assert _MAX_PROVIDER_POLL_DURATION_S > _MAX_POLL_DURATION_S
     assert "poll_elapsed_s" in source
 
 
@@ -123,6 +135,14 @@ def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
     assert 'failure_class="canceled"' in helper
     assert "upstream_billable=False" in helper
     assert "cancel_sent_at" in helper
+
+
+def test_retryable_poll_error_exhaustion_expires_without_billable_signal() -> None:
+    source = inspect.getsource(video_generation.run_video_poll)
+
+    assert "retryable_poll_error = _is_retryable_video_exception(exc)" in source
+    assert 'status="expired" if retryable_poll_error else "failed"' in source
+    assert "upstream_billable=False if retryable_poll_error else None" in source
 
 
 def test_reconcile_expires_overdue_tasks_without_provider_task_id() -> None:

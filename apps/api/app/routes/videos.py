@@ -537,6 +537,12 @@ def _public_video_diagnostics(raw: Any) -> dict[str, Any]:
         "submit_retry_count",
         "poll_retry_count",
         "deadline_expired_polling_continues",
+        "extended_polling_continues",
+        "extended_poll_delay_s",
+        "max_poll_count",
+        "max_poll_duration_s",
+        "max_provider_poll_duration_s",
+        "poll_elapsed_s",
         "faststart",
         "ffmpeg_missing",
     ):
