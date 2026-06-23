@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -476,6 +476,170 @@ async def test_run_video_poll_releases_lease_when_submit_is_requeued(
     assert enqueued and enqueued[0][0] == "video-1"
     assert enqueued[0][1]["defer_s"] == video_generation._POLL_INTERVAL_S  # noqa: SLF001
     assert released and released[0][0] == "video-1"
+
+
+@pytest.mark.asyncio
+async def test_video_poll_window_exhaustion_continues_running_provider_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+            self.commits = 0
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.row)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    now = datetime(2026, 6, 23, 6, 40, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        status="running",
+        progress_stage="rendering",
+        progress_pct=20,
+        poll_count=video_generation._MAX_POLL_COUNT,  # noqa: SLF001
+        submitted_at=now
+        - timedelta(seconds=video_generation._MAX_POLL_DURATION_S + 5),  # noqa: SLF001
+        upstream_response={},
+        next_poll_at=None,
+        error_code="poll_timeout",
+        error_message="old timeout",
+        diagnostics={},
+    )
+    session = Session(row)
+    published: list[dict[str, Any]] = []
+    enqueued: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_publish(
+        _redis: Any, _generation: Any, event_name: str, **extra: Any
+    ) -> None:
+        published.append({"event_name": event_name, **extra})
+
+    async def fake_enqueue(_redis: Any, task_id: str, **kwargs: Any) -> None:
+        enqueued.append((task_id, kwargs))
+
+    async def fail_terminal(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("running upstream task must not be terminal-failed")
+
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: session)
+    monkeypatch.setattr(video_generation, "_now", lambda: now)
+    monkeypatch.setattr(video_generation, "_publish", fake_publish)
+    monkeypatch.setattr(video_generation, "_enqueue_poll", fake_enqueue)
+    monkeypatch.setattr(video_generation, "_finish_terminal_failure", fail_terminal)
+
+    await video_generation._apply_poll_result(  # noqa: SLF001
+        object(),
+        "video-1",
+        video_generation.PollResult(
+            status="running",
+            progress=20,
+            raw={"id": "provider-task-1", "status": "running"},
+        ),
+    )
+
+    assert row.status == "running"
+    assert row.progress_stage == "rendering"
+    assert row.error_code is None
+    assert row.error_message is None
+    assert row.diagnostics["extended_polling_continues"] is True
+    assert row.diagnostics["extended_poll_delay_s"] == (
+        video_generation._EXTENDED_POLL_INTERVAL_S  # noqa: SLF001
+    )
+    assert row.next_poll_at == now + timedelta(
+        seconds=video_generation._EXTENDED_POLL_INTERVAL_S  # noqa: SLF001
+    )
+    assert published[0]["extended_polling"] is True
+    assert enqueued == [
+        (
+            "video-1",
+            {"defer_s": video_generation._EXTENDED_POLL_INTERVAL_S},  # noqa: SLF001
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_video_provider_tracking_timeout_expires_without_upstream_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result(row)
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    now = datetime(2026, 6, 25, 6, 40, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id="video-1",
+        status="running",
+        progress_stage="rendering",
+        progress_pct=20,
+        poll_count=video_generation._MAX_POLL_COUNT,  # noqa: SLF001
+        submitted_at=now
+        - timedelta(seconds=video_generation._MAX_PROVIDER_POLL_DURATION_S + 1),  # noqa: SLF001
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_finish_terminal_failure(
+        _session: Any,
+        _redis: Any,
+        generation: Any,
+        poll: Any,
+        **_kwargs: Any,
+    ) -> None:
+        captured["generation"] = generation
+        captured["poll"] = poll
+
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(video_generation, "_now", lambda: now)
+    monkeypatch.setattr(
+        video_generation, "_finish_terminal_failure", fake_finish_terminal_failure
+    )
+
+    await video_generation._apply_poll_result(  # noqa: SLF001
+        object(),
+        "video-1",
+        video_generation.PollResult(
+            status="running",
+            upstream_billable=None,
+            raw={"id": "provider-task-1", "status": "running"},
+        ),
+    )
+
+    poll = captured["poll"]
+    assert captured["generation"] is row
+    assert poll.status == "expired"
+    assert poll.failure_class == "poll_timeout"
+    assert poll.upstream_billable is False
+    assert poll.raw["max_provider_poll_duration_s"] == (
+        video_generation._MAX_PROVIDER_POLL_DURATION_S  # noqa: SLF001
+    )
 
 
 @pytest.mark.asyncio
