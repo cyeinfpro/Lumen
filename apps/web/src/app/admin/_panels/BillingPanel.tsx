@@ -60,7 +60,7 @@ const VIDEO_PRICING_VARIANTS = [
 ] as const;
 
 type VideoPricingVariant = (typeof VIDEO_PRICING_VARIANTS)[number];
-const VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"] as const;
+const VIDEO_RESOLUTIONS = ["480p", "720p", "1080p", "4k"] as const;
 type VideoResolution = (typeof VIDEO_RESOLUTIONS)[number];
 type VideoPriceBucket = VideoResolution | "base";
 type VideoRuleMap = Partial<
@@ -80,13 +80,13 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
   {
     model: "seedance-2.0",
     prices: {
-      t2v: { "480p": 46, "720p": 46, "1080p": 51 },
-      i2v: { "480p": 46, "720p": 46, "1080p": 51 },
-      reference_image: { "480p": 46, "720p": 46, "1080p": 51 },
-      reference_video: { "480p": 28, "720p": 28, "1080p": 31 },
-      reference: { "480p": 46, "720p": 46, "1080p": 51 },
+      t2v: { "480p": 46, "720p": 46, "1080p": 51, "4k": 26 },
+      i2v: { "480p": 46, "720p": 46, "1080p": 51, "4k": 26 },
+      reference_image: { "480p": 46, "720p": 46, "1080p": 51, "4k": 26 },
+      reference_video: { "480p": 28, "720p": 28, "1080p": 31, "4k": 16 },
+      reference: { "480p": 46, "720p": 46, "1080p": 51, "4k": 26 },
     },
-    note: "火山官方 token 单价：480/720P 无视频 46、含视频 28；1080P 无视频 51、含视频 31。实际视频费用还取决于分辨率最低 token 用量，480P 与 720P 不同价。",
+    note: "火山官方 token 单价：480/720P 无视频 46、含视频 28；1080P 无视频 51、含视频 31；4k 无视频 26、含视频 16。实际视频费用还取决于分辨率最低 token 用量。",
   },
   {
     model: "seedance-2.0-fast",

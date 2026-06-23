@@ -164,6 +164,11 @@ def test_official_seedance_480p_and_720p_hold_estimates_are_not_equal() -> None:
     assert 108_900 > 50_218
 
 
+def test_official_seedance_4k_hold_estimates_cover_current_price_table() -> None:
+    assert video_billing.round_micro_for_tokens(971_924, 26_000_000) >= 25_270_000
+    assert video_billing.round_micro_for_tokens(3_888_125, 16_000_000) >= 62_210_000
+
+
 def test_video_pricing_variant_splits_reference_media_kind() -> None:
     assert video_billing.video_pricing_variant("t2v") == "t2v"
     assert video_billing.video_pricing_variant("t2v", resolution="720p") == "t2v_720p"
