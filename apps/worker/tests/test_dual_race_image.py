@@ -106,6 +106,56 @@ async def test_dual_race_responses_wins_when_image2_fails_fast(
 
 
 @pytest.mark.asyncio
+async def test_dual_race_image2_result_unknown_cancels_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses_cancelled = asyncio.Event()
+
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+        await asyncio.sleep(0.01)
+        raise UpstreamError(
+            "image2 result unknown",
+            status_code=0,
+            error_code="direct_image_result_unknown",
+        )
+
+    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+        try:
+            await asyncio.sleep(5.0)
+            return ("img-from-responses", None)
+        except asyncio.CancelledError:
+            responses_cancelled.set()
+            raise
+
+    monkeypatch.setattr(upstream, "_direct_generate_image_with_failover", fake_image2)
+    monkeypatch.setattr(
+        upstream, "_responses_image_stream_with_failover", fake_responses
+    )
+
+    with pytest.raises(UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream._dual_race_image_action(
+                action="generate",
+                prompt="hi",
+                size="1024x1024",
+                images=None,
+                n=1,
+                quality="high",
+                output_format=None,
+                output_compression=None,
+                background=None,
+                moderation=None,
+                model=None,
+                progress_callback=None,
+                provider_override=None,
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert responses_cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_dual_race_both_lanes_fail_merges_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

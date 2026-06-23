@@ -1638,6 +1638,8 @@ async def _post_with_retry(
     json_body: dict[str, Any] | None = None,
     data: dict[str, str] | None = None,
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+    timeout: httpx.Timeout | None = None,
+    retry_httpx_exceptions: bool = True,
     max_attempts: int = 2,  # 和 curl 版对齐；上游网关失败每次 ~80s
     backoff_base_s: float = 1.0,
 ) -> httpx.Response:
@@ -1663,10 +1665,23 @@ async def _post_with_retry(
             )
         try:
             if json_body is not None:
-                resp = await client.post(url, json=json_body, headers=headers)
+                resp = await client.post(
+                    url,
+                    json=json_body,
+                    headers=headers,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                )
             else:
-                resp = await client.post(url, data=data, files=files, headers=headers)
+                resp = await client.post(
+                    url,
+                    data=data,
+                    files=files,
+                    headers=headers,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                )
         except _RETRY_HTTPX_EXC as exc:
+            if not retry_httpx_exceptions:
+                raise
             last_exc = exc
             logger.warning(
                 "upstream transient httpx error attempt=%d/%d url=%s err=%r",
@@ -1691,6 +1706,55 @@ async def _post_with_retry(
         return last_resp
     assert last_exc is not None
     raise last_exc
+
+
+def _minimum_image_read_timeout(size: str) -> float:
+    pixels = _parse_size_pixels(size)
+    if pixels is not None and pixels > _IMAGE_4K_PIXELS:
+        return _IMAGE_READ_TIMEOUT_4K_S
+    return _IMAGE_READ_TIMEOUT_MIN_S
+
+
+async def _image_request_timeout(size: str) -> tuple[httpx.Timeout, float]:
+    timeout_config = await _resolve_timeout_config()
+    read_timeout_s = max(timeout_config.read, _minimum_image_read_timeout(size))
+    return timeout_config.to_httpx(read=read_timeout_s), read_timeout_s
+
+
+def _direct_image_result_unknown_error(
+    exc: BaseException,
+    *,
+    path: str,
+    method: str,
+    url: str,
+    trace_id: str,
+    timeout_s: float,
+) -> UpstreamError:
+    exc_type = type(exc).__name__
+    return UpstreamError(
+        (
+            f"{path} timed out after {timeout_s:.0f}s; upstream result is unknown. "
+            "The request may already have been accepted, so it was not retried automatically."
+        ),
+        status_code=0,
+        error_code=EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+        payload={
+            "path": path,
+            "method": method,
+            "url": url,
+            "x_trace_id": trace_id,
+            "timeout_s": timeout_s,
+            "upstream_result_unknown": True,
+            "exception": exc_type,
+        },
+    )
+
+
+def _is_direct_image_result_unknown(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, UpstreamError)
+        and exc.error_code == EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+    )
 
 
 async def _direct_generate_image_once(
@@ -1745,6 +1809,7 @@ async def _direct_generate_image_once(
         endpoint="images/generations",
         body=body,
     )
+    request_timeout, read_timeout_s = await _image_request_timeout(size)
     started = time.monotonic()
     try:
         resp = await _post_with_retry(
@@ -1752,7 +1817,26 @@ async def _direct_generate_image_once(
             url=url,
             headers=headers,
             json_body=body,
+            timeout=request_timeout,
+            retry_httpx_exceptions=False,
         )
+    except httpx.TimeoutException as exc:
+        duration_ms = (time.monotonic() - started) * 1000.0
+        _log_upstream_call(
+            endpoint="images_generations",
+            status=0,
+            duration_ms=duration_ms,
+            trace_id=trace_id,
+            response_headers=None,
+        )
+        raise _direct_image_result_unknown_error(
+            exc,
+            path="images/generations",
+            method="POST",
+            url=url,
+            trace_id=trace_id,
+            timeout_s=read_timeout_s,
+        ) from exc
     except _RETRY_HTTPX_EXC as exc:
         duration_ms = (time.monotonic() - started) * 1000.0
         _log_upstream_call(
@@ -1910,18 +1994,35 @@ async def _direct_edit_image_once(
         body=data,
         files=files,
     )
-    timeout_config = await _resolve_timeout_config()
     proxy_url = await resolve_provider_proxy_url(proxy_override)
     started = time.monotonic()
+    _, read_timeout_s = await _image_request_timeout(size)
     try:
         status, payload = await _curl_post_multipart(
             url=url,
             data=data,
             files=files,
             headers=headers,
-            timeout_s=timeout_config.read,
+            timeout_s=read_timeout_s,
             proxy_url=proxy_url,
         )
+    except httpx.TimeoutException as exc:
+        duration_ms = (time.monotonic() - started) * 1000.0
+        _log_upstream_call(
+            endpoint="images_edits",
+            status=0,
+            duration_ms=duration_ms,
+            trace_id=trace_id,
+            response_headers=None,
+        )
+        raise _direct_image_result_unknown_error(
+            exc,
+            path="images/edits",
+            method="POST",
+            url=url,
+            trace_id=trace_id,
+            timeout_s=read_timeout_s,
+        ) from exc
     except (asyncio.CancelledError, UpstreamCancelled):
         raise
     except Exception as exc:  # noqa: BLE001
@@ -2783,6 +2884,11 @@ async def _curl_post_multipart_using_paths(
             raise httpx.TimeoutException(
                 f"curl multipart timed out after {guard_timeout_s:.2f}s"
             ) from exc
+        if proc.returncode == 28:
+            stderr = stderr_b.decode("utf-8", "replace")[:500]
+            raise httpx.TimeoutException(
+                f"curl multipart timeout rc=28 stderr={stderr}"
+            )
         if proc.returncode != 0:
             raise httpx.HTTPError(
                 f"curl failed rc={proc.returncode} stderr={stderr_b.decode('utf-8', 'replace')[:500]}"
@@ -3757,19 +3863,17 @@ _IMAGE_4K_PIXELS = 4_000_000
 
 # 4K 生图 SSE 总耗时常超 3 分钟（排队 + 渲染 + base64 序列化），
 # settings.upstream_read_timeout_s=180s 偏紧。文档 §Lumen #5 建议拉到 300-420s。
+_IMAGE_READ_TIMEOUT_MIN_S = 180.0
 _IMAGE_READ_TIMEOUT_4K_S = 360.0
 
 
 def _select_image_read_timeout(size: str) -> float:
     """按图像像素分级选 read/idle timeout。
 
-    1K/2K：用 settings.upstream_read_timeout_s（默认 180s）
+    1K/2K：至少 180s，避免生图这种有副作用的 POST 被 20s 级运行时设置误杀。
     4K：取 max(默认, 360s)，避免被 settings 改小后误伤
     """
-    pixels = _parse_size_pixels(size)
-    if pixels is not None and pixels > _IMAGE_4K_PIXELS:
-        return max(settings.upstream_read_timeout_s, _IMAGE_READ_TIMEOUT_4K_S)
-    return settings.upstream_read_timeout_s
+    return max(settings.upstream_read_timeout_s, _minimum_image_read_timeout(size))
 
 
 def _parse_size_pixels(size: str) -> int | None:
@@ -6262,6 +6366,12 @@ async def _dual_race_image_action(
                 if isinstance(exc, UpstreamCancelled):
                     # caller 取消 → finally 段会收割残余 lane
                     raise exc
+                if _is_direct_image_result_unknown(exc):
+                    await _cancel_and_wait_tasks(
+                        pending,
+                        label=f"{action} dual_race result-unknown cleanup",
+                    )
+                    raise exc
                 errors.append((lane_name, exc))
                 logger.warning("%s dual_race: %s failed: %r", action, lane_name, exc)
 
@@ -6875,6 +6985,8 @@ async def _run_image_once_for_provider(
         except (asyncio.CancelledError, UpstreamCancelled):
             raise
         except Exception as exc:  # noqa: BLE001
+            if _is_direct_image_result_unknown(exc):
+                raise
             logger.warning(
                 "%s image2 provider=%s failed; falling back to responses: %r",
                 action,
@@ -6986,6 +7098,8 @@ async def _run_image_once_for_provider(
             except (asyncio.CancelledError, UpstreamCancelled):
                 raise
             except Exception as fallback_exc:  # noqa: BLE001
+                if _is_direct_image_result_unknown(fallback_exc):
+                    raise
                 raise _merge_image_path_errors(
                     action=action,
                     primary_path="responses",
@@ -7011,6 +7125,8 @@ async def _run_image_once_for_provider(
         except (asyncio.CancelledError, UpstreamCancelled):
             raise
         except Exception as fallback_exc:  # noqa: BLE001
+            if _is_direct_image_result_unknown(fallback_exc):
+                raise
             raise _merge_image_path_errors(
                 action=action,
                 primary_path="responses",
