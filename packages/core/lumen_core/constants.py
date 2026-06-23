@@ -151,6 +151,7 @@ class GenerationErrorCode(StrEnum):
     REFERENCE_MISSING = "reference_missing"
     MISSING_INPUT_IMAGES = "missing_input_images"
     REFERENCE_IMAGE_TOO_LARGE = "reference_image_too_large"
+    DIRECT_IMAGE_RESULT_UNKNOWN = "direct_image_result_unknown"
     MODERATION_BLOCKED = "moderation_blocked"
     CONTENT_POLICY_VIOLATION = "content_policy_violation"
     SAFETY_VIOLATION = "safety_violation"

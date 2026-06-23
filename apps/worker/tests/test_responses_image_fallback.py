@@ -1457,6 +1457,105 @@ async def test_generate_image_image2_route_falls_back_to_responses(
 
 
 @pytest.mark.asyncio
+async def test_generate_image_image2_result_unknown_does_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TimeoutDirectClient()
+
+    async def fake_resolve_runtime() -> tuple[str, str]:
+        return "https://upstream.example/v1", "test-key"
+
+    async def fake_get_images_client() -> TimeoutDirectClient:
+        return client
+
+    async def fake_resolve(key: str) -> str | None:
+        assert key == "image.primary_route"
+        return "image2"
+
+    async def fake_timeout_config() -> upstream._TimeoutConfig:
+        return upstream._TimeoutConfig(connect=10.0, read=20.0, write=30.0)
+
+    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
+    monkeypatch.setattr(upstream, "resolve", fake_resolve)
+    patch_responses_stream(monkeypatch, client)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream.generate_image(
+                prompt="make an image",
+                size="1024x1024",
+                n=1,
+                quality="high",
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert len(client.posts) == 1
+    assert client.streams == []
+
+
+@pytest.mark.asyncio
+async def test_responses_primary_image2_result_unknown_is_not_merged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_race_responses_image(**_kwargs: Any) -> tuple[str, str | None]:
+        raise upstream.UpstreamError(
+            "responses temporarily failed",
+            status_code=503,
+            error_code="server_error",
+        )
+
+    async def fake_direct_generate_image_with_failover(
+        **_kwargs: Any,
+    ) -> list[tuple[str, str | None]]:
+        raise upstream.UpstreamError(
+            "image2 result unknown",
+            status_code=0,
+            error_code="direct_image_result_unknown",
+            payload={"upstream_result_unknown": True},
+        )
+
+    monkeypatch.setattr(upstream, "_race_responses_image", fake_race_responses_image)
+    monkeypatch.setattr(
+        upstream,
+        "_direct_generate_image_with_failover",
+        fake_direct_generate_image_with_failover,
+    )
+
+    provider = provider_pool.ResolvedProvider(
+        name="test",
+        base_url="https://upstream.example/v1",
+        api_key="test-key",
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream._run_image_once_for_provider(
+                action="generate",
+                provider=provider,
+                channel="stream_only",
+                engine="responses",
+                prompt="make an image",
+                size="1024x1024",
+                images=None,
+                n=1,
+                quality="high",
+                output_format=None,
+                output_compression=None,
+                background=None,
+                moderation=None,
+                model=None,
+                progress_callback=None,
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.payload["upstream_result_unknown"] is True
+
+
+@pytest.mark.asyncio
 async def test_generate_small_size_keeps_partial_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

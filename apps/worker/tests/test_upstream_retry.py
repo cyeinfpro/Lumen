@@ -121,6 +121,59 @@ async def test_post_with_retry_honors_retry_after_header(
     assert sleeps == [2.5]
 
 
+@pytest.mark.asyncio
+async def test_post_with_retry_can_disable_httpx_exception_retries() -> None:
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            raise httpx.ReadTimeout("image still rendering")
+
+    client = _Client()
+
+    with pytest.raises(httpx.ReadTimeout):
+        await upstream._post_with_retry(
+            client=client,  # type: ignore[arg-type]
+            url="https://example.invalid/v1/images/generations",
+            headers={},
+            json_body={"prompt": "test"},
+            retry_httpx_exceptions=False,
+        )
+
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_curl_multipart_rc28_is_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Proc:
+        returncode = 28
+        pid = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"Operation timed out after 180001 milliseconds"
+
+    async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> _Proc:
+        return _Proc()
+
+    monkeypatch.setattr(
+        upstream.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with pytest.raises(httpx.TimeoutException):
+        await upstream._curl_post_multipart_using_paths(
+            url="https://example.invalid/v1/images/edits",
+            data={"prompt": "test"},
+            staged_files=[],
+            headers={},
+            timeout_s=180,
+        )
+
+
 def test_image_idempotency_key_uses_stable_file_fingerprints() -> None:
     files = [
         ("image[]", ("ref.png", b"secret-image-bytes", "image/png")),
@@ -159,13 +212,19 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     async def fake_post_with_retry(**kwargs: Any) -> httpx.Response:
         seen["headers"] = dict(kwargs["headers"])
         seen["json_body"] = dict(kwargs["json_body"])
+        seen["timeout"] = kwargs.get("timeout")
+        seen["retry_httpx_exceptions"] = kwargs.get("retry_httpx_exceptions")
         return httpx.Response(
             200,
             json={"data": [{"b64_json": "ZmFrZQ==", "revised_prompt": "ok"}]},
         )
 
+    async def fake_timeout_config() -> upstream._TimeoutConfig:
+        return upstream._TimeoutConfig(connect=10.0, read=20.0, write=30.0)
+
     monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
     monkeypatch.setattr(upstream, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
 
     token = upstream.push_image_trace_id("gen-fixed")
     try:
@@ -193,6 +252,112 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     )
     assert headers["x-trace-id"] == "gen-fixed"
     assert headers["Idempotency-Key"] == expected_key
+    assert seen["timeout"].read == upstream._IMAGE_READ_TIMEOUT_MIN_S
+    assert seen["retry_httpx_exceptions"] is False
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_timeout_is_result_unknown_not_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_post_with_retry(**_kwargs: Any) -> httpx.Response:
+        raise httpx.ReadTimeout("client gave up")
+
+    async def fake_timeout_config() -> upstream._TimeoutConfig:
+        return upstream._TimeoutConfig(connect=10.0, read=20.0, write=30.0)
+
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+    monkeypatch.setattr(upstream, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream._direct_generate_image_once(
+            prompt="test",
+            size="1024x1024",
+            n=1,
+            quality="high",
+            output_format="png",
+            output_compression=None,
+            background="auto",
+            moderation="auto",
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+
+    exc = exc_info.value
+    assert exc.error_code == upstream.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+    assert exc.payload["timeout_s"] == upstream._IMAGE_READ_TIMEOUT_MIN_S
+    assert exc.payload["upstream_result_unknown"] is True
+    from app.retry import is_retriable
+
+    assert (
+        is_retriable(
+            exc.error_code,
+            exc.status_code,
+            error_message=str(exc),
+        ).retriable
+        is False
+    )
+    assert not upstream._should_continue_image_provider_failover(
+        exc,
+        retriable=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_edit_timeout_is_result_unknown_not_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_curl_post_multipart(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+        seen["timeout_s"] = kwargs["timeout_s"]
+        raise httpx.TimeoutException("curl image edit timed out")
+
+    async def fake_timeout_config() -> upstream._TimeoutConfig:
+        return upstream._TimeoutConfig(connect=10.0, read=20.0, write=30.0)
+
+    monkeypatch.setattr(upstream, "_curl_post_multipart", fake_curl_post_multipart)
+    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream._direct_edit_image_once(
+            prompt="test edit",
+            size="1024x1024",
+            images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
+            mask=None,
+            n=1,
+            quality="high",
+            output_format="png",
+            output_compression=None,
+            background="auto",
+            moderation="auto",
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+
+    exc = exc_info.value
+    assert seen["timeout_s"] == upstream._IMAGE_READ_TIMEOUT_MIN_S
+    assert exc.error_code == upstream.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+    assert exc.payload["path"] == "images/edits"
+    assert exc.payload["upstream_result_unknown"] is True
+    from app.retry import is_retriable
+
+    assert (
+        is_retriable(
+            exc.error_code,
+            exc.status_code,
+            error_message=str(exc),
+        ).retriable
+        is False
+    )
+    assert not upstream._should_continue_image_provider_failover(
+        exc,
+        retriable=False,
+    )
 
 
 @pytest.mark.asyncio

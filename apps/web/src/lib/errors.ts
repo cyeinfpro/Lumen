@@ -32,6 +32,7 @@ export interface NormalizedError {
 const CODE_TITLE: Record<string, string> = {
   network_error: "网络异常",
   upstream_timeout: "服务繁忙",
+  direct_image_result_unknown: "生图结果未确认",
   rate_limited: "操作过于频繁",
   unauthorized: "登录已过期",
   forbidden: "没有访问权限",
@@ -78,6 +79,8 @@ const CODE_TITLE: Record<string, string> = {
 const CODE_DESC: Record<string, string> = {
   network_error: "网络断开或请求超时，请稍后重试",
   upstream_timeout: "上游响应超时，请稍后再试",
+  direct_image_result_unknown:
+    "图片请求等待超时，但上游可能仍在生成；系统已停止自动重试以避免重复扣费",
   rate_limited: "请求过于频繁，稍后重试",
   unauthorized: "请重新登录后继续操作",
   forbidden: "你没有权限访问该资源",
@@ -117,6 +120,7 @@ const CODE_DESC: Record<string, string> = {
 const CODE_ACTION: Record<string, ErrorAction> = {
   network_error: "retry",
   upstream_timeout: "retry",
+  direct_image_result_unknown: "wait",
   rate_limited: "wait",
   unauthorized: "login",
   forbidden: "back",
