@@ -110,6 +110,7 @@ _VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
 }
 _SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
+_SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
 _HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
 _OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
 _OMNI_FLASH_DURATIONS = tuple(range(6, 11))
@@ -887,6 +888,30 @@ def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
     return is_seedance_20_fast_identifier(*identifiers)
 
 
+def _is_seedance_20_mini_model(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-").replace(".", "-")
+        if "seedance-2-0-mini" in value:
+            return True
+    return False
+
+
+def _is_seedance_20_standard_model(*identifiers: str | None) -> bool:
+    if _is_seedance_20_fast_model(*identifiers) or _is_seedance_20_mini_model(
+        *identifiers
+    ):
+        return False
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-").replace(".", "-")
+        if "seedance-2-0" in value:
+            return True
+    return False
+
+
 def _is_happyhorse_model(*identifiers: str | None) -> bool:
     for identifier in identifiers:
         if not isinstance(identifier, str):
@@ -924,8 +949,13 @@ def _video_resolution_options_for_model(
     if _is_omni_flash_model(model, upstream_model):
         allowed = set(_OMNI_FLASH_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
-    if _is_seedance_20_fast_model(model, upstream_model):
+    if _is_seedance_20_fast_model(model, upstream_model) or _is_seedance_20_mini_model(
+        model, upstream_model
+    ):
         allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
+        return [resolution for resolution in available if resolution in allowed]
+    if _is_seedance_20_standard_model(model, upstream_model):
+        allowed = set(_SEEDANCE_20_STANDARD_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
     return [resolution for resolution in available if resolution != "4k"]
 

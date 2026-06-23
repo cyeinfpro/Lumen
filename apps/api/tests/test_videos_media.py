@@ -274,20 +274,26 @@ def test_video_cursor_requires_timezone() -> None:
     assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
 
 
-def test_seedance_20_fast_resolution_options_exclude_1080p() -> None:
+def test_seedance_20_resolution_options_match_official_model_limits() -> None:
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
         "seedance-2.0-fast",
-        available_resolutions=["480p", "720p", "1080p"],
+        available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["480p", "720p"]
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
         "seedance-2.0",
         upstream_model="doubao-seedance-2-0-fast-260128",
-        available_resolutions=["480p", "720p", "1080p"],
+        available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["480p", "720p"]
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
         "seedance-2.0",
+        upstream_model="doubao-seedance-2-0-mini-260128",
         available_resolutions=["480p", "720p", "1080p", "4k"],
-    ) == ["480p", "720p", "1080p"]
+    ) == ["480p", "720p"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "seedance-2.0",
+        upstream_model="doubao-seedance-2-0-260128",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["480p", "720p", "1080p", "4k"]
 
 
 def test_omni_flash_duration_options_are_model_specific() -> None:
@@ -373,6 +379,80 @@ async def test_video_options_exposes_billing_model_for_provider_alias(
     assert options.models[0].model == "seedance-2.0"
     assert options.models[0].billing_model == "seedance-2.0-fast"
     assert options.models[0].billing_models == {"t2v": "seedance-2.0-fast"}
+
+
+@pytest.mark.asyncio
+async def test_video_options_exposes_seedance_20_standard_4k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "seedance-2.0": {
+                "t2v": {
+                    "720p:5": 108_900,
+                    "1080p:5": 242_942,
+                    "4k:5": 971_924,
+                }
+            }
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    async def price_options(_db):
+        return [
+            VideoPriceOptionOut(
+                model="seedance-2.0",
+                action="t2v",
+                resolution="720p",
+                variant="t2v_720p",
+                price=videos._money(46_000_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="seedance-2.0",
+                action="t2v",
+                resolution="1080p",
+                variant="t2v_1080p",
+                price=videos._money(51_000_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="seedance-2.0",
+                action="t2v",
+                resolution="4k",
+                variant="t2v_4k",
+                price=videos._money(26_000_000),  # noqa: SLF001
+                enabled=True,
+            ),
+        ]
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+    monkeypatch.setattr(videos, "_video_price_options", price_options)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        object(),
+    )
+
+    assert options.enabled is True
+    assert len(options.models) == 1
+    assert options.models[0].model == "seedance-2.0"
+    assert options.models[0].actions == ["t2v"]
+    assert options.models[0].resolutions == ["720p", "1080p", "4k"]
 
 
 @pytest.mark.asyncio
@@ -639,6 +719,49 @@ async def test_video_create_rejects_seedance_20_fast_1080p(
         "480p",
         "720p",
     ]
+
+
+@pytest.mark.asyncio
+async def test_video_create_accepts_seedance_20_standard_4k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0",
+        prompt="make a 4k clip",
+        duration_s=5,
+        resolution="4k",
+        aspect_ratio="16:9",
+        idempotency_key="idem-standard-4k",
+    )
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {"seedance-2.0": {"t2v": {"4k:5": 971_924}}}
+
+    async def provider_state(_db):
+        return [provider], []
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_billing_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+
+    selected, ready_estimates = await videos._require_video_create_ready(  # noqa: SLF001
+        object(), body
+    )
+
+    assert selected is provider
+    assert ready_estimates["seedance-2.0"]["t2v"]["4k:5"] == 971_924
 
 
 @pytest.mark.asyncio
