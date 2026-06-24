@@ -201,7 +201,9 @@ def _reference_upload_ext(file: UploadFile) -> tuple[str, str]:
 
 
 def _reference_token_expiry(now: datetime | None = None) -> str:
-    return ((now or datetime.now(timezone.utc)) + _REFERENCE_ACCESS_TOKEN_TTL).isoformat()
+    return (
+        (now or datetime.now(timezone.utc)) + _REFERENCE_ACCESS_TOKEN_TTL
+    ).isoformat()
 
 
 def _parse_reference_token_expiry(raw: Any) -> datetime | None:
@@ -883,6 +885,65 @@ def _estimate_duration_options_for_model_action(
     return sorted(durations)
 
 
+def _video_price_action_for_provider(provider_kind: str, action: str) -> str:
+    if (
+        provider_kind in {"dashscope", "omni_flash"}
+        and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
+    ):
+        return "reference_image"
+    return action
+
+
+def _duration_options_for_provider_action(
+    estimates: dict[str, Any],
+    *,
+    model: str,
+    upstream_model: str | None,
+    provider_kind: str,
+    action: str,
+    resolutions: Iterable[str],
+    fallback_durations: Iterable[int],
+    allow_action_fallback: bool = True,
+    allow_global_fallback: bool = True,
+) -> list[int]:
+    if _is_omni_flash_model(model, upstream_model):
+        return _duration_options_for_model(model, upstream_model=upstream_model)
+    billing_model = video_billing_model(model, upstream_model)
+    price_action = _video_price_action_for_provider(provider_kind, action)
+    estimate_durations = _estimate_duration_options_for_model_action(
+        estimates,
+        model=billing_model,
+        action=price_action,
+        resolutions=resolutions,
+    )
+    if estimate_durations:
+        return _duration_options_for_model(
+            model,
+            upstream_model=upstream_model,
+            available_durations=estimate_durations,
+        )
+    if allow_action_fallback:
+        action_durations = _estimate_duration_options_for_model_action(
+            estimates,
+            model=billing_model,
+            action=price_action,
+            resolutions=[],
+        )
+        if action_durations:
+            return _duration_options_for_model(
+                model,
+                upstream_model=upstream_model,
+                available_durations=action_durations,
+            )
+    if not allow_global_fallback:
+        return []
+    return _duration_options_for_model(
+        model,
+        upstream_model=upstream_model,
+        available_durations=fallback_durations,
+    )
+
+
 def _ordered_video_resolutions(values: Iterable[str]) -> list[str]:
     return sorted(
         set(values),
@@ -1180,6 +1241,8 @@ async def video_options(
 
     model_actions: dict[str, set[str]] = {}
     model_durations: dict[str, set[int]] = {}
+    model_action_durations: dict[str, dict[str, set[int]]] = {}
+    model_action_resolution_durations: dict[str, dict[str, dict[str, set[int]]]] = {}
     model_resolutions: dict[str, set[str]] = {}
     model_billing_models: dict[str, dict[str, str]] = {}
     for provider in providers:
@@ -1196,11 +1259,8 @@ async def video_options(
                         upstream_model=upstream_model,
                         available_resolutions=resolutions,
                     )
-                    price_action = (
-                        "reference_image"
-                        if provider.kind in {"dashscope", "omni_flash"}
-                        and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
-                        else action
+                    price_action = _video_price_action_for_provider(
+                        provider.kind, action
                     )
                     action_resolutions = [
                         resolution
@@ -1218,16 +1278,45 @@ async def video_options(
                         action=price_action,
                         resolutions=action_resolutions,
                     )
-                    action_durations = _duration_options_for_model(
-                        key,
+                    action_durations = _duration_options_for_provider_action(
+                        estimates,
+                        model=key,
                         upstream_model=upstream_model,
-                        available_durations=estimate_durations
-                        or durations
-                        or global_durations,
+                        provider_kind=provider.kind,
+                        action=action,
+                        resolutions=action_resolutions,
+                        fallback_durations=durations or global_durations,
                     )
                     if action_resolutions:
                         model_actions.setdefault(key, set()).add(action)
                         model_durations.setdefault(key, set()).update(action_durations)
+                        model_action_durations.setdefault(key, {}).setdefault(
+                            action, set()
+                        ).update(action_durations)
+                        action_resolution_durations = (
+                            model_action_resolution_durations.setdefault(
+                                key, {}
+                            ).setdefault(action, {})
+                        )
+                        for resolution in action_resolutions:
+                            resolution_durations = (
+                                _duration_options_for_provider_action(
+                                    estimates,
+                                    model=key,
+                                    upstream_model=upstream_model,
+                                    provider_kind=provider.kind,
+                                    action=action,
+                                    resolutions=[resolution],
+                                    fallback_durations=estimate_durations
+                                    or durations
+                                    or global_durations,
+                                    allow_action_fallback=False,
+                                    allow_global_fallback=False,
+                                )
+                            )
+                            action_resolution_durations.setdefault(
+                                resolution, set()
+                            ).update(resolution_durations)
                         model_resolutions.setdefault(key, set()).update(
                             action_resolutions
                         )
@@ -1243,12 +1332,7 @@ async def video_options(
                 upstream_model=upstream_model,
                 available_resolutions=resolutions,
             )
-            price_action = (
-                "reference_image"
-                if provider.kind in {"dashscope", "omni_flash"}
-                and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
-                else action
-            )
+            price_action = _video_price_action_for_provider(provider.kind, action)
             action_resolutions = [
                 resolution
                 for resolution in allowed_resolutions
@@ -1265,14 +1349,43 @@ async def video_options(
                 action=price_action,
                 resolutions=action_resolutions,
             )
-            action_durations = _duration_options_for_model(
-                model,
+            action_durations = _duration_options_for_provider_action(
+                estimates,
+                model=model,
                 upstream_model=upstream_model,
-                available_durations=estimate_durations or durations or global_durations,
+                provider_kind=provider.kind,
+                action=action,
+                resolutions=action_resolutions,
+                fallback_durations=durations or global_durations,
             )
             if action_resolutions:
                 model_actions.setdefault(model, set()).add(action)
                 model_durations.setdefault(model, set()).update(action_durations)
+                model_action_durations.setdefault(model, {}).setdefault(
+                    action, set()
+                ).update(action_durations)
+                action_resolution_durations = (
+                    model_action_resolution_durations.setdefault(model, {}).setdefault(
+                        action, {}
+                    )
+                )
+                for resolution in action_resolutions:
+                    resolution_durations = _duration_options_for_provider_action(
+                        estimates,
+                        model=model,
+                        upstream_model=upstream_model,
+                        provider_kind=provider.kind,
+                        action=action,
+                        resolutions=[resolution],
+                        fallback_durations=estimate_durations
+                        or durations
+                        or global_durations,
+                        allow_action_fallback=False,
+                        allow_global_fallback=False,
+                    )
+                    action_resolution_durations.setdefault(resolution, set()).update(
+                        resolution_durations
+                    )
                 model_resolutions.setdefault(model, set()).update(action_resolutions)
                 model_billing_models.setdefault(model, {})[action] = billing_model
     if enabled and not model_actions and unavailable_reason is None:
@@ -1296,6 +1409,21 @@ async def video_options(
                 billing_models=billing_models,
                 actions=sorted_actions,  # type: ignore[arg-type]
                 durations_s=sorted(model_durations.get(model, set())),
+                durations_by_action={
+                    action: sorted(durations)
+                    for action, durations in model_action_durations.get(
+                        model, {}
+                    ).items()
+                },
+                durations_by_action_resolution={
+                    action: {
+                        resolution: sorted(durations)
+                        for resolution, durations in resolution_map.items()
+                    }
+                    for action, resolution_map in model_action_resolution_durations.get(
+                        model, {}
+                    ).items()
+                },
                 resolutions=_ordered_video_resolutions(
                     model_resolutions.get(model, set())
                 ),  # type: ignore[arg-type]
@@ -1329,8 +1457,7 @@ async def _require_video_create_ready(
     if not await _billing_enabled(db):
         raise _http("billing_disabled", "video generation requires wallet billing", 503)
     estimates = await _video_hold_estimates(db)
-    _, resolutions = _estimate_pairs(estimates)
-    durations = _duration_options(estimates)
+    durations, resolutions = _estimate_pairs(estimates)
     if body.resolution not in resolutions:
         raise _http("invalid_resolution", "resolution is not available", 422)
     if body.aspect_ratio not in _DEFAULT_VIDEO_ASPECT_RATIOS:
@@ -1346,20 +1473,6 @@ async def _require_video_create_ready(
             503,
         )
     upstream_model = provider.upstream_model_for(body.model, body.action)
-    model_durations = _duration_options_for_model(
-        body.model,
-        upstream_model=upstream_model,
-        available_durations=durations,
-    )
-    if body.duration_s not in model_durations:
-        raise _http(
-            "invalid_duration",
-            "duration_s is not available for this model",
-            422,
-            model=body.model,
-            duration_s=body.duration_s,
-            available_durations_s=model_durations,
-        )
     model_resolutions = _video_resolution_options_for_model(
         body.model,
         upstream_model=upstream_model,
@@ -1373,6 +1486,26 @@ async def _require_video_create_ready(
             model=body.model,
             resolution=body.resolution,
             available_resolutions=model_resolutions,
+        )
+    model_durations = _duration_options_for_provider_action(
+        estimates,
+        model=body.model,
+        upstream_model=upstream_model,
+        provider_kind=provider.kind,
+        action=body.action,
+        resolutions=[body.resolution],
+        fallback_durations=durations,
+        allow_action_fallback=False,
+        allow_global_fallback=False,
+    )
+    if body.duration_s not in model_durations:
+        raise _http(
+            "invalid_duration",
+            "duration_s is not available for this model",
+            422,
+            model=body.model,
+            duration_s=body.duration_s,
+            available_durations_s=model_durations,
         )
     return provider, estimates
 
@@ -1461,9 +1594,8 @@ async def _reference_media_snapshots(
         snapshots = [dict(item) for item in fallback_snapshots]
         if reference_public_base_url is not None:
             for snapshot in snapshots:
-                if (
-                    snapshot.get("kind") == "image"
-                    and isinstance(snapshot.get("image_id"), str)
+                if snapshot.get("kind") == "image" and isinstance(
+                    snapshot.get("image_id"), str
                 ):
                     image = (
                         await db.execute(
@@ -1483,9 +1615,8 @@ async def _reference_media_snapshots(
                         )
                         snapshot["url"] = url
                         snapshot.update(meta)
-                if (
-                    snapshot.get("kind") == "video"
-                    and isinstance(snapshot.get("video_id"), str)
+                if snapshot.get("kind") == "video" and isinstance(
+                    snapshot.get("video_id"), str
                 ):
                     video = (
                         await db.execute(
@@ -1676,7 +1807,10 @@ async def _create_video_generation_record(
             aspect_ratio=body.aspect_ratio,
             available_aspect_ratios=list(_HAPPYHORSE_ASPECT_RATIOS),
         )
-    if provider.kind == "omni_flash" and body.aspect_ratio not in _OMNI_FLASH_ASPECT_RATIOS:
+    if (
+        provider.kind == "omni_flash"
+        and body.aspect_ratio not in _OMNI_FLASH_ASPECT_RATIOS
+    ):
         raise _http(
             "invalid_aspect_ratio",
             "aspect_ratio is not available for Omni Flash",
