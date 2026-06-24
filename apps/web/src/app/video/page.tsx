@@ -305,8 +305,15 @@ function resolutionOptionsForModel(
 function durationOptionsForModel(
   options: VideoOptionsOut | undefined,
   model: string,
+  action: VideoAction,
+  resolution: string,
 ): number[] {
   const modelOptions = options?.models.find((item) => item.model === model);
+  const actionResolutionDurations =
+    modelOptions?.durations_by_action_resolution?.[action]?.[resolution];
+  if (actionResolutionDurations?.length) return actionResolutionDurations;
+  const actionDurations = modelOptions?.durations_by_action?.[action];
+  if (actionDurations?.length) return actionDurations;
   if (modelOptions?.durations_s?.length) return modelOptions.durations_s;
   return options?.durations_s?.length ? options.durations_s : VIDEO_DURATION_OPTIONS;
 }
@@ -329,6 +336,10 @@ function preferredResolution(options: string[]): string {
 
 function preferredDuration(options: number[]): number {
   return options.includes(5) ? 5 : options[0] ?? 5;
+}
+
+function durationOrPreferred(current: number, options: number[]): number {
+  return options.includes(current) ? current : preferredDuration(options);
 }
 
 function mergeById(
@@ -865,13 +876,13 @@ export default function VideoPage() {
     () => resolutionOptionsForModel(options, selectedModel),
     [options, selectedModel],
   );
-  const availableDurations = useMemo(
-    () => durationOptionsForModel(options, selectedModel),
-    [options, selectedModel],
-  );
   const effectiveResolution = availableResolutions.includes(resolution)
     ? resolution
     : preferredResolution(availableResolutions);
+  const availableDurations = useMemo(
+    () => durationOptionsForModel(options, selectedModel, action, effectiveResolution),
+    [action, effectiveResolution, options, selectedModel],
+  );
   const effectiveDurationS = availableDurations.includes(durationS)
     ? durationS
     : preferredDuration(availableDurations);
@@ -1356,8 +1367,25 @@ export default function VideoPage() {
                         selected={action === key}
                         onSelect={() => {
                           clearPromptEnhanceChoices();
+                          const nextModel = firstModelForAction(options, key);
+                          const nextResolutions = resolutionOptionsForModel(
+                            options,
+                            nextModel,
+                          );
+                          const nextResolution = nextResolutions.includes(resolution)
+                            ? resolution
+                            : preferredResolution(nextResolutions);
+                          const nextDurations = durationOptionsForModel(
+                            options,
+                            nextModel,
+                            key,
+                            nextResolution,
+                          );
                           setAction(key);
-                          setModel(firstModelForAction(options, key));
+                          setModel(nextModel);
+                          setDurationS((prev) =>
+                            durationOrPreferred(prev, nextDurations),
+                          );
                         }}
                       />
                     ))}
@@ -1595,7 +1623,23 @@ export default function VideoPage() {
                     onSubmit={() => createMut.mutate()}
                     onModelChange={(value) => {
                       clearPromptEnhanceChoices();
+                      const nextResolutions = resolutionOptionsForModel(
+                        options,
+                        value,
+                      );
+                      const nextResolution = nextResolutions.includes(resolution)
+                        ? resolution
+                        : preferredResolution(nextResolutions);
+                      const nextDurations = durationOptionsForModel(
+                        options,
+                        value,
+                        action,
+                        nextResolution,
+                      );
                       setModel(value);
+                      setDurationS((prev) =>
+                        durationOrPreferred(prev, nextDurations),
+                      );
                     }}
                     onDurationChange={(value) => {
                       clearPromptEnhanceChoices();
@@ -1603,7 +1647,16 @@ export default function VideoPage() {
                     }}
                     onResolutionChange={(value) => {
                       clearPromptEnhanceChoices();
+                      const nextDurations = durationOptionsForModel(
+                        options,
+                        selectedModel,
+                        action,
+                        value,
+                      );
                       setResolution(value);
+                      setDurationS((prev) =>
+                        durationOrPreferred(prev, nextDurations),
+                      );
                     }}
                     onAspectRatioChange={(value) => {
                       clearPromptEnhanceChoices();

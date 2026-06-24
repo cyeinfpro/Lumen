@@ -619,6 +619,10 @@ class VideoModelOptionOut(BaseModel):
     billing_models: dict[str, str] = Field(default_factory=dict)
     actions: list[VideoAction] = Field(default_factory=list)
     durations_s: list[int] = Field(default_factory=list)
+    durations_by_action: dict[VideoAction, list[int]] = Field(default_factory=dict)
+    durations_by_action_resolution: dict[VideoAction, dict[str, list[int]]] = Field(
+        default_factory=dict
+    )
     resolutions: list[VideoResolution] = Field(default_factory=list)
 
 

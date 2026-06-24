@@ -25,3 +25,10 @@ test("video prompt enhancement panel remains reachable above mobile chrome", () 
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
   match(source, /scroll-mt-4 md:scroll-mt-6/);
 });
+
+test("video duration selector follows selected model action and resolution", () => {
+  match(source, /durations_by_action_resolution\?\.\[action\]\?\.\[resolution\]/);
+  match(source, /durations_by_action\?\.\[action\]/);
+  match(source, /function durationOrPreferred\(current: number, options: number\[\]\)/);
+  match(source, /setDurationS\(\(prev\) =>\s*durationOrPreferred\(prev, nextDurations\),\s*\)/);
+});

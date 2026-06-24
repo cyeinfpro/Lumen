@@ -533,6 +533,67 @@ async def test_video_options_exposes_happyhorse_reference_with_image_pricing_onl
 
 
 @pytest.mark.asyncio
+async def test_video_options_scopes_seedance_reference_duration_by_model_action_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "doubao-seedance-2-0-260128"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "happyhorse-1.0": {"reference_image": {"1080p:3": 3_000_000}},
+            "seedance-2.0": {
+                "reference_image": {
+                    "1080p:4": 242_942,
+                    "1080p:5": 242_942,
+                }
+            },
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    async def price_options(_db):
+        return [
+            VideoPriceOptionOut(
+                model="seedance-2.0",
+                action="reference_image",
+                resolution="1080p",
+                variant="reference_image_1080p",
+                price=videos._money(51_000_000),  # noqa: SLF001
+                enabled=True,
+            )
+        ]
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+    monkeypatch.setattr(videos, "_video_price_options", price_options)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        object(),
+    )
+
+    assert options.durations_s == [-1, 3, 4, 5]
+    assert len(options.models) == 1
+    assert options.models[0].model == "seedance-2.0"
+    assert options.models[0].durations_s == [-1, 4, 5]
+    assert options.models[0].durations_by_action == {"reference": [-1, 4, 5]}
+    assert options.models[0].durations_by_action_resolution == {
+        "reference": {"1080p": [-1, 4, 5]}
+    }
+
+
+@pytest.mark.asyncio
 async def test_video_options_exposes_omni_flash_reference_with_image_pricing_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -719,6 +780,113 @@ async def test_video_create_rejects_seedance_20_fast_1080p(
         "480p",
         "720p",
     ]
+
+
+@pytest.mark.asyncio
+async def test_video_create_rejects_seedance_reference_duration_leaked_from_other_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0",
+        prompt="animate these references",
+        reference_media=[
+            VideoReferenceMediaIn(kind="image", url="https://example.com/ref.png")
+        ],
+        duration_s=3,
+        resolution="1080p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-seedance-reference-3s",
+    )
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "doubao-seedance-2-0-260128"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "happyhorse-1.0": {"reference_image": {"1080p:3": 3_000_000}},
+            "seedance-2.0": {
+                "reference_image": {
+                    "1080p:4": 242_942,
+                    "1080p:5": 242_942,
+                }
+            },
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_billing_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._require_video_create_ready(object(), body)  # noqa: SLF001
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_duration"
+    assert excinfo.value.detail["error"]["details"]["available_durations_s"] == [
+        -1,
+        4,
+        5,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_video_create_rejects_duration_from_other_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0",
+        prompt="animate these references",
+        reference_media=[
+            VideoReferenceMediaIn(kind="image", url="https://example.com/ref.png")
+        ],
+        duration_s=5,
+        resolution="1080p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-seedance-reference-1080p-missing",
+    )
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "doubao-seedance-2-0-260128"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "happyhorse-1.0": {"reference_image": {"1080p:3": 3_000_000}},
+            "seedance-2.0": {"reference_image": {"720p:5": 108_900}},
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_billing_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._require_video_create_ready(object(), body)  # noqa: SLF001
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_duration"
+    assert excinfo.value.detail["error"]["details"]["available_durations_s"] == []
 
 
 @pytest.mark.asyncio
@@ -973,9 +1141,7 @@ async def test_reference_public_base_url_still_fails_for_required_media(
         )
 
     assert excinfo.value.status_code == 503
-    assert (
-        excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
-    )
+    assert excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
 
 
 @pytest.mark.asyncio
@@ -1007,9 +1173,7 @@ async def test_reference_public_base_url_still_fails_for_video_reference(
         )
 
     assert excinfo.value.status_code == 503
-    assert (
-        excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
-    )
+    assert excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
 
 
 def test_create_video_generation_maps_billing_error() -> None:
@@ -1407,9 +1571,7 @@ async def test_reference_media_snapshots_falls_back_to_inline_when_variant_optio
 
     assert snapshots[0]["url"] is None
     assert snapshots[0]["upstream_reference_variant"] is None
-    assert (
-        snapshots[0]["upstream_reference_variant_error"]["code"] == "invalid_image"
-    )
+    assert snapshots[0]["upstream_reference_variant_error"]["code"] == "invalid_image"
 
 
 @pytest.mark.asyncio
