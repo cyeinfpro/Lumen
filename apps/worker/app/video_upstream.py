@@ -35,6 +35,7 @@ class VideoReferenceMedia:
     data: bytes | None = None
     mime: str | None = None
     url: str | None = None
+    label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -714,12 +715,71 @@ def _require_http_url(raw: str | None, *, field: str) -> str:
     return value
 
 
+def _clean_reference_label(raw: str | None) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    value = " ".join(raw.split())
+    if not value:
+        return None
+    return value[:80]
+
+
+def _seedance_prompt_with_reference_order(req: VideoSubmitRequest) -> str:
+    if req.action != "reference" or not req.reference_media:
+        return req.prompt
+
+    lines: list[str] = []
+    image_index = 0
+    video_index = 0
+    for item in req.reference_media:
+        if item.kind == "image":
+            image_index += 1
+            official = f"Image {image_index}"
+            localized = f"图片 {image_index}"
+            description = f"reference image #{image_index}"
+        elif item.kind == "video":
+            video_index += 1
+            official = f"Video {video_index}"
+            localized = f"视频 {video_index}"
+            description = f"reference video #{video_index}"
+        else:
+            continue
+
+        aliases: list[str] = []
+        for alias in (
+            _clean_reference_label(item.label),
+            localized,
+            f"[{localized}]",
+        ):
+            if alias and alias not in aliases and alias != official:
+                aliases.append(alias)
+        alias_text = f"; user-prompt aliases: {', '.join(aliases)}" if aliases else ""
+        lines.append(f"- {official}: {description} in the content array{alias_text}.")
+
+    if not lines:
+        return req.prompt
+
+    return (
+        "Reference asset order for this Seedance request. Interpret the user's "
+        "asset mentions by the official type + number below:\n"
+        + "\n".join(lines)
+        + "\n\nUser prompt:\n"
+        + req.prompt
+    )
+
+
 def _seedance_content(
     req: VideoSubmitRequest,
     *,
     allow_input_image_url: bool = False,
+    include_reference_order_prompt: bool = False,
 ) -> list[dict[str, Any]]:
-    content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
+    prompt = (
+        _seedance_prompt_with_reference_order(req)
+        if include_reference_order_prompt
+        else req.prompt
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     if req.action == "i2v":
         image_url = req.input_image_url if allow_input_image_url else None
         if not image_url:
@@ -825,7 +885,7 @@ class VolcanoSeedanceAdapter:
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
         body: dict[str, Any] = {
             "model": req.upstream_model,
-            "content": _seedance_content(req),
+            "content": _seedance_content(req, include_reference_order_prompt=True),
             "ratio": req.aspect_ratio,
             "resolution": req.resolution,
             "duration": req.duration_s,

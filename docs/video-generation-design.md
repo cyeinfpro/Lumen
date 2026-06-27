@@ -66,8 +66,8 @@ Lumen 现为 AI 图片生成平台。本设计为其增加**视频生成**能力
 ```
 id                        uuid7 pk
 user_id                   FK users(id) ON DELETE CASCADE
-action                    "t2v" | "i2v"
-model                     "seedance-2.0" | "seedance-2.0-fast" ...
+action                    "t2v" | "i2v" | "reference"
+model                     "seedance-2.0" | "seedance-2.0-fast" | "seedance-2.0-mini" ...
 provider_name             nullable str
 provider_kind             "volcano" | "veo"
 provider_task_id          nullable str
@@ -190,7 +190,11 @@ class PollResult:
         "seedance-2.0:t2v": "doubao-seedance-2-0-260128",
         "seedance-2.0:i2v": "doubao-seedance-2-0-260128",
         "seedance-2.0-fast:t2v": "doubao-seedance-2-0-fast-260128",
-        "seedance-2.0-fast:i2v": "doubao-seedance-2-0-fast-260128"
+        "seedance-2.0-fast:i2v": "doubao-seedance-2-0-fast-260128",
+        "seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128",
+        "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
+        "seedance-2.0-mini:i2v": "dreamina-seedance-2-0-mini-260615",
+        "seedance-2.0-mini:reference": "dreamina-seedance-2-0-mini-260615"
       }
     }
   ]
@@ -392,6 +396,12 @@ hold token 上界不要猜闭式公式，走保守配置表：
   "seedance-2.0": {
     "t2v": {"720p:5": 60000, "1080p:5": 130000, "1080p:10": 280000},
     "i2v": {"720p:5": 60000, "1080p:5": 130000, "1080p:10": 280000}
+  },
+  "seedance-2.0-mini": {
+    "t2v": {"480p:4": 51429, "720p:4": 108900},
+    "i2v": {"480p:4": 51429, "720p:4": 108900},
+    "reference_image": {"480p:4": 51429, "720p:4": 108900},
+    "reference_video": {"480p:4": 190000, "720p:4": 411668}
   }
 }
 ```

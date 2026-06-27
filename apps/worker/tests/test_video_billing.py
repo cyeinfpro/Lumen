@@ -190,9 +190,7 @@ async def test_resolve_video_billing_uses_fast_model_from_upstream_model(
 ) -> None:
     session = FakeSession()
     generation = _generation()
-    generation.upstream_request = {
-        "upstream_model": "doubao-seedance-2-0-fast-260128"
-    }
+    generation.upstream_request = {"upstream_model": "doubao-seedance-2-0-fast-260128"}
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def held_amount_for_ref(*_args, **_kwargs) -> int:
@@ -252,6 +250,76 @@ async def test_resolve_video_billing_uses_fast_model_from_upstream_model(
     assert resolution.decision == "actual_usage_settle"
     assert resolution.actual_micro == 4_029_300
     assert calls[0][1]["meta"]["billing_model"] == "seedance-2.0-fast"
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_uses_mini_model_from_upstream_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    generation = _generation()
+    generation.upstream_request = {
+        "upstream_model": "dreamina-seedance-2-0-mini-260615"
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle_cost(
+        _session,
+        *,
+        model: str,
+        action: str,
+        actual_total_tokens: int,
+        resolution: str | None = None,
+        pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
+    ) -> int:
+        assert (model, action, actual_total_tokens) == (
+            "seedance-2.0-mini",
+            "t2v",
+            108_900,
+        )
+        assert resolution == "720p"
+        assert pricing_variant == "t2v_720p"
+        assert estimated_micro == 1_000
+        return 2_504_700
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(
+            amount_micro=-2_504_700,
+            balance_after=7_495_300,
+            hold_after=0,
+        )
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        generation,
+        poll_result={"status": "succeeded", "usage_total_tokens": 108_900},
+        reason="succeeded",
+    )
+
+    assert resolution.decision == "actual_usage_settle"
+    assert resolution.actual_micro == 2_504_700
+    assert calls[0][1]["meta"]["billing_model"] == "seedance-2.0-mini"
 
 
 @pytest.mark.asyncio

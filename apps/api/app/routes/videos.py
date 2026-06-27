@@ -69,6 +69,7 @@ from lumen_core.video_billing import (
     estimate_video_cost,
     expand_video_duration_estimates,
     is_seedance_20_fast_identifier,
+    is_seedance_20_mini_identifier,
     split_video_resolution_pricing_variant,
     video_billing_model,
     video_pricing_variant,
@@ -1059,13 +1060,7 @@ def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
 
 
 def _is_seedance_20_mini_model(*identifiers: str | None) -> bool:
-    for identifier in identifiers:
-        if not isinstance(identifier, str):
-            continue
-        value = identifier.strip().lower().replace("_", "-").replace(".", "-")
-        if "seedance-2-0-mini" in value:
-            return True
-    return False
+    return is_seedance_20_mini_identifier(*identifiers)
 
 
 def _is_seedance_20_standard_model(*identifiers: str | None) -> bool:

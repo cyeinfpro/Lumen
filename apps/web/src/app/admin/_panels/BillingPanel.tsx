@@ -99,6 +99,17 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
     },
     note: "火山官方 token 单价：480/720P 无视频 37、含视频 22 元/百万 token；Fast 不支持 1080P。实际视频费用按分辨率最低 token 用量计算，480P 与 720P 不同价。",
   },
+  {
+    model: "seedance-2.0-mini",
+    prices: {
+      t2v: { "480p": 23, "720p": 23 },
+      i2v: { "480p": 23, "720p": 23 },
+      reference_image: { "480p": 23, "720p": 23 },
+      reference_video: { "480p": 14, "720p": 14 },
+      reference: { "480p": 23, "720p": 23 },
+    },
+    note: "火山/ModelArk 官方价折算：480/720P 无视频 23、含视频 14 元/百万 token；Mini 不支持 1080P/4k。实际视频费用按分辨率最低 token 用量计算。",
+  },
 ];
 
 function videoRuleVariant(variant: VideoPricingVariant, resolution: VideoResolution): string {
