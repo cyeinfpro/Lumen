@@ -42,6 +42,7 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
             "reference_media": [
                 {
                     "kind": "video",
+                    "label": "视频 1",
                     "url": "https://example.com/reference.mp4",
                 }
             ]
@@ -52,6 +53,7 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
 
     assert len(result) == 1
     assert result[0].kind == "video"
+    assert result[0].label == "视频 1"
     assert result[0].url == "https://example.com/reference.mp4"
 
 
@@ -65,6 +67,7 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
             "reference_media": [
                 {
                     "kind": "image",
+                    "label": "图片 1",
                     "url": "https://lumen.example/api/images/reference/image-1/binary",
                     "upstream_reference_storage_key": "u/user-1/ref.jpg",
                     "upstream_reference_mime": "image/jpeg",
@@ -83,6 +86,7 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
 
     assert len(result) == 1
     assert result[0].kind == "image"
+    assert result[0].label == "图片 1"
     assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
     assert result[0].data == b"image"
     assert result[0].mime == "image/jpeg"
@@ -109,9 +113,7 @@ async def test_reference_media_bytes_url_snapshot_survives_missing_variant_bytes
     async def failing_get_bytes(key: str) -> bytes:
         raise FileNotFoundError(key)
 
-    monkeypatch.setattr(
-        video_generation_tasks.storage, "aget_bytes", failing_get_bytes
-    )
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", failing_get_bytes)
 
     result = await _reference_media_bytes(generation)
 
@@ -238,7 +240,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
             action="reference",
             model="seedance-2.0",
             upstream_model="dreamina-seedance-2-0-260128",
-            prompt="[Image 1] and [Video 1]",
+            prompt="参考 [图片 1]，运动参考 [视频 1]",
             duration_s=5,
             resolution="720p",
             aspect_ratio="adaptive",
@@ -249,6 +251,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
                     kind="image",
                     data=b"image",
                     mime="image/png",
+                    label="图片 1",
                 ),
                 VideoReferenceMedia(
                     kind="video",
@@ -256,6 +259,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
                         "https://lumen.example/api/videos/reference/video-1/binary"
                         "?token=t"
                     ),
+                    label="视频 1",
                 ),
             ],
         )
@@ -268,10 +272,19 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
     assert client.body["watermark"] is False
     assert len(client.body["safety_identifier"]) == 64
     assert "fps" not in client.body
+    prompt_text = client.body["content"][0]["text"]
+    assert "Reference asset order" in prompt_text
+    assert "Image 1" in prompt_text
+    assert "Video 1" in prompt_text
+    assert "[图片 1]" in prompt_text
+    assert "[视频 1]" in prompt_text
+    assert "参考 [图片 1]，运动参考 [视频 1]" in prompt_text
     assert client.body["content"][1]["role"] == "reference_image"
     assert client.body["content"][1]["image_url"]["url"].startswith(
         "data:image/png;base64,"
     )
+    assert "label" not in client.body["content"][1]
+    assert "name" not in client.body["content"][1]
     assert client.body["content"][2] == {
         "type": "video_url",
         "role": "reference_video",
@@ -279,6 +292,8 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
             "url": ("https://lumen.example/api/videos/reference/video-1/binary?token=t")
         },
     }
+    assert "label" not in client.body["content"][2]
+    assert "name" not in client.body["content"][2]
 
 
 @pytest.mark.asyncio
@@ -477,9 +492,7 @@ async def test_volcano_third_party_poll_reads_live_moyu_wrapped_result_shape() -
                     "data": {
                         "id": "cgt-20260607183443-jmltj",
                         "status": "succeeded",
-                        "content": {
-                            "video_url": "https://cdn.example/live-output.mp4"
-                        },
+                        "content": {"video_url": "https://cdn.example/live-output.mp4"},
                         "usage": {
                             "completion_tokens": 130500,
                             "total_tokens": 130500,
@@ -617,7 +630,9 @@ async def test_volcano_third_party_poll_respects_explicit_billable_false() -> No
 
 
 @pytest.mark.asyncio
-async def test_unified_video_create_submit_uses_omni_flash_generations_payload() -> None:
+async def test_unified_video_create_submit_uses_omni_flash_generations_payload() -> (
+    None
+):
     provider = VideoProviderDefinition(
         name="google-omni-flash",
         kind="omni_flash",
@@ -707,9 +722,7 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
     assert client.requests[0]["body"]["images"] == [
         "https://lumen.example/api/images/reference/image-1/binary"
     ]
-    assert client.requests[1]["body"]["images"] == [
-        "data:image/jpeg;base64,aW1hZ2U="
-    ]
+    assert client.requests[1]["body"]["images"] == ["data:image/jpeg;base64,aW1hZ2U="]
 
 
 @pytest.mark.asyncio
@@ -754,9 +767,7 @@ async def test_unified_video_create_retries_string_invalid_url_error() -> None:
 
     assert result.provider_task_id == "omni-task-1"
     assert len(client.requests) == 2
-    assert client.requests[1]["body"]["images"] == [
-        "data:image/jpeg;base64,aW1hZ2U="
-    ]
+    assert client.requests[1]["body"]["images"] == ["data:image/jpeg;base64,aW1hZ2U="]
 
 
 @pytest.mark.asyncio
@@ -812,9 +823,7 @@ async def test_unified_video_create_falls_back_to_legacy_create_path() -> None:
         [
             httpx.Response(
                 404,
-                json={
-                    "error": {"message": "Invalid URL (POST /v1/video/generations)"}
-                },
+                json={"error": {"message": "Invalid URL (POST /v1/video/generations)"}},
             ),
             httpx.Response(200, json={"task_id": "omni-task-1"}),
         ]
@@ -876,7 +885,9 @@ async def test_unified_video_create_poll_reads_query_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unified_video_create_poll_does_not_complete_on_ambiguous_running_url() -> None:
+async def test_unified_video_create_poll_does_not_complete_on_ambiguous_running_url() -> (
+    None
+):
     provider = VideoProviderDefinition(
         name="google-omni-flash",
         kind="omni_flash",
@@ -898,12 +909,17 @@ async def test_unified_video_create_poll_does_not_complete_on_ambiguous_running_
 
     assert result.status == "running"
     assert result.progress == 42
-    assert result.video_url == "https://gateway.example.com/v1/video/generations/omni-task-1"
+    assert (
+        result.video_url
+        == "https://gateway.example.com/v1/video/generations/omni-task-1"
+    )
     assert result.upstream_billable is None
 
 
 @pytest.mark.asyncio
-async def test_unified_video_create_poll_completes_on_explicit_running_video_url() -> None:
+async def test_unified_video_create_poll_completes_on_explicit_running_video_url() -> (
+    None
+):
     provider = VideoProviderDefinition(
         name="google-omni-flash",
         kind="omni_flash",
@@ -1052,11 +1068,7 @@ def test_video_http_error_keeps_missing_model_as_invalid_input() -> None:
     exc = _http_error(
         "submit",
         400,
-        {
-            "error": {
-                "message": "Model name not specified, model name cannot be empty"
-            }
-        },
+        {"error": {"message": "Model name not specified, model name cannot be empty"}},
     )
 
     assert exc.error_code == "invalid_input"

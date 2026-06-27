@@ -424,6 +424,10 @@ async def _reference_media_bytes(
             continue
         url = item.get("url")
         clean_url = url.strip() if isinstance(url, str) else ""
+        label = item.get("label")
+        clean_label = (
+            label.strip() if isinstance(label, str) and label.strip() else None
+        )
         mime = item.get("mime") if isinstance(item.get("mime"), str) else None
         upstream_mime = item.get("upstream_reference_mime")
         if isinstance(upstream_mime, str) and upstream_mime.strip():
@@ -460,6 +464,7 @@ async def _reference_media_bytes(
                     data=data,
                     mime=mime,
                     url=clean_url,
+                    label=clean_label,
                 )
             )
             continue
@@ -476,6 +481,7 @@ async def _reference_media_bytes(
                     else await storage.aget_bytes(clean_storage_key)
                 ),
                 mime=mime,
+                label=clean_label,
             )
         )
     if not result:
@@ -1020,7 +1026,7 @@ async def _schedule_poll_retry(
         except Exception:
             logger.warning(
                 "video poll retry enqueue failed task=%s", generation.id, exc_info=True
-        )
+            )
         return True
 
 

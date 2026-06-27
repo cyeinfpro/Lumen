@@ -35,6 +35,30 @@ def test_video_billing_model_uses_fast_when_upstream_is_fast() -> None:
     )
 
 
+def test_video_billing_model_uses_mini_when_upstream_or_model_is_mini() -> None:
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0",
+            "dreamina-seedance-2-0-mini-260615",
+        )
+        == "seedance-2.0-mini"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0",
+            "doubao-seedance-2-0-mini-260128",
+        )
+        == "seedance-2.0-mini"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0-mini",
+            "dreamina-seedance-2-0-mini-260615",
+        )
+        == "seedance-2.0-mini"
+    )
+
+
 def test_video_token_upper_bound_rejects_invalid_values() -> None:
     estimates = {
         "seedance-2.0": {
@@ -167,6 +191,12 @@ def test_official_seedance_480p_and_720p_hold_estimates_are_not_equal() -> None:
 def test_official_seedance_4k_hold_estimates_cover_current_price_table() -> None:
     assert video_billing.round_micro_for_tokens(971_924, 26_000_000) >= 25_270_000
     assert video_billing.round_micro_for_tokens(3_888_125, 16_000_000) >= 62_210_000
+
+
+def test_official_seedance_mini_hold_estimates_cover_current_price_table() -> None:
+    assert video_billing.round_micro_for_tokens(51_429, 23_000_000) >= 1_180_000
+    assert video_billing.round_micro_for_tokens(108_900, 23_000_000) >= 2_494_000
+    assert video_billing.round_micro_for_tokens(433_334, 14_000_000) >= 6_066_676
 
 
 def test_video_pricing_variant_splits_reference_media_kind() -> None:

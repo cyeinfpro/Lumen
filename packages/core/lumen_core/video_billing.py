@@ -26,7 +26,9 @@ VIDEO_REFERENCE_IMAGE_PRICING_VARIANT = "reference_image"
 VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
 VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
 SEEDANCE_20_FAST_MODEL = "seedance-2.0-fast"
+SEEDANCE_20_MINI_MODEL = "seedance-2.0-mini"
 _SEEDANCE_20_FAST_RE = re.compile(r"seedance[-.]2[-.]0[-.]fast")
+_SEEDANCE_20_MINI_RE = re.compile(r"seedance[-.]2[-.]0[-.]mini")
 VIDEO_PRICING_VARIANTS = (
     "t2v",
     "i2v",
@@ -116,9 +118,21 @@ def is_seedance_20_fast_identifier(*identifiers: str | None) -> bool:
     return False
 
 
+def is_seedance_20_mini_identifier(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-")
+        if _SEEDANCE_20_MINI_RE.search(value):
+            return True
+    return False
+
+
 def video_billing_model(model: str, upstream_model: str | None = None) -> str:
     if is_seedance_20_fast_identifier(model, upstream_model):
         return SEEDANCE_20_FAST_MODEL
+    if is_seedance_20_mini_identifier(model, upstream_model):
+        return SEEDANCE_20_MINI_MODEL
     return model
 
 
@@ -391,7 +405,9 @@ async def settle_video_cost(
     actual_micro = round_micro_for_tokens(int(actual_total_tokens), int(unit_price))
     if estimated_micro is not None:
         estimate = int(estimated_micro)
-        if estimate > 0 and actual_micro > estimate * max(1, int(max_estimate_multiplier)):
+        if estimate > 0 and actual_micro > estimate * max(
+            1, int(max_estimate_multiplier)
+        ):
             return estimate
     return actual_micro
 
@@ -402,6 +418,7 @@ __all__ = [
     "SMART_VIDEO_DURATION_S",
     "SMART_VIDEO_HOLD_DURATION_S",
     "SEEDANCE_20_FAST_MODEL",
+    "SEEDANCE_20_MINI_MODEL",
     "SUPPORTED_VIDEO_DURATIONS_S",
     "VIDEO_BILLING_TOKENS_PER_SECOND",
     "VIDEO_LEGACY_REFERENCE_PRICING_VARIANT",
@@ -415,6 +432,7 @@ __all__ = [
     "expand_video_duration_estimates",
     "hold_estimate_duration_s",
     "is_seedance_20_fast_identifier",
+    "is_seedance_20_mini_identifier",
     "round_micro_for_tokens",
     "settle_video_cost",
     "split_video_resolution_pricing_variant",
