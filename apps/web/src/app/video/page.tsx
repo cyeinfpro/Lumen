@@ -217,6 +217,23 @@ function formatDurationLabel(durationS: number): string {
   return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
 }
 
+function formatTaskElapsed(ms?: number | null): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function taskElapsedLabel(item: VideoGenerationOut): string | null {
+  const elapsed = formatTaskElapsed(item.elapsed_ms);
+  if (!elapsed) return null;
+  return `${isTerminalVideo(item) ? "耗时" : "已耗时"} ${elapsed}`;
+}
+
 function isActiveVideo(item: VideoGenerationOut): boolean {
   if (ACTIVE_VIDEO_STATUSES.includes(
     item.status as (typeof ACTIVE_VIDEO_STATUSES)[number],
@@ -435,10 +452,6 @@ function videoSrc(video: VideoGenerationWithVideo["video"]): string {
   return video.url?.trim() || videoBinaryUrl(video.id);
 }
 
-function videoDownloadSrc(id: string): string {
-  return videoDownloadUrl(id);
-}
-
 function posterSrc(video: VideoGenerationWithVideo["video"]): string | undefined {
   return video.poster_url?.trim() || undefined;
 }
@@ -453,8 +466,19 @@ function hasVideo(item: VideoGenerationOut): item is VideoGenerationWithVideo {
   return item.video != null;
 }
 
-function videoDownloadName(item: VideoGenerationWithVideo): string {
-  const ext = item.video.mime === "video/quicktime" ? "mov" : "mp4";
+function activeTemporaryDownload(item: VideoGenerationOut) {
+  const download = item.temporary_download;
+  const url = download?.url?.trim();
+  if (!download || !url) return null;
+  const expiresAtMs = Date.parse(download.expires_at);
+  if (!Number.isFinite(expiresAtMs) || download.expires_in_s <= 30) {
+    return null;
+  }
+  return { ...download, url };
+}
+
+function videoDownloadName(item: VideoGenerationOut): string {
+  const ext = hasVideo(item) && item.video.mime === "video/quicktime" ? "mov" : "mp4";
   return `lumen-video-${item.id.slice(0, 8)}.${ext}`;
 }
 
@@ -2458,20 +2482,32 @@ function VideoDownloadLink({
   item,
   fullWidth = false,
 }: {
-  item: VideoGenerationWithVideo;
+  item: VideoGenerationOut;
   fullWidth?: boolean;
 }) {
+  const temporaryDownload = activeTemporaryDownload(item);
+  const stableHref = hasVideo(item) ? videoDownloadUrl(item.video.id) : "";
+  const href = temporaryDownload?.url || stableHref;
+  if (!href) return null;
+  const isTemporary = temporaryDownload != null;
+  const expiresTitle =
+    isTemporary
+      ? `火山临时链接，约 ${Math.max(1, Math.floor(temporaryDownload.expires_in_s / 60))} 分钟后过期`
+      : undefined;
   return (
     <a
-      href={videoDownloadSrc(item.video.id)}
-      download={videoDownloadName(item)}
+      href={href}
+      download={isTemporary ? undefined : videoDownloadName(item)}
+      target={isTemporary ? "_blank" : undefined}
+      rel={isTemporary ? "noopener noreferrer" : undefined}
+      title={expiresTitle}
       className={cn(
         "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
         fullWidth && "w-full",
       )}
     >
       <Download className="h-3.5 w-3.5 shrink-0" />
-      下载
+      {isTemporary ? "快速下载" : "下载"}
     </a>
   );
 }
@@ -2677,6 +2713,7 @@ function VideoPreviewDialog({
   onCopy: () => void;
   onDelete: () => void;
 }) {
+  const elapsedLabel = taskElapsedLabel(item);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -2705,6 +2742,11 @@ function VideoPreviewDialog({
               <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
                 {actionLabel(item.action)} · {item.resolution} · {formatDurationLabel(item.duration_s)}
               </span>
+              {elapsedLabel && (
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
+                  {elapsedLabel}
+                </span>
+              )}
             </div>
             <h2
               id={`video-preview-${item.id}`}
@@ -2740,6 +2782,11 @@ function VideoPreviewDialog({
                 <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
                   {formatDurationLabel(item.duration_s)}
                 </span>
+                {elapsedLabel && (
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
+                    {elapsedLabel}
+                  </span>
+                )}
                 <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
                   {item.video.has_audio ? "含音频" : "无音频"}
                 </span>
@@ -2866,6 +2913,8 @@ function TaskRow({
   const copy = stageCopy(item);
   const videoItem = hasVideo(item) ? item : null;
   const retryable = isFailedHistoryVideo(item);
+  const canDownload = videoItem != null || activeTemporaryDownload(item) != null;
+  const elapsedLabel = taskElapsedLabel(item);
   return (
     <article
       className={cn(
@@ -2885,6 +2934,7 @@ function TaskRow({
             <span>{actionLabel(item.action)}</span>
             <span>{item.resolution}</span>
             <span>{formatDurationLabel(item.duration_s)}</span>
+            {elapsedLabel && <span>{elapsedLabel}</span>}
           </div>
           <p className="mt-1 line-clamp-2 text-sm text-[var(--fg-0)]">{item.prompt}</p>
           <p className="mt-1 text-xs leading-5 text-[var(--fg-2)]">{copy.detail}</p>
@@ -2953,7 +3003,7 @@ function TaskRow({
             预览
           </Button>
         )}
-        {videoItem && <VideoDownloadLink item={videoItem} />}
+        {canDownload && <VideoDownloadLink item={item} />}
         {onUseDraft && (
           <Button
             variant="outline"

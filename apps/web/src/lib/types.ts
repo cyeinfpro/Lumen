@@ -1074,6 +1074,13 @@ export interface VideoOut {
   created_at?: string | null;
 }
 
+export interface VideoTemporaryDownloadOut {
+  source: string;
+  url: string;
+  expires_at: string;
+  expires_in_s: number;
+}
+
 export interface VideoReferenceMediaIn {
   kind: "image" | "video";
   image_id?: string | null;
@@ -1178,6 +1185,8 @@ export interface VideoGenerationOut {
   billed_tokens?: number | null;
   billed_cost?: MoneyOut | null;
   video?: VideoOut | null;
+  temporary_download?: VideoTemporaryDownloadOut | null;
+  elapsed_ms?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   diagnostics?: Record<string, unknown>;
