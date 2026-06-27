@@ -483,6 +483,13 @@ class VideoOut(BaseOut):
     created_at: datetime | None = None
 
 
+class VideoTemporaryDownloadOut(BaseModel):
+    source: str
+    url: str
+    expires_at: datetime
+    expires_in_s: int
+
+
 VideoAction = Literal["t2v", "i2v", "reference"]
 VideoPricingVariant = Literal[
     "t2v",
@@ -661,6 +668,8 @@ class VideoGenerationOut(BaseOut):
     billed_tokens: int | None = None
     billed_cost: MoneyOut | None = None
     video: VideoOut | None = None
+    temporary_download: VideoTemporaryDownloadOut | None = None
+    elapsed_ms: int | None = None
     error_code: str | None = None
     error_message: str | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
@@ -2319,6 +2328,7 @@ __all__ = [
     "ActiveTasksOut",
     "ImageOut",
     "VideoOut",
+    "VideoTemporaryDownloadOut",
     "VideoAction",
     "VideoCreateIn",
     "VideoReferenceMediaIn",

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterable, Iterator
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import (
     APIRouter,
@@ -54,8 +54,10 @@ from lumen_core.schemas import (
     VideoPriceOptionOut,
     VideoReferenceMediaIn,
     VideoReferenceMediaOut,
+    VideoTemporaryDownloadOut,
     normalize_asset_reference_url,
 )
+from lumen_core.url_security import is_private_host
 from lumen_core.video_billing import (
     SMART_VIDEO_DURATION_S,
     SUPPORTED_VIDEO_DURATIONS_S,
@@ -133,6 +135,7 @@ _VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 _VIDEO_REFERENCE_UPLOAD_MAX_COUNT = 20
 _VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES = 1024 * 1024 * 1024
 _REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
+_TEMPORARY_DOWNLOAD_MIN_REMAINING = timedelta(seconds=60)
 _VIDEO_REFERENCE_MIME_EXT = {
     "video/mp4": "mp4",
     "video/quicktime": "mov",
@@ -162,6 +165,104 @@ def _video_binary_url(video_id: str) -> str:
 
 def _video_poster_url(video_id: str, poster_storage_key: str | None) -> str | None:
     return f"/api/videos/{video_id}/poster" if poster_storage_key else None
+
+
+def _nested_text(raw: Any, path: tuple[str, ...]) -> str | None:
+    current = raw
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current.strip() if isinstance(current, str) and current.strip() else None
+
+
+def _upstream_video_url(raw: Any) -> str | None:
+    for path in (
+        ("content", "video_url"),
+        ("data", "content", "video_url"),
+        ("data", "data", "content", "video_url"),
+        ("data", "data", "data", "content", "video_url"),
+    ):
+        value = _nested_text(raw, path)
+        if value:
+            return value
+    return None
+
+
+def _temporary_video_download_out(
+    row: VideoGeneration,
+    *,
+    now: datetime | None = None,
+) -> VideoTemporaryDownloadOut | None:
+    if row.provider_kind != "volcano":
+        return None
+    raw_url = _upstream_video_url(row.upstream_response)
+    if not raw_url:
+        return None
+    parsed = urlsplit(raw_url)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or is_private_host(parsed.hostname)
+    ):
+        return None
+    host = parsed.hostname.rstrip(".").lower()
+    if host != "volces.com" and not host.endswith(".volces.com"):
+        return None
+    query = parse_qs(parsed.query, keep_blank_values=False)
+    algorithm = (query.get("X-Tos-Algorithm") or [""])[0]
+    signature = (query.get("X-Tos-Signature") or [""])[0]
+    signed_at_raw = (query.get("X-Tos-Date") or [""])[0]
+    expires_raw = (query.get("X-Tos-Expires") or [""])[0]
+    if algorithm != "TOS4-HMAC-SHA256" or not signature:
+        return None
+    try:
+        expires_s = int(expires_raw)
+        if expires_s <= 0:
+            return None
+        signed_at = datetime.strptime(signed_at_raw, "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except (TypeError, ValueError):
+        return None
+    expires_at = signed_at + timedelta(seconds=expires_s)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    remaining_s = int((expires_at - current.astimezone(timezone.utc)).total_seconds())
+    if remaining_s <= int(_TEMPORARY_DOWNLOAD_MIN_REMAINING.total_seconds()):
+        return None
+    return VideoTemporaryDownloadOut(
+        source="volcano",
+        url=raw_url,
+        expires_at=expires_at,
+        expires_in_s=remaining_s,
+    )
+
+
+def _generation_elapsed_ms(
+    row: VideoGeneration,
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    started_at = row.created_at
+    if started_at is None:
+        return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    else:
+        started_at = started_at.astimezone(timezone.utc)
+    finished_at = row.finished_at
+    if finished_at is None:
+        finished_at = now or datetime.now(timezone.utc)
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    else:
+        finished_at = finished_at.astimezone(timezone.utc)
+    elapsed_s = max(0.0, (finished_at - started_at).total_seconds())
+    return int(elapsed_s * 1000)
 
 
 def _video_out(video: Video) -> VideoOut:
@@ -620,6 +721,8 @@ async def _generation_out(
         if row.billed_cost_micro is not None
         else None,
         video=_video_out(video) if video is not None else None,
+        temporary_download=_temporary_video_download_out(row),
+        elapsed_ms=_generation_elapsed_ms(row),
         error_code=row.error_code,
         error_message=row.error_message,
         diagnostics=_public_video_diagnostics(row.diagnostics),

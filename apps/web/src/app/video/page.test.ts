@@ -32,3 +32,18 @@ test("video duration selector follows selected model action and resolution", () 
   match(source, /function durationOrPreferred\(current: number, options: number\[\]\)/);
   match(source, /setDurationS\(\(prev\) =>\s*durationOrPreferred\(prev, nextDurations\),\s*\)/);
 });
+
+test("video temporary upstream download is available before local storage", () => {
+  match(source, /function activeTemporaryDownload\(item: VideoGenerationOut\)/);
+  match(source, /const canDownload = videoItem != null \|\| activeTemporaryDownload\(item\) != null/);
+  match(source, /target=\{isTemporary \? "_blank" : undefined\}/);
+  match(source, /\{isTemporary \? "快速下载" : "下载"\}/);
+});
+
+test("video task rows and preview show elapsed runtime", () => {
+  match(source, /function formatTaskElapsed\(ms\?: number \| null\): string \| null/);
+  match(source, /function taskElapsedLabel\(item: VideoGenerationOut\): string \| null/);
+  match(source, /\$\{isTerminalVideo\(item\) \? "耗时" : "已耗时"\} \$\{elapsed\}/);
+  match(source, /const elapsedLabel = taskElapsedLabel\(item\)/);
+  match(source, /\{elapsedLabel && <span>\{elapsedLabel\}<\/span>\}/);
+});

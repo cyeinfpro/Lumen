@@ -228,6 +228,123 @@ def test_video_media_response_honors_weak_multi_and_wildcard_etags(
     assert wildcard.status_code == 304
 
 
+def _volcano_tos_url(
+    *,
+    signed_at: str = "20260627T092821Z",
+    expires_s: int = 86400,
+) -> str:
+    return (
+        "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/"
+        "doubao-seedance-2-0/output.mp4"
+        "?X-Tos-Algorithm=TOS4-HMAC-SHA256"
+        "&X-Tos-Credential=AKLT%2F20260627%2Fcn-beijing%2Ftos%2Frequest"
+        f"&X-Tos-Date={signed_at}"
+        f"&X-Tos-Expires={expires_s}"
+        "&X-Tos-Signature=abc123"
+        "&X-Tos-SignedHeaders=host"
+    )
+
+
+def test_temporary_video_download_exposes_unexpired_volcano_tos_url() -> None:
+    row = SimpleNamespace(
+        provider_kind="volcano",
+        upstream_response={"content": {"video_url": _volcano_tos_url()}},
+    )
+
+    out = videos._temporary_video_download_out(  # noqa: SLF001
+        row,
+        now=datetime(2026, 6, 27, 9, 29, 21, tzinfo=timezone.utc),
+    )
+
+    assert out is not None
+    assert out.source == "volcano"
+    assert out.url == _volcano_tos_url()
+    assert out.expires_at == datetime(2026, 6, 28, 9, 28, 21, tzinfo=timezone.utc)
+    assert out.expires_in_s == 86_340
+
+
+def test_temporary_video_download_hides_expired_or_near_expired_urls() -> None:
+    row = SimpleNamespace(
+        provider_kind="volcano",
+        upstream_response={"content": {"video_url": _volcano_tos_url()}},
+    )
+
+    out = videos._temporary_video_download_out(  # noqa: SLF001
+        row,
+        now=datetime(2026, 6, 28, 9, 27, 31, tzinfo=timezone.utc),
+    )
+
+    assert out is None
+
+
+def test_temporary_video_download_requires_volcano_tos_signature() -> None:
+    unsigned = SimpleNamespace(
+        provider_kind="volcano",
+        upstream_response={"content": {"video_url": "https://cdn.example/output.mp4"}},
+    )
+    spoofed = SimpleNamespace(
+        provider_kind="volcano",
+        upstream_response={
+            "content": {
+                "video_url": _volcano_tos_url().replace(
+                    "ark-acg-cn-beijing.tos-cn-beijing.volces.com",
+                    "cdn.example",
+                )
+            }
+        },
+    )
+    other_provider = SimpleNamespace(
+        provider_kind="omni_flash",
+        upstream_response={"content": {"video_url": _volcano_tos_url()}},
+    )
+
+    assert (
+        videos._temporary_video_download_out(  # noqa: SLF001
+            unsigned,
+            now=datetime(2026, 6, 27, 9, 29, 21, tzinfo=timezone.utc),
+        )
+        is None
+    )
+    assert (
+        videos._temporary_video_download_out(  # noqa: SLF001
+            spoofed,
+            now=datetime(2026, 6, 27, 9, 29, 21, tzinfo=timezone.utc),
+        )
+        is None
+    )
+    assert (
+        videos._temporary_video_download_out(  # noqa: SLF001
+            other_provider,
+            now=datetime(2026, 6, 27, 9, 29, 21, tzinfo=timezone.utc),
+        )
+        is None
+    )
+
+
+def test_generation_elapsed_ms_uses_finished_at_for_terminal_rows() -> None:
+    row = SimpleNamespace(
+        created_at=datetime(2026, 6, 27, 9, 14, 35, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 6, 27, 9, 28, 50, tzinfo=timezone.utc),
+    )
+
+    assert videos._generation_elapsed_ms(row) == 855_000  # noqa: SLF001
+
+
+def test_generation_elapsed_ms_uses_now_for_active_rows() -> None:
+    row = SimpleNamespace(
+        created_at=datetime(2026, 6, 27, 9, 14, 35, tzinfo=timezone.utc),
+        finished_at=None,
+    )
+
+    assert (
+        videos._generation_elapsed_ms(  # noqa: SLF001
+            row,
+            now=datetime(2026, 6, 27, 9, 15, 5, 500000, tzinfo=timezone.utc),
+        )
+        == 30_500
+    )
+
+
 def test_video_duration_options_include_smart_duration() -> None:
     assert (
         videos._duration_options(  # noqa: SLF001
