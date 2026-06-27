@@ -492,6 +492,64 @@ async def test_create_assistant_task_chat_caller_without_preflight_still_holds(
 
 
 @pytest.mark.asyncio
+async def test_create_assistant_task_splits_image_count_into_wallet_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    estimate_calls: list[dict[str, Any]] = []
+    hold_calls: list[dict[str, Any]] = []
+
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    async def estimate_for_tier(*_args: Any, **kwargs: Any) -> tuple[int, str]:
+        estimate_calls.append(dict(kwargs))
+        return 7_000, kwargs["tier"]
+
+    async def hold(_db: Any, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
+        hold_calls.append({"user_id": user_id, "amount_micro": amount_micro, **kwargs})
+        return SimpleNamespace(balance_after=100_000, hold_after=amount_micro)
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(
+        messages.billing_core,
+        "estimate_image_cost_for_tier",
+        estimate_for_tier,
+    )
+    monkeypatch.setattr(messages.billing_core, "hold", hold)
+
+    db = _Db([])
+    result = await messages._create_assistant_task(  # noqa: SLF001
+        db=db,  # type: ignore[arg-type]
+        user_id="user-1",
+        account_mode="wallet",
+        conv=_conv(),  # type: ignore[arg-type]
+        user_msg=SimpleNamespace(id="user-msg"),
+        intent=messages.Intent.TEXT_TO_IMAGE,
+        idempotency_key="idem-image-split-holds",
+        image_params=ImageParamsIn(count=3, quality="2k"),
+        chat_params=ChatParamsIn(),
+        system_prompt=None,
+        attachment_ids=[],
+        text="make three options",
+    )
+
+    gens = [item for item in db.added if item.__class__.__name__ == "Generation"]
+    assert result.generation_ids == [gen.id for gen in gens]
+    assert len(gens) == 3
+    assert estimate_calls == [{"tier": "2k", "n": 1}]
+    assert [call["ref_id"] for call in hold_calls] == result.generation_ids
+    assert all(call["amount_micro"] == 7_000 for call in hold_calls)
+    assert all(call["allow_negative"] is False for call in hold_calls)
+    assert [call["meta"]["image_count"] for call in hold_calls] == [1, 1, 1]
+    assert [call["meta"]["batch_task_index"] for call in hold_calls] == [1, 2, 3]
+    assert [gen.upstream_request["n"] for gen in gens] == [1, 1, 1]
+
+
+@pytest.mark.asyncio
 async def test_post_message_wallet_preflight_failure_rolls_back_flushed_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1245,7 +1303,7 @@ async def test_post_message_persists_image_render_options(
     )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
-    await messages.post_message(
+    out = await messages.post_message(
         "conv-1",
         PostMessageIn(
             idempotency_key="idem-img-options",
@@ -1268,7 +1326,9 @@ async def test_post_message_persists_image_render_options(
         db,  # type: ignore[arg-type]
     )
 
-    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    gens = [item for item in db.added if item.__class__.__name__ == "Generation"]
+    assert len(gens) == 10
+    assert out.generation_ids == [gen.id for gen in gens]
     expected = {
         "fast": False,
         "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
@@ -1280,15 +1340,35 @@ async def test_post_message_persists_image_render_options(
         "output_compression": 88,
         "billing_tier": "4k",
         "billing_tier_source": "request_quality",
-        "n": 10,
+        "n": 1,
     }
-    for key, value in expected.items():
-        assert gen.upstream_request[key] == value
-    assert gen.upstream_request["trace_id"].startswith("gen_")
-    assert gen.upstream_request["queue_lane"] == "image:interactive:medium"
-    outbox = next(item for item in db.added if item.__class__.__name__ == "OutboxEvent")
-    assert outbox.payload["task_id"] == gen.id
-    assert "defer_s" not in outbox.payload
+    stored_key = messages._stored_idempotency_key(  # noqa: SLF001
+        "conv-1", "idem-img-options"
+    )
+    trace_ids: set[str] = set()
+    for idx, gen in enumerate(gens, start=1):
+        for key, value in expected.items():
+            assert gen.upstream_request[key] == value
+        assert gen.upstream_request["trace_id"].startswith("gen_")
+        trace_ids.add(gen.upstream_request["trace_id"])
+        assert gen.upstream_request["queue_lane"] == "image:interactive:medium"
+        assert gen.upstream_request["batch_task_index"] == idx
+        assert gen.upstream_request["batch_task_count"] == 10
+        assert gen.upstream_request["requested_image_count"] == 10
+        assert gen.idempotency_key == messages._generation_child_idempotency_key(  # noqa: SLF001
+            stored_key, idx
+        )
+    assert len(trace_ids) == 10
+    outboxes = [item for item in db.added if item.__class__.__name__ == "OutboxEvent"]
+    assert [outbox.payload["task_id"] for outbox in outboxes] == [gen.id for gen in gens]
+    assert "defer_s" not in outboxes[0].payload
+    assert [outbox.payload.get("defer_s") for outbox in outboxes[1:]] == [
+        min(
+            messages.IMAGE_MULTI_GEN_STAGGER_CAP_S,
+            i * messages.IMAGE_MULTI_GEN_STAGGER_S,
+        )
+        for i in range(1, 10)
+    ]
 
 
 @pytest.mark.asyncio

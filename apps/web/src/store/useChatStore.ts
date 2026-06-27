@@ -2926,7 +2926,12 @@ function createChatStore() {
       // 1) 乐观插入 user msg + pending assistant msg
       const optimisticUserId = `opt-user-${uuid()}`;
       const optimisticAssistantId = `opt-asst-${uuid()}`;
-      const optimisticGenIds = isImage ? [`opt-gen-${uuid()}`] : [];
+      const optimisticGenIds = isImage
+        ? Array.from(
+            { length: clampImageCount(params.count) },
+            () => `opt-gen-${uuid()}`,
+          )
+        : [];
       const optimisticGenId = optimisticGenIds[0];
       const now = Date.now();
 
