@@ -67,6 +67,7 @@ type VideoGenerationWithVideo = VideoGenerationOut & {
 type ReferenceDraft = VideoReferenceMediaIn & {
   _key: string;
   label: string;
+  ref_id: string;
   display: string;
 };
 
@@ -122,6 +123,18 @@ const VIDEO_PROMPT_VARIANT_TITLES = [
   "动作节奏版",
   "参考一致版",
 ];
+const REFERENCE_REF_ID_RE = /^ref:(image|video):([1-9][0-9]{0,2})$/;
+const CHINESE_DIGITS: Record<number, string> = {
+  1: "一",
+  2: "二",
+  3: "三",
+  4: "四",
+  5: "五",
+  6: "六",
+  7: "七",
+  8: "八",
+  9: "九",
+};
 
 type VideoHistoryFilter = "all" | "succeeded" | "failed";
 
@@ -588,12 +601,178 @@ function normalizeAssetUrl(value: string): string {
   return /^asset-[a-z0-9][a-z0-9_-]*$/.test(assetId) ? `asset://${assetId}` : "";
 }
 
+function referenceRefId(kind: "image" | "video", index: number): string {
+  return `ref:${kind}:${index}`;
+}
+
+function referenceRefIndex(
+  refId: string | null | undefined,
+  kind: "image" | "video",
+): number | null {
+  const match = (refId ?? "").trim().toLowerCase().match(REFERENCE_REF_ID_RE);
+  if (!match || match[1] !== kind) return null;
+  const index = Number(match[2]);
+  return Number.isInteger(index) && index > 0 ? index : null;
+}
+
+function referenceLabel(kind: "image" | "video", index: number): string {
+  return `${kind === "image" ? "图片" : "视频"} ${index}`;
+}
+
+function nextReferenceIdentity(
+  kind: "image" | "video",
+  refs: ReferenceDraft[],
+): { refId: string; label: string } {
+  const maxIndex = refs.reduce((max, item) => {
+    if (item.kind !== kind) return max;
+    return Math.max(max, referenceRefIndex(item.ref_id, kind) ?? 0);
+  }, 0);
+  const index = maxIndex + 1;
+  return { refId: referenceRefId(kind, index), label: referenceLabel(kind, index) };
+}
+
+function referencePromptToken(
+  item: Pick<VideoReferenceMediaIn, "kind" | "ref_id">,
+  fallbackIndex = 1,
+): string {
+  const rawRefId = item.ref_id?.trim().toLowerCase() ?? "";
+  const index = referenceRefIndex(rawRefId, item.kind);
+  return `[${index ? rawRefId : referenceRefId(item.kind, fallbackIndex)}]`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function referenceMentionAliases(item: ReferenceDraft): string[] {
+  const index = referenceRefIndex(item.ref_id, item.kind);
+  if (!index) return [];
+  const aliases = new Set<string>();
+  const noun = item.kind === "image" ? "图片" : "视频";
+  const shortNoun = item.kind === "image" ? "图" : "视频";
+  const zh = CHINESE_DIGITS[index];
+  const videoRoleAliases =
+    item.kind === "video"
+      ? [
+          `视频素材 ${index}`,
+          `视频素材${index}`,
+          `参考视频 ${index}`,
+          `参考视频${index}`,
+          `动作参考 ${index}`,
+          `动作参考${index}`,
+          `运动参考 ${index}`,
+          `运动参考${index}`,
+        ]
+      : [];
+  for (const alias of [
+    item.label,
+    `[${item.label}]`,
+    `${noun} ${index}`,
+    `${noun}${index}`,
+    `${shortNoun}${index}`,
+    ...videoRoleAliases,
+    item.kind === "image" ? `第${index}张${noun}` : `第${index}个${noun}`,
+    item.kind === "image" ? `第${index}张${shortNoun}` : `第${index}段${noun}`,
+    item.kind === "video" ? `第${index}段素材` : "",
+    item.kind === "video" ? `第${index}个视频素材` : "",
+    zh && item.kind === "image" ? `第${zh}张${noun}` : "",
+    zh && item.kind === "image" ? `第${zh}张${shortNoun}` : "",
+    zh && item.kind === "video" ? `第${zh}个${noun}` : "",
+    zh && item.kind === "video" ? `第${zh}段${noun}` : "",
+    zh && item.kind === "video" ? `第${zh}段素材` : "",
+    zh && item.kind === "video" ? `第${zh}个视频素材` : "",
+  ]) {
+    if (typeof alias !== "string") continue;
+    const clean = alias.trim();
+    if (clean) aliases.add(clean);
+  }
+  return Array.from(aliases);
+}
+
+function normalizePromptReferenceMentions(
+  text: string,
+  refs: ReferenceDraft[],
+): string {
+  if (!text.trim() || refs.length === 0) return text;
+  let next = text;
+  for (const item of refs) {
+    const token = referencePromptToken(item);
+    if (next.includes(token)) continue;
+    for (const alias of referenceMentionAliases(item)) {
+      const pattern = new RegExp(escapeRegExp(alias), "i");
+      if (!pattern.test(next)) continue;
+      next = next.replace(pattern, (match) => `${match} ${token}`);
+      break;
+    }
+  }
+
+  for (const kind of ["image", "video"] as const) {
+    const sameKindRefs = refs.filter((item) => item.kind === kind);
+    if (sameKindRefs.length !== 1) continue;
+    const item = sameKindRefs[0];
+    const token = referencePromptToken(item);
+    if (next.includes(token)) continue;
+    const phrases =
+      kind === "image"
+        ? ["这张参考图", "这个参考图", "这张图片", "这个图片", "这张图", "这个图"]
+        : [
+            "这段参考视频",
+            "这个参考视频",
+            "这段视频素材",
+            "这个视频素材",
+            "这段动作参考",
+            "这个动作参考",
+            "这段运动参考",
+            "这个运动参考",
+            "这段素材",
+            "这个素材",
+            "这段视频",
+            "这个视频",
+          ];
+    for (const phrase of phrases) {
+      const pattern = new RegExp(escapeRegExp(phrase), "i");
+      if (!pattern.test(next)) continue;
+      next = next.replace(pattern, (match) => `${match} ${token}`);
+      break;
+    }
+  }
+  return next;
+}
+
+function preservePromptReferenceTokens(
+  promptText: string,
+  sourceText: string,
+  refs: ReferenceDraft[],
+): string {
+  if (!promptText.trim() || refs.length === 0) return promptText;
+  const missingTokens = refs
+    .map((item) => referencePromptToken(item))
+    .filter((token) => sourceText.includes(token) && !promptText.includes(token));
+  if (missingTokens.length === 0) return promptText;
+  const trimmed = promptText.trimEnd();
+  const suffix = `保持参考锚点 ${missingTokens.join("、")} 对应的素材约束。`;
+  return `${trimmed}${/[。.!?？]$/.test(trimmed) ? " " : "。"}${suffix}`;
+}
+
+function anchorPromptEnhanceCandidates(
+  candidates: PromptEnhanceCandidate[],
+  sourceText: string,
+  refs: ReferenceDraft[],
+): PromptEnhanceCandidate[] {
+  if (refs.length === 0) return candidates;
+  return candidates.map((candidate) => ({
+    ...candidate,
+    prompt: preservePromptReferenceTokens(candidate.prompt, sourceText, refs),
+  }));
+}
+
 function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
   if (item.url) {
     return {
       kind: item.kind,
       url: item.url,
       label: item.label,
+      ref_id: item.ref_id,
     };
   }
   return {
@@ -601,6 +780,7 @@ function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
     image_id: item.kind === "image" ? item.image_id ?? null : null,
     video_id: item.kind === "video" ? item.video_id ?? null : null,
     label: item.label,
+    ref_id: item.ref_id,
   };
 }
 
@@ -967,13 +1147,6 @@ export default function VideoPage() {
     durationS: effectiveDurationS,
     referenceHasVideo: referenceMedia.some((item) => item.kind === "video"),
   });
-  const nextReferenceLabel = useCallback(
-    (kind: "image" | "video") => {
-      const count = referenceMedia.filter((item) => item.kind === kind).length + 1;
-      return `${kind === "image" ? "图片" : "视频"} ${count}`;
-    },
-    [referenceMedia],
-  );
   const clearPromptEnhanceChoices = useCallback(() => {
     setPromptEnhancePreview("");
     setPromptEnhanceCandidates([]);
@@ -1006,8 +1179,8 @@ export default function VideoPage() {
     });
   }, [clearPromptEnhanceSelection, prompt]);
 
-  const insertReferenceTag = useCallback((label: string) => {
-    insertPromptText(`[${label}]`);
+  const insertReferenceTag = useCallback((item: ReferenceDraft) => {
+    insertPromptText(referencePromptToken(item));
   }, [insertPromptText]);
 
   const uploadMut = useMutation({
@@ -1062,7 +1235,7 @@ export default function VideoPage() {
           return prev;
         }
         accepted = true;
-        const label = `${ref.kind === "image" ? "图片" : "视频"} ${currentCount + 1}`;
+        const identity = nextReferenceIdentity(ref.kind, prev);
         return [
           ...prev,
           {
@@ -1070,7 +1243,8 @@ export default function VideoPage() {
             kind: ref.kind,
             image_id: ref.kind === "image" ? ref.image_id : null,
             video_id: ref.kind === "video" ? ref.video_id : null,
-            label,
+            label: identity.label,
+            ref_id: identity.refId,
             display: ref.display,
           },
         ];
@@ -1093,32 +1267,33 @@ export default function VideoPage() {
       return;
     }
     clearPromptEnhanceChoices();
-    const label = nextReferenceLabel("image");
     setReferenceMedia((prev) => [
       ...prev,
-      {
-        _key: uuid(),
-        kind: "image",
-        url,
-        label,
-        display: url,
-      },
+      (() => {
+        const identity = nextReferenceIdentity("image", prev);
+        return {
+          _key: uuid(),
+          kind: "image" as const,
+          url,
+          label: identity.label,
+          ref_id: identity.refId,
+          display: url,
+        };
+      })(),
     ]);
     setAssetUrlInput("");
     toast.success("官方素材已添加");
-  }, [
-    assetUrlInput,
-    clearPromptEnhanceChoices,
-    nextReferenceLabel,
-    referenceMedia,
-  ]);
+  }, [assetUrlInput, clearPromptEnhanceChoices, referenceMedia]);
 
   const createMut = useMutation({
     mutationFn: () =>
       createVideoGeneration({
         action,
         model: selectedModel,
-        prompt: prompt.trim(),
+        prompt:
+          action === "reference"
+            ? normalizePromptReferenceMentions(prompt.trim(), referenceMedia)
+            : prompt.trim(),
         input_image_id: action === "i2v" ? inputImageId.trim() : null,
         reference_media:
           action === "reference"
@@ -1207,6 +1382,7 @@ export default function VideoPage() {
           video_id: ref.kind === "video" ? ref.video_id ?? null : null,
           url: ref.url ?? null,
           label,
+          ref_id: ref.ref_id || referenceRefId(ref.kind, kindIndex),
           display:
             ref.url
               ? ref.url.replace(/^asset:\/\//i, "asset://")
@@ -1229,7 +1405,11 @@ export default function VideoPage() {
   const enhancePromptAction = useCallback(async () => {
     if (isEnhancingPrompt || !canEnhancePrompt) return;
     const original = prompt;
-    const current = prompt.trim();
+    const activeReferenceMedia = action === "reference" ? referenceMedia : [];
+    const current =
+      action === "reference"
+        ? normalizePromptReferenceMentions(prompt.trim(), activeReferenceMedia)
+        : prompt.trim();
     const ctl = new AbortController();
     promptEnhanceAbortRef.current?.abort();
     promptEnhanceAbortRef.current = ctl;
@@ -1260,7 +1440,11 @@ export default function VideoPage() {
         },
         ctl.signal,
       );
-      const candidates = parsePromptEnhanceCandidates(accumulated);
+      const candidates = anchorPromptEnhanceCandidates(
+        parsePromptEnhanceCandidates(accumulated),
+        current,
+        activeReferenceMedia,
+      );
       const recommended = candidates[0];
       if (recommended) {
         const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
@@ -1298,7 +1482,11 @@ export default function VideoPage() {
       if (!ctl.signal.aborted) {
         const description = err instanceof Error ? err.message : undefined;
         if (accumulated.trim()) {
-          const candidates = parsePromptEnhanceCandidates(accumulated);
+          const candidates = anchorPromptEnhanceCandidates(
+            parsePromptEnhanceCandidates(accumulated),
+            current,
+            activeReferenceMedia,
+          );
           const recommended = candidates[0];
           if (recommended) {
             const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
@@ -1622,7 +1810,7 @@ export default function VideoPage() {
                               <ReferenceChip
                                 key={item._key}
                                 item={item}
-                                onInsert={() => insertReferenceTag(item.label)}
+                                onInsert={() => insertReferenceTag(item)}
                                 onRemove={() => {
                                   clearPromptEnhanceChoices();
                                   setReferenceMedia((prev) =>
@@ -1667,7 +1855,7 @@ export default function VideoPage() {
                         readOnly={isEnhancingPrompt}
                         rows={6}
                         maxLength={10000}
-                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进、参考素材怎么用，以及不要出现的字幕/水印。"
+                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 [ref:image:1] 这类锚点来指定图片/视频。"
                         className={cn(
                           "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
                           isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
@@ -2483,11 +2671,13 @@ function ReferenceChip({
   onInsert: () => void;
   onRemove: () => void;
 }) {
+  const token = referencePromptToken(item);
   return (
     <div className="inline-flex min-h-10 max-w-full items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-2 text-xs text-[var(--fg-1)]">
       <button
         type="button"
         onClick={onInsert}
+        title={`插入 ${token}`}
         className="inline-flex min-w-0 items-center gap-2 rounded-[var(--radius-control)] px-1 py-1 text-left transition-colors hover:bg-[var(--bg-2)]"
       >
         {item.kind === "image" ? (
@@ -2495,7 +2685,8 @@ function ReferenceChip({
         ) : (
           <VideoIcon className="h-3.5 w-3.5 shrink-0" />
         )}
-        <span className="shrink-0">[{item.label}]</span>
+        <span className="shrink-0 font-medium text-[var(--fg-0)]">{token}</span>
+        <span className="shrink-0 text-[var(--fg-2)]">{item.label}</span>
         <span className="truncate text-[var(--fg-2)]">{item.display}</span>
       </button>
       <button

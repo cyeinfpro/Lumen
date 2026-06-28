@@ -500,6 +500,7 @@ VideoPricingVariant = Literal[
 ]
 VideoResolution = Literal["480p", "720p", "1080p", "4k"]
 VideoAspectRatio = Literal["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
+_VIDEO_REFERENCE_ID_RE = re.compile(r"^ref:(image|video):[1-9][0-9]{0,2}$")
 
 
 class VideoReferenceMediaIn(BaseModel):
@@ -510,9 +511,18 @@ class VideoReferenceMediaIn(BaseModel):
     video_id: str | None = Field(default=None, max_length=36)
     url: str | None = Field(default=None, max_length=2048)
     label: str | None = Field(default=None, max_length=32)
+    ref_id: str | None = Field(default=None, max_length=32)
 
     @model_validator(mode="after")
     def validate_reference_source(self) -> "VideoReferenceMediaIn":
+        if self.ref_id:
+            ref_id = self.ref_id.strip().lower()
+            match = _VIDEO_REFERENCE_ID_RE.fullmatch(ref_id)
+            if match is None:
+                raise ValueError("reference media ref_id must look like ref:image:1")
+            if match.group(1) != self.kind:
+                raise ValueError("reference media ref_id kind must match kind")
+            self.ref_id = ref_id
         sources = [
             bool((self.image_id or "").strip()),
             bool((self.video_id or "").strip()),
@@ -560,6 +570,7 @@ class VideoReferenceMediaOut(BaseModel):
     video_id: str | None = None
     url: str | None = None
     label: str | None = None
+    ref_id: str | None = None
     mime: str | None = None
 
 

@@ -1722,7 +1722,14 @@ async def test_reference_media_snapshots_adds_public_url_for_image(
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
         user_id="user-1",
-        items=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
+        items=[
+            VideoReferenceMediaIn(
+                kind="image",
+                image_id="image-1",
+                label="商品图",
+                ref_id="ref:image:2",
+            )
+        ],
         reference_public_base_url="https://lumen.example",
     )
 
@@ -1730,6 +1737,8 @@ async def test_reference_media_snapshots_adds_public_url_for_image(
         "https://lumen.example/api/images/reference/image-1/binary?token="
     )
     assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["label"] == "商品图"
+    assert snapshots[0]["ref_id"] == "ref:image:2"
     assert "video_reference_access_token" in image.metadata_jsonb
     assert "video_reference_access_token_expires_at" in image.metadata_jsonb
     assert ensured == ["image-1"]
@@ -1776,6 +1785,8 @@ async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
                 "kind": "image",
                 "image_id": "image-1",
                 "url": "https://old.example/api/images/reference/image-1/binary?token=old",
+                "label": "",
+                "ref_id": "ref:video:2",
             }
         ],
         reference_public_base_url="https://lumen.example",
@@ -1785,6 +1796,8 @@ async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
         "https://lumen.example/api/images/reference/image-1/binary?token="
     )
     assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["ref_id"] == "ref:image:1"
+    assert snapshots[0]["label"] == "Image 1"
 
 
 @pytest.mark.asyncio

@@ -428,6 +428,12 @@ async def _reference_media_bytes(
         clean_label = (
             label.strip() if isinstance(label, str) and label.strip() else None
         )
+        ref_id = item.get("ref_id")
+        clean_ref_id = (
+            ref_id.strip().lower()
+            if isinstance(ref_id, str) and ref_id.strip()
+            else None
+        )
         mime = item.get("mime") if isinstance(item.get("mime"), str) else None
         upstream_mime = item.get("upstream_reference_mime")
         if isinstance(upstream_mime, str) and upstream_mime.strip():
@@ -465,6 +471,7 @@ async def _reference_media_bytes(
                     mime=mime,
                     url=clean_url,
                     label=clean_label,
+                    ref_id=clean_ref_id,
                 )
             )
             continue
@@ -482,6 +489,7 @@ async def _reference_media_bytes(
                 ),
                 mime=mime,
                 label=clean_label,
+                ref_id=clean_ref_id,
             )
         )
     if not result:

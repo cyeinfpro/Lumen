@@ -31,8 +31,23 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
 });
 
 test("video prompt enhancement copy stays video-model specific", () => {
-  match(source, /动作轨迹、镜头运动、首尾时间推进、参考素材怎么用/);
+  match(source, /动作轨迹、镜头运动、首尾时间推进/);
+  match(source, /点击参考素材插入 \[ref:image:1\]/);
   match(source, /按火山视频结构补动作、运镜和参考一致性/);
+});
+
+test("video reference prompts use stable anchor ids through enhancement", () => {
+  match(source, /const REFERENCE_REF_ID_RE = \/\^ref:\(image\|video\):/);
+  match(source, /function normalizePromptReferenceMentions\(/);
+  match(source, /function preservePromptReferenceTokens\(/);
+  match(source, /anchorPromptEnhanceCandidates\(/);
+  match(source, /normalizePromptReferenceMentions\(prompt\.trim\(\), referenceMedia\)/);
+  match(source, /referencePromptToken\(item\)/);
+  match(source, /插入 \$\{token\}/);
+  match(source, /\[ref:image:1\]/);
+  match(source, /视频素材 \$\{index\}/);
+  match(source, /动作参考 \$\{index\}/);
+  match(source, /这段素材/);
 });
 
 test("video prompt enhancement respects Vibe Creating non-rewrite actions", () => {

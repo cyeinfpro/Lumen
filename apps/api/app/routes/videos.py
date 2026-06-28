@@ -583,8 +583,28 @@ def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | N
         else None,
         url=url,
         label=snapshot.get("label") if isinstance(snapshot.get("label"), str) else None,
+        ref_id=snapshot.get("ref_id")
+        if isinstance(snapshot.get("ref_id"), str)
+        else None,
         mime=snapshot.get("mime") if isinstance(snapshot.get("mime"), str) else None,
     )
+
+
+def _reference_snapshot_ref_id(kind: str, index: int, raw: Any) -> str:
+    default = f"ref:{kind}:{index}"
+    if not isinstance(raw, str):
+        return default
+    value = raw.strip().lower()
+    parts = value.split(":")
+    if (
+        len(parts) == 3
+        and parts[0] == "ref"
+        and parts[1] == kind
+        and parts[2].isdigit()
+        and int(parts[2]) > 0
+    ):
+        return value
+    return default
 
 
 def _is_internal_reference_url(raw_url: str | None) -> bool:
@@ -1690,6 +1710,29 @@ async def _reference_media_snapshots(
 ) -> list[dict[str, Any]]:
     if fallback_snapshots is not None:
         snapshots = [dict(item) for item in fallback_snapshots]
+        image_index = 0
+        video_index = 0
+        for snapshot in snapshots:
+            if snapshot.get("kind") == "image":
+                image_index += 1
+                snapshot["ref_id"] = _reference_snapshot_ref_id(
+                    "image", image_index, snapshot.get("ref_id")
+                )
+                if (
+                    not isinstance(snapshot.get("label"), str)
+                    or not snapshot["label"].strip()
+                ):
+                    snapshot["label"] = f"Image {image_index}"
+            elif snapshot.get("kind") == "video":
+                video_index += 1
+                snapshot["ref_id"] = _reference_snapshot_ref_id(
+                    "video", video_index, snapshot.get("ref_id")
+                )
+                if (
+                    not isinstance(snapshot.get("label"), str)
+                    or not snapshot["label"].strip()
+                ):
+                    snapshot["label"] = f"Video {video_index}"
         if reference_public_base_url is not None:
             for snapshot in snapshots:
                 if snapshot.get("kind") == "image" and isinstance(
@@ -1741,16 +1784,20 @@ async def _reference_media_snapshots(
         if item.kind == "image":
             image_index += 1
             default_label = f"Image {image_index}"
+            default_ref_id = f"ref:image:{image_index}"
         else:
             video_index += 1
             default_label = f"Video {video_index}"
+            default_ref_id = f"ref:video:{video_index}"
         label = (item.label or "").strip() or default_label
+        ref_id = (item.ref_id or "").strip() or default_ref_id
         if item.url:
             snapshots.append(
                 {
                     "kind": item.kind,
                     "url": _validate_reference_url(item.url),
                     "label": label,
+                    "ref_id": ref_id,
                     "source": "url",
                 }
             )
@@ -1783,6 +1830,7 @@ async def _reference_media_snapshots(
                     "kind": "image",
                     "image_id": image.id,
                     "label": label,
+                    "ref_id": ref_id,
                     "storage_key": image.storage_key,
                     "sha256": image.sha256,
                     "mime": image.mime,
@@ -1811,6 +1859,7 @@ async def _reference_media_snapshots(
                     "kind": "video",
                     "video_id": video.id,
                     "label": label,
+                    "ref_id": ref_id,
                     "storage_key": video.storage_key,
                     "sha256": video.sha256,
                     "mime": video.mime,
@@ -2397,6 +2446,9 @@ async def retry_video_generation(
                 else None,
                 url=item.get("url") if isinstance(item.get("url"), str) else None,
                 label=item.get("label") if isinstance(item.get("label"), str) else None,
+                ref_id=item.get("ref_id")
+                if isinstance(item.get("ref_id"), str)
+                else None,
             )
             reference_inputs.append(reference_input)
             valid_reference_snapshots.append(item)

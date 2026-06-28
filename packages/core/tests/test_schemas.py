@@ -62,8 +62,7 @@ def test_video_provider_schema_accepts_volcano_third_party():
     item = body.items[0]
     assert item.kind == "volcano_third_party"
     assert (
-        item.models["seedance-2.0-fast:reference"]
-        == "doubao-seedance-2-0-fast-260128"
+        item.models["seedance-2.0-fast:reference"] == "doubao-seedance-2-0-fast-260128"
     )
 
 
@@ -295,8 +294,18 @@ def test_video_create_schema_enforces_action_image_contract():
         model="seedance-2.0",
         prompt="[Image 1] and [Video 1] keep the character consistent",
         reference_media=[
-            {"kind": "image", "image_id": "img-1", "label": "Image 1"},
-            {"kind": "video", "video_id": "vid-1", "label": "Video 1"},
+            {
+                "kind": "image",
+                "image_id": "img-1",
+                "label": "Image 1",
+                "ref_id": "ref:image:1",
+            },
+            {
+                "kind": "video",
+                "video_id": "vid-1",
+                "label": "Video 1",
+                "ref_id": "ref:video:1",
+            },
         ],
         duration_s=5,
         resolution="480p",
@@ -366,6 +375,26 @@ def test_video_create_schema_enforces_action_image_contract():
         {
             "action": "reference",
             "reference_media": [
+                {
+                    "kind": "image",
+                    "image_id": "img-2",
+                    "ref_id": "ref:video:1",
+                }
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "image_id": "img-2",
+                    "ref_id": "image-1",
+                }
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
                 {"kind": "image", "image_id": f"img-{idx}"} for idx in range(10)
             ],
         },
@@ -399,6 +428,10 @@ def test_video_reference_media_rejects_unsafe_url_sources():
     from lumen_core.schemas import VideoReferenceMediaIn
 
     VideoReferenceMediaIn(kind="image", url="https://cdn.example.com/ref.png")
+    ref = VideoReferenceMediaIn(
+        kind="image", url="https://cdn.example.com/ref.png", ref_id=" REF:IMAGE:1 "
+    )
+    assert ref.ref_id == "ref:image:1"
     VideoReferenceMediaIn(kind="image", url="asset://asset-20260609161523-stlqd")
     mixed_asset = VideoReferenceMediaIn(
         kind="image",
