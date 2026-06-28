@@ -28,6 +28,9 @@ VIDEO_PROVIDER_KINDS = (
     "fake",
 )
 VIDEO_ACTIONS = ("t2v", "i2v", "reference")
+_VOLCANO_DOMESTIC_MODEL_ALIASES = {
+    "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
+}
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,15 @@ def _parse_models(raw: Any, *, provider_name: str) -> dict[str, str]:
     return result
 
 
+def _normalize_volcano_models(models: dict[str, str], *, kind: str) -> dict[str, str]:
+    if kind != "volcano":
+        return models
+    return {
+        key: _VOLCANO_DOMESTIC_MODEL_ALIASES.get(value, value)
+        for key, value in models.items()
+    }
+
+
 def parse_video_provider_item(
     item: dict[str, Any],
     *,
@@ -141,6 +153,10 @@ def parse_video_provider_item(
     if enabled and kind != "fake" and not api_key:
         raise ValueError(f"provider {name}: api_key is required")
     proxy_name = item.get("proxy", item.get("proxy_name"))
+    models = _normalize_volcano_models(
+        _parse_models(item.get("models"), provider_name=name),
+        kind=kind,
+    )
     return VideoProviderDefinition(
         name=name,
         kind=kind,
@@ -154,7 +170,7 @@ def parse_video_provider_item(
         concurrency=_parse_int(
             item.get("concurrency", 1), default=1, minimum=1, maximum=32
         ),
-        models=_parse_models(item.get("models"), provider_name=name),
+        models=models,
         proxy_name=proxy_name.strip()
         if isinstance(proxy_name, str) and proxy_name.strip()
         else None,

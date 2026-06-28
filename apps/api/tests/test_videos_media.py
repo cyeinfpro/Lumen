@@ -408,7 +408,7 @@ def test_seedance_20_resolution_options_match_official_model_limits() -> None:
     ) == ["480p", "720p"]
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
         "seedance-2.0-mini",
-        upstream_model="dreamina-seedance-2-0-mini-260615",
+        upstream_model="doubao-seedance-2-0-mini-260615",
         available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["480p", "720p"]
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
@@ -587,9 +587,9 @@ async def test_video_options_exposes_seedance_20_mini(
         base_url="https://ark.example/api/v3",
         api_key="sk-test",
         models={
-            "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
-            "seedance-2.0-mini:i2v": "dreamina-seedance-2-0-mini-260615",
-            "seedance-2.0-mini:reference": "dreamina-seedance-2-0-mini-260615",
+            "seedance-2.0-mini:t2v": "doubao-seedance-2-0-mini-260615",
+            "seedance-2.0-mini:i2v": "doubao-seedance-2-0-mini-260615",
+            "seedance-2.0-mini:reference": "doubao-seedance-2-0-mini-260615",
         },
     )
 
@@ -996,7 +996,7 @@ async def test_video_create_rejects_seedance_20_mini_1080p(
         base_url="https://ark.example/api/v3",
         api_key="sk-test",
         models={
-            "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
+            "seedance-2.0-mini:t2v": "doubao-seedance-2-0-mini-260615",
         },
     )
 

@@ -91,7 +91,7 @@ const VOLCANO_MODEL_PRESETS = [
   },
   {
     model: "seedance-2.0-mini",
-    upstream: "dreamina-seedance-2-0-mini-260615",
+    upstream: "doubao-seedance-2-0-mini-260615",
   },
 ] as const;
 const VEO_MODEL_PRESETS = [

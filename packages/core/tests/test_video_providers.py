@@ -50,6 +50,40 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
     )
 
 
+def test_parse_volcano_provider_rewrites_byteplus_seedance_mini_alias() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            models={
+                "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
+            }
+        ),
+        index=0,
+    )
+
+    assert (
+        provider.upstream_model_for("seedance-2.0-mini", "t2v")
+        == "doubao-seedance-2-0-mini-260615"
+    )
+
+
+def test_parse_third_party_provider_keeps_byteplus_seedance_mini_alias() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            kind="volcano_third_party",
+            base_url="https://www.moyu.info",
+            models={
+                "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
+            },
+        ),
+        index=0,
+    )
+
+    assert (
+        provider.upstream_model_for("seedance-2.0-mini", "t2v")
+        == "dreamina-seedance-2-0-mini-260615"
+    )
+
+
 def test_parse_dashscope_happyhorse_provider() -> None:
     provider = parse_video_provider_item(
         _provider_raw(
