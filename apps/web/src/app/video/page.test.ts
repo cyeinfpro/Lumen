@@ -23,7 +23,10 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /function PromptEnhanceChooser\(/);
   match(source, /onReturnToEditor=\{scrollPromptEditorIntoView\}/);
   match(source, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
-  match(source, /max-h-\[clamp\(14rem,60dvh,34rem\)\][^"]*overflow-y-auto/);
+  match(source, /sticky bottom-3/);
+  match(source, /max-h-\[min\(72dvh,36rem\)\]/);
+  match(source, /xl:grid-cols-\[minmax\(220px,280px\)_minmax\(0,1fr\)\]/);
+  match(source, /overflow-y-auto whitespace-pre-wrap/);
   match(source, /回到编辑/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
@@ -32,22 +35,39 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
 
 test("video prompt enhancement copy stays video-model specific", () => {
   match(source, /动作轨迹、镜头运动、首尾时间推进/);
-  match(source, /点击参考素材插入 \[ref:image:1\]/);
+  match(source, /点击参考素材插入 @图片1 \/ @视频1/);
   match(source, /按火山视频结构补动作、运镜和参考一致性/);
 });
 
 test("video reference prompts use stable anchor ids through enhancement", () => {
   match(source, /const REFERENCE_REF_ID_RE = \/\^ref:\(image\|video\):/);
+  match(source, /function referenceDisplayToken\(/);
+  match(source, /function serializePromptReferenceMentions\(/);
+  match(source, /function displayPromptReferenceMentions\(/);
   match(source, /function normalizePromptReferenceMentions\(/);
   match(source, /function preservePromptReferenceTokens\(/);
   match(source, /anchorPromptEnhanceCandidates\(/);
-  match(source, /normalizePromptReferenceMentions\(prompt\.trim\(\), referenceMedia\)/);
+  match(source, /serializePromptReferenceMentions\(prompt\.trim\(\), referenceMedia\)/);
   match(source, /referencePromptToken\(item\)/);
-  match(source, /插入 \$\{token\}/);
-  match(source, /\[ref:image:1\]/);
+  match(source, /insertPromptText\(referenceDisplayToken\(item\)\)/);
+  match(source, /return `@/);
+  match(source, /item\.kind === "image" \? "图片" : "视频"/);
+  match(source, /displayPromptReferenceMentions\(value, referenceMedia\)/);
+  match(source, /referenceRefId\(item\.kind, fallbackIndex\)/);
   match(source, /视频素材 \$\{index\}/);
   match(source, /动作参考 \$\{index\}/);
   match(source, /这段素材/);
+});
+
+test("video reference chips render material thumbnails", () => {
+  match(source, /previewUrl\?: string \| null/);
+  match(source, /function imageReferencePreviewUrl\(/);
+  match(source, /imageVariantUrl\(image\.id, "thumb256"\)/);
+  match(source, /video\.poster_url\) \?\? videoPosterUrl\(video\.id\)/);
+  match(source, /function ReferenceThumbnail\(/);
+  match(source, /<ReferenceThumbnail item=\{item\} active=\{active\} \/>/);
+  match(source, /<img\s+src=\{previewUrl \?\? ""\}/);
+  match(source, /promptContainsReferenceMention\(prompt, item\)/);
 });
 
 test("video prompt enhancement respects Vibe Creating non-rewrite actions", () => {
