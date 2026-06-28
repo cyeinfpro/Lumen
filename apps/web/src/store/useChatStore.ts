@@ -223,7 +223,7 @@ interface ChatState {
 }
 
 const DEFAULT_PARAMS: ImageParams = {
-  aspect_ratio: "16:9",
+  aspect_ratio: "7:10",
   size_mode: "fixed",
   quality: "4k",
   render_quality: "high",
@@ -496,6 +496,8 @@ const ASPECT_RATIOS = new Set<AspectRatio>([
   "9:16",
   "21:9",
   "9:21",
+  "10:7",
+  "7:10",
   "4:5",
   "3:4",
   "4:3",
@@ -2287,7 +2289,7 @@ function buildMessageListState(
       action: "generate",
       prompt: typeof content.text === "string" ? content.text : "",
       size_requested: firstImage?.size_requested ?? "auto",
-      aspect_ratio: "1:1",
+      aspect_ratio: DEFAULT_PARAMS.aspect_ratio,
       input_image_ids: [],
       primary_input_image_id: null,
       status: "succeeded",
@@ -3451,7 +3453,7 @@ function createChatStore() {
               params?.size_mode === "fixed" && params.fixed_size
                 ? params.fixed_size
                 : "auto",
-            aspect_ratio: params?.aspect_ratio ?? "16:9",
+            aspect_ratio: params?.aspect_ratio ?? DEFAULT_PARAMS.aspect_ratio,
             input_image_ids: attachments.map((a) => a.source_image_id ?? a.id),
             primary_input_image_id:
               attachments[0]?.source_image_id ?? attachments[0]?.id ?? null,
@@ -3512,8 +3514,10 @@ function createChatStore() {
       const gen = img.from_generation_id
         ? state.generations[img.from_generation_id]
         : undefined;
-      const aspect = (gen?.aspect_ratio ?? "16:9") as AspectRatio;
-      const preset = PRESET[aspect] ?? PRESET["16:9"];
+      const aspect = (
+        gen?.aspect_ratio ?? DEFAULT_PARAMS.aspect_ratio
+      ) as AspectRatio;
+      const preset = PRESET[aspect] ?? PRESET[DEFAULT_PARAMS.aspect_ratio];
       const fixedSize = `${preset.w}x${preset.h}`;
       const originalPrompt = gen?.prompt ?? "";
       const upscaleInstruction = [
@@ -4213,7 +4217,7 @@ function createChatStore() {
           const action = get_id("action");
           const prompt = get_id("prompt") ?? "";
           const size_requested = get_id("size_requested") ?? "auto";
-          const aspect_ratio = get_id("aspect_ratio") ?? "1:1";
+          const aspect_ratio = get_id("aspect_ratio") ?? DEFAULT_PARAMS.aspect_ratio;
           const primary_input_image_id =
             get_id("primary_input_image_id") ?? null;
           const inputImagesRaw = payload.input_image_ids;
@@ -4347,7 +4351,7 @@ function createChatStore() {
                 action: "generate",
                 prompt: "",
                 size_requested: img.size_requested,
-                aspect_ratio: "1:1",
+                aspect_ratio: DEFAULT_PARAMS.aspect_ratio,
                 input_image_ids: [],
                 primary_input_image_id: null,
                 status: "succeeded",

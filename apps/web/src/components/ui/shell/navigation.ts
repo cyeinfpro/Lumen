@@ -1,4 +1,6 @@
 export type AppNavKey = "studio" | "video" | "projects" | "assets" | "me";
+export type HideableAppNavKey = Exclude<AppNavKey, "me">;
+export type NavVisibility = Partial<Record<HideableAppNavKey, boolean>>;
 
 export interface AppNavItem {
   key: AppNavKey;
@@ -93,19 +95,81 @@ export const APP_NAV_ITEMS: readonly AppNavItem[] = IS_DESKTOP_RUNTIME
   ? DESKTOP_NAV_ITEMS
   : DOCKER_NAV_ITEMS;
 
+export const DEFAULT_NAV_VISIBILITY: Required<NavVisibility> = {
+  studio: true,
+  video: true,
+  projects: true,
+  assets: true,
+};
+
+export function normalizeNavVisibility(
+  value: NavVisibility | undefined | null,
+): Required<NavVisibility> {
+  return {
+    studio: value?.studio !== false,
+    video: value?.video !== false,
+    projects: value?.projects !== false,
+    assets: value?.assets !== false,
+  };
+}
+
+function isNavItemVisible(
+  item: AppNavItem,
+  visibility: NavVisibility | undefined | null,
+): boolean {
+  if (item.key === "me") return true;
+  return normalizeNavVisibility(visibility)[item.key] !== false;
+}
+
+export function getAppNavItems(
+  visibility?: NavVisibility | null,
+): readonly AppNavItem[] {
+  return APP_NAV_ITEMS.filter((item) => isNavItemVisible(item, visibility));
+}
+
 export function matchesPathPrefix(pathname: string, prefix: string): boolean {
   if (prefix === "/") return pathname === "/" || pathname === "";
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
-export function getActiveNavKey(pathname: string): AppNavKey | null {
+function getActiveNavKeyFromItems(
+  pathname: string,
+  items: readonly AppNavItem[],
+): AppNavKey | null {
   const normalized = pathname || "/";
-  for (const item of APP_NAV_ITEMS) {
+  for (const item of items) {
     if (item.matchPrefixes.some((prefix) => matchesPathPrefix(normalized, prefix))) {
       return item.key;
     }
   }
   return null;
+}
+
+export function getActiveNavKey(
+  pathname: string,
+  visibility?: NavVisibility | null,
+): AppNavKey | null {
+  return getActiveNavKeyFromItems(pathname, getAppNavItems(visibility));
+}
+
+export function getRouteNavKey(pathname: string): AppNavKey | null {
+  return getActiveNavKeyFromItems(pathname, APP_NAV_ITEMS);
+}
+
+export function getFirstVisibleNavRoute(
+  visibility?: NavVisibility | null,
+): string {
+  return getAppNavItems(visibility)[0]?.route ?? "/me";
+}
+
+export function getRedirectForHiddenNavPath(
+  pathname: string,
+  visibility?: NavVisibility | null,
+): string | null {
+  const key = getRouteNavKey(pathname);
+  if (!key || key === "me") return null;
+  if (normalizeNavVisibility(visibility)[key] !== false) return null;
+  return getFirstVisibleNavRoute(visibility);
 }
 
 export function isSameRoute(pathname: string, route: string): boolean {

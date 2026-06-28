@@ -34,6 +34,20 @@ def test_resolve_size_fixed_without_explicit_size_uses_aspect_preset():
     assert resolved.prompt_suffix == ""
 
 
+@pytest.mark.parametrize(
+    ("aspect", "expected"),
+    [
+        ("10:7", "3424x2400"),
+        ("7:10", "2400x3424"),
+    ],
+)
+def test_resolve_size_fixed_supports_paper_like_ratios(aspect, expected):
+    resolved = resolve_size(aspect, "fixed")
+
+    assert resolved.size == expected
+    assert resolved.prompt_suffix == ""
+
+
 def test_resolve_size_fixed_rejects_invalid_format():
     with pytest.raises(ValueError, match="invalid fixed_size format"):
         resolve_size("1:1", "fixed", "1024 by 1024")

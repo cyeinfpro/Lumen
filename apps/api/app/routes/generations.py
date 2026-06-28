@@ -28,6 +28,10 @@ from pydantic import BaseModel
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.byok_retention import (
+    applies_to_user as byok_retention_applies_to_user,
+    cutoffs as byok_retention_cutoffs,
+)
 from lumen_core.constants import GenerationStatus
 from lumen_core.models import Conversation, Generation, Image, ImageVariant, Message
 from lumen_core.providers import parse_provider_bool
@@ -35,6 +39,7 @@ from lumen_core.providers import parse_provider_bool
 from ..db import get_db
 from ..deps import CurrentUser
 from ..config import settings
+from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 
 
 router = APIRouter()
@@ -46,7 +51,16 @@ COUNT_CAP = 10_000
 
 # ---------- 支持的 aspect ratio 白名单 ----------
 
-_ALLOWED_RATIOS = {"1:1", "16:9", "9:16", "4:5", "3:4", "21:9"}
+_ALLOWED_RATIOS = {
+    "1:1",
+    "16:9",
+    "9:16",
+    "4:5",
+    "3:4",
+    "21:9",
+    "10:7",
+    "7:10",
+}
 
 
 def _bool_option(value: object, default: bool = False) -> bool:
@@ -157,6 +171,7 @@ def _apply_filters(
     has_ref: bool,
     fast: bool,
     q: str | None,
+    visible_after: datetime | None = None,
 ) -> Select:  # type: ignore[type-arg]
     stmt = stmt.join(Message, Message.id == Generation.message_id).join(
         Conversation, Conversation.id == Message.conversation_id
@@ -169,6 +184,8 @@ def _apply_filters(
         Conversation.deleted_at.is_(None),
         Conversation.archived.is_(False),
     )
+    if visible_after is not None:
+        stmt = stmt.where(Generation.created_at >= visible_after)
     if settings.lumen_runtime.strip().lower() != "desktop":
         stmt = stmt.where(
             Generation.upstream_request["workflow_run_id"].astext.is_(None)
@@ -230,6 +247,12 @@ async def list_generation_feed(
     if cursor:
         cur_ts, cur_id, cursor_total = _decode_cursor(cursor)
 
+    visible_after: datetime | None = None
+    if byok_retention_applies_to_user(user):
+        policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+        if policy.hide_enabled:
+            visible_after = byok_retention_cutoffs(policy=policy).visible_after
+
     # ---- total（不包括 cursor 分页条件；包括所有过滤）----
     # New cursors carry the first-page total so infinite-scroll page requests
     # don't pay a full COUNT(*) on every fetch.
@@ -244,6 +267,7 @@ async def list_generation_feed(
             has_ref=has_ref,
             fast=fast,
             q=q,
+            visible_after=visible_after,
         )
         limited_count = select(func.count()).select_from(
             count_stmt.limit(COUNT_CAP + 1).subquery()
@@ -259,6 +283,7 @@ async def list_generation_feed(
         has_ref=has_ref,
         fast=fast,
         q=q,
+        visible_after=visible_after,
     )
 
     if cur_ts is not None and cur_id is not None:
@@ -303,12 +328,16 @@ async def list_generation_feed(
         )
         .subquery()
     )
+    image_filters = []
+    if visible_after is not None:
+        image_filters.append(Image.created_at >= visible_after)
     img_rows = (
         (
             await db.execute(
                 select(Image)
                 .join(ranked_images, Image.id == ranked_images.c.image_id)
                 .where(ranked_images.c.rn == 1)
+                .where(*image_filters)
                 .order_by(ranked_images.c.owner_generation_id.asc())
             )
         )

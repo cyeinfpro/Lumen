@@ -8,6 +8,7 @@
 // - 子 panel 另见 _panels/*
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import NextImage from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -20,7 +21,9 @@ import {
   Archive,
   Clapperboard,
   CreditCard,
+  Eye,
   HardDrive,
+  Images,
   Inbox,
   KeyRound,
   Link2,
@@ -31,20 +34,27 @@ import {
   Server,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   UserCog,
   Users as UsersIcon,
   Wifi,
+  X,
   type LucideIcon,
 } from "lucide-react";
 
 import {
   useAddAllowedEmailMutation,
+  useAdminUserHistoryQuery,
   useAdminUsersInfiniteQuery,
   useAllowedEmailsQuery,
+  useDeleteAdminUserMutation,
   useRemoveAllowedEmailMutation,
+  useSetAdminUserPasswordMutation,
 } from "@/lib/queries";
 import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
+import type { AdminUserOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
 import { ByokPanel } from "./_panels/ByokPanel";
@@ -786,6 +796,15 @@ function UsersPanel() {
   const [roleFilter, setRoleFilter] = useState<"all" | "admin" | "member">(
     "all",
   );
+  const [historyUser, setHistoryUser] = useState<AdminUserOut | null>(null);
+  const [passwordUser, setPasswordUser] = useState<AdminUserOut | null>(null);
+  const [deleteUser, setDeleteUser] = useState<AdminUserOut | null>(null);
+  const passwordMut = useSetAdminUserPasswordMutation({
+    onSuccess: () => setPasswordUser(null),
+  });
+  const deleteMut = useDeleteAdminUserMutation({
+    onSuccess: () => setDeleteUser(null),
+  });
 
   const rows = useMemo(
     () => q.data?.pages.flatMap((p) => p.items) ?? [],
@@ -879,6 +898,7 @@ function UsersPanel() {
                     <th className="text-right py-3 px-4 font-medium">生成</th>
                     <th className="text-right py-3 px-4 font-medium">对话</th>
                     <th className="text-right py-3 px-4 font-medium">消息</th>
+                    <th className="text-right py-3 px-4 font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -912,6 +932,13 @@ function UsersPanel() {
                       <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
                         {u.messages_count}
                       </td>
+                      <td className="py-3 px-4">
+                        <UserActions
+                          onHistory={() => setHistoryUser(u)}
+                          onPassword={() => setPasswordUser(u)}
+                          onDelete={() => setDeleteUser(u)}
+                        />
+                      </td>
                     </motion.tr>
                   ))}
                 </tbody>
@@ -942,6 +969,12 @@ function UsersPanel() {
                     <MiniStat label="对话" value={u.completions_count} />
                     <MiniStat label="消息" value={u.messages_count} />
                   </div>
+                  <UserActions
+                    onHistory={() => setHistoryUser(u)}
+                    onPassword={() => setPasswordUser(u)}
+                    onDelete={() => setDeleteUser(u)}
+                    mobile
+                  />
                 </li>
               ))}
             </ul>
@@ -967,7 +1000,323 @@ function UsersPanel() {
           </button>
         </div>
       )}
+
+      {historyUser && (
+        <UserHistoryDialog
+          user={historyUser}
+          onClose={() => setHistoryUser(null)}
+        />
+      )}
+      {passwordUser && (
+        <PasswordDialog
+          user={passwordUser}
+          pending={passwordMut.isPending}
+          error={passwordMut.error?.message ?? null}
+          onClose={() => setPasswordUser(null)}
+          onSubmit={(password) =>
+            passwordMut.mutate({ userId: passwordUser.id, password })
+          }
+        />
+      )}
+      <ConfirmDialog
+        open={deleteUser != null}
+        onOpenChange={(open) => {
+          if (!open && !deleteMut.isPending) setDeleteUser(null);
+        }}
+        title="删除用户"
+        description={
+          deleteUser ? (
+            <span>
+              将软删除 <span className="font-mono">{deleteUser.email}</span>，
+              并撤销会话、隐藏会话和图片。
+            </span>
+          ) : null
+        }
+        confirmText="删除"
+        cancelText="取消"
+        tone="danger"
+        confirming={deleteMut.isPending}
+        onConfirm={() => {
+          if (deleteUser) deleteMut.mutate(deleteUser.id);
+        }}
+      />
     </section>
+  );
+}
+
+function UserActions({
+  onHistory,
+  onPassword,
+  onDelete,
+  mobile = false,
+}: {
+  onHistory: () => void;
+  onPassword: () => void;
+  onDelete: () => void;
+  mobile?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-1.5",
+        mobile ? "pt-1" : "justify-end",
+      )}
+    >
+      <ActionIcon label="历史" icon={Eye} onClick={onHistory} />
+      <ActionIcon label="改密码" icon={KeyRound} onClick={onPassword} />
+      <ActionIcon
+        label="删除"
+        icon={Trash2}
+        onClick={onDelete}
+        danger
+      />
+    </div>
+  );
+}
+
+function ActionIcon({
+  label,
+  icon: Icon,
+  onClick,
+  danger = false,
+}: {
+  label: string;
+  icon: LucideIcon;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border transition-colors",
+        danger
+          ? "border-danger-border bg-danger-soft text-[var(--danger-fg)] hover:brightness-110"
+          : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function UserHistoryDialog({
+  user,
+  onClose,
+}: {
+  user: AdminUserOut;
+  onClose: () => void;
+}) {
+  const q = useAdminUserHistoryQuery(user.id);
+  const items = q.data?.items ?? [];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <motion.div
+        initial={{ opacity: 0, y: 16, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        className="surface-dialog mobile-dialog-panel flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden sm:rounded-[var(--radius-dialog)]"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] p-4">
+          <div className="min-w-0">
+            <h2 className="type-card-title">生成历史</h2>
+            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">{user.email}</p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {q.isLoading ? (
+            <ListSkeleton rows={5} />
+          ) : q.isError ? (
+            <ErrorBlock
+              message={q.error?.message ?? "未知错误"}
+              onRetry={() => void q.refetch()}
+            />
+          ) : items.length === 0 ? (
+            <EmptyBlock title="暂无生成历史" />
+          ) : (
+            <div className="space-y-3">
+              {items.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-3"
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div className="min-w-0 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusPill status={item.status} />
+                        <RetentionPill state={item.retention_state} />
+                        <span className="font-mono text-xs text-[var(--fg-2)]">
+                          {formatISODate(item.created_at)}
+                        </span>
+                      </div>
+                      <p className="line-clamp-3 text-sm text-[var(--fg-0)]">
+                        {item.prompt || "无提示词"}
+                      </p>
+                      {item.conversation_title && (
+                        <p className="text-xs text-[var(--fg-2)]">
+                          {item.conversation_title}
+                        </p>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 md:w-44">
+                      {item.images.slice(0, 3).map((image) => (
+                        <a
+                          key={image.id}
+                          href={image.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)]"
+                        >
+                          <NextImage
+                            src={image.thumb_url ?? image.preview_url ?? image.url}
+                            alt=""
+                            fill
+                            sizes="64px"
+                            className="object-cover"
+                            unoptimized
+                          />
+                        </a>
+                      ))}
+                      {item.images.length === 0 && (
+                        <div className="col-span-3 flex aspect-[3/1] items-center justify-center rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-2)]">
+                          <Images className="h-4 w-4" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+function PasswordDialog({
+  user,
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  user: AdminUserOut;
+  pending: boolean;
+  error: string | null;
+  onClose: () => void;
+  onSubmit: (password: string) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const canSubmit = password.length >= 8 && !pending;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !pending) onClose();
+      }}
+    >
+      <motion.form
+        initial={{ opacity: 0, y: 16, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (canSubmit) onSubmit(password);
+        }}
+        className="surface-dialog mobile-dialog-panel w-full max-w-sm space-y-4 overflow-hidden p-5 sm:rounded-[var(--radius-dialog)]"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="type-card-title">修改密码</h2>
+            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">{user.email}</p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭"
+            onClick={onClose}
+            disabled={pending}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <label className="block space-y-1.5">
+          <span className="text-xs text-[var(--fg-2)]">新密码</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            minLength={8}
+            maxLength={128}
+            autoFocus
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-strong)]"
+          />
+        </label>
+        {error && <p className="text-xs text-[var(--danger)]">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--fg-0)] px-3 text-xs text-[var(--bg-0)] transition-colors disabled:opacity-50"
+          >
+            {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            保存
+          </button>
+        </div>
+      </motion.form>
+    </motion.div>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  return (
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-1)]">
+      {status}
+    </span>
+  );
+}
+
+function RetentionPill({
+  state,
+}: {
+  state: "active" | "hidden" | "deleted";
+}) {
+  const label =
+    state === "hidden" ? "已隐藏" : state === "deleted" ? "已删除" : "可见";
+  return (
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-2)]">
+      {label}
+    </span>
   );
 }
 

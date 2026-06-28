@@ -66,9 +66,19 @@ class LoginIn(BaseModel):
     password: str = Field(max_length=128)
 
 
+class NavigationVisibilityOut(BaseModel):
+    studio: bool = True
+    video: bool = True
+    projects: bool = True
+    assets: bool = True
+
+
 class RuntimeDefaultsOut(BaseModel):
     fast: bool = True
     upload_max_source_bytes: int = 50 * 1024 * 1024
+    nav_visibility: NavigationVisibilityOut = Field(
+        default_factory=NavigationVisibilityOut
+    )
 
 
 class UserOut(BaseOut):
@@ -143,7 +153,7 @@ class ConversationPatchIn(BaseModel):
 class ImageParamsIn(BaseModel):
     # AspectRatio 的 Literal 联合在 sizing.py 里维护；此处 import 复用，
     # 避免两处列表漂移（之前 3:2/2:3/4:3/9:21 未同步就是这里遗漏）
-    aspect_ratio: "AspectRatioLiteral" = "1:1"
+    aspect_ratio: "AspectRatioLiteral" = "7:10"
     size_mode: Literal["auto", "fixed"] = "auto"
     fixed_size: str | None = None
     style_preset_id: str | None = None
@@ -1980,6 +1990,10 @@ class ByokSettingsOut(BaseModel):
     validation_model: str = "gpt-5.4"
     validation_timeout_ms: int = 15000
     pending_token_ttl_seconds: int = 900
+    retention_hide_enabled: bool = True
+    retention_delete_enabled: bool = False
+    retention_hide_days: int = 3
+    retention_delete_days: int = 7
 
 
 class ByokSettingsPatchIn(BaseModel):
@@ -1990,6 +2004,10 @@ class ByokSettingsPatchIn(BaseModel):
     validation_model: str | None = Field(default=None, max_length=64)
     validation_timeout_ms: int | None = Field(default=None, ge=1000, le=120000)
     pending_token_ttl_seconds: int | None = Field(default=None, ge=60, le=3600)
+    retention_hide_enabled: bool | None = None
+    retention_delete_enabled: bool | None = None
+    retention_hide_days: int | None = Field(default=None, ge=1, le=3650)
+    retention_delete_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class ApiSupplierTemplateOut(BaseOut):
@@ -2317,6 +2335,7 @@ class PosterInpaintIn(BaseModel):
 __all__ = [
     "SignupIn",
     "LoginIn",
+    "NavigationVisibilityOut",
     "RuntimeDefaultsOut",
     "UserOut",
     "SystemPromptOut",

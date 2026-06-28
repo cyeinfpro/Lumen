@@ -4,6 +4,11 @@ import {
   type LightboxItem,
   type OpenLightboxDetail,
 } from "@/components/ui/lightbox/types";
+import {
+  DEFAULT_NAV_VISIBILITY,
+  normalizeNavVisibility,
+  type NavVisibility,
+} from "@/components/ui/shell/navigation";
 
 interface UiLightboxGalleryItem {
   imageId: string;
@@ -59,6 +64,8 @@ interface UiState {
   /** Sidebar 搜索查询（持久化到 URL 由消费侧负责，store 仅做单一真相源） */
   sidebarSearch: string;
   setSidebarSearch: (q: string) => void;
+  navVisibility: Required<NavVisibility>;
+  setNavVisibility: (visibility: NavVisibility | undefined | null) => void;
   lightbox: UiLightboxState;
   openLightbox: (id: string, src: string, alt: string, previewSrc?: string) => void;
   /**
@@ -91,6 +98,9 @@ export const useUiStore = create<UiState>((set) => ({
   setStudioView: (view) => set({ studioView: view }),
   sidebarSearch: "",
   setSidebarSearch: (q) => set({ sidebarSearch: q }),
+  navVisibility: DEFAULT_NAV_VISIBILITY,
+  setNavVisibility: (visibility) =>
+    set({ navVisibility: normalizeNavVisibility(visibility) }),
   lightbox: createClosedLightbox(),
   openLightbox: (id, src, alt, previewSrc) =>
     set({

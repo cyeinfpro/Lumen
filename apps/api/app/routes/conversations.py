@@ -19,6 +19,11 @@ from sqlalchemy import and_, desc, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
+from lumen_core.byok_retention import (
+    applies_to_user as byok_retention_applies_to_user,
+    is_user_visible as byok_retention_is_user_visible,
+    user_visible_filter as byok_retention_user_visible_filter,
+)
 from lumen_core.constants import CompletionStatus, GenerationStatus
 from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
@@ -61,6 +66,7 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
+from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
@@ -196,6 +202,23 @@ async def _get_owned_conv(db: AsyncSession, conv_id: str, user_id: str) -> Conve
     ).scalar_one_or_none()
     if not conv:
         raise _not_found()
+    return conv
+
+
+async def _get_owned_visible_conv(
+    db: AsyncSession,
+    conv_id: str,
+    user: Any,
+) -> Conversation:
+    conv = await _get_owned_conv(db, conv_id, user.id)
+    if byok_retention_applies_to_user(user):
+        policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+        if not byok_retention_is_user_visible(
+            account_mode=getattr(user, "account_mode", None),
+            created_at=conv.last_activity_at,
+            policy=policy,
+        ):
+            raise _not_found()
     return conv
 
 
@@ -462,10 +485,20 @@ async def list_conversations(
     q: str | None = None,
     limit: int = Query(default=30, ge=1, le=100),
 ) -> ConversationListOut:
+    retention_filter = None
+    if byok_retention_applies_to_user(user):
+        policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+        retention_filter = byok_retention_user_visible_filter(
+            user,
+            Conversation.last_activity_at,
+            policy=policy,
+        )
     stmt = select(Conversation).where(
         Conversation.user_id == user.id,
         Conversation.deleted_at.is_(None),
     )
+    if retention_filter is not None:
+        stmt = stmt.where(retention_filter)
     stmt = _exclude_workflow_conversations(stmt)
     if q:
         # Why: escape LIKE wildcards so user input cannot match outside intent.
@@ -575,7 +608,7 @@ async def get_conversation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ConversationOut:
-    conv = await _get_owned_conv(db, conv_id, user.id)
+    conv = await _get_owned_visible_conv(db, conv_id, user)
     return ConversationOut.model_validate(conv)
 
 
@@ -588,7 +621,7 @@ async def patch_conversation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ConversationOut:
-    conv = await _get_owned_conv(db, conv_id, user.id)
+    conv = await _get_owned_visible_conv(db, conv_id, user)
     if body.title is not None:
         if len(body.title) > 500:
             raise HTTPException(
@@ -1749,8 +1782,16 @@ async def list_messages(
         description='逗号分隔；含 "tasks" 时附带返回 generations/completions/images',
     ),
 ) -> MessageListOut:
-    await _get_owned_conv(db, conv_id, user.id)
+    await _get_owned_visible_conv(db, conv_id, user)
     alive_filters = _message_alive_filters()
+    retention_filter = None
+    if byok_retention_applies_to_user(user):
+        policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+        retention_filter = byok_retention_user_visible_filter(
+            user,
+            Message.created_at,
+            policy=policy,
+        )
     stmt = (
         select(Message)
         .join(Conversation, Conversation.id == Message.conversation_id)
@@ -1762,6 +1803,8 @@ async def list_messages(
             *alive_filters,
         )
     )
+    if retention_filter is not None:
+        stmt = stmt.where(retention_filter)
 
     # `since` accepts ISO8601 timestamp or a message_id.
     if since:
@@ -1913,15 +1956,38 @@ async def list_messages(
                 Image.user_id == user.id,
                 Image.deleted_at.is_(None),
             )
-            if gen_ids and image_ids:
-                stmt_img = stmt_img.where(
-                    or_(
-                        Image.owner_generation_id.in_(gen_ids),
-                        Image.id.in_(image_ids),
-                    )
+            image_retention_filter = None
+            if byok_retention_applies_to_user(user):
+                policy = retention_policy_from_settings(
+                    await read_byok_settings_cached(db)
                 )
+                image_retention_filter = byok_retention_user_visible_filter(
+                    user,
+                    Image.created_at,
+                    policy=policy,
+                )
+            if gen_ids and image_ids:
+                if image_retention_filter is not None:
+                    stmt_img = stmt_img.where(
+                        or_(
+                            and_(
+                                Image.owner_generation_id.in_(gen_ids),
+                                image_retention_filter,
+                            ),
+                            Image.id.in_(image_ids),
+                        )
+                    )
+                else:
+                    stmt_img = stmt_img.where(
+                        or_(
+                            Image.owner_generation_id.in_(gen_ids),
+                            Image.id.in_(image_ids),
+                        )
+                    )
             elif gen_ids:
                 stmt_img = stmt_img.where(Image.owner_generation_id.in_(gen_ids))
+                if image_retention_filter is not None:
+                    stmt_img = stmt_img.where(image_retention_filter)
             else:
                 stmt_img = stmt_img.where(Image.id.in_(image_ids))
             stmt_img = stmt_img.order_by(desc(Image.created_at), desc(Image.id)).limit(
@@ -1954,7 +2020,7 @@ async def get_conversation_context(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ConversationContextOut:
-    conv = await _get_owned_conv(db, conv_id, user.id)
+    conv = await _get_owned_visible_conv(db, conv_id, user)
     return await _estimate_context_window(
         db,
         conv=conv,
@@ -2541,7 +2607,7 @@ async def get_compact_conversation_status(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
-    await _get_owned_conv(db, conv_id, user.id)
+    await _get_owned_visible_conv(db, conv_id, user)
     redis = get_redis()
     job_key = _manual_compact_job_key(
         user_id=user.id,

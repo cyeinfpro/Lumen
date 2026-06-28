@@ -33,11 +33,12 @@ import {
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import {
-  APP_NAV_ITEMS,
   getActiveNavKey,
+  getAppNavItems,
   isSameRoute,
   type AppNavKey,
 } from "@/components/ui/shell/navigation";
+import { useUiStore } from "@/store/useUiStore";
 import { cn } from "@/lib/utils";
 
 type CommandIcon = ComponentType<SVGProps<SVGSVGElement>>;
@@ -91,19 +92,6 @@ const NAV_ICONS: Record<AppNavKey, CommandIcon> = {
   assets: Images,
   me: User,
 };
-
-const NAV_COMMANDS: Command[] = APP_NAV_ITEMS.map((item) =>
-  command({
-    id: `nav-${item.key}`,
-    label: item.label,
-    detail: item.detail,
-    href: item.route,
-    navKey: item.key,
-    group: "导航",
-    keywords: item.keywords,
-    icon: NAV_ICONS[item.key],
-  }),
-);
 
 const IS_DESKTOP_RUNTIME = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
 
@@ -167,8 +155,7 @@ const DOCKER_ONLY_COMMANDS: Command[] = [
   }),
 ];
 
-const COMMANDS: Command[] = [
-  ...NAV_COMMANDS,
+const STATIC_COMMANDS: Command[] = [
   ...SHARED_COMMANDS,
   ...(IS_DESKTOP_RUNTIME ? [] : DOCKER_ONLY_COMMANDS),
 ];
@@ -184,6 +171,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const navVisibility = useUiStore((s) => s.navVisibility);
   // SSR/CSR 一致：getServerSnapshot=Ctrl，getClientSnapshot 探测 navigator。
   // 用 useSyncExternalStore 避免 hydration mismatch + 不踩 react-hooks/set-state-in-effect。
   const modifierLabel = useSyncExternalStore<string>(
@@ -194,20 +182,40 @@ export function CommandPalette() {
   // SSR safe：首屏视为桌面，挂载后由 matchMedia 修正。
   const [isDesktop, setIsDesktop] = useState(true);
 
+  const navCommands = useMemo(
+    () =>
+      getAppNavItems(navVisibility).map((item) =>
+        command({
+          id: `nav-${item.key}`,
+          label: item.label,
+          detail: item.detail,
+          href: item.route,
+          navKey: item.key,
+          group: "导航",
+          keywords: item.keywords,
+          icon: NAV_ICONS[item.key],
+        }),
+      ),
+    [navVisibility],
+  );
+  const commands = useMemo(
+    () => [...navCommands, ...STATIC_COMMANDS],
+    [navCommands],
+  );
   const filteredCommands = useMemo(() => {
     const tokens = normalizeSearchValue(query).split(" ").filter(Boolean);
-    if (tokens.length === 0) return COMMANDS;
-    return COMMANDS.filter((item) =>
+    if (tokens.length === 0) return commands;
+    return commands.filter((item) =>
       tokens.every((token) => item.searchText.includes(token)),
     );
-  }, [query]);
+  }, [commands, query]);
 
   const effectiveSelectedIndex =
     filteredCommands.length === 0
       ? 0
       : Math.min(selectedIndex, filteredCommands.length - 1);
   const selectedCommand = filteredCommands[effectiveSelectedIndex];
-  const activeNavKey = getActiveNavKey(pathname);
+  const activeNavKey = getActiveNavKey(pathname, navVisibility);
   const optionId = useCallback(
     (id: string) => `${listboxId}-${id}`,
     [listboxId],
@@ -228,20 +236,24 @@ export function CommandPalette() {
     setOpen(true);
   }, []);
 
-  const closePalette = useCallback((restoreFocus = true) => {
+  const resetPalette = useCallback(() => {
     setOpen(false);
     setQuery("");
     setSelectedIndex(0);
+  }, []);
+
+  const closePalette = useCallback((restoreFocus = true) => {
+    resetPalette();
     if (restoreFocus) {
       window.setTimeout(() => {
         previousFocusRef.current?.focus({ preventScroll: true });
       }, 0);
     }
-  }, []);
+  }, [resetPalette]);
 
   const runCommand = useCallback(
     (item: Command) => {
-      closePalette(false);
+      resetPalette();
       if (item.action === "toggle-sidebar") {
         window.dispatchEvent(new CustomEvent("lumen:sidebar-toggle"));
         return;
@@ -250,7 +262,7 @@ export function CommandPalette() {
         router.push(item.href);
       }
     },
-    [closePalette, router],
+    [resetPalette, router],
   );
 
   useEffect(() => {

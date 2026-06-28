@@ -7,8 +7,10 @@ import { Eraser, Gauge, Image as ImageIcon, SlidersHorizontal } from "lucide-rea
 const RATIO_CHOICES: Array<{ value: string | null; label: string }> = [
   { value: null, label: "全部" },
   { value: "9:16", label: "竖图 9:16" },
+  { value: "7:10", label: "7:10" },
   { value: "4:5", label: "海报 4:5" },
   { value: "3:4", label: "竖版 3:4" },
+  { value: "10:7", label: "10:7" },
   { value: "16:9", label: "横图 16:9" },
   { value: "1:1", label: "方图 1:1" },
   { value: "21:9", label: "超宽 21:9" },

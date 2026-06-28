@@ -6,8 +6,9 @@ from typing import Any
 import pytest
 from fastapi import Request
 
+from app.routes import byok as byok_routes
 from app.routes import system_settings
-from lumen_core.schemas import SystemSettingsUpdateIn
+from lumen_core.schemas import ByokSettingsPatchIn, SystemSettingsUpdateIn
 
 
 def _request() -> Request:
@@ -20,6 +21,14 @@ def _request() -> Request:
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+def test_byok_fallback_setting_is_forced_off_for_compat_clients() -> None:
+    pairs = byok_routes._setting_pairs(  # noqa: SLF001
+        ByokSettingsPatchIn(fallback_to_admin_provider=True)
+    )
+
+    assert pairs == [("byok.fallback_to_admin_provider", "0")]
 
 
 @pytest.mark.asyncio

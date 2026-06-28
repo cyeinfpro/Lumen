@@ -106,10 +106,12 @@ def _setting_pairs(body: ByokSettingsPatchIn) -> list[tuple[str, str]]:
             )
         )
     if body.fallback_to_admin_provider is not None:
+        # Deprecated compatibility field. BYOK must remain strict: no user key
+        # means no task, never a fallback to the admin provider pool.
         pairs.append(
             (
                 "byok.fallback_to_admin_provider",
-                "1" if body.fallback_to_admin_provider else "0",
+                "0",
             )
         )
     if body.validation_model is not None:
@@ -120,6 +122,24 @@ def _setting_pairs(body: ByokSettingsPatchIn) -> list[tuple[str, str]]:
         pairs.append(
             ("byok.pending_token_ttl_seconds", str(body.pending_token_ttl_seconds))
         )
+    if body.retention_hide_enabled is not None:
+        pairs.append(
+            (
+                "byok.retention_hide_enabled",
+                "1" if body.retention_hide_enabled else "0",
+            )
+        )
+    if body.retention_delete_enabled is not None:
+        pairs.append(
+            (
+                "byok.retention_delete_enabled",
+                "1" if body.retention_delete_enabled else "0",
+            )
+        )
+    if body.retention_hide_days is not None:
+        pairs.append(("byok.retention_hide_days", str(body.retention_hide_days)))
+    if body.retention_delete_days is not None:
+        pairs.append(("byok.retention_delete_days", str(body.retention_delete_days)))
     return pairs
 
 
@@ -142,6 +162,39 @@ async def patch_byok_settings(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ByokSettingsOut:
+    if (
+        body.retention_hide_enabled is not None
+        or body.retention_delete_enabled is not None
+        or body.retention_hide_days is not None
+        or body.retention_delete_days is not None
+    ):
+        current = await read_byok_settings(db)
+        hide_enabled = (
+            body.retention_hide_enabled
+            if body.retention_hide_enabled is not None
+            else current.retention_hide_enabled
+        )
+        delete_enabled = (
+            body.retention_delete_enabled
+            if body.retention_delete_enabled is not None
+            else current.retention_delete_enabled
+        )
+        hide_days = (
+            body.retention_hide_days
+            if body.retention_hide_days is not None
+            else current.retention_hide_days
+        )
+        delete_days = (
+            body.retention_delete_days
+            if body.retention_delete_days is not None
+            else current.retention_delete_days
+        )
+        if hide_enabled and delete_enabled and delete_days < hide_days:
+            raise _http(
+                "invalid_retention_window",
+                "delete days must be greater than or equal to hide days",
+                422,
+            )
     pairs = _setting_pairs(body)
     if pairs:
         await update_settings(db, pairs)

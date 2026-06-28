@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -26,6 +26,7 @@ from lumen_core.constants import (
 )
 from lumen_core.models import (
     AllowedEmail,
+    AuthSession,
     Completion,
     Conversation,
     Generation,
@@ -37,12 +38,15 @@ from lumen_core.models import (
 )
 from lumen_core.schemas import AdminUserOut, AllowedEmailOut
 from lumen_core.utils import ensure_utc
+from lumen_core.byok_retention import retention_state as byok_retention_state
 
 from ..arq_pool import get_arq_pool
 from ..audit import hash_email
+from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..redis_client import get_redis
+from ..security import hash_password
 from ._admin_common import admin_http as _http, write_admin_audit
 from .images import (
     ALLOWED_VARIANTS,
@@ -52,6 +56,7 @@ from .images import (
     _fs_path,
     _storage_streaming_response,
 )
+from .me import _cancel_account_active_tasks, _post_commit_account_task_cleanup
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -896,6 +901,63 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     return created_at, uid
 
 
+class _AdminSetUserPasswordIn(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class _AdminUserHistoryImageOut(BaseModel):
+    id: str
+    url: str
+    display_url: str
+    preview_url: str | None = None
+    thumb_url: str | None = None
+    width: int
+    height: int
+    mime: str
+
+
+class _AdminUserHistoryItemOut(BaseModel):
+    id: str
+    kind: Literal["generation"]
+    created_at: datetime
+    status: str
+    prompt: str | None = None
+    conversation_id: str | None = None
+    conversation_title: str | None = None
+    message_id: str | None = None
+    retention_state: Literal["active", "hidden", "deleted"] = "active"
+    images: list[_AdminUserHistoryImageOut] = Field(default_factory=list)
+
+
+class _AdminUserHistoryOut(BaseModel):
+    user: AdminUserOut
+    items: list[_AdminUserHistoryItemOut]
+
+
+def _admin_history_image_out(
+    img: Image,
+    variant_kinds: set[str],
+) -> _AdminUserHistoryImageOut:
+    return _AdminUserHistoryImageOut(
+        id=img.id,
+        url=_admin_image_binary_url(img.id),
+        display_url=_admin_image_variant_url(img.id, DISPLAY_VARIANT),
+        preview_url=(
+            _admin_image_variant_url(img.id, "preview1024")
+            if "preview1024" in variant_kinds
+            else None
+        ),
+        thumb_url=(
+            _admin_image_variant_url(img.id, "thumb256")
+            if "thumb256" in variant_kinds
+            else None
+        ),
+        width=img.width,
+        height=img.height,
+        mime=img.mime,
+    )
+
+
 @router.get("/users")
 async def list_users(
     _admin: AdminUser,
@@ -936,7 +998,7 @@ async def list_users(
         gen_count.label("generations_count"),
         comp_count.label("completions_count"),
         msg_count.label("messages_count"),
-    ).order_by(User.created_at.desc(), User.id.desc())
+    ).where(User.deleted_at.is_(None)).order_by(User.created_at.desc(), User.id.desc())
 
     if cursor:
         ts, uid = _decode_cursor(cursor)
@@ -970,6 +1032,248 @@ async def list_users(
         last = rows[-1]
         next_cursor = _encode_cursor(last.created_at, last.id)
     return {"items": items, "next_cursor": next_cursor}
+
+
+async def _admin_user_out(db: AsyncSession, user_id: str) -> AdminUserOut:
+    gen_count = (
+        select(func.count(Generation.id))
+        .where(Generation.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
+    comp_count = (
+        select(func.count(Completion.id))
+        .where(Completion.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
+    msg_count = (
+        select(func.count(Message.id))
+        .select_from(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(Conversation.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
+    row = (
+        await db.execute(
+            select(
+                User.id,
+                User.email,
+                User.role,
+                User.account_mode,
+                User.display_name,
+                User.created_at,
+                gen_count.label("generations_count"),
+                comp_count.label("completions_count"),
+                msg_count.label("messages_count"),
+            ).where(User.id == user_id, User.deleted_at.is_(None))
+        )
+    ).first()
+    if row is None:
+        raise _http("not_found", "user not found", 404)
+    return AdminUserOut(
+        id=row.id,
+        email=row.email,
+        role=row.role,
+        account_mode=row.account_mode,
+        display_name=row.display_name or None,
+        created_at=row.created_at,
+        generations_count=int(row.generations_count or 0),
+        completions_count=int(row.completions_count or 0),
+        messages_count=int(row.messages_count or 0),
+    )
+
+
+@router.get("/users/{user_id}/history", response_model=_AdminUserHistoryOut)
+async def get_user_history(
+    user_id: str,
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=200),
+) -> _AdminUserHistoryOut:
+    user_out = await _admin_user_out(db, user_id)
+    rows = (
+        await db.execute(
+            select(
+                Generation,
+                Conversation.id.label("conversation_id"),
+                Conversation.title.label("conversation_title"),
+            )
+            .join(Message, Message.id == Generation.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Generation.user_id == user_id,
+                Message.deleted_at.is_(None),
+                Conversation.deleted_at.is_(None),
+            )
+            .order_by(desc(Generation.created_at), desc(Generation.id))
+            .limit(limit)
+        )
+    ).all()
+    generations = [row[0] for row in rows]
+    gen_ids = [gen.id for gen in generations]
+    images_by_gen: dict[str, list[Image]] = {}
+    variant_map: dict[str, set[str]] = {}
+    if gen_ids:
+        images = list(
+            (
+                await db.execute(
+                    select(Image)
+                    .where(
+                        Image.owner_generation_id.in_(gen_ids),
+                        Image.deleted_at.is_(None),
+                    )
+                    .order_by(Image.created_at.asc(), Image.id.asc())
+                )
+            ).scalars()
+        )
+        for img in images:
+            if img.owner_generation_id:
+                images_by_gen.setdefault(img.owner_generation_id, []).append(img)
+        if images:
+            variant_rows = (
+                await db.execute(
+                    select(ImageVariant.image_id, ImageVariant.kind).where(
+                        ImageVariant.image_id.in_([img.id for img in images])
+                    )
+                )
+            ).all()
+            for image_id, kind in variant_rows:
+                variant_map.setdefault(image_id, set()).add(kind)
+
+    policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+    items: list[_AdminUserHistoryItemOut] = []
+    for gen, conversation_id, conversation_title in rows:
+        item_images = [
+            _admin_history_image_out(img, variant_map.get(img.id, set()))
+            for img in images_by_gen.get(gen.id, [])
+        ]
+        items.append(
+            _AdminUserHistoryItemOut(
+                id=gen.id,
+                kind="generation",
+                created_at=gen.created_at,
+                status=gen.status,
+                prompt=gen.prompt,
+                conversation_id=conversation_id,
+                conversation_title=conversation_title or None,
+                message_id=gen.message_id,
+                retention_state=byok_retention_state(
+                    account_mode=user_out.account_mode,
+                    created_at=gen.created_at,
+                    policy=policy,
+                ),
+                images=item_images,
+            )
+        )
+    return _AdminUserHistoryOut(user=user_out, items=items)
+
+
+@router.patch(
+    "/users/{user_id}/password",
+    dependencies=[Depends(verify_csrf)],
+)
+async def set_user_password(
+    user_id: str,
+    body: _AdminSetUserPasswordIn,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    target = (
+        await db.execute(
+            select(User)
+            .where(User.id == user_id, User.deleted_at.is_(None))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise _http("not_found", "user not found", 404)
+    target.password_hash = hash_password(body.password)
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == target.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await write_admin_audit(
+        db,
+        request,
+        admin,
+        event_type="admin.user.password_set",
+        target_user_id=target.id,
+        details={"target_email_hash": hash_email(target.email)},
+        autocommit=False,
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete(
+    "/users/{user_id}",
+    dependencies=[Depends(verify_csrf)],
+)
+async def delete_user(
+    user_id: str,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    if user_id == admin.id:
+        raise _http("cannot_delete_self", "admin cannot delete own account", 400)
+    target = (
+        await db.execute(
+            select(User)
+            .where(User.id == user_id, User.deleted_at.is_(None))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise _http("not_found", "user not found", 404)
+
+    now = datetime.now(timezone.utc)
+    target.deleted_at = now
+    sessions_result = await db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == target.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    conversations_result = await db.execute(
+        update(Conversation)
+        .where(Conversation.user_id == target.id, Conversation.deleted_at.is_(None))
+        .values(deleted_at=now)
+    )
+    images_result = await db.execute(
+        update(Image)
+        .where(Image.user_id == target.id, Image.deleted_at.is_(None))
+        .values(deleted_at=now)
+    )
+    task_cleanup = await _cancel_account_active_tasks(
+        db,
+        user_id=target.id,
+        canceled_at=now,
+        account_mode=getattr(target, "account_mode", "wallet"),
+    )
+    await write_admin_audit(
+        db,
+        request,
+        admin,
+        event_type="admin.user.delete",
+        target_user_id=target.id,
+        details={
+            "target_email_hash": hash_email(target.email),
+            "sessions_revoked": int(sessions_result.rowcount or 0),
+            "conversations_deleted": int(conversations_result.rowcount or 0),
+            "images_deleted": int(images_result.rowcount or 0),
+            "generations_canceled": task_cleanup["generations_canceled"],
+            "completions_canceled": task_cleanup["completions_canceled"],
+        },
+        autocommit=False,
+    )
+    await db.commit()
+    await _post_commit_account_task_cleanup(user_id=target.id, cleanup=task_cleanup)
+    return {"ok": True}
 
 
 # ---------- Request events ----------

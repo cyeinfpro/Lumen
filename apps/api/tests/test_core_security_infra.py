@@ -18,6 +18,26 @@ def test_session_cookie_contains_expiry_timestamp() -> None:
     assert parse_session_cookie(raw) == "session-1"
 
 
+def test_nav_feature_guard_maps_primary_api_paths() -> None:
+    assert main._nav_feature_for_api_path("/videos/generations") == (
+        "video",
+        "ui.nav.video_visible",
+    )
+    assert main._nav_feature_for_api_path("/workflows/run") == (
+        "projects",
+        "ui.nav.projects_visible",
+    )
+    assert main._nav_feature_for_api_path("/generations/feed") == (
+        "assets",
+        "ui.nav.assets_visible",
+    )
+    assert main._nav_feature_for_api_path("/conversations/conv-1/messages") == (
+        "studio",
+        "ui.nav.studio_visible",
+    )
+    assert main._nav_feature_for_api_path("/me/sessions") is None
+
+
 @pytest.mark.asyncio
 async def test_body_size_limit_counts_chunked_body(monkeypatch: pytest.MonkeyPatch) -> None:
     async def app(_scope, receive, send):

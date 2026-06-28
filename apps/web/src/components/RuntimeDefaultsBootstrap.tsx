@@ -1,16 +1,23 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getMe, type AuthUser } from "@/lib/apiClient";
 import { isPublicPath } from "@/lib/auth/publicPaths";
+import {
+  getRedirectForHiddenNavPath,
+  normalizeNavVisibility,
+  type NavVisibility,
+} from "@/components/ui/shell/navigation";
 import { useChatStore } from "@/store/useChatStore";
+import { useUiStore } from "@/store/useUiStore";
 
 export type RuntimeDefaults = {
   fast?: boolean;
   upload_max_source_bytes?: number;
+  nav_visibility?: NavVisibility;
 };
 
 const RUNTIME_DEFAULTS_COOKIE = "lumen_runtime_defaults_v1";
@@ -27,6 +34,9 @@ function pickRuntimeDefaults(
     value.upload_max_source_bytes > 0
   ) {
     next.upload_max_source_bytes = value.upload_max_source_bytes;
+  }
+  if (value?.nav_visibility && typeof value.nav_visibility === "object") {
+    next.nav_visibility = normalizeNavVisibility(value.nav_visibility);
   }
   return next;
 }
@@ -50,21 +60,25 @@ export function RuntimeDefaultsBootstrap({
   defaults: RuntimeDefaults;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const isPublicAuthPath = isPublicPath(pathname);
   const defaultFast = defaults.fast;
   const defaultUploadMaxSourceBytes = defaults.upload_max_source_bytes;
+  const defaultNavVisibility = defaults.nav_visibility;
 
   const initialDefaults = useMemo(
     () =>
       pickRuntimeDefaults({
         fast: defaultFast,
         upload_max_source_bytes: defaultUploadMaxSourceBytes,
+        nav_visibility: defaultNavVisibility,
       }),
-    [defaultFast, defaultUploadMaxSourceBytes],
+    [defaultFast, defaultUploadMaxSourceBytes, defaultNavVisibility],
   );
 
   useLayoutEffect(() => {
     useChatStore.getState().applyRuntimeDefaults(initialDefaults);
+    useUiStore.getState().setNavVisibility(initialDefaults.nav_visibility);
   }, [initialDefaults]);
 
   const meQuery = useQuery<AuthUser>({
@@ -79,25 +93,40 @@ export function RuntimeDefaultsBootstrap({
   const serverRuntimeDefaults = meQuery.data?.runtime_defaults;
   const serverFast = serverRuntimeDefaults?.fast;
   const serverUploadMaxSourceBytes = serverRuntimeDefaults?.upload_max_source_bytes;
+  const serverNavVisibility = serverRuntimeDefaults?.nav_visibility;
 
   const runtimeDefaults = useMemo(
     () =>
       pickRuntimeDefaults({
         fast: serverFast,
         upload_max_source_bytes: serverUploadMaxSourceBytes,
+        nav_visibility: serverNavVisibility,
       }),
-    [serverFast, serverUploadMaxSourceBytes],
+    [serverFast, serverUploadMaxSourceBytes, serverNavVisibility],
   );
 
   useLayoutEffect(() => {
     if (!meQuery.data) return;
     useChatStore.getState().applyRuntimeDefaults(runtimeDefaults);
+    useUiStore.getState().setNavVisibility(runtimeDefaults.nav_visibility);
   }, [meQuery.data, runtimeDefaults]);
 
   useEffect(() => {
     if (!meQuery.data) return;
     writeRuntimeDefaultsCookie(runtimeDefaults);
   }, [meQuery.data, runtimeDefaults]);
+
+  const effectiveNavVisibility =
+    meQuery.data && runtimeDefaults.nav_visibility
+      ? runtimeDefaults.nav_visibility
+      : initialDefaults.nav_visibility;
+
+  useEffect(() => {
+    if (isPublicAuthPath) return;
+    const redirectTo = getRedirectForHiddenNavPath(pathname, effectiveNavVisibility);
+    if (!redirectTo || redirectTo === pathname) return;
+    router.replace(redirectTo);
+  }, [effectiveNavVisibility, isPublicAuthPath, pathname, router]);
 
   return null;
 }

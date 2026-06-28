@@ -20,6 +20,7 @@ from lumen_core import __version__ as lumen_core_version
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.constants import MAX_PROMPT_CHARS
 from lumen_core.desktop_runtime import DESKTOP_TOKEN_HEADER, is_desktop_runtime
+from lumen_core.runtime_settings import get_spec
 from sqlalchemy import text
 
 from .arq_pool import close_arq_pool, get_arq_pool
@@ -34,7 +35,11 @@ from .observability import (
 )
 from .ratelimit import _is_trusted_proxy
 from .redis_client import get_redis
-from .runtime_settings import migrate_image_primary_route, migrate_provider_purposes
+from .runtime_settings import (
+    get_setting,
+    migrate_image_primary_route,
+    migrate_provider_purposes,
+)
 from .services.billing_cache import BillingCacheService
 
 
@@ -251,6 +256,95 @@ class _DesktopLocalTokenMiddleware:
         await self.app(scope, receive, send)
 
 
+_NAV_FEATURE_API_PREFIXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "studio",
+        "ui.nav.studio_visible",
+        (
+            "/conversations",
+            "/prompts/enhance",
+        ),
+    ),
+    (
+        "video",
+        "ui.nav.video_visible",
+        (
+            "/videos",
+            "/prompts/video/enhance",
+        ),
+    ),
+    (
+        "projects",
+        "ui.nav.projects_visible",
+        (
+            "/workflows",
+            "/storyboards",
+        ),
+    ),
+    (
+        "assets",
+        "ui.nav.assets_visible",
+        (
+            "/generations/feed",
+            "/me/shares",
+        ),
+    ),
+)
+
+
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def _nav_feature_for_api_path(path: str) -> tuple[str, str] | None:
+    for feature, setting_key, prefixes in _NAV_FEATURE_API_PREFIXES:
+        if any(_path_matches_prefix(path, prefix) for prefix in prefixes):
+            return feature, setting_key
+    return None
+
+
+class _NavFeatureGuardMiddleware:
+    """Block direct API access when the matching user-facing page is hidden."""
+
+    def __init__(self, app):  # type: ignore[no-untyped-def]
+        self.app = app
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope["type"] != "http" or scope.get("method") == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+        matched = _nav_feature_for_api_path(scope.get("path", ""))
+        if matched is None:
+            await self.app(scope, receive, send)
+            return
+
+        feature, setting_key = matched
+        spec = get_spec(setting_key)
+        if spec is None:
+            await self.app(scope, receive, send)
+            return
+        try:
+            async with SessionLocal() as session:
+                raw = await get_setting(session, spec)
+        except Exception:  # noqa: BLE001
+            logger.warning("nav feature guard setting read failed", exc_info=True)
+            await self.app(scope, receive, send)
+            return
+        if raw == "0":
+            response = JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "error": {
+                        "code": "feature_disabled",
+                        "message": f"{feature} is disabled",
+                    }
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def _is_prod_env() -> bool:
     if is_desktop_runtime(settings.lumen_runtime):
         return False
@@ -435,6 +529,7 @@ def build_app() -> FastAPI:
     )
     app.add_middleware(_BodySizeLimitMiddleware)
     app.add_middleware(_DesktopLocalTokenMiddleware)
+    app.add_middleware(_NavFeatureGuardMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
     return app
 

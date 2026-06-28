@@ -117,6 +117,24 @@ def test_generation_fast_default_setting_is_registered_and_validated():
         parse_value(spec, "2")
 
 
+def test_ui_nav_visibility_settings_are_registered_and_validated():
+    expected_env = {
+        "ui.nav.studio_visible": "UI_NAV_STUDIO_VISIBLE",
+        "ui.nav.video_visible": "UI_NAV_VIDEO_VISIBLE",
+        "ui.nav.projects_visible": "UI_NAV_PROJECTS_VISIBLE",
+        "ui.nav.assets_visible": "UI_NAV_ASSETS_VISIBLE",
+    }
+    for key, env_key in expected_env.items():
+        spec = get_spec(key)
+        assert spec is not None
+        assert spec.parser is int
+        assert spec.env_fallback == env_key
+        assert parse_value(spec, "0") == 0
+        assert parse_value(spec, "1") == 1
+        with pytest.raises(ValueError):
+            parse_value(spec, "2")
+
+
 def test_billing_settings_are_registered_and_validated():
     enabled = get_spec("billing.enabled")
     rate = get_spec("billing.usd_to_rmb_rate")

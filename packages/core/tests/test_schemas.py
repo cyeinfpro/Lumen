@@ -114,6 +114,7 @@ def test_image_params_support_render_and_output_options():
     assert params.background == "transparent"
     assert params.moderation == "low"
     assert ImageParamsIn().quality == "4k"
+    assert ImageParamsIn().aspect_ratio == "7:10"
     assert ImageParamsIn().render_quality == "high"
     assert ImageParamsIn().count == 1
     assert ImageParamsIn(count=10).count == 10

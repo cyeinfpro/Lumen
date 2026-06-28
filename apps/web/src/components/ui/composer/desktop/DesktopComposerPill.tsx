@@ -76,6 +76,8 @@ const ASPECT_OPTIONS: { value: AspectRatio; label: string; hint: string }[] = [
   { value: "2:3", label: "2:3", hint: "竖向标准" },
   { value: "4:3", label: "4:3", hint: "横向常规" },
   { value: "3:4", label: "3:4", hint: "竖向常规" },
+  { value: "10:7", label: "10:7", hint: "横向" },
+  { value: "7:10", label: "7:10", hint: "竖向" },
   { value: "16:9", label: "16:9", hint: "横向宽屏" },
   { value: "9:16", label: "9:16", hint: "竖向宽屏" },
   { value: "21:9", label: "21:9", hint: "超宽电影" },

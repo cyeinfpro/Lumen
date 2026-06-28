@@ -1283,6 +1283,30 @@ async def test_user_api_credential_is_ignored_for_wallet_accounts(
 
 
 @pytest.mark.asyncio
+async def test_byok_mode_disabled_blocks_byok_task_without_admin_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=False, fallback_to_admin_provider=True)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_credential(), _supplier(purposes=["chat"])))])
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "chat",
+            "byok",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 403
+    assert excinfo.value.detail["error"]["code"] == "byok_disabled"
+    assert db.statements == []
+
+
+@pytest.mark.asyncio
 async def test_post_message_persists_image_render_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

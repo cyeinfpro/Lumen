@@ -14,6 +14,7 @@ import type {
   StructuredAttachment,
   AllowedEmailOut,
   AdminRequestEventsOut,
+  AdminUserHistoryOut,
   AdminContextHealthOut,
   AdminModelsOut,
   AdminUserOut,
@@ -102,6 +103,12 @@ export interface AuthUser {
   runtime_defaults?: {
     fast?: boolean;
     upload_max_source_bytes?: number;
+    nav_visibility?: {
+      studio?: boolean;
+      video?: boolean;
+      projects?: boolean;
+      assets?: boolean;
+    };
   };
 }
 
@@ -2483,6 +2490,38 @@ export function listAdminUsers(
   const suffix = q.toString() ? `?${q.toString()}` : "";
   return apiFetch<{ items: AdminUserOut[]; next_cursor?: string }>(
     `/admin/users${suffix}`,
+  );
+}
+
+export function getAdminUserHistory(
+  userId: string,
+  params: { limit?: number } = {},
+): Promise<AdminUserHistoryOut> {
+  const q = new URLSearchParams();
+  if (params.limit != null) q.set("limit", String(params.limit));
+  const suffix = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch<AdminUserHistoryOut>(
+    `/admin/users/${encodeURIComponent(userId)}/history${suffix}`,
+  );
+}
+
+export function setAdminUserPassword(
+  userId: string,
+  password: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/admin/users/${encodeURIComponent(userId)}/password`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ password }),
+    },
+  );
+}
+
+export function deleteAdminUser(userId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/admin/users/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
   );
 }
 

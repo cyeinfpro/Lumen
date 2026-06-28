@@ -17,8 +17,8 @@ import { SPRING, DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import {
-  APP_NAV_ITEMS,
   getActiveNavKey,
+  getAppNavItems,
   isSameRoute,
   type AppNavItem,
   type AppNavKey,
@@ -34,24 +34,28 @@ const TAB_ICONS: Record<AppNavKey, LucideIcon> = {
   me: User,
 };
 
-const TABS: readonly TabDef[] = APP_NAV_ITEMS.map((item) => ({
-  ...item,
-  Icon: TAB_ICONS[item.key],
-}));
-
 export function MobileTabBar() {
   const pathname = usePathname();
   const router = useRouter();
   const { haptic } = useHaptic();
   // spec §3.3：Lightbox 打开时 fade-out
   const lightboxOpen = useUiStore((s) => s.lightbox.open);
+  const navVisibility = useUiStore((s) => s.navVisibility);
   const { isKeyboardOpen } = useKeyboardInset();
+  const tabs = useMemo(
+    () =>
+      getAppNavItems(navVisibility).map((item) => ({
+        ...item,
+        Icon: TAB_ICONS[item.key],
+      })),
+    [navVisibility],
+  );
 
   const activeIndex = useMemo(() => {
-    const activeKey = getActiveNavKey(pathname) ?? "studio";
-    const index = TABS.findIndex((tab) => tab.key === activeKey);
+    const activeKey = getActiveNavKey(pathname, navVisibility) ?? "studio";
+    const index = tabs.findIndex((tab) => tab.key === activeKey);
     return index >= 0 ? index : 0;
-  }, [pathname]);
+  }, [pathname, tabs, navVisibility]);
 
   const onTap = useCallback(
     (tab: TabDef) => {
@@ -85,7 +89,7 @@ export function MobileTabBar() {
       }}
     >
       <ul className="relative flex items-stretch h-12 max-w-[640px] mx-auto">
-        {TABS.map((tab, idx) => {
+        {tabs.map((tab, idx) => {
           const active = idx === activeIndex;
           const { Icon } = tab;
           return (

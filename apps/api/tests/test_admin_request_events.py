@@ -499,3 +499,132 @@ def test_completion_upstream_request_exposes_provider_and_responses_route() -> N
         "source": "composer",
         "upstream_route": "responses",
     }
+
+
+class _AdminResult:
+    def __init__(self, value=None, *, rowcount: int = 0):
+        self.value = value
+        self.rowcount = rowcount
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _AdminDb:
+    def __init__(self, results):
+        self.results = list(results)
+        self.statements = []
+        self.committed = False
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        if self.results:
+            return self.results.pop(0)
+        return _AdminResult()
+
+    async def commit(self):
+        self.committed = True
+
+
+@pytest.mark.asyncio
+async def test_admin_set_user_password_hashes_and_revokes_sessions(monkeypatch):
+    target = SimpleNamespace(
+        id="user-1",
+        email="member@example.com",
+        password_hash="old-hash",
+    )
+    db = _AdminDb([_AdminResult(target), _AdminResult(rowcount=2)])
+    audits = []
+
+    monkeypatch.setattr(admin, "hash_password", lambda password: f"hashed:{password}")
+
+    async def fake_audit(*_args, **kwargs):
+        audits.append(kwargs)
+
+    monkeypatch.setattr(admin, "write_admin_audit", fake_audit)
+
+    out = await admin.set_user_password(
+        "user-1",
+        admin._AdminSetUserPasswordIn(password="new-password"),
+        SimpleNamespace(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": True}
+    assert target.password_hash == "hashed:new-password"
+    assert db.committed is True
+    assert audits[0]["event_type"] == "admin.user.password_set"
+    assert audits[0]["target_user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_user_rejects_self_delete():
+    with pytest.raises(HTTPException) as exc:
+        await admin.delete_user(
+            "admin-1",
+            SimpleNamespace(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),
+            _AdminDb([]),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"]["code"] == "cannot_delete_self"
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_user_soft_deletes_and_runs_cleanup(monkeypatch):
+    target = SimpleNamespace(
+        id="user-1",
+        email="member@example.com",
+        account_mode="byok",
+        deleted_at=None,
+    )
+    db = _AdminDb(
+        [
+            _AdminResult(target),
+            _AdminResult(rowcount=2),
+            _AdminResult(rowcount=3),
+            _AdminResult(rowcount=4),
+        ]
+    )
+    task_cleanup = {"generations_canceled": 5, "completions_canceled": 6}
+    cleanup_calls = []
+    audits = []
+
+    async def fake_cancel(*_args, **kwargs):
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["account_mode"] == "byok"
+        return task_cleanup
+
+    async def fake_post_commit(*_args, **kwargs):
+        cleanup_calls.append(kwargs)
+
+    async def fake_audit(*_args, **kwargs):
+        audits.append(kwargs)
+
+    monkeypatch.setattr(admin, "_cancel_account_active_tasks", fake_cancel)
+    monkeypatch.setattr(
+        admin,
+        "_post_commit_account_task_cleanup",
+        fake_post_commit,
+    )
+    monkeypatch.setattr(admin, "write_admin_audit", fake_audit)
+
+    out = await admin.delete_user(
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": True}
+    assert target.deleted_at is not None
+    assert db.committed is True
+    assert audits[0]["event_type"] == "admin.user.delete"
+    assert audits[0]["details"]["sessions_revoked"] == 2
+    assert audits[0]["details"]["conversations_deleted"] == 3
+    assert audits[0]["details"]["images_deleted"] == 4
+    assert audits[0]["details"]["generations_canceled"] == 5
+    assert audits[0]["details"]["completions_canceled"] == 6
+    assert cleanup_calls == [{"user_id": "user-1", "cleanup": task_cleanup}]

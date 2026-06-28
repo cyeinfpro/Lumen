@@ -14,6 +14,8 @@ export type AspectRatio =
   | "9:16"
   | "21:9"
   | "9:21"
+  | "10:7"
+  | "7:10"
   | "4:5"
   | "3:4"
   | "4:3"
@@ -545,6 +547,10 @@ export interface InviteLinkPublicOut {
 export type SystemSettingKey =
   | "site.public_base_url"
   | "site.share_expiration_days"
+  | "ui.nav.studio_visible"
+  | "ui.nav.video_visible"
+  | "ui.nav.projects_visible"
+  | "ui.nav.assets_visible"
   | "upstream.pixel_budget"
   | "upstream.global_concurrency"
   | "upstream.default_model"
@@ -578,6 +584,10 @@ export type SystemSettingKey =
   | "byok.validation_model"
   | "byok.validation_timeout_ms"
   | "byok.pending_token_ttl_seconds"
+  | "byok.retention_hide_enabled"
+  | "byok.retention_delete_enabled"
+  | "byok.retention_hide_days"
+  | "byok.retention_delete_days"
   | "billing.enabled"
   | "billing.usd_to_rmb_rate"
   | "billing.allow_negative_balance"
@@ -817,6 +827,10 @@ export interface ByokSettingsOut {
   validation_model: string;
   validation_timeout_ms: number;
   pending_token_ttl_seconds: number;
+  retention_hide_enabled: boolean;
+  retention_delete_enabled: boolean;
+  retention_hide_days: number;
+  retention_delete_days: number;
 }
 
 export interface ByokSettingsPatchIn {
@@ -827,6 +841,39 @@ export interface ByokSettingsPatchIn {
   validation_model?: string;
   validation_timeout_ms?: number;
   pending_token_ttl_seconds?: number;
+  retention_hide_enabled?: boolean;
+  retention_delete_enabled?: boolean;
+  retention_hide_days?: number;
+  retention_delete_days?: number;
+}
+
+export interface AdminUserHistoryImageOut {
+  id: string;
+  url: string;
+  display_url: string;
+  preview_url: string | null;
+  thumb_url: string | null;
+  width: number;
+  height: number;
+  mime: string;
+}
+
+export interface AdminUserHistoryItemOut {
+  id: string;
+  kind: "generation";
+  created_at: string;
+  status: string;
+  prompt: string | null;
+  conversation_id: string | null;
+  conversation_title: string | null;
+  message_id: string | null;
+  retention_state: "active" | "hidden" | "deleted";
+  images: AdminUserHistoryImageOut[];
+}
+
+export interface AdminUserHistoryOut {
+  user: AdminUserOut;
+  items: AdminUserHistoryItemOut[];
 }
 
 export interface ApiSupplierTemplateOut {
