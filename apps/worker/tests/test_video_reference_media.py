@@ -43,6 +43,7 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
                 {
                     "kind": "video",
                     "label": "视频 1",
+                    "ref_id": "ref:video:1",
                     "url": "https://example.com/reference.mp4",
                 }
             ]
@@ -54,6 +55,7 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
     assert len(result) == 1
     assert result[0].kind == "video"
     assert result[0].label == "视频 1"
+    assert result[0].ref_id == "ref:video:1"
     assert result[0].url == "https://example.com/reference.mp4"
 
 
@@ -68,6 +70,7 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
                 {
                     "kind": "image",
                     "label": "图片 1",
+                    "ref_id": "ref:image:1",
                     "url": "https://lumen.example/api/images/reference/image-1/binary",
                     "upstream_reference_storage_key": "u/user-1/ref.jpg",
                     "upstream_reference_mime": "image/jpeg",
@@ -87,6 +90,7 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
     assert len(result) == 1
     assert result[0].kind == "image"
     assert result[0].label == "图片 1"
+    assert result[0].ref_id == "ref:image:1"
     assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
     assert result[0].data == b"image"
     assert result[0].mime == "image/jpeg"
@@ -252,6 +256,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
                     data=b"image",
                     mime="image/png",
                     label="图片 1",
+                    ref_id="ref:image:1",
                 ),
                 VideoReferenceMedia(
                     kind="video",
@@ -260,6 +265,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
                         "?token=t"
                     ),
                     label="视频 1",
+                    ref_id="ref:video:1",
                 ),
             ],
         )
@@ -273,11 +279,16 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
     assert len(client.body["safety_identifier"]) == 64
     assert "fps" not in client.body
     prompt_text = client.body["content"][0]["text"]
-    assert "Reference asset order" in prompt_text
+    assert "Reference asset contract" in prompt_text
+    assert "stable anchor: [ref:image:1]" in prompt_text
+    assert "stable anchor: [ref:video:1]" in prompt_text
     assert "Image 1" in prompt_text
     assert "Video 1" in prompt_text
     assert "[图片 1]" in prompt_text
     assert "[视频 1]" in prompt_text
+    assert "视频素材1" in prompt_text
+    assert "动作参考1" in prompt_text
+    assert "第1段素材" in prompt_text
     assert "参考 [图片 1]，运动参考 [视频 1]" in prompt_text
     assert client.body["content"][1]["role"] == "reference_image"
     assert client.body["content"][1]["image_url"]["url"].startswith(
@@ -362,7 +373,12 @@ async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -
             aspect_ratio="16:9",
             generate_audio=True,
             reference_media=[
-                VideoReferenceMedia(kind="image", data=b"image", mime="image/jpeg"),
+                VideoReferenceMedia(
+                    kind="image",
+                    data=b"image",
+                    mime="image/jpeg",
+                    ref_id="ref:image:1",
+                ),
             ],
         )
     )
@@ -370,16 +386,17 @@ async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -
     assert result.provider_task_id == "moyu-task-1"
     assert client.path == "v1/video/generations"
     assert client.body["model"] == "doubao-seedance-2-0-fast-260128"
-    assert client.body["prompt"] == "make it cinematic"
+    assert "Reference asset contract" in client.body["prompt"]
+    assert "stable anchor: [ref:image:1]" in client.body["prompt"]
+    assert "make it cinematic" in client.body["prompt"]
     assert set(client.body) == {"model", "prompt", "metadata"}
     assert client.body["metadata"]["duration"] == 6
     assert client.body["metadata"]["resolution"] == "720p"
     assert client.body["metadata"]["ratio"] == "16:9"
     assert client.body["metadata"]["generate_audio"] is True
-    assert client.body["metadata"]["content"][0] == {
-        "type": "text",
-        "text": "make it cinematic",
-    }
+    assert client.body["metadata"]["content"][0]["type"] == "text"
+    assert "Reference asset contract" in client.body["metadata"]["content"][0]["text"]
+    assert "make it cinematic" in client.body["metadata"]["content"][0]["text"]
     assert client.body["metadata"]["content"][1]["role"] == "reference_image"
     assert client.body["metadata"]["content"][1]["image_url"]["url"].startswith(
         "data:image/jpeg;base64,"

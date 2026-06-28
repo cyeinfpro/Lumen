@@ -1087,6 +1087,7 @@ export interface VideoReferenceMediaIn {
   video_id?: string | null;
   url?: string | null;
   label?: string | null;
+  ref_id?: string | null;
 }
 
 export interface VideoReferenceMediaOut {
@@ -1095,6 +1096,7 @@ export interface VideoReferenceMediaOut {
   video_id?: string | null;
   url?: string | null;
   label?: string | null;
+  ref_id?: string | null;
   mime?: string | null;
 }
 

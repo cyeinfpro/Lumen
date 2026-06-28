@@ -100,20 +100,27 @@ def test_video_prompt_enhance_defaults_to_single_motion_first_prompt() -> None:
     assert "motion/camera-first" in system_prompt
     assert "Volcano/Seedance-style video generation prompts" in system_prompt
     assert "Also apply Vibe Creating when appropriate" in system_prompt
-    assert "visual anchor, main action/state, local mood, or video theme/style" in system_prompt
+    assert (
+        "visual anchor, main action/state, local mood, or video theme/style"
+        in system_prompt
+    )
     assert "Preserve exact dialogue, voiceover, music, sound effects" in system_prompt
     assert "keep identity, outfit/product details" in system_prompt
     assert "Do NOT repeat or inventory existing subjects" in system_prompt
     assert "motion trajectory" in system_prompt
     assert "camera movement" in system_prompt
     assert "De-emphasize low-value technical camera controls" in system_prompt
+    assert "[ref:image:1]" in system_prompt
+    assert "ambiguous phrase without an anchor" in system_prompt
     assert "Do not invent subtitles" in system_prompt
     assert "seed values" in system_prompt
     assert "Output ONLY the enhanced video prompt text" in system_prompt
 
 
 @pytest.mark.asyncio
-async def test_video_prompt_enhance_variant_count_three_requires_parseable_variants() -> None:
+async def test_video_prompt_enhance_variant_count_three_requires_parseable_variants() -> (
+    None
+):
     from app.routes import prompts
 
     body = prompts.VideoEnhanceIn(
@@ -134,7 +141,9 @@ async def test_video_prompt_enhance_variant_count_three_requires_parseable_varia
 
     assert token_changed is False
     assert "Output exactly 3 variants" in system_prompt
-    assert '<variant action="direct_rewrite" title="short unique title">' in system_prompt
+    assert (
+        '<variant action="direct_rewrite" title="short unique title">' in system_prompt
+    )
     assert "ask_first" in system_prompt
     assert "keep_original" in system_prompt
     assert "optional_vc" in system_prompt
@@ -148,6 +157,7 @@ async def test_video_prompt_enhance_variant_count_three_requires_parseable_varia
     assert "火山/Seedance 视频提示词结构" in content_text
     assert "Vibe Creating 判断" in content_text
     assert "视觉锚点、行为/状态、局部调性或视频主题/风格" in content_text
+    assert "参考素材锚点合同" in content_text
     assert 'action="ask_first"' in content_text
     assert "direct_pass、light_refine、direct_rewrite、ask_first" in content_text
     assert "动作轨迹" in content_text
@@ -168,11 +178,13 @@ async def test_video_prompt_enhance_content_accepts_reference_only_input() -> No
                 kind="image",
                 url="https://example.com/ref.png",
                 label="产品图",
+                ref_id="ref:image:1",
             ),
             VideoReferenceMediaIn(
                 kind="video",
                 url="https://example.com/motion.mp4",
                 label="动作参考",
+                ref_id="ref:video:1",
             ),
         ],
     )
@@ -185,9 +197,21 @@ async def test_video_prompt_enhance_content_accepts_reference_only_input() -> No
     )
 
     assert token_changed is False
-    assert {"type": "input_image", "image_url": "https://example.com/ref.png"} in content
+    assert {
+        "type": "input_image",
+        "image_url": "https://example.com/ref.png",
+    } in content
     assert any(
-        item.get("type") == "input_text" and "https://example.com/motion.mp4" in item.get("text", "")
+        item.get("type") == "input_text" and "[ref:image:1]" in item.get("text", "")
+        for item in content
+    )
+    assert any(
+        item.get("type") == "input_text"
+        and "https://example.com/motion.mp4" in item.get("text", "")
+        for item in content
+    )
+    assert any(
+        item.get("type") == "input_text" and "[ref:video:1]" in item.get("text", "")
         for item in content
     )
 
@@ -205,6 +229,7 @@ async def test_video_prompt_enhance_content_accepts_asset_reference() -> None:
                 kind="image",
                 url="asset://asset-20260609161523-stlqd",
                 label="真人素材",
+                ref_id="ref:image:3",
             ),
         ],
     )
@@ -221,6 +246,7 @@ async def test_video_prompt_enhance_content_accepts_asset_reference() -> None:
     assert any(
         item.get("type") == "input_text"
         and "asset://asset-20260609161523-stlqd" in item.get("text", "")
+        and "[ref:image:3]" in item.get("text", "")
         for item in content
     )
 
@@ -474,7 +500,9 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
     monkeypatch.setattr(prompts.PROMPTS_ENHANCE_LIMITER, "check", fake_check)
     monkeypatch.setattr(prompts, "get_redis", lambda: object())
     monkeypatch.setattr(prompts, "_resolve_provider_order", fake_resolve_provider_order)
-    monkeypatch.setattr(prompts, "_prepare_prompt_enhance_billing", fake_prepare_billing)
+    monkeypatch.setattr(
+        prompts, "_prepare_prompt_enhance_billing", fake_prepare_billing
+    )
     monkeypatch.setattr(prompts, "_stream_enhance", fake_stream_enhance)
     monkeypatch.setattr(prompts, "_stream_with_keepalive", passthrough_stream)
 

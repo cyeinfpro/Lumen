@@ -36,6 +36,7 @@ class VideoReferenceMedia:
     mime: str | None = None
     url: str | None = None
     label: str | None = None
+    ref_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -724,7 +725,88 @@ def _clean_reference_label(raw: str | None) -> str | None:
     return value[:80]
 
 
-def _seedance_prompt_with_reference_order(req: VideoSubmitRequest) -> str:
+def _reference_anchor_token(kind: str, index: int, ref_id: str | None = None) -> str:
+    clean = (ref_id or "").strip().lower()
+    parts = clean.split(":")
+    if (
+        len(parts) == 3
+        and parts[0] == "ref"
+        and parts[1] == kind
+        and parts[2].isdigit()
+        and int(parts[2]) > 0
+    ):
+        return f"[{clean}]"
+    return f"[ref:{kind}:{index}]"
+
+
+def _reference_order_aliases(
+    *,
+    kind: Literal["image", "video"],
+    index: int,
+    label: str | None,
+    official: str,
+    localized: str,
+    anchor: str,
+) -> list[str]:
+    aliases: list[str] = []
+    zh_digits = {
+        1: "一",
+        2: "二",
+        3: "三",
+        4: "四",
+        5: "五",
+        6: "六",
+        7: "七",
+        8: "八",
+        9: "九",
+    }
+    noun = "图片" if kind == "image" else "视频"
+    short_noun = "图" if kind == "image" else "视频"
+    for alias in (
+        anchor,
+        anchor.strip("[]"),
+        _clean_reference_label(label),
+        localized,
+        f"[{localized}]",
+        f"{noun}{index}",
+        f"{short_noun}{index}",
+        f"视频素材{index}" if kind == "video" else None,
+        f"视频素材 {index}" if kind == "video" else None,
+        f"参考视频{index}" if kind == "video" else None,
+        f"参考视频 {index}" if kind == "video" else None,
+        f"动作参考{index}" if kind == "video" else None,
+        f"动作参考 {index}" if kind == "video" else None,
+        f"运动参考{index}" if kind == "video" else None,
+        f"运动参考 {index}" if kind == "video" else None,
+        f"第{index}张{noun}" if kind == "image" else f"第{index}个{noun}",
+        f"第{index}张{short_noun}" if kind == "image" else f"第{index}段{noun}",
+        f"第{index}段素材" if kind == "video" else None,
+        f"第{index}个视频素材" if kind == "video" else None,
+        f"第{zh_digits[index]}张{noun}"
+        if index in zh_digits and kind == "image"
+        else None,
+        f"第{zh_digits[index]}张{short_noun}"
+        if index in zh_digits and kind == "image"
+        else None,
+        f"第{zh_digits[index]}个{noun}"
+        if index in zh_digits and kind == "video"
+        else None,
+        f"第{zh_digits[index]}段{noun}"
+        if index in zh_digits and kind == "video"
+        else None,
+        f"第{zh_digits[index]}段素材"
+        if index in zh_digits and kind == "video"
+        else None,
+        f"第{zh_digits[index]}个视频素材"
+        if index in zh_digits and kind == "video"
+        else None,
+    ):
+        if alias and alias not in aliases and alias != official:
+            aliases.append(alias)
+    return aliases
+
+
+def _prompt_with_reference_order(req: VideoSubmitRequest) -> str:
     if req.action != "reference" or not req.reference_media:
         return req.prompt
 
@@ -737,31 +819,38 @@ def _seedance_prompt_with_reference_order(req: VideoSubmitRequest) -> str:
             official = f"Image {image_index}"
             localized = f"图片 {image_index}"
             description = f"reference image #{image_index}"
+            anchor = _reference_anchor_token("image", image_index, item.ref_id)
         elif item.kind == "video":
             video_index += 1
             official = f"Video {video_index}"
             localized = f"视频 {video_index}"
             description = f"reference video #{video_index}"
+            anchor = _reference_anchor_token("video", video_index, item.ref_id)
         else:
             continue
 
-        aliases: list[str] = []
-        for alias in (
-            _clean_reference_label(item.label),
-            localized,
-            f"[{localized}]",
-        ):
-            if alias and alias not in aliases and alias != official:
-                aliases.append(alias)
+        aliases = _reference_order_aliases(
+            kind=item.kind,
+            index=image_index if item.kind == "image" else video_index,
+            label=item.label,
+            official=official,
+            localized=localized,
+            anchor=anchor,
+        )
         alias_text = f"; user-prompt aliases: {', '.join(aliases)}" if aliases else ""
-        lines.append(f"- {official}: {description} in the content array{alias_text}.")
+        lines.append(
+            f"- {official}: {description} in the content array; stable anchor: "
+            f"{anchor}{alias_text}."
+        )
 
     if not lines:
         return req.prompt
 
     return (
-        "Reference asset order for this Seedance request. Interpret the user's "
-        "asset mentions by the official type + number below:\n"
+        "Reference asset contract for this video request. Interpret the user's "
+        "asset mentions by the stable anchors and official type + number below. "
+        "If the user prompt includes an anchor such as [ref:image:1], bind that "
+        "instruction only to the matching reference asset:\n"
         + "\n".join(lines)
         + "\n\nUser prompt:\n"
         + req.prompt
@@ -775,7 +864,7 @@ def _seedance_content(
     include_reference_order_prompt: bool = False,
 ) -> list[dict[str, Any]]:
     prompt = (
-        _seedance_prompt_with_reference_order(req)
+        _prompt_with_reference_order(req)
         if include_reference_order_prompt
         else req.prompt
     )
@@ -967,8 +1056,13 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         return f"v1/{suffix}"
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        prompt = _prompt_with_reference_order(req)
         metadata: dict[str, Any] = {
-            "content": _seedance_content(req, allow_input_image_url=True),
+            "content": _seedance_content(
+                req,
+                allow_input_image_url=True,
+                include_reference_order_prompt=True,
+            ),
             "resolution": req.resolution,
             "ratio": req.aspect_ratio,
             "generate_audio": req.generate_audio,
@@ -981,7 +1075,7 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
             metadata["watermark"] = req.watermark
         body = {
             "model": req.upstream_model,
-            "prompt": req.prompt or "video generation",
+            "prompt": prompt or "video generation",
             "metadata": metadata,
         }
         async with self._client() as client:
@@ -1226,7 +1320,7 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": req.upstream_model,
-            "prompt": req.prompt,
+            "prompt": _prompt_with_reference_order(req),
             "size": req.resolution.upper(),
         }
         if req.aspect_ratio != "adaptive":
@@ -1400,7 +1494,7 @@ class DashScopeHappyHorseAdapter:
         return httpx.AsyncClient(**kwargs)
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
-        input_payload: dict[str, Any] = {"prompt": req.prompt}
+        input_payload: dict[str, Any] = {"prompt": _prompt_with_reference_order(req)}
         if req.action == "i2v":
             input_payload["media"] = [
                 {

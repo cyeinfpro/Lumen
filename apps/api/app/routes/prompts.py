@@ -90,6 +90,8 @@ Rules:
 - Preserve the user's original intent and subject matter exactly
 - Preserve exact dialogue, voiceover, music, sound effects, lyrics, required structure, and explicitly requested parameters verbatim
 - Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- Preserve exact reference anchors such as [ref:image:1] or [ref:video:1] when they appear; never replace an anchor with a plain description only
+- If multiple same-kind references are supplied and the user says this image, that image, left image, or another ambiguous phrase without an anchor, ask a concise clarification question instead of guessing
 - For image-to-video or first-frame tasks, keep identity, outfit/product details, layout, lighting, and viewpoint stable; describe only the intended motion after the reference frame
 - For reference-video tasks, extract reusable motion rhythm, camera path, and continuity cues without copying unrelated subjects or scenes
 - Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
@@ -120,6 +122,8 @@ Rules:
 - Preserve the user's original intent and subject matter exactly
 - Preserve exact dialogue, voiceover, music, sound effects, lyrics, required structure, and explicitly requested parameters verbatim
 - Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- Preserve exact reference anchors such as [ref:image:1] or [ref:video:1] when they appear; never replace an anchor with a plain description only
+- If multiple same-kind references are supplied and the user says this image, that image, left image, or another ambiguous phrase without an anchor, ask a concise clarification question instead of guessing
 - For image-to-video or first-frame tasks, keep identity, outfit/product details, layout, lighting, and viewpoint stable; describe only the intended motion after the reference frame
 - For reference-video tasks, extract reusable motion rhythm, camera path, and continuity cues without copying unrelated subjects or scenes
 - Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
@@ -455,6 +459,20 @@ def _append_video_context_line(lines: list[str], key: str, value: Any) -> None:
     lines.append(f"{key}: {value}")
 
 
+def _reference_anchor(ref_id: str | None, kind: str, index: int) -> str:
+    clean = (ref_id or "").strip().lower()
+    parts = clean.split(":")
+    if (
+        len(parts) == 3
+        and parts[0] == "ref"
+        and parts[1] == kind
+        and parts[2].isdigit()
+        and int(parts[2]) > 0
+    ):
+        return f"[{clean}]"
+    return f"[ref:{kind}:{index}]"
+
+
 def _video_reference_public_url(video: Video, public_base_url: str) -> tuple[str, bool]:
     metadata = dict(video.metadata_jsonb or {})
     token = metadata.get("reference_access_token")
@@ -521,7 +539,13 @@ async def _build_video_enhance_content(
         ),
         (
             "信息密度：若缺少视觉锚点、行为/状态、局部调性或视频主题/风格，"
-            "请先输出 action=\"ask_first\" 的 1-3 个必要问题，不要硬猜。"
+            '请先输出 action="ask_first" 的 1-3 个必要问题，不要硬猜。'
+        ),
+        (
+            "参考素材锚点合同：参考图/视频都有唯一锚点，例如 [ref:image:1]。"
+            "优化后必须保留用户实际引用到的锚点；如果同类素材有多张而用户只说"
+            "这张图、那张图、左图、右图等模糊指代，请输出 ask_first 补问，"
+            "不要自行选择。"
         ),
         (
             "约束优先：用户明确写出的台词、旁白、音乐、音效、歌词、"
@@ -582,10 +606,19 @@ async def _build_video_enhance_content(
         label = (item.label or "").strip() or (
             f"参考图片 {index}" if item.kind == "image" else f"参考视频 {index}"
         )
+        same_kind_index = sum(
+            1 for prior in body.reference_media[:index] if prior.kind == item.kind
+        )
+        anchor = _reference_anchor(item.ref_id, item.kind, same_kind_index)
         if item.kind == "image":
             if item.image_id:
                 image = await _owned_image(db, user_id=user_id, image_id=item.image_id)
-                content.append({"type": "input_text", "text": f"{label}："})
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": f"{label} 锚点 {anchor}；优化输出引用该素材时必须保留此锚点：",
+                    }
+                )
                 image_url = await _image_data_url(image)
                 if image_url:
                     appended, media_payload_bytes = _append_input_image_with_budget(
@@ -613,9 +646,9 @@ async def _build_video_enhance_content(
                     {
                         "type": "input_text",
                         "text": (
-                            f"{label} 外部图片数据 URL："
+                            f"{label} 锚点 {anchor}；外部图片数据 URL："
                             if is_data_image
-                            else f"{label} 外部图片 URL：{image_url}"
+                            else f"{label} 锚点 {anchor}；外部图片 URL：{image_url}"
                         ),
                     }
                 )
@@ -639,7 +672,7 @@ async def _build_video_enhance_content(
                 content.append(
                     {
                         "type": "input_text",
-                        "text": f"{label} 外部图片引用：{(item.url or '').strip()}",
+                        "text": f"{label} 锚点 {anchor}；外部图片引用：{(item.url or '').strip()}",
                     }
                 )
             continue
@@ -654,6 +687,7 @@ async def _build_video_enhance_content(
                 token_changed = token_changed or changed
             details = [
                 f"{label}：参考视频",
+                f"anchor={anchor}",
                 f"video_id={video.id}",
                 f"mime={video.mime}",
                 f"duration_ms={video.duration_ms}",
@@ -686,7 +720,7 @@ async def _build_video_enhance_content(
             content.append(
                 {
                     "type": "input_text",
-                    "text": f"{label} 外部参考视频 URL：{(item.url or '').strip()}",
+                    "text": f"{label} 锚点 {anchor}；外部参考视频 URL：{(item.url or '').strip()}",
                 }
             )
 
