@@ -39,7 +39,7 @@ def test_video_billing_model_uses_mini_when_upstream_or_model_is_mini() -> None:
     assert (
         video_billing.video_billing_model(
             "seedance-2.0",
-            "dreamina-seedance-2-0-mini-260615",
+            "doubao-seedance-2-0-mini-260615",
         )
         == "seedance-2.0-mini"
     )
@@ -53,7 +53,7 @@ def test_video_billing_model_uses_mini_when_upstream_or_model_is_mini() -> None:
     assert (
         video_billing.video_billing_model(
             "seedance-2.0-mini",
-            "dreamina-seedance-2-0-mini-260615",
+            "doubao-seedance-2-0-mini-260615",
         )
         == "seedance-2.0-mini"
     )

@@ -192,9 +192,9 @@ class PollResult:
         "seedance-2.0-fast:t2v": "doubao-seedance-2-0-fast-260128",
         "seedance-2.0-fast:i2v": "doubao-seedance-2-0-fast-260128",
         "seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128",
-        "seedance-2.0-mini:t2v": "dreamina-seedance-2-0-mini-260615",
-        "seedance-2.0-mini:i2v": "dreamina-seedance-2-0-mini-260615",
-        "seedance-2.0-mini:reference": "dreamina-seedance-2-0-mini-260615"
+        "seedance-2.0-mini:t2v": "doubao-seedance-2-0-mini-260615",
+        "seedance-2.0-mini:i2v": "doubao-seedance-2-0-mini-260615",
+        "seedance-2.0-mini:reference": "doubao-seedance-2-0-mini-260615"
       }
     }
   ]

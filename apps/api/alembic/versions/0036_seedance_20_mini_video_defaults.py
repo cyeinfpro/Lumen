@@ -28,12 +28,10 @@ _DURATIONS = tuple(range(4, 16))
 _NO_VIDEO_ACTIONS = ("t2v", "i2v", "reference", "reference_image")
 _RESOLUTIONS = ("480p", "720p")
 
-# BytePlus ModelArk pricing docs, updated 2026-06-23:
-# - dreamina-seedance-2-0-mini-260615 supports 480p/720p output.
-# - Online unit price is USD 3.5/MTok without video input and USD 2.1/MTok
+# Volcengine ModelArk pricing docs, updated 2026-06-23:
+# - doubao-seedance-2-0-mini-260615 supports 480p/720p output.
+# - Online unit price is equivalent to 23 RMB/MTok without video input and 14 RMB/MTok
 #   with video input.
-# - The local billing table stores the existing Volcengine RMB-style unit
-#   prices; these values keep the same ratio against Seedance 2.0/Fast.
 _NO_VIDEO_UNIT_PRICE = 23_000_000
 _VIDEO_INPUT_UNIT_PRICE = 14_000_000
 

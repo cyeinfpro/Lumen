@@ -259,7 +259,7 @@ async def test_resolve_video_billing_uses_mini_model_from_upstream_model(
     session = FakeSession()
     generation = _generation()
     generation.upstream_request = {
-        "upstream_model": "dreamina-seedance-2-0-mini-260615"
+        "upstream_model": "doubao-seedance-2-0-mini-260615"
     }
     calls: list[tuple[str, dict[str, object]]] = []
 

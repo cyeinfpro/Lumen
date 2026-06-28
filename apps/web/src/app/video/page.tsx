@@ -609,7 +609,6 @@ export default function VideoPage() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const referenceFileRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
-  const promptEnhancePanelRef = useRef<HTMLDivElement | null>(null);
   const promptEnhanceAbortRef = useRef<AbortController | null>(null);
   const terminalHistorySyncedRef = useRef<Set<string>>(new Set());
   const refreshInFlightRef = useRef<Set<string>>(new Set());
@@ -939,19 +938,6 @@ export default function VideoPage() {
     },
     [],
   );
-
-  useEffect(() => {
-    if (!promptEnhancePanelVisible) return;
-
-    const scrollTimer = window.setTimeout(() => {
-      promptEnhancePanelRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 80);
-
-    return () => window.clearTimeout(scrollTimer);
-  }, [promptEnhanceCandidates.length, promptEnhancePanelVisible]);
 
   const availableModels = useMemo(
     () => options?.models.filter((item) => item.actions.includes(action)) ?? [],
@@ -1356,6 +1342,13 @@ export default function VideoPage() {
     selectedModel,
   ]);
 
+  const scrollPromptEditorIntoView = useCallback(() => {
+    const target = promptRef.current;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    requestAnimationFrame(() => target.focus());
+  }, []);
+
   const applyPromptEnhanceCandidate = useCallback(
     (candidate: PromptEnhanceCandidate) => {
       if (!canApplyPromptEnhanceCandidate(candidate)) return;
@@ -1681,10 +1674,7 @@ export default function VideoPage() {
                         )}
                       />
                       {promptEnhancePanelVisible && (
-                        <div
-                          ref={promptEnhancePanelRef}
-                          className="scroll-mt-4 md:scroll-mt-6"
-                        >
+                        <div className="scroll-mt-4 md:scroll-mt-6">
                           <PromptEnhanceChooser
                             loading={isEnhancingPrompt}
                             preview={promptEnhancePreview}
@@ -1692,6 +1682,7 @@ export default function VideoPage() {
                             selectedId={selectedPromptEnhanceCandidateId}
                             onSelect={applyPromptEnhanceCandidate}
                             onDismiss={clearPromptEnhanceChoices}
+                            onReturnToEditor={scrollPromptEditorIntoView}
                           />
                         </div>
                       )}
@@ -2331,6 +2322,7 @@ function PromptEnhanceChooser({
   selectedId,
   onSelect,
   onDismiss,
+  onReturnToEditor,
 }: {
   loading: boolean;
   preview: string;
@@ -2338,6 +2330,7 @@ function PromptEnhanceChooser({
   selectedId: string;
   onSelect: (candidate: PromptEnhanceCandidate) => void;
   onDismiss: () => void;
+  onReturnToEditor: () => void;
 }) {
   const cleanPreview = cleanPromptEnhanceText(preview);
   const visibleCandidates = candidates.length > 0 ? candidates : [];
@@ -2358,7 +2351,7 @@ function PromptEnhanceChooser({
 
   return (
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
             {loading ? (
@@ -2385,14 +2378,24 @@ function PromptEnhanceChooser({
           </span>
         </div>
         {!loading && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onDismiss}
-            leftIcon={<XCircle className="h-3.5 w-3.5" />}
-          >
-            清除
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onReturnToEditor}
+              leftIcon={<PencilLine className="h-3.5 w-3.5" />}
+            >
+              回到编辑
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDismiss}
+              leftIcon={<XCircle className="h-3.5 w-3.5" />}
+            >
+              清除
+            </Button>
+          </div>
         )}
       </div>
 
@@ -2403,7 +2406,7 @@ function PromptEnhanceChooser({
       )}
 
       {visibleCandidates.length > 0 && (
-        <div className="grid gap-2">
+        <div className="grid max-h-[clamp(14rem,60dvh,34rem)] gap-2 overflow-y-auto pr-1">
           {visibleCandidates.map((candidate) => {
             const selected = candidate.id === selectedId;
             const canApply = canApplyPromptEnhanceCandidate(candidate);
