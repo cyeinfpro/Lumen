@@ -115,6 +115,45 @@ def test_public_share_binary_response_requires_revalidation() -> None:
     assert response.headers["X-Content-Type-Options"] == "nosniff"
 
 
+@pytest.mark.asyncio
+async def test_public_visible_image_map_batches_account_modes(monkeypatch) -> None:
+    now = datetime(2026, 6, 29, tzinfo=timezone.utc)
+    images = [
+        SimpleNamespace(
+            id="img-byok-old",
+            user_id="user-byok",
+            created_at=now - timedelta(days=5),
+        ),
+        SimpleNamespace(
+            id="img-wallet-old",
+            user_id="user-wallet",
+            created_at=now - timedelta(days=5),
+        ),
+    ]
+    db = _Db([[("user-byok", "byok"), ("user-wallet", "wallet")]])
+
+    async def fake_settings(_db):
+        return SimpleNamespace(
+            retention_hide_enabled=True,
+            retention_delete_enabled=False,
+            retention_hide_days=3,
+            retention_delete_days=7,
+        )
+
+    def fake_visible(*, account_mode, created_at, policy):
+        return account_mode != "byok" or created_at >= now - timedelta(
+            days=policy.hide_days
+        )
+
+    monkeypatch.setattr(shares, "read_byok_settings_cached", fake_settings)
+    monkeypatch.setattr(shares, "byok_retention_is_user_visible", fake_visible)
+
+    visible = await shares._public_visible_image_map(db, images)  # noqa: SLF001
+
+    assert visible == {"img-byok-old": False, "img-wallet-old": True}
+    assert len(db.statements) == 1
+
+
 def test_share_storage_path_keeps_final_symlink_visible_to_safe_open(
     tmp_path: Path,
 ) -> None:
@@ -557,7 +596,13 @@ async def test_public_share_variant_by_id_is_scoped_to_share_owner(
         kind="preview1024",
         storage_key="u/user-1/two.preview1024.webp",
     )
-    db = _Db([(share, primary), variant])
+    target = SimpleNamespace(
+        id="img-2",
+        user_id="user-1",
+        storage_key="u/user-1/two.png",
+        mime="image/png",
+    )
+    db = _Db([(share, primary), (variant, target)])
 
     await shares.get_public_share_image_variant_by_id(
         "token-1",

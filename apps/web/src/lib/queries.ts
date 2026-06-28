@@ -29,6 +29,7 @@ import {
   createStoryboardShot,
   createSystemPrompt,
   createApparelModelLibraryItem,
+  deleteAdminUser,
   deleteConversation,
   deleteStoryboard,
   deleteStoryboardAsset,
@@ -50,6 +51,7 @@ import {
   getWorkflow,
   getStoryboard,
   getSystemSettings,
+  getAdminUserHistory,
   listApparelModelLibrary,
   listAdminRequestEvents,
   listAdminUsers,
@@ -92,6 +94,7 @@ import {
   revokeMySession,
   revokeShare,
   moveStoryboardShot,
+  setAdminUserPassword,
   setDefaultSystemPrompt,
   getAdminModels,
   getProviders,
@@ -185,6 +188,7 @@ import {
 } from "./apiClient";
 import type {
   AdminUserOut,
+  AdminUserHistoryOut,
   AdminRequestEventsOut,
   AdminModelsOut,
   AllowedEmailOut,
@@ -222,6 +226,8 @@ export const qk = {
   allowedEmails: () => ["admin", "allowed_emails"] as const,
   adminUsers: (params?: { limit?: number; cursor?: string }) =>
     ["admin", "users", params ?? {}] as const,
+  adminUserHistory: (userId: string) =>
+    ["admin", "users", userId, "history"] as const,
   adminRequestEvents: (params?: {
     limit?: number;
     kind?: "all" | "generation" | "completion";
@@ -410,6 +416,50 @@ export function useAdminUsersInfiniteQuery(params?: { limit?: number }) {
     queryFn: ({ pageParam }) => listAdminUsers({ limit, cursor: pageParam }),
     initialPageParam: undefined,
     getNextPageParam: (last) => last.next_cursor,
+  });
+}
+
+export function useAdminUserHistoryQuery(
+  userId: string | null,
+  options?: Omit<UseQueryOptions<AdminUserHistoryOut>, "queryKey" | "queryFn">,
+) {
+  return useQuery<AdminUserHistoryOut>({
+    queryKey: qk.adminUserHistory(userId ?? ""),
+    queryFn: () => getAdminUserHistory(userId ?? "", { limit: 80 }),
+    enabled: Boolean(userId) && (options?.enabled ?? true),
+    ...options,
+  });
+}
+
+export function useSetAdminUserPasswordMutation(
+  options?: Omit<
+    UseMutationOptions<{ ok: boolean }, Error, { userId: string; password: string }>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, { userId: string; password: string }>({
+    mutationFn: ({ userId, password }) => setAdminUserPassword(userId, password),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeleteAdminUserMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deleteAdminUser,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      qc.removeQueries({ queryKey: qk.adminUserHistory(vars) });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }
 
@@ -672,6 +722,7 @@ export function useUpdateSystemSettingsMutation(
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.systemSettings() });
+      qc.invalidateQueries({ queryKey: ["me"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

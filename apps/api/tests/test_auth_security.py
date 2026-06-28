@@ -163,6 +163,32 @@ def test_clear_auth_cookies_matches_cookie_attributes(
 
 
 @pytest.mark.asyncio
+async def test_runtime_defaults_include_navigation_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "generation.fast_default": "0",
+        "ui.nav.studio_visible": "1",
+        "ui.nav.video_visible": "0",
+        "ui.nav.projects_visible": "1",
+        "ui.nav.assets_visible": "0",
+    }
+
+    async def fake_get_setting(_db, spec):
+        return values.get(spec.key)
+
+    monkeypatch.setattr(auth, "get_setting", fake_get_setting)
+
+    defaults = await auth._runtime_defaults(object())  # noqa: SLF001
+
+    assert defaults.fast is False
+    assert defaults.nav_visibility.studio is True
+    assert defaults.nav_visibility.video is False
+    assert defaults.nav_visibility.projects is True
+    assert defaults.nav_visibility.assets is False
+
+
+@pytest.mark.asyncio
 async def test_get_current_user_rejects_soft_deleted_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

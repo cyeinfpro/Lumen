@@ -16,9 +16,11 @@ import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 import { isDesktopRuntime } from "@/lib/desktop/runtime";
 import { formatRmb, formatRmbCompact } from "@/lib/money";
 import { SPRING } from "@/lib/motion";
+import { useUiStore } from "@/store/useUiStore";
 import {
-  APP_NAV_ITEMS,
   getActiveNavKey,
+  getAppNavItems,
+  getFirstVisibleNavRoute,
   isSameRoute,
   type AppNavItem,
   type AppNavKey,
@@ -35,10 +37,19 @@ export interface DesktopTopNavProps {
 export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const navVisibility = useUiStore((s) => s.navVisibility);
+  const navItems = useMemo(
+    () => getAppNavItems(navVisibility),
+    [navVisibility],
+  );
+  const homeHref = useMemo(
+    () => getFirstVisibleNavRoute(navVisibility),
+    [navVisibility],
+  );
 
   const currentActive: DesktopNavTab = useMemo(() => {
-    return getActiveNavKey(pathname) ?? active;
-  }, [pathname, active]);
+    return getActiveNavKey(pathname, navVisibility) ?? active;
+  }, [pathname, active, navVisibility]);
 
   const onTap = useCallback(
     (tab: AppNavItem) => {
@@ -90,7 +101,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
           </IconButton>
         )}
         <Link
-          href="/"
+          href={homeHref}
           className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-1 transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
           aria-label="Lumen 首页"
         >
@@ -104,7 +115,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       {/* Middle: Tabs — 占据中间 1fr，居中显示，可挤压 */}
       <nav aria-label="主导航" className="flex min-w-0 flex-1 justify-center overflow-hidden">
         <ul ref={tabsRef} onKeyDown={onTabsKeyDown} className="flex items-center gap-1">
-          {APP_NAV_ITEMS.map((tab) => {
+          {navItems.map((tab) => {
             const isActive = tab.key === currentActive;
             return (
               <li key={tab.key} className="relative">

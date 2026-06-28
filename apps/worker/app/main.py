@@ -26,6 +26,7 @@ from .observability import (
 from .provider_pool import probe_providers
 from .services import billing_cache
 from .tasks import auto_title as auto_title_tasks
+from .tasks import byok_retention as byok_retention_tasks
 from .tasks import completion as completion_tasks
 from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
@@ -128,6 +129,12 @@ class WorkerSettings:
                 memory_tasks.cleanup_memory,
                 hour={3},
                 minute={17},
+                run_at_startup=False,
+            ),
+            cron(
+                byok_retention_tasks.cleanup_byok_retention,
+                hour={3},
+                minute={27},
                 run_at_startup=False,
             ),
             # last_used_at 批量 flush: 每分钟 0/30 秒各一次, 把 redis ZSET 累积的

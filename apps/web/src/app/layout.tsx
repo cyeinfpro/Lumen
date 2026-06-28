@@ -91,6 +91,15 @@ function normalizeRuntimeDefaults(value: unknown): RuntimeDefaults {
   ) {
     next.upload_max_source_bytes = raw.upload_max_source_bytes;
   }
+  if (raw.nav_visibility && typeof raw.nav_visibility === "object") {
+    const nav = raw.nav_visibility;
+    next.nav_visibility = {
+      studio: nav.studio !== false,
+      video: nav.video !== false,
+      projects: nav.projects !== false,
+      assets: nav.assets !== false,
+    };
+  }
   return next;
 }
 

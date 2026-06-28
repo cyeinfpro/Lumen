@@ -74,6 +74,10 @@ function sizeLabel(ratio: string, sizeRequested: string): string {
       return "3840x2160";
     case "9:16":
       return "2160x3840";
+    case "10:7":
+      return "3424x2400";
+    case "7:10":
+      return "2400x3424";
     case "1:1":
       return "2048x2048";
     case "4:5":

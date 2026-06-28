@@ -574,7 +574,7 @@ function clearLocalAccountState(queryClient: QueryClient) {
       attachments: [],
       mode: "chat",
       params: {
-        aspect_ratio: "16:9",
+        aspect_ratio: "7:10",
         size_mode: "auto",
         count: 1,
       },

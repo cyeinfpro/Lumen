@@ -1,7 +1,7 @@
 "use client";
 
 // Lumen 管理面板：BYOK（用户自带 Key）
-// UI 目标：把 4 个技术开关翻成「业务模式」，新增供应商分基础/高级两段，
+// UI 目标：把 BYOK 开关翻成「业务模式」，新增供应商分基础/高级两段，
 // 已有供应商默认折叠为 summary 行，展开后才显示编辑表单。
 // 视觉风格保持 admin 既定深色主题（var(--bg-1)/(--bg-0) + amber accent）。
 
@@ -77,7 +77,7 @@ const EMPTY_SUPPLIER: SupplierDraft = {
   probe_key: "",
 };
 
-// —— 业务模式（review §9）：把 4 个开关合并为单选预设 ——
+// —— 业务模式（review §9）：把 3 个开关合并为单选预设 ——
 
 type ByokMode = "off" | "bind_only" | "key_first" | "fully_open";
 
@@ -87,7 +87,6 @@ type ModeToggles = Required<
     | "mode_enabled"
     | "byok_signup_enabled"
     | "byok_signup_bypasses_allowlist"
-    | "fallback_to_admin_provider"
   >
 >;
 
@@ -107,7 +106,7 @@ const MODE_DEFS: ModeDef[] = [
     hint: "用户全部走站长配置的全局 Key，最简",
     scenario: "私有部署 / 内部演示",
     icon: Lock,
-    toggles: { mode_enabled: false, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+    toggles: { mode_enabled: false, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false },
   },
   {
     value: "bind_only",
@@ -115,7 +114,7 @@ const MODE_DEFS: ModeDef[] = [
     hint: "已注册用户可在账号设置里换成自己的 Key，不开放注册",
     scenario: "小范围邀请制",
     icon: KeyRound,
-    toggles: { mode_enabled: true, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+    toggles: { mode_enabled: true, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false },
   },
   {
     value: "key_first",
@@ -123,7 +122,7 @@ const MODE_DEFS: ModeDef[] = [
     hint: "未登录用户可先输 Key 再注册，仍要走邀请链接",
     scenario: "邀请制 + 自助 BYOK",
     icon: Sparkles,
-    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: false },
   },
   {
     value: "fully_open",
@@ -131,7 +130,7 @@ const MODE_DEFS: ModeDef[] = [
     hint: "任何人凭 Key 即可注册，不再校验邀请白名单",
     scenario: "公网公开站",
     icon: Globe,
-    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: true, fallback_to_admin_provider: false },
+    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: true },
   },
 ];
 
@@ -141,8 +140,7 @@ function detectMode(s: ByokSettingsOut | undefined): ByokMode | null {
     if (
       def.toggles.mode_enabled === s.mode_enabled &&
       def.toggles.byok_signup_enabled === s.byok_signup_enabled &&
-      def.toggles.byok_signup_bypasses_allowlist === s.byok_signup_bypasses_allowlist &&
-      def.toggles.fallback_to_admin_provider === s.fallback_to_admin_provider
+      def.toggles.byok_signup_bypasses_allowlist === s.byok_signup_bypasses_allowlist
     ) {
       return def.value;
     }
@@ -159,7 +157,6 @@ const ADVANCED_TOGGLES: Array<{
   { key: "mode_enabled", label: "BYOK 总开关", hint: "关闭后所有用户走站长 Key", requiresMode: false },
   { key: "byok_signup_enabled", label: "公开注册", hint: "未登录用户也能用 Key 注册", requiresMode: true },
   { key: "byok_signup_bypasses_allowlist", label: "绕过白名单", hint: "BYOK 注册免邀请链接 / allowlist", requiresMode: true },
-  { key: "fallback_to_admin_provider", label: "管理员兜底", hint: "用户 Key 失败时回落到全局 Provider", requiresMode: true },
 ];
 
 // —— 工具 ——
@@ -313,6 +310,15 @@ export function ByokPanel() {
   const settingsBusy = saveSettingsMut.isPending;
   const settingsDirty = Object.keys(settingsDraft).length > 0;
   const loading = settingsQ.isLoading || suppliersQ.isLoading;
+  const retentionHideDays =
+    settingsDraft.retention_hide_days ?? settings?.retention_hide_days ?? 3;
+  const retentionDeleteDays =
+    settingsDraft.retention_delete_days ?? settings?.retention_delete_days ?? 7;
+  const retentionInvalid = Boolean(
+    effectiveSettings?.retention_hide_enabled &&
+      effectiveSettings?.retention_delete_enabled &&
+      retentionDeleteDays < retentionHideDays,
+  );
 
   return (
     <div className="space-y-6">
@@ -324,7 +330,7 @@ export function ByokPanel() {
           BYOK 模式
         </header>
         <p className="text-xs text-[var(--fg-2)]">
-          按业务场景一键配置；下方「高级覆盖」可手动微调四个原始开关。
+          按业务场景一键配置；下方「高级覆盖」可手动微调 3 个原始开关。
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {MODE_DEFS.map((def) => (
@@ -340,7 +346,7 @@ export function ByokPanel() {
 
         <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
-            <span>高级覆盖（手动改 4 个原始开关）</span>
+            <span>高级覆盖（手动改 3 个原始开关）</span>
             <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
           </summary>
           <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-[var(--border-subtle)]">
@@ -397,12 +403,62 @@ export function ByokPanel() {
           </div>
         </div>
 
+        <div className="space-y-3">
+          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">数据保留</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <ToggleRow
+              label="超过窗口后用户侧隐藏"
+              hint="仅影响 BYOK 用户；管理员仍可在删除前查看。"
+              checked={Boolean(effectiveSettings?.retention_hide_enabled ?? true)}
+              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, retention_hide_enabled: v }))}
+            />
+            <ToggleRow
+              label="自动软删除过期数据"
+              hint="危险操作，默认关闭；开启后 worker 会按删除窗口软删除 BYOK 过期数据。"
+              checked={Boolean(effectiveSettings?.retention_delete_enabled ?? false)}
+              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, retention_delete_enabled: v }))}
+            />
+            <FieldNumber
+              label="隐藏窗口（天）"
+              hint="默认 3 天；关闭隐藏开关时不生效。"
+              min={1}
+              max={3650}
+              value={retentionHideDays}
+              onChange={(v) =>
+                setSettingsDraft((cur) => ({
+                  ...cur,
+                  retention_hide_days: clampInt(v, 1, 3650),
+                }))
+              }
+            />
+            <FieldNumber
+              label="删除窗口（天）"
+              hint="默认 7 天；关闭自动删除时不生效。"
+              min={1}
+              max={3650}
+              value={retentionDeleteDays}
+              onChange={(v) =>
+                setSettingsDraft((cur) => ({
+                  ...cur,
+                  retention_delete_days: clampInt(v, 1, 3650),
+                }))
+              }
+            />
+          </div>
+          {retentionInvalid && (
+            <p className="flex items-start gap-2 text-xs text-[var(--danger)]">
+              <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
+              删除窗口不能小于隐藏窗口。
+            </p>
+          )}
+        </div>
+
         <div className="flex items-center gap-3 flex-wrap">
           <Button
             variant="primary"
             size="md"
             onClick={() => saveSettingsMut.mutate()}
-            disabled={settingsBusy || !settingsDirty}
+            disabled={settingsBusy || !settingsDirty || retentionInvalid}
             loading={settingsBusy}
             leftIcon={!settingsBusy ? <Save className="w-4 h-4" /> : undefined}
           >

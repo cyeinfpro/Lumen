@@ -52,6 +52,7 @@ import { ErrorBlock } from "../page";
 type Op = { kind: "set"; value: string } | { kind: "clear" };
 type SettingGroupId =
   | "site"
+  | "ui"
   | "image"
   | "upstream"
   | "providers"
@@ -135,6 +136,10 @@ const IMAGE_OUTPUT_FORMAT_KEY = "image.output_format";
 const IMAGE_JOB_BASE_URL_KEY = "image.job_base_url";
 const SITE_PUBLIC_BASE_URL_KEY = "site.public_base_url";
 const SITE_SHARE_EXPIRATION_DAYS_KEY = "site.share_expiration_days";
+const UI_NAV_STUDIO_VISIBLE_KEY = "ui.nav.studio_visible";
+const UI_NAV_VIDEO_VISIBLE_KEY = "ui.nav.video_visible";
+const UI_NAV_PROJECTS_VISIBLE_KEY = "ui.nav.projects_visible";
+const UI_NAV_ASSETS_VISIBLE_KEY = "ui.nav.assets_visible";
 const HIDDEN_KEYS = new Set<string>([
   "providers",
   "image.primary_route",
@@ -218,6 +223,50 @@ const SETTING_META: Record<string, SettingMeta> = {
     defaultValue: "0",
     recommended: "公开分享建议设置 7 到 30 天；0 表示永久。",
     keywords: ["share", "expiration", "expires", "days", "分享", "有效期", "过期"],
+  },
+  [UI_NAV_STUDIO_VISIBLE_KEY]: {
+    group: "ui",
+    title: "显示创作入口",
+    summary: "控制主导航里的「创作」是否向用户显示。",
+    detail: "关闭后用户访问创作页会自动跳到第一个可见入口。",
+    kind: "toggle",
+    icon: SlidersHorizontal,
+    defaultValue: "1",
+    recommended: "默认显示。四个业务入口可分别关闭。",
+    keywords: ["ui", "nav", "studio", "创作", "入口", "导航"],
+  },
+  [UI_NAV_VIDEO_VISIBLE_KEY]: {
+    group: "ui",
+    title: "显示视频入口",
+    summary: "控制主导航里的「视频」是否向用户显示。",
+    detail: "关闭后视频页不会出现在顶部导航、移动底栏和命令面板中。",
+    kind: "toggle",
+    icon: SlidersHorizontal,
+    defaultValue: "1",
+    recommended: "未开放视频能力或只做图片时可以关闭。",
+    keywords: ["ui", "nav", "video", "视频", "入口", "导航"],
+  },
+  [UI_NAV_PROJECTS_VISIBLE_KEY]: {
+    group: "ui",
+    title: "显示项目入口",
+    summary: "控制主导航里的「项目」是否向用户显示。",
+    detail: "关闭后项目中心及项目子页会从用户导航入口中隐藏。",
+    kind: "toggle",
+    icon: SlidersHorizontal,
+    defaultValue: "1",
+    recommended: "项目流程未准备好时可以单独关闭。",
+    keywords: ["ui", "nav", "projects", "项目", "入口", "导航"],
+  },
+  [UI_NAV_ASSETS_VISIBLE_KEY]: {
+    group: "ui",
+    title: "显示资产入口",
+    summary: "控制主导航里的「资产」是否向用户显示。",
+    detail: "关闭后资产流、图库和素材库入口会从用户导航中隐藏。",
+    kind: "toggle",
+    icon: SlidersHorizontal,
+    defaultValue: "1",
+    recommended: "不希望用户浏览历史资产时可以关闭。",
+    keywords: ["ui", "nav", "assets", "stream", "library", "资产", "图库", "入口"],
   },
   "image.engine": {
     group: "image",
@@ -617,6 +666,12 @@ const GROUPS: {
     icon: ImageIcon,
   },
   {
+    id: "ui",
+    label: "界面入口",
+    description: "创作、视频、项目和资产显示",
+    icon: SlidersHorizontal,
+  },
+  {
     id: "upstream",
     label: "对话与请求",
     description: "模型、并发和超时",
@@ -676,7 +731,7 @@ const GROUP_NAV_SECTIONS: {
   label: string;
   ids: FilterId[];
 }[] = [
-  { label: "核心", ids: ["all", "image", "upstream", "providers", "site"] },
+  { label: "核心", ids: ["all", "image", "upstream", "providers", "site", "ui"] },
   {
     label: "上下文",
     ids: ["context_auto", "context_caption", "context_manual"],
@@ -2330,6 +2385,7 @@ function groupSettings(
 function countByGroup(items: SystemSettingItem[]): Record<SettingGroupId, number> {
   const counts: Record<SettingGroupId, number> = {
     site: 0,
+    ui: 0,
     image: 0,
     upstream: 0,
     providers: 0,

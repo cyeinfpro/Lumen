@@ -37,6 +37,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.byok_retention import (
+    applies_to_user as byok_retention_applies_to_user,
+    cutoffs as byok_retention_cutoffs,
+    is_user_visible as byok_retention_is_user_visible,
+)
 from lumen_core.constants import ImageSource, ImageVisibility
 from lumen_core.image_signing import (
     ALLOWED_VARIANTS as SIGNED_ALLOWED_VARIANTS,
@@ -50,7 +55,15 @@ from lumen_core.image_reference import (
     make_reference_variant,
     validate_mask_preflight,
 )
-from lumen_core.models import Image, ImageVariant, Share
+from lumen_core.models import (
+    Conversation,
+    Generation,
+    Image,
+    ImageVariant,
+    Message,
+    Share,
+    User,
+)
 from lumen_core.model_image_metadata import (
     build_model_image_metadata,
     model_image_filename,
@@ -60,6 +73,7 @@ from lumen_core.model_image_metadata import (
 from lumen_core.schemas import ImageOut
 
 from ..audit import hash_email, request_ip_hash, write_audit
+from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
@@ -118,6 +132,124 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     return HTTPException(
         status_code=http, detail={"error": {"code": code, "message": msg}}
     )
+
+
+def _content_references_image(value: Any, image_id: str) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if (
+                key in {"image_id", "source_image_id", "mask_image_id"}
+                and item == image_id
+            ):
+                return True
+            if _content_references_image(item, image_id):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_content_references_image(item, image_id) for item in value)
+    return False
+
+
+async def _image_referenced_by_visible_user_history(
+    db: AsyncSession,
+    img: Image,
+    user: Any,
+    policy: Any,
+) -> bool:
+    visible_after = byok_retention_cutoffs(policy=policy).visible_after
+    gen_row = (
+        await db.execute(
+            select(Generation.id)
+            .join(Message, Message.id == Generation.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Generation.user_id == user.id,
+                Conversation.user_id == user.id,
+                Conversation.deleted_at.is_(None),
+                Message.deleted_at.is_(None),
+                Message.created_at >= visible_after,
+                or_(
+                    Generation.id == getattr(img, "owner_generation_id", None),
+                    Generation.primary_input_image_id == img.id,
+                    Generation.mask_image_id == img.id,
+                ),
+            )
+            .limit(1)
+        )
+    ).first()
+    if gen_row is not None:
+        return True
+
+    gen_inputs = (
+        await db.execute(
+            select(Generation.input_image_ids)
+            .join(Message, Message.id == Generation.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Generation.user_id == user.id,
+                Conversation.user_id == user.id,
+                Conversation.deleted_at.is_(None),
+                Message.deleted_at.is_(None),
+                Message.created_at >= visible_after,
+            )
+        )
+    ).scalars().all()
+    if any(img.id in (input_ids or []) for input_ids in gen_inputs):
+        return True
+
+    contents = (
+        await db.execute(
+            select(Message.content)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Conversation.user_id == user.id,
+                Conversation.deleted_at.is_(None),
+                Message.deleted_at.is_(None),
+                Message.created_at >= visible_after,
+            )
+        )
+    ).scalars().all()
+    return any(_content_references_image(content, img.id) for content in contents)
+
+
+async def _ensure_image_visible_to_user(
+    db: AsyncSession,
+    img: Image,
+    user: Any,
+) -> None:
+    if not byok_retention_applies_to_user(user):
+        return
+    created_at = getattr(img, "created_at", None)
+    if created_at is None:
+        return
+    policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+    if not byok_retention_is_user_visible(
+        account_mode=getattr(user, "account_mode", None),
+        created_at=created_at,
+        policy=policy,
+    ):
+        if await _image_referenced_by_visible_user_history(db, img, user, policy):
+            return
+        raise _http("not_found", "image not found", 404)
+
+
+async def _ensure_public_image_visible(db: AsyncSession, img: Image) -> None:
+    user_id = getattr(img, "user_id", None)
+    created_at = getattr(img, "created_at", None)
+    if not user_id or created_at is None:
+        return
+    account_mode = (
+        await db.execute(select(User.account_mode).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if account_mode != "byok":
+        return
+    policy = retention_policy_from_settings(await read_byok_settings_cached(db))
+    if not byok_retention_is_user_visible(
+        account_mode=account_mode,
+        created_at=created_at,
+        policy=policy,
+    ):
+        raise _http("not_found", "image not found", 404)
 
 
 def _too_many_pixels() -> HTTPException:
@@ -996,6 +1128,7 @@ async def get_image_meta(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await _ensure_image_visible_to_user(db, img, user)
     return await _image_out(db, img)
 
 
@@ -1017,6 +1150,7 @@ async def get_image_binary(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await _ensure_image_visible_to_user(db, img, user)
 
     path = _fs_path(img.storage_key)
     return _storage_streaming_response(
@@ -1050,6 +1184,7 @@ async def get_image_variant(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await _ensure_image_visible_to_user(db, img, user)
     variant = (
         await db.execute(
             select(ImageVariant).where(
@@ -1125,6 +1260,7 @@ async def get_image_signed(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await _ensure_public_image_visible(db, img)
 
     # Why: defense-in-depth. The HMAC signature is the primary authorization,
     # but if the signing secret leaks (e.g. compromised worker) an attacker
@@ -1236,6 +1372,7 @@ async def reference_image_binary(
     ).scalar_one_or_none()
     if img is None:
         raise _http("not_found", "image not found", 404)
+    await _ensure_public_image_visible(db, img)
     metadata = img.metadata_jsonb or {}
     if not _video_reference_token_is_valid(
         metadata,
@@ -1294,6 +1431,7 @@ async def get_image_by_key(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await _ensure_image_visible_to_user(db, img, user)
     path = _fs_path(img.storage_key)
     return _storage_streaming_response(
         path,

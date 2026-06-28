@@ -37,6 +37,7 @@ from lumen_core.models import (
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     LoginIn,
+    NavigationVisibilityOut,
     RuntimeDefaultsOut,
     SignupByokIn,
     SignupIn,
@@ -82,6 +83,12 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
+_NAV_VISIBILITY_SETTING_KEYS = {
+    "studio": "ui.nav.studio_visible",
+    "video": "ui.nav.video_visible",
+    "projects": "ui.nav.projects_visible",
+    "assets": "ui.nav.assets_visible",
+}
 
 # Why: strip control chars (incl. NUL/CR/LF/DEL) before persisting UA so log
 # injection / DB driver quirks can't slip through user-controlled headers.
@@ -252,9 +259,19 @@ async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
         raw = await get_setting(db, spec)
         if raw in {"0", "1"}:
             fast_default = raw == "1"
+    nav_visibility: dict[str, bool] = {}
+    for nav_key, setting_key in _NAV_VISIBILITY_SETTING_KEYS.items():
+        visible = True
+        nav_spec = get_spec(setting_key)
+        if nav_spec is not None:
+            raw = await get_setting(db, nav_spec)
+            if raw in {"0", "1"}:
+                visible = raw == "1"
+        nav_visibility[nav_key] = visible
     return RuntimeDefaultsOut(
         fast=fast_default,
         upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
+        nav_visibility=NavigationVisibilityOut(**nav_visibility),
     )
 
 

@@ -74,6 +74,11 @@ from lumen_core.models import (
     new_uuid7,
 )
 from lumen_core.queue_metadata import generation_queue_metadata
+from lumen_core.byok_retention import (
+    applies_to_user as byok_retention_applies_to_user,
+    is_user_visible as byok_retention_is_user_visible,
+    user_visible_filter as byok_retention_user_visible_filter,
+)
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     ChatParamsIn,
@@ -93,7 +98,11 @@ from ..audit import hash_email, write_audit
 # Why: read_byok_settings is re-exported here so existing tests that
 # monkeypatch `messages.read_byok_settings` keep working. Production code on
 # this path uses read_byok_settings_cached (TTL ~30 s) — see review #20.
-from ..byok_service import read_byok_settings, read_byok_settings_cached  # noqa: F401
+from ..byok_service import (  # noqa: F401
+    read_byok_settings,
+    read_byok_settings_cached,
+    retention_policy_from_settings,
+)
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
@@ -809,6 +818,35 @@ def _message_alive_filters() -> tuple[Any, ...]:
     return (deleted_at.is_(None),)
 
 
+async def _byok_retention_policy_for_user(db: AsyncSession, user: User):
+    if not byok_retention_applies_to_user(user):
+        return None
+    return retention_policy_from_settings(await read_byok_settings_cached(db))
+
+
+async def _ensure_conversation_visible_to_user(
+    db: AsyncSession,
+    conv: Conversation,
+    user: User,
+) -> None:
+    policy = await _byok_retention_policy_for_user(db, user)
+    if policy is None:
+        return
+    if not byok_retention_is_user_visible(
+        account_mode=user.account_mode,
+        created_at=conv.last_activity_at,
+        policy=policy,
+    ):
+        raise _http("not_found", "conversation not found", 404)
+
+
+async def _byok_image_visible_filter(db: AsyncSession, user: User):
+    policy = await _byok_retention_policy_for_user(db, user)
+    if policy is None:
+        return None
+    return byok_retention_user_visible_filter(user, Image.created_at, policy=policy)
+
+
 async def _load_owned_prompt_content(
     db: AsyncSession, *, user_id: str, prompt_id: str | None
 ) -> str | None:
@@ -1205,7 +1243,7 @@ async def _resolve_task_credential_pin(
         return None
     byok_settings = await read_byok_settings_cached(db)
     if not byok_settings.mode_enabled:
-        return None
+        raise _http("byok_disabled", "BYOK is disabled", 403)
 
     active_row = (
         await db.execute(
@@ -1946,6 +1984,7 @@ async def submit_user_message(
     ).scalar_one_or_none()
     if not conv:
         raise _http("not_found", "conversation not found", 404)
+    await _ensure_conversation_visible_to_user(db, conv, user)
 
     # ---- idempotency short-circuit (best-effort: skips an INSERT round trip) ---
     prior = await _lookup_idempotent_post(db, user.id, conv_id, body.idempotency_key)
@@ -1969,6 +2008,7 @@ async def submit_user_message(
     # ---- validate attachments belong to user (and are alive) ----
     attachment_ids = list(body.attachment_image_ids or [])
     if attachment_ids:
+        image_retention_filter = await _byok_image_visible_filter(db, user)
         rows = (
             (
                 await db.execute(
@@ -1976,6 +2016,11 @@ async def submit_user_message(
                         Image.id.in_(attachment_ids),
                         Image.user_id == user.id,
                         Image.deleted_at.is_(None),
+                        *(
+                            (image_retention_filter,)
+                            if image_retention_filter is not None
+                            else ()
+                        ),
                     )
                 )
             )
@@ -2025,12 +2070,18 @@ async def submit_user_message(
                 f"mask requires exactly one reference image (got {len(attachment_ids)})",
                 422,
             )
+        image_retention_filter = await _byok_image_visible_filter(db, user)
         mask_row = (
             await db.execute(
                 select(Image.id).where(
                     Image.id == mask_image_id,
                     Image.user_id == user.id,
                     Image.deleted_at.is_(None),
+                    *(
+                        (image_retention_filter,)
+                        if image_retention_filter is not None
+                        else ()
+                    ),
                 )
             )
         ).scalar_one_or_none()
@@ -2285,13 +2336,29 @@ async def create_silent_generation(
     ).scalar_one_or_none()
     if not conv:
         raise _http("not_found", "conversation not found", 404)
+    await _ensure_conversation_visible_to_user(db, conv, user)
 
+    retention_policy = await _byok_retention_policy_for_user(db, user)
+    message_retention_filter = (
+        byok_retention_user_visible_filter(
+            user,
+            Message.created_at,
+            policy=retention_policy,
+        )
+        if retention_policy is not None
+        else None
+    )
     parent_msg = (
         await db.execute(
             select(Message).where(
                 Message.id == body.parent_message_id,
                 Message.conversation_id == conv_id,
                 *_message_alive_filters(),
+                *(
+                    (message_retention_filter,)
+                    if message_retention_filter is not None
+                    else ()
+                ),
             )
         )
     ).scalar_one_or_none()
@@ -2300,6 +2367,7 @@ async def create_silent_generation(
 
     attachment_ids = list(body.attachment_image_ids or [])
     if attachment_ids:
+        image_retention_filter = await _byok_image_visible_filter(db, user)
         rows = (
             (
                 await db.execute(
@@ -2307,6 +2375,11 @@ async def create_silent_generation(
                         Image.id.in_(attachment_ids),
                         Image.user_id == user.id,
                         Image.deleted_at.is_(None),
+                        *(
+                            (image_retention_filter,)
+                            if image_retention_filter is not None
+                            else ()
+                        ),
                     )
                 )
             )

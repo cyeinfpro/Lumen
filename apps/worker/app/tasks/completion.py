@@ -75,12 +75,19 @@ from lumen_core.chat_tools import (
     tool_status_idle_timed_out,
     tool_status_idle_timeout_remaining_seconds,
 )
+from lumen_core.byok_retention import (
+    BYOK_DEFAULT_DELETE_ENABLED,
+    ByokRetentionPolicy,
+    applies_to_account_mode as byok_retention_applies_to_account_mode,
+    cutoffs as byok_retention_cutoffs,
+)
 from lumen_core.models import (
     Completion,
     Conversation,
     Image,
     ImageVariant,
     Message,
+    User,
     new_uuid7,
 )
 from lumen_core.pricing import parse_usage
@@ -125,6 +132,34 @@ from .generation import (
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("lumen.worker.completion")
+
+
+async def _resolve_byok_retention_policy() -> ByokRetentionPolicy:
+    return ByokRetentionPolicy(
+        hide_enabled=bool(
+            await runtime_settings.resolve_int("byok.retention_hide_enabled", 1)
+        ),
+        delete_enabled=bool(
+            await runtime_settings.resolve_int(
+                "byok.retention_delete_enabled",
+                int(BYOK_DEFAULT_DELETE_ENABLED),
+            )
+        ),
+        hide_days=await runtime_settings.resolve_int("byok.retention_hide_days", 3),
+        delete_days=await runtime_settings.resolve_int(
+            "byok.retention_delete_days",
+            7,
+        ),
+    ).normalized()
+
+
+async def _message_retention_filter_for_account(account_mode: str | None):
+    if not byok_retention_applies_to_account_mode(account_mode):
+        return None
+    policy = await _resolve_byok_retention_policy()
+    if not policy.hide_enabled:
+        return None
+    return Message.created_at >= byok_retention_cutoffs(policy=policy).visible_after
 
 try:
     from . import context_summary
@@ -2055,6 +2090,7 @@ async def _load_rows_desc(
     target: Message,
     budget_tokens: int | None,
     system_prompt: str | None,
+    retention_filter: Any | None = None,
 ) -> tuple[list[Message], int, bool]:
     rows_desc: list[Message] = []
     used_tokens = estimate_system_prompt_tokens(system_prompt)
@@ -2079,6 +2115,7 @@ async def _load_rows_desc(
                         same_timestamp_filter,
                     ),
                 ),
+                *((retention_filter,) if retention_filter is not None else ()),
             )
             .order_by(desc(Message.created_at), desc(Message.id))
             .limit(HISTORY_FETCH_BATCH)
@@ -2116,6 +2153,7 @@ async def _load_rows_desc_after_summary(
     conversation_id: str,
     target: Message,
     summary: dict[str, Any],
+    retention_filter: Any | None = None,
 ) -> list[Message]:
     rows_desc: list[Message] = []
     cursor_created_at = target.created_at
@@ -2138,6 +2176,7 @@ async def _load_rows_desc_after_summary(
                         same_timestamp_filter,
                     ),
                 ),
+                *((retention_filter,) if retention_filter is not None else ()),
             )
             .order_by(desc(Message.created_at), desc(Message.id))
             .limit(HISTORY_FETCH_BATCH)
@@ -2314,6 +2353,7 @@ async def _pack_recent_history(
     system_prompt: str | None,
     redis: Any | None = None,
     chat_model: str | None = None,
+    account_mode: str | None = None,
 ) -> PackedContext:
     # 按模型查 input budget；未传 chat_model（旧调用 / 测试桩）时退回模块级
     # CONTEXT_INPUT_TOKEN_BUDGET，保持现有 monkeypatch 测试可以收紧预算。
@@ -2338,6 +2378,9 @@ async def _pack_recent_history(
     summary_model = await _resolve_summary_model()
     conv = await session.get(Conversation, conversation_id)
     summary = getattr(conv, "summary_jsonb", None) if conv is not None else None
+    retention_filter = await _message_retention_filter_for_account(account_mode)
+    if retention_filter is not None:
+        summary = None
     all_rows_desc: list[Message] | None = None
     total_used_tokens = 0
     total_truncated = False
@@ -2360,6 +2403,7 @@ async def _pack_recent_history(
             conversation_id=conversation_id,
             target=target,
             summary=summary,  # type: ignore[arg-type]
+            retention_filter=retention_filter,
         )
         first_user = await _pick_first_user_from_summary(session, summary)  # type: ignore[arg-type]
         current_user = await _pick_current_user_with_lookup(
@@ -2397,6 +2441,7 @@ async def _pack_recent_history(
         target=target,
         budget_tokens=None,
         system_prompt=system_prompt,
+        retention_filter=retention_filter,
     )
     first_user = _pick_first_user(all_rows_desc)
     current_user = await _pick_current_user_with_lookup(
@@ -2436,6 +2481,7 @@ async def _pack_recent_history(
             target=target,
             budget_tokens=input_budget,
             system_prompt=system_prompt,
+            retention_filter=retention_filter,
         )
         packed = _fallback_pack(
             system_prompt=system_prompt,
@@ -2588,6 +2634,7 @@ async def _pack_recent_history(
             target=target,
             budget_tokens=input_budget,
             system_prompt=system_prompt,
+            retention_filter=retention_filter,
         )
         packed = _fallback_pack(
             system_prompt=system_prompt,
@@ -2647,6 +2694,7 @@ async def _pack_recent_history(
             target=target,
             budget_tokens=input_budget,
             system_prompt=system_prompt,
+            retention_filter=retention_filter,
         )
         packed = _fallback_pack(
             system_prompt=system_prompt,
@@ -2958,6 +3006,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     attempt = 0
     attempt_epoch = 0
     user_api_credential_id: str | None = None
+    account_mode = "wallet"
     runtime_override: Any | None = None
     queue_metadata_payload: dict[str, Any] = {}
 
@@ -2988,6 +3037,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         message_id = comp.message_id
         system_prompt = comp.system_prompt
         user_api_credential_id = getattr(comp, "user_api_credential_id", None)
+        user_row = await session.get(User, user_id)
+        account_mode = getattr(user_row, "account_mode", "wallet")
         # 关键：chat 走 /v1/responses 但要用聊天模型（gpt-5.5 等），
         # 而 UPSTREAM_MODEL 是图像模型 gpt-image-2，不能跨用
         chat_model = comp.model or DEFAULT_CHAT_MODEL
@@ -3185,6 +3236,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     system_prompt=system_prompt,
                     redis=redis,
                     chat_model=chat_model,
+                    account_mode=account_mode,
                 )
                 # _pack_recent_history 可能跑数百 ms（多张图 base64、history scan）；
                 # 期间 lease 可能因 redis 抖动丢掉。下面还有 db 写入，先卡一道。

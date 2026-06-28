@@ -3,13 +3,10 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
-const HOT_ROUTES = [
-  "/",
-  "/projects",
-  "/library",
-  "/settings/usage",
-  "/admin",
-] as const;
+import { getAppNavItems } from "@/components/ui/shell/navigation";
+import { useUiStore } from "@/store/useUiStore";
+
+const STATIC_HOT_ROUTES = ["/settings/usage", "/admin"] as const;
 
 type IdleWindow = {
   requestIdleCallback?: (
@@ -30,6 +27,7 @@ function shouldSkipWarmup() {
 export function IdleRouteWarmup() {
   const router = useRouter();
   const pathname = usePathname();
+  const navVisibility = useUiStore((s) => s.navVisibility);
 
   useEffect(() => {
     if (shouldSkipWarmup()) return;
@@ -40,7 +38,11 @@ export function IdleRouteWarmup() {
     const cancelIdleCallback = idleWindow.cancelIdleCallback;
     const run = () => {
       if (cancelled) return;
-      for (const route of HOT_ROUTES) {
+      const hotRoutes = [
+        ...getAppNavItems(navVisibility).map((item) => item.route),
+        ...STATIC_HOT_ROUTES,
+      ];
+      for (const route of hotRoutes) {
         if (route === pathname) continue;
         try {
           router.prefetch(route);
@@ -66,7 +68,7 @@ export function IdleRouteWarmup() {
         window.clearTimeout(handle);
       }
     };
-  }, [pathname, router]);
+  }, [navVisibility, pathname, router]);
 
   return null;
 }

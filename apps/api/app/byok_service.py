@@ -29,6 +29,13 @@ from lumen_core.byok import (
     new_verification_token,
     validate_api_key_shape,
 )
+from lumen_core.byok_retention import (
+    BYOK_DEFAULT_DELETE_ENABLED,
+    BYOK_DEFAULT_DELETE_DAYS,
+    BYOK_DEFAULT_HIDE_ENABLED,
+    BYOK_DEFAULT_HIDE_DAYS,
+    ByokRetentionPolicy,
+)
 from lumen_core.models import (
     ApiSupplierTemplate,
     SystemSetting,
@@ -119,9 +126,10 @@ async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
         byok_signup_bypasses_allowlist=bool(
             await _int("auth.byok_signup_bypasses_allowlist", 0)
         ),
-        fallback_to_admin_provider=bool(
-            await _int("byok.fallback_to_admin_provider", 0)
-        ),
+        # Deprecated safety rail: BYOK users must use their own verified key.
+        # Keep the response field for old clients, but never allow admin-pool
+        # fallback semantics to be enabled by a stale DB/env value.
+        fallback_to_admin_provider=False,
         validation_model=await _str(
             "byok.validation_model", BYOK_DEFAULT_VALIDATION_MODEL
         ),
@@ -132,7 +140,45 @@ async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
             "byok.pending_token_ttl_seconds",
             BYOK_DEFAULT_PENDING_TOKEN_TTL_SECONDS,
         ),
+        retention_hide_enabled=bool(
+            await _int("byok.retention_hide_enabled", int(BYOK_DEFAULT_HIDE_ENABLED))
+        ),
+        retention_delete_enabled=bool(
+            await _int(
+                "byok.retention_delete_enabled",
+                int(BYOK_DEFAULT_DELETE_ENABLED),
+            )
+        ),
+        retention_hide_days=await _int(
+            "byok.retention_hide_days",
+            BYOK_DEFAULT_HIDE_DAYS,
+        ),
+        retention_delete_days=await _int(
+            "byok.retention_delete_days",
+            BYOK_DEFAULT_DELETE_DAYS,
+        ),
     )
+
+
+def retention_policy_from_settings(settings_out: ByokSettingsOut) -> ByokRetentionPolicy:
+    return ByokRetentionPolicy(
+        hide_enabled=bool(
+            getattr(settings_out, "retention_hide_enabled", BYOK_DEFAULT_HIDE_ENABLED)
+        ),
+        delete_enabled=bool(
+            getattr(
+                settings_out,
+                "retention_delete_enabled",
+                BYOK_DEFAULT_DELETE_ENABLED,
+            )
+        ),
+        hide_days=int(
+            getattr(settings_out, "retention_hide_days", BYOK_DEFAULT_HIDE_DAYS)
+        ),
+        delete_days=int(
+            getattr(settings_out, "retention_delete_days", BYOK_DEFAULT_DELETE_DAYS)
+        ),
+    ).normalized()
 
 
 # In-process TTL cache for read_byok_settings. The hot path is
