@@ -39,12 +39,14 @@ import {
   enhanceVideoPrompt,
   getVideoGeneration,
   getVideoOptions,
+  imageVariantUrl,
   listVideoGenerations,
   retryVideoGeneration,
   uploadImage,
   uploadVideo,
   videoBinaryUrl,
   videoDownloadUrl,
+  videoPosterUrl,
 } from "@/lib/apiClient";
 import { prewarmImage, prewarmVideoMetadata } from "@/lib/imagePreload";
 import { useSSE } from "@/lib/useSSE";
@@ -69,6 +71,7 @@ type ReferenceDraft = VideoReferenceMediaIn & {
   label: string;
   ref_id: string;
   display: string;
+  previewUrl?: string | null;
 };
 
 type PromptEnhanceAction =
@@ -478,6 +481,28 @@ function posterSrc(video: VideoGenerationWithVideo["video"]): string | undefined
   return video.poster_url?.trim() || undefined;
 }
 
+function cleanReferencePreviewUrl(value: string | null | undefined): string | null {
+  const clean = value?.trim();
+  if (!clean || /^asset:\/\//i.test(clean)) return null;
+  return clean;
+}
+
+function imageReferencePreviewUrl(image: {
+  id: string;
+  thumb_url?: string | null;
+  preview_url?: string | null;
+  display_url?: string | null;
+  url?: string | null;
+}): string {
+  return (
+    cleanReferencePreviewUrl(image.thumb_url) ??
+    cleanReferencePreviewUrl(image.preview_url) ??
+    cleanReferencePreviewUrl(image.display_url) ??
+    cleanReferencePreviewUrl(image.url) ??
+    imageVariantUrl(image.id, "thumb256")
+  );
+}
+
 function prewarmVideoItem(item: VideoGenerationWithVideo | null | undefined): void {
   if (!item) return;
   prewarmImage(posterSrc(item.video));
@@ -640,8 +665,30 @@ function referencePromptToken(
   return `[${index ? rawRefId : referenceRefId(item.kind, fallbackIndex)}]`;
 }
 
+function referenceDisplayToken(
+  item: Pick<VideoReferenceMediaIn, "kind" | "ref_id">,
+  fallbackIndex = 1,
+): string {
+  const rawRefId = item.ref_id?.trim().toLowerCase() ?? "";
+  const index = referenceRefIndex(rawRefId, item.kind) ?? fallbackIndex;
+  return `@${item.kind === "image" ? "图片" : "视频"}${index}`;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function referenceDisplayAliases(item: ReferenceDraft): string[] {
+  const index = referenceRefIndex(item.ref_id, item.kind);
+  if (!index) return [];
+  const noun = item.kind === "image" ? "图片" : "视频";
+  const shortNoun = item.kind === "image" ? "图" : "视频";
+  return [
+    referenceDisplayToken(item),
+    `@${noun} ${index}`,
+    `@${shortNoun}${index}`,
+    `@${shortNoun} ${index}`,
+  ];
 }
 
 function referenceMentionAliases(item: ReferenceDraft): string[] {
@@ -687,6 +734,20 @@ function referenceMentionAliases(item: ReferenceDraft): string[] {
     if (clean) aliases.add(clean);
   }
   return Array.from(aliases);
+}
+
+function replaceReferenceDisplayMentionsWithAnchors(
+  text: string,
+  refs: ReferenceDraft[],
+): string {
+  let next = text;
+  for (const item of refs) {
+    const token = referencePromptToken(item);
+    for (const alias of referenceDisplayAliases(item)) {
+      next = next.replace(new RegExp(escapeRegExp(alias), "g"), token);
+    }
+  }
+  return next;
 }
 
 function normalizePromptReferenceMentions(
@@ -737,6 +798,48 @@ function normalizePromptReferenceMentions(
     }
   }
   return next;
+}
+
+function serializePromptReferenceMentions(
+  text: string,
+  refs: ReferenceDraft[],
+): string {
+  return normalizePromptReferenceMentions(
+    replaceReferenceDisplayMentionsWithAnchors(text, refs),
+    refs,
+  );
+}
+
+function displayPromptReferenceMentions(
+  text: string,
+  refs: ReferenceDraft[],
+): string {
+  let next = text;
+  for (const item of refs) {
+    next = next.replace(
+      new RegExp(escapeRegExp(referencePromptToken(item)), "g"),
+      referenceDisplayToken(item),
+    );
+  }
+  return next;
+}
+
+function displayPromptEnhanceCandidates(
+  candidates: PromptEnhanceCandidate[],
+  refs: ReferenceDraft[],
+): PromptEnhanceCandidate[] {
+  if (refs.length === 0) return candidates;
+  return candidates.map((candidate) => ({
+    ...candidate,
+    prompt: displayPromptReferenceMentions(candidate.prompt, refs),
+  }));
+}
+
+function promptContainsReferenceMention(text: string, item: ReferenceDraft): boolean {
+  return (
+    text.includes(referencePromptToken(item)) ||
+    referenceDisplayAliases(item).some((alias) => text.includes(alias))
+  );
 }
 
 function preservePromptReferenceTokens(
@@ -1180,7 +1283,7 @@ export default function VideoPage() {
   }, [clearPromptEnhanceSelection, prompt]);
 
   const insertReferenceTag = useCallback((item: ReferenceDraft) => {
-    insertPromptText(referencePromptToken(item));
+    insertPromptText(referenceDisplayToken(item));
   }, [insertPromptText]);
 
   const uploadMut = useMutation({
@@ -1207,6 +1310,7 @@ export default function VideoPage() {
           kind: "image" as const,
           image_id: img.id,
           display: `${img.width}x${img.height}`,
+          previewUrl: imageReferencePreviewUrl(img),
         };
       }
       if (file.type.startsWith("video/")) {
@@ -1220,6 +1324,7 @@ export default function VideoPage() {
           kind: "video" as const,
           video_id: video.id,
           display: video.size_bytes ? `${Math.round(video.size_bytes / 1024 / 1024)}MB` : "视频",
+          previewUrl: cleanReferencePreviewUrl(video.poster_url) ?? videoPosterUrl(video.id),
         };
       }
       throw new Error("只支持图片或视频");
@@ -1246,6 +1351,7 @@ export default function VideoPage() {
             label: identity.label,
             ref_id: identity.refId,
             display: ref.display,
+            previewUrl: ref.previewUrl,
           },
         ];
       });
@@ -1278,6 +1384,7 @@ export default function VideoPage() {
           label: identity.label,
           ref_id: identity.refId,
           display: url,
+          previewUrl: null,
         };
       })(),
     ]);
@@ -1292,7 +1399,7 @@ export default function VideoPage() {
         model: selectedModel,
         prompt:
           action === "reference"
-            ? normalizePromptReferenceMentions(prompt.trim(), referenceMedia)
+            ? serializePromptReferenceMentions(prompt.trim(), referenceMedia)
             : prompt.trim(),
         input_image_id: action === "i2v" ? inputImageId.trim() : null,
         reference_media:
@@ -1358,7 +1465,6 @@ export default function VideoPage() {
   const loadAsDraft = useCallback((item: VideoGenerationOut) => {
     clearPromptEnhanceChoices();
     setAction(item.action);
-    setPrompt(item.prompt);
     setModel(item.model);
     setDurationS(item.duration_s);
     setResolution(item.resolution);
@@ -1367,8 +1473,7 @@ export default function VideoPage() {
     setSeed(item.seed != null ? String(item.seed) : "");
     setInputImageId(item.input_image_id ?? "");
     setUploadedLabel(item.input_image_id ? "已从历史任务载入" : "");
-    setReferenceMedia(
-      item.reference_media.map((ref, index) => {
+    const draftReferenceMedia = item.reference_media.map((ref, index) => {
         const kindIndex =
           item.reference_media
             .slice(0, index + 1)
@@ -1389,9 +1494,17 @@ export default function VideoPage() {
               : ref.kind === "image"
               ? ref.image_id?.slice(0, 8) ?? "图片"
               : ref.video_id?.slice(0, 8) ?? "视频",
+          previewUrl:
+            ref.kind === "image"
+              ? cleanReferencePreviewUrl(ref.url) ??
+                (ref.image_id ? imageVariantUrl(ref.image_id, "thumb256") : null)
+              : ref.video_id
+              ? videoPosterUrl(ref.video_id)
+              : null,
         };
-      }),
-    );
+      });
+    setReferenceMedia(draftReferenceMedia);
+    setPrompt(displayPromptReferenceMentions(item.prompt, draftReferenceMedia));
     requestAnimationFrame(() => promptRef.current?.focus());
     toast.success("已套用参数");
   }, [clearPromptEnhanceChoices]);
@@ -1408,7 +1521,7 @@ export default function VideoPage() {
     const activeReferenceMedia = action === "reference" ? referenceMedia : [];
     const current =
       action === "reference"
-        ? normalizePromptReferenceMentions(prompt.trim(), activeReferenceMedia)
+        ? serializePromptReferenceMentions(prompt.trim(), activeReferenceMedia)
         : prompt.trim();
     const ctl = new AbortController();
     promptEnhanceAbortRef.current?.abort();
@@ -1436,13 +1549,18 @@ export default function VideoPage() {
         (delta) => {
           if (ctl.signal.aborted || promptEnhanceAbortRef.current !== ctl) return;
           accumulated += delta;
-          setPromptEnhancePreview(accumulated);
+          setPromptEnhancePreview(
+            displayPromptReferenceMentions(accumulated, activeReferenceMedia),
+          );
         },
         ctl.signal,
       );
-      const candidates = anchorPromptEnhanceCandidates(
-        parsePromptEnhanceCandidates(accumulated),
-        current,
+      const candidates = displayPromptEnhanceCandidates(
+        anchorPromptEnhanceCandidates(
+          parsePromptEnhanceCandidates(accumulated),
+          current,
+          activeReferenceMedia,
+        ),
         activeReferenceMedia,
       );
       const recommended = candidates[0];
@@ -1482,9 +1600,12 @@ export default function VideoPage() {
       if (!ctl.signal.aborted) {
         const description = err instanceof Error ? err.message : undefined;
         if (accumulated.trim()) {
-          const candidates = anchorPromptEnhanceCandidates(
-            parsePromptEnhanceCandidates(accumulated),
-            current,
+          const candidates = displayPromptEnhanceCandidates(
+            anchorPromptEnhanceCandidates(
+              parsePromptEnhanceCandidates(accumulated),
+              current,
+              activeReferenceMedia,
+            ),
             activeReferenceMedia,
           );
           const recommended = candidates[0];
@@ -1496,7 +1617,12 @@ export default function VideoPage() {
             setPromptEnhanceCandidates(candidates);
             setSelectedPromptEnhanceCandidateId(autoApply ? recommended.id : "");
           } else {
-            setPrompt(cleanPromptEnhanceText(accumulated));
+            setPrompt(
+              displayPromptReferenceMentions(
+                cleanPromptEnhanceText(accumulated),
+                activeReferenceMedia,
+              ),
+            );
           }
           setPromptEnhancePreview("");
           toast.error("优化中断", {
@@ -1550,9 +1676,13 @@ export default function VideoPage() {
   const handlePromptChange = useCallback(
     (value: string) => {
       clearPromptEnhanceSelection();
-      setPrompt(value);
+      setPrompt(
+        action === "reference"
+          ? displayPromptReferenceMentions(value, referenceMedia)
+          : value,
+      );
     },
-    [clearPromptEnhanceSelection],
+    [action, clearPromptEnhanceSelection, referenceMedia],
   );
 
   const submitDisabledReason = useMemo(() => {
@@ -1810,6 +1940,7 @@ export default function VideoPage() {
                               <ReferenceChip
                                 key={item._key}
                                 item={item}
+                                active={promptContainsReferenceMention(prompt, item)}
                                 onInsert={() => insertReferenceTag(item)}
                                 onRemove={() => {
                                   clearPromptEnhanceChoices();
@@ -1855,7 +1986,7 @@ export default function VideoPage() {
                         readOnly={isEnhancingPrompt}
                         rows={6}
                         maxLength={10000}
-                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 [ref:image:1] 这类锚点来指定图片/视频。"
+                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
                         className={cn(
                           "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
                           isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
@@ -2521,8 +2652,20 @@ function PromptEnhanceChooser({
   onReturnToEditor: () => void;
 }) {
   const cleanPreview = cleanPromptEnhanceText(preview);
-  const visibleCandidates = candidates.length > 0 ? candidates : [];
+  const visibleCandidates = candidates;
   const firstCandidate = visibleCandidates[0];
+  const [previewCandidateId, setPreviewCandidateId] = useState("");
+  const effectivePreviewCandidateId = visibleCandidates.some(
+    (candidate) => candidate.id === previewCandidateId,
+  )
+    ? previewCandidateId
+    : visibleCandidates.some((candidate) => candidate.id === selectedId)
+      ? selectedId
+      : firstCandidate?.id ?? "";
+  const previewCandidate =
+    visibleCandidates.find((candidate) => candidate.id === effectivePreviewCandidateId) ??
+    firstCandidate ??
+    null;
   const autoApplied =
     firstCandidate != null &&
     firstCandidate.id === selectedId &&
@@ -2538,7 +2681,7 @@ function PromptEnhanceChooser({
   };
 
   return (
-    <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+    <div className="sticky bottom-3 z-20 flex max-h-[min(72dvh,36rem)] min-h-0 flex-col gap-2 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/95 p-3 shadow-[var(--shadow-2)] backdrop-blur-xl">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
@@ -2588,74 +2731,101 @@ function PromptEnhanceChooser({
       </div>
 
       {loading && (
-        <div className="min-h-20 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
+        <div className="min-h-20 flex-1 overflow-y-auto rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
           {cleanPreview || "等待上游返回..."}
         </div>
       )}
 
-      {visibleCandidates.length > 0 && (
-        <div className="grid max-h-[clamp(14rem,60dvh,34rem)] gap-2 overflow-y-auto pr-1">
-          {visibleCandidates.map((candidate) => {
-            const selected = candidate.id === selectedId;
-            const canApply = canApplyPromptEnhanceCandidate(candidate);
-            return (
-              <div
-                key={candidate.id}
-                className={cn(
-                  "rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-3 transition-colors",
-                  selected
-                    ? "border-[var(--accent-border)] shadow-[var(--shadow-1)]"
-                    : "border-[var(--border-subtle)]",
-                )}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span
-                        className={cn(
-                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
-                          selected
-                            ? "border-[var(--accent-border)] text-[var(--accent)]"
-                            : "border-[var(--border)] text-[var(--fg-2)]",
-                        )}
-                      >
-                        {selected ? (
-                          <CircleCheck className="h-3.5 w-3.5" />
-                        ) : (
-                          <PencilLine className="h-3 w-3" />
-                        )}
-                      </span>
-                      <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
-                        {candidate.title}
-                      </p>
-                    </div>
-                    <p className="mt-2 max-h-28 overflow-y-auto text-sm leading-6 text-[var(--fg-1)]">
-                      {candidate.prompt}
+      {!loading && visibleCandidates.length > 0 && previewCandidate && (
+        <div className="grid min-h-0 flex-1 gap-2 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
+          <div className="flex min-w-0 gap-2 overflow-x-auto pb-1 xl:max-h-[min(42dvh,24rem)] xl:flex-col xl:overflow-y-auto xl:pb-0 xl:pr-1">
+            {visibleCandidates.map((candidate) => {
+              const selected = candidate.id === selectedId;
+              const previewing = candidate.id === previewCandidate.id;
+              return (
+                <button
+                  key={candidate.id}
+                  type="button"
+                  onClick={() => setPreviewCandidateId(candidate.id)}
+                  className={cn(
+                    "min-h-16 w-[min(78vw,18rem)] shrink-0 rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-2.5 text-left transition-[background-color,border-color] xl:w-full",
+                    previewing
+                      ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
+                      : "border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
+                  )}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className={cn(
+                        "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                        selected
+                          ? "border-[var(--accent-border)] text-[var(--accent)]"
+                          : "border-[var(--border)] text-[var(--fg-2)]",
+                      )}
+                    >
+                      {selected ? (
+                        <CircleCheck className="h-3.5 w-3.5" />
+                      ) : (
+                        <PencilLine className="h-3 w-3" />
+                      )}
+                    </span>
+                    <p className="min-w-0 truncate text-sm font-semibold text-[var(--fg-0)]">
+                      {candidate.title}
                     </p>
+                    {selected && (
+                      <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                        已应用
+                      </span>
+                    )}
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      variant={selected ? "secondary" : "outline"}
-                      size="sm"
-                      disabled={selected || !canApply}
-                      onClick={() => onSelect(candidate)}
-                    >
-                      {promptEnhanceCandidateButtonText(candidate, selected)}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-9 w-9 px-0"
-                      onClick={() => void copyCandidate(candidate)}
-                      aria-label="复制优化提示词"
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
+                    {candidate.prompt}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
+                  {previewCandidate.title}
+                </p>
+                <p className="text-xs text-[var(--fg-2)]">
+                  {previewCandidate.id === selectedId ? "当前已应用到编辑器" : "预览当前候选"}
+                </p>
               </div>
-            );
-          })}
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  variant={previewCandidate.id === selectedId ? "secondary" : "outline"}
+                  size="sm"
+                  disabled={
+                    previewCandidate.id === selectedId ||
+                    !canApplyPromptEnhanceCandidate(previewCandidate)
+                  }
+                  onClick={() => onSelect(previewCandidate)}
+                >
+                  {promptEnhanceCandidateButtonText(
+                    previewCandidate,
+                    previewCandidate.id === selectedId,
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-9 w-9 px-0"
+                  onClick={() => void copyCandidate(previewCandidate)}
+                  aria-label="复制优化提示词"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+            <div className="min-h-[9rem] flex-1 overflow-y-auto whitespace-pre-wrap px-3 py-3 text-sm leading-6 text-[var(--fg-1)]">
+              {previewCandidate.prompt}
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -2664,28 +2834,34 @@ function PromptEnhanceChooser({
 
 function ReferenceChip({
   item,
+  active,
   onInsert,
   onRemove,
 }: {
   item: ReferenceDraft;
+  active: boolean;
   onInsert: () => void;
   onRemove: () => void;
 }) {
-  const token = referencePromptToken(item);
+  const displayToken = referenceDisplayToken(item);
+  const anchorToken = referencePromptToken(item);
   return (
-    <div className="inline-flex min-h-10 max-w-full items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-2 text-xs text-[var(--fg-1)]">
+    <div
+      className={cn(
+        "inline-flex min-h-12 max-w-full items-center gap-2 rounded-[var(--radius-control)] border bg-[var(--bg-1)] px-1.5 py-1 text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
+        active
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
+          : "border-[var(--border)]",
+      )}
+    >
       <button
         type="button"
         onClick={onInsert}
-        title={`插入 ${token}`}
-        className="inline-flex min-w-0 items-center gap-2 rounded-[var(--radius-control)] px-1 py-1 text-left transition-colors hover:bg-[var(--bg-2)]"
+        title={active ? `已引用 ${displayToken}，提交时映射为 ${anchorToken}` : `插入 ${displayToken}`}
+        className="group inline-flex min-w-0 items-center gap-2 rounded-[var(--radius-control)] px-1 py-1 text-left transition-colors hover:bg-[var(--bg-2)]"
       >
-        {item.kind === "image" ? (
-          <ImageIcon className="h-3.5 w-3.5 shrink-0" />
-        ) : (
-          <VideoIcon className="h-3.5 w-3.5 shrink-0" />
-        )}
-        <span className="shrink-0 font-medium text-[var(--fg-0)]">{token}</span>
+        <ReferenceThumbnail item={item} active={active} />
+        <span className="shrink-0 font-medium text-[var(--fg-0)]">{displayToken}</span>
         <span className="shrink-0 text-[var(--fg-2)]">{item.label}</span>
         <span className="truncate text-[var(--fg-2)]">{item.display}</span>
       </button>
@@ -2698,6 +2874,48 @@ function ReferenceChip({
         <XCircle className="h-3.5 w-3.5" />
       </button>
     </div>
+  );
+}
+
+function ReferenceThumbnail({
+  item,
+  active,
+}: {
+  item: ReferenceDraft;
+  active: boolean;
+}) {
+  const [failed, setFailed] = useState(false);
+  const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  const showPreview = Boolean(previewUrl && !failed);
+  const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
+
+  return (
+    <span className="relative h-9 w-9 shrink-0">
+      <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-[calc(var(--radius-control)-2px)] border border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)]">
+        {showPreview ? (
+          <img
+            src={previewUrl ?? ""}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        )}
+      </span>
+      {active && (
+        <span className="absolute -right-1 -top-1 rounded-full border border-[var(--bg-1)] bg-[var(--accent)] p-0.5 text-[var(--accent-on)] shadow-[var(--shadow-1)]">
+          <CircleCheck className="h-2.5 w-2.5" aria-hidden="true" />
+        </span>
+      )}
+      {item.kind === "video" && showPreview && (
+        <span className="absolute bottom-0.5 right-0.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/85 p-0.5 text-[var(--fg-1)]">
+          <VideoIcon className="h-2.5 w-2.5" aria-hidden="true" />
+        </span>
+      )}
+    </span>
   );
 }
 
