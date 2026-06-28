@@ -26,6 +26,22 @@ test("video prompt enhancement panel remains reachable above mobile chrome", () 
   match(source, /scroll-mt-4 md:scroll-mt-6/);
 });
 
+test("video prompt enhancement copy stays video-model specific", () => {
+  match(source, /动作轨迹、镜头运动、首尾时间推进、参考素材怎么用/);
+  match(source, /按火山视频结构补动作、运镜和参考一致性/);
+});
+
+test("video prompt enhancement respects Vibe Creating non-rewrite actions", () => {
+  match(source, /type PromptEnhanceAction =/);
+  match(source, /action === "ask_first"/);
+  match(source, /action === "keep_original"/);
+  match(source, /action === "optional_vc"/);
+  match(source, /function shouldAutoApplyPromptEnhanceCandidate/);
+  match(source, /function canApplyPromptEnhanceCandidate/);
+  match(source, /未自动替换/);
+  match(source, /仅查看/);
+});
+
 test("video duration selector follows selected model action and resolution", () => {
   match(source, /durations_by_action_resolution\?\.\[action\]\?\.\[resolution\]/);
   match(source, /durations_by_action\?\.\[action\]/);
