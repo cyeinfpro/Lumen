@@ -62,11 +62,17 @@ test("video reference prompts use stable anchor ids through enhancement", () => 
 test("video reference chips render material thumbnails", () => {
   match(source, /previewUrl\?: string \| null/);
   match(source, /function imageReferencePreviewUrl\(/);
-  match(source, /imageVariantUrl\(image\.id, "thumb256"\)/);
+  match(source, /imageVariantUrl\(image\.id, "display2048"\)/);
+  match(source, /imageVariantUrl\(ref\.image_id, "display2048"\)/);
   match(source, /video\.poster_url\) \?\? videoPosterUrl\(video\.id\)/);
   match(source, /function ReferenceThumbnail\(/);
   match(source, /<ReferenceThumbnail item=\{item\} active=\{active\} \/>/);
+  match(source, /w-\[min\(82vw,19rem\)\]/);
+  match(source, /h-24 w-32/);
   match(source, /<img\s+src=\{previewUrl \?\? ""\}/);
+  match(source, /function ReferenceMediaPreviewDialog\(/);
+  match(source, /onPreview=\{\(\) => setReferencePreviewItem\(item\)\}/);
+  match(source, /查看 \$\{displayToken\} 预览/);
   match(source, /promptContainsReferenceMention\(prompt, item\)/);
 });
 

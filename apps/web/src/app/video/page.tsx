@@ -17,6 +17,7 @@ import {
   Film,
   Gauge,
   ImageIcon,
+  Maximize2,
   PencilLine,
   Play,
   RefreshCw,
@@ -495,11 +496,11 @@ function imageReferencePreviewUrl(image: {
   url?: string | null;
 }): string {
   return (
-    cleanReferencePreviewUrl(image.thumb_url) ??
     cleanReferencePreviewUrl(image.preview_url) ??
     cleanReferencePreviewUrl(image.display_url) ??
+    cleanReferencePreviewUrl(image.thumb_url) ??
     cleanReferencePreviewUrl(image.url) ??
-    imageVariantUrl(image.id, "thumb256")
+    imageVariantUrl(image.id, "display2048")
   );
 }
 
@@ -911,6 +912,7 @@ export default function VideoPage() {
   const [inputImageId, setInputImageId] = useState("");
   const [uploadedLabel, setUploadedLabel] = useState("");
   const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
+  const [referencePreviewItem, setReferencePreviewItem] = useState<ReferenceDraft | null>(null);
   const referenceMediaRef = useRef<ReferenceDraft[]>([]);
   const [assetUrlInput, setAssetUrlInput] = useState("");
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
@@ -1497,7 +1499,7 @@ export default function VideoPage() {
           previewUrl:
             ref.kind === "image"
               ? cleanReferencePreviewUrl(ref.url) ??
-                (ref.image_id ? imageVariantUrl(ref.image_id, "thumb256") : null)
+                (ref.image_id ? imageVariantUrl(ref.image_id, "display2048") : null)
               : ref.video_id
               ? videoPosterUrl(ref.video_id)
               : null,
@@ -1942,8 +1944,12 @@ export default function VideoPage() {
                                 item={item}
                                 active={promptContainsReferenceMention(prompt, item)}
                                 onInsert={() => insertReferenceTag(item)}
+                                onPreview={() => setReferencePreviewItem(item)}
                                 onRemove={() => {
                                   clearPromptEnhanceChoices();
+                                  setReferencePreviewItem((current) =>
+                                    current?._key === item._key ? null : current,
+                                  );
                                   setReferenceMedia((prev) =>
                                     prev.filter((ref) => ref._key !== item._key),
                                   );
@@ -2242,6 +2248,16 @@ export default function VideoPage() {
             toast.success("描述已复制");
           }}
           onDelete={() => deleteMut.mutate(playbackVideoItem.video.id)}
+        />
+      )}
+      {referencePreviewItem && (
+        <ReferenceMediaPreviewDialog
+          item={referencePreviewItem}
+          onClose={() => setReferencePreviewItem(null)}
+          onInsert={() => {
+            insertReferenceTag(referencePreviewItem);
+            setReferencePreviewItem(null);
+          }}
         />
       )}
       <div className="md:hidden">
@@ -2836,11 +2852,13 @@ function ReferenceChip({
   item,
   active,
   onInsert,
+  onPreview,
   onRemove,
 }: {
   item: ReferenceDraft;
   active: boolean;
   onInsert: () => void;
+  onPreview: () => void;
   onRemove: () => void;
 }) {
   const displayToken = referenceDisplayToken(item);
@@ -2848,7 +2866,7 @@ function ReferenceChip({
   return (
     <div
       className={cn(
-        "inline-flex min-h-12 max-w-full items-center gap-2 rounded-[var(--radius-control)] border bg-[var(--bg-1)] px-1.5 py-1 text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
+        "relative flex h-24 w-[min(82vw,19rem)] shrink-0 overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-1)] text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
         active
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
           : "border-[var(--border)]",
@@ -2856,20 +2874,35 @@ function ReferenceChip({
     >
       <button
         type="button"
-        onClick={onInsert}
-        title={active ? `已引用 ${displayToken}，提交时映射为 ${anchorToken}` : `插入 ${displayToken}`}
-        className="group inline-flex min-w-0 items-center gap-2 rounded-[var(--radius-control)] px-1 py-1 text-left transition-colors hover:bg-[var(--bg-2)]"
+        onClick={onPreview}
+        title={`查看 ${displayToken} 预览`}
+        aria-label={`查看 ${displayToken} 预览`}
+        className="shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/50"
       >
         <ReferenceThumbnail item={item} active={active} />
-        <span className="shrink-0 font-medium text-[var(--fg-0)]">{displayToken}</span>
-        <span className="shrink-0 text-[var(--fg-2)]">{item.label}</span>
-        <span className="truncate text-[var(--fg-2)]">{item.display}</span>
+      </button>
+      <button
+        type="button"
+        onClick={onInsert}
+        title={active ? `已引用 ${displayToken}，提交时映射为 ${anchorToken}` : `插入 ${displayToken}`}
+        className="flex min-w-0 flex-1 cursor-pointer flex-col justify-center gap-1 px-3 py-2.5 pr-9 text-left transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/50"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 font-semibold text-[var(--fg-0)]">{displayToken}</span>
+          <span className="min-w-0 truncate text-[var(--fg-2)]">{item.label}</span>
+        </span>
+        <span className="max-w-full truncate font-mono text-[11px] text-[var(--fg-2)]">
+          {item.display}
+        </span>
+        <span className="text-[11px] text-[var(--fg-2)]">
+          {active ? "已用于提示词" : "点击文字插入引用"}
+        </span>
       </button>
       <button
         type="button"
         aria-label="移除参考素材"
         onClick={onRemove}
-        className="shrink-0 rounded-full p-0.5 text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
+        className="absolute right-1.5 top-1.5 shrink-0 rounded-full bg-[var(--bg-1)]/85 p-0.5 text-[var(--fg-2)] shadow-[var(--shadow-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
       >
         <XCircle className="h-3.5 w-3.5" />
       </button>
@@ -2890,32 +2923,146 @@ function ReferenceThumbnail({
   const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
 
   return (
-    <span className="relative h-9 w-9 shrink-0">
-      <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-[calc(var(--radius-control)-2px)] border border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)]">
-        {showPreview ? (
-          <img
-            src={previewUrl ?? ""}
-            alt=""
-            className="h-full w-full object-cover"
-            loading="lazy"
-            decoding="async"
-            onError={() => setFailed(true)}
-          />
-        ) : (
-          <Icon className="h-4 w-4" aria-hidden="true" />
-        )}
-      </span>
+    <span className="relative flex h-24 w-32 shrink-0 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)]">
+      {showPreview ? (
+        <img
+          src={previewUrl ?? ""}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center">
+          <Icon className="h-5 w-5" aria-hidden="true" />
+          <span className="text-[10px] font-medium leading-3">
+            {failed ? "预览失败" : "暂无预览"}
+          </span>
+        </span>
+      )}
+      {showPreview && (
+        <span className="absolute bottom-1.5 left-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-0)]/82 p-1 text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+          <Maximize2 className="h-3 w-3" aria-hidden="true" />
+        </span>
+      )}
       {active && (
-        <span className="absolute -right-1 -top-1 rounded-full border border-[var(--bg-1)] bg-[var(--accent)] p-0.5 text-[var(--accent-on)] shadow-[var(--shadow-1)]">
+        <span className="absolute right-1.5 top-1.5 rounded-full border border-[var(--bg-1)] bg-[var(--accent)] p-0.5 text-[var(--accent-on)] shadow-[var(--shadow-1)]">
           <CircleCheck className="h-2.5 w-2.5" aria-hidden="true" />
         </span>
       )}
       {item.kind === "video" && showPreview && (
-        <span className="absolute bottom-0.5 right-0.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/85 p-0.5 text-[var(--fg-1)]">
+        <span className="absolute bottom-1.5 right-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/85 p-0.5 text-[var(--fg-1)]">
           <VideoIcon className="h-2.5 w-2.5" aria-hidden="true" />
         </span>
       )}
     </span>
+  );
+}
+
+function ReferenceMediaPreviewDialog({
+  item,
+  onClose,
+  onInsert,
+}: {
+  item: ReferenceDraft;
+  onClose: () => void;
+  onInsert: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  const displayToken = referenceDisplayToken(item);
+  const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`reference-preview-${item._key}`}
+        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-4xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(760px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <p className="type-caption text-[var(--fg-2)]">
+              {item.kind === "video" ? "参考视频" : "参考图片"}
+            </p>
+            <h2
+              id={`reference-preview-${item._key}`}
+              className="mt-1 truncate text-base font-semibold text-[var(--fg-0)]"
+            >
+              {displayToken} · {item.label}
+            </h2>
+            <p className="mt-1 truncate font-mono text-xs text-[var(--fg-2)]">
+              {item.display}
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 px-0"
+            onClick={onClose}
+            aria-label="关闭参考素材预览"
+          >
+            <XCircle className="h-4 w-4" />
+          </Button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-hidden bg-[var(--bg-0)] p-3 sm:p-5">
+          <div className="flex h-full min-h-[18rem] items-center justify-center overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]">
+            {previewUrl && !failed ? (
+              <img
+                src={previewUrl}
+                alt={`${displayToken} 预览`}
+                className="h-full w-full object-contain"
+                decoding="async"
+                onError={() => setFailed(true)}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-2 px-5 text-center text-[var(--fg-2)]">
+                <Icon className="h-8 w-8" aria-hidden="true" />
+                <p className="text-sm font-medium text-[var(--fg-1)]">
+                  {failed ? "预览加载失败" : "这个素材暂无可显示预览"}
+                </p>
+                <p className="max-w-md text-xs leading-5">
+                  官方 asset 素材可能只有素材 ID；上传图片会优先显示展示图。
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center justify-between gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:px-5">
+          <span className="shrink-0 text-xs text-[var(--fg-2)]">
+            提交时映射为 {referencePromptToken(item)}
+          </span>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>
+              关闭
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onInsert}
+              leftIcon={<Tags className="h-3.5 w-3.5" />}
+            >
+              插入引用
+            </Button>
+          </div>
+        </footer>
+      </section>
+    </div>
   );
 }
 
