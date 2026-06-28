@@ -70,10 +70,19 @@ type ReferenceDraft = VideoReferenceMediaIn & {
   display: string;
 };
 
+type PromptEnhanceAction =
+  | "direct_pass"
+  | "light_refine"
+  | "direct_rewrite"
+  | "ask_first"
+  | "keep_original"
+  | "optional_vc";
+
 type PromptEnhanceCandidate = {
   id: string;
   title: string;
   prompt: string;
+  action: PromptEnhanceAction;
 };
 
 const VIDEO_EVENTS = [
@@ -493,28 +502,82 @@ function cleanPromptEnhanceText(value: string): string {
     .trim();
 }
 
+function promptEnhanceAttribute(attrs: string, name: string): string {
+  const pattern = new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i");
+  const match = pattern.exec(attrs);
+  return cleanPromptEnhanceText(match?.[1] ?? match?.[2] ?? "");
+}
+
+function normalizePromptEnhanceAction(value: string): PromptEnhanceAction {
+  const action = value.trim().toLowerCase().replace(/[-\s]/g, "_");
+  if (
+    action === "direct_pass" ||
+    action === "light_refine" ||
+    action === "direct_rewrite" ||
+    action === "ask_first" ||
+    action === "keep_original" ||
+    action === "optional_vc"
+  ) {
+    return action;
+  }
+  return "direct_rewrite";
+}
+
+function shouldAutoApplyPromptEnhanceCandidate(
+  candidate: PromptEnhanceCandidate,
+): boolean {
+  return !(
+    candidate.action === "ask_first" ||
+    candidate.action === "keep_original" ||
+    candidate.action === "optional_vc"
+  );
+}
+
+function canApplyPromptEnhanceCandidate(candidate: PromptEnhanceCandidate): boolean {
+  return candidate.action !== "ask_first" && candidate.action !== "keep_original";
+}
+
+function promptEnhanceCandidateButtonText(
+  candidate: PromptEnhanceCandidate,
+  selected: boolean,
+): string {
+  if (!canApplyPromptEnhanceCandidate(candidate)) return "仅查看";
+  if (selected) return "已用";
+  return "使用";
+}
+
 function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
   const normalized = raw.replace(/\r\n/g, "\n").trim();
   if (!normalized) return [];
   const candidates: PromptEnhanceCandidate[] = [];
-  const variantPattern =
-    /<variant(?:\s+title=(?:"([^"]+)"|'([^']+)'))?\s*>([\s\S]*?)<\/variant>/gi;
+  const variantPattern = /<variant\b([^>]*)>([\s\S]*?)<\/variant>/gi;
   for (const match of normalized.matchAll(variantPattern)) {
-    const promptText = cleanPromptEnhanceText(match[3] ?? "");
+    const attrs = match[1] ?? "";
+    const promptText = cleanPromptEnhanceText(match[2] ?? "");
     if (!promptText) continue;
     const title =
-      cleanPromptEnhanceText(match[1] ?? match[2] ?? "") ||
+      promptEnhanceAttribute(attrs, "title") ||
       VIDEO_PROMPT_VARIANT_TITLES[candidates.length] ||
       `方案 ${candidates.length + 1}`;
     candidates.push({
       id: `variant-${candidates.length + 1}`,
       title,
       prompt: promptText,
+      action: normalizePromptEnhanceAction(promptEnhanceAttribute(attrs, "action")),
     });
   }
   if (candidates.length > 0) return candidates.slice(0, VIDEO_PROMPT_VARIANT_COUNT);
   const fallback = cleanPromptEnhanceText(normalized);
-  return fallback ? [{ id: "variant-1", title: "优化结果", prompt: fallback }] : [];
+  return fallback
+    ? [
+        {
+          id: "variant-1",
+          title: "优化结果",
+          prompt: fallback,
+          action: "direct_rewrite",
+        },
+      ]
+    : [];
 }
 
 function normalizeAssetUrl(value: string): string {
@@ -1214,15 +1277,32 @@ export default function VideoPage() {
       const candidates = parsePromptEnhanceCandidates(accumulated);
       const recommended = candidates[0];
       if (recommended) {
-        setPrompt(recommended.prompt);
+        const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
+        if (autoApply) {
+          setPrompt(recommended.prompt);
+        }
         setPromptEnhanceCandidates(candidates);
-        setSelectedPromptEnhanceCandidateId(recommended.id);
+        setSelectedPromptEnhanceCandidateId(autoApply ? recommended.id : "");
         setPromptEnhancePreview("");
-        toast.success(
-          candidates.length > 1
-            ? `已生成 ${candidates.length} 个优化方案`
-            : "提示词已优化",
-        );
+        if (recommended.action === "ask_first") {
+          toast.success("需要补充信息", {
+            description: "已保留原描述，请根据补问补齐后再优化。",
+          });
+        } else if (recommended.action === "keep_original") {
+          toast.success("已判断为原样保留", {
+            description: "这个需求更适合保留原工作流，不自动改写。",
+          });
+        } else if (recommended.action === "optional_vc" && !autoApply) {
+          toast.success("已生成可选 VC 版", {
+            description: "未自动替换原描述，可手动选择使用。",
+          });
+        } else {
+          toast.success(
+            candidates.length > 1
+              ? `已生成 ${candidates.length} 个优化方案`
+              : "提示词已优化",
+          );
+        }
       } else {
         setPromptEnhancePreview("");
         toast.error("优化失败", { description: "没有收到有效提示词" });
@@ -1235,9 +1315,12 @@ export default function VideoPage() {
           const candidates = parsePromptEnhanceCandidates(accumulated);
           const recommended = candidates[0];
           if (recommended) {
-            setPrompt(recommended.prompt);
+            const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
+            if (autoApply) {
+              setPrompt(recommended.prompt);
+            }
             setPromptEnhanceCandidates(candidates);
-            setSelectedPromptEnhanceCandidateId(recommended.id);
+            setSelectedPromptEnhanceCandidateId(autoApply ? recommended.id : "");
           } else {
             setPrompt(cleanPromptEnhanceText(accumulated));
           }
@@ -1275,6 +1358,7 @@ export default function VideoPage() {
 
   const applyPromptEnhanceCandidate = useCallback(
     (candidate: PromptEnhanceCandidate) => {
+      if (!canApplyPromptEnhanceCandidate(candidate)) return;
       setPrompt(candidate.prompt);
       setSelectedPromptEnhanceCandidateId(candidate.id);
       requestAnimationFrame(() => promptRef.current?.focus());
@@ -1590,7 +1674,7 @@ export default function VideoPage() {
                         readOnly={isEnhancingPrompt}
                         rows={6}
                         maxLength={10000}
-                        placeholder="写清主体、动作、镜头运动、节奏、参考素材怎么使用，以及不要出现的内容。"
+                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进、参考素材怎么用，以及不要出现的字幕/水印。"
                         className={cn(
                           "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
                           isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
@@ -2257,6 +2341,11 @@ function PromptEnhanceChooser({
 }) {
   const cleanPreview = cleanPromptEnhanceText(preview);
   const visibleCandidates = candidates.length > 0 ? candidates : [];
+  const firstCandidate = visibleCandidates[0];
+  const autoApplied =
+    firstCandidate != null &&
+    firstCandidate.id === selectedId &&
+    shouldAutoApplyPromptEnhanceCandidate(firstCandidate);
 
   const copyCandidate = async (candidate: PromptEnhanceCandidate) => {
     try {
@@ -2284,10 +2373,14 @@ function PromptEnhanceChooser({
             </span>
             <span className="block truncate text-xs text-[var(--fg-2)]">
               {visibleCandidates.length > 1
-                ? `${visibleCandidates.length} 个候选，已应用推荐版`
+                ? autoApplied
+                  ? `${visibleCandidates.length} 个候选，已应用推荐版`
+                  : `${visibleCandidates.length} 个候选，未自动替换`
                 : loading
-                  ? "优先补运动、运镜和时间推进"
-                  : "已应用到描述"}
+                  ? "按火山视频结构补动作、运镜和参考一致性"
+                  : autoApplied
+                    ? "已应用到描述"
+                    : "已保留原描述"}
             </span>
           </span>
         </div>
@@ -2313,6 +2406,7 @@ function PromptEnhanceChooser({
         <div className="grid gap-2">
           {visibleCandidates.map((candidate) => {
             const selected = candidate.id === selectedId;
+            const canApply = canApplyPromptEnhanceCandidate(candidate);
             return (
               <div
                 key={candidate.id}
@@ -2352,10 +2446,10 @@ function PromptEnhanceChooser({
                     <Button
                       variant={selected ? "secondary" : "outline"}
                       size="sm"
-                      disabled={selected}
+                      disabled={selected || !canApply}
                       onClick={() => onSelect(candidate)}
                     >
-                      {selected ? "已用" : "使用"}
+                      {promptEnhanceCandidateButtonText(candidate, selected)}
                     </Button>
                     <Button
                       variant="ghost"

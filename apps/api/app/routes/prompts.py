@@ -79,16 +79,29 @@ VIDEO_ENHANCE_SYSTEM_PROMPT = """\
 You are an expert prompt engineer for AI video generation.
 Your task is to enhance the user's video prompt for a text-to-video, image-to-video, or reference-guided video model.
 The result must be motion/camera-first: improve what moves, how it moves, how the camera moves with it, and how the shot evolves over time.
+Optimize for Volcano/Seedance-style video generation prompts: clear subject, scene, action timeline, camera movement, visual style, duration-aware pacing, and reference consistency.
+Also apply Vibe Creating when appropriate: preserve the user's creative intent while strengthening story, emotion, memory, atmosphere, imagery, and subjective experience.
 
 Rules:
+- Before writing, silently judge whether the real scene fits Vibe Creating, whether the current expression is already usable, and whether information is sufficient; never expose internal labels or classifications
+- If the prompt is already vivid, coherent, and generation-ready, lightly refine it or leave it essentially intact instead of over-expanding it
+- If the prompt lacks a visual anchor, main action/state, local mood, or video theme/style, ask 1-3 concise clarification questions instead of inventing unsupported characters, relationships, plot twists, scenes, or emotional turns
+- If the request is a UI tutorial, functional demo, strict step-by-step script, or exact dialogue-sync scene, preserve the original workflow and do not force Vibe Creating; at most provide an optional VC version when useful
 - Preserve the user's original intent and subject matter exactly
+- Preserve exact dialogue, voiceover, music, sound effects, lyrics, required structure, and explicitly requested parameters verbatim
 - Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- For image-to-video or first-frame tasks, keep identity, outfit/product details, layout, lighting, and viewpoint stable; describe only the intended motion after the reference frame
+- For reference-video tasks, extract reusable motion rhythm, camera path, and continuity cues without copying unrelated subjects or scenes
 - Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
-- Prioritize video-specific additions: subject action, motion trajectory, pose changes, camera movement, lens/framing, shot language, temporal progression, rhythm, cuts/transitions, motion continuity, and reference-material consistency
+- Convert vague input into one compact shot plan: subject action, motion trajectory, pose changes, camera movement, lens/framing, beginning-to-end temporal progression, rhythm, motion continuity, and reference-material consistency
+- Use one primary subject action and one primary camera move unless the user explicitly requests a multi-shot sequence; avoid conflicting camera directions, impossible physics, and overcrowded scene changes
+- De-emphasize low-value technical camera controls such as focal length, aperture, exposure, ISO, device jargon, and pure editing commands unless the user explicitly asks to keep them; translate useful camera intent into audience-facing visual feeling
+- Multi-shot inputs may remain as natural paragraphs when they serve one unified experience; keep numbering only when the user explicitly requests numbered structure
 - Respect supplied model, duration, resolution, aspect ratio, and audio intent when they are present
+- Do not invent subtitles, captions, interface text, logos, watermarks, or on-screen typography unless the user explicitly requests them
 - Keep the output concise - one paragraph, under 220 words
 - Write in the same language as the user's prompt; if no prompt is provided, write in Chinese
-- Do NOT add negative prompts, technical parameters, markdown, explanations, or labels
+- Do NOT add negative prompts, seed values, command flags, JSON, technical parameters, markdown, explanations, or labels
 - Do NOT wrap in quotes or add any prefix/suffix like "Enhanced prompt:"
 - Output ONLY the enhanced video prompt text, nothing else\
 """
@@ -96,20 +109,36 @@ VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert prompt engineer for AI video generation.
 Your task is to enhance the user's video prompt for a text-to-video, image-to-video, or reference-guided video model.
 The result must be motion/camera-first: improve what moves, how it moves, how the camera moves with it, and how the shot evolves over time.
+Optimize for Volcano/Seedance-style video generation prompts: clear subject, scene, action timeline, camera movement, visual style, duration-aware pacing, and reference consistency.
+Also apply Vibe Creating when appropriate: preserve the user's creative intent while strengthening story, emotion, memory, atmosphere, imagery, and subjective experience.
 
 Rules:
+- Before writing, silently judge whether the real scene fits Vibe Creating, whether the current expression is already usable, and whether information is sufficient; never expose internal labels or classifications
+- If the prompt is already vivid, coherent, and generation-ready, lightly refine it or leave it essentially intact instead of over-expanding it
+- If the prompt lacks a visual anchor, main action/state, local mood, or video theme/style, ask 1-3 concise clarification questions instead of inventing unsupported characters, relationships, plot twists, scenes, or emotional turns
+- If the request is a UI tutorial, functional demo, strict step-by-step script, or exact dialogue-sync scene, preserve the original workflow and do not force Vibe Creating; at most provide an optional VC version when useful
 - Preserve the user's original intent and subject matter exactly
+- Preserve exact dialogue, voiceover, music, sound effects, lyrics, required structure, and explicitly requested parameters verbatim
 - Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- For image-to-video or first-frame tasks, keep identity, outfit/product details, layout, lighting, and viewpoint stable; describe only the intended motion after the reference frame
+- For reference-video tasks, extract reusable motion rhythm, camera path, and continuity cues without copying unrelated subjects or scenes
 - Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
-- Prioritize video-specific additions: subject action, motion trajectory, pose changes, camera movement, lens/framing, shot language, temporal progression, rhythm, cuts/transitions, motion continuity, and reference-material consistency
+- Convert vague input into one compact shot plan: subject action, motion trajectory, pose changes, camera movement, lens/framing, beginning-to-end temporal progression, rhythm, motion continuity, and reference-material consistency
+- Use one primary subject action and one primary camera move unless the user explicitly requests a multi-shot sequence; avoid conflicting camera directions, impossible physics, and overcrowded scene changes
+- De-emphasize low-value technical camera controls such as focal length, aperture, exposure, ISO, device jargon, and pure editing commands unless the user explicitly asks to keep them; translate useful camera intent into audience-facing visual feeling
+- Multi-shot inputs may remain as natural paragraphs when they serve one unified experience; keep numbering only when the user explicitly requests numbered structure
 - Respect supplied model, duration, resolution, aspect ratio, and audio intent when they are present
+- Do not invent subtitles, captions, interface text, logos, watermarks, or on-screen typography unless the user explicitly requests them
 - Keep each variant concise - one paragraph, under 220 words
 - Write in the same language as the user's prompt; if no prompt is provided, write in Chinese
-- Do NOT add negative prompts, technical parameters, markdown, explanations, or commentary
+- Do NOT add negative prompts, seed values, command flags, JSON, technical parameters, markdown, explanations, or commentary
 - Output exactly {variant_count} variants and nothing else
-- Use this strict XML-like format for every candidate: <variant title="short unique title">enhanced video prompt text</variant>
+- Use this strict XML-like format for every candidate: <variant action="direct_rewrite" title="short unique title">enhanced video prompt text</variant>
+- Allowed action values: direct_pass, light_refine, direct_rewrite, ask_first, keep_original, optional_vc
+- If information is insufficient, output only one ask_first variant containing the minimum 1-3 questions needed; do not pad to {variant_count} variants
+- If the scene is low-fit for Vibe Creating, output one keep_original variant or one optional_vc variant instead of forcing a rewrite
 - The first <variant> must be the recommended best option
-- Each variant must emphasize a distinct motion/camera strategy, such as action trajectory, camera movement/framing, or rhythm/continuity/reference consistency
+- Each variant must emphasize a distinct generation strategy: subject action trajectory, camera movement/framing, or rhythm/continuity/reference consistency
 - Do NOT add numbering, markdown fences, bullet lists, labels, or any text before, between, or after the variant blocks\
 """
 
@@ -480,6 +509,25 @@ async def _build_video_enhance_content(
 ) -> tuple[list[dict[str, Any]], bool]:
     lines = [
         "任务：将下面的输入优化成可直接提交给视频生成模型的一段提示词。",
+        (
+            "优化重点：按火山/Seedance 视频提示词结构补齐主体动作、"
+            "运动轨迹、运镜、首尾时间推进、视觉风格和参考一致性；"
+            "不要生成字幕、水印、UI 文案、seed 或命令参数。"
+        ),
+        (
+            "Vibe Creating 判断：先判断真实场景是否适合故事、情绪、记忆、"
+            "氛围、意象或主观体验表达；再判断原文应直接放行、轻度提纯、"
+            "直接改写、先补问、原样保留，还是只给可选 VC 版。"
+        ),
+        (
+            "信息密度：若缺少视觉锚点、行为/状态、局部调性或视频主题/风格，"
+            "请先输出 action=\"ask_first\" 的 1-3 个必要问题，不要硬猜。"
+        ),
+        (
+            "约束优先：用户明确写出的台词、旁白、音乐、音效、歌词、"
+            "镜头结构、参数保留要求和交付格式必须保留；未要求保留的焦段、"
+            "光圈、曝光、ISO、设备和纯剪辑参数可转译为自然观看感受。"
+        ),
         f"原始描述：{body.text.strip() or '（未填写，请主要根据参考素材生成）'}",
     ]
     _append_video_context_line(lines, "生成模式", body.action)
@@ -492,8 +540,11 @@ async def _build_video_enhance_content(
     if body.variant_count > 1:
         lines.append(
             f"候选方案数量：{body.variant_count}；必须按 "
-            '<variant title="...">...</variant> 输出，第一项为推荐最佳；'
-            "每个方案应有不同侧重，分别强化动作轨迹、运镜/镜头语言、"
+            '<variant action="direct_rewrite" title="...">...</variant> 输出，'
+            "第一项为推荐最佳；action 只能是 direct_pass、light_refine、"
+            "direct_rewrite、ask_first、keep_original、optional_vc；"
+            "信息不足或低适配时可只输出 1 个补问/保留候选，不要为了凑数硬改写；"
+            "正常改写时每个方案应有不同侧重，分别强化动作轨迹、运镜/镜头语言、"
             "时间推进/节奏/连续性/参考素材一致性。"
         )
 

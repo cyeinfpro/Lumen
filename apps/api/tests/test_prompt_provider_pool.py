@@ -98,9 +98,17 @@ def test_video_prompt_enhance_defaults_to_single_motion_first_prompt() -> None:
     assert system_prompt == prompts.VIDEO_ENHANCE_SYSTEM_PROMPT
     assert "<variant" not in system_prompt
     assert "motion/camera-first" in system_prompt
+    assert "Volcano/Seedance-style video generation prompts" in system_prompt
+    assert "Also apply Vibe Creating when appropriate" in system_prompt
+    assert "visual anchor, main action/state, local mood, or video theme/style" in system_prompt
+    assert "Preserve exact dialogue, voiceover, music, sound effects" in system_prompt
+    assert "keep identity, outfit/product details" in system_prompt
     assert "Do NOT repeat or inventory existing subjects" in system_prompt
     assert "motion trajectory" in system_prompt
     assert "camera movement" in system_prompt
+    assert "De-emphasize low-value technical camera controls" in system_prompt
+    assert "Do not invent subtitles" in system_prompt
+    assert "seed values" in system_prompt
     assert "Output ONLY the enhanced video prompt text" in system_prompt
 
 
@@ -126,15 +134,25 @@ async def test_video_prompt_enhance_variant_count_three_requires_parseable_varia
 
     assert token_changed is False
     assert "Output exactly 3 variants" in system_prompt
-    assert '<variant title="short unique title">' in system_prompt
+    assert '<variant action="direct_rewrite" title="short unique title">' in system_prompt
+    assert "ask_first" in system_prompt
+    assert "keep_original" in system_prompt
+    assert "optional_vc" in system_prompt
+    assert "output only one ask_first variant" in system_prompt
     assert "</variant>" in system_prompt
     assert "The first <variant> must be the recommended best option" in system_prompt
-    assert "distinct motion/camera strategy" in system_prompt
+    assert "distinct generation strategy" in system_prompt
     assert "候选方案数量：3" in content_text
-    assert '<variant title="...">...</variant>' in content_text
+    assert '<variant action="direct_rewrite" title="...">...</variant>' in content_text
     assert "第一项为推荐最佳" in content_text
+    assert "火山/Seedance 视频提示词结构" in content_text
+    assert "Vibe Creating 判断" in content_text
+    assert "视觉锚点、行为/状态、局部调性或视频主题/风格" in content_text
+    assert 'action="ask_first"' in content_text
+    assert "direct_pass、light_refine、direct_rewrite、ask_first" in content_text
     assert "动作轨迹" in content_text
     assert "运镜/镜头语言" in content_text
+    assert "不要生成字幕、水印、UI 文案、seed 或命令参数" in content_text
 
 
 @pytest.mark.asyncio
