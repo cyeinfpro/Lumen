@@ -38,7 +38,7 @@ import {
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
 import { useChatStore, type ReasoningEffort } from "@/store/useChatStore";
-import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
+import type { Quality, RenderQualityChoice } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
 import { enhancePrompt } from "@/lib/apiClient";
@@ -62,6 +62,7 @@ import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
+import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import { LazyMaskCanvas } from "../LazyMaskCanvas";
 
 interface DesktopComposerPillProps {
@@ -69,21 +70,6 @@ interface DesktopComposerPillProps {
 }
 
 type ComposerMode = "chat" | "image";
-
-const ASPECT_OPTIONS: { value: AspectRatio; label: string; hint: string }[] = [
-  { value: "1:1", label: "1:1", hint: "方形" },
-  { value: "3:2", label: "3:2", hint: "横向标准" },
-  { value: "2:3", label: "2:3", hint: "竖向标准" },
-  { value: "4:3", label: "4:3", hint: "横向常规" },
-  { value: "3:4", label: "3:4", hint: "竖向常规" },
-  { value: "10:7", label: "10:7", hint: "横向" },
-  { value: "7:10", label: "7:10", hint: "竖向" },
-  { value: "16:9", label: "16:9", hint: "横向宽屏" },
-  { value: "9:16", label: "9:16", hint: "竖向宽屏" },
-  { value: "21:9", label: "21:9", hint: "超宽电影" },
-  { value: "9:21", label: "9:21", hint: "超竖超长" },
-  { value: "4:5", label: "4:5", hint: "社交方形偏长" },
-];
 
 const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }[] = [
   { value: "none", label: "最快", hint: "直接回复" },
@@ -979,19 +965,12 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                   anchorRef={aspectTriggerRef}
                   ariaLabel="选择宽高比"
                   align="left"
+                  className="max-h-[430px]"
                 >
-                  <PopoverList
-                    title="宽高比"
-                    items={ASPECT_OPTIONS.map((o) => ({
-                      key: o.value,
-                      label: o.label,
-                      hint: o.hint,
-                      selected: o.value === aspect,
-                      onSelect: () => {
-                        setAspectRatio(o.value);
-                        setAspectPopoverOpen(false);
-                      },
-                    }))}
+                  <AspectRatioPicker
+                    value={aspect}
+                    onChange={setAspectRatio}
+                    onClose={() => setAspectPopoverOpen(false)}
                   />
                 </DesktopPopover>
               </div>
