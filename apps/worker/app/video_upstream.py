@@ -31,7 +31,7 @@ VideoProviderStatus = Literal[
 
 @dataclass(frozen=True)
 class VideoReferenceMedia:
-    kind: Literal["image", "video"]
+    kind: Literal["image", "video", "audio"]
     data: bytes | None = None
     mime: str | None = None
     url: str | None = None
@@ -741,7 +741,7 @@ def _reference_anchor_token(kind: str, index: int, ref_id: str | None = None) ->
 
 def _reference_order_aliases(
     *,
-    kind: Literal["image", "video"],
+    kind: Literal["image", "video", "audio"],
     index: int,
     label: str | None,
     official: str,
@@ -760,8 +760,8 @@ def _reference_order_aliases(
         8: "八",
         9: "九",
     }
-    noun = "图片" if kind == "image" else "视频"
-    short_noun = "图" if kind == "image" else "视频"
+    noun = "图片" if kind == "image" else "音频" if kind == "audio" else "视频"
+    short_noun = "图" if kind == "image" else noun
     for alias in (
         anchor,
         anchor.strip("[]"),
@@ -774,6 +774,10 @@ def _reference_order_aliases(
         f"视频素材 {index}" if kind == "video" else None,
         f"参考视频{index}" if kind == "video" else None,
         f"参考视频 {index}" if kind == "video" else None,
+        f"音频素材{index}" if kind == "audio" else None,
+        f"音频素材 {index}" if kind == "audio" else None,
+        f"参考音频{index}" if kind == "audio" else None,
+        f"参考音频 {index}" if kind == "audio" else None,
         f"动作参考{index}" if kind == "video" else None,
         f"动作参考 {index}" if kind == "video" else None,
         f"运动参考{index}" if kind == "video" else None,
@@ -782,6 +786,8 @@ def _reference_order_aliases(
         f"第{index}张{short_noun}" if kind == "image" else f"第{index}段{noun}",
         f"第{index}段素材" if kind == "video" else None,
         f"第{index}个视频素材" if kind == "video" else None,
+        f"第{index}段音频素材" if kind == "audio" else None,
+        f"第{index}个音频素材" if kind == "audio" else None,
         f"第{zh_digits[index]}张{noun}"
         if index in zh_digits and kind == "image"
         else None,
@@ -800,6 +806,18 @@ def _reference_order_aliases(
         f"第{zh_digits[index]}个视频素材"
         if index in zh_digits and kind == "video"
         else None,
+        f"第{zh_digits[index]}个{noun}"
+        if index in zh_digits and kind == "audio"
+        else None,
+        f"第{zh_digits[index]}段{noun}"
+        if index in zh_digits and kind == "audio"
+        else None,
+        f"第{zh_digits[index]}段音频素材"
+        if index in zh_digits and kind == "audio"
+        else None,
+        f"第{zh_digits[index]}个音频素材"
+        if index in zh_digits and kind == "audio"
+        else None,
     ):
         if alias and alias not in aliases and alias != official:
             aliases.append(alias)
@@ -813,6 +831,7 @@ def _prompt_with_reference_order(req: VideoSubmitRequest) -> str:
     lines: list[str] = []
     image_index = 0
     video_index = 0
+    audio_index = 0
     for item in req.reference_media:
         if item.kind == "image":
             image_index += 1
@@ -820,18 +839,27 @@ def _prompt_with_reference_order(req: VideoSubmitRequest) -> str:
             localized = f"图片 {image_index}"
             description = f"reference image #{image_index}"
             anchor = _reference_anchor_token("image", image_index, item.ref_id)
+            index = image_index
         elif item.kind == "video":
             video_index += 1
             official = f"Video {video_index}"
             localized = f"视频 {video_index}"
             description = f"reference video #{video_index}"
             anchor = _reference_anchor_token("video", video_index, item.ref_id)
+            index = video_index
+        elif item.kind == "audio":
+            audio_index += 1
+            official = f"Audio {audio_index}"
+            localized = f"音频 {audio_index}"
+            description = f"reference audio #{audio_index}"
+            anchor = _reference_anchor_token("audio", audio_index, item.ref_id)
+            index = audio_index
         else:
             continue
 
         aliases = _reference_order_aliases(
             kind=item.kind,
-            index=image_index if item.kind == "image" else video_index,
+            index=index,
             label=item.label,
             official=official,
             localized=localized,
@@ -1171,37 +1199,24 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
     def _media_url(self, item: VideoReferenceMedia, *, field: str) -> str:
         if item.url:
             return item.url
-        if item.kind == "image" and item.data:
-            if len(item.data) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
-                raise VideoUpstreamError(
-                    f"{field} is too large for inline video submission",
-                    error_code="invalid_input",
-                    status_code=413,
-                )
-            return _image_data_url(item.data, item.mime)
         raise VideoUpstreamError(
-            f"{field} requires a public URL or base64 image",
+            f"{field} requires a public URL",
             error_code="invalid_input",
             status_code=422,
         )
 
-    def _reference_media_arrays(self, req: VideoSubmitRequest) -> tuple[list[str], list[str]]:
+    def _reference_media_arrays(
+        self, req: VideoSubmitRequest
+    ) -> tuple[list[str], list[str], list[str]]:
         images: list[str] = []
         videos: list[str] = []
+        audios: list[str] = []
         if req.action == "i2v":
             if req.input_image_url:
                 images.append(req.input_image_url)
-            elif req.input_image_bytes:
-                if len(req.input_image_bytes) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
-                    raise VideoUpstreamError(
-                        "input image is too large for inline video submission",
-                        error_code="invalid_input",
-                        status_code=413,
-                    )
-                images.append(_image_data_url(req.input_image_bytes, req.input_image_mime))
             else:
                 raise VideoUpstreamError(
-                    "missing input image bytes",
+                    "input image requires a public URL",
                     error_code="invalid_input",
                     status_code=422,
                 )
@@ -1217,6 +1232,8 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
                     images.append(self._media_url(item, field="reference image"))
                 elif item.kind == "video":
                     videos.append(self._media_url(item, field="reference video"))
+                elif item.kind == "audio":
+                    audios.append(self._media_url(item, field="reference audio"))
         elif req.action != "t2v":
             raise VideoUpstreamError(
                 f"unsupported video action: {req.action}",
@@ -1235,10 +1252,16 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
                 error_code="invalid_input",
                 status_code=422,
             )
-        return images, videos
+        if len(audios) > 1:
+            raise VideoUpstreamError(
+                "New API video generation supports at most 1 reference audio",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        return images, videos, audios
 
     def _submit_body(self, req: VideoSubmitRequest) -> dict[str, Any]:
-        images, videos = self._reference_media_arrays(req)
+        images, videos, audios = self._reference_media_arrays(req)
         body: dict[str, Any] = {
             "model": req.upstream_model,
             "prompt": _prompt_with_reference_order(req),
@@ -1250,6 +1273,8 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
             body["images"] = images
         if videos:
             body["videos"] = videos
+        if audios:
+            body["audios"] = audios
         return body
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:

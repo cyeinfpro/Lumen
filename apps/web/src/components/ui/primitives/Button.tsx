@@ -1,16 +1,15 @@
 "use client";
 
 // 通用按钮原语。variant × size 正交；loading 时禁用并替换左图标为 Spinner。
-// 升级版：集成 Framer Motion 提供更丝滑的物理动效（按压反弹、物理悬浮）。
+// 微交互由 GlobalGsapMotion 统一接管，避免每个按钮创建独立动画实例。
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "./Spinner";
-import { motion, HTMLMotionProps } from "framer-motion";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline" | "glass" | "link";
 type Size = "sm" | "md" | "lg";
 
-export interface ButtonProps extends Omit<HTMLMotionProps<"button">, "transition" | "children"> {
+export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   variant?: Variant;
   size?: Size;
   loading?: boolean;
@@ -22,10 +21,10 @@ export interface ButtonProps extends Omit<HTMLMotionProps<"button">, "transition
 
 const BASE =
   "inline-flex items-center justify-center gap-1.5 font-medium rounded-[var(--radius-control)] " +
-  "transition-[background-color,color,border-color,box-shadow] duration-150 " +
+  "transition-[background-color,color,border-color,box-shadow,filter,transform] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "select-none text-center leading-tight";
+  "select-none text-center leading-tight active:scale-[0.98] motion-reduce:active:scale-100";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
@@ -87,11 +86,12 @@ export function Button({
   const isDisabled = disabled || loading;
   const spinnerSize = size === "lg" ? 20 : size === "sm" ? 12 : 16;
   return (
-    <motion.button
+    <button
       ref={ref}
       type={type ?? "button"}
       disabled={isDisabled}
       aria-busy={loading || undefined}
+      data-lumen-interactive={isDisabled ? undefined : "true"}
       className={cn(
         BASE,
         VARIANTS[variant],
@@ -99,9 +99,6 @@ export function Button({
         fullWidth && "w-full",
         className,
       )}
-      whileHover={isDisabled ? undefined : { scale: 1.01 }}
-      whileTap={isDisabled ? undefined : { scale: 0.96 }}
-      transition={{ type: "spring", stiffness: 400, damping: 25 }}
       {...props}
     >
       {loading ? (
@@ -113,7 +110,7 @@ export function Button({
       {rightIcon ? (
         <span className="inline-flex items-center shrink-0">{rightIcon}</span>
       ) : null}
-    </motion.button>
+    </button>
   );
 }
 

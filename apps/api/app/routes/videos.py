@@ -537,7 +537,7 @@ async def _reference_video_upstream_public_url(
 
 
 def _provider_requires_public_media(provider: Any) -> bool:
-    return getattr(provider, "kind", None) == "dashscope"
+    return getattr(provider, "kind", None) in {"dashscope", "volcano_newapi"}
 
 
 def _provider_prefers_public_media_url(provider: Any) -> bool:
@@ -570,7 +570,7 @@ def _unlink_file_if_exists(path: Path) -> None:
 
 def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | None:
     kind = snapshot.get("kind")
-    if kind not in {"image", "video"}:
+    if kind not in {"image", "video", "audio"}:
         return None
     raw_url = snapshot.get("url") if isinstance(snapshot.get("url"), str) else None
     url = None if _is_internal_reference_url(raw_url) else raw_url
@@ -1736,6 +1736,7 @@ async def _reference_media_snapshots(
         snapshots = [dict(item) for item in fallback_snapshots]
         image_index = 0
         video_index = 0
+        audio_index = 0
         for snapshot in snapshots:
             if snapshot.get("kind") == "image":
                 image_index += 1
@@ -1757,6 +1758,16 @@ async def _reference_media_snapshots(
                     or not snapshot["label"].strip()
                 ):
                     snapshot["label"] = f"Video {video_index}"
+            elif snapshot.get("kind") == "audio":
+                audio_index += 1
+                snapshot["ref_id"] = _reference_snapshot_ref_id(
+                    "audio", audio_index, snapshot.get("ref_id")
+                )
+                if (
+                    not isinstance(snapshot.get("label"), str)
+                    or not snapshot["label"].strip()
+                ):
+                    snapshot["label"] = f"Audio {audio_index}"
         if reference_public_base_url is not None:
             for snapshot in snapshots:
                 if snapshot.get("kind") == "image" and isinstance(
@@ -1804,15 +1815,20 @@ async def _reference_media_snapshots(
     snapshots: list[dict[str, Any]] = []
     image_index = 0
     video_index = 0
+    audio_index = 0
     for item in items:
         if item.kind == "image":
             image_index += 1
             default_label = f"Image {image_index}"
             default_ref_id = f"ref:image:{image_index}"
-        else:
+        elif item.kind == "video":
             video_index += 1
             default_label = f"Video {video_index}"
             default_ref_id = f"ref:video:{video_index}"
+        else:
+            audio_index += 1
+            default_label = f"Audio {audio_index}"
+            default_ref_id = f"ref:audio:{audio_index}"
         label = (item.label or "").strip() or default_label
         ref_id = (item.ref_id or "").strip() or default_ref_id
         if item.url:
@@ -1905,6 +1921,78 @@ async def _reference_media_snapshots(
     return snapshots
 
 
+def _validate_provider_reference_media(
+    provider_kind: str,
+    reference_snapshots: list[dict[str, Any]],
+) -> None:
+    if provider_kind == "dashscope" and any(
+        item.get("kind") == "video"
+        for item in reference_snapshots
+        if isinstance(item, dict)
+    ):
+        raise _http(
+            "unsupported_reference_media",
+            "HappyHorse reference-to-video supports image references only",
+            422,
+        )
+    if provider_kind == "omni_flash" and any(
+        item.get("kind") in {"video", "audio"}
+        for item in reference_snapshots
+        if isinstance(item, dict)
+    ):
+        raise _http(
+            "unsupported_reference_media",
+            "Omni Flash unified video create supports image references only",
+            422,
+        )
+    if provider_kind != "volcano_newapi" and any(
+        item.get("kind") == "audio"
+        for item in reference_snapshots
+        if isinstance(item, dict)
+    ):
+        raise _http(
+            "unsupported_reference_media",
+            "reference audio is only available for Volcano New API",
+            422,
+        )
+    if provider_kind != "volcano_newapi":
+        return
+
+    image_count = sum(
+        1
+        for item in reference_snapshots
+        if isinstance(item, dict) and item.get("kind") == "image"
+    )
+    video_count = sum(
+        1
+        for item in reference_snapshots
+        if isinstance(item, dict) and item.get("kind") == "video"
+    )
+    audio_count = sum(
+        1
+        for item in reference_snapshots
+        if isinstance(item, dict) and item.get("kind") == "audio"
+    )
+    if image_count > 4:
+        raise _http(
+            "too_many_reference_images",
+            "Volcano New API supports at most 4 reference images",
+            422,
+        )
+    if video_count > 3:
+        raise _http(
+            "too_many_reference_videos",
+            "Volcano New API supports at most 3 reference videos",
+            422,
+        )
+    if audio_count > 1:
+        raise _http(
+            "too_many_reference_audios",
+            "Volcano New API supports at most 1 reference audio",
+            422,
+        )
+
+
 async def _create_video_generation_record(
     db: AsyncSession,
     body: VideoCreateIn,
@@ -1944,26 +2032,7 @@ async def _create_video_generation_record(
         reference_public_base_url=reference_public_base,
         required_public_media=requires_public_media,
     )
-    if provider.kind == "dashscope" and any(
-        item.get("kind") == "video"
-        for item in reference_snapshots
-        if isinstance(item, dict)
-    ):
-        raise _http(
-            "unsupported_reference_media",
-            "HappyHorse reference-to-video supports image references only",
-            422,
-        )
-    if provider.kind == "omni_flash" and any(
-        item.get("kind") == "video"
-        for item in reference_snapshots
-        if isinstance(item, dict)
-    ):
-        raise _http(
-            "unsupported_reference_media",
-            "Omni Flash unified video create supports image references only",
-            422,
-        )
+    _validate_provider_reference_media(provider.kind, reference_snapshots)
     if (
         provider.kind == "dashscope"
         and body.action in {"t2v", "reference"}
@@ -2457,7 +2526,7 @@ async def retry_video_generation(
     reference_inputs: list[VideoReferenceMediaIn] = []
     valid_reference_snapshots: list[dict[str, Any]] = []
     for item in reference_snapshots:
-        if item.get("kind") not in {"image", "video"}:
+        if item.get("kind") not in {"image", "video", "audio"}:
             continue
         try:
             reference_input = VideoReferenceMediaIn(

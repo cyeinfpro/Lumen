@@ -75,6 +75,9 @@ type ReferenceDraft = VideoReferenceMediaIn & {
   previewUrl?: string | null;
 };
 
+type ReferenceKind = VideoReferenceMediaIn["kind"];
+type ReferenceLimits = Record<ReferenceKind, number>;
+
 type PromptEnhanceAction =
   | "direct_pass"
   | "light_refine"
@@ -127,7 +130,10 @@ const VIDEO_PROMPT_VARIANT_TITLES = [
   "动作节奏版",
   "参考一致版",
 ];
-const REFERENCE_REF_ID_RE = /^ref:(image|video):([1-9][0-9]{0,2})$/;
+const REFERENCE_REF_ID_RE = /^ref:(image|video|audio):([1-9][0-9]{0,2})$/;
+const REFERENCE_KINDS: ReferenceKind[] = ["image", "video", "audio"];
+const DEFAULT_REFERENCE_LIMITS: ReferenceLimits = { image: 9, video: 3, audio: 1 };
+const NEWAPI_REFERENCE_LIMITS: ReferenceLimits = { image: 4, video: 3, audio: 1 };
 const CHINESE_DIGITS: Record<number, string> = {
   1: "一",
   2: "二",
@@ -627,13 +633,22 @@ function normalizeAssetUrl(value: string): string {
   return /^asset-[a-z0-9][a-z0-9_-]*$/.test(assetId) ? `asset://${assetId}` : "";
 }
 
-function referenceRefId(kind: "image" | "video", index: number): string {
+function isNewApiVideoModel(model: string): boolean {
+  const value = model.trim().toLowerCase().replace(/[_.]/g, "-");
+  return value === "video-ds-2-0" || value.startsWith("video-ds-2-0-");
+}
+
+function referenceLimitsForModel(model: string): ReferenceLimits {
+  return isNewApiVideoModel(model) ? NEWAPI_REFERENCE_LIMITS : DEFAULT_REFERENCE_LIMITS;
+}
+
+function referenceRefId(kind: ReferenceKind, index: number): string {
   return `ref:${kind}:${index}`;
 }
 
 function referenceRefIndex(
   refId: string | null | undefined,
-  kind: "image" | "video",
+  kind: ReferenceKind,
 ): number | null {
   const match = (refId ?? "").trim().toLowerCase().match(REFERENCE_REF_ID_RE);
   if (!match || match[1] !== kind) return null;
@@ -641,12 +656,49 @@ function referenceRefIndex(
   return Number.isInteger(index) && index > 0 ? index : null;
 }
 
-function referenceLabel(kind: "image" | "video", index: number): string {
-  return `${kind === "image" ? "图片" : "视频"} ${index}`;
+function referenceKindNoun(kind: ReferenceKind): string {
+  if (kind === "image") return "图片";
+  if (kind === "audio") return "音频";
+  return "视频";
+}
+
+function referenceKindShortNoun(kind: ReferenceKind): string {
+  if (kind === "image") return "图";
+  return referenceKindNoun(kind);
+}
+
+function referenceLabel(kind: ReferenceKind, index: number): string {
+  return `${referenceKindNoun(kind)} ${index}`;
+}
+
+function referenceLimitMessage(kind: ReferenceKind, limit: number): string {
+  const unit = kind === "image" ? "张" : "个";
+  return `参考${referenceKindNoun(kind)}最多 ${limit} ${unit}`;
+}
+
+function referenceCountsFor(refs: ReferenceDraft[]): ReferenceLimits {
+  return {
+    image: refs.filter((item) => item.kind === "image").length,
+    video: refs.filter((item) => item.kind === "video").length,
+    audio: refs.filter((item) => item.kind === "audio").length,
+  };
+}
+
+function referenceLimitViolation(
+  refs: ReferenceDraft[],
+  limits: ReferenceLimits,
+): string | null {
+  const counts = referenceCountsFor(refs);
+  for (const kind of REFERENCE_KINDS) {
+    if (counts[kind] > limits[kind]) {
+      return referenceLimitMessage(kind, limits[kind]);
+    }
+  }
+  return null;
 }
 
 function nextReferenceIdentity(
-  kind: "image" | "video",
+  kind: ReferenceKind,
   refs: ReferenceDraft[],
 ): { refId: string; label: string } {
   const maxIndex = refs.reduce((max, item) => {
@@ -672,7 +724,7 @@ function referenceDisplayToken(
 ): string {
   const rawRefId = item.ref_id?.trim().toLowerCase() ?? "";
   const index = referenceRefIndex(rawRefId, item.kind) ?? fallbackIndex;
-  return `@${item.kind === "image" ? "图片" : "视频"}${index}`;
+  return `@${referenceKindNoun(item.kind)}${index}`;
 }
 
 function escapeRegExp(value: string): string {
@@ -682,8 +734,8 @@ function escapeRegExp(value: string): string {
 function referenceDisplayAliases(item: ReferenceDraft): string[] {
   const index = referenceRefIndex(item.ref_id, item.kind);
   if (!index) return [];
-  const noun = item.kind === "image" ? "图片" : "视频";
-  const shortNoun = item.kind === "image" ? "图" : "视频";
+  const noun = referenceKindNoun(item.kind);
+  const shortNoun = referenceKindShortNoun(item.kind);
   return [
     referenceDisplayToken(item),
     `@${noun} ${index}`,
@@ -696,8 +748,8 @@ function referenceMentionAliases(item: ReferenceDraft): string[] {
   const index = referenceRefIndex(item.ref_id, item.kind);
   if (!index) return [];
   const aliases = new Set<string>();
-  const noun = item.kind === "image" ? "图片" : "视频";
-  const shortNoun = item.kind === "image" ? "图" : "视频";
+  const noun = referenceKindNoun(item.kind);
+  const shortNoun = referenceKindShortNoun(item.kind);
   const zh = CHINESE_DIGITS[index];
   const videoRoleAliases =
     item.kind === "video"
@@ -712,6 +764,15 @@ function referenceMentionAliases(item: ReferenceDraft): string[] {
           `运动参考${index}`,
         ]
       : [];
+  const audioRoleAliases =
+    item.kind === "audio"
+      ? [
+          `音频素材 ${index}`,
+          `音频素材${index}`,
+          `参考音频 ${index}`,
+          `参考音频${index}`,
+        ]
+      : [];
   for (const alias of [
     item.label,
     `[${item.label}]`,
@@ -719,16 +780,23 @@ function referenceMentionAliases(item: ReferenceDraft): string[] {
     `${noun}${index}`,
     `${shortNoun}${index}`,
     ...videoRoleAliases,
+    ...audioRoleAliases,
     item.kind === "image" ? `第${index}张${noun}` : `第${index}个${noun}`,
     item.kind === "image" ? `第${index}张${shortNoun}` : `第${index}段${noun}`,
     item.kind === "video" ? `第${index}段素材` : "",
     item.kind === "video" ? `第${index}个视频素材` : "",
+    item.kind === "audio" ? `第${index}段音频素材` : "",
+    item.kind === "audio" ? `第${index}个音频素材` : "",
     zh && item.kind === "image" ? `第${zh}张${noun}` : "",
     zh && item.kind === "image" ? `第${zh}张${shortNoun}` : "",
     zh && item.kind === "video" ? `第${zh}个${noun}` : "",
     zh && item.kind === "video" ? `第${zh}段${noun}` : "",
     zh && item.kind === "video" ? `第${zh}段素材` : "",
     zh && item.kind === "video" ? `第${zh}个视频素材` : "",
+    zh && item.kind === "audio" ? `第${zh}个${noun}` : "",
+    zh && item.kind === "audio" ? `第${zh}段${noun}` : "",
+    zh && item.kind === "audio" ? `第${zh}段音频素材` : "",
+    zh && item.kind === "audio" ? `第${zh}个音频素材` : "",
   ]) {
     if (typeof alias !== "string") continue;
     const clean = alias.trim();
@@ -1229,6 +1297,15 @@ export default function VideoPage() {
     [action, options?.models],
   );
   const selectedModel = model || firstModelForAction(options, action);
+  const referenceLimits = useMemo(
+    () => referenceLimitsForModel(selectedModel),
+    [selectedModel],
+  );
+  const referenceCounts = useMemo(
+    () => referenceCountsFor(referenceMedia),
+    [referenceMedia],
+  );
+  const referenceLimitError = referenceLimitViolation(referenceMedia, referenceLimits);
   const selectedBillingModel = billingModelForAction(options, selectedModel, action);
   const availableResolutions = useMemo(
     () => resolutionOptionsForModel(options, selectedModel),
@@ -1303,9 +1380,10 @@ export default function VideoPage() {
     mutationFn: async (file: File) => {
       if (file.type.startsWith("image/")) {
         if (
-          referenceMediaRef.current.filter((item) => item.kind === "image").length >= 9
+          referenceMediaRef.current.filter((item) => item.kind === "image").length >=
+          referenceLimits.image
         ) {
-          throw new Error("参考图片最多 9 张");
+          throw new Error(referenceLimitMessage("image", referenceLimits.image));
         }
         const img = await uploadImage(file);
         return {
@@ -1317,9 +1395,10 @@ export default function VideoPage() {
       }
       if (file.type.startsWith("video/")) {
         if (
-          referenceMediaRef.current.filter((item) => item.kind === "video").length >= 3
+          referenceMediaRef.current.filter((item) => item.kind === "video").length >=
+          referenceLimits.video
         ) {
-          throw new Error("参考视频最多 3 个");
+          throw new Error(referenceLimitMessage("video", referenceLimits.video));
         }
         const video = await uploadVideo(file);
         return {
@@ -1335,10 +1414,10 @@ export default function VideoPage() {
       clearPromptEnhanceChoices();
       let accepted = false;
       setReferenceMedia((prev) => {
-        const limit = ref.kind === "image" ? 9 : 3;
+        const limit = referenceLimits[ref.kind];
         const currentCount = prev.filter((item) => item.kind === ref.kind).length;
         if (currentCount >= limit) {
-          toast.error(ref.kind === "image" ? "参考图片最多 9 张" : "参考视频最多 3 个");
+          toast.error(referenceLimitMessage(ref.kind, limit));
           return prev;
         }
         accepted = true;
@@ -1370,8 +1449,11 @@ export default function VideoPage() {
       }
       return;
     }
-    if (referenceMedia.filter((item) => item.kind === "image").length >= 9) {
-      toast.error("参考图片最多 9 张");
+    if (
+      referenceMedia.filter((item) => item.kind === "image").length >=
+      referenceLimits.image
+    ) {
+      toast.error(referenceLimitMessage("image", referenceLimits.image));
       return;
     }
     clearPromptEnhanceChoices();
@@ -1392,7 +1474,7 @@ export default function VideoPage() {
     ]);
     setAssetUrlInput("");
     toast.success("官方素材已添加");
-  }, [assetUrlInput, clearPromptEnhanceChoices, referenceMedia]);
+  }, [assetUrlInput, clearPromptEnhanceChoices, referenceLimits, referenceMedia]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -1482,7 +1564,7 @@ export default function VideoPage() {
           item.reference_media
             .slice(0, index + 1)
             .filter((current) => current.kind === ref.kind).length;
-        const fallbackLabel = `${ref.kind === "image" ? "图片" : "视频"} ${kindIndex}`;
+        const fallbackLabel = referenceLabel(ref.kind, kindIndex);
         const label = ref.label || fallbackLabel;
         return {
           _key: uuid(),
@@ -1497,12 +1579,14 @@ export default function VideoPage() {
               ? ref.url.replace(/^asset:\/\//i, "asset://")
               : ref.kind === "image"
               ? ref.image_id?.slice(0, 8) ?? "图片"
-              : ref.video_id?.slice(0, 8) ?? "视频",
+              : ref.kind === "video"
+              ? ref.video_id?.slice(0, 8) ?? "视频"
+              : "音频",
           previewUrl:
             ref.kind === "image"
               ? cleanReferencePreviewUrl(ref.url) ??
                 (ref.image_id ? imageVariantUrl(ref.image_id, "display2048") : null)
-              : ref.video_id
+              : ref.kind === "video" && ref.video_id
               ? videoPosterUrl(ref.video_id)
               : null,
         };
@@ -1701,6 +1785,9 @@ export default function VideoPage() {
     if (action === "reference" && referenceMedia.length === 0) {
       return "先添加参考素材";
     }
+    if (action === "reference" && referenceLimitError) {
+      return referenceLimitError;
+    }
     if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
     if (estimate === null) return "缺少预扣估算";
     return "可以提交";
@@ -1716,6 +1803,7 @@ export default function VideoPage() {
     options?.unavailable_reason,
     optionsQ.isLoading,
     prompt,
+    referenceLimitError,
     referenceMedia.length,
     seedIsValid,
     effectiveResolution,
@@ -1731,6 +1819,7 @@ export default function VideoPage() {
     (action === "t2v" ||
       (action === "i2v" && inputImageId.trim().length > 0) ||
       (action === "reference" && referenceMedia.length > 0)) &&
+    (action !== "reference" || !referenceLimitError) &&
     seedIsValid &&
     estimate !== null &&
     !createMut.isPending;
@@ -1909,10 +1998,13 @@ export default function VideoPage() {
                             </span>
                           </button>
                           <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                            图片 {referenceMedia.filter((item) => item.kind === "image").length}/9
+                            图片 {referenceCounts.image}/{referenceLimits.image}
                           </span>
                           <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                            视频 {referenceMedia.filter((item) => item.kind === "video").length}/3
+                            视频 {referenceCounts.video}/{referenceLimits.video}
+                          </span>
+                          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
+                            音频 {referenceCounts.audio}/{referenceLimits.audio}
                           </span>
                           <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto lg:min-w-[360px] lg:flex-1">
                             <div className="relative min-w-[180px] flex-1">
@@ -2700,7 +2792,7 @@ function PromptEnhanceChooser({
 
   return (
     <div className="sticky bottom-3 z-20 flex max-h-[min(72dvh,36rem)] min-h-0 flex-col gap-2 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/95 p-3 shadow-[var(--shadow-2)] backdrop-blur-xl">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
             {loading ? (
@@ -2748,104 +2840,106 @@ function PromptEnhanceChooser({
         )}
       </div>
 
-      {loading && (
-        <div className="min-h-20 flex-1 overflow-y-auto rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
-          {cleanPreview || "等待上游返回..."}
-        </div>
-      )}
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+        {loading && (
+          <div className="max-h-[min(48dvh,28rem)] min-h-20 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
+            {cleanPreview || "等待上游返回..."}
+          </div>
+        )}
 
-      {!loading && visibleCandidates.length > 0 && previewCandidate && (
-        <div className="grid min-h-0 flex-1 gap-2 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
-          <div className="flex min-w-0 gap-2 overflow-x-auto pb-1 xl:max-h-[min(42dvh,24rem)] xl:flex-col xl:overflow-y-auto xl:pb-0 xl:pr-1">
-            {visibleCandidates.map((candidate) => {
-              const selected = candidate.id === selectedId;
-              const previewing = candidate.id === previewCandidate.id;
-              return (
-                <button
-                  key={candidate.id}
-                  type="button"
-                  onClick={() => setPreviewCandidateId(candidate.id)}
-                  className={cn(
-                    "min-h-16 w-[min(78vw,18rem)] shrink-0 rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-2.5 text-left transition-[background-color,border-color] xl:w-full",
-                    previewing
-                      ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
-                      : "border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
-                  )}
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span
-                      className={cn(
-                        "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
-                        selected
-                          ? "border-[var(--accent-border)] text-[var(--accent)]"
-                          : "border-[var(--border)] text-[var(--fg-2)]",
-                      )}
-                    >
-                      {selected ? (
-                        <CircleCheck className="h-3.5 w-3.5" />
-                      ) : (
-                        <PencilLine className="h-3 w-3" />
-                      )}
-                    </span>
-                    <p className="min-w-0 truncate text-sm font-semibold text-[var(--fg-0)]">
-                      {candidate.title}
-                    </p>
-                    {selected && (
-                      <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
-                        已应用
-                      </span>
+        {!loading && visibleCandidates.length > 0 && previewCandidate && (
+          <div className="grid min-h-0 gap-2 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
+            <div className="flex min-w-0 shrink-0 gap-2 overflow-x-auto pb-1 xl:max-h-[min(42dvh,24rem)] xl:flex-col xl:overflow-y-auto xl:overscroll-contain xl:pb-0 xl:pr-1">
+              {visibleCandidates.map((candidate) => {
+                const selected = candidate.id === selectedId;
+                const previewing = candidate.id === previewCandidate.id;
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    onClick={() => setPreviewCandidateId(candidate.id)}
+                    className={cn(
+                      "min-h-16 w-[min(78vw,18rem)] shrink-0 rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-2.5 text-left transition-[background-color,border-color] xl:w-full",
+                      previewing
+                        ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
+                        : "border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
                     )}
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
-                    {candidate.prompt}
-                  </p>
-                </button>
-              );
-            })}
-          </div>
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={cn(
+                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                          selected
+                            ? "border-[var(--accent-border)] text-[var(--accent)]"
+                            : "border-[var(--border)] text-[var(--fg-2)]",
+                        )}
+                      >
+                        {selected ? (
+                          <CircleCheck className="h-3.5 w-3.5" />
+                        ) : (
+                          <PencilLine className="h-3 w-3" />
+                        )}
+                      </span>
+                      <p className="min-w-0 truncate text-sm font-semibold text-[var(--fg-0)]">
+                        {candidate.title}
+                      </p>
+                      {selected && (
+                        <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                          已应用
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
+                      {candidate.prompt}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
 
-          <div className="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
-                  {previewCandidate.title}
-                </p>
-                <p className="text-xs text-[var(--fg-2)]">
-                  {previewCandidate.id === selectedId ? "当前已应用到编辑器" : "预览当前候选"}
-                </p>
+            <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] xl:min-h-0">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
+                    {previewCandidate.title}
+                  </p>
+                  <p className="text-xs text-[var(--fg-2)]">
+                    {previewCandidate.id === selectedId ? "当前已应用到编辑器" : "预览当前候选"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    variant={previewCandidate.id === selectedId ? "secondary" : "outline"}
+                    size="sm"
+                    disabled={
+                      previewCandidate.id === selectedId ||
+                      !canApplyPromptEnhanceCandidate(previewCandidate)
+                    }
+                    onClick={() => onSelect(previewCandidate)}
+                  >
+                    {promptEnhanceCandidateButtonText(
+                      previewCandidate,
+                      previewCandidate.id === selectedId,
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 w-9 px-0"
+                    onClick={() => void copyCandidate(previewCandidate)}
+                    aria-label="复制优化提示词"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  variant={previewCandidate.id === selectedId ? "secondary" : "outline"}
-                  size="sm"
-                  disabled={
-                    previewCandidate.id === selectedId ||
-                    !canApplyPromptEnhanceCandidate(previewCandidate)
-                  }
-                  onClick={() => onSelect(previewCandidate)}
-                >
-                  {promptEnhanceCandidateButtonText(
-                    previewCandidate,
-                    previewCandidate.id === selectedId,
-                  )}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-9 w-9 px-0"
-                  onClick={() => void copyCandidate(previewCandidate)}
-                  aria-label="复制优化提示词"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </Button>
+              <div className="max-h-[min(42dvh,24rem)] min-h-[9rem] flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words px-3 py-3 text-sm leading-6 text-[var(--fg-1)]">
+                {previewCandidate.prompt}
               </div>
-            </div>
-            <div className="min-h-[9rem] flex-1 overflow-y-auto whitespace-pre-wrap px-3 py-3 text-sm leading-6 text-[var(--fg-1)]">
-              {previewCandidate.prompt}
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

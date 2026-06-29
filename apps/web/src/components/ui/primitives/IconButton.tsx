@@ -1,17 +1,16 @@
 "use client";
 
 // 正方形图标按钮。aria-label 在类型层强制；tooltip prop 可选包裹。
-// 升级版：集成 Framer Motion 提供物理按压动效。
+// 微交互由 GlobalGsapMotion 统一接管，避免每个按钮创建独立动画实例。
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "./Spinner";
 import { Tooltip } from "./Tooltip";
-import { motion, HTMLMotionProps } from "framer-motion";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline";
 type Size = "sm" | "md" | "lg";
 
-export interface IconButtonProps extends Omit<HTMLMotionProps<"button">, "transition" | "children"> {
+export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   variant?: Variant;
   size?: Size;
   loading?: boolean;
@@ -25,10 +24,10 @@ export interface IconButtonProps extends Omit<HTMLMotionProps<"button">, "transi
 
 const BASE =
   "inline-flex items-center justify-center rounded-[var(--radius-control)] " +
-  "transition-[background-color,color,border-color] duration-150 " +
+  "transition-[background-color,color,border-color,filter,transform] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "shrink-0 select-none";
+  "shrink-0 select-none active:scale-[0.96] motion-reduce:active:scale-100";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
@@ -67,19 +66,17 @@ export function IconButton({
 }: IconButtonProps & { ref?: React.Ref<HTMLButtonElement> }) {
   const isDisabled = disabled || loading;
   const btn = (
-    <motion.button
+    <button
       ref={ref}
       type={type ?? "button"}
       disabled={isDisabled}
       aria-busy={loading || undefined}
+      data-lumen-interactive={isDisabled ? undefined : "true"}
       className={cn(BASE, VARIANTS[variant], SIZES[size], className)}
-      whileHover={isDisabled ? undefined : { scale: 1.05 }}
-      whileTap={isDisabled ? undefined : { scale: 0.92 }}
-      transition={{ type: "spring", stiffness: 400, damping: 25 }}
       {...props}
     >
       {loading ? <Spinner size={size === "lg" ? 20 : 16} /> : children}
-    </motion.button>
+    </button>
   );
 
   if (tooltip != null && tooltip !== "") {
