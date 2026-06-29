@@ -214,6 +214,8 @@ LUMEN_IMAGE_TAG=main
 
 实际阶段：`check` -> `backup_preflight` -> `fetch_release` -> `set_image_tag` -> `pull_images` -> `start_infra` -> `migrate_db` -> `switch` -> `restart_services` -> `health_check` -> `cleanup`。
 
+`cleanup` 会清理未被运行容器引用的 Docker 镜像、buildx 缓存和旧 release 目录。默认 fast 更新会为旧镜像/buildx 缓存保留 48 小时回滚窗口；可用 `LUMEN_CLEANUP_IMAGES_HOURS` / `LUMEN_CLEANUP_CACHE_HOURS` 调整，或用 `LUMEN_UPDATE_SKIP_DOCKER_CLEANUP=1` 临时跳过 Docker 清理。
+
 如果需要在本机用 Dockerfile 重新构建（无 GHCR 访问，或本地有改动）：
 
 ```bash

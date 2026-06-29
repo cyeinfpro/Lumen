@@ -1210,7 +1210,7 @@ cleanup
 | `switch` | 更新 `current` symlink；`previous` 指向旧 release | 失败回滚 symlink |
 | `restart_services` | `docker compose up -d --wait api worker web` | 失败自动尝试 `LUMEN_IMAGE_TAG=<previous>` 重新 up |
 | `health_check` | API `/healthz` + Web `/` + Worker redis ping | 失败提示 §18 rollback 命令 |
-| `cleanup` | `docker image prune` + 删除旧 release（保留 N=3 份） | 不阻断成功 |
+| `cleanup` | `docker image prune` + `docker buildx prune` + 删除旧 release（保留 N=3 份）；fast 模式默认保留 48h 旧镜像回滚窗口 | 不阻断成功 |
 
 ### 11.3.2 pull 优先，build 兜底
 
@@ -2115,7 +2115,7 @@ docker compose --profile tgbot up -d tgbot
 | Web standalone 配置不完整 | Web 容器启动失败 | 先用非 standalone 方案，§19 加冒烟用例 |
 | Bot 无 token 导致 compose wait 失败 | 主栈启动失败 | §5 / §21.5 放 profile |
 | 迁移后回滚旧代码不兼容 | 回滚失败 | §11.6 强制 forward-compatible migration；切换前备份 |
-| 镜像占用磁盘 | 磁盘打满 | `cleanup` 阶段 `docker image prune`；保留近 N=3 旧 release |
+| 镜像占用磁盘 | 磁盘打满 | `cleanup` 阶段 `docker image prune` + `docker buildx prune`；fast 模式保留 48h 旧镜像回滚窗口，旧 release 保留近 N=3 |
 | 管理后台 update 仍假设 systemd | 后台更新失败 | 同步改 `scripts/update.sh` 阶段和测试，runner 走 PathChanged |
 | ghcr.io 国内访问慢 / 失败 | install / update 卡 pull | §10.5 Docker daemon 代理 + `LUMEN_IMAGE_REGISTRY` 可改 |
 | 单架构镜像（amd64）部署到 arm64 | 无法启动 | §6.5 GitHub Actions 引入 buildx matrix（本期可先 amd64-only，但需写入 README） |

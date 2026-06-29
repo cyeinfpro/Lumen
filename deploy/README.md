@@ -103,6 +103,7 @@ bash scripts/lumenctl.sh restore <ts>     # 等价 scripts/restore.sh <timestamp
 - `install.sh` / `update.sh` / `migrate_to_releases.sh` 会按实际 `LUMEN_DATA_ROOT` 渲染并启用 `lumen-update.path`；如果手工复制模板，默认监听 `/opt/lumendata/backup/.update.trigger`
 - runner 默认 `LUMEN_UPDATE_BUILD=0` —— **优先 `docker compose pull` GHCR 预构建镜像**，仅当外部 `EnvironmentFile` 显式置 1 时才本地构建
 - runner 用宿主机用户身份调用 `scripts/update.sh`，按阶段输出 `phase=check / backup_preflight / fetch_release / set_image_tag / pull_images / start_infra / migrate_db / switch / restart_services / health_check / cleanup`
+- `cleanup` 阶段会清理未运行 Docker 镜像和 buildx 缓存；默认 fast 模式保留 48 小时回滚窗口，可用 `LUMEN_CLEANUP_IMAGES_HOURS` / `LUMEN_CLEANUP_CACHE_HOURS` 调整，或用 `LUMEN_UPDATE_SKIP_DOCKER_CLEANUP=1` 临时跳过
 - 后台 API 解析这些阶段并实时推送到前端
 
 如要禁用后台一键更新：
