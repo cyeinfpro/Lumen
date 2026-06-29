@@ -4,7 +4,7 @@
 # 行为（详见 docs/docker-full-stack-cutover-plan.md §11.3）：
 #   1. lumen_with_lock "update" 把整段流程包在全局锁里
 #   2. 解析目标 LUMEN_IMAGE_TAG（channel + GitHub Releases），current==target 直接 noop
-#   3. 默认 fast 模式：少做 release 拉取、可配置备份、按需迁移、跳过阻塞式 cleanup
+#   3. 默认 fast 模式：少做 release 拉取、可配置备份、按需迁移、保守清理旧镜像
 #   4. 准备新 release 目录，shared/.env 软链回去
 #   5. set_image_tag → fast 跳过显式 pull / standard 执行 docker compose pull
 #   6. 判断 DB migration 是否变化；无 migration 时跳过 stop + alembic upgrade
@@ -619,6 +619,81 @@ probe_ghcr_tag() {
     esac
 }
 
+run_update_cleanup() {
+    local cleanup_action="${1:-updated}"
+    local cleanup_dangling_default="0"
+    local cleanup_images_default="0"
+    local cleanup_cache_default="0"
+
+    if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
+        # Fast mode is the normal admin-update path. Keep a short rollback buffer
+        # for freshly pulled images, but still reclaim the old tags that would
+        # otherwise accumulate across frequent releases.
+        cleanup_images_default="48"
+        cleanup_cache_default="48"
+    fi
+
+    local CLEANUP_DANGLING_H CLEANUP_IMAGES_H CLEANUP_CACHE_H
+    CLEANUP_DANGLING_H="${LUMEN_CLEANUP_DANGLING_HOURS:-${cleanup_dangling_default}}"
+    CLEANUP_IMAGES_H="${LUMEN_CLEANUP_IMAGES_HOURS:-${cleanup_images_default}}"
+    CLEANUP_CACHE_H="${LUMEN_CLEANUP_CACHE_HOURS:-${cleanup_cache_default}}"
+
+    _cleanup_filter_args() {
+        local hours="$1"
+        if [ "${hours}" -gt 0 ] 2>/dev/null; then
+            printf -- '--filter\nuntil=%sh\n' "${hours}"
+        fi
+    }
+
+    emit_start cleanup
+    emit_info cleanup action "${cleanup_action}"
+
+    if lumen_env_truthy "${LUMEN_UPDATE_SKIP_DOCKER_CLEANUP:-0}"; then
+        log_info "[cleanup] LUMEN_UPDATE_SKIP_DOCKER_CLEANUP=1：跳过 docker image/buildx prune。"
+        emit_info cleanup docker_prune "skipped_by_env"
+    elif ! lumen_detect_docker_access; then
+        log_warn "[cleanup] Docker 不可用或当前用户无权访问，跳过 docker image/buildx prune。"
+        emit_info cleanup docker_prune "skipped_no_docker_access"
+    else
+        # 1. dangling layers — 几乎 0 风险。
+        filter_args=()
+        while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_DANGLING_H}")
+        if ! lumen_docker image prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+            log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
+        else
+            emit_info cleanup dangling_pruned "hours=${CLEANUP_DANGLING_H}"
+        fi
+
+        # 2. unused images — docker protects images still referenced by running
+        # containers, so this does not remove the current deployment.
+        filter_args=()
+        while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_IMAGES_H}")
+        if ! lumen_docker image prune -a -f "${filter_args[@]}" >/dev/null 2>&1; then
+            log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
+        else
+            emit_info cleanup unused_images_pruned "hours=${CLEANUP_IMAGES_H}"
+        fi
+
+        # 3. buildx build cache — local build paths can grow unbounded.
+        if lumen_docker buildx version >/dev/null 2>&1; then
+            filter_args=()
+            while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_CACHE_H}")
+            if ! lumen_docker buildx prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+                log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
+            else
+                emit_info cleanup buildx_cache_pruned "hours=${CLEANUP_CACHE_H}"
+            fi
+        fi
+    fi
+
+    # 4. 旧 release 目录 — keep 最近 N 个（含 current）。
+    if ! lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"; then
+        log_warn "[cleanup] 旧 release 清理失败（已忽略）。"
+    fi
+
+    emit_done cleanup 0
+}
+
 # Trap：任何未结束 phase 收口为 fail，并尝试切回旧 release。
 UPDATE_ERROR_HANDLED=0
 on_err() {
@@ -898,10 +973,7 @@ else
 fi
 
 if [ "${SKIP_TO_CLEANUP}" -eq 1 ]; then
-    # 直接跳到 cleanup
-    emit_start cleanup
-    emit_info cleanup action "noop"
-    emit_done  cleanup 0
+    run_update_cleanup "noop"
     return 0
 fi
 
@@ -1785,73 +1857,7 @@ if [ "${HEALTH_FAIL}" -eq 1 ]; then
 fi
 emit_done health_check 0
 
-# ---------------------------------------------------------------------------
-# Phase: cleanup
-# 多级 prune：dangling images / 未引用 images / buildx cache / 旧 release。
-# 三个时间窗口可通过 env 覆盖；**默认 0 = 不加 until filter，立即清所有**：
-#   LUMEN_CLEANUP_DANGLING_HOURS  (default 0)
-#   LUMEN_CLEANUP_IMAGES_HOURS    (default 0)
-#   LUMEN_CLEANUP_CACHE_HOURS     (default 0)
-# 24 小时连发多版本时 until 过滤反而把所有候选都豁免；默认激进清理符合
-# "每次更新都打扫一次"的诉求。需要保留旧镜像做回滚的 host 自己设 hours。
-# 仍在跑的容器引用的 image 永远不会被 prune（docker 自己保护），所以
-# 0-filter 安全：清掉的都是真 unused。
-# 任一步失败仅 warn 不阻断，磁盘清理把成功的 update 拉成 fail 不可接受。
-# ---------------------------------------------------------------------------
-emit_start cleanup
-
-CLEANUP_DANGLING_H="${LUMEN_CLEANUP_DANGLING_HOURS:-0}"
-CLEANUP_IMAGES_H="${LUMEN_CLEANUP_IMAGES_HOURS:-0}"
-CLEANUP_CACHE_H="${LUMEN_CLEANUP_CACHE_HOURS:-0}"
-
-_cleanup_filter_args() {
-    local hours="$1"
-    if [ "${hours}" -gt 0 ] 2>/dev/null; then
-        printf -- '--filter\nuntil=%sh\n' "${hours}"
-    fi
-}
-
-if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ "${LUMEN_UPDATE_FAST_CLEANUP:-0}" != "1" ]; then
-    log_info "[cleanup] fast 模式：跳过 docker image/buildx prune；仅清理旧 release 目录。"
-    emit_info cleanup image_prune "skipped_by_fast_mode"
-else
-    # 1. dangling layers — 几乎 0 风险。
-    filter_args=()
-    while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_DANGLING_H}")
-    if ! lumen_docker image prune -f "${filter_args[@]}" >/dev/null 2>&1; then
-        log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
-    else
-        emit_info cleanup dangling_pruned "hours=${CLEANUP_DANGLING_H}"
-    fi
-
-    # 2. untagged unused images — 旧 :main / :v1.0.x。docker 不会 prune 仍被运行容器
-    #    引用的 image，所以默认无 filter 安全。
-    filter_args=()
-    while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_IMAGES_H}")
-    if ! lumen_docker image prune -a -f "${filter_args[@]}" >/dev/null 2>&1; then
-        log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
-    else
-        emit_info cleanup unused_images_pruned "hours=${CLEANUP_IMAGES_H}"
-    fi
-
-    # 3. buildx build cache — local build 路径会无限增长，必须定期清。
-    if lumen_docker buildx version >/dev/null 2>&1; then
-        filter_args=()
-        while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_CACHE_H}")
-        if ! lumen_docker buildx prune -f "${filter_args[@]}" >/dev/null 2>&1; then
-            log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
-        else
-            emit_info cleanup buildx_cache_pruned "hours=${CLEANUP_CACHE_H}"
-        fi
-    fi
-fi
-
-# 4. 旧 release 目录 — keep 最近 N 个（含 current）。
-if ! lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"; then
-    log_warn "[cleanup] 旧 release 清理失败（已忽略）。"
-fi
-
-emit_done cleanup 0
+run_update_cleanup "updated"
 
 # ---------------------------------------------------------------------------
 # 收尾

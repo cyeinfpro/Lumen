@@ -1011,16 +1011,20 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
         "cleanup must prune buildx build cache; it grows unbounded if "
         "LUMEN_UPDATE_BUILD=1 ever runs (or just from compose builds)"
     )
-    # Env overlay so operators can lengthen the buffer if they need
-    # week-long rollback windows on a particular host. Defaults are 0 —
-    # an `until=Nh` filter that catches no candidates would defeat the
-    # whole point on a host that publishes versions faster than N hours.
-    assert "LUMEN_CLEANUP_DANGLING_HOURS:-0" in code
-    assert "LUMEN_CLEANUP_IMAGES_HOURS:-0" in code
-    assert "LUMEN_CLEANUP_CACHE_HOURS:-0" in code
+    # Env overlay so operators can lengthen or shorten the buffer if they need
+    # different rollback windows on a particular host. Fast mode keeps a 48h
+    # rollback buffer by default while still reclaiming older release images.
+    assert 'cleanup_images_default="48"' in code
+    assert 'cleanup_cache_default="48"' in code
+    assert "LUMEN_CLEANUP_DANGLING_HOURS:-${cleanup_dangling_default}" in code
+    assert "LUMEN_CLEANUP_IMAGES_HOURS:-${cleanup_images_default}" in code
+    assert "LUMEN_CLEANUP_CACHE_HOURS:-${cleanup_cache_default}" in code
+    assert "LUMEN_UPDATE_SKIP_DOCKER_CLEANUP" in code
     # Helper that omits --filter when hours==0 so prune actually runs
     # against everything, not "everything older than 0 hours".
     assert "_cleanup_filter_args" in code
+    assert 'run_update_cleanup "noop"' in code
+    assert 'run_update_cleanup "updated"' in code
     # Each prune failure must warn-not-fail, otherwise a stale CIFS or
     # docker daemon hiccup would mark a perfectly applied update as failed.
     assert code.count("已忽略") >= 4
@@ -1040,7 +1044,8 @@ def test_update_script_defaults_to_fast_update_path() -> None:
     assert 'reuse_healthy' in code
     assert 'recreated_for_release_bind_mount' in code
     assert '--no-deps' in code
-    assert 'image_prune "skipped_by_fast_mode"' in code
+    assert 'image_prune "skipped_by_fast_mode"' not in code
+    assert 'cleanup_images_default="48"' in code
 
 
 def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
