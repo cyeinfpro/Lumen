@@ -77,6 +77,7 @@ type ProviderSummary = {
 
 const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const VOLCANO_THIRD_PARTY_BASE_URL = "https://www.moyu.info";
+const VOLCANO_NEWAPI_BASE_URL = "https://zz1cc.cc.cd";
 const DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com";
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const OMNI_FLASH_BASE_URL = "https://api.example.com";
@@ -92,6 +93,16 @@ const VOLCANO_MODEL_PRESETS = [
   {
     model: "seedance-2.0-mini",
     upstream: "doubao-seedance-2-0-mini-260615",
+  },
+] as const;
+const VOLCANO_NEWAPI_MODEL_PRESETS = [
+  {
+    model: "video-ds-2.0",
+    upstream: "video-ds-2.0",
+  },
+  {
+    model: "video-ds-2.0-fast",
+    upstream: "video-ds-2.0-fast",
   },
 ] as const;
 const VEO_MODEL_PRESETS = [
@@ -125,6 +136,7 @@ const ACTION_LABELS: Record<VideoAction, string> = {
 const KIND_LABELS: Record<VideoProviderKind, string> = {
   volcano: "火山方舟",
   volcano_third_party: "火山第三方",
+  volcano_newapi: "火山 New API",
   dashscope: "DashScope",
   veo: "Google Veo",
   omni_flash: "Google Omni Flash",
@@ -154,6 +166,12 @@ function modelDraft(
 
 function volcanoModelDrafts(): ModelDraft[] {
   return VOLCANO_MODEL_PRESETS.map((preset) =>
+    modelDraft(preset.model, preset.upstream, preset.upstream, preset.upstream),
+  );
+}
+
+function volcanoNewApiModelDrafts(): ModelDraft[] {
+  return VOLCANO_NEWAPI_MODEL_PRESETS.map((preset) =>
     modelDraft(preset.model, preset.upstream, preset.upstream, preset.upstream),
   );
 }
@@ -334,6 +352,22 @@ function emptyVolcanoThirdPartyDraft(): Draft {
   };
 }
 
+function emptyVolcanoNewApiDraft(): Draft {
+  return {
+    _key: nextKey(),
+    name: "volcano-newapi",
+    kind: "volcano_newapi",
+    base_url: VOLCANO_NEWAPI_BASE_URL,
+    api_key: "",
+    enabled: true,
+    priority: 100,
+    weight: 1,
+    concurrency: 10,
+    proxy: "",
+    models: volcanoNewApiModelDrafts(),
+  };
+}
+
 function emptyDashScopeDraft(): Draft {
   return {
     _key: nextKey(),
@@ -404,6 +438,7 @@ function presetName(draft: Draft, fallback: string): string {
     !name ||
     name === "volcano-main" ||
     name === "volcano-third-party" ||
+    name === "volcano-newapi" ||
     name === "dashscope-happyhorse" ||
     name === "google-veo" ||
     name === "google-omni-flash" ||
@@ -437,6 +472,19 @@ function volcanoThirdPartyPresetPatch(draft: Draft): Partial<Draft> {
     weight: Math.max(1, Number(draft.weight) || 1),
     concurrency: 10,
     models: volcanoModelDrafts(),
+  };
+}
+
+function volcanoNewApiPresetPatch(draft: Draft): Partial<Draft> {
+  return {
+    name: presetName(draft, "volcano-newapi"),
+    kind: "volcano_newapi",
+    base_url: VOLCANO_NEWAPI_BASE_URL,
+    enabled: draft.enabled,
+    priority: draft.priority || 100,
+    weight: Math.max(1, Number(draft.weight) || 1),
+    concurrency: 10,
+    models: volcanoNewApiModelDrafts(),
   };
 }
 
@@ -494,6 +542,7 @@ function fakePresetPatch(draft: Draft): Partial<Draft> {
 
 function presetPatchForKind(draft: Draft): Partial<Draft> {
   if (draft.kind === "volcano_third_party") return volcanoThirdPartyPresetPatch(draft);
+  if (draft.kind === "volcano_newapi") return volcanoNewApiPresetPatch(draft);
   if (draft.kind === "dashscope") return dashscopePresetPatch(draft);
   if (draft.kind === "veo") return veoPresetPatch(draft);
   if (draft.kind === "omni_flash") return omniFlashPresetPatch(draft);
@@ -955,6 +1004,7 @@ export function VideoProvidersPanel() {
             onToggle={setEnabledDraft}
             onAddVolcano={() => addDraft(emptyVolcanoDraft())}
             onAddVolcanoThirdParty={() => addDraft(emptyVolcanoThirdPartyDraft())}
+            onAddVolcanoNewApi={() => addDraft(emptyVolcanoNewApiDraft())}
             onAddDashscope={() => addDraft(emptyDashScopeDraft())}
             onAddVeo={() => addDraft(emptyVeoDraft())}
             onAddOmniFlash={() => addDraft(emptyOmniFlashDraft())}
@@ -1370,6 +1420,7 @@ function EditCommandCenter({
   onToggle,
   onAddVolcano,
   onAddVolcanoThirdParty,
+  onAddVolcanoNewApi,
   onAddDashscope,
   onAddVeo,
   onAddOmniFlash,
@@ -1384,6 +1435,7 @@ function EditCommandCenter({
   onToggle: (value: boolean) => void;
   onAddVolcano: () => void;
   onAddVolcanoThirdParty: () => void;
+  onAddVolcanoNewApi: () => void;
   onAddDashscope: () => void;
   onAddVeo: () => void;
   onAddOmniFlash: () => void;
@@ -1422,7 +1474,7 @@ function EditCommandCenter({
           {globalIssue}
         </div>
       )}
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
         <PresetButton
           icon={<Zap className="h-4 w-4" />}
           title="火山 Seedance"
@@ -1434,6 +1486,12 @@ function EditCommandCenter({
           title="火山第三方"
           detail="MOYU / 中转网关"
           onClick={onAddVolcanoThirdParty}
+        />
+        <PresetButton
+          icon={<Server className="h-4 w-4" />}
+          title="New API"
+          detail="/v1/videos"
+          onClick={onAddVolcanoNewApi}
         />
         <PresetButton
           icon={<Clapperboard className="h-4 w-4" />}
@@ -1558,6 +1616,8 @@ function ProviderEditor({
                     onPatch(volcanoPresetPatch(draft));
                   } else if (kind === "volcano_third_party") {
                     onPatch(volcanoThirdPartyPresetPatch(draft));
+                  } else if (kind === "volcano_newapi") {
+                    onPatch(volcanoNewApiPresetPatch(draft));
                   } else if (kind === "dashscope") {
                     onPatch(dashscopePresetPatch(draft));
                   } else if (kind === "veo") {
@@ -1574,6 +1634,7 @@ function ProviderEditor({
               >
                 <option value="volcano">火山方舟</option>
                 <option value="volcano_third_party">火山第三方 / MOYU</option>
+                <option value="volcano_newapi">火山 New API / /v1/videos</option>
                 <option value="dashscope">DashScope / HappyHorse</option>
                 <option value="veo">Google Veo</option>
                 <option value="omni_flash">Google Omni Flash / 第三方</option>

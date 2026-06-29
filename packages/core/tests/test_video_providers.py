@@ -125,6 +125,26 @@ def test_parse_volcano_third_party_provider() -> None:
     assert provider.supports("seedance-2.0", "reference")
 
 
+def test_parse_volcano_newapi_provider() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            name="volcano-newapi",
+            kind="volcano_newapi",
+            base_url="https://zz1cc.cc.cd/v1",
+            models={
+                "video-ds-2.0:t2v": "video-ds-2.0",
+                "video-ds-2.0-fast:t2v": "video-ds-2.0-fast",
+            },
+        ),
+        index=0,
+    )
+
+    assert provider.kind == "volcano_newapi"
+    assert provider.base_url == "https://zz1cc.cc.cd/v1"
+    assert provider.supports("video-ds-2.0", "t2v")
+    assert provider.supports("video-ds-2.0-fast", "t2v")
+
+
 def test_parse_omni_flash_provider() -> None:
     provider = parse_video_provider_item(
         _provider_raw(

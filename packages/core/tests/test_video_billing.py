@@ -28,8 +28,22 @@ def test_video_billing_model_uses_fast_when_upstream_is_fast() -> None:
     )
     assert (
         video_billing.video_billing_model(
+            "video-ds-2.0-fast",
+            "video-ds-2.0-fast",
+        )
+        == "seedance-2.0-fast"
+    )
+    assert (
+        video_billing.video_billing_model(
             "seedance-2.0",
             "doubao-seedance-2-0-260128",
+        )
+        == "seedance-2.0"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "video-ds-2.0",
+            "video-ds-2.0",
         )
         == "seedance-2.0"
     )
