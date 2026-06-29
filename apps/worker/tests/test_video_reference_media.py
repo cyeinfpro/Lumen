@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from app import video_upstream as video_upstream_module
 from app.tasks import video_generation as video_generation_tasks
 from app.tasks.video_generation import _reference_media_bytes, _try_provider_cancel
 from app.video_upstream import (
@@ -14,6 +15,7 @@ from app.video_upstream import (
     VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
+    VolcanoNewApiVideoAdapter,
     VolcanoSeedanceAdapter,
     VolcanoThirdPartySeedanceAdapter,
     _billable,
@@ -647,6 +649,175 @@ async def test_volcano_third_party_poll_respects_explicit_billable_false() -> No
 
 
 @pytest.mark.asyncio
+async def test_volcano_newapi_submit_uses_v1_videos_payload() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:t2v": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+    client = ThirdPartyCaptureClient(post_json={"id": "newapi-task-1"})
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="t2v",
+            model="video-ds-2.0-fast",
+            upstream_model="video-ds-2.0-fast",
+            prompt="A cinematic 9:16 cat video",
+            duration_s=15,
+            resolution="720p",
+            aspect_ratio="9:16",
+        )
+    )
+
+    assert result.provider_task_id == "newapi-task-1"
+    assert client.path == "v1/videos"
+    assert client.body == {
+        "model": "video-ds-2.0-fast",
+        "prompt": "A cinematic 9:16 cat video",
+        "seconds": 15,
+        "aspect_ratio": "9:16",
+    }
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_submit_forwards_reference_media_arrays() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd/v1",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:reference": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+    client = ThirdPartyCaptureClient(post_json={"task_id": "newapi-task-1"})
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="video-ds-2.0-fast",
+            upstream_model="video-ds-2.0-fast",
+            prompt="Use the reference image style and motion",
+            duration_s=-1,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url="https://lumen.example/input.png",
+                    label="图片 1",
+                    ref_id="ref:image:1",
+                ),
+                VideoReferenceMedia(
+                    kind="video",
+                    url="https://lumen.example/input.mp4",
+                    label="视频 1",
+                    ref_id="ref:video:1",
+                ),
+            ],
+        )
+    )
+
+    assert client.path == "videos"
+    assert client.body["model"] == "video-ds-2.0-fast"
+    assert client.body["seconds"] == 15
+    assert "aspect_ratio" not in client.body
+    assert client.body["images"] == ["https://lumen.example/input.png"]
+    assert client.body["videos"] == ["https://lumen.example/input.mp4"]
+    assert "Reference asset contract" in client.body["prompt"]
+    assert "stable anchor: [ref:image:1]" in client.body["prompt"]
+    assert "stable anchor: [ref:video:1]" in client.body["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_poll_falls_back_to_content_url() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:t2v": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={"id": "newapi-task-1", "status": "succeeded", "progress": 100}
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("newapi-task-1")
+
+    assert client.path == "v1/videos/newapi-task-1"
+    assert result.status == "succeeded"
+    assert result.video_url == "https://zz1cc.cc.cd/v1/videos/newapi-task-1/content"
+    assert result.upstream_billable is True
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_fetch_content_uses_bearer_and_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:t2v": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+    requests: list[httpx.Request] = []
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        assert allow_http is True
+        return SimpleNamespace(url=raw_url)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "zz1cc.cc.cd":
+            assert request.headers.get("authorization") == "Bearer sk-test"
+            return httpx.Response(
+                302,
+                headers={"location": "https://cdn.example.com/result.mp4"},
+                request=request,
+            )
+        assert request.url.host == "cdn.example.com"
+        assert "authorization" not in request.headers
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4"},
+            content=b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom",
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    adapter._raw_client = lambda: httpx.AsyncClient(  # type: ignore[method-assign]
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+
+    data = await adapter.fetch_result(
+        "https://zz1cc.cc.cd/v1/videos/newapi-task-1/content"
+    )
+
+    assert data.startswith(b"\x00\x00\x00\x18ftyp")
+    assert [request.url.host for request in requests] == [
+        "zz1cc.cc.cd",
+        "cdn.example.com",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_unified_video_create_submit_uses_omni_flash_generations_payload() -> (
     None
 ):
@@ -1051,6 +1222,18 @@ def test_adapter_for_provider_selects_volcano_third_party_adapter() -> None:
     )
 
     assert isinstance(adapter_for_provider(provider), VolcanoThirdPartySeedanceAdapter)
+
+
+def test_adapter_for_provider_selects_volcano_newapi_adapter() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:t2v": "video-ds-2.0-fast"},
+    )
+
+    assert isinstance(adapter_for_provider(provider), VolcanoNewApiVideoAdapter)
 
 
 def test_adapter_for_provider_selects_unified_video_create_adapter() -> None:

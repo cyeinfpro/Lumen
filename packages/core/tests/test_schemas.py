@@ -66,6 +66,35 @@ def test_video_provider_schema_accepts_volcano_third_party():
     )
 
 
+def test_video_provider_schema_accepts_volcano_newapi():
+    from lumen_core.schemas import VideoProvidersUpdateIn
+
+    body = VideoProvidersUpdateIn(
+        enabled=True,
+        items=[
+            {
+                "name": "volcano-newapi",
+                "kind": "volcano_newapi",
+                "base_url": "https://zz1cc.cc.cd",
+                "api_key": "sk-test",
+                "enabled": True,
+                "priority": 100,
+                "weight": 1,
+                "concurrency": 10,
+                "models": {
+                    "video-ds-2.0:t2v": "video-ds-2.0",
+                    "video-ds-2.0-fast:t2v": "video-ds-2.0-fast",
+                },
+            }
+        ],
+    )
+
+    item = body.items[0]
+    assert item.kind == "volcano_newapi"
+    assert item.models["video-ds-2.0:t2v"] == "video-ds-2.0"
+    assert item.models["video-ds-2.0-fast:t2v"] == "video-ds-2.0-fast"
+
+
 def test_video_provider_schema_accepts_omni_flash():
     from lumen_core.schemas import VideoProvidersUpdateIn
 

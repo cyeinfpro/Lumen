@@ -416,6 +416,16 @@ def test_seedance_20_resolution_options_match_official_model_limits() -> None:
         upstream_model="doubao-seedance-2-0-260128",
         available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["480p", "720p", "1080p", "4k"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "video-ds-2.0",
+        upstream_model="video-ds-2.0",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["480p", "720p", "1080p", "4k"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "video-ds-2.0-fast",
+        upstream_model="video-ds-2.0-fast",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["480p", "720p"]
 
 
 def test_omni_flash_duration_options_are_model_specific() -> None:
@@ -451,6 +461,21 @@ def test_omni_flash_resolution_options_exclude_480p() -> None:
         upstream_model="gemini_omni_flash",
         available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["720p", "1080p", "4k"]
+
+
+def test_volcano_newapi_resolution_options_are_720p_only() -> None:
+    assert videos._video_resolution_options_for_provider(  # noqa: SLF001
+        "volcano_newapi",
+        "video-ds-2.0",
+        upstream_model="video-ds-2.0",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["720p"]
+    assert videos._video_resolution_options_for_provider(  # noqa: SLF001
+        "volcano_newapi",
+        "video-ds-2.0-fast",
+        upstream_model="video-ds-2.0-fast",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["720p"]
 
 
 @pytest.mark.asyncio
@@ -1319,12 +1344,15 @@ def _video_provider(kind: str) -> VideoProviderDefinition:
 
 def test_volcano_third_party_prefers_reference_public_urls() -> None:
     third_party = _video_provider("volcano_third_party")
+    newapi = _video_provider("volcano_newapi")
     official = _video_provider("volcano")
     dashscope = _video_provider("dashscope")
     omni_flash = _video_provider("omni_flash")
 
     assert videos._provider_prefers_public_media_url(third_party) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(third_party) is False  # noqa: SLF001
+    assert videos._provider_prefers_public_media_url(newapi) is True  # noqa: SLF001
+    assert videos._provider_requires_public_media(newapi) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(official) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(dashscope) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(dashscope) is True  # noqa: SLF001

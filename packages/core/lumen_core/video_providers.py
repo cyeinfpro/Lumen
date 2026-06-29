@@ -22,6 +22,7 @@ from .providers import (
 VIDEO_PROVIDER_KINDS = (
     "volcano",
     "volcano_third_party",
+    "volcano_newapi",
     "dashscope",
     "veo",
     "omni_flash",

@@ -1431,7 +1431,9 @@ export default function VideoPage() {
       setItems((prev) => mergeById(prev, [gen]));
       toast.success("已请求取消", {
         description:
-          gen.provider_kind === "dashscope" || gen.provider_kind === "omni_flash"
+          gen.provider_kind === "dashscope" ||
+          gen.provider_kind === "omni_flash" ||
+          gen.provider_kind === "volcano_newapi"
             ? "该供应商可能无法中止已提交任务，若上游最终成功仍会按结果计费。"
             : undefined,
       });

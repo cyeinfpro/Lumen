@@ -114,6 +114,7 @@ _VIDEO_RESOLUTION_ORDER = {
 }
 _SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
 _SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
+_VOLCANO_NEWAPI_RESOLUTIONS = ("720p",)
 _HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
 _OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
 _OMNI_FLASH_DURATIONS = tuple(range(6, 11))
@@ -542,7 +543,7 @@ def _provider_requires_public_media(provider: Any) -> bool:
 def _provider_prefers_public_media_url(provider: Any) -> bool:
     return _provider_requires_public_media(provider) or getattr(
         provider, "kind", None
-    ) in {"volcano_third_party", "omni_flash"}
+    ) in {"volcano_third_party", "volcano_newapi", "omni_flash"}
 
 
 def _write_new_file_atomic(path: Path, data: bytes) -> None:
@@ -1092,7 +1093,7 @@ def _is_seedance_20_standard_model(*identifiers: str | None) -> bool:
         if not isinstance(identifier, str):
             continue
         value = identifier.strip().lower().replace("_", "-").replace(".", "-")
-        if "seedance-2-0" in value:
+        if "seedance-2-0" in value or "video-ds-2-0" in value:
             return True
     return False
 
@@ -1143,6 +1144,26 @@ def _video_resolution_options_for_model(
         allowed = set(_SEEDANCE_20_STANDARD_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
     return [resolution for resolution in available if resolution != "4k"]
+
+
+def _video_resolution_options_for_provider(
+    provider_kind: str,
+    model: str,
+    *,
+    upstream_model: str | None = None,
+    available_resolutions: Iterable[str] | None = None,
+) -> list[str]:
+    available = _ordered_video_resolutions(
+        available_resolutions or _DEFAULT_VIDEO_RESOLUTIONS
+    )
+    if provider_kind == "volcano_newapi":
+        allowed = set(_VOLCANO_NEWAPI_RESOLUTIONS)
+        return [resolution for resolution in available if resolution in allowed]
+    return _video_resolution_options_for_model(
+        model,
+        upstream_model=upstream_model,
+        available_resolutions=available,
+    )
 
 
 def _request_fingerprint(body: VideoCreateIn) -> str:
@@ -1372,7 +1393,8 @@ async def video_options(
                         continue
                     upstream_model = provider.upstream_model_for(key, action)
                     billing_model = video_billing_model(key, upstream_model)
-                    allowed_resolutions = _video_resolution_options_for_model(
+                    allowed_resolutions = _video_resolution_options_for_provider(
+                        provider.kind,
                         key,
                         upstream_model=upstream_model,
                         available_resolutions=resolutions,
@@ -1445,7 +1467,8 @@ async def video_options(
                 continue
             upstream_model = provider.upstream_model_for(model, action)
             billing_model = video_billing_model(model, upstream_model)
-            allowed_resolutions = _video_resolution_options_for_model(
+            allowed_resolutions = _video_resolution_options_for_provider(
+                provider.kind,
                 model,
                 upstream_model=upstream_model,
                 available_resolutions=resolutions,
@@ -1591,7 +1614,8 @@ async def _require_video_create_ready(
             503,
         )
     upstream_model = provider.upstream_model_for(body.model, body.action)
-    model_resolutions = _video_resolution_options_for_model(
+    model_resolutions = _video_resolution_options_for_provider(
+        provider.kind,
         body.model,
         upstream_model=upstream_model,
         available_resolutions=resolutions,

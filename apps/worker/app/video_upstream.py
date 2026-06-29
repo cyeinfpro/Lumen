@@ -1148,6 +1148,287 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         return CancelResult(accepted=True, raw=raw)
 
 
+class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
+    """New API compatible async video gateways using /v1/videos."""
+
+    _MAX_CONTENT_REDIRECTS = 5
+
+    def _client_base_url(self) -> str:
+        return _collapse_url_path_slashes(self.provider.base_url)
+
+    def _path(self, suffix: str) -> str:
+        base_path = urlsplit(self._client_base_url()).path.rstrip("/")
+        if base_path.endswith("/v1"):
+            return suffix
+        return f"v1/{suffix}"
+
+    def _content_url(self, provider_task_id: str) -> str:
+        return urljoin(
+            f"{self._client_base_url().rstrip('/')}/",
+            self._path(f"videos/{provider_task_id}/content"),
+        )
+
+    def _media_url(self, item: VideoReferenceMedia, *, field: str) -> str:
+        if item.url:
+            return item.url
+        if item.kind == "image" and item.data:
+            if len(item.data) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
+                raise VideoUpstreamError(
+                    f"{field} is too large for inline video submission",
+                    error_code="invalid_input",
+                    status_code=413,
+                )
+            return _image_data_url(item.data, item.mime)
+        raise VideoUpstreamError(
+            f"{field} requires a public URL or base64 image",
+            error_code="invalid_input",
+            status_code=422,
+        )
+
+    def _reference_media_arrays(self, req: VideoSubmitRequest) -> tuple[list[str], list[str]]:
+        images: list[str] = []
+        videos: list[str] = []
+        if req.action == "i2v":
+            if req.input_image_url:
+                images.append(req.input_image_url)
+            elif req.input_image_bytes:
+                if len(req.input_image_bytes) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        "input image is too large for inline video submission",
+                        error_code="invalid_input",
+                        status_code=413,
+                    )
+                images.append(_image_data_url(req.input_image_bytes, req.input_image_mime))
+            else:
+                raise VideoUpstreamError(
+                    "missing input image bytes",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+        elif req.action == "reference":
+            if not req.reference_media:
+                raise VideoUpstreamError(
+                    "reference generation requires reference image or video",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            for item in req.reference_media:
+                if item.kind == "image":
+                    images.append(self._media_url(item, field="reference image"))
+                elif item.kind == "video":
+                    videos.append(self._media_url(item, field="reference video"))
+        elif req.action != "t2v":
+            raise VideoUpstreamError(
+                f"unsupported video action: {req.action}",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if len(images) > 4:
+            raise VideoUpstreamError(
+                "New API video generation supports at most 4 reference images",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if len(videos) > 3:
+            raise VideoUpstreamError(
+                "New API video generation supports at most 3 reference videos",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        return images, videos
+
+    def _submit_body(self, req: VideoSubmitRequest) -> dict[str, Any]:
+        images, videos = self._reference_media_arrays(req)
+        body: dict[str, Any] = {
+            "model": req.upstream_model,
+            "prompt": _prompt_with_reference_order(req),
+            "seconds": 15 if req.duration_s == -1 else req.duration_s,
+        }
+        if req.aspect_ratio != "adaptive":
+            body["aspect_ratio"] = req.aspect_ratio
+        if images:
+            body["images"] = images
+        if videos:
+            body["videos"] = videos
+        return body
+
+    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        async with self._client() as client:
+            response = await client.post(
+                self._path("videos"),
+                json=self._submit_body(req),
+                headers=_submit_headers(req),
+            )
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("submit", response.status_code, raw)
+        provider_task_id = _provider_task_id(raw)
+        if provider_task_id is None:
+            raise VideoUpstreamError(
+                "video submit response did not include task id",
+                error_code="bad_response",
+                status_code=response.status_code,
+                raw=raw,
+            )
+        return SubmitResult(provider_task_id=provider_task_id, raw=raw)
+
+    async def poll(self, provider_task_id: str) -> PollResult:
+        async with self._client() as client:
+            response = await client.get(self._path(f"videos/{provider_task_id}"))
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("poll", response.status_code, raw)
+        status = _status(
+            _nested_get(
+                raw,
+                ("status",),
+                ("data", "status"),
+                ("result", "status"),
+                ("output", "status"),
+                ("task_status",),
+                ("data", "task_status"),
+                ("output", "task_status"),
+            )
+        )
+        progress = _int_or_none(
+            _nested_get(
+                raw,
+                ("progress",),
+                ("data", "progress"),
+                ("result", "progress"),
+                ("output", "progress"),
+                ("percent",),
+            )
+        )
+        video_url = _absolute_url(_explicit_video_result_url(raw), self._client_base_url())
+        if status == "succeeded" and not video_url:
+            video_url = self._content_url(provider_task_id)
+        upstream_billable = _billable(raw)
+        return PollResult(
+            status=status,
+            progress=progress,
+            video_url=video_url,
+            failure_class=_failure_class(raw),
+            usage_total_tokens=_usage_total_tokens(raw)
+            or _duration_usage_total_tokens(raw),
+            upstream_billable=upstream_billable
+            if upstream_billable is not None
+            else (True if status == "succeeded" else None),
+            raw=raw,
+        )
+
+    def _content_request_headers(self, raw_url: str) -> dict[str, str]:
+        target = urlsplit(raw_url)
+        base = urlsplit(self._client_base_url())
+        target_port = target.port or (443 if target.scheme == "https" else 80)
+        base_port = base.port or (443 if base.scheme == "https" else 80)
+        if (
+            target.scheme.lower() == base.scheme.lower()
+            and target.hostname == base.hostname
+            and target_port == base_port
+        ):
+            return {"Authorization": f"Bearer {self.provider.api_key}"}
+        return {}
+
+    def _raw_client(self) -> httpx.AsyncClient:
+        proxy_url = (
+            socks_proxy_url(self.provider.proxy) if self.provider.proxy else None
+        )
+        timeout = httpx.Timeout(
+            connect=settings.upstream_connect_timeout_s,
+            read=settings.upstream_read_timeout_s,
+            write=settings.upstream_write_timeout_s,
+            pool=30.0,
+        )
+        kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        return httpx.AsyncClient(**kwargs)
+
+    async def fetch_result(self, video_url: str) -> bytes:
+        current_url = video_url
+        for _redirect in range(self._MAX_CONTENT_REDIRECTS + 1):
+            try:
+                target = await resolve_public_http_target(current_url, allow_http=True)
+            except ValueError as exc:
+                raise VideoUpstreamError(
+                    "video result URL must be public HTTP(S)",
+                    error_code="invalid_input",
+                    status_code=422,
+                ) from exc
+            async with self._raw_client() as client:
+                async with client.stream(
+                    "GET",
+                    target.url,
+                    headers=self._content_request_headers(target.url),
+                ) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise VideoUpstreamError(
+                                "video fetch redirect did not include a location",
+                                error_code="fetch_failed",
+                                status_code=response.status_code,
+                            )
+                        current_url = urljoin(str(response.url), location)
+                        continue
+                    if response.status_code >= 400:
+                        raise VideoUpstreamError(
+                            f"video fetch failed status={response.status_code}",
+                            error_code="fetch_failed",
+                            status_code=response.status_code,
+                        )
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        parsed_length = _int_or_none(content_length)
+                        if (
+                            parsed_length is not None
+                            and parsed_length > _VIDEO_FETCH_MAX_BYTES
+                        ):
+                            raise VideoUpstreamError(
+                                "video fetch response exceeds maximum size",
+                                error_code="fetch_failed",
+                                status_code=413,
+                            )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > _VIDEO_FETCH_MAX_BYTES:
+                            raise VideoUpstreamError(
+                                "video fetch response exceeds maximum size",
+                                error_code="fetch_failed",
+                                status_code=413,
+                            )
+                        chunks.append(bytes(chunk))
+                    data = b"".join(chunks)
+                    if not data:
+                        raise VideoUpstreamError(
+                            "video fetch response was empty",
+                            error_code="fetch_failed",
+                            status_code=response.status_code,
+                        )
+                    _validate_video_response_bytes(
+                        data, response.headers.get("content-type", "")
+                    )
+                    return data
+        raise VideoUpstreamError(
+            "video fetch exceeded redirect limit",
+            error_code="fetch_failed",
+            status_code=508,
+        )
+
+    async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        del provider_task_id
+        return None
+
+
 class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
     """Third-party unified video gateways using /v1/video/generations."""
 
@@ -1654,6 +1935,8 @@ def adapter_for_provider(provider: VideoProviderDefinition) -> VideoProviderAdap
         return VolcanoSeedanceAdapter(provider)
     if provider.kind == "volcano_third_party":
         return VolcanoThirdPartySeedanceAdapter(provider)
+    if provider.kind == "volcano_newapi":
+        return VolcanoNewApiVideoAdapter(provider)
     if provider.kind == "dashscope":
         return DashScopeHappyHorseAdapter(provider)
     if provider.kind == "omni_flash":
@@ -1732,6 +2015,7 @@ __all__ = [
     "VideoReferenceMedia",
     "VideoSubmitRequest",
     "VideoUpstreamError",
+    "VolcanoNewApiVideoAdapter",
     "VolcanoSeedanceAdapter",
     "VolcanoThirdPartySeedanceAdapter",
     "adapter_for_provider",

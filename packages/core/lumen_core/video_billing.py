@@ -27,7 +27,10 @@ VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
 VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
 SEEDANCE_20_FAST_MODEL = "seedance-2.0-fast"
 SEEDANCE_20_MINI_MODEL = "seedance-2.0-mini"
-_SEEDANCE_20_FAST_RE = re.compile(r"seedance[-.]2[-.]0[-.]fast")
+SEEDANCE_20_MODEL = "seedance-2.0"
+_SEEDANCE_20_FAST_RE = re.compile(
+    r"(?:seedance[-.]2[-.]0[-.]fast|video[-.]ds[-.]2[-.]0[-.]fast)"
+)
 _SEEDANCE_20_MINI_RE = re.compile(r"seedance[-.]2[-.]0[-.]mini")
 VIDEO_PRICING_VARIANTS = (
     "t2v",
@@ -128,11 +131,23 @@ def is_seedance_20_mini_identifier(*identifiers: str | None) -> bool:
     return False
 
 
+def is_video_ds_20_standard_identifier(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-").replace(".", "-")
+        if "video-ds-2-0" in value:
+            return True
+    return False
+
+
 def video_billing_model(model: str, upstream_model: str | None = None) -> str:
     if is_seedance_20_fast_identifier(model, upstream_model):
         return SEEDANCE_20_FAST_MODEL
     if is_seedance_20_mini_identifier(model, upstream_model):
         return SEEDANCE_20_MINI_MODEL
+    if is_video_ds_20_standard_identifier(model, upstream_model):
+        return SEEDANCE_20_MODEL
     return model
 
 
@@ -418,6 +433,7 @@ __all__ = [
     "SMART_VIDEO_DURATION_S",
     "SMART_VIDEO_HOLD_DURATION_S",
     "SEEDANCE_20_FAST_MODEL",
+    "SEEDANCE_20_MODEL",
     "SEEDANCE_20_MINI_MODEL",
     "SUPPORTED_VIDEO_DURATIONS_S",
     "VIDEO_BILLING_TOKENS_PER_SECOND",
@@ -433,6 +449,7 @@ __all__ = [
     "hold_estimate_duration_s",
     "is_seedance_20_fast_identifier",
     "is_seedance_20_mini_identifier",
+    "is_video_ds_20_standard_identifier",
     "round_micro_for_tokens",
     "settle_video_cost",
     "split_video_resolution_pricing_variant",
