@@ -603,9 +603,8 @@ async def _build_video_enhance_content(
 
     public_base_url: str | None = None
     for index, item in enumerate(body.reference_media, start=1):
-        label = (item.label or "").strip() or (
-            f"参考图片 {index}" if item.kind == "image" else f"参考视频 {index}"
-        )
+        noun = "图片" if item.kind == "image" else "音频" if item.kind == "audio" else "视频"
+        label = (item.label or "").strip() or f"参考{noun} {index}"
         same_kind_index = sum(
             1 for prior in body.reference_media[:index] if prior.kind == item.kind
         )
@@ -675,6 +674,15 @@ async def _build_video_enhance_content(
                         "text": f"{label} 锚点 {anchor}；外部图片引用：{(item.url or '').strip()}",
                     }
                 )
+            continue
+
+        if item.kind == "audio":
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": f"{label} 锚点 {anchor}；外部参考音频 URL：{(item.url or '').strip()}",
+                }
+            )
             continue
 
         if item.video_id:

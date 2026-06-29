@@ -62,6 +62,32 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reference_media_bytes_accepts_audio_url_snapshots() -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "audio",
+                    "label": "音频 1",
+                    "ref_id": "ref:audio:1",
+                    "url": "https://example.com/reference.mp3",
+                }
+            ]
+        },
+    )
+
+    result = await _reference_media_bytes(generation)
+
+    assert len(result) == 1
+    assert result[0].kind == "audio"
+    assert result[0].label == "音频 1"
+    assert result[0].ref_id == "ref:audio:1"
+    assert result[0].url == "https://example.com/reference.mp3"
+    assert result[0].data is None
+
+
+@pytest.mark.asyncio
 async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -147,6 +173,27 @@ async def test_reference_media_bytes_rejects_local_video_snapshots() -> None:
 
     with pytest.raises(
         RuntimeError, match="reference video snapshot missing public URL"
+    ):
+        await _reference_media_bytes(generation)
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_rejects_local_audio_snapshots() -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "audio",
+                    "storage_key": "u/user-1/aref/audio-1/original.mp3",
+                    "mime": "audio/mpeg",
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(
+        RuntimeError, match="reference audio snapshot missing public URL"
     ):
         await _reference_media_bytes(generation)
 
@@ -722,6 +769,12 @@ async def test_volcano_newapi_submit_forwards_reference_media_arrays() -> None:
                     label="视频 1",
                     ref_id="ref:video:1",
                 ),
+                VideoReferenceMedia(
+                    kind="audio",
+                    url="https://lumen.example/input.mp3",
+                    label="音频 1",
+                    ref_id="ref:audio:1",
+                ),
             ],
         )
     )
@@ -732,9 +785,132 @@ async def test_volcano_newapi_submit_forwards_reference_media_arrays() -> None:
     assert "aspect_ratio" not in client.body
     assert client.body["images"] == ["https://lumen.example/input.png"]
     assert client.body["videos"] == ["https://lumen.example/input.mp4"]
+    assert client.body["audios"] == ["https://lumen.example/input.mp3"]
     assert "Reference asset contract" in client.body["prompt"]
     assert "stable anchor: [ref:image:1]" in client.body["prompt"]
     assert "stable anchor: [ref:video:1]" in client.body["prompt"]
+    assert "stable anchor: [ref:audio:1]" in client.body["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_submit_requires_reference_media_urls() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd/v1",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:reference": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="reference image requires a public URL"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="reference",
+                model="video-ds-2.0-fast",
+                upstream_model="video-ds-2.0-fast",
+                prompt="Use the reference image style and motion",
+                duration_s=15,
+                resolution="720p",
+                aspect_ratio="9:16",
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="image",
+                        data=b"image-bytes",
+                        mime="image/png",
+                        label="图片 1",
+                        ref_id="ref:image:1",
+                    )
+                ],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_submit_limits_reference_media_like_newapi() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd/v1",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:reference": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="at most 4 reference images"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="reference",
+                model="video-ds-2.0-fast",
+                upstream_model="video-ds-2.0-fast",
+                prompt="Use the reference media",
+                duration_s=15,
+                resolution="720p",
+                aspect_ratio="9:16",
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="image",
+                        url=f"https://lumen.example/input-{idx}.png",
+                    )
+                    for idx in range(5)
+                ],
+            )
+        )
+
+    with pytest.raises(VideoUpstreamError, match="at most 1 reference audio"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="reference",
+                model="video-ds-2.0-fast",
+                upstream_model="video-ds-2.0-fast",
+                prompt="Use the reference media",
+                duration_s=15,
+                resolution="720p",
+                aspect_ratio="9:16",
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="audio",
+                        url=f"https://lumen.example/input-{idx}.mp3",
+                    )
+                    for idx in range(2)
+                ],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_submit_requires_i2v_image_url() -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd/v1",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:i2v": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="input image requires a public URL"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="i2v",
+                model="video-ds-2.0-fast",
+                upstream_model="video-ds-2.0-fast",
+                prompt="Animate this image",
+                duration_s=15,
+                resolution="720p",
+                aspect_ratio="9:16",
+                input_image_bytes=b"image-bytes",
+                input_image_mime="image/png",
+            )
+        )
 
 
 @pytest.mark.asyncio

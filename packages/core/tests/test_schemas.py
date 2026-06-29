@@ -434,6 +434,16 @@ def test_video_create_schema_enforces_action_image_contract():
                 {"kind": "video", "video_id": f"vid-{idx}"} for idx in range(4)
             ],
         },
+        {
+            "action": "reference",
+            "reference_media": [
+                {
+                    "kind": "audio",
+                    "url": f"https://example.com/ref-{idx}.mp3",
+                }
+                for idx in range(2)
+            ],
+        },
     ):
         payload = {
             "model": "seedance-2.0",
@@ -446,6 +456,50 @@ def test_video_create_schema_enforces_action_image_contract():
         }
         try:
             VideoCreateIn(**payload)
+        except ValidationError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"expected validation error for {kwargs}")
+
+
+def test_video_reference_audio_media_is_url_only():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn, VideoReferenceMediaIn
+
+    audio = VideoReferenceMediaIn(
+        kind="audio",
+        url="https://cdn.example.com/ref.mp3",
+        label="Audio 1",
+        ref_id=" REF:AUDIO:1 ",
+    )
+
+    assert audio.ref_id == "ref:audio:1"
+    VideoCreateIn(
+        action="reference",
+        model="video-ds-2.0-fast",
+        prompt="use the reference image and audio",
+        reference_media=[
+            {"kind": "image", "url": "https://cdn.example.com/ref.png"},
+            audio,
+        ],
+        duration_s=15,
+        resolution="720p",
+        aspect_ratio="9:16",
+        idempotency_key="idem-reference-audio",
+    )
+
+    for kwargs in (
+        {"kind": "audio", "image_id": "img-1"},
+        {"kind": "audio", "video_id": "vid-1"},
+        {
+            "kind": "audio",
+            "url": "https://cdn.example.com/ref.mp3",
+            "ref_id": "ref:image:1",
+        },
+    ):
+        try:
+            VideoReferenceMediaIn(**kwargs)
         except ValidationError:
             pass
         else:  # pragma: no cover

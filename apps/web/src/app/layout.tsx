@@ -5,6 +5,7 @@ import localFont from "next/font/local";
 
 import "./globals.css";
 import { LumenAppShell } from "@/components/LumenAppShell";
+import { GlobalGsapMotion } from "@/components/ui/motion/GlobalGsapMotion";
 import type { RuntimeDefaults } from "@/components/RuntimeDefaultsBootstrap";
 
 // Self-hosted to keep `next build` offline. Google Fonts fetch fails behind
@@ -161,13 +162,15 @@ export default async function RootLayout({
       <body
         className={`${instrumentSerif.variable} ${geist.variable} ${ibmPlexMono.variable} antialiased bg-[var(--bg-0)] text-[var(--fg-0)] min-h-[100dvh] flex flex-col overflow-x-hidden`}
       >
-        {isPublicShareRoute ? (
-          children
-        ) : (
-          <LumenAppShell initialRuntimeDefaults={runtimeDefaults}>
-            {children}
-          </LumenAppShell>
-        )}
+        <GlobalGsapMotion>
+          {isPublicShareRoute ? (
+            children
+          ) : (
+            <LumenAppShell initialRuntimeDefaults={runtimeDefaults}>
+              {children}
+            </LumenAppShell>
+          )}
+        </GlobalGsapMotion>
       </body>
     </html>
   );

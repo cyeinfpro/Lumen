@@ -60,6 +60,8 @@ export function Card({
   return (
     <div
       ref={ref}
+      data-lumen-card={hover ? "true" : undefined}
+      data-lumen-reveal={hover ? "true" : undefined}
       className={cn(
         VARIANTS[variant],
         ELEVATIONS[elevation],

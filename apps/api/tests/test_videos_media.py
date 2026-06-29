@@ -1352,12 +1352,47 @@ def test_volcano_third_party_prefers_reference_public_urls() -> None:
     assert videos._provider_prefers_public_media_url(third_party) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(third_party) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(newapi) is True  # noqa: SLF001
-    assert videos._provider_requires_public_media(newapi) is False  # noqa: SLF001
+    assert videos._provider_requires_public_media(newapi) is True  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(official) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(dashscope) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(dashscope) is True  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(omni_flash) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(omni_flash) is False  # noqa: SLF001
+
+
+def test_volcano_newapi_reference_media_limits_match_newapi_contract() -> None:
+    videos._validate_provider_reference_media(  # noqa: SLF001
+        "volcano_newapi",
+        [
+            *({"kind": "image"} for _idx in range(4)),
+            *({"kind": "video"} for _idx in range(3)),
+            {"kind": "audio"},
+        ],
+    )
+
+    for snapshots, code in (
+        ([{"kind": "image"} for _idx in range(5)], "too_many_reference_images"),
+        ([{"kind": "video"} for _idx in range(4)], "too_many_reference_videos"),
+        ([{"kind": "audio"} for _idx in range(2)], "too_many_reference_audios"),
+    ):
+        with pytest.raises(HTTPException) as excinfo:
+            videos._validate_provider_reference_media(  # noqa: SLF001
+                "volcano_newapi",
+                snapshots,
+            )
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail["error"]["code"] == code
+
+
+def test_reference_audio_requires_volcano_newapi_provider() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        videos._validate_provider_reference_media(  # noqa: SLF001
+            "volcano",
+            [{"kind": "audio"}],
+        )
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "unsupported_reference_media"
 
 
 @pytest.mark.asyncio
@@ -1532,12 +1567,19 @@ async def test_reference_media_snapshots_default_labels_are_per_kind() -> None:
         items=[
             VideoReferenceMediaIn(kind="video", url="https://example.com/ref.mp4"),
             VideoReferenceMediaIn(kind="image", url="https://example.com/ref.png"),
+            VideoReferenceMediaIn(kind="audio", url="https://example.com/ref.mp3"),
         ],
     )
 
     assert [(item["kind"], item["label"]) for item in snapshots] == [
         ("video", "Video 1"),
         ("image", "Image 1"),
+        ("audio", "Audio 1"),
+    ]
+    assert [(item["kind"], item["ref_id"]) for item in snapshots] == [
+        ("video", "ref:video:1"),
+        ("image", "ref:image:1"),
+        ("audio", "ref:audio:1"),
     ]
 
 

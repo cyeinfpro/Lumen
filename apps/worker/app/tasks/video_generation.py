@@ -420,7 +420,7 @@ async def _reference_media_bytes(
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
-        if kind not in {"image", "video"}:
+        if kind not in {"image", "video", "audio"}:
             continue
         url = item.get("url")
         clean_url = url.strip() if isinstance(url, str) else ""
@@ -475,6 +475,8 @@ async def _reference_media_bytes(
                 )
             )
             continue
+        if kind == "audio":
+            raise RuntimeError("reference audio snapshot missing public URL")
         if kind == "video":
             raise RuntimeError("reference video snapshot missing public URL")
         if not clean_storage_key:

@@ -620,6 +620,7 @@
     background: color-mix(in srgb, var(--bg-1) 72%, transparent);
     box-shadow: var(--shadow-1);
     backdrop-filter: blur(12px);
+    isolation: isolate;
   }
   .surface-card-hover {
     transition:
@@ -632,12 +633,18 @@
     background: color-mix(in srgb, var(--bg-1) 84%, transparent);
     box-shadow: var(--shadow-2);
   }
+  [data-lumen-card="true"]:focus-within,
+  .surface-card-hover:focus-within {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-2);
+  }
   .surface-panel {
     border-radius: var(--radius-panel);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-1) 82%, transparent);
     box-shadow: var(--shadow-2);
     backdrop-filter: blur(16px);
+    isolation: isolate;
   }
   .surface-dialog {
     border-radius: var(--radius-dialog);
@@ -645,11 +652,27 @@
     background: color-mix(in srgb, var(--bg-1) 94%, transparent);
     box-shadow: var(--shadow-3);
     backdrop-filter: blur(20px);
+    isolation: isolate;
   }
   .control-shell {
     border-radius: var(--radius-control);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-1) 66%, transparent);
+  }
+  [data-lumen-interactive="true"],
+  [data-lumen-card="true"] {
+    transform-origin: center;
+  }
+  [data-lumen-interactive="true"] {
+    cursor: pointer;
+  }
+  @media (hover: none), (pointer: coarse) {
+    [data-lumen-interactive="true"]:active {
+      filter: brightness(1.04);
+    }
+    [data-lumen-card="true"]:active {
+      filter: brightness(1.03);
+    }
   }
   @supports not (background: color-mix(in srgb, white 50%, transparent)) {
     .surface-card,

@@ -25,8 +25,10 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
   match(source, /sticky bottom-3/);
   match(source, /max-h-\[min\(72dvh,36rem\)\]/);
+  match(source, /min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1/);
   match(source, /xl:grid-cols-\[minmax\(220px,280px\)_minmax\(0,1fr\)\]/);
-  match(source, /overflow-y-auto whitespace-pre-wrap/);
+  match(source, /max-h-\[min\(48dvh,28rem\)\] min-h-20 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
+  match(source, /max-h-\[min\(42dvh,24rem\)\] min-h-\[9rem\] flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
   match(source, /回到编辑/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
@@ -40,7 +42,7 @@ test("video prompt enhancement copy stays video-model specific", () => {
 });
 
 test("video reference prompts use stable anchor ids through enhancement", () => {
-  match(source, /const REFERENCE_REF_ID_RE = \/\^ref:\(image\|video\):/);
+  match(source, /const REFERENCE_REF_ID_RE = \/\^ref:\(image\|video\|audio\):/);
   match(source, /function referenceDisplayToken\(/);
   match(source, /function serializePromptReferenceMentions\(/);
   match(source, /function displayPromptReferenceMentions\(/);
@@ -51,7 +53,8 @@ test("video reference prompts use stable anchor ids through enhancement", () => 
   match(source, /referencePromptToken\(item\)/);
   match(source, /insertPromptText\(referenceDisplayToken\(item\)\)/);
   match(source, /return `@/);
-  match(source, /item\.kind === "image" \? "图片" : "视频"/);
+  match(source, /function referenceKindNoun\(kind: ReferenceKind\)/);
+  match(source, /if \(kind === "audio"\) return "音频"/);
   match(source, /displayPromptReferenceMentions\(value, referenceMedia\)/);
   match(source, /referenceRefId\(item\.kind, fallbackIndex\)/);
   match(source, /视频素材 \$\{index\}/);

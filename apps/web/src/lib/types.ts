@@ -1130,7 +1130,7 @@ export interface VideoTemporaryDownloadOut {
 }
 
 export interface VideoReferenceMediaIn {
-  kind: "image" | "video";
+  kind: "image" | "video" | "audio";
   image_id?: string | null;
   video_id?: string | null;
   url?: string | null;
@@ -1139,7 +1139,7 @@ export interface VideoReferenceMediaIn {
 }
 
 export interface VideoReferenceMediaOut {
-  kind: "image" | "video";
+  kind: "image" | "video" | "audio";
   image_id?: string | null;
   video_id?: string | null;
   url?: string | null;

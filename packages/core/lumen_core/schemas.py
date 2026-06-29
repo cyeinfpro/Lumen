@@ -510,13 +510,13 @@ VideoPricingVariant = Literal[
 ]
 VideoResolution = Literal["480p", "720p", "1080p", "4k"]
 VideoAspectRatio = Literal["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
-_VIDEO_REFERENCE_ID_RE = re.compile(r"^ref:(image|video):[1-9][0-9]{0,2}$")
+_VIDEO_REFERENCE_ID_RE = re.compile(r"^ref:(image|video|audio):[1-9][0-9]{0,2}$")
 
 
 class VideoReferenceMediaIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["image", "video"]
+    kind: Literal["image", "video", "audio"]
     image_id: str | None = Field(default=None, max_length=36)
     video_id: str | None = Field(default=None, max_length=36)
     url: str | None = Field(default=None, max_length=2048)
@@ -529,7 +529,7 @@ class VideoReferenceMediaIn(BaseModel):
             ref_id = self.ref_id.strip().lower()
             match = _VIDEO_REFERENCE_ID_RE.fullmatch(ref_id)
             if match is None:
-                raise ValueError("reference media ref_id must look like ref:image:1")
+                raise ValueError("reference media ref_id must look like ref:<kind>:1")
             if match.group(1) != self.kind:
                 raise ValueError("reference media ref_id kind must match kind")
             self.ref_id = ref_id
@@ -548,10 +548,16 @@ class VideoReferenceMediaIn(BaseModel):
             (self.video_id or "").strip() or (self.url or "").strip()
         ):
             raise ValueError("video reference requires video_id or url")
+        if self.kind == "audio" and not (self.url or "").strip():
+            raise ValueError("audio reference requires url")
         if self.kind == "image" and (self.video_id or "").strip():
             raise ValueError("image reference must not include video_id")
         if self.kind == "video" and (self.image_id or "").strip():
             raise ValueError("video reference must not include image_id")
+        if self.kind == "audio" and (
+            (self.image_id or "").strip() or (self.video_id or "").strip()
+        ):
+            raise ValueError("audio reference supports url only")
         if self.url:
             asset_url = normalize_asset_reference_url(self.url)
             if asset_url is not None:
@@ -575,7 +581,7 @@ class VideoReferenceMediaIn(BaseModel):
 
 
 class VideoReferenceMediaOut(BaseModel):
-    kind: Literal["image", "video"]
+    kind: Literal["image", "video", "audio"]
     image_id: str | None = None
     video_id: str | None = None
     url: str | None = None
@@ -616,17 +622,22 @@ class VideoCreateIn(BaseModel):
             raise ValueError("reference must not include input_image_id")
         if self.action == "reference":
             if not self.reference_media:
-                raise ValueError("reference requires at least one image or video")
+                raise ValueError("reference requires at least one reference media")
             image_count = sum(
                 1 for item in self.reference_media if item.kind == "image"
             )
             video_count = sum(
                 1 for item in self.reference_media if item.kind == "video"
             )
+            audio_count = sum(
+                1 for item in self.reference_media if item.kind == "audio"
+            )
             if image_count > 9:
                 raise ValueError("reference supports at most 9 images")
             if video_count > 3:
                 raise ValueError("reference supports at most 3 videos")
+            if audio_count > 1:
+                raise ValueError("reference supports at most 1 audio")
         return self
 
 
