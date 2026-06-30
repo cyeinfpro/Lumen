@@ -31,7 +31,7 @@ import {
   Video as VideoIcon,
   XCircle,
 } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
 import {
   cancelVideoGeneration,
@@ -61,6 +61,7 @@ import type {
 import { Button, Card, toast } from "@/components/ui/primitives";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
 import { formatRmb } from "@/lib/money";
+import { DURATION, EASE } from "@/lib/motion";
 import { cn, uuid } from "@/lib/utils";
 
 type VideoGenerationWithVideo = VideoGenerationOut & {
@@ -534,6 +535,16 @@ function activeTemporaryDownload(item: VideoGenerationOut) {
 function videoDownloadName(item: VideoGenerationOut): string {
   const ext = hasVideo(item) && item.video.mime === "video/quicktime" ? "mov" : "mp4";
   return `lumen-video-${item.id.slice(0, 8)}.${ext}`;
+}
+
+function motionSafeScrollBehavior(): ScrollBehavior {
+  if (
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    return "auto";
+  }
+  return "smooth";
 }
 
 function cleanPromptEnhanceText(value: string): string {
@@ -1747,7 +1758,7 @@ export default function VideoPage() {
   const scrollPromptEditorIntoView = useCallback(() => {
     const target = promptRef.current;
     if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.scrollIntoView({ behavior: motionSafeScrollBehavior(), block: "center" });
     requestAnimationFrame(() => target.focus());
   }, []);
 
@@ -2703,7 +2714,7 @@ function ModeCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        "group relative min-h-[54px] min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-[background-color,border-color,color,transform] duration-200",
+        "group relative min-h-[54px] min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-[background-color,border-color,color] duration-[var(--dur-normal)]",
         selected
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
           : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -2842,7 +2853,7 @@ function PromptEnhanceChooser({
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
         {loading && (
-          <div className="max-h-[min(48dvh,28rem)] min-h-20 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
+          <div className="h-[min(32dvh,18rem)] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
             {cleanPreview || "等待上游返回..."}
           </div>
         )}
@@ -3080,7 +3091,7 @@ function ReferenceMediaPreviewDialog({
 
   return (
     <div
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -3117,7 +3128,7 @@ function ReferenceMediaPreviewDialog({
           </Button>
         </header>
         <div className="min-h-0 flex-1 overflow-hidden bg-[var(--bg-0)] p-3 sm:p-5">
-          <div className="flex h-full min-h-[18rem] items-center justify-center overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]">
+          <div className="flex h-full min-h-0 items-center justify-center overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] sm:min-h-[18rem]">
             {previewUrl && !failed ? (
               <img
                 src={previewUrl}
@@ -3473,7 +3484,7 @@ function VideoPreviewDialog({
 
   return (
     <div
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -3659,6 +3670,8 @@ function TaskRow({
 }) {
   const active = isActiveVideo(item);
   const progress = progressForItem(item);
+  const progressScale = Math.max(0, Math.min(1, progress / 100));
+  const reduceMotion = useReducedMotion();
   const copy = stageCopy(item);
   const videoItem = hasVideo(item) ? item : null;
   const retryable = isFailedHistoryVideo(item);
@@ -3693,12 +3706,12 @@ function TaskRow({
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
         <motion.div
           className={cn(
-            "h-full rounded-full",
+            "h-full w-full origin-left rounded-full",
             active ? "bg-[var(--accent)]" : item.status === "succeeded" ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
           )}
           initial={false}
-          animate={{ width: `${progress}%` }}
-          transition={{ duration: 0.26, ease: [0.2, 0.8, 0.2, 1] }}
+          animate={{ scaleX: progressScale }}
+          transition={{ duration: reduceMotion ? 0 : DURATION.normal, ease: EASE.develop }}
         />
       </div>
       {showPreview && videoItem && onPreview && (

@@ -395,7 +395,7 @@ function DesktopSidebarDrawer({
         <>
           <motion.div
             key="drawer-backdrop"
-            className="fixed inset-0 bg-black/50 z-40"
+            className="fixed inset-0 z-[calc(var(--z-dialog)-1)] bg-black/50"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -405,12 +405,13 @@ function DesktopSidebarDrawer({
           />
           <motion.aside
             key="drawer-panel"
-            className="fixed left-0 top-0 bottom-0 w-72 bg-[var(--bg-1)] border-r border-[var(--border-subtle)] z-50 overflow-hidden"
+            className="fixed left-0 top-0 bottom-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]"
             initial={{ x: -288 }}
             animate={{ x: 0 }}
             exit={{ x: -288 }}
             transition={SPRING.sheet}
             role="dialog"
+            aria-modal="true"
             aria-label="会话侧栏"
           >
             {children}

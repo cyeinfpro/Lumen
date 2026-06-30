@@ -112,7 +112,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                     fill
                     sizes="(max-width: 768px) 50vw, 360px"
                     unoptimized
-                    className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+                    className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
                   />
                   <span className="pointer-events-none absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-white/90 mix-blend-difference">
                     N°{String(index + 1).padStart(2, "0")}

@@ -75,7 +75,7 @@ export function CandidateCard({
                   fill
                   sizes="(max-width: 768px) 50vw, 220px"
                   unoptimized
-                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
                 />
               </button>
             ))

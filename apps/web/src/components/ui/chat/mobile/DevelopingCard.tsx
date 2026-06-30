@@ -3,37 +3,19 @@
 // DevelopingCard：queued/running 状态的显影卡；失败态带重试。
 // 扫光用 globals.css 的 .lumen-developing 类；失败时红底。
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { RotateCcw, X } from "lucide-react";
 import type { Generation } from "@/lib/types";
 import { aspectRatioToCss } from "@/lib/sizing";
 import { cn } from "@/lib/utils";
 
-// prefers-reduced-motion 降级：静态琥珀竖条从左到右 tween 一次（JS 驱动百分比 left，
-// 不依赖 globals.css 新增 keyframes）。完成后停在右侧。
+// prefers-reduced-motion 降级：保留静态状态提示，不再移动扫光。
 function ReducedMotionBar() {
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const duration = 2400;
-    const start = performance.now();
-    let raf = 0;
-    const tick = (t: number) => {
-      const p = Math.min(1, (t - start) / duration);
-      el.style.left = `${p * 100}%`;
-      if (p < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
   return (
     <div
-      ref={ref}
       aria-hidden
-      className="absolute top-0 bottom-0 w-[3px] bg-[var(--amber-400)] -translate-x-1/2"
+      className="absolute inset-y-0 left-0 w-[3px] bg-[var(--amber-400)]"
       style={{
-        left: 0,
         boxShadow: "0 0 12px var(--amber-glow-strong)",
       }}
     />
@@ -161,7 +143,7 @@ export function DevelopingCard({
             className={cn(
               "inline-flex items-center gap-1.5 px-4 h-9 rounded-full",
               "bg-[var(--bg-2)] border border-[var(--border)] text-body-sm text-[var(--fg-0)]",
-              "active:scale-[0.97] transition-transform",
+              "active:opacity-[var(--op-press)] transition-opacity",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
             )}
             aria-label="重试生成"
@@ -212,7 +194,7 @@ export function DevelopingCard({
                 "inline-flex items-center gap-1.5 px-3.5 h-8 rounded-full",
                 "bg-[var(--bg-1)]/70 backdrop-blur-sm border border-[var(--border)]",
                 "text-[12px] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-                "active:scale-[0.95] transition-all",
+                "active:opacity-[var(--op-press)] transition-[color,opacity]",
               )}
               aria-label="取消生成"
             >

@@ -159,7 +159,7 @@ export function PosterStyleDetailDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-black/60 backdrop-blur-md mobile-dialog-shell"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-black/60 backdrop-blur-md"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

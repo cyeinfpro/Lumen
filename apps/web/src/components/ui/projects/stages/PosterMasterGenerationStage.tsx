@@ -193,7 +193,7 @@ function MasterCard({
             fill
             sizes="(max-width: 768px) 50vw, 260px"
             unoptimized
-            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">

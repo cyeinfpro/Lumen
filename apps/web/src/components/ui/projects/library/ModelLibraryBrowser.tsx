@@ -894,7 +894,7 @@ function ModelLibraryCard({
           fill
           unoptimized
           sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 240px"
-          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
         <div
           aria-hidden
@@ -1118,7 +1118,7 @@ function UploadDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md mobile-dialog-shell md:items-center md:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

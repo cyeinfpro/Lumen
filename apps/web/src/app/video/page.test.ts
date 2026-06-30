@@ -22,12 +22,13 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   doesNotMatch(source, /block: "start"/);
   match(source, /function PromptEnhanceChooser\(/);
   match(source, /onReturnToEditor=\{scrollPromptEditorIntoView\}/);
-  match(source, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
+  match(source, /function motionSafeScrollBehavior\(\): ScrollBehavior/);
+  match(source, /target\.scrollIntoView\(\{ behavior: motionSafeScrollBehavior\(\), block: "center" \}\)/);
   match(source, /sticky bottom-3/);
   match(source, /max-h-\[min\(72dvh,36rem\)\]/);
   match(source, /min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1/);
   match(source, /xl:grid-cols-\[minmax\(220px,280px\)_minmax\(0,1fr\)\]/);
-  match(source, /max-h-\[min\(48dvh,28rem\)\] min-h-20 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
+  match(source, /h-\[min\(32dvh,18rem\)\] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
   match(source, /max-h-\[min\(42dvh,24rem\)\] min-h-\[9rem\] flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
   match(source, /回到编辑/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);

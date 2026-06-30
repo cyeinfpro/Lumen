@@ -120,7 +120,7 @@ function MaskCanvasInner({
         transition={{ duration: 0.16 }}
         className={cn(
           "fixed inset-0 z-[var(--z-dialog)]",
-          "bg-black/72 backdrop-blur-md",
+          "bg-black/72 backdrop-blur-md mobile-perf-surface",
           "mobile-dialog-shell flex items-end justify-center sm:items-center",
           "px-3 sm:p-6",
         )}

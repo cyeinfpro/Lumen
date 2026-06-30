@@ -21,10 +21,10 @@ export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 
 const BASE =
   "inline-flex items-center justify-center gap-1.5 font-medium rounded-[var(--radius-control)] " +
-  "transition-[background-color,color,border-color,box-shadow,filter,transform] duration-150 " +
+  "transition-[background-color,color,border-color,box-shadow,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "select-none text-center leading-tight active:scale-[0.98] motion-reduce:active:scale-100";
+  "select-none text-center leading-tight active:opacity-[var(--op-press)]";
 
 const VARIANTS: Record<Variant, string> = {
   primary:

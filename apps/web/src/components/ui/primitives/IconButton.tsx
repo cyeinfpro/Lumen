@@ -24,10 +24,10 @@ export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLBut
 
 const BASE =
   "inline-flex items-center justify-center rounded-[var(--radius-control)] " +
-  "transition-[background-color,color,border-color,filter,transform] duration-150 " +
+  "transition-[background-color,color,border-color,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "shrink-0 select-none active:scale-[0.96] motion-reduce:active:scale-100";
+  "shrink-0 select-none active:opacity-[var(--op-press)]";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
