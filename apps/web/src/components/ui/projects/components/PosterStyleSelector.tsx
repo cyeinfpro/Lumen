@@ -183,7 +183,7 @@ function StyleCard({
               fill
               sizes="(max-width: 768px) 50vw, 240px"
               unoptimized
-              className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+              className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
             />
           ) : (
             <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">

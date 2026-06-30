@@ -204,7 +204,7 @@ function LoginInner() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[var(--shadow-amber)]"
+                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:opacity-[var(--op-press)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-[filter,opacity,box-shadow] shadow-[var(--shadow-amber)]"
                 >
                   {submitting ? (
                     <>
@@ -310,9 +310,7 @@ function BrandPanel() {
     <aside className="hidden md:flex relative overflow-hidden bg-[var(--bg-1)]/30 border-r border-[var(--border)]">
       {/* 背景装饰 */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute left-0 top-0 h-64 w-64 rounded-full bg-[var(--color-lumen-amber)]/10 blur-3xl" />
-        {/* eslint-disable-next-line no-restricted-syntax -- 品牌装饰 blur，非状态色 */}
-        <div className="absolute bottom-0 right-0 w-96 h-96 rounded-full bg-orange-500/5 blur-3xl" />
+        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(242,169,58,0.10)_0%,transparent_38%,rgba(255,255,255,0.025)_100%)]" />
         <div
           className="absolute inset-0 opacity-[0.04]"
           style={{

@@ -369,7 +369,7 @@ function SignupForm({
         <button
           type="submit"
           disabled={!canSubmit}
-          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[var(--shadow-amber)]"
+          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:opacity-[var(--op-press)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-[filter,opacity,box-shadow] shadow-[var(--shadow-amber)]"
         >
           {submitting ? (
             <>

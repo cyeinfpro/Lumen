@@ -747,7 +747,7 @@ function JobThumb({
           fill
           unoptimized
           sizes="(max-width: 768px) 50vw, 220px"
-          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
         {/* N°NN 序号 */}
         {typeof order === "number" ? (
@@ -891,7 +891,7 @@ function SaveJobItemDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md mobile-dialog-shell md:items-center md:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

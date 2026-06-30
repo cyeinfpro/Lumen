@@ -250,7 +250,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             onClick={() => {
               void handleShareLink();
             }}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:scale-[0.98]"
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:opacity-[var(--op-press)]"
           >
             {linkShared ? (
               <Check className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
@@ -329,7 +329,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
         <Link
           href="/"
-          className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.97] md:w-auto"
+          className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] md:w-auto"
         >
           打开主页
           <ArrowRight className="h-3.5 w-3.5" />
@@ -381,7 +381,7 @@ function ShareImageTile({
   return (
     <div
       className={cn(
-        "share-tile-shell group relative overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-black text-left shadow-[var(--shadow-3)] transition-[border-color,transform,box-shadow] duration-200 hover:border-white/20 hover:shadow-[var(--shadow-amber)]",
+        "share-tile-shell group relative overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-black text-left shadow-[var(--shadow-3)] transition-[border-color,box-shadow] duration-[var(--dur-normal)] hover:border-white/20 hover:shadow-[var(--shadow-amber)]",
         single ? "max-w-full" : "mb-2 w-full break-inside-avoid md:mb-3",
       )}
     >
@@ -416,7 +416,7 @@ function ShareImageTile({
         type="button"
         onClick={() => onDownload(image)}
         disabled={downloading}
-        className="absolute right-2 top-2 z-10 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/90 backdrop-blur transition-all hover:bg-black/70 active:scale-[0.94] disabled:opacity-60 sm:opacity-0 sm:group-hover:opacity-100"
+        className="absolute right-2 top-2 z-10 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/90 backdrop-blur transition-[background-color,border-color,opacity] hover:bg-black/70 disabled:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100"
         aria-label="下载原图"
       >
         {downloading ? (
@@ -702,7 +702,7 @@ function ShareLightbox({
         }}
       >
         <div
-          className="relative max-w-full transition-transform duration-200 ease-out"
+          className="relative max-w-full overflow-hidden transition-transform duration-[var(--dur-normal)] ease-[var(--ease-develop)]"
           style={{
             ...lightboxImageFrameStyle(image),
             transform: dragX ? `translate3d(${dragX}px,0,0)` : undefined,
@@ -732,7 +732,7 @@ function ShareLightbox({
             type="button"
             onClick={() => onDownload(image)}
             disabled={downloading}
-            className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-70 sm:h-11"
+            className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:h-11"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -786,7 +786,7 @@ function ShareFilmstrip({
             type="button"
             onClick={() => onSelect(index)}
             className={cn(
-              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-all",
+              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity]",
               index === activeIndex
                 ? "border-[var(--color-lumen-amber)] opacity-100"
                 : "border-white/15 opacity-[0.62] hover:opacity-90",
@@ -846,7 +846,8 @@ function ResilientShareImage({
           loading={loading}
           decoding="async"
           className={cn(
-            "pointer-events-none absolute inset-0 h-full w-full scale-[1.025] opacity-60 blur-md",
+            "pointer-events-none absolute inset-0 h-full w-full",
+            surface === "lightbox" ? "opacity-35" : "scale-[1.025] opacity-60 blur-md",
             surface === "lightbox" || surface === "single"
               ? "object-contain"
               : "object-cover",
@@ -905,7 +906,7 @@ function ResilientShareImage({
 function ShareNotice({ notice }: { notice: Notice | null }) {
   if (!notice) return null;
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[70] flex justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
+    <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[calc(var(--z-lightbox,80)+5)] flex justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
       <div
         className={cn(
           "rounded-full border px-4 py-2 text-sm shadow-[var(--shadow-3)] backdrop-blur-xl",

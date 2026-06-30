@@ -125,26 +125,59 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
     .filter(Boolean)
     .join(" ");
 
-  const commonStyle = {
+  const pressStyle = {
     transform: `scale(${scale})`,
     opacity,
   } as React.CSSProperties;
 
+  const mergedStyle = (style?: React.CSSProperties): React.CSSProperties => ({
+    ...style,
+    transform: [style?.transform, pressStyle.transform].filter(Boolean).join(" "),
+    opacity: pressStyle.opacity,
+  });
+
   if (as === "a") {
-    const anchorProps = rest as AnchorHTMLAttributes<HTMLAnchorElement>;
+    const {
+      style,
+      onClick,
+      onKeyDown,
+      onPointerDown: onPointerDownProp,
+      onPointerUp,
+      onPointerCancel,
+      onPointerLeave,
+      ...anchorProps
+    } = rest as AnchorHTMLAttributes<HTMLAnchorElement>;
     return (
       <a
         ref={ref as React.Ref<HTMLAnchorElement>}
         data-pressed={pressed || undefined}
         aria-disabled={disabled || undefined}
         className={baseClasses}
-        style={commonStyle}
-        onPointerDown={onPointerDown}
-        onPointerUp={clearPressed}
-        onPointerCancel={clearPressed}
-        onPointerLeave={clearPressed}
-        onClick={handleClick}
-        onKeyDown={handleKeyDown}
+        style={mergedStyle(style)}
+        onPointerDown={(event) => {
+          onPointerDownProp?.(event);
+          if (!event.defaultPrevented) onPointerDown();
+        }}
+        onPointerUp={(event) => {
+          onPointerUp?.(event);
+          clearPressed();
+        }}
+        onPointerCancel={(event) => {
+          onPointerCancel?.(event);
+          clearPressed();
+        }}
+        onPointerLeave={(event) => {
+          onPointerLeave?.(event);
+          clearPressed();
+        }}
+        onClick={(event) => {
+          onClick?.(event);
+          if (!event.defaultPrevented) handleClick();
+        }}
+        onKeyDown={(event) => {
+          onKeyDown?.(event);
+          if (!event.defaultPrevented) handleKeyDown(event);
+        }}
         {...anchorProps}
       >
         {children}
@@ -152,7 +185,15 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
     );
   }
 
-  const buttonProps = rest as ButtonHTMLAttributes<HTMLButtonElement>;
+  const {
+    style,
+    onClick,
+    onPointerDown: onPointerDownProp,
+    onPointerUp,
+    onPointerCancel,
+    onPointerLeave,
+    ...buttonProps
+  } = rest as ButtonHTMLAttributes<HTMLButtonElement>;
   return (
     <button
       ref={ref as React.Ref<HTMLButtonElement>}
@@ -160,12 +201,27 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
       data-pressed={pressed || undefined}
       disabled={disabled}
       className={baseClasses}
-      style={commonStyle}
-      onPointerDown={onPointerDown}
-      onPointerUp={clearPressed}
-      onPointerCancel={clearPressed}
-      onPointerLeave={clearPressed}
-      onClick={handleClick}
+      style={mergedStyle(style)}
+      onPointerDown={(event) => {
+        onPointerDownProp?.(event);
+        if (!event.defaultPrevented) onPointerDown();
+      }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event);
+        clearPressed();
+      }}
+      onPointerCancel={(event) => {
+        onPointerCancel?.(event);
+        clearPressed();
+      }}
+      onPointerLeave={(event) => {
+        onPointerLeave?.(event);
+        clearPressed();
+      }}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!event.defaultPrevented) handleClick();
+      }}
       {...buttonProps}
     >
       {children}

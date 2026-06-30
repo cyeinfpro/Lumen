@@ -569,7 +569,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
               fill
               sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 25vw"
               unoptimized
-              className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+              className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
             />
           ) : (
             <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">

@@ -49,15 +49,9 @@ export function ImageGrid({
         className,
       )}
     >
-      {images.map((image, index) => (
-        <button
-          key={image.id}
-          type="button"
-          onClick={() => onPreview?.(image, index)}
-          className={cn(
-            "group relative aspect-[4/5] overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          )}
-        >
+      {images.map((image, index) => {
+        const content = (
+          <>
           <Image
             src={imageSrc(image)}
             alt="项目图片"
@@ -65,13 +59,38 @@ export function ImageGrid({
             height={compact ? 300 : 450}
             sizes={compact ? "240px" : "(max-width: 768px) 50vw, 320px"}
             unoptimized
-            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+            className={cn(
+              "h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)]",
+              onPreview && "group-hover:scale-[1.02]",
+            )}
           />
           <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">
             {String(index + 1).padStart(2, "0")}
           </span>
-        </button>
-      ))}
+          </>
+        );
+        const className = cn(
+          "group relative aspect-[4/5] overflow-hidden bg-[var(--bg-2)]",
+          onPreview && "cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        );
+        if (!onPreview) {
+          return (
+            <div key={image.id} className={className}>
+              {content}
+            </div>
+          );
+        }
+        return (
+          <button
+            key={image.id}
+            type="button"
+            onClick={() => onPreview(image, index)}
+            className={className}
+          >
+            {content}
+          </button>
+        );
+      })}
     </div>
   );
 }

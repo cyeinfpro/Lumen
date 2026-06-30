@@ -4,32 +4,14 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
 
-gsap.registerPlugin(useGSAP, ScrollTrigger);
+gsap.registerPlugin(useGSAP);
 gsap.config({ nullTargetWarn: false });
 
 const PAGE_ITEM_SELECTOR = [
   "[data-lumen-page-item]",
-  ".surface-card",
-  ".surface-panel",
-  ".surface-dialog",
-  ".stream-tile-shell",
-  ".share-tile-shell",
-  "article",
 ].join(",");
 
-const REVEAL_SELECTOR = [
-  "[data-lumen-reveal]",
-  ".surface-card",
-  ".surface-panel",
-  ".surface-dialog",
-  ".stream-tile-shell",
-  ".share-tile-shell",
-].join(",");
-
-const INTERACTIVE_SELECTOR =
-  "[data-lumen-interactive='true']:not(:disabled):not([aria-disabled='true'])";
 const CARD_SELECTOR = "[data-lumen-card='true']";
 
 function isUsableElement(el: HTMLElement): boolean {
@@ -63,9 +45,7 @@ function collectMotionItems(
 function closestMotionTarget(event: Event, root: HTMLElement): HTMLElement | null {
   const target = event.target;
   if (!(target instanceof Element)) return null;
-  const el = target.closest<HTMLElement>(
-    `${INTERACTIVE_SELECTOR}, ${CARD_SELECTOR}`,
-  );
+  const el = target.closest<HTMLElement>(CARD_SELECTOR);
   if (!el || !root.contains(el)) return null;
   return el;
 }
@@ -83,7 +63,7 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
   useGSAP(
-    (_context, contextSafe) => {
+    () => {
       const root = rootRef.current;
       if (!root) return;
       if (initialRouteRef.current) {
@@ -91,111 +71,66 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
         return;
       }
 
-      let rafOne = 0;
-      let rafTwo = 0;
       let mm: ReturnType<typeof gsap.matchMedia> | null = null;
-      const toContextSafe =
-        contextSafe ?? ((fn: () => void) => fn);
 
-      const runMotion = toContextSafe(() => {
-        const page =
-          root.querySelector<HTMLElement>("[data-lumen-motion-page]") ??
-          root.querySelector<HTMLElement>("main") ??
-          root;
+      const page =
+        root.querySelector<HTMLElement>("[data-lumen-motion-page]") ??
+        root.querySelector<HTMLElement>("main") ??
+        root;
 
-        mm = gsap.matchMedia();
-        mm.add(
-          {
-            reduceMotion: "(prefers-reduced-motion: reduce)",
-            desktop: "(min-width: 768px)",
-          },
-          (context) => {
-            const conditions = context.conditions as
-              | { reduceMotion?: boolean; desktop?: boolean }
-              | undefined;
-            const reduceMotion = Boolean(conditions?.reduceMotion);
-            if (reduceMotion) {
-              gsap.set(page, {
-                autoAlpha: 1,
-                clearProps: "transform,opacity,visibility",
-              });
-              return;
-            }
-
-            const pageItems = collectMotionItems(page, PAGE_ITEM_SELECTOR, 18);
-            const tl = gsap.timeline({
-              defaults: { ease: "power2.out", overwrite: "auto" },
+      mm = gsap.matchMedia();
+      mm.add(
+        {
+          reduceMotion: "(prefers-reduced-motion: reduce)",
+        },
+        (context) => {
+          const conditions = context.conditions as
+            | { reduceMotion?: boolean }
+            | undefined;
+          const reduceMotion = Boolean(conditions?.reduceMotion);
+          if (reduceMotion) {
+            gsap.set(page, {
+              autoAlpha: 1,
+              clearProps: "opacity,visibility",
             });
+            return;
+          }
 
+          const pageItems = collectMotionItems(page, PAGE_ITEM_SELECTOR, 18);
+          const tl = gsap.timeline({
+            defaults: { ease: "power2.out", overwrite: "auto" },
+          });
+
+          tl.fromTo(
+            page,
+            { autoAlpha: 0.985 },
+            {
+              autoAlpha: 1,
+              duration: 0.18,
+              clearProps: "opacity,visibility",
+            },
+          );
+
+          if (pageItems.length > 0) {
             tl.fromTo(
-              page,
-              { autoAlpha: 0.985, y: 8, scale: 0.997 },
+              pageItems,
+              { autoAlpha: 0, y: 8 },
               {
                 autoAlpha: 1,
                 y: 0,
-                scale: 1,
                 duration: 0.28,
+                stagger: { each: 0.02, from: "start" },
                 clearProps: "transform,opacity,visibility",
               },
+              "<0.03",
             );
-
-            if (pageItems.length > 0) {
-              tl.fromTo(
-                pageItems,
-                { autoAlpha: 0, y: 10 },
-                {
-                  autoAlpha: 1,
-                  y: 0,
-                  duration: 0.34,
-                  stagger: { each: 0.025, from: "start" },
-                  clearProps: "transform,opacity,visibility",
-                },
-                "<0.04",
-              );
-            }
-
-            const revealItems = collectMotionItems(
-              root,
-              REVEAL_SELECTOR,
-              80,
-            ).filter((item) => !pageItems.includes(item));
-            if (revealItems.length > 0) {
-              ScrollTrigger.batch(revealItems, {
-                start: "top 92%",
-                once: true,
-                interval: 0.08,
-                batchMax: conditions?.desktop ? 10 : 6,
-                onEnter: (batch) => {
-                  gsap.fromTo(
-                    batch,
-                    { autoAlpha: 0, y: 16, scale: 0.99 },
-                    {
-                      autoAlpha: 1,
-                      y: 0,
-                      scale: 1,
-                      duration: 0.42,
-                      stagger: { each: 0.035, from: "start" },
-                      ease: "power2.out",
-                      overwrite: "auto",
-                      clearProps: "transform,opacity,visibility",
-                    },
-                  );
-                },
-              });
-              window.requestAnimationFrame(() => ScrollTrigger.refresh());
-            }
-          },
-        );
-      });
-
-      rafOne = window.requestAnimationFrame(() => {
-        rafTwo = window.requestAnimationFrame(runMotion);
-      });
+          }
+        },
+      );
 
       return () => {
-        window.cancelAnimationFrame(rafOne);
-        window.cancelAnimationFrame(rafTwo);
         mm?.revert();
+        gsap.killTweensOf(page);
       };
     },
     { scope: rootRef, dependencies: [pathname], revertOnUpdate: true },
@@ -204,74 +139,58 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-    const pointerFine = window.matchMedia("(hover: hover) and (pointer: fine)");
-    if (!pointerFine.matches) return;
+    let mm: ReturnType<typeof gsap.matchMedia> | null = gsap.matchMedia();
+    mm.add(
+      {
+        pointerFine: "(hover: hover) and (pointer: fine)",
+        reduceMotion: "(prefers-reduced-motion: reduce)",
+      },
+      (context) => {
+        const conditions = context.conditions as
+          | { pointerFine?: boolean; reduceMotion?: boolean }
+          | undefined;
+        if (!conditions?.pointerFine || conditions.reduceMotion) return;
 
-    const onPointerOver = (event: PointerEvent) => {
-      const el = closestMotionTarget(event, root);
-      if (!el || !crossedTargetBoundary(el, event.relatedTarget)) return;
-      const isCard = el.matches(CARD_SELECTOR);
-      gsap.to(el, {
-        y: isCard ? -3 : -1,
-        scale: isCard ? 1.004 : 1.012,
-        duration: 0.18,
-        ease: "power2.out",
-        overwrite: "auto",
-      });
-    };
+        const onPointerOver = (event: PointerEvent) => {
+          const el = closestMotionTarget(event, root);
+          if (!el || !crossedTargetBoundary(el, event.relatedTarget)) return;
+          gsap.to(el, {
+            y: -2,
+            duration: 0.16,
+            ease: "power2.out",
+            overwrite: "auto",
+          });
+        };
 
-    const onPointerOut = (event: PointerEvent) => {
-      const el = closestMotionTarget(event, root);
-      if (!el || !crossedTargetBoundary(el, event.relatedTarget)) return;
-      gsap.to(el, {
-        y: 0,
-        scale: 1,
-        duration: 0.22,
-        ease: "power2.out",
-        overwrite: "auto",
-        clearProps: "transform",
-      });
-    };
+        const onPointerOut = (event: PointerEvent) => {
+          const el = closestMotionTarget(event, root);
+          if (!el || !crossedTargetBoundary(el, event.relatedTarget)) return;
+          gsap.to(el, {
+            y: 0,
+            duration: 0.18,
+            ease: "power2.out",
+            overwrite: "auto",
+            clearProps: "transform",
+          });
+        };
 
-    const onPointerDown = (event: PointerEvent) => {
-      const el = closestMotionTarget(event, root);
-      if (!el) return;
-      gsap.to(el, {
-        y: 0,
-        scale: 0.965,
-        duration: 0.08,
-        ease: "power2.out",
-        overwrite: "auto",
-      });
-    };
+        root.addEventListener("pointerover", onPointerOver);
+        root.addEventListener("pointerout", onPointerOut);
+        root.addEventListener("pointercancel", onPointerOut);
 
-    const onPointerUp = (event: PointerEvent) => {
-      const el = closestMotionTarget(event, root);
-      if (!el) return;
-      const isCard = el.matches(CARD_SELECTOR);
-      gsap.to(el, {
-        y: isCard ? -3 : -1,
-        scale: isCard ? 1.004 : 1.012,
-        duration: 0.16,
-        ease: "power2.out",
-        overwrite: "auto",
-      });
-    };
-
-    root.addEventListener("pointerover", onPointerOver);
-    root.addEventListener("pointerout", onPointerOut);
-    root.addEventListener("pointerdown", onPointerDown);
-    root.addEventListener("pointerup", onPointerUp);
-    root.addEventListener("pointercancel", onPointerOut);
+        return () => {
+          root.removeEventListener("pointerover", onPointerOver);
+          root.removeEventListener("pointerout", onPointerOut);
+          root.removeEventListener("pointercancel", onPointerOut);
+          gsap.killTweensOf(root.querySelectorAll(CARD_SELECTOR));
+        };
+      },
+    );
 
     return () => {
-      root.removeEventListener("pointerover", onPointerOver);
-      root.removeEventListener("pointerout", onPointerOut);
-      root.removeEventListener("pointerdown", onPointerDown);
-      root.removeEventListener("pointerup", onPointerUp);
-      root.removeEventListener("pointercancel", onPointerOut);
+      mm?.revert();
+      mm = null;
     };
   }, []);
 

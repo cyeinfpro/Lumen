@@ -64,7 +64,7 @@ export function ResultImageCard({
           fill
           sizes="(max-width: 768px) 50vw, 360px"
           unoptimized
-          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
         {typeof score === "number" ? (
           <div className="absolute right-3 top-3">

@@ -47,7 +47,7 @@ export function SelectableImageGrid({
                   fill
                   sizes="(max-width: 768px) 50vw, 360px"
                   unoptimized
-                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
                 />
               </button>
               <span className="pointer-events-none absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">

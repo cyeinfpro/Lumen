@@ -296,7 +296,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
         </div>
         <Link
           href="/"
-          className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
+          className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:opacity-[var(--op-press)] text-black text-sm font-medium transition-[filter,opacity]"
         >
           <Sparkles className="w-3.5 h-3.5" /> 打开主页
         </Link>
