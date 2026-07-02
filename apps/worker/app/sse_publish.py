@@ -29,6 +29,8 @@ _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 _DEDUPE_RESERVATION_PENDING_ERROR = "sse dedupe reservation has no stream id"
 _DEDUPE_RESERVATION_WAIT_SECONDS = 0.25
 _DEDUPE_RESERVATION_POLL_SECONDS = 0.025
+_DEDUPE_RESERVATION_STALE_SECONDS = 2.0
+_DEDUPE_RECOVERY_SCAN_COUNT = 100
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
 _XADD_IDEMPOTENT_LUA = """
 local existing = redis.call('GET', KEYS[2])
@@ -155,6 +157,94 @@ async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
     return _decode_redis_value(existing)
 
 
+def _redis_mapping_value(mapping: Any, field: str) -> Any:
+    if not isinstance(mapping, dict):
+        return None
+    if field in mapping:
+        return mapping[field]
+    encoded = field.encode("utf-8")
+    if encoded in mapping:
+        return mapping[encoded]
+    return None
+
+
+async def _find_stream_id_by_event_id(
+    redis: Any,
+    *,
+    stream_key: str,
+    event_id: str,
+) -> str | None:
+    xrevrange_fn = getattr(redis, "xrevrange", None)
+    if not callable(xrevrange_fn):
+        return None
+    try:
+        rows = await xrevrange_fn(stream_key, count=_DEDUPE_RECOVERY_SCAN_COUNT)
+    except TypeError:
+        rows = await xrevrange_fn(stream_key, "+", "-", _DEDUPE_RECOVERY_SCAN_COUNT)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "publish_event: dedupe stream recovery scan failed key=%s err=%s",
+            stream_key,
+            exc,
+        )
+        return None
+    for raw_stream_id, fields in rows or []:
+        raw_event_id = _redis_mapping_value(fields, "event_id")
+        if raw_event_id is None:
+            continue
+        if _decode_redis_value(raw_event_id) == event_id:
+            return _decode_redis_value(raw_stream_id)
+    return None
+
+
+async def _reservation_stale_enough_to_reclaim(redis: Any, dedupe_key: str) -> bool:
+    pttl_fn = getattr(redis, "pttl", None)
+    if not callable(pttl_fn):
+        return True
+    try:
+        ttl_ms = int(await pttl_fn(dedupe_key))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "publish_event: dedupe reservation pttl failed key=%s err=%s",
+            dedupe_key,
+            exc,
+        )
+        return False
+    if ttl_ms < 0:
+        return True
+    age_ms = (_EVENTS_DEDUPE_TTL_SECONDS * 1000) - ttl_ms
+    return age_ms >= int(_DEDUPE_RESERVATION_STALE_SECONDS * 1000)
+
+
+async def _recover_dedupe_stream_id(
+    redis: Any,
+    *,
+    stream_key: str,
+    dedupe_key: str,
+    event_id: str,
+) -> str | None:
+    stream_id = await _find_stream_id_by_event_id(
+        redis,
+        stream_key=stream_key,
+        event_id=event_id,
+    )
+    if stream_id is None:
+        return None
+    try:
+        await _store_dedupe_stream_id(
+            redis,
+            dedupe_key=dedupe_key,
+            stream_id=stream_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "publish_event: dedupe recovery store failed key=%s err=%s",
+            dedupe_key,
+            exc,
+        )
+    return stream_id
+
+
 async def _wait_for_dedupe_stream_id(
     redis: Any,
     dedupe_key: str,
@@ -241,7 +331,17 @@ async def _xadd_event_without_lua(
         existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
         if existing is not None:
             return existing
+        recovered = await _recover_dedupe_stream_id(
+            redis,
+            stream_key=stream_key,
+            dedupe_key=dedupe_key,
+            event_id=event_id,
+        )
+        if recovered is not None:
+            return recovered
         if not reclaim_empty_reservation:
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
+        if not await _reservation_stale_enough_to_reclaim(redis, dedupe_key):
             raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
         delete_fn = getattr(redis, "delete", None)
         if callable(delete_fn):
@@ -307,13 +407,21 @@ async def _xadd_event_once(
         )
     except Exception as exc:  # noqa: BLE001
         if _is_dedupe_reservation_pending(exc):
+            dedupe_key = f"{stream_key}:dedupe:{event_id}"
             existing = await _wait_for_dedupe_stream_id(
                 redis,
-                f"{stream_key}:dedupe:{event_id}",
+                dedupe_key,
             )
             if existing is not None:
                 return existing
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR) from exc
+            return await _xadd_event_without_lua(
+                redis,
+                stream_key=stream_key,
+                event_name=event_name,
+                event_id=event_id,
+                payload_json=payload_json,
+                reclaim_empty_reservation=True,
+            )
         if not _is_lua_xadd_unsupported(exc):
             raise
         return await _xadd_event_without_lua(

@@ -114,6 +114,14 @@ _REDEMPTION_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE = uuid.UUID(
     "cf14d7e7-73ca-4b91-89fa-d4ab765034c9"
 )
+_REDEMPTION_ALREADY_USED_CONSTRAINT = "uq_redeem_code_user"
+_REDEMPTION_REPLAY_CONSTRAINTS = frozenset(
+    (
+        _REDEMPTION_ALREADY_USED_CONSTRAINT,
+        "redemption_codes_usage_pkey",
+        "uq_wallet_tx_idemp",
+    )
+)
 _BILLING_AUDIT_EVENT_PREFIXES = (
     "wallet.",
     "pricing.",
@@ -126,6 +134,8 @@ _BILLING_WINDOWS: dict[str, timedelta] = {
     "1d": timedelta(days=1),
     "7d": timedelta(days=7),
 }
+MAX_ADMIN_ADJUST_MICRO = 1_000_000 * billing_core.MICRO_RMB
+MAX_ADMIN_NEGATIVE_BALANCE_MICRO = 100_000 * billing_core.MICRO_RMB
 _BULK_RATE_UNITS: dict[str, str] = {
     "input": "per_1k_tokens_in",
     "output": "per_1k_tokens_out",
@@ -154,6 +164,20 @@ def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    orig = getattr(exc, "orig", None)
+    diag = getattr(orig, "diag", None)
+    for source in (diag, orig):
+        value = getattr(source, "constraint_name", None)
+        if isinstance(value, str) and value:
+            return value.lower()
+    msg = f"{exc!s} {diag!s}".lower()
+    for name in _REDEMPTION_REPLAY_CONSTRAINTS:
+        if name in msg:
+            return name
+    return None
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -1619,6 +1643,10 @@ async def redeem_code(
     matching_codes = (
         (
             await db.execute(
+                # PostgreSQL's row lock serializes the redeemed_count
+                # check/increment across different users for the same code.
+                # Same-request replay races are handled by unique constraints
+                # in the IntegrityError path below.
                 select(RedemptionCode)
                 .where(RedemptionCode.code_hash.in_(code_hashes))
                 .with_for_update()
@@ -1685,12 +1713,8 @@ async def redeem_code(
         await _invalidate_balance_cache(user.id)
     except IntegrityError as exc:
         await db.rollback()
-        # Only treat the per-user-redeem unique constraint as CODE_ALREADY_USED.
-        # Other constraint violations (FK, wallet_tx idempotency, etc.) bubble
-        # up as 500 so misattribution doesn't mask real bugs.
-        diag = str(getattr(exc.orig, "diag", None) or "")
-        msg = f"{exc!s} {diag}".lower()
-        if "uq_redeem_code_user" in msg:
+        constraint_name = _integrity_constraint_name(exc)
+        if constraint_name in _REDEMPTION_REPLAY_CONSTRAINTS:
             existing = await _redemption_out_for_usage(
                 db,
                 user_id=user.id,
@@ -1702,6 +1726,10 @@ async def redeem_code(
                     user.id, idempotency_key, request_hash, existing
                 )
                 return existing
+        # Only treat the per-user-redeem unique constraint as CODE_ALREADY_USED.
+        # Other constraint violations (FK, wallet_tx without a completed usage
+        # row, etc.) bubble as 500 so misattribution doesn't mask real bugs.
+        if constraint_name == _REDEMPTION_ALREADY_USED_CONSTRAINT:
             raise _http(
                 "CODE_ALREADY_USED",
                 "this code was already used by this user",
@@ -2560,6 +2588,17 @@ async def admin_adjust_wallet(
     if target.account_mode != "wallet":
         raise _http("ACCOUNT_NOT_WALLET", "target user is not a wallet account", 409)
     amount = _rmb_to_micro_or_422(body.amount_rmb_signed, field="amount_rmb_signed")
+    if abs(amount) > MAX_ADMIN_ADJUST_MICRO:
+        raise _http(
+            "amount_too_large",
+            "admin wallet adjustment exceeds the per-operation limit",
+            422,
+            max_amount_micro=MAX_ADMIN_ADJUST_MICRO,
+        )
+    allow_negative = await _allow_negative_balance(db)
+    min_balance_micro = (
+        -MAX_ADMIN_NEGATIVE_BALANCE_MICRO if allow_negative and amount < 0 else None
+    )
     try:
         tx = await billing_core.adjust(
             db,
@@ -2567,9 +2606,17 @@ async def admin_adjust_wallet(
             amount,
             admin_id=admin.id,
             reason=body.reason,
-            allow_negative=await _allow_negative_balance(db),
+            allow_negative=allow_negative,
+            min_balance_micro=min_balance_micro,
         )
     except billing_core.BillingError as exc:
+        if exc.code == "negative_balance_limit_exceeded":
+            raise _http(
+                exc.code,
+                exc.message,
+                exc.status_code,
+                max_negative_balance_micro=MAX_ADMIN_NEGATIVE_BALANCE_MICRO,
+            ) from exc
         raise _billing_http(exc)
     await write_audit(
         db,

@@ -7,6 +7,8 @@ import pytest
 
 from lumen_core.url_security import (
     assert_public_http_target,
+    is_forbidden_ip,
+    is_private_host,
     resolve_public_http_target,
 )
 
@@ -14,6 +16,21 @@ from lumen_core.url_security import (
 def _addrinfo(ip: str, port: int = 443) -> tuple[Any, ...]:
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
     return (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))
+
+
+def test_private_host_rejects_ipv4_mapped_ipv6_loopback() -> None:
+    assert is_forbidden_ip("::ffff:127.0.0.1")
+    assert is_forbidden_ip("::ffff:169.254.169.254")
+    assert is_private_host("::ffff:10.0.0.1")
+
+
+def test_private_host_rejects_legacy_ipv4_spellings() -> None:
+    assert is_private_host("127.1")
+    assert is_private_host("0177.0.0.1")
+    assert is_private_host("0x7f.0.0.1")
+    assert is_private_host("2130706433")
+    assert is_private_host("010.010.010.010")
+    assert not is_private_host("93.184.216.34")
 
 
 @pytest.mark.asyncio
@@ -74,3 +91,18 @@ async def test_assert_public_http_target_rejects_private_rebound_resolution(
 
     with pytest.raises(ValueError, match="private address"):
         await assert_public_http_target("https://rebind.example/v1")
+
+
+@pytest.mark.asyncio
+async def test_assert_public_http_target_rejects_ipv4_mapped_rebound_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_getaddrinfo(
+        _host: str, port: int, *_args: Any, **_kwargs: Any
+    ) -> list[tuple[Any, ...]]:
+        return [_addrinfo("::ffff:127.0.0.1", port)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="private address"):
+        await assert_public_http_target("https://mapped-rebind.example/v1")

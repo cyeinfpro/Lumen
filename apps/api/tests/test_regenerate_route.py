@@ -243,6 +243,23 @@ async def test_mask_image_id_from_target_preserves_alive_mask() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mask_image_id_from_target_does_not_scan_later_generations() -> None:
+    first = SimpleNamespace(mask_image_id=None)
+    second = SimpleNamespace(mask_image_id="mask-2")
+    db = _Db([_Result(all_values=[first, second])])
+
+    out = await regenerate._mask_image_id_from_target(
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        target_msg_id="assistant-old",
+    )
+
+    assert out is None
+    assert len(db.statements) == 1
+
+
+@pytest.mark.asyncio
 async def test_regenerate_rejects_image_to_image_without_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -508,10 +508,13 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append((user_id, db.committed))
 
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
     monkeypatch.setattr(tasks, "get_redis", lambda: redis)
     monkeypatch.setattr(tasks, "publish_sse_event", fake_publish_sse_event)
     monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
-    monkeypatch.setattr(tasks, "_task_wallet_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tasks, "_task_wallet_exists", wallet_exists)
     monkeypatch.setattr(tasks, "invalidate_balance_cache", invalidate_balance_cache)
     gen = SimpleNamespace(
         id="gen-1",
@@ -614,6 +617,49 @@ async def test_cancel_queued_generation_skips_wallet_release_for_byok(
 
 
 @pytest.mark.asyncio
+async def test_cancel_queued_generation_releases_wallet_hold_for_wallet_user_when_wallet_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+
+    async def fake_publish_sse_event(*_args: Any, **_kwargs: Any) -> str:
+        return "sse-1"
+
+    async def release_queued_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def invalidate_balance_cache(_user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(tasks, "publish_sse_event", fake_publish_sse_event)
+    monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
+    monkeypatch.setattr(tasks, "_task_wallet_exists", wallet_exists)
+    monkeypatch.setattr(tasks, "invalidate_balance_cache", invalidate_balance_cache)
+    gen = SimpleNamespace(
+        id="gen-1",
+        user_id="user-1",
+        message_id="msg-1",
+        status=GenerationStatus.QUEUED.value,
+        finished_at=None,
+    )
+    db = _Db([_Result(gen)])
+
+    out = await tasks.cancel_generation(
+        "gen-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": GenerationStatus.CANCELED.value}
+    assert released == ["called"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_queued_completion_releases_wallet_hold_after_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,9 +692,12 @@ async def test_cancel_queued_completion_releases_wallet_hold_after_commit(
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append((user_id, db.committed))
 
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
     monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
     monkeypatch.setattr(tasks, "invalidate_balance_cache", invalidate_balance_cache)
-    monkeypatch.setattr(tasks, "_task_wallet_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tasks, "_task_wallet_exists", wallet_exists)
 
     out = await tasks.cancel_completion(
         "comp-1",
@@ -693,8 +742,12 @@ async def test_cancel_queued_completion_skips_wallet_release_for_byok(
     async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
+    async def invalidate_balance_cache(_user_id: str) -> None:
+        return None
+
     monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
     monkeypatch.setattr(tasks, "_task_wallet_exists", wallet_exists)
+    monkeypatch.setattr(tasks, "invalidate_balance_cache", invalidate_balance_cache)
 
     out = await tasks.cancel_completion(
         "comp-1",
@@ -704,6 +757,42 @@ async def test_cancel_queued_completion_skips_wallet_release_for_byok(
 
     assert out == {"status": CompletionStatus.CANCELED.value}
     assert released == []
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_completion_releases_wallet_hold_for_wallet_user_when_wallet_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+    monkeypatch.setattr(tasks, "get_redis", lambda: _Redis())
+    comp = SimpleNamespace(
+        id="comp-1",
+        user_id="user-1",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage=CompletionStage.QUEUED.value,
+        finished_at=None,
+    )
+    db = _Db([_Result(comp)])
+
+    async def release_queued_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
+    monkeypatch.setattr(tasks, "_task_wallet_exists", wallet_exists)
+
+    out = await tasks.cancel_completion(
+        "comp-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": CompletionStatus.CANCELED.value}
+    assert released == ["called"]
     assert db.committed is True
 
 

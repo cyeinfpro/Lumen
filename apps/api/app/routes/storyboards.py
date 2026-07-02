@@ -157,7 +157,9 @@ def _video_url(video_id: str | None) -> str | None:
     return f"/api/videos/{video_id}/binary" if video_id else None
 
 
-def _video_poster_url(video_id: str | None, poster_storage_key: str | None) -> str | None:
+def _video_poster_url(
+    video_id: str | None, poster_storage_key: str | None
+) -> str | None:
     return f"/api/videos/{video_id}/poster" if video_id and poster_storage_key else None
 
 
@@ -169,6 +171,7 @@ def _clear_shot_video_output(out_json: dict[str, Any]) -> dict[str, Any]:
         "video_status",
         "video_progress_stage",
         "video_progress_pct",
+        "video_submission",
     ):
         cleaned.pop(key, None)
     return cleaned
@@ -506,14 +509,20 @@ async def _get_run(
     return run
 
 
-async def _load_steps(db: AsyncSession, run_id: str) -> list[WorkflowStep]:
-    rows = (
-        await db.execute(
-            select(WorkflowStep)
-            .where(WorkflowStep.workflow_run_id == run_id)
-            .order_by(WorkflowStep.created_at.asc(), WorkflowStep.id.asc())
-        )
-    ).scalars()
+async def _load_steps(
+    db: AsyncSession,
+    run_id: str,
+    *,
+    lock: bool = False,
+) -> list[WorkflowStep]:
+    stmt = (
+        select(WorkflowStep)
+        .where(WorkflowStep.workflow_run_id == run_id)
+        .order_by(WorkflowStep.created_at.asc(), WorkflowStep.id.asc())
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    rows = (await db.execute(stmt)).scalars()
     return list(rows.all())
 
 
@@ -593,9 +602,13 @@ def _asset_out(step: WorkflowStep) -> StoryboardAssetOut:
             if isinstance(out.get("approved_at"), str)
             else _iso(step.approved_at)
         ),
-        error_code=out.get("error_code") if isinstance(out.get("error_code"), str) else None,
+        error_code=out.get("error_code")
+        if isinstance(out.get("error_code"), str)
+        else None,
         error_message=(
-            out.get("error_message") if isinstance(out.get("error_message"), str) else None
+            out.get("error_message")
+            if isinstance(out.get("error_message"), str)
+            else None
         ),
         created_at=step.created_at,
         updated_at=step.updated_at,
@@ -630,6 +643,75 @@ def _shot_source_hash(shot: WorkflowStep, assets_by_id: dict[str, WorkflowStep])
     return _short_hash(payload)
 
 
+def _storyboard_video_submission_fingerprint(
+    *,
+    step: WorkflowStep,
+    keyframe_image_id: str,
+) -> str:
+    inp = dict(step.input_json or {})
+    out = dict(step.output_json or {})
+    return _short_hash(
+        {
+            "keyframe_generation_id": out.get("keyframe_generation_id"),
+            "keyframe_image_id": keyframe_image_id,
+            "keyframe_source_hash": inp.get("keyframe_source_hash"),
+        }
+    )
+
+
+def _new_storyboard_video_idempotency_key(
+    *,
+    run_id: str,
+    step_id: str,
+    submission_fingerprint: str,
+) -> str:
+    token = _short_hash(
+        {
+            "run_id": run_id,
+            "step_id": step_id,
+            "submission_fingerprint": submission_fingerprint,
+            "nonce": new_uuid7(),
+        }
+    )[:16]
+    return f"sb:{run_id}:{step_id}:v:{token}"[:96]
+
+
+def _resolve_storyboard_video_idempotency_key(
+    *,
+    run_id: str,
+    step: WorkflowStep,
+    keyframe_image_id: str,
+    requested_key: str | None,
+) -> tuple[str, str]:
+    submission_fingerprint = _storyboard_video_submission_fingerprint(
+        step=step,
+        keyframe_image_id=keyframe_image_id,
+    )
+    if requested_key:
+        return requested_key[:96], submission_fingerprint
+    out = dict(step.output_json or {})
+    submission = (
+        out.get("video_submission")
+        if isinstance(out.get("video_submission"), dict)
+        else {}
+    )
+    existing_key = submission.get("idempotency_key")
+    if (
+        submission.get("fingerprint") == submission_fingerprint
+        and isinstance(existing_key, str)
+        and existing_key
+    ):
+        return existing_key[:96], submission_fingerprint
+    return (
+        _new_storyboard_video_idempotency_key(
+            run_id=run_id,
+            step_id=step.id,
+            submission_fingerprint=submission_fingerprint,
+        ),
+        submission_fingerprint,
+    )
+
+
 def _shot_out(
     step: WorkflowStep,
     *,
@@ -655,25 +737,35 @@ def _shot_out(
         if isinstance(inp.get("keyframe_source_hash"), str)
         else None
     )
-    keyframe_stale = bool(keyframe_image_id and stored_source_hash != current_source_hash)
+    keyframe_stale = bool(
+        keyframe_image_id and stored_source_hash != current_source_hash
+    )
     video_generation = (
         video_generations.get(video_generation_id) if video_generation_id else None
     )
-    video = videos_by_generation.get(video_generation_id) if video_generation_id else None
+    video = (
+        videos_by_generation.get(video_generation_id) if video_generation_id else None
+    )
     return StoryboardShotOut(
         id=step.id,
         index=int(inp.get("index") or 0),
-        title=_clean_text(str(inp.get("title") or ""), max_len=160, default="未命名分镜"),
+        title=_clean_text(
+            str(inp.get("title") or ""), max_len=160, default="未命名分镜"
+        ),
         purpose=_clean_text(str(inp.get("purpose") or ""), max_len=1000),
         narration=_clean_text(str(inp.get("narration") or ""), max_len=2000),
         visual=_clean_text(str(inp.get("visual") or ""), max_len=2000),
         shot_type=_clean_text(str(inp.get("shot_type") or ""), max_len=80),
         camera_move=_clean_text(str(inp.get("camera_move") or ""), max_len=80),
         transition=_clean_text(str(inp.get("transition") or ""), max_len=80),
-        reference_notes=_clean_text(str(inp.get("reference_notes") or ""), max_len=2000),
+        reference_notes=_clean_text(
+            str(inp.get("reference_notes") or ""), max_len=2000
+        ),
         duration_s=int(inp.get("duration_s") or STORYBOARD_DEFAULT_DURATION_S),
         asset_ids=_clean_string_list(inp.get("asset_ids") or []),
-        keyframe_prompt=_clean_text(str(inp.get("keyframe_prompt") or ""), max_len=MAX_PROMPT_CHARS),
+        keyframe_prompt=_clean_text(
+            str(inp.get("keyframe_prompt") or ""), max_len=MAX_PROMPT_CHARS
+        ),
         keyframe_source_hash=stored_source_hash,
         current_source_hash=current_source_hash,
         keyframe_stale=keyframe_stale,
@@ -700,9 +792,13 @@ def _shot_out(
         video_progress_pct=(
             video_generation.progress_pct if video_generation is not None else None
         ),
-        error_code=out.get("error_code") if isinstance(out.get("error_code"), str) else None,
+        error_code=out.get("error_code")
+        if isinstance(out.get("error_code"), str)
+        else None,
         error_message=(
-            out.get("error_message") if isinstance(out.get("error_message"), str) else None
+            out.get("error_message")
+            if isinstance(out.get("error_message"), str)
+            else None
         ),
         created_at=step.created_at,
         updated_at=step.updated_at,
@@ -710,7 +806,7 @@ def _shot_out(
 
 
 async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
-    steps = await _load_steps(db, run.id)
+    steps = await _load_steps(db, run.id, lock=True)
     generation_ids = {
         task_id
         for step in steps
@@ -722,6 +818,29 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
         for out in (dict(step.output_json or {}) for step in steps)
         if isinstance(out.get("video_generation_id"), str)
     }
+    recovered_video_generations = await _recover_storyboard_video_generations(
+        db, run=run, steps=steps
+    )
+    changed = False
+    if recovered_video_generations:
+        for step in steps:
+            if _step_kind(step) != "shot":
+                continue
+            out = dict(step.output_json or {})
+            if isinstance(out.get("video_generation_id"), str):
+                continue
+            recovered = recovered_video_generations.get(step.step_key)
+            if recovered is None:
+                continue
+            out["video_generation_id"] = recovered.id
+            step.output_json = out
+            step.task_ids = _clean_string_list([*(step.task_ids or []), recovered.id])
+            if _rank_status(step.status) >= _rank_status(
+                "keyframe_approved"
+            ) and _rank_status(step.status) < _rank_status("generating"):
+                step.status = "generating"
+            video_generation_ids.add(recovered.id)
+            changed = True
     generations: dict[str, Generation] = {}
     if generation_ids:
         rows = (
@@ -745,7 +864,10 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
             )
         ).scalars()
         for image in rows.all():
-            if image.owner_generation_id and image.owner_generation_id not in images_by_generation:
+            if (
+                image.owner_generation_id
+                and image.owner_generation_id not in images_by_generation
+            ):
                 images_by_generation[image.owner_generation_id] = image
 
     video_generations: dict[str, VideoGeneration] = {}
@@ -775,19 +897,28 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
             if row.owner_generation_id is not None
         }
 
-    changed = False
     for step in steps:
         kind = _step_kind(step)
         out = dict(step.output_json or {})
         if kind == "asset":
             generation_id = out.get("generation_id")
-            gen = generations.get(generation_id) if isinstance(generation_id, str) else None
+            gen = (
+                generations.get(generation_id)
+                if isinstance(generation_id, str)
+                else None
+            )
             if gen is None:
                 continue
             image = images_by_generation.get(gen.id)
             if gen.status == GenerationStatus.SUCCEEDED.value and image is not None:
                 if out.get("image_id") != image.id or step.status == "generating":
-                    out.update({"image_id": image.id, "error_code": None, "error_message": None})
+                    out.update(
+                        {
+                            "image_id": image.id,
+                            "error_code": None,
+                            "error_message": None,
+                        }
+                    )
                     step.output_json = out
                     step.image_ids = [image.id]
                     if step.status == "generating":
@@ -801,7 +932,8 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                     out.update(
                         {
                             "error_code": gen.error_code or gen.status,
-                            "error_message": gen.error_message or "asset generation failed",
+                            "error_message": gen.error_message
+                            or "asset generation failed",
                         }
                     )
                     step.output_json = out
@@ -830,14 +962,19 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                         if step.status == "keyframe_generating":
                             step.status = "keyframe_ready"
                         changed = True
-                elif gen.status in {
-                    GenerationStatus.FAILED.value,
-                    GenerationStatus.CANCELED.value,
-                } and step.status == "keyframe_generating":
+                elif (
+                    gen.status
+                    in {
+                        GenerationStatus.FAILED.value,
+                        GenerationStatus.CANCELED.value,
+                    }
+                    and step.status == "keyframe_generating"
+                ):
                     out.update(
                         {
                             "error_code": gen.error_code or gen.status,
-                            "error_message": gen.error_message or "keyframe generation failed",
+                            "error_message": gen.error_message
+                            or "keyframe generation failed",
                         }
                     )
                     step.output_json = out
@@ -856,25 +993,84 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
             if vg.status == VideoGenerationStatus.SUCCEEDED.value and video is not None:
                 if step.status != "done":
                     step.status = "done"
+                    out.pop("video_submission", None)
                     out.update({"error_code": None, "error_message": None})
                     step.output_json = out
                     changed = True
-            elif vg.status in {
-                VideoGenerationStatus.FAILED.value,
-                VideoGenerationStatus.CANCELED.value,
-                VideoGenerationStatus.EXPIRED.value,
-            } and step.status == "generating":
+            elif (
+                vg.status
+                in {
+                    VideoGenerationStatus.FAILED.value,
+                    VideoGenerationStatus.CANCELED.value,
+                    VideoGenerationStatus.EXPIRED.value,
+                }
+                and step.status == "generating"
+            ):
                 out.update(
                     {
                         "error_code": vg.error_code or vg.status,
                         "error_message": vg.error_message or "video generation failed",
                     }
                 )
+                out.pop("video_submission", None)
                 step.output_json = out
                 step.status = "keyframe_approved"
                 changed = True
     if changed:
         await db.flush()
+
+
+async def _recover_storyboard_video_generations(
+    db: AsyncSession,
+    *,
+    run: WorkflowRun,
+    steps: list[WorkflowStep],
+) -> dict[str, VideoGeneration]:
+    expected_fingerprints: dict[str, str] = {}
+    for step in steps:
+        if _step_kind(step) != "shot":
+            continue
+        out = dict(step.output_json or {})
+        if isinstance(out.get("video_generation_id"), str):
+            continue
+        keyframe_image_id = out.get("keyframe_image_id")
+        if not isinstance(keyframe_image_id, str) or not keyframe_image_id:
+            continue
+        expected_fingerprints[step.step_key] = _storyboard_video_submission_fingerprint(
+            step=step,
+            keyframe_image_id=keyframe_image_id,
+        )
+    if not expected_fingerprints:
+        return {}
+    rows = (
+        await db.execute(
+            select(VideoGeneration)
+            .where(
+                VideoGeneration.user_id == run.user_id,
+                VideoGeneration.upstream_request["workflow_type"].as_string()
+                == STORYBOARD_WORKFLOW_TYPE,
+                VideoGeneration.upstream_request["workflow_run_id"].as_string()
+                == run.id,
+            )
+            .order_by(desc(VideoGeneration.created_at), desc(VideoGeneration.id))
+        )
+    ).scalars()
+    recovered: dict[str, VideoGeneration] = {}
+    for row in rows.all():
+        request = row.upstream_request if isinstance(row.upstream_request, dict) else {}
+        step_key = request.get("workflow_step_key")
+        expected_fingerprint = (
+            expected_fingerprints.get(step_key) if isinstance(step_key, str) else None
+        )
+        if (
+            isinstance(step_key, str)
+            and expected_fingerprint is not None
+            and request.get("storyboard_video_submission_fingerprint")
+            == expected_fingerprint
+            and step_key not in recovered
+        ):
+            recovered[step_key] = row
+    return recovered
 
 
 async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut:
@@ -932,7 +1128,8 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
         key=lambda item: (item.index, item.created_at, item.id),
     )
     asset_outs = sorted(
-        [_asset_out(step) for step in assets], key=lambda item: (item.created_at, item.id)
+        [_asset_out(step) for step in assets],
+        key=lambda item: (item.created_at, item.id),
     )
     md = _default_storyboard_metadata()
     md.update(_run_metadata(run))
@@ -959,12 +1156,18 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
             status=assembly.status,
             video_id=video_id,
             video_url=_video_url(video_id),
-            poster_url=_video_poster_url(video_id, video.poster_storage_key if video else None),
+            poster_url=_video_poster_url(
+                video_id, video.poster_storage_key if video else None
+            ),
             segment_count=len(segment_ids),
             segment_ids=segment_ids,
-            error_code=out.get("error_code") if isinstance(out.get("error_code"), str) else None,
+            error_code=out.get("error_code")
+            if isinstance(out.get("error_code"), str)
+            else None,
             error_message=(
-                out.get("error_message") if isinstance(out.get("error_message"), str) else None
+                out.get("error_message")
+                if isinstance(out.get("error_message"), str)
+                else None
             ),
             updated_at=assembly.updated_at,
         )
@@ -972,8 +1175,22 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
     thumbnail_url = (
         assembly_out.poster_url
         if assembly_out and assembly_out.poster_url
-        else next((shot.keyframe_display_url or shot.keyframe_image_url for shot in shot_outs if shot.keyframe_image_id), None)
-        or next((asset.display_url or asset.image_url for asset in asset_outs if asset.image_id), None)
+        else next(
+            (
+                shot.keyframe_display_url or shot.keyframe_image_url
+                for shot in shot_outs
+                if shot.keyframe_image_id
+            ),
+            None,
+        )
+        or next(
+            (
+                asset.display_url or asset.image_url
+                for asset in asset_outs
+                if asset.image_id
+            ),
+            None,
+        )
     )
 
     return StoryboardRunOut(
@@ -1001,7 +1218,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
     )
 
 
-async def _list_item_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunListItemOut:
+async def _list_item_out(
+    db: AsyncSession, run: WorkflowRun
+) -> StoryboardRunListItemOut:
     out = await _build_run_out(db, run)
     return StoryboardRunListItemOut(
         id=out.id,
@@ -1153,7 +1372,10 @@ async def _create_storyboard_image_task(
             "workflow_run_id": run.id,
             "workflow_step_key": step.step_key,
             "storyboard_purpose": purpose,
-            "input_images": [{"image_id": image_id, "role": "reference"} for image_id in attachment_ids],
+            "input_images": [
+                {"image_id": image_id, "role": "reference"}
+                for image_id in attachment_ids
+            ],
             "primary_input_image_id": attachment_ids[0] if attachment_ids else None,
         },
     )
@@ -1197,9 +1419,7 @@ async def _publish_storyboard_image_tasks(
         return_exceptions=True,
     )
     published = [
-        task
-        for task, result in zip(tasks, results, strict=False)
-        if result is True
+        task for task, result in zip(tasks, results, strict=False) if result is True
     ]
     for result in results:
         if isinstance(result, Exception):
@@ -1330,9 +1550,13 @@ async def _validate_asset_ids(
     found = {row.id: row for row in rows.all() if _step_kind(row) == "asset"}
     missing = [asset_id for asset_id in ids if asset_id not in found]
     if missing:
-        raise _http("invalid_asset_ids", "one or more assets are not in this storyboard", 422)
+        raise _http(
+            "invalid_asset_ids", "one or more assets are not in this storyboard", 422
+        )
     if require_approved:
-        not_ready = [asset_id for asset_id in ids if found[asset_id].status != "approved"]
+        not_ready = [
+            asset_id for asset_id in ids if found[asset_id].status != "approved"
+        ]
         if not_ready:
             raise _http("asset_not_approved", "all bound assets must be approved", 422)
     return ids
@@ -1416,7 +1640,8 @@ async def create_storyboard(
         metadata_jsonb={
             **_default_storyboard_metadata(),
             "style": body.style.strip(),
-            "aspect_ratio": body.aspect_ratio.strip() or STORYBOARD_DEFAULT_ASPECT_RATIO,
+            "aspect_ratio": body.aspect_ratio.strip()
+            or STORYBOARD_DEFAULT_ASPECT_RATIO,
             "resolution": body.resolution.strip() or STORYBOARD_DEFAULT_RESOLUTION,
             "model": body.model.strip() or STORYBOARD_DEFAULT_MODEL,
             "generate_audio": body.generate_audio,
@@ -1482,7 +1707,9 @@ async def get_storyboard(
     return out
 
 
-@router.patch("/{run_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.patch(
+    "/{run_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)]
+)
 async def patch_storyboard(
     run_id: str,
     body: StoryboardPatchIn,
@@ -1529,7 +1756,9 @@ async def patch_storyboard(
         run.status = "in_progress"
     out = await _build_run_out(db, run)
     await db.commit()
-    await _publish_storyboard_event(user.id, run.id, "storyboard.updated", {"run": out.model_dump(mode="json")})
+    await _publish_storyboard_event(
+        user.id, run.id, "storyboard.updated", {"run": out.model_dump(mode="json")}
+    )
     return out
 
 
@@ -1559,7 +1788,11 @@ async def delete_storyboard(
     return {"ok": True}
 
 
-@router.post("/{run_id}/assets", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/assets",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def add_asset(
     run_id: str,
     body: StoryboardAssetCreateIn,
@@ -1589,7 +1822,11 @@ async def add_asset(
     return out
 
 
-@router.patch("/{run_id}/assets/{step_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.patch(
+    "/{run_id}/assets/{step_id}",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def patch_asset(
     run_id: str,
     step_id: str,
@@ -1612,7 +1849,9 @@ async def patch_asset(
         data["revision"] = int(data.get("revision") or 1) + 1
         step.input_json = data
         if step.status == "approved":
-            step.status = "ready" if (step.output_json or {}).get("image_id") else "waiting_input"
+            step.status = (
+                "ready" if (step.output_json or {}).get("image_id") else "waiting_input"
+            )
             step.approved_at = None
             out_json = dict(step.output_json or {})
             out_json.pop("approved_at", None)
@@ -1622,7 +1861,11 @@ async def patch_asset(
     return out
 
 
-@router.post("/{run_id}/assets/{step_id}/generate", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/assets/{step_id}/generate",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def generate_asset(
     run_id: str,
     step_id: str,
@@ -1666,7 +1909,11 @@ async def generate_asset(
     return out
 
 
-@router.post("/{run_id}/assets/{step_id}/approve", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/assets/{step_id}/approve",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def approve_asset(
     run_id: str,
     step_id: str,
@@ -1678,7 +1925,9 @@ async def approve_asset(
     await _sync_storyboard_outputs(db, run)
     out_json = dict(step.output_json or {})
     if not out_json.get("image_id"):
-        raise _http("asset_image_required", "generate an asset image before approval", 422)
+        raise _http(
+            "asset_image_required", "generate an asset image before approval", 422
+        )
     now = _now()
     step.status = "approved"
     step.approved_at = now
@@ -1687,11 +1936,17 @@ async def approve_asset(
     step.output_json = out_json
     out = await _build_run_out(db, run)
     await db.commit()
-    await _publish_storyboard_event(user.id, run.id, "storyboard.asset_ready", {"asset_id": step.id})
+    await _publish_storyboard_event(
+        user.id, run.id, "storyboard.asset_ready", {"asset_id": step.id}
+    )
     return out
 
 
-@router.delete("/{run_id}/assets/{step_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.delete(
+    "/{run_id}/assets/{step_id}",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def delete_asset(
     run_id: str,
     step_id: str,
@@ -1701,10 +1956,14 @@ async def delete_asset(
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     step = await _get_step(db, run, step_id, kind="asset", lock=True)
     await db.delete(step)
-    shots = [s for s in await _load_steps(db, run.id) if _step_kind(s) == "shot"]
+    shots = [
+        s for s in await _load_steps(db, run.id, lock=True) if _step_kind(s) == "shot"
+    ]
     for shot in shots:
         data = dict(shot.input_json or {})
-        asset_ids = [asset_id for asset_id in data.get("asset_ids", []) if asset_id != step_id]
+        asset_ids = [
+            asset_id for asset_id in data.get("asset_ids", []) if asset_id != step_id
+        ]
         if asset_ids != data.get("asset_ids", []):
             data["asset_ids"] = asset_ids
             shot.input_json = data
@@ -1713,7 +1972,11 @@ async def delete_asset(
     return out
 
 
-@router.post("/{run_id}/shots/rebuild", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/rebuild",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def rebuild_shots(
     run_id: str,
     body: StoryboardShotsRebuildIn,
@@ -1728,11 +1991,17 @@ async def rebuild_shots(
         await db.flush()
         existing = []
     md = _run_metadata(run)
-    shots = body.shots if body.shots is not None else _shots_from_script(str(md.get("script") or run.user_prompt))
+    shots = (
+        body.shots
+        if body.shots is not None
+        else _shots_from_script(str(md.get("script") or run.user_prompt))
+    )
     offset = len(existing)
     for idx, item in enumerate(shots, start=1 + offset):
         data = _shot_input_from_body(item, index=idx)
-        data["asset_ids"] = await _validate_asset_ids(db, run, data.get("asset_ids") or [])
+        data["asset_ids"] = await _validate_asset_ids(
+            db, run, data.get("asset_ids") or []
+        )
         step = WorkflowStep(
             workflow_run_id=run.id,
             step_key=_shot_step_key(new_uuid7()),
@@ -1748,7 +2017,11 @@ async def rebuild_shots(
     return out
 
 
-@router.post("/{run_id}/shots", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def add_shot(
     run_id: str,
     body: StoryboardShotCreateIn,
@@ -1773,7 +2046,11 @@ async def add_shot(
     return out
 
 
-@router.patch("/{run_id}/shots/{step_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.patch(
+    "/{run_id}/shots/{step_id}",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def patch_shot(
     run_id: str,
     step_id: str,
@@ -1788,7 +2065,12 @@ async def patch_shot(
     before_hash = _short_hash(step.input_json or {})
     after_hash = _short_hash(data)
     step.input_json = data
-    if before_hash != after_hash and step.status in {"keyframe_ready", "keyframe_approved", "generating", "done"}:
+    if before_hash != after_hash and step.status in {
+        "keyframe_ready",
+        "keyframe_approved",
+        "generating",
+        "done",
+    }:
         step.status = "approved"
         out_json = _clear_shot_video_output(dict(step.output_json or {}))
         out_json.pop("keyframe_approved_at", None)
@@ -1798,7 +2080,11 @@ async def patch_shot(
     return out
 
 
-@router.post("/{run_id}/shots/{step_id}/approve", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/{step_id}/approve",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def approve_shot(
     run_id: str,
     step_id: str,
@@ -1817,7 +2103,11 @@ async def approve_shot(
     return out
 
 
-@router.post("/{run_id}/shots/{step_id}/keyframe", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/{step_id}/keyframe",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def generate_shot_keyframe(
     run_id: str,
     step_id: str,
@@ -1828,7 +2118,9 @@ async def generate_shot_keyframe(
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     step = await _get_step(db, run, step_id, kind="shot", lock=True)
     if _rank_status(step.status) < _rank_status("approved"):
-        raise _http("shot_not_approved", "approve the shot before keyframe generation", 422)
+        raise _http(
+            "shot_not_approved", "approve the shot before keyframe generation", 422
+        )
     asset_ids = await _validate_asset_ids(
         db,
         run,
@@ -1880,7 +2172,11 @@ async def generate_shot_keyframe(
     return out
 
 
-@router.post("/{run_id}/shots/keyframes/generate-all", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/keyframes/generate-all",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def generate_all_keyframes(
     run_id: str,
     user: CurrentUser,
@@ -1888,21 +2184,33 @@ async def generate_all_keyframes(
 ) -> StoryboardRunOut:
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     await _sync_storyboard_outputs(db, run)
-    steps = await _load_steps(db, run.id)
+    steps = await _load_steps(db, run.id, lock=True)
     assets = [step for step in steps if _step_kind(step) == "asset"]
     shots = [step for step in steps if _step_kind(step) == "shot"]
     assets_by_id = {asset.id: asset for asset in assets}
+    not_approved = [
+        shot.id
+        for shot in shots
+        if _rank_status(shot.status) < _rank_status("approved")
+        or shot.status in {"keyframe_generating", "generating"}
+    ]
+    if not_approved:
+        raise _http(
+            "shots_not_approved",
+            "all shots must be approved and idle before batch keyframe generation",
+            422,
+            shot_ids=not_approved,
+        )
     candidates = [
         shot
         for shot in shots
-        if _rank_status(shot.status) >= _rank_status("approved")
-        and (
+        if (
             not dict(shot.output_json or {}).get("keyframe_image_id")
             or dict(shot.input_json or {}).get("keyframe_source_hash")
             != _shot_source_hash(shot, assets_by_id)
         )
     ]
-    tasks: list[tuple[WorkflowStep, StoryboardImageTask]] = []
+    planned: list[tuple[WorkflowStep, list[str], str, str]] = []
     for shot in candidates:
         asset_ids = await _validate_asset_ids(
             db,
@@ -1920,6 +2228,9 @@ async def generate_all_keyframes(
         ]
         source_hash = _shot_source_hash(shot, assets_by_id)
         prompt = _shot_keyframe_prompt(run, shot, assets_by_id, None)
+        planned.append((shot, attachment_ids, source_hash, prompt))
+    tasks: list[tuple[WorkflowStep, StoryboardImageTask]] = []
+    for shot, attachment_ids, source_hash, prompt in planned:
         task = await _create_storyboard_image_task(
             db=db,
             user=user,
@@ -1962,7 +2273,11 @@ async def generate_all_keyframes(
     return out
 
 
-@router.post("/{run_id}/shots/{step_id}/keyframe/approve", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/{step_id}/keyframe/approve",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def approve_keyframe(
     run_id: str,
     step_id: str,
@@ -1979,7 +2294,9 @@ async def approve_keyframe(
     if not out_json.get("keyframe_image_id"):
         raise _http("keyframe_required", "generate a keyframe before approval", 422)
     if inp.get("keyframe_source_hash") != source_hash:
-        raise _http("keyframe_stale", "keyframe is stale; regenerate before approval", 422)
+        raise _http(
+            "keyframe_stale", "keyframe is stale; regenerate before approval", 422
+        )
     now = _now()
     step.status = "keyframe_approved"
     step.approved_at = now
@@ -1988,11 +2305,17 @@ async def approve_keyframe(
     step.output_json = out_json
     out = await _build_run_out(db, run)
     await db.commit()
-    await _publish_storyboard_event(user.id, run.id, "storyboard.keyframe_ready", {"shot_id": step.id})
+    await _publish_storyboard_event(
+        user.id, run.id, "storyboard.keyframe_ready", {"shot_id": step.id}
+    )
     return out
 
 
-@router.post("/{run_id}/shots/{step_id}/submit", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/{step_id}/submit",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def submit_shot(
     run_id: str,
     step_id: str,
@@ -2002,7 +2325,9 @@ async def submit_shot(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StoryboardRunOut:
     if getattr(user, "account_mode", "wallet") != "wallet":
-        raise _http("account_mode_forbidden", "video generation requires wallet mode", 403)
+        raise _http(
+            "account_mode_forbidden", "video generation requires wallet mode", 403
+        )
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     step = await _get_step(db, run, step_id, kind="shot", lock=True)
     await _sync_storyboard_outputs(db, run)
@@ -2012,26 +2337,49 @@ async def submit_shot(
     out_json = dict(step.output_json or {})
     keyframe_id = out_json.get("keyframe_image_id")
     if step.status != "keyframe_approved" or not keyframe_id:
-        raise _http("keyframe_not_approved", "approve the keyframe before video submission", 422)
+        raise _http(
+            "keyframe_not_approved", "approve the keyframe before video submission", 422
+        )
     if inp.get("keyframe_source_hash") != source_hash:
-        raise _http("keyframe_stale", "keyframe is stale; regenerate before submission", 422)
+        raise _http(
+            "keyframe_stale", "keyframe is stale; regenerate before submission", 422
+        )
     md = _run_metadata(run)
-    prompt = (body.prompt or inp.get("keyframe_prompt") or inp.get("visual") or run.user_prompt)
+    prompt = (
+        body.prompt
+        or inp.get("keyframe_prompt")
+        or inp.get("visual")
+        or run.user_prompt
+    )
+    idempotency_key, submission_fingerprint = _resolve_storyboard_video_idempotency_key(
+        run_id=run.id,
+        step=step,
+        keyframe_image_id=str(keyframe_id),
+        requested_key=body.idempotency_key,
+    )
+    out_json["video_submission"] = {
+        "fingerprint": submission_fingerprint,
+        "idempotency_key": idempotency_key,
+        "created_at": _now().isoformat(),
+    }
+    out_json.update({"error_code": None, "error_message": None})
+    step.output_json = out_json
+    step.status = "generating"
+    run.current_step = "videos"
+    await db.flush()
     video_body = VideoCreateIn(
         action="i2v",
         model=str(md.get("model") or STORYBOARD_DEFAULT_MODEL),
         prompt=str(prompt)[:MAX_PROMPT_CHARS],
         input_image_id=str(keyframe_id),
-        duration_s=body.duration_s or int(inp.get("duration_s") or STORYBOARD_DEFAULT_DURATION_S),
+        duration_s=body.duration_s
+        or int(inp.get("duration_s") or STORYBOARD_DEFAULT_DURATION_S),
         resolution=str(md.get("resolution") or STORYBOARD_DEFAULT_RESOLUTION),
         aspect_ratio=str(md.get("aspect_ratio") or STORYBOARD_DEFAULT_ASPECT_RATIO),
         generate_audio=bool(md.get("generate_audio", True)),
         seed=md.get("seed") if isinstance(md.get("seed"), int) else None,
         watermark=False,
-        idempotency_key=(
-            body.idempotency_key
-            or f"storyboard:{run.id}:{step.id}:video:{inp.get('keyframe_source_hash')}"
-        )[:96],
+        idempotency_key=idempotency_key,
     )
     video_out = await _create_video_generation_record(
         db,
@@ -2043,6 +2391,8 @@ async def submit_shot(
             "workflow_run_id": run.id,
             "workflow_step_key": step.step_key,
             "storyboard_purpose": "shot_video",
+            "storyboard_keyframe_image_id": str(keyframe_id),
+            "storyboard_video_submission_fingerprint": submission_fingerprint,
             "source": "storyboard",
             "action_source": "storyboard_video",
         },
@@ -2069,7 +2419,11 @@ async def submit_shot(
     return out
 
 
-@router.post("/{run_id}/shots/submit-all", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/submit-all",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def submit_all_shots(
     run_id: str,
     request: Request,
@@ -2081,7 +2435,9 @@ async def submit_all_shots(
     candidates = [
         shot
         for shot in out.shots
-        if shot.status == "keyframe_approved" and shot.keyframe_image_id and not shot.keyframe_stale
+        if shot.status == "keyframe_approved"
+        and shot.keyframe_image_id
+        and not shot.keyframe_stale
     ]
     for shot in candidates:
         await submit_shot(run_id, shot.id, StoryboardSubmitShotIn(), request, user, db)
@@ -2091,7 +2447,11 @@ async def submit_all_shots(
     return out
 
 
-@router.post("/{run_id}/assemble", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/assemble",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def assemble_storyboard(
     run_id: str,
     user: CurrentUser,
@@ -2106,7 +2466,12 @@ async def assemble_storyboard(
         raise _http("shots_required", "create shots before assembly", 422)
     not_done = [shot.id for shot in shots if shot.status != "done"]
     if not_done:
-        raise _http("shots_not_done", "all shots must be done before assembly", 422, shot_ids=not_done)
+        raise _http(
+            "shots_not_done",
+            "all shots must be done before assembly",
+            422,
+            shot_ids=not_done,
+        )
     ordered = sorted(shots, key=lambda s: int((s.input_json or {}).get("index") or 0))
     segment_ids = [
         str((shot.output_json or {}).get("video_generation_id"))
@@ -2114,7 +2479,9 @@ async def assemble_storyboard(
         if (shot.output_json or {}).get("video_generation_id")
     ]
     if len(segment_ids) != len(ordered):
-        raise _http("segment_missing", "one or more shots are missing generated video ids", 422)
+        raise _http(
+            "segment_missing", "one or more shots are missing generated video ids", 422
+        )
     assembly = await _assembly_step(db, run)
     assembly.status = "compositing"
     assembly.output_json = {
@@ -2147,7 +2514,9 @@ async def assemble_storyboard(
             _job_id=arq_job_id("storyboard_assembly", run.id, payload.get("outbox_id")),
         )
     except Exception:
-        logger.warning("storyboard assembly enqueue failed run=%s", run.id, exc_info=True)
+        logger.warning(
+            "storyboard assembly enqueue failed run=%s", run.id, exc_info=True
+        )
     await _publish_storyboard_event(
         user.id,
         run.id,
@@ -2157,7 +2526,11 @@ async def assemble_storyboard(
     return out
 
 
-@router.delete("/{run_id}/shots/{step_id}", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.delete(
+    "/{run_id}/shots/{step_id}",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def delete_shot(
     run_id: str,
     step_id: str,
@@ -2175,7 +2548,11 @@ async def delete_shot(
     return out
 
 
-@router.post("/{run_id}/shots/{step_id}/move", response_model=StoryboardRunOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{run_id}/shots/{step_id}/move",
+    response_model=StoryboardRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def move_shot(
     run_id: str,
     step_id: str,
@@ -2186,7 +2563,10 @@ async def move_shot(
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     target = await _get_step(db, run, step_id, kind="shot", lock=True)
     shots = [s for s in await _load_steps(db, run.id) if _step_kind(s) == "shot"]
-    ordered = sorted(shots, key=lambda s: (int((s.input_json or {}).get("index") or 0), s.created_at, s.id))
+    ordered = sorted(
+        shots,
+        key=lambda s: (int((s.input_json or {}).get("index") or 0), s.created_at, s.id),
+    )
     pos = next((idx for idx, shot in enumerate(ordered) if shot.id == target.id), -1)
     new_pos = pos + body.direction
     if pos < 0 or new_pos < 0 or new_pos >= len(ordered):

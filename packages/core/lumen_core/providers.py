@@ -504,10 +504,18 @@ def _attach_provider_proxies(
         proxy = None
         if provider.proxy_name:
             proxy = proxy_by_name.get(provider.proxy_name)
-            if proxy is None:
+            if proxy is None and provider.enabled:
                 errors.append(
                     f"provider {provider.name}: proxy {provider.proxy_name} not found"
                 )
+            elif proxy is not None and not proxy.enabled:
+                if not provider.enabled:
+                    proxy = None
+                else:
+                    errors.append(
+                        f"provider {provider.name}: proxy {provider.proxy_name} is disabled"
+                    )
+                    proxy = None
         result.append(replace(provider, proxy=proxy))
     return result, errors
 
@@ -953,14 +961,16 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
                 env.setdefault("DISPLAY", "localhost:0")
                 env["LUMEN_SSH_PASSWORD_FILE"] = str(password_file)
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
+            proc: asyncio.subprocess.Process | None = None
+            tunnel_started = False
             try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
                 for _ in range(_SSH_TUNNEL_READY_CHECKS):
                     if proc.returncode is not None:
                         stderr = await _read_process_stderr(proc)
@@ -971,16 +981,17 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
                     if await _local_port_accepts(local_port):
                         url = f"socks5h://127.0.0.1:{local_port}"
                         _SSH_TUNNELS[key] = _SshTunnel(url=url, process=proc)
+                        tunnel_started = True
                         return url
                     await asyncio.sleep(0.1)
                 else:
                     stderr = await _read_process_stderr(proc)
                     last_error = f"timed out waiting for local SOCKS port: {stderr}".strip()
             finally:
+                if proc is not None and not tunnel_started:
+                    await _terminate_process(proc)
                 _unlink_quietly(askpass_path)
                 _unlink_quietly(password_file)
-
-            await _terminate_process(proc)
 
         raise RuntimeError(
             f"ssh proxy {proxy.name} failed to start after "

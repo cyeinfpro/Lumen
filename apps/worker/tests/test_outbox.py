@@ -254,6 +254,36 @@ async def test_publish_outbox_keeps_event_retryable_when_enqueue_fails(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_increment_outbox_fail_count_sets_expiry_atomically() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.eval_args: tuple[object, ...] | None = None
+
+        async def eval(self, *args: object) -> int:
+            self.eval_args = args
+            return 2
+
+        async def hincrby(self, *_args: object) -> int:
+            raise AssertionError("fail count must not use non-atomic HINCRBY")
+
+        async def expire(self, *_args: object) -> bool:
+            raise AssertionError("fail count must not use separate EXPIRE")
+
+    redis = Redis()
+
+    count = await outbox._increment_outbox_fail_count(redis, "event-1")  # noqa: SLF001
+
+    assert count == 2
+    assert redis.eval_args == (
+        outbox._INCR_FAIL_COUNT_LUA,  # noqa: SLF001
+        1,
+        outbox._OUTBOX_FAIL_COUNT_HASH,  # noqa: SLF001
+        "event-1",
+        str(outbox._OUTBOX_FAIL_COUNT_TTL_S),  # noqa: SLF001
+    )
+
+
+@pytest.mark.asyncio
 async def test_publish_outbox_writes_dedupe_only_after_commit(monkeypatch):
     class _CommitFailSession(FakeSession):
         async def __aexit__(self, *exc_info):

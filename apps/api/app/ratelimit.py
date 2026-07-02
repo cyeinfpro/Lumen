@@ -164,15 +164,10 @@ class RateLimiter:
                 str(self.initial_tokens if self.initial_tokens is not None else cost),
             )
         except Exception as exc:
-            # always_on 限流（公开端点防刷）总是 fail-closed，避免 dev 漏放被刷。
-            # dev 下其他限流保留 fail-open 但 ERROR 级别日志方便定位。
-            if is_dev and not _is_test_env() and not self.always_on:
-                logger.error(
-                    "rate limiter redis failure (dev/local fail-open) key=%s err=%r",
-                    key,
-                    exc,
-                )
-                return
+            # If a non-always-on limiter is disabled in local/dev, we return
+            # before touching Redis above. Reaching this block means the limiter
+            # is intentionally active, so Redis failures are fail-closed in every
+            # environment.
             logger.error(
                 "rate limiter redis failure (fail-closed) key=%s err=%r",
                 key,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 
 import httpx
@@ -26,6 +27,9 @@ from app.video_upstream import (
     adapter_for_provider,
 )
 from lumen_core.video_providers import VideoProviderDefinition
+
+
+_PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
 
 
 @pytest.mark.asyncio
@@ -977,7 +981,7 @@ async def test_volcano_newapi_fetch_content_uses_bearer_and_redirects(
         "resolve_public_http_target",
         fake_resolve_public_target,
     )
-    adapter._raw_client = lambda: httpx.AsyncClient(  # type: ignore[method-assign]
+    adapter._raw_client = lambda _target=None: httpx.AsyncClient(  # type: ignore[method-assign]
         transport=httpx.MockTransport(handler),
         follow_redirects=False,
     )
@@ -991,6 +995,56 @@ async def test_volcano_newapi_fetch_content_uses_bearer_and_redirects(
         "zz1cc.cc.cd",
         "cdn.example.com",
     ]
+
+
+@pytest.mark.asyncio
+async def test_volcano_newapi_fetch_result_uses_pinned_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="newapi",
+        kind="volcano_newapi",
+        base_url="https://zz1cc.cc.cd",
+        api_key="sk-test",
+        models={"video-ds-2.0-fast:t2v": "video-ds-2.0-fast"},
+    )
+    adapter = VolcanoNewApiVideoAdapter(provider)
+    pinned_targets: list[object] = []
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        assert allow_http is True
+        return SimpleNamespace(url=raw_url, resolved_ips=("93.184.216.34",))
+
+    def fake_pinned_transport(target: object) -> httpx.MockTransport:
+        pinned_targets.append(target)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "video/mp4"},
+                content=b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom",
+                request=request,
+            )
+
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    monkeypatch.setattr(
+        video_upstream_module,
+        "pinned_async_http_transport",
+        fake_pinned_transport,
+    )
+
+    data = await adapter.fetch_result(
+        "https://zz1cc.cc.cd/v1/videos/newapi-task-1/content"
+    )
+
+    assert data.startswith(b"\x00\x00\x00\x18ftyp")
+    assert len(pinned_targets) == 1
 
 
 @pytest.mark.asyncio
@@ -1138,6 +1192,181 @@ async def test_unified_video_create_retries_string_invalid_url_error() -> None:
 async def test_fetch_video_url_rejects_private_targets_before_fetch() -> None:
     with pytest.raises(VideoUpstreamError) as excinfo:
         await _fetch_video_url_bytes("http://127.0.0.1/internal.mp4")
+
+    assert excinfo.value.error_code == "invalid_input"
+    assert excinfo.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_url_as_data_url_resolves_target_and_disables_env_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    real_async_client = video_upstream_module.httpx.AsyncClient
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        seen["resolved"] = (raw_url, allow_http)
+        return SimpleNamespace(url="https://cdn.example.com/ref.png")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request_url"] = str(request.url)
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "image/png",
+                "content-length": str(len(_PNG_BYTES)),
+            },
+            content=_PNG_BYTES,
+            request=request,
+        )
+
+    def fake_async_client(**kwargs):
+        seen["client_kwargs"] = kwargs
+        return real_async_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    monkeypatch.setattr(video_upstream_module.httpx, "AsyncClient", fake_async_client)
+
+    result = await video_upstream_module._fetch_image_url_as_data_url(
+        "https://lumen.example/ref.png",
+        field="reference_image",
+        fallback_mime="image/jpeg",
+    )
+
+    assert seen["resolved"] == ("https://lumen.example/ref.png", True)
+    assert seen["request_url"] == "https://cdn.example.com/ref.png"
+    assert seen["client_kwargs"]["trust_env"] is False
+    assert seen["client_kwargs"]["follow_redirects"] is False
+    assert result == (
+        "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode("ascii")
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_url_as_data_url_rejects_oversized_content_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_async_client = video_upstream_module.httpx.AsyncClient
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        return SimpleNamespace(url=raw_url)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "image/png",
+                "content-length": str(
+                    video_upstream_module._OMNI_FALLBACK_IMAGE_MAX_BYTES + 1
+                ),
+            },
+            content=_PNG_BYTES,
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    monkeypatch.setattr(
+        video_upstream_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await video_upstream_module._fetch_image_url_as_data_url(
+            "https://cdn.example.com/too-large.png",
+            field="reference_image",
+        )
+
+    assert excinfo.value.error_code == "invalid_input"
+    assert excinfo.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_url_as_data_url_rejects_non_image_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_async_client = video_upstream_module.httpx.AsyncClient
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        return SimpleNamespace(url=raw_url)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"<html>not an image</html>",
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    monkeypatch.setattr(
+        video_upstream_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await video_upstream_module._fetch_image_url_as_data_url(
+            "https://cdn.example.com/error.html",
+            field="reference_image",
+            fallback_mime="image/jpeg",
+        )
+
+    assert excinfo.value.error_code == "invalid_input"
+    assert excinfo.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_url_as_data_url_rejects_non_image_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_async_client = video_upstream_module.httpx.AsyncClient
+
+    async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
+        return SimpleNamespace(url=raw_url)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/png"},
+            content=b"not actually a png",
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        video_upstream_module,
+        "resolve_public_http_target",
+        fake_resolve_public_target,
+    )
+    monkeypatch.setattr(
+        video_upstream_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await video_upstream_module._fetch_image_url_as_data_url(
+            "https://cdn.example.com/fake.png",
+            field="reference_image",
+        )
 
     assert excinfo.value.error_code == "invalid_input"
     assert excinfo.value.status_code == 422

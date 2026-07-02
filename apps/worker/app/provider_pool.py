@@ -160,6 +160,7 @@ class ProviderHealth:
     image_consecutive_failures: int = 0
     image_cooldown_until: float | None = None
     image_last_used_at: float | None = None
+    image_last_attempted_at: float | None = None
     # OpenAI 上游 429 / quota 触发的硬冷却（按 retry-after 头设置）
     image_rate_limited_until: float | None = None
     # image-job per-endpoint 统计（仅 image_jobs 路由用到；其他路径不影响）
@@ -172,6 +173,7 @@ class ProviderHealth:
     # 成功后污染 generations lane 的排序（典型坏果：generations 流量长期堆在
     # 某个 priority=0 / 永远 None 的号上）。
     image_last_used_at_per_ek: dict[str, float] = field(default_factory=dict)
+    image_last_attempted_at_per_ek: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -424,9 +426,12 @@ class ProviderPool:
 
             for p in ordered:
                 h = self._health.get(p.name)
-                if h is None or not self._is_open(h, now):
+                with self._stats_lock:
+                    is_open = False if h is None else self._is_open(h, now)
+                    cooldown_until = None if h is None else h.cooldown_until
+                if h is None or not is_open:
                     healthy.append(p)
-                elif h.cooldown_until is not None and now >= h.cooldown_until:
+                elif cooldown_until is not None and now >= cooldown_until:
                     half_open.append(p)
                 else:
                     circuit_open.append(p)
@@ -719,20 +724,31 @@ class ProviderPool:
             if p.name in avoided:
                 skipped.append((p.name, "avoided_from_previous_attempt"))
                 continue
-            if self._is_open(h, now):
+            with self._stats_lock:
+                text_circuit_open = self._is_open(h, now)
+                image_cooldown_until = h.image_cooldown_until
+                image_rate_limited_until = h.image_rate_limited_until
+                inflight = h.image_inflight.get(endpoint_kind or "", 0)
+                # Attempts include failures and in-flight starts. They keep a
+                # never-successful but just-tried account from being selected
+                # over and over when all providers otherwise tie.
+                ek_key = endpoint_kind or ""
+                last_attempted = h.image_last_attempted_at_per_ek.get(ek_key)
+                last_used = h.image_last_used_at_per_ek.get(ek_key)
+            if text_circuit_open:
                 skipped.append((p.name, "text_circuit_open"))
                 continue
             if (
                 not ignore_cooldown
-                and h.image_cooldown_until is not None
-                and now < h.image_cooldown_until
+                and image_cooldown_until is not None
+                and now < image_cooldown_until
             ):
                 skipped.append((p.name, "image_cooldown"))
                 continue
             if (
                 not ignore_cooldown
-                and h.image_rate_limited_until is not None
-                and now < h.image_rate_limited_until
+                and image_rate_limited_until is not None
+                and now < image_rate_limited_until
             ):
                 skipped.append((p.name, "image_rate_limited"))
                 continue
@@ -758,22 +774,26 @@ class ProviderPool:
                 retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
             if not allowed:
                 # 缓存到 image_rate_limited_until，避免下次选号再查 Redis
-                h.image_rate_limited_until = now + max(1.0, retry_after)
+                with self._stats_lock:
+                    h.image_rate_limited_until = now + max(1.0, retry_after)
                 skipped.append(
                     (p.name, f"quota_exhausted retry_after={retry_after:.0f}s")
                 )
                 continue
-            ek_key = endpoint_kind or ""
-            with self._stats_lock:
-                inflight = h.image_inflight.get(ek_key, 0)
             # last_used_at 严格按 endpoint_kind 维度查；不 fallback 到全局
             # image_last_used_at——一个号在 responses lane 成功后，那次成功不应
             # 推后它在 generations lane 的排序，否则 generations 流量会长期堆在
             # "从没在 generations 上成功过"的号上（典型坏果：Cybersol 永远排第一）。
             # None（从未在该 endpoint 上成功）→ -inf 排最前；不能用 `or 0.0`，
             # 因为 monotonic() 可能 < 0 之外的任意正小值，会把"从未用过"误排到中间。
-            last_used = h.image_last_used_at_per_ek.get(ek_key)
-            last_used_key = last_used if last_used is not None else float("-inf")
+            last_attempted_or_used = (
+                last_attempted if last_attempted is not None else last_used
+            )
+            last_used_key = (
+                last_attempted_or_used
+                if last_attempted_or_used is not None
+                else float("-inf")
+            )
             target_bucket = candidates
             if requires_mask and mask_transport_required:
                 if p.image_edit_input_transport == "file":
@@ -843,6 +863,26 @@ class ProviderPool:
         # endpoint_kind_allowed）完成，到这里 candidates 必然只剩可用号；不再做
         # 二次过滤，避免维护双份失败信息。
         candidates.sort(key=lambda x: (x[1][0], x[1][2], x[1][1], -x[0].priority))
+        if acquire_inflight and task_id:
+            candidates = await self._reserve_first_quota_candidate(
+                candidates,
+                redis=redis,
+                account_limiter=account_limiter,
+                task_id=task_id,
+                wall_now=wall_now,
+                mono_now=now,
+                skipped=skipped,
+            )
+            if not candidates:
+                detail = (
+                    ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
+                )
+                raise UpstreamError(
+                    f"all accounts unavailable for image: {detail}",
+                    error_code=EC.ALL_ACCOUNTS_FAILED.value,
+                    status_code=503,
+                    payload={"skipped": skipped},
+                )
         result = [
             ResolvedProvider(
                 name=p.name,
@@ -869,6 +909,56 @@ class ProviderPool:
         if acquire_inflight and result:
             self.acquire_image_inflight(result[0].name, endpoint_kind)
         return result
+
+    async def _reserve_first_quota_candidate(
+        self,
+        candidates: list[tuple[ProviderConfig, tuple[int, float, float]]],
+        *,
+        redis: Any,
+        account_limiter: Any,
+        task_id: str,
+        wall_now: float,
+        mono_now: float,
+        skipped: list[tuple[str, str]],
+    ) -> list[tuple[ProviderConfig, tuple[int, float, float]]]:
+        """Reserve quota for the provider whose inflight slot we are claiming.
+
+        ``check_quota`` is still used while gathering candidates so exhausted
+        providers are filtered early. This second pass closes the race for the
+        selected provider by re-checking and reserving in one Redis script.
+        """
+        if redis is None:
+            return candidates
+        for idx, (provider, sort_key) in enumerate(candidates):
+            try:
+                allowed, retry_after, _member = await account_limiter.reserve_quota(
+                    redis,
+                    provider.name,
+                    provider.image_rate_limit,
+                    provider.image_daily_quota,
+                    task_id=task_id,
+                    now=wall_now,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "account_limiter.reserve_quota raised provider=%s err=%s — "
+                    "treating as temporarily unavailable",
+                    provider.name,
+                    exc,
+                )
+                allowed = False
+                retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
+            if allowed:
+                if idx == 0:
+                    return candidates
+                return [(provider, sort_key)] + candidates[:idx] + candidates[idx + 1 :]
+            h = self._health.setdefault(provider.name, ProviderHealth())
+            with self._stats_lock:
+                h.image_rate_limited_until = mono_now + max(1.0, retry_after)
+            skipped.append(
+                (provider.name, f"quota_exhausted retry_after={retry_after:.0f}s")
+            )
+        return []
 
     def _image_candidate_adaptive_score(
         self,
@@ -939,12 +1029,14 @@ class ProviderPool:
         h = self._health.get(provider_name)
         if h is None:
             return
-        was_open = h.consecutive_failures >= _CB_FAILURE_THRESHOLD
-        h.consecutive_failures = 0
-        h.last_success_at = time.monotonic()
-        h.cooldown_until = None
-        if not is_probe:
-            self._record_request_stats(h, total=1, success=1)
+        with self._stats_lock:
+            was_open = h.consecutive_failures >= _CB_FAILURE_THRESHOLD
+            h.consecutive_failures = 0
+            h.last_success_at = time.monotonic()
+            h.cooldown_until = None
+            if not is_probe:
+                h.total_requests += 1
+                h.successful_requests += 1
         if was_open:
             logger.info("circuit_closed: provider=%s recovered", provider_name)
 
@@ -957,20 +1049,27 @@ class ProviderPool:
             # probe 不毒化熔断（不动 consecutive_failures / cooldown_until），但仍
             # 上报一次 fail 让监控可见——_record_request_stats 只递 total/fail
             # 计数器，不会触发熔断逻辑（已 verify）。
-            h.last_failure_at = now
-            self._record_request_stats(h, total=1, fail=1)
+            with self._stats_lock:
+                h.last_failure_at = now
+                h.total_requests += 1
+                h.failed_requests += 1
             return
-        h.consecutive_failures += 1
-        h.last_failure_at = now
-        self._record_request_stats(h, total=1, fail=1)
-        if h.consecutive_failures >= _CB_FAILURE_THRESHOLD:
-            multiplier = min(h.consecutive_failures - _CB_FAILURE_THRESHOLD + 1, 10)
-            duration = min(_CB_COOLDOWN_BASE_S * multiplier, _CB_COOLDOWN_MAX_S)
-            h.cooldown_until = now + duration
+        with self._stats_lock:
+            h.consecutive_failures += 1
+            h.last_failure_at = now
+            h.total_requests += 1
+            h.failed_requests += 1
+            failures = h.consecutive_failures
+            duration = 0.0
+            if failures >= _CB_FAILURE_THRESHOLD:
+                multiplier = min(failures - _CB_FAILURE_THRESHOLD + 1, 10)
+                duration = min(_CB_COOLDOWN_BASE_S * multiplier, _CB_COOLDOWN_MAX_S)
+                h.cooldown_until = now + duration
+        if failures >= _CB_FAILURE_THRESHOLD:
             logger.warning(
                 "circuit_open: provider=%s failures=%d cooldown=%.0fs",
                 provider_name,
-                h.consecutive_failures,
+                failures,
                 duration,
             )
 
@@ -985,9 +1084,12 @@ class ProviderPool:
         endpoint 的路径会用到。caller 必须保证最终调一次 release_image_inflight。
         """
         k = endpoint_kind or ""
+        now = time.monotonic()
         with self._stats_lock:
             h = self._health.setdefault(provider_name, ProviderHealth())
             h.image_inflight[k] = h.image_inflight.get(k, 0) + 1
+            h.image_last_attempted_at = now
+            h.image_last_attempted_at_per_ek[k] = now
 
     def release_image_inflight(
         self, provider_name: str, endpoint_kind: str | None
@@ -1023,14 +1125,18 @@ class ProviderPool:
         retry-after 过去；此处只动 health 维度。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        was_image_open = h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD
         now = time.monotonic()
-        h.image_consecutive_failures = 0
-        h.image_cooldown_until = None
-        h.image_last_used_at = now
-        if endpoint_kind:
-            h.image_last_used_at_per_ek[endpoint_kind] = now
-        h.last_success_at = now  # 同时更新全局 last_success_at（探活逻辑会用）
+        ek_key = endpoint_kind or ""
+        with self._stats_lock:
+            was_image_open = h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD
+            h.image_consecutive_failures = 0
+            h.image_cooldown_until = None
+            h.image_last_used_at = now
+            h.image_last_attempted_at = now
+            h.image_last_attempted_at_per_ek[ek_key] = now
+            if endpoint_kind:
+                h.image_last_used_at_per_ek[endpoint_kind] = now
+            h.last_success_at = now  # 同时更新全局 last_success_at（探活逻辑会用）
         if endpoint_kind and record_endpoint:
             self.record_endpoint_success(provider_name, endpoint_kind)
         self._record_request_stats(h, total=1, success=1)
@@ -1055,8 +1161,15 @@ class ProviderPool:
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
         now = time.monotonic()
-        h.image_consecutive_failures += 1
-        h.last_failure_at = now
+        ek_key = endpoint_kind or ""
+        with self._stats_lock:
+            h.image_consecutive_failures += 1
+            h.last_failure_at = now
+            h.image_last_attempted_at = now
+            h.image_last_attempted_at_per_ek[ek_key] = now
+            image_failures = h.image_consecutive_failures
+            if image_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
+                h.image_cooldown_until = now + _IMAGE_CB_COOLDOWN_S
         if endpoint_kind:
             self.record_endpoint_failure(provider_name, endpoint_kind)
         self._record_request_stats(h, total=1, fail=1)
@@ -1068,12 +1181,11 @@ class ProviderPool:
             ).inc()
         except Exception:  # noqa: BLE001
             pass
-        if h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
-            h.image_cooldown_until = now + _IMAGE_CB_COOLDOWN_S
+        if image_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
             logger.warning(
                 "image_circuit_open: provider=%s image_failures=%d cooldown=%.0fs",
                 provider_name,
-                h.image_consecutive_failures,
+                image_failures,
                 _IMAGE_CB_COOLDOWN_S,
             )
 
@@ -1212,8 +1324,10 @@ class ProviderPool:
             if retry_after_s is not None and retry_after_s > 0
             else _IMAGE_RATE_LIMITED_DEFAULT_S
         )
-        h.image_rate_limited_until = now + wait
-        h.last_failure_at = now
+        with self._stats_lock:
+            h.image_rate_limited_until = now + wait
+            h.last_failure_at = now
+            h.image_last_attempted_at = now
         self._record_request_stats(h, total=1, fail=1)
         try:
             from .observability import account_image_calls_total
@@ -1553,10 +1667,11 @@ class ProviderPool:
         计数（probe 不计入真实请求统计）。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        was_image_open = h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD
-        h.image_consecutive_failures = 0
-        h.image_cooldown_until = None
-        h.last_probe_at = time.monotonic()
+        with self._stats_lock:
+            was_image_open = h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD
+            h.image_consecutive_failures = 0
+            h.image_cooldown_until = None
+            h.last_probe_at = time.monotonic()
         if was_image_open:
             logger.info(
                 "image_circuit_closed: provider=%s recovered via probe",
@@ -1571,14 +1686,17 @@ class ProviderPool:
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
         now = time.monotonic()
-        h.image_consecutive_failures += 1
-        h.last_probe_at = now
-        if h.image_consecutive_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
-            h.image_cooldown_until = now + _IMAGE_CB_COOLDOWN_S
+        with self._stats_lock:
+            h.image_consecutive_failures += 1
+            h.last_probe_at = now
+            image_failures = h.image_consecutive_failures
+            if image_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
+                h.image_cooldown_until = now + _IMAGE_CB_COOLDOWN_S
+        if image_failures >= _IMAGE_CB_FAILURE_THRESHOLD:
             logger.warning(
                 "image_circuit_open: provider=%s probe_failures=%d cooldown=%.0fs",
                 provider_name,
-                h.image_consecutive_failures,
+                image_failures,
                 _IMAGE_CB_COOLDOWN_S,
             )
 

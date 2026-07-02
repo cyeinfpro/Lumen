@@ -571,8 +571,8 @@ class VideoReferenceMediaIn(BaseModel):
                 if not (parsed.netloc or parsed.path.strip("/")):
                     raise ValueError("reference media asset url must not be empty")
                 return self
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError("reference media url must be an http(s) or asset URL")
+            if parsed.scheme.lower() != "https" or not parsed.hostname:
+                raise ValueError("reference media url must be an https or asset URL")
             if parsed.username or parsed.password:
                 raise ValueError("reference media url must not include credentials")
             if is_private_host(parsed.hostname):

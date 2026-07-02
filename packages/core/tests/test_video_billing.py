@@ -466,6 +466,29 @@ async def test_estimate_video_cost_fails_closed_without_pricing(
 
 
 @pytest.mark.asyncio
+async def test_estimate_video_cost_fails_closed_for_zero_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def zero_price(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", zero_price)
+
+    with pytest.raises(video_billing.VideoBillingError) as excinfo:
+        await video_billing.estimate_video_cost(
+            object(),  # type: ignore[arg-type]
+            model="seedance-2.0",
+            action="t2v",
+            resolution="720p",
+            duration_s=5,
+            estimates={"seedance-2.0": {"t2v": {"720p:5": 60_000}}},
+        )
+
+    assert excinfo.value.code == "video_pricing_missing"
+    assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_estimate_video_cost_fails_closed_without_hold_estimate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,3 +509,45 @@ async def test_estimate_video_cost_fails_closed_without_hold_estimate(
 
     assert excinfo.value.code == "video_estimate_missing"
     assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_settle_video_cost_fails_closed_for_zero_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def zero_price(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", zero_price)
+
+    with pytest.raises(video_billing.VideoBillingError) as excinfo:
+        await video_billing.settle_video_cost(
+            object(),  # type: ignore[arg-type]
+            model="seedance-2.0",
+            action="t2v",
+            actual_total_tokens=60_000,
+            resolution="720p",
+        )
+
+    assert excinfo.value.code == "video_pricing_missing"
+
+
+@pytest.mark.asyncio
+async def test_settle_video_cost_rejects_zero_actual_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_price(*_args, **_kwargs):
+        return 10_000
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    with pytest.raises(video_billing.VideoBillingError) as excinfo:
+        await video_billing.settle_video_cost(
+            object(),  # type: ignore[arg-type]
+            model="seedance-2.0",
+            action="t2v",
+            actual_total_tokens=0,
+            resolution="720p",
+        )
+
+    assert excinfo.value.code == "video_invalid_settlement"

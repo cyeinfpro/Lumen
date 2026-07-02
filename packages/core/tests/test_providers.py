@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -253,6 +254,75 @@ def test_build_effective_provider_config_attaches_named_proxy():
     assert providers[0].proxy is proxies[0]
 
 
+def test_build_effective_provider_config_reports_disabled_named_proxy():
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "egress",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "primary",
+                    "base_url": "https://upstream.example",
+                    "api_key": "sk-test",
+                    "proxy": "egress",
+                }
+            ],
+        }
+    )
+
+    providers, proxies, errors = build_effective_provider_config(
+        raw_providers=raw,
+        legacy_base_url=None,
+        legacy_api_key=None,
+    )
+
+    assert [p.name for p in proxies] == ["egress"]
+    assert providers[0].proxy is None
+    assert errors == ["provider primary: proxy egress is disabled"]
+
+
+def test_build_effective_provider_config_allows_disabled_provider_stale_proxy():
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "egress",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "parked",
+                    "base_url": "https://upstream.example",
+                    "api_key": "",
+                    "enabled": False,
+                    "proxy": "egress",
+                }
+            ],
+        }
+    )
+
+    providers, _proxies, errors = build_effective_provider_config(
+        raw_providers=raw,
+        legacy_base_url=None,
+        legacy_api_key=None,
+    )
+
+    assert errors == []
+    assert providers[0].enabled is False
+    assert providers[0].proxy is None
+
+
 def test_socks_proxy_url_quotes_credentials():
     proxy = ProviderProxyDefinition(
         name="p",
@@ -323,6 +393,137 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     assert not os.path.exists(env["SSH_ASKPASS"])
 
     await provider_mod.close_provider_proxy_tunnels()
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_terminates_failed_password_process_before_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    captured: dict[str, object] = {}
+    proc = _FakeSshProcess()
+
+    def fake_which(name: str) -> str | None:
+        if name == "ssh":
+            return "/usr/bin/ssh"
+        return None
+
+    async def fake_create_subprocess_exec(
+        *cmd: str,
+        **kwargs: object,
+    ) -> _FakeSshProcess:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return proc
+
+    async def fake_local_port_accepts(_port: int) -> bool:
+        return False
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41556)
+    monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
+    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_READY_CHECKS", 1)
+    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_START_ATTEMPTS", 1)
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-cn",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                username="root",
+                password="secret-password",
+            )
+        )
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert proc.returncode == 0
+    assert isinstance(env["LUMEN_SSH_PASSWORD_FILE"], str)
+    assert not os.path.exists(env["LUMEN_SSH_PASSWORD_FILE"])
+    assert isinstance(env["SSH_ASKPASS"], str)
+    assert not os.path.exists(env["SSH_ASKPASS"])
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    captured: dict[str, object] = {}
+    proc = _FakeSshProcess()
+    unlink_events: list[tuple[str, int | None, bool]] = []
+    original_unlink = provider_mod._unlink_quietly
+
+    def fake_which(name: str) -> str | None:
+        if name == "ssh":
+            return "/usr/bin/ssh"
+        return None
+
+    async def fake_create_subprocess_exec(
+        *cmd: str,
+        **kwargs: object,
+    ) -> _FakeSshProcess:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        env = captured["env"]
+        if isinstance(env, dict):
+            captured["password_file"] = env.get("LUMEN_SSH_PASSWORD_FILE")
+            captured["askpass_path"] = env.get("SSH_ASKPASS")
+        return proc
+
+    async def fake_local_port_accepts(_port: int) -> bool:
+        return False
+
+    async def fake_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError()
+
+    def tracking_unlink(path: str | None) -> None:
+        if path:
+            if path == captured.get("password_file"):
+                label = "password"
+            elif path == captured.get("askpass_path"):
+                label = "askpass"
+            else:
+                label = "other"
+            unlink_events.append((label, proc.returncode, os.path.exists(path)))
+        original_unlink(path)
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41557)
+    monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
+    monkeypatch.setattr(provider_mod, "_unlink_quietly", tracking_unlink)
+    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_START_ATTEMPTS", 1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-cn",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                username="root",
+                password="secret-password",
+            )
+        )
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert proc.returncode == 0
+    assert ("password", 0, True) in unlink_events
+    assert ("askpass", 0, True) in unlink_events
+    assert isinstance(env["LUMEN_SSH_PASSWORD_FILE"], str)
+    assert not os.path.exists(env["LUMEN_SSH_PASSWORD_FILE"])
+    assert isinstance(env["SSH_ASKPASS"], str)
+    assert not os.path.exists(env["SSH_ASKPASS"])
 
 
 def test_parse_provider_item_uses_index_name_when_name_is_blank():

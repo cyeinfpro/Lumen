@@ -338,6 +338,17 @@ def test_resize_mask_rejects_invalid_bytes() -> None:
     assert ei.value.error_code == EC.BAD_REFERENCE_IMAGE.value
 
 
+def test_resize_mask_rejects_invalid_reference_bytes_without_mask_false_positive() -> None:
+    """A bad reference must not be misreported as a mask resize or retriable error."""
+    mask = _make_mask_png(size=(32, 32))
+    with pytest.raises(upstream.UpstreamError) as ei:
+        generation._resize_mask_to_reference(mask, b"not-a-png")
+
+    assert ei.value.error_code == EC.BAD_REFERENCE_IMAGE.value
+    assert "reference image not decodable" in str(ei.value)
+    assert "mask image not decodable" not in str(ei.value)
+
+
 def test_resize_mask_binarizes_partial_alpha_same_size() -> None:
     """同尺寸但 alpha=128 (partial) → fast path miss，要二值化兜底。
 

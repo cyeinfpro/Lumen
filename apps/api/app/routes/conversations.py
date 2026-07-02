@@ -123,6 +123,21 @@ def _dec_cursor(raw: str | None) -> dict[str, Any] | None:
     return decoded
 
 
+def _cursor_field_str(cur: dict[str, Any], field: str) -> str:
+    value = cur.get(field)
+    if not isinstance(value, str) or not value:
+        raise _bad_request("invalid_cursor", "invalid cursor")
+    return value
+
+
+def _cursor_field_datetime(cur: dict[str, Any], field: str) -> datetime:
+    value = _cursor_field_str(cur, field)
+    try:
+        return _coerce_aware(datetime.fromisoformat(value))
+    except ValueError as exc:
+        raise _bad_request("invalid_cursor", "invalid cursor timestamp") from exc
+
+
 def _exclude_workflow_conversations(stmt):
     if settings.lumen_runtime.strip().lower() == "desktop":
         return stmt
@@ -511,14 +526,15 @@ async def list_conversations(
             )
             stmt = stmt.where(Conversation.title.ilike(f"%{q_escaped}%", escape="\\"))
     cur = _dec_cursor(cursor)
-    if cur and "la" in cur and "id" in cur:
-        la = _coerce_aware(datetime.fromisoformat(cur["la"]))
+    if cur is not None:
+        la = _cursor_field_datetime(cur, "la")
+        cur_id = _cursor_field_str(cur, "id")
         stmt = stmt.where(
             or_(
                 Conversation.last_activity_at < la,
                 and_(
                     Conversation.last_activity_at == la,
-                    Conversation.id < cur["id"],
+                    Conversation.id < cur_id,
                 ),
             )
         )
@@ -1855,12 +1871,13 @@ async def list_messages(
     # latest messages so a refresh can restore in-flight assistant tasks.
     cur = _dec_cursor(cursor)
     uses_desc_order = False
-    if cur and "ca" in cur and "id" in cur:
-        ca = _coerce_aware(datetime.fromisoformat(cur["ca"]))
+    if cur is not None:
+        ca = _cursor_field_datetime(cur, "ca")
+        cur_id = _cursor_field_str(cur, "id")
         stmt = stmt.where(
             or_(
                 Message.created_at < ca,
-                and_(Message.created_at == ca, Message.id < cur["id"]),
+                and_(Message.created_at == ca, Message.id < cur_id),
             )
         ).order_by(desc(Message.created_at), desc(Message.id))
         uses_desc_order = True

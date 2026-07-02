@@ -166,6 +166,7 @@ _IMAGE_QUEUE_FAIR_SCAN_LIMIT = 1000
 _IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S = 30
 _IMAGE_QUEUE_NOT_BEFORE_GRACE_S = 600
 _IMAGE_PROVIDER_UNAVAILABLE_RETRY_S = 30
+_STALE_ATTEMPT_REQUEUE_DELAY_S = 5
 _IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S = 5.0
 # Redis 抖动时 not_before cooldown 写入也可能失败，被 except 吞掉后这一轮立刻
 # 又会被 _kick_image_queue 拉起来重试。fallback 到进程内 monotonic 表，
@@ -1778,7 +1779,11 @@ async def _postprocess_raw_generated_image(
                 pil.load()
                 pipeline_out = await process_transparent_request(pil, prompt=prompt)
         except TransparentPipelineFailure as exc:
-            qc_dict = exc.qc.to_dict() if exc.qc is not None else None
+            qc_dict = (
+                _sanitize_transparent_qc_payload(exc.qc.to_dict())
+                if exc.qc is not None
+                else None
+            )
             raise UpstreamError(
                 f"transparent material pipeline failed: {exc}",
                 error_code=EC.BAD_RESPONSE.value,
@@ -1799,7 +1804,9 @@ async def _postprocess_raw_generated_image(
             has_transparency=True,
         )
         transparent_alpha_recovered = True
-        transparent_qc_payload = pipeline_out.qc.to_dict()
+        transparent_qc_payload = _sanitize_transparent_qc_payload(
+            pipeline_out.qc.to_dict()
+        )
         transparent_provider = pipeline_out.provider
 
     try:
@@ -2458,6 +2465,7 @@ async def _maybe_record_model_library_generate_image(
                 WorkflowStep.workflow_run_id == run.id,
                 WorkflowStep.step_key == "model_library_generate",
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if step is None:
@@ -2559,6 +2567,7 @@ async def _maybe_record_poster_style_library_generate_image(
                 WorkflowStep.workflow_run_id == run.id,
                 WorkflowStep.step_key == "poster_style_library_generate",
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if step is None:
@@ -2720,6 +2729,7 @@ async def _maybe_record_model_library_candidate_image(
                 WorkflowStep.workflow_run_id == run.id,
                 WorkflowStep.step_key == "model_library_generate",
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if step is None:
@@ -3452,9 +3462,14 @@ async def _mark_generation_attempt_retrying(
             str(time.time() + delay),
             ex=_retry_not_before_ttl(delay),
         )
-        await redis.enqueue_job(
-            "run_generation", task_id, _defer_by=delay, _job_try=attempt + 1
+        enqueued = await _enqueue_generation_once(
+            redis,
+            task_id,
+            defer_by=delay,
+            job_try=attempt + 1,
         )
+        if not enqueued:
+            return False
     except Exception as enq_exc:  # noqa: BLE001
         logger.error("re-enqueue failed task=%s err=%s", task_id, enq_exc)
         enqueue_err = "retry_enqueue_failed"
@@ -3485,6 +3500,93 @@ async def _mark_generation_attempt_retrying(
             "retry_delay_seconds": delay,
             "error_code": error_code,
             "error_message": error_message,
+            "reason": reason,
+        },
+    )
+    return True
+
+
+async def _maybe_requeue_stale_generation_attempt(
+    redis: Any,
+    *,
+    task_id: str,
+    attempt: int,
+    reason: str,
+    delay: float = _STALE_ATTEMPT_REQUEUE_DELAY_S,
+) -> bool:
+    """Requeue an actionable stale attempt without touching superseded rows.
+
+    Stale write failures can happen after another path already put the same
+    attempt back in queued state. Only that narrow state is safe to requeue;
+    running, terminal, and newer-attempt rows must be left alone.
+    """
+    if attempt <= 0:
+        return False
+    try:
+        async with SessionLocal() as session:
+            row = (
+                await session.execute(
+                    select(Generation.status, Generation.message_id, Generation.user_id)
+                    .where(
+                        Generation.id == task_id,
+                        Generation.attempt == attempt,
+                        Generation.status == GenerationStatus.QUEUED.value,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).one_or_none()
+            if row is None:
+                return False
+            _status, message_id, user_id = row
+            await session.rollback()
+    except _StaleGenerationAttempt as stale_exc:
+        logger.info(
+            "stale attempt requeue skipped task=%s attempt=%s err=%s",
+            task_id,
+            attempt,
+            stale_exc,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stale attempt requeue check failed task=%s attempt=%s err=%s",
+            task_id,
+            attempt,
+            exc,
+        )
+        return False
+
+    try:
+        await redis.set(
+            _image_queue_not_before_key(task_id),
+            str(time.time() + delay),
+            ex=_retry_not_before_ttl(delay),
+        )
+        await redis.enqueue_job(
+            "run_generation", task_id, _defer_by=delay, _job_try=attempt + 1
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stale attempt re-enqueue failed task=%s attempt=%s err=%s",
+            task_id,
+            attempt,
+            exc,
+        )
+        return False
+
+    await publish_event(
+        redis,
+        str(user_id),
+        task_channel(task_id),
+        EV_GEN_RETRYING,
+        {
+            "generation_id": task_id,
+            "message_id": str(message_id),
+            "attempt": attempt,
+            "max_attempts": _MAX_ATTEMPTS,
+            "retry_delay_seconds": delay,
+            "error_code": "stale_attempt_requeued",
+            "error_message": f"stale attempt requeued: {reason}"[:2000],
             "reason": reason,
         },
     )
@@ -3646,6 +3748,26 @@ async def _find_existing_generated_image(
             getattr(row, "user_id", None),
         )
         return None
+    if getattr(row, "source", None) != ImageSource.GENERATED.value:
+        logger.error(
+            "short-circuit guard: image %s source mismatch got=%s — ignoring",
+            getattr(row, "id", "?"),
+            getattr(row, "source", None),
+        )
+        return None
+    try:
+        width = int(getattr(row, "width", 0) or 0)
+        height = int(getattr(row, "height", 0) or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    if width <= 0 or height <= 0:
+        logger.error(
+            "short-circuit guard: image %s invalid dimensions %sx%s — ignoring",
+            getattr(row, "id", "?"),
+            getattr(row, "width", None),
+            getattr(row, "height", None),
+        )
+        return None
     return row
 
 
@@ -3707,11 +3829,55 @@ def _safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
     details: dict[str, Any] = {}
     transparent_qc = payload.get("transparent_qc")
     if isinstance(transparent_qc, dict):
-        details["transparent_qc"] = transparent_qc
+        sanitized_qc = _sanitize_transparent_qc_payload(transparent_qc)
+        if sanitized_qc:
+            details["transparent_qc"] = sanitized_qc
     transparent_provider = payload.get("transparent_provider")
     if isinstance(transparent_provider, str) and transparent_provider:
         details["transparent_provider"] = transparent_provider[:128]
     return details
+
+
+def _sanitize_transparent_qc_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep transparent QC diagnostics useful without copying arbitrary payload."""
+    out: dict[str, Any] = {}
+
+    passed = payload.get("passed")
+    if isinstance(passed, bool):
+        out["passed"] = passed
+
+    for key in (
+        "score",
+        "alpha_coverage",
+        "largest_component_ratio",
+    ):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            out[key] = round(float(value), 4)
+
+    border_alpha_max = payload.get("border_alpha_max")
+    if isinstance(border_alpha_max, (int, float)) and math.isfinite(
+        float(border_alpha_max)
+    ):
+        out["border_alpha_max"] = max(0, min(255, int(border_alpha_max)))
+
+    bbox = payload.get("foreground_bbox")
+    if (
+        isinstance(bbox, (list, tuple))
+        and len(bbox) == 4
+        and all(isinstance(v, (int, float)) and math.isfinite(float(v)) for v in bbox)
+    ):
+        out["foreground_bbox"] = [max(0, int(v)) for v in bbox]
+    elif bbox is None and "foreground_bbox" in payload:
+        out["foreground_bbox"] = None
+
+    for key in ("failure_reasons", "warnings"):
+        raw_items = payload.get(key)
+        if isinstance(raw_items, list):
+            items = [str(item)[:160] for item in raw_items[:20]]
+            out[key] = items
+
+    return out
 
 
 def _decide_moderation_retry_upgrade(
@@ -3844,14 +4010,15 @@ async def _handle_dual_race_bonus_image(
     idempotency_suffix: str = ":b",
     extra_upstream_fields: dict[str, Any] | None = None,
     record_model_library_candidate: bool = True,
+    settle_billing: bool = False,
     log_label: str = "dual_race bonus",
 ) -> bool:
     """处理 dual_race 的 bonus 图：建独立 generation row + 写盘 + 写 DB + publish。
 
     bonus 图作为同一条 assistant message 的另一条 generation；前端通过 EV_GEN_ATTACHED
     把 bonus_gen_id push 到 message.generation_ids 并建 placeholder，再消费
-    EV_GEN_SUCCEEDED 把图挂上去。bonus row 的 upstream_request 带 is_dual_race_bonus=true
-    让成本统计 / BI 查询能过滤掉（避免 dual_race 用户翻倍计费）。
+    EV_GEN_SUCCEEDED 把图挂上去。真正需要计费的 bonus / batch extra 必须在同一
+    DB 事务里 settle 成功后才 commit，避免把上游成本静默标成 free。
 
     任何异常都不抛——bonus 是"锦上添花"，失败只 log warn，不影响 winner 已成功的状态。
     """
@@ -3930,11 +4097,18 @@ async def _handle_dual_race_bonus_image(
         if billing_meta is not None
         else {
             "is_dual_race_bonus": True,
-            "billing_free": True,
-            "billing_label": "free",
-            "billing_exempt_reason": "dual_race_loser",
+            "billing_free": False,
+            "billing_label": "billable",
+            "billing_policy": "dual_race_loser_settled_separately",
         }
     )
+    if result_billing_meta.get("billing_free") is not True and not settle_billing:
+        logger.warning(
+            "%s missing settle_billing for billable image parent=%s",
+            log_label,
+            parent_task_id,
+        )
+        return False
     image_metadata: dict[str, Any] = {**model_metadata, **result_billing_meta}
     if model_metadata:
         try:
@@ -4136,7 +4310,17 @@ async def _handle_dual_race_bonus_image(
                             exc,
                         )
 
+                if settle_billing:
+                    await worker_billing.settle_generation(
+                        session,
+                        bonus_row,
+                        width=width,
+                        height=height,
+                        image_count=1,
+                    )
                 await session.commit()
+                if settle_billing:
+                    await worker_billing.flush_balance_cache_refreshes(session)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s DB write failed parent=%s err=%r",
@@ -5772,7 +5956,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     gen,
                     width=width,
                     height=height,
-                    image_count=actual_image_count,
+                    image_count=1,
                 )
                 await session.commit()
                 await worker_billing.flush_balance_cache_refreshes(session)
@@ -5835,7 +6019,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         upstream_actual_route=actual_upstream_route,
                         upstream_actual_source=actual_upstream_source,
                         upstream_actual_endpoint=actual_upstream_endpoint,
-                        billing_meta={},
+                        billing_meta={
+                            "billing_free": False,
+                            "billing_label": "billable",
+                            "billing_policy": "batch_extra_settled_separately",
+                        },
                         idempotency_suffix=f":n{batch_index}",
                         extra_upstream_fields={
                             "batch_parent_generation_id": task_id,
@@ -5843,6 +6031,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             "batch_count": actual_image_count,
                         },
                         record_model_library_candidate=False,
+                        settle_billing=True,
                         log_label="image2 n result",
                     )
                 except (_LeaseLost, _TaskCancelled, asyncio.CancelledError):
@@ -5921,6 +6110,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         upstream_actual_route=bonus_provider_event.get("route"),
                         upstream_actual_source=bonus_provider_event.get("source"),
                         upstream_actual_endpoint=bonus_provider_event.get("endpoint"),
+                        settle_billing=True,
                     )
                 except (_LeaseLost, _TaskCancelled, asyncio.CancelledError):
                     logger.info(
@@ -5971,7 +6161,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         logger.info(
             "generation stale attempt task=%s attempt=%s err=%s", task_id, attempt, exc
         )
-        _task_outcome = "stale_attempt"
+        requeued = await _maybe_requeue_stale_generation_attempt(
+            redis,
+            task_id=task_id,
+            attempt=attempt,
+            reason=type(exc).__name__,
+        )
+        _task_outcome = "retry" if requeued else "stale_attempt"
         return
 
     except _TaskCancelled as exc:
@@ -6122,6 +6318,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
 
         moderation_upgrade = False
+        moderation_retry_max_attempts = _MAX_ATTEMPTS
         if (
             not decision.retriable
             and not _is_dual_race_sentinel(reserved_provider_name)
@@ -6162,9 +6359,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 )
                 decision = upgraded
                 moderation_upgrade = True
+                moderation_retry_max_attempts = max(
+                    attempt + 1,
+                    min(_MODERATION_RETRY_CAP, max(1, _enabled_count)),
+                )
 
         effective_max_attempts = (
-            _MODERATION_RETRY_CAP if moderation_upgrade else _MAX_ATTEMPTS
+            moderation_retry_max_attempts if moderation_upgrade else _MAX_ATTEMPTS
         )
         _task_outcome = (
             "retry"

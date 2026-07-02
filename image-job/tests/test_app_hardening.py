@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
+import sqlite3
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +26,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from PIL import Image
 
 
@@ -46,6 +49,67 @@ def _tiny_png_b64() -> str:
     buf = BytesIO()
     Image.new("RGB", (2, 2), color=(128, 128, 128)).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _png_bytes(size: tuple[int, int] = (2, 2)) -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", size, color=(128, 128, 128)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                auth_hash TEXT NOT NULL,
+                auth_header TEXT,
+                request_type TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                relay_url TEXT NOT NULL,
+                retention_days INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                elapsed_ms INTEGER,
+                upstream_status INTEGER,
+                image_count INTEGER NOT NULL DEFAULT 0,
+                images_json TEXT,
+                error TEXT,
+                upstream_body TEXT
+            );
+            """
+        )
+    finally:
+        conn.close()
+
+    app.init_storage_sync()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(jobs)")}
+    finally:
+        conn.close()
+
+    assert "idempotency_key" in cols
+    assert "request_hash" in cols
+    assert "jobs_auth_idempotency_idx" in indexes
 
 
 # --- 1) terminal helpers ----------------------------------------------------
@@ -413,3 +477,264 @@ def test_fail_interrupted_running_jobs_requeues_when_auth_present(
 
     # 无 auth 的被标 failed（保持原行为）
     assert by_id["job-no-auth"]["status"] == "failed"
+
+
+def test_image_job_create_is_idempotent_per_auth_and_key(monkeypatch, tmp_path) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    async def fake_enqueue(_job_id: str) -> str:
+        return "queued"
+
+    monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
+
+    class Req:
+        headers = {
+            "authorization": "Bearer sk-test",
+            "Idempotency-Key": "stable-job",
+        }
+
+        async def json(self) -> dict[str, object]:
+            return {
+                "endpoint": "/v1/images/generations",
+                "body": {"prompt": "cat"},
+            }
+
+    async def _run() -> tuple[dict[str, object], dict[str, object], int]:
+        first = await app.create_image_job(Req())
+        second = await app.create_image_job(Req())
+        rows = await app.db_all("SELECT * FROM jobs", ())
+        return first, second, len(rows)
+
+    first, second, row_count = asyncio.run(_run())
+
+    assert first["job_id"] == second["job_id"]
+    assert row_count == 1
+
+
+def test_image_job_payload_idempotency_key_is_persisted_and_deduped(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    async def fake_enqueue(_job_id: str) -> str:
+        return "queued"
+
+    monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
+
+    class Req:
+        headers = {"authorization": "Bearer sk-test"}
+
+        async def json(self) -> dict[str, object]:
+            return {
+                "endpoint": "/v1/images/generations",
+                "idempotency_key": "payload-stable-job",
+                "body": {"prompt": "cat"},
+            }
+
+    async def _run() -> tuple[dict[str, object], dict[str, object], int, str | None]:
+        first = await app.create_image_job(Req())
+        second = await app.create_image_job(Req())
+        rows = await app.db_all("SELECT * FROM jobs", ())
+        return first, second, len(rows), rows[0]["idempotency_key"]
+
+    first, second, row_count, stored_key = asyncio.run(_run())
+
+    assert first["job_id"] == second["job_id"]
+    assert row_count == 1
+    assert stored_key == hashlib.sha256(b"payload-stable-job").hexdigest()
+
+
+def test_idempotent_duplicate_reschedules_existing_queued_job(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    class Req:
+        headers = {
+            "authorization": "Bearer sk-test",
+            "Idempotency-Key": "stable-job",
+        }
+
+        async def json(self) -> dict[str, object]:
+            return {
+                "endpoint": "/v1/images/generations",
+                "body": {"prompt": "cat"},
+            }
+
+    async def _run() -> tuple[dict[str, object], int, bool]:
+        raw_payload = await Req().json()
+        payload = app.validate_payload(raw_payload)
+        await app.insert_job(
+            "job-existing",
+            payload,
+            "Bearer sk-test",
+            idempotency_key=hashlib.sha256(b"stable-job").hexdigest(),
+            payload_hash=app.request_hash(payload),
+        )
+
+        response = await app.create_image_job(Req())
+        rows = await app.db_all("SELECT * FROM jobs", ())
+        return response, len(rows), "job-existing" in app._queued_ids
+
+    response, row_count, queued = asyncio.run(_run())
+
+    assert response["job_id"] == "job-existing"
+    assert row_count == 1
+    assert queued is True
+
+
+def test_image_job_idempotency_key_conflict_rejects_different_payload(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    async def fake_enqueue(_job_id: str) -> str:
+        return "queued"
+
+    monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
+
+    class Req:
+        headers = {
+            "authorization": "Bearer sk-test",
+            "Idempotency-Key": "stable-job",
+        }
+
+        def __init__(self, prompt: str) -> None:
+            self.prompt = prompt
+
+        async def json(self) -> dict[str, object]:
+            return {
+                "endpoint": "/v1/images/generations",
+                "body": {"prompt": self.prompt},
+            }
+
+    async def _run() -> None:
+        await app.create_image_job(Req("cat"))
+        await app.create_image_job(Req("dog"))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_run())
+
+    assert exc.value.status_code == 409
+
+
+def test_refs_dedupe_is_scoped_by_auth_hash(monkeypatch, tmp_path) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    raw = _png_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+
+    app._write_ref_sync("auth-a", sha, "token-a", "png", raw)  # noqa: SLF001
+    assert app._existing_ref_sync("auth-a", sha) == ("token-a", "png")  # noqa: SLF001
+    assert app._existing_ref_sync("auth-b", sha) is None  # noqa: SLF001
+
+    app._write_ref_sync("auth-b", sha, "token-b", "png", raw)  # noqa: SLF001
+    assert app._existing_ref_sync("auth-a", sha) == ("token-a", "png")  # noqa: SLF001
+    assert app._existing_ref_sync("auth-b", sha) == ("token-b", "png")  # noqa: SLF001
+
+
+def test_image_metadata_rejects_images_above_pixel_limit(monkeypatch) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "MAX_IMAGE_PIXELS", 1)
+
+    with pytest.raises(app.JobFailure) as exc:
+        app.image_metadata(_png_bytes((2, 2)), "image/png")
+
+    assert exc.value.error_class == app.ERROR_CLASS_IMAGE_SAVE
+
+
+def test_pillow_decompression_limit_tracks_config(monkeypatch) -> None:
+    monkeypatch.setenv("IMAGE_JOB_MAX_IMAGE_PIXELS", "12345")
+    app = load_app_module()
+
+    assert app.MAX_IMAGE_PIXELS == 12345
+    assert app.Image.MAX_IMAGE_PIXELS == 12345
+
+
+def test_process_job_claims_queued_row_once(monkeypatch, tmp_path) -> None:
+    app = load_app_module()
+
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    calls: list[str] = []
+
+    async def fake_call_upstream(row) -> tuple[int, list[dict[str, object]]]:
+        calls.append(row["job_id"])
+        await asyncio.sleep(0)
+        return (
+            200,
+            [
+                {
+                    "url": "https://example.com/image.png",
+                    "width": 2,
+                    "height": 2,
+                    "bytes": 10,
+                    "format": "png",
+                    "expires_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+        )
+
+    monkeypatch.setattr(app, "call_upstream", fake_call_upstream)
+
+    async def _run() -> tuple[list[str], str, int]:
+        await app.insert_job(
+            "job-claim",
+            {
+                "request_type": "generations",
+                "endpoint": "/v1/images/generations",
+                "body": {"prompt": "cat"},
+                "retention_days": 1,
+            },
+            "Bearer sk-test",
+        )
+        await asyncio.gather(app.process_job("job-claim"), app.process_job("job-claim"))
+        row = await app.db_one(
+            "SELECT status, attempts FROM jobs WHERE job_id = ?",
+            ("job-claim",),
+        )
+        assert row is not None
+        return calls, row["status"], row["attempts"]
+
+    seen_calls, status, attempts = asyncio.run(_run())
+
+    assert seen_calls == ["job-claim"]
+    assert status == "succeeded"
+    assert attempts == 1

@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import conv_channel, user_channel
@@ -188,6 +188,59 @@ class ConversationActiveScopeIn(BaseModel):
 class UsedMemoriesOut(BaseModel):
     used_memory_ids: list[str] = []
     used_memory_summary: list[dict[str, str]] = []
+
+
+async def _filter_owned_used_memory_payload(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    ids: object,
+    summary: object,
+) -> UsedMemoriesOut:
+    if not isinstance(ids, list):
+        return UsedMemoriesOut()
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for value in ids:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        ordered_ids.append(value)
+    if not ordered_ids:
+        return UsedMemoriesOut()
+    owned = set(
+        (
+            await db.execute(
+                select(UserMemory.id).where(
+                    UserMemory.id.in_(ordered_ids),
+                    UserMemory.user_id == user_id,
+                    or_(UserMemory.disabled.is_(False), UserMemory.disabled.is_(None)),
+                    UserMemory.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    filtered_ids = [memory_id for memory_id in ordered_ids if memory_id in owned]
+    if not filtered_ids:
+        return UsedMemoriesOut()
+    filtered_id_set = set(filtered_ids)
+    filtered_summary: list[dict[str, str]] = []
+    if isinstance(summary, list):
+        for item in summary:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or item_id not in filtered_id_set:
+                continue
+            filtered_summary.append(
+                {k: str(v) for k, v in item.items() if k in {"id", "type", "content"}}
+            )
+    return UsedMemoriesOut(
+        used_memory_ids=filtered_ids,
+        used_memory_summary=filtered_summary,
+    )
 
 
 def _memory_to_out(m: UserMemory) -> MemoryOut:
@@ -729,7 +782,7 @@ async def undo_memory_write(
             )
         return {"ok": True}
     if not await _claim_undo_token(redis, body.undo_token, owner=user.id):
-        return {"ok": True}
+        return {"ok": False}
     action = payload.get("action")
     memory_id = payload.get("memory_id")
     reembed_id: str | None = None
@@ -1296,6 +1349,7 @@ async def get_conversation_used_memories(
                 Completion.user_id == user.id,
                 Conversation.id == conv_id,
                 Conversation.user_id == user.id,
+                Message.deleted_at.is_(None),
             )
             .order_by(desc(Completion.created_at))
             .limit(1)
@@ -1306,15 +1360,11 @@ async def get_conversation_used_memories(
         return UsedMemoriesOut()
     ids = memory.get("used_memory_ids")
     summary = memory.get("used_memory_summary")
-    return UsedMemoriesOut(
-        used_memory_ids=[v for v in ids if isinstance(v, str)] if isinstance(ids, list) else [],
-        used_memory_summary=[
-            {k: str(v) for k, v in item.items() if k in {"id", "type", "content"}}
-            for item in summary
-            if isinstance(item, dict)
-        ]
-        if isinstance(summary, list)
-        else [],
+    return await _filter_owned_used_memory_payload(
+        db,
+        user_id=user.id,
+        ids=ids,
+        summary=summary,
     )
 
 async def cleanup_expired_staging(db: AsyncSession) -> int:

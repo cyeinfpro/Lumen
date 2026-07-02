@@ -1,6 +1,6 @@
 from sqlalchemy import CheckConstraint, Float
 
-from lumen_core.models import Image, SoftDeleteMixin, User, Video, VideoGeneration
+from lumen_core.models import Generation, Image, SoftDeleteMixin, User, Video, VideoGeneration
 
 
 def test_image_nsfw_score_uses_explicit_float_column_type():
@@ -30,6 +30,14 @@ def test_user_extraction_threshold_default_matches_latest_migration():
     assert column.default is not None
     assert column.default.arg == 0.80
     assert str(column.server_default.arg) == "0.80"
+
+
+def test_generation_has_user_created_index_for_history_queries():
+    index = next(
+        idx for idx in Generation.__table__.indexes if idx.name == "ix_generations_user_created"
+    )
+
+    assert [col.name for col in index.columns] == ["user_id", "created_at"]
 
 
 def test_video_generation_has_idempotency_and_provider_task_guards():

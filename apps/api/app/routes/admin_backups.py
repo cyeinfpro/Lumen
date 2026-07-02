@@ -15,6 +15,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,13 @@ class _ScriptResult(NamedTuple):
     returncode: int
     stdout: str
     stderr: str
+
+
+class _BackupPair(NamedTuple):
+    pg: Path
+    redis: Path
+    pg_stat: os.stat_result
+    redis_stat: os.stat_result
 
 
 def _chmod_tolerate_eperm(path: Path | str, mode: int) -> None:
@@ -175,6 +183,44 @@ def _write_pid_marker(path: Path, pid: int, started_at: datetime) -> None:
     tmp.replace(path)
 
 
+def _try_write_pid_marker(path: Path, pid: int, started_at: datetime) -> bool:
+    """Atomically create a maintenance marker.
+
+    The Redis system lock is the cross-process guard in normal operation. When
+    Redis is unavailable the service degrades to marker-file checks, so marker
+    creation itself must be exclusive to close the local check/write race.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = f"pid={pid}\nstarted_at={started_at.isoformat()}\n".encode("utf-8")
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if _read_pid_marker(path):
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+            except PermissionError:
+                pass
+            os.write(fd, payload)
+            return True
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(fd)
+    return False
+
+
 def _unlink_marker(path: Path) -> None:
     try:
         path.unlink()
@@ -290,6 +336,35 @@ def _parse_ts(name: str, suffix: str) -> str | None:
     return stem
 
 
+def _resolved_backup_dir(backup_root: Path, name: str) -> Path:
+    directory = (backup_root / name).resolve(strict=True)
+    directory.relative_to(backup_root)
+    if not directory.is_dir():
+        raise ValueError(f"{name} backup path is not a directory")
+    return directory
+
+
+def _regular_file_lstat(path: Path) -> os.stat_result:
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{path.name} is not a regular backup file")
+    return st
+
+
+def _backup_pair_for_timestamp(backup_root: Path, ts: str) -> _BackupPair:
+    pg_dir = _resolved_backup_dir(backup_root, "pg")
+    redis_dir = _resolved_backup_dir(backup_root, "redis")
+    pg = pg_dir / f"{ts}.pg.dump.gz"
+    rd = redis_dir / f"{ts}.redis.tgz"
+
+    pg.resolve(strict=True).relative_to(pg_dir)
+    rd.resolve(strict=True).relative_to(redis_dir)
+
+    pg_stat = _regular_file_lstat(pg)
+    redis_stat = _regular_file_lstat(rd)
+    return _BackupPair(pg=pg, redis=rd, pg_stat=pg_stat, redis_stat=redis_stat)
+
+
 @router.get("", response_model=BackupListOut)
 async def list_backups(_admin: AdminUser) -> BackupListOut:
     backup_root = _backup_root()
@@ -300,28 +375,24 @@ async def list_backups(_admin: AdminUser) -> BackupListOut:
 
     pg_map: dict[str, tuple[int, float]] = {}
     for p in pg_dir.iterdir():
-        if not p.is_file():
-            continue
         ts = _parse_ts(p.name, ".pg.dump.gz")
         if ts is None:
             continue
         try:
-            st = p.stat()
+            st = _regular_file_lstat(p)
             pg_map[ts] = (st.st_size, st.st_mtime)
-        except OSError:
+        except (OSError, ValueError):
             continue
 
     redis_map: dict[str, tuple[int, float]] = {}
     for p in redis_dir.iterdir():
-        if not p.is_file():
-            continue
         ts = _parse_ts(p.name, ".redis.tgz")
         if ts is None:
             continue
         try:
-            st = p.stat()
+            st = _regular_file_lstat(p)
             redis_map[ts] = (st.st_size, st.st_mtime)
-        except OSError:
+        except (OSError, ValueError):
             continue
 
     # 只返回配对成功的
@@ -480,7 +551,13 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
             409,
         )
     marker = _maintenance_marker_path(_BACKUP_RUNNING_MARKER)
-    _write_pid_marker(marker, os.getpid(), datetime.now(timezone.utc))
+    if not _try_write_pid_marker(marker, os.getpid(), datetime.now(timezone.utc)):
+        await lock_service.release(lock, succeeded=False, reason="maintenance_busy")
+        raise _http(
+            "maintenance_busy",
+            "another maintenance operation is running",
+            409,
+        )
     succeeded = False
     release_reason = "backup_failed"
     started_at = datetime.now(timezone.utc)
@@ -643,27 +720,19 @@ async def restore_backup(
         raise _http("invalid_timestamp", "timestamp must match YYYYMMDD-HHMMSS", 400)
 
     backup_root = _backup_root().resolve()
-    pg = backup_root / "pg" / f"{ts}.pg.dump.gz"
-    rd = backup_root / "redis" / f"{ts}.redis.tgz"
-    # Why: ``ts`` is regex-validated to ``YYYYMMDD-HHMMSS`` so it cannot
-    # contain ``/`` or ``..``, but we still pin the resolved paths back
-    # under ``backup_root`` as a belt-and-braces guard against future regex
-    # widening or symlink shenanigans inside the backup tree.
     try:
-        pg.resolve().relative_to(backup_root)
-        rd.resolve().relative_to(backup_root)
-    except (ValueError, OSError):
-        await lock_service.release(lock, succeeded=False, reason="invalid_path")
-        raise _http("invalid_path", "backup path escapes root", 400)
-    if not pg.is_file() or not rd.is_file():
+        pair = _backup_pair_for_timestamp(backup_root, ts)
+    except FileNotFoundError:
         await lock_service.release(lock, succeeded=False, reason="backup_not_found")
         raise _http("backup_not_found", f"no paired backup for {ts}", 404)
-
-    try:
-        skew = int(abs(pg.stat().st_mtime - rd.stat().st_mtime))
+    except ValueError:
+        await lock_service.release(lock, succeeded=False, reason="invalid_path")
+        raise _http("invalid_path", "backup path escapes root or is not regular", 400)
     except OSError as exc:
         await lock_service.release(lock, succeeded=False, reason="backup_stat_failed")
         raise _http("backup_stat_failed", f"cannot stat backup files: {exc}", 500)
+
+    skew = int(abs(pair.pg_stat.st_mtime - pair.redis_stat.st_mtime))
     if skew > _PAIR_MTIME_WINDOW_SEC:
         await lock_service.release(lock, succeeded=False, reason="backup_inconsistent")
         raise _http(

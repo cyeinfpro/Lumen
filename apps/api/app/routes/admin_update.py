@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -53,15 +54,18 @@ from .admin_backups import (
 )
 
 _marker_cleanup_tasks: set[asyncio.Task[None]] = set()
+_marker_cleanup_tasks_lock = threading.Lock()
 
 
 async def _shutdown_marker_cleanup_tasks() -> None:
-    tasks = list(_marker_cleanup_tasks)
+    with _marker_cleanup_tasks_lock:
+        tasks = list(_marker_cleanup_tasks)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    _marker_cleanup_tasks.difference_update(tasks)
+    with _marker_cleanup_tasks_lock:
+        _marker_cleanup_tasks.difference_update(tasks)
 
 
 @asynccontextmanager
@@ -1896,9 +1900,15 @@ def _schedule_marker_cleanup_when_done(
     proc: subprocess.Popen[bytes],
 ) -> asyncio.Task[None]:
     task = asyncio.create_task(_cleanup_marker_when_done(proc))
-    _marker_cleanup_tasks.add(task)
-    task.add_done_callback(_marker_cleanup_tasks.discard)
+    with _marker_cleanup_tasks_lock:
+        _marker_cleanup_tasks.add(task)
+    task.add_done_callback(_discard_marker_cleanup_task)
     return task
+
+
+def _discard_marker_cleanup_task(task: asyncio.Task[None]) -> None:
+    with _marker_cleanup_tasks_lock:
+        _marker_cleanup_tasks.discard(task)
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:

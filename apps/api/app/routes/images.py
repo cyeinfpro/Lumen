@@ -36,6 +36,7 @@ from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lumen_core.byok_retention import (
     applies_to_user as byok_retention_applies_to_user,
@@ -1269,10 +1270,14 @@ async def get_image_signed(
     # private images that were never publicly shared cannot be served by
     # this endpoint even with a valid signature.
     now = datetime.now(timezone.utc)
+    share_primary = aliased(Image)
     share_hit = (
         await db.execute(
             select(Share.id)
+            .join(share_primary, share_primary.id == Share.image_id)
             .where(
+                share_primary.user_id == img.user_id,
+                share_primary.deleted_at.is_(None),
                 or_(
                     Share.image_id == img.id,
                     Share.image_ids.contains([img.id]),

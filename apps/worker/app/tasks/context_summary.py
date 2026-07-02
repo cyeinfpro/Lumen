@@ -285,6 +285,75 @@ def _summary_satisfies_request(
     return existing_hash == extra_hash
 
 
+def _summary_quality_rank(summary: dict[str, Any] | None) -> int:
+    if not is_summary_usable(summary):
+        return -1
+    fallback_reason = summary.get("fallback_reason") or summary.get("last_quality_signal")
+    return 0 if fallback_reason else 1
+
+
+def _summary_int(summary: dict[str, Any] | None, key: str) -> int:
+    if not isinstance(summary, dict):
+        return 0
+    try:
+        return max(0, int(summary.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _summary_dt(summary: dict[str, Any] | None, key: str) -> datetime | None:
+    if not isinstance(summary, dict):
+        return None
+    raw = summary.get(key)
+    if isinstance(raw, datetime):
+        return _coerce_aware(raw)
+    if isinstance(raw, str):
+        return _parse_iso_datetime(raw)
+    return None
+
+
+def _current_summary_wins_equal_boundary(
+    current: dict[str, Any],
+    new: dict[str, Any],
+    *,
+    allow_equal_boundary_refresh: bool = False,
+) -> bool:
+    """Return True when an equal-boundary CAS write should keep current.
+
+    Same-boundary writes are common when two workers compact the same message
+    range. Coverage alone cannot justify replacing the row; prefer non-fallback
+    summaries, then higher run counters. A forced/manual refresh can replace an
+    equal-quality row, but not with a lower-quality fallback.
+    """
+    if current.get("extra_instruction_hash") != new.get("extra_instruction_hash"):
+        return False
+
+    current_quality = _summary_quality_rank(current)
+    new_quality = _summary_quality_rank(new)
+    if current_quality > new_quality:
+        return True
+    if current_quality < new_quality:
+        return False
+
+    current_runs = _summary_int(current, "compression_runs")
+    new_runs = _summary_int(new, "compression_runs")
+    if current_runs > new_runs:
+        return True
+    if current_runs < new_runs:
+        return False
+
+    current_compressed_at = _summary_dt(current, "compressed_at")
+    new_compressed_at = _summary_dt(new, "compressed_at")
+    if (
+        current_compressed_at
+        and new_compressed_at
+        and current_compressed_at > new_compressed_at
+    ):
+        return True
+
+    return not allow_equal_boundary_refresh
+
+
 def _public_summary_result(
     summary: dict[str, Any], *, created: bool, status: str
 ) -> dict[str, Any]:
@@ -1327,14 +1396,35 @@ async def _cas_write_summary(
     session: Any,
     conv_id: str,
     summary: dict[str, Any],
+    *,
+    lock: _SummaryLock | None = None,
+    allow_equal_boundary_refresh: bool = False,
 ) -> bool:
     """Serialize writes with a row lock and refuse to overwrite newer coverage."""
+    if lock is not None and lock.lost_reason:
+        logger.warning(
+            "context_summary.cas_write_skipped_lock_lost conv=%s reason=%s",
+            conv_id,
+            lock.lost_reason,
+        )
+        return False
     try:
         result = await session.execute(
             select(Conversation).where(Conversation.id == conv_id).with_for_update()
         )
         current = result.scalar_one_or_none()
         if current is None:
+            return False
+        if lock is not None and lock.lost_reason:
+            logger.warning(
+                "context_summary.cas_write_aborted_lock_lost conv=%s reason=%s",
+                conv_id,
+                lock.lost_reason,
+            )
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             return False
         current_summary = current.summary_jsonb if isinstance(current.summary_jsonb, dict) else None
         if is_summary_usable(current_summary):
@@ -1346,12 +1436,19 @@ async def _cas_write_summary(
                     new_dt = datetime.fromisoformat(new_raw.replace("Z", "+00:00"))
                     current_id = current_summary.get("up_to_message_id")
                     new_id = summary.get("up_to_message_id")
-                    if _compare_message_position(
+                    position_cmp = _compare_message_position(
                         current_dt,
                         current_id if isinstance(current_id, str) else None,
                         new_dt,
                         new_id if isinstance(new_id, str) else None,
-                    ) > 0:
+                    )
+                    if position_cmp > 0:
+                        return False
+                    if position_cmp == 0 and _current_summary_wins_equal_boundary(
+                        current_summary,
+                        summary,
+                        allow_equal_boundary_refresh=allow_equal_boundary_refresh,
+                    ):
                         return False
                 except ValueError:
                     pass
@@ -1683,7 +1780,13 @@ async def ensure_context_summary(
                 },
             )
             return None
-        wrote = await _cas_write_summary(session, conv_id, summary_jsonb)
+        wrote = await _cas_write_summary(
+            session,
+            conv_id,
+            summary_jsonb,
+            lock=lock,
+            allow_equal_boundary_refresh=force,
+        )
         if not wrote:
             latest = await _read_current_summary(session, conv_id)
             if _summary_satisfies_request(latest, boundary, extra_hash):

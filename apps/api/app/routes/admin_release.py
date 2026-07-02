@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import subprocess
 from contextlib import asynccontextmanager
@@ -150,6 +151,8 @@ def _build_rollback_script(*, target_id: str, lumen_root: Path) -> str:
     atomic on Linux for the same filesystem, so a crash mid-rollback leaves
     either the old or the new ``current`` — never a half-swapped symlink.
     """
+    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}", target_id):
+        raise ValueError("invalid release id")
     root_q = shlex.quote(str(lumen_root))
     target_q = shlex.quote(target_id)
     return rf"""

@@ -80,6 +80,11 @@ def test_no_upgrade_when_all_providers_tried() -> None:
     )
 
 
+def test_upgrade_keeps_soft_avoid_before_last_provider() -> None:
+    # One provider already avoided and two still available: keep soft-avoid retrying.
+    assert _upgrade(already_avoided_count=1, enabled_provider_count=3) is not None
+
+
 def test_upgrade_until_cap_with_many_providers() -> None:
     # 10 个 provider 时上限受 _MODERATION_RETRY_CAP 控制——不会试完所有 10 个。
     last_upgrade = _MODERATION_RETRY_CAP - 2

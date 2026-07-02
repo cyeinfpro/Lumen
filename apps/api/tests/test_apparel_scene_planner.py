@@ -156,7 +156,9 @@ def _complete_scene_card(**overrides: Any) -> dict[str, Any]:
     return card
 
 
-def test_normalize_scene_cards_aligns_by_product_visibility_without_fallback_fill() -> None:
+def test_normalize_scene_cards_aligns_by_product_visibility_without_fallback_fill() -> (
+    None
+):
     shot_picks = [
         ("front_full_body", {"label": "正面全身"}),
         ("detail_half_body", {"label": "半身细节"}),
@@ -213,7 +215,9 @@ def test_normalize_scene_cards_aligns_by_product_visibility_without_fallback_fil
     assert cards[2]["location"] == "街边玻璃门外"
 
 
-def test_normalize_scene_cards_rejects_incomplete_gpt_card_instead_of_pool_fill() -> None:
+def test_normalize_scene_cards_rejects_incomplete_gpt_card_instead_of_pool_fill() -> (
+    None
+):
     with pytest.raises(ValueError, match="incomplete GPT scene_card"):
         scene_planner._normalize_scene_cards(
             [
@@ -230,7 +234,9 @@ def test_normalize_scene_cards_rejects_incomplete_gpt_card_instead_of_pool_fill(
         )
 
 
-def test_normalize_scene_cards_rejects_non_side_back_view_instead_of_rewriting() -> None:
+def test_normalize_scene_cards_rejects_non_side_back_view_instead_of_rewriting() -> (
+    None
+):
     raw_cards = [
         _complete_scene_card(
             id="natural_pose-1",
@@ -251,11 +257,81 @@ def test_normalize_scene_cards_rejects_non_side_back_view_instead_of_rewriting()
         )
     ]
 
-    with pytest.raises(ValueError, match="back/side view"):
+    with pytest.raises(ValueError, match=r"back/side (view|camera angle)"):
         scene_planner._normalize_scene_cards(
             raw_cards,
             [("natural_pose", {"label": "自然动作", "framing": "tone_first"})],
         )
+
+
+def test_normalize_scene_cards_rejects_side_profile_camera_for_front_shot() -> None:
+    raw_cards = [
+        _complete_scene_card(
+            id="front_full_body-1",
+            camera={
+                "distance": "full_body",
+                "angle": "side_profile",
+                "lens_feel": "natural_standard",
+                "orientation": "vertical",
+            },
+            pose="身体正面站位，双手自然放低",
+            motion="向镜头前走半步后停住",
+            composition="人物完整入镜，服装正面清楚",
+        )
+    ]
+
+    with pytest.raises(ValueError, match=r"back/side (view|camera angle)"):
+        scene_planner._normalize_scene_cards(
+            raw_cards,
+            [("front_full_body", {"label": "正面全身", "framing": "product_first"})],
+        )
+
+
+def test_normalize_scene_cards_requires_front_angle_for_natural_pose() -> None:
+    raw_cards = [
+        _complete_scene_card(
+            id="natural_pose-1",
+            camera={
+                "distance": "full_body",
+                "angle": "low_angle",
+                "lens_feel": "natural_standard",
+                "orientation": "vertical",
+            },
+            pose="正面微侧的小幅移动姿态",
+            motion="向镜头前走半步后自然停住",
+        )
+    ]
+
+    with pytest.raises(ValueError, match="front-facing"):
+        scene_planner._normalize_scene_cards(
+            raw_cards,
+            [("natural_pose", {"label": "自然动作", "framing": "tone_first"})],
+        )
+
+
+def test_normalize_scene_cards_accepts_side_profile_for_side_shot() -> None:
+    raw_cards = [
+        _complete_scene_card(
+            id="side_or_back-1",
+            camera={
+                "distance": "full_body",
+                "angle": "side_profile",
+                "lens_feel": "natural_standard",
+                "orientation": "vertical",
+            },
+            pose="侧身站位，肩背轮廓完整",
+            motion="小步转身，衣摆随动作轻微移动",
+            product_visibility="side_or_back_silhouette",
+            composition="侧面廓形清楚，人物完整入镜",
+        )
+    ]
+
+    cards = scene_planner._normalize_scene_cards(
+        raw_cards,
+        [("side_or_back", {"label": "侧面背面", "framing": "tone_first"})],
+    )
+
+    assert cards[0]["camera"]["angle"] == "side_profile"
 
 
 def test_normalize_scene_cards_rejects_duplicate_gpt_fingerprint() -> None:
@@ -726,9 +802,10 @@ async def test_prompt_composer_expands_only_shooting_brief(
     assert payload["product_context"]["visual_keywords"] == ["蓝色牛仔", "异色背带"]
     assert "GPT Image 2" in captured["instructions"]
     assert "只输出 1 条最终 shooting_brief" in captured["instructions"]
-    assert "不得把原本的行走、落步、半转、回头等动态改成静态站姿" in captured[
-        "instructions"
-    ]
+    assert (
+        "不得把原本的行走、落步、半转、回头等动态改成静态站姿"
+        in captured["instructions"]
+    )
     assert captured["reference_images"] == [
         {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
         {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},

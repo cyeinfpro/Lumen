@@ -1708,16 +1708,22 @@ def _validate_reference_url(raw_url: str) -> str:
         if not asset_id:
             raise _http("invalid_reference_url", "asset reference is empty", 422)
         return f"asset://{asset_id.lower()}"
-    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+    if parts.scheme.lower() != "https" or not parts.hostname:
         raise _http(
             "invalid_reference_url",
-            "reference URL must be http, https, or asset://",
+            "reference URL must be https or asset://",
             422,
         )
     if parts.username or parts.password:
         raise _http(
             "invalid_reference_url",
             "reference URL must not include credentials",
+            422,
+        )
+    if is_private_host(parts.hostname):
+        raise _http(
+            "invalid_reference_url",
+            "reference URL host is not allowed",
             422,
         )
     return value
@@ -2187,8 +2193,8 @@ async def _create_video_generation_record(
         est_token_upper=cost.estimated_tokens,
         est_cost_micro=cost.hold_micro,
     )
-    db.add(vg)
     try:
+        db.add(vg)
         await billing_core.hold(
             db,
             user.id,
@@ -2212,21 +2218,20 @@ async def _create_video_generation_record(
                 "pricing_variant": pricing_variant,
             },
         )
+        payload = {
+            "task_id": vg.id,
+            "user_id": user.id,
+            "kind": "video_generation",
+        }
+        outbox = OutboxEvent(kind="video_generation", payload=payload, published_at=None)
+        db.add(outbox)
+        await db.flush()
+        payload["outbox_id"] = str(outbox.id)
+        outbox.payload = dict(payload)
+        await db.commit()
     except billing_core.BillingError as exc:
         await db.rollback()
         raise _http(exc.code, exc.message, exc.status_code) from exc
-    payload = {
-        "task_id": vg.id,
-        "user_id": user.id,
-        "kind": "video_generation",
-    }
-    outbox = OutboxEvent(kind="video_generation", payload=payload, published_at=None)
-    db.add(outbox)
-    await db.flush()
-    payload["outbox_id"] = str(outbox.id)
-    outbox.payload = dict(payload)
-    try:
-        await db.commit()
     except IntegrityError as exc:
         await db.rollback()
         winner = (
@@ -2432,6 +2437,7 @@ async def cancel_video_generation(
     if row is None:
         raise _http("not_found", "video generation not found", 404)
     now = datetime.now(timezone.utc)
+    balance_changed = False
     if row.status not in _VIDEO_TERMINAL_STATUSES:
         row.cancel_requested_at = row.cancel_requested_at or now
         if (
@@ -2444,7 +2450,7 @@ async def cancel_video_generation(
             row.error_code = "canceled"
             row.error_message = "cancelled before upstream submission"
             row.finished_at = now
-            await billing_core.release(
+            tx = await billing_core.release(
                 db,
                 user.id,
                 ref_type="video_generation",
@@ -2457,9 +2463,18 @@ async def cancel_video_generation(
                     "billing_decision": "pre_submit_cancel_release",
                 },
             )
+            if tx is None:
+                await db.rollback()
+                raise _http(
+                    "video_hold_release_missing",
+                    "video hold release transaction was not created",
+                    409,
+                )
+            balance_changed = True
     await db.commit()
     await db.refresh(row)
-    await invalidate_balance_cache(user.id)
+    if balance_changed:
+        await invalidate_balance_cache(user.id)
     try:
         await publish_sse_event(
             get_redis(),
@@ -2502,6 +2517,7 @@ async def retry_video_generation(
                 VideoGeneration.id == generation_id,
                 VideoGeneration.user_id == user.id,
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if row is None:

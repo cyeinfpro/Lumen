@@ -1804,6 +1804,7 @@ class TelegramBinding(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    tg_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 

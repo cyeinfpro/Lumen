@@ -23,6 +23,23 @@ def _request() -> Request:
     )
 
 
+def test_sanitize_last_event_id_uses_supplied_server_time() -> None:
+    assert (
+        events._sanitize_last_event_id(  # noqa: SLF001
+            "1720000000000-0",
+            now_ms=1_720_000_001_000,
+        )
+        == "1720000000000-0"
+    )
+    assert (
+        events._sanitize_last_event_id(  # noqa: SLF001
+            "1720000000000-0",
+            now_ms=1_719_999_000_000,
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_sse_connection_slot_limits_and_releases() -> None:
     class Redis:
@@ -852,6 +869,76 @@ async def test_events_replay_uses_effective_subscription_channels(
 
     assert captured["requested_channels"] == {"conv:conv-1"}
     assert captured["include_user_channel"] is False
+
+
+@pytest.mark.asyncio
+async def test_events_replay_validates_last_event_id_with_redis_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_iter_replay_events(*_args: Any, **kwargs: Any):
+        captured["last_event_id"] = kwargs["last_event_id"]
+        if False:
+            yield {}
+
+    async def fake_acquire_sse_connection_slot(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    class PubSub:
+        async def subscribe(self, *_channels: str) -> None:
+            return None
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        async def get_message(self, **_kwargs: Any) -> None:
+            return None
+
+    class Redis:
+        async def time(self) -> tuple[int, int]:
+            return (1_720_000_001, 0)
+
+        def pubsub(self) -> PubSub:
+            return PubSub()
+
+    class DisconnectedRequest:
+        headers = {"Last-Event-ID": "1720000000000-0"}
+
+        async def is_disconnected(self) -> bool:
+            return True
+
+    redis = Redis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(events, "_iter_replay_events", fake_iter_replay_events)
+    monkeypatch.setattr(
+        events,
+        "_acquire_sse_connection_slot",
+        fake_acquire_sse_connection_slot,
+    )
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+    monkeypatch.setattr(events.time, "time", lambda: 1.0)
+
+    response = await events.events(
+        DisconnectedRequest(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="conv:conv-1",
+    )
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert captured["last_event_id"] == "1720000000000-0"
 
 
 @pytest.mark.asyncio

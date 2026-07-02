@@ -12,7 +12,10 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from lumen_core.providers import socks_proxy_url
-from lumen_core.url_security import resolve_public_http_target
+from lumen_core.url_security import (
+    pinned_async_http_transport,
+    resolve_public_http_target,
+)
 from lumen_core.video_billing import VIDEO_BILLING_TOKENS_PER_SECOND
 from lumen_core.video_providers import VideoProviderDefinition
 
@@ -541,14 +544,42 @@ def _image_response_mime(response: httpx.Response, fallback: str | None) -> str 
     if raw:
         if raw.startswith("image/"):
             return raw
-        if fallback_value.startswith("image/"):
-            return fallback_value
         raise VideoUpstreamError(
             "Omni Flash fallback image URL did not return an image",
             error_code="invalid_input",
-            status_code=response.status_code,
+            status_code=422,
+            raw={"content_type": raw},
         )
-    return fallback_value or None
+    return fallback_value if fallback_value.startswith("image/") else None
+
+
+def _sniff_image_mime(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    return None
+
+
+def _validated_image_data_url_mime(
+    data: bytes,
+    declared_mime: str | None,
+    *,
+    field: str,
+) -> str:
+    sniffed = _sniff_image_mime(data)
+    if sniffed:
+        return sniffed
+    raise VideoUpstreamError(
+        f"{field} fallback image bytes are not a supported image",
+        error_code="invalid_input",
+        status_code=422,
+        raw={"content_type": declared_mime},
+    )
 
 
 def _looks_like_iso_bmff_video(data: bytes) -> bool:
@@ -579,16 +610,24 @@ async def _fetch_video_url_bytes(video_url: str) -> bytes:
             error_code="invalid_input",
             status_code=422,
         ) from exc
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(
+    transport = (
+        pinned_async_http_transport(target)
+        if getattr(target, "resolved_ips", ())
+        else None
+    )
+    client_kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(
             connect=settings.upstream_connect_timeout_s,
             read=settings.upstream_read_timeout_s,
             write=settings.upstream_write_timeout_s,
             pool=30.0,
         ),
-        follow_redirects=False,
-        trust_env=False,
-    ) as client:
+        "follow_redirects": False,
+        "trust_env": False,
+    }
+    if transport is not None:
+        client_kwargs["transport"] = transport
+    async with httpx.AsyncClient(**client_kwargs) as client:
         async with client.stream("GET", target.url) as response:
             if response.status_code >= 400:
                 raise VideoUpstreamError(
@@ -652,7 +691,19 @@ async def _fetch_image_url_as_data_url(
         write=settings.upstream_write_timeout_s,
         pool=30.0,
     )
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+    transport = (
+        pinned_async_http_transport(target)
+        if getattr(target, "resolved_ips", ())
+        else None
+    )
+    client_kwargs: dict[str, Any] = {
+        "timeout": timeout,
+        "follow_redirects": False,
+        "trust_env": False,
+    }
+    if transport is not None:
+        client_kwargs["transport"] = transport
+    async with httpx.AsyncClient(**client_kwargs) as client:
         async with client.stream("GET", target.url) as response:
             if response.status_code >= 300:
                 raise VideoUpstreamError(
@@ -662,10 +713,13 @@ async def _fetch_image_url_as_data_url(
                 )
             content_length = response.headers.get("content-length")
             if content_length:
-                try:
-                    expected_bytes = int(content_length)
-                except ValueError:
-                    expected_bytes = 0
+                expected_bytes = _int_or_none(content_length)
+                if expected_bytes is None:
+                    raise VideoUpstreamError(
+                        f"{field} fallback image content-length is invalid",
+                        error_code="invalid_input",
+                        status_code=422,
+                    )
                 if expected_bytes > _OMNI_FALLBACK_IMAGE_MAX_BYTES:
                     raise VideoUpstreamError(
                         f"{field} fallback image is too large",
@@ -691,6 +745,7 @@ async def _fetch_image_url_as_data_url(
             error_code="invalid_input",
             status_code=422,
         )
+    mime = _validated_image_data_url_mime(data, mime, field=field)
     return _image_data_url(data, mime)
 
 
@@ -1355,7 +1410,7 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
             return {"Authorization": f"Bearer {self.provider.api_key}"}
         return {}
 
-    def _raw_client(self) -> httpx.AsyncClient:
+    def _raw_client(self, target: Any | None = None) -> httpx.AsyncClient:
         proxy_url = (
             socks_proxy_url(self.provider.proxy) if self.provider.proxy else None
         )
@@ -1372,6 +1427,8 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         }
         if proxy_url:
             kwargs["proxy"] = proxy_url
+        elif getattr(target, "resolved_ips", ()):
+            kwargs["transport"] = pinned_async_http_transport(target)
         return httpx.AsyncClient(**kwargs)
 
     async def fetch_result(self, video_url: str) -> bytes:
@@ -1385,7 +1442,7 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
                     error_code="invalid_input",
                     status_code=422,
                 ) from exc
-            async with self._raw_client() as client:
+            async with self._raw_client(target) as client:
                 async with client.stream(
                     "GET",
                     target.url,

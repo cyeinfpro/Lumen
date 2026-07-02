@@ -1690,11 +1690,64 @@ _SIDE_BACK_VIEW_TOKENS = (
     "侧面轮廓",
     "侧背",
 )
+_SIDE_BACK_CAMERA_ANGLE_TOKENS = (
+    *_SIDE_BACK_VIEW_TOKENS,
+    "side profile",
+    "side-profile",
+    "side_profile",
+    "profile",
+    "side",
+    "back",
+    "rear",
+    "behind",
+)
+_FRONT_CAMERA_ANGLE_TOKENS = (
+    "front",
+    "front view",
+    "front_view",
+    "front three quarter",
+    "front-three-quarter",
+    "front_three_quarter",
+    "three quarter front",
+    "three-quarter-front",
+    "three_quarter_front",
+    "3/4 front",
+    "eye level",
+    "eye-level",
+    "eye_level",
+    "straight on",
+    "straight-on",
+    "straight_on",
+    "正面",
+    "三分之二正面",
+    "四分之三正面",
+    "平视",
+)
 
 
 def _has_view_token(value: Any, tokens: tuple[str, ...]) -> bool:
     text = str(value or "").lower()
     return any(token.lower() in text for token in tokens)
+
+
+def _camera_angle_has_token(value: Any, tokens: tuple[str, ...]) -> bool:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return False
+    normalized = re.sub(r"[_-]+", " ", raw)
+    for token in tokens:
+        token_text = str(token or "").strip().lower()
+        if not token_text:
+            continue
+        token_normalized = re.sub(r"[_-]+", " ", token_text)
+        if re.search(
+            rf"(?<![a-z0-9]){re.escape(token_normalized)}(?![a-z0-9])",
+            normalized,
+        ):
+            return True
+        if any("\u4e00" <= ch <= "\u9fff" for ch in token_text) and token_text in raw:
+            return True
+    return False
 
 
 def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
@@ -1713,11 +1766,7 @@ def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
         "natural_detail",
         "shooting_brief",
     )
-    missing = [
-        key
-        for key in required
-        if not str(card.get(key) or "").strip()
-    ]
+    missing = [key for key in required if not str(card.get(key) or "").strip()]
     camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
     for key in ("distance", "angle", "lens_feel", "orientation"):
         if not str(camera.get(key) or "").strip():
@@ -1726,11 +1775,31 @@ def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
 
 
 def _reject_side_back_for_non_side_card(card: dict[str, Any], shot_class: str) -> None:
-    if shot_class == "side_or_back":
-        return
     camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera_angle = camera.get("angle")
+    if shot_class == "side_or_back":
+        if not (
+            _has_view_token(camera_angle, _SIDE_BACK_VIEW_TOKENS)
+            or _camera_angle_has_token(camera_angle, _SIDE_BACK_CAMERA_ANGLE_TOKENS)
+        ):
+            raise ValueError(
+                "side_or_back GPT scene_card must use side/back camera angle"
+            )
+        return
+    if _camera_angle_has_token(camera_angle, _SIDE_BACK_CAMERA_ANGLE_TOKENS):
+        raise ValueError("non-side GPT scene_card uses back/side view camera angle")
+    if shot_class in {
+        "front_full_body",
+        "natural_pose",
+    } and not _camera_angle_has_token(
+        camera_angle,
+        _FRONT_CAMERA_ANGLE_TOKENS,
+    ):
+        raise ValueError(
+            f"{shot_class} GPT scene_card camera.angle must stay front-facing"
+        )
     checked = {
-        "camera.angle": camera.get("angle"),
+        "camera.angle": camera_angle,
         "product_visibility": card.get("product_visibility"),
         "micro_event": card.get("micro_event"),
         "pose": card.get("pose"),
@@ -1799,8 +1868,7 @@ def _normalize_scene_cards(
             raise ValueError(f"missing GPT scene_card for shot {index + 1}")
         camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
         card = {
-            "id": clean_text(raw.get("id"), max_len=80)
-            or f"scene-{index + 1:02d}",
+            "id": clean_text(raw.get("id"), max_len=80) or f"scene-{index + 1:02d}",
             "scene_family": clean_text(raw.get("scene_family"), max_len=60)
             or "gpt55_scene",
             "location": clean_text(raw.get("location"), max_len=120),
@@ -1818,10 +1886,14 @@ def _normalize_scene_cards(
             "composition": clean_text(raw.get("composition"), max_len=180),
             "product_visibility": clean_text(raw.get("product_visibility"), max_len=80)
             or _product_visibility_for_shot(shot_class),
-            "environment_detail": clean_text(raw.get("environment_detail"), max_len=220),
+            "environment_detail": clean_text(
+                raw.get("environment_detail"), max_len=220
+            ),
             "lighting_detail": clean_text(raw.get("lighting_detail"), max_len=220),
             "camera_detail": clean_text(raw.get("camera_detail"), max_len=220),
-            "composition_detail": clean_text(raw.get("composition_detail"), max_len=220),
+            "composition_detail": clean_text(
+                raw.get("composition_detail"), max_len=220
+            ),
             "creative_intent": clean_text(raw.get("creative_intent"), max_len=220),
             "natural_detail": clean_text(raw.get("natural_detail"), max_len=220),
             "shooting_brief": _sanitize_shooting_brief(

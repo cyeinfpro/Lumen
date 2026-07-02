@@ -17,7 +17,12 @@ os.environ.setdefault(
     "STORAGE_ROOT", f"{tempfile.gettempdir()}/lumen-worker-test-storage"
 )
 
-from lumen_core.constants import EV_GEN_FAILED, EV_GEN_RETRYING, MessageStatus
+from lumen_core.constants import (
+    EV_GEN_FAILED,
+    EV_GEN_RETRYING,
+    GenerationStatus,
+    MessageStatus,
+)
 from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
@@ -195,7 +200,12 @@ async def test_generation_conversation_alive_check_filters_deleted_rows() -> Non
             lock=True,
         )
 
-    rendered = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    rendered = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
     assert "JOIN messages" in rendered
     assert "messages.deleted_at IS NULL" in rendered
     assert "conversations.deleted_at IS NULL" in rendered
@@ -383,14 +393,33 @@ def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
         "transparent material pipeline failed",
         error_code=generation.EC.BAD_RESPONSE.value,
         payload={
-            "transparent_qc": {"alpha_ratio": 0.0},
+            "transparent_qc": {
+                "passed": False,
+                "score": 0.123456,
+                "failure_reasons": ["alpha_all_opaque"],
+                "warnings": ["connectivity_skipped"],
+                "foreground_bbox": [1.2, 2.8, 30, 40],
+                "alpha_coverage": 0.99999,
+                "border_alpha_max": 512,
+                "largest_component_ratio": 0.77777,
+                "prompt": "do-not-expose",
+            },
             "transparent_provider": "rembg-local",
             "raw": "do-not-expose",
         },
     )
 
     assert generation._safe_generation_error_details(exc) == {
-        "transparent_qc": {"alpha_ratio": 0.0},
+        "transparent_qc": {
+            "passed": False,
+            "score": 0.1235,
+            "alpha_coverage": 1.0,
+            "largest_component_ratio": 0.7778,
+            "border_alpha_max": 255,
+            "foreground_bbox": [1, 2, 30, 40],
+            "failure_reasons": ["alpha_all_opaque"],
+            "warnings": ["connectivity_skipped"],
+        },
         "transparent_provider": "rembg-local",
     }
 
@@ -496,6 +525,117 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
     assert generation._image_queue_not_before_key("gen-1") in redis.store
     assert published[0]["event_name"] == EV_GEN_RETRYING
     assert published[0]["data"]["reason"] == "lease_lost"
+
+
+@pytest.mark.asyncio
+async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    published: list[dict[str, Any]] = []
+
+    class _RowResult:
+        def __init__(self, row: tuple[str, str, str] | None) -> None:
+            self.row = row
+
+        def one_or_none(self):
+            return self.row
+
+    class _Session:
+        rolled_back = False
+        statements: list[Any] = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return _RowResult((GenerationStatus.QUEUED.value, "msg-1", "user-1"))
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    session = _Session()
+
+    async def fake_publish_event(redis_arg, user_id, channel, event_name, data):
+        published.append(
+            {
+                "redis": redis_arg,
+                "user_id": user_id,
+                "channel": channel,
+                "event_name": event_name,
+                "data": data,
+            }
+        )
+
+    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
+    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+
+    ok = await generation._maybe_requeue_stale_generation_attempt(
+        redis,
+        task_id="gen-1",
+        attempt=2,
+        reason="row_lock_lost",
+        delay=1.25,
+    )
+
+    assert ok is True
+    assert session.rolled_back is True
+    rendered = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "generations.status = 'queued'" in rendered
+    assert "generations.attempt = 2" in rendered
+    assert "FOR UPDATE SKIP LOCKED" in rendered
+    assert redis.enqueued == [
+        ("run_generation", ("gen-1",), {"_defer_by": 1.25, "_job_try": 3})
+    ]
+    assert published[0]["event_name"] == EV_GEN_RETRYING
+    assert published[0]["data"]["reason"] == "row_lock_lost"
+
+
+@pytest.mark.asyncio
+async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+
+    class _RowResult:
+        def one_or_none(self):
+            return None
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, _statement):
+            return _RowResult()
+
+    async def fail_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("non-actionable stale rows must not publish")
+
+    monkeypatch.setattr(generation, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(generation, "publish_event", fail_publish)
+
+    ok = await generation._maybe_requeue_stale_generation_attempt(
+        redis,
+        task_id="gen-1",
+        attempt=2,
+        reason="superseded",
+        delay=1.0,
+    )
+
+    assert ok is False
+    assert redis.enqueued == []
 
 
 @pytest.mark.asyncio
@@ -951,8 +1091,10 @@ class _ModelLibraryHookSession:
         self.run = run
         self.step = step
         self.calls = 0
+        self.statements = []
 
-    async def execute(self, _statement):
+    async def execute(self, statement):
+        self.statements.append(statement)
         self.calls += 1
         return _ScalarResult(self.run if self.calls == 1 else self.step)
 
@@ -995,6 +1137,8 @@ async def test_model_library_generate_hook_waits_for_all_multi_gender_tasks() ->
     assert step.image_ids == ["img-1", "img-2"]
     assert step.status == "running"
     assert run.status == "running"
+    rendered = str(session.statements[1].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in rendered
 
 
 @pytest.mark.asyncio
@@ -1027,6 +1171,34 @@ async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
     assert run.current_step == "model_library_generate"
 
 
+@pytest.mark.asyncio
+async def test_model_library_candidate_hook_locks_step_output_json_row() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["winner-img"],
+        input_json={},
+        output_json={"dual_race_bonus_image_ids": ["bonus-1"]},
+        task_ids=[],
+        status="running",
+    )
+    session = _ModelLibraryHookSession(run, step)
+
+    await generation._maybe_record_model_library_candidate_image(
+        session=session,
+        user_id="user-1",
+        parent_upstream_request={
+            "workflow_action": "model_library_generate",
+            "workflow_step_key": "model_library_generate",
+            "workflow_run_id": "run-1",
+        },
+        bonus_image_id="bonus-2",
+    )
+
+    assert step.output_json["dual_race_bonus_image_ids"] == ["bonus-1", "bonus-2"]
+    rendered = str(session.statements[1].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in rendered
+
+
 class _PosterStyleLibraryHookSession:
     """Session mock：按 execute 顺序返回 run / step / existing_item 结果。"""
 
@@ -1037,8 +1209,10 @@ class _PosterStyleLibraryHookSession:
         self.added: list = []
         self.flush_calls = 0
         self._scalar_queue = [run, step, existing_item]
+        self.statements = []
 
-    async def execute(self, _statement):
+    async def execute(self, statement):
+        self.statements.append(statement)
         value = self._scalar_queue.pop(0) if self._scalar_queue else None
         return _ScalarResult(value)
 
@@ -1104,6 +1278,8 @@ async def test_poster_style_library_hook_inserts_item_and_keeps_step_running() -
     assert inserted.user_id == "user-1"
     assert inserted.id.startswith("user:")
     assert inserted.metadata_jsonb["workflow_run_id"] == "run-1"
+    rendered = str(session.statements[1].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in rendered
 
 
 @pytest.mark.asyncio

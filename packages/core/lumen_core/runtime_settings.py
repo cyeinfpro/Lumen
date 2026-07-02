@@ -1010,7 +1010,7 @@ def _provider_config_items(value: object) -> tuple[list[object], list[object]]:
     return provider_items, proxy_items
 
 
-def _validate_proxy_item(item: object, index: int) -> str:
+def _validate_proxy_item(item: object, index: int) -> tuple[str, bool]:
     if not isinstance(item, dict):
         raise ValueError(f"proxies[{index}] must be an object")
     name = item.get("name", "")
@@ -1035,7 +1035,11 @@ def _validate_proxy_item(item: object, index: int) -> str:
         raise ValueError(f"proxies[{index}].port must be an integer") from exc
     if port_int < 1 or port_int > 65535:
         raise ValueError(f"proxies[{index}].port must be between 1 and 65535")
-    return name.strip()
+    try:
+        enabled = parse_provider_bool(item.get("enabled"), default=True)
+    except ValueError as exc:
+        raise ValueError(f"proxies[{index}].enabled must be a boolean") from exc
+    return name.strip(), enabled
 
 
 def validate_providers(raw: str) -> str:
@@ -1055,12 +1059,12 @@ def validate_providers(raw: str) -> str:
     items, proxies = _provider_config_items(parsed)
     if not items:
         raise ValueError("providers must be a non-empty JSON array")
-    proxy_names: set[str] = set()
+    proxy_enabled_by_name: dict[str, bool] = {}
     for i, item in enumerate(proxies):
-        proxy_name = _validate_proxy_item(item, i)
-        if proxy_name in proxy_names:
+        proxy_name, proxy_enabled = _validate_proxy_item(item, i)
+        if proxy_name in proxy_enabled_by_name:
             raise ValueError(f"proxies[{i}].name is duplicated: {proxy_name}")
-        proxy_names.add(proxy_name)
+        proxy_enabled_by_name[proxy_name] = proxy_enabled
 
     provider_names: set[str] = set()
     for i, item in enumerate(items):
@@ -1098,9 +1102,17 @@ def validate_providers(raw: str) -> str:
         proxy_name = item.get("proxy", item.get("proxy_name"))
         if isinstance(proxy_name, str) and proxy_name.strip():
             name_clean = proxy_name.strip()
-            if name_clean not in proxy_names:
+            if name_clean not in proxy_enabled_by_name and enabled:
                 raise ValueError(
                     f"providers[{i}].proxy references unknown proxy: {name_clean}"
+                )
+            if (
+                name_clean in proxy_enabled_by_name
+                and not proxy_enabled_by_name[name_clean]
+                and enabled
+            ):
+                raise ValueError(
+                    f"providers[{i}].proxy references disabled proxy: {name_clean}"
                 )
         try:
             normalize_provider_purposes(item.get("purposes"))

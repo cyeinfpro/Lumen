@@ -66,8 +66,8 @@ _RECON_STALE_AFTER_S = 30
 _RECON_LIMIT = 100
 _SUBMIT_RESULT_CACHE_TTL_S = 7 * 24 * 60 * 60
 _SUBMIT_RESULT_CACHE_PREFIX = "video:submit_result:"
-_VIDEO_PROVIDER_SLOT_STALE_AFTER_S = 30 * 60
-_VIDEO_PROVIDER_SLOT_TTL_S = 2 * 60 * 60
+_VIDEO_PROVIDER_SLOT_STALE_AFTER_S = _MAX_PROVIDER_POLL_DURATION_S + 5 * 60
+_VIDEO_PROVIDER_SLOT_TTL_S = _VIDEO_PROVIDER_SLOT_STALE_AFTER_S + 60 * 60
 _VIDEO_PROVIDER_SLOT_PREFIX = "video:provider_slot:"
 _VIDEO_PROVIDER_SLOT_LOCK_PREFIX = "video:provider_slot_lock:"
 _TERMINAL_STATUSES = {
@@ -91,6 +91,13 @@ _RETRYABLE_VIDEO_ERROR_CODES = {
 class _StoredVideo:
     video: Video
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _CachedSubmitResult:
+    result: SubmitResult
+    provider_name: str | None = None
+    provider_kind: str | None = None
 
 
 def _now() -> datetime:
@@ -218,21 +225,30 @@ def _submit_result_cache_key(task_id: str) -> str:
     return f"{_SUBMIT_RESULT_CACHE_PREFIX}{task_id}"
 
 
-async def _store_submit_result(redis: Any, task_id: str, result: SubmitResult) -> None:
+async def _store_submit_result(
+    redis: Any,
+    task_id: str,
+    result: SubmitResult,
+    *,
+    provider_name: str | None = None,
+    provider_kind: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "provider_task_id": result.provider_task_id,
+        "raw": result.raw,
+    }
+    if provider_name:
+        payload["provider_name"] = provider_name
+    if provider_kind:
+        payload["provider_kind"] = provider_kind
     await redis.set(
         _submit_result_cache_key(task_id),
-        json.dumps(
-            {
-                "provider_task_id": result.provider_task_id,
-                "raw": result.raw,
-            },
-            separators=(",", ":"),
-        ),
+        json.dumps(payload, separators=(",", ":")),
         ex=_SUBMIT_RESULT_CACHE_TTL_S,
     )
 
 
-async def _load_submit_result(redis: Any, task_id: str) -> SubmitResult | None:
+async def _load_submit_result(redis: Any, task_id: str) -> _CachedSubmitResult | None:
     raw = await redis.get(_submit_result_cache_key(task_id))
     if raw is None:
         return None
@@ -249,11 +265,48 @@ async def _load_submit_result(redis: Any, task_id: str) -> SubmitResult | None:
         return None
     provider_task_id = payload.get("provider_task_id")
     raw_result = payload.get("raw")
+    provider_name = payload.get("provider_name")
+    provider_kind = payload.get("provider_kind")
     if not isinstance(provider_task_id, str) or not provider_task_id:
         return None
     if not isinstance(raw_result, dict):
         return None
-    return SubmitResult(provider_task_id=provider_task_id, raw=raw_result)
+    return _CachedSubmitResult(
+        result=SubmitResult(provider_task_id=provider_task_id, raw=raw_result),
+        provider_name=provider_name
+        if isinstance(provider_name, str) and provider_name
+        else None,
+        provider_kind=provider_kind
+        if isinstance(provider_kind, str) and provider_kind
+        else None,
+    )
+
+
+def _cached_submit_result(cached: Any) -> SubmitResult:
+    if isinstance(cached, _CachedSubmitResult):
+        return cached.result
+    return SubmitResult(
+        provider_task_id=str(getattr(cached, "provider_task_id")),
+        raw=dict(getattr(cached, "raw")),
+    )
+
+
+def _cached_submit_provider_name(cached: Any) -> str | None:
+    value = getattr(cached, "provider_name", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _cached_submit_provider_kind(cached: Any) -> str | None:
+    value = getattr(cached, "provider_kind", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _enqueue_job_id(kind: str, task_id: str, defer_s: int) -> str:
+    delay = max(0, int(defer_s or 0))
+    due_at = time.time() + delay
+    bucket_s = max(1, delay)
+    bucket = int(due_at // bucket_s)
+    return f"lumen:{kind}:{task_id}:{bucket_s}:{bucket}"
 
 
 async def _enqueue_poll(
@@ -263,7 +316,7 @@ async def _enqueue_poll(
         "run_video_poll",
         task_id,
         _defer_by=defer_s,
-        _job_id=f"lumen:video_poll:{task_id}:{int(time.time())}",
+        _job_id=_enqueue_job_id("video_poll", task_id, defer_s),
     )
 
 
@@ -274,7 +327,7 @@ async def _enqueue_submit(
         "run_video_generation",
         task_id,
         _defer_by=defer_s,
-        _job_id=f"lumen:video_generation:reconcile:{task_id}:{int(time.time())}",
+        _job_id=_enqueue_job_id("video_generation", task_id, defer_s),
     )
 
 
@@ -318,6 +371,10 @@ async def _acquire_provider_slot(
     try:
         cutoff = time.time() - _VIDEO_PROVIDER_SLOT_STALE_AFTER_S
         await redis.zremrangebyscore(zkey, 0, cutoff)
+        if await redis.zscore(zkey, task_id) is not None:
+            await redis.zadd(zkey, {task_id: time.time()})
+            await redis.expire(zkey, _VIDEO_PROVIDER_SLOT_TTL_S)
+            return True
         active = await redis.zcard(zkey)
         if int(active or 0) >= max(1, int(concurrency)):
             return False
@@ -537,6 +594,7 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                     reason="deadline_expired_before_submit",
                 )
                 await session.commit()
+                await worker_flush_balance_cache(session)
                 await _release_lease(redis, task_id, token)
                 return
             if (
@@ -547,10 +605,42 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
             ):
                 await _mark_pre_submit_canceled(session, redis, generation)
                 await session.commit()
+                await worker_flush_balance_cache(session)
                 await _release_lease(redis, task_id, token)
                 return
             if cached_submit is not None:
-                result = cached_submit
+                result = _cached_submit_result(cached_submit)
+                cached_provider_name = _cached_submit_provider_name(cached_submit)
+                cached_provider_kind = _cached_submit_provider_kind(cached_submit)
+                if cached_provider_name and not generation.provider_name:
+                    generation.provider_name = cached_provider_name
+                if cached_provider_kind and not generation.provider_kind:
+                    generation.provider_kind = cached_provider_kind
+                provider = await _provider_for_generation(generation)
+                slot_acquired = await _acquire_provider_slot(
+                    redis,
+                    provider.name,
+                    provider.concurrency,
+                    generation.id,
+                )
+                if not slot_acquired:
+                    try:
+                        await _enqueue_submit(
+                            redis,
+                            generation.id,
+                            defer_s=_POLL_INTERVAL_S,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "video cached submit re-enqueue failed task=%s",
+                            generation.id,
+                            exc_info=True,
+                        )
+                    await _release_lease(redis, task_id, token)
+                    return
+                slot_provider_name = provider.name
+                generation.provider_name = provider.name
+                generation.provider_kind = provider.kind
             else:
                 provider = await _provider_for_generation(generation)
                 slot_acquired = await _acquire_provider_slot(
@@ -614,7 +704,13 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                     )
                 )
                 try:
-                    await _store_submit_result(redis, task_id, result)
+                    await _store_submit_result(
+                        redis,
+                        task_id,
+                        result,
+                        provider_name=provider.name,
+                        provider_kind=provider.kind,
+                    )
                 except Exception:
                     logger.warning(
                         "video submit cache store failed task=%s",
@@ -708,7 +804,7 @@ async def _mark_pre_submit_expired(
             status="expired",
             failure_class="deadline_expired",
             upstream_billable=False,
-            raw={"reason": reason},
+            raw={"reason": "pre_submit_expired", "detail": reason},
         ),
         reason=reason,
     )
@@ -782,6 +878,7 @@ async def _fail_before_submit(
                 else "submit_failed_before_upstream_cost",
             )
             await session.commit()
+            await worker_flush_balance_cache(session)
             await _publish(redis, generation, EV_VIDEO_FAILED)
     finally:
         if release_provider_name:
@@ -907,7 +1004,7 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
                 PollResult(
                     status="expired" if retryable_poll_error else "failed",
                     failure_class=exc.error_code,
-                    upstream_billable=False if retryable_poll_error else None,
+                    upstream_billable=None,
                     raw=exc.raw
                     or {
                         "error": _video_exception_message(exc, phase="poll"),
@@ -1065,12 +1162,17 @@ async def _finish_cancelled_after_provider_poll_error(
         poll = PollResult(
             status="cancelled",
             failure_class="canceled",
-            upstream_billable=False,
-            raw=exc.raw
-            or {
-                "phase": "poll",
-                "error": _video_exception_message(exc, phase="poll"),
-                "error_code": "upstream_not_ready",
+            upstream_billable=None,
+            raw={
+                **(
+                    exc.raw
+                    or {
+                        "phase": "poll",
+                        "error": _video_exception_message(exc, phase="poll"),
+                        "error_code": "upstream_not_ready",
+                    }
+                ),
+                "upstream_cost_ambiguous": True,
             },
         )
         await _finish_terminal_failure(
@@ -1131,7 +1233,7 @@ async def _apply_poll_result(
                 status="expired",
                 failure_class="poll_timeout",
                 usage_total_tokens=poll.usage_total_tokens,
-                upstream_billable=False,
+                upstream_billable=None,
                 raw={
                     **(poll.raw or {}),
                     "error": "video task exceeded maximum provider tracking window",

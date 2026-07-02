@@ -134,6 +134,20 @@ class AccessGate(BaseMiddleware):
             from_user = cb.from_user
         else:
             from_user = msg.from_user if msg is not None else None
+        if from_user is None or chat.id != from_user.id:
+            logger.info(
+                "rejecting chat/from_user mismatch: chat_id=%s from_user_id=%s",
+                chat.id,
+                from_user.id if from_user else None,
+            )
+            if cb is not None:
+                await cb.answer("仅支持本人私聊使用。", show_alert=True)
+            elif msg is not None:
+                try:
+                    await msg.answer("仅支持本人私聊使用。")
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if self._allowed_user_ids:
             uid = from_user.id if from_user else None
             if uid not in self._allowed_user_ids:
@@ -144,4 +158,6 @@ class AccessGate(BaseMiddleware):
                     await cb.answer("没有权限。", show_alert=True)
                 return
 
+        data["tg_chat_id"] = chat.id
+        data["tg_user_id"] = from_user.id
         return await handler(event, data)

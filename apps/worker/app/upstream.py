@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
+import email.utils
 import hashlib
 import inspect
 import io
@@ -50,6 +51,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 
@@ -70,7 +72,7 @@ from lumen_core.providers import (
     provider_supports_route,
     resolve_provider_proxy_url,
 )
-from lumen_core.url_security import resolve_public_http_target
+from lumen_core.url_security import pinned_async_http_transport, resolve_public_http_target
 
 from .config import settings
 from .runtime_settings import resolve, resolve_db
@@ -1089,10 +1091,17 @@ def _attach_image_idempotency_key(
 def _parse_retry_after_seconds(value: str | None) -> float | None:
     if not value:
         return None
+    stripped = value.strip()
     try:
-        seconds = float(value.strip())
+        seconds = float(stripped)
     except (TypeError, ValueError):
-        return None
+        try:
+            retry_at = email.utils.parsedate_to_datetime(stripped)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     if not math.isfinite(seconds) or seconds < 0:
         return None
     return min(seconds, 15.0)
@@ -2358,6 +2367,17 @@ async def _submit_and_wait_image_job(
     submit_url = _image_jobs_url(base_url)
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key, trace_id=trace_id)
+    payload_idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    if payload_idempotency_key:
+        digest = hashlib.sha256(payload_idempotency_key.encode("utf-8")).hexdigest()
+        headers.setdefault("Idempotency-Key", f"lumen-image-job-{digest[:32]}")
+    else:
+        _attach_image_idempotency_key(
+            headers,
+            trace_id=trace_id,
+            endpoint="image-jobs",
+            body=payload,
+        )
     started = time.monotonic()
     try:
         resp = await _post_with_retry(
@@ -3704,17 +3724,27 @@ async def _reference_cache_trim(redis: Any, *, user_id: str) -> None:
 
 
 async def _reference_url_is_live(url: str) -> bool:
-    if not url.startswith(("http://", "https://")):
+    candidate = url.strip()
+    if not candidate.lower().startswith(("http://", "https://")):
         return False
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-            trust_env=False,
-            timeout=httpx.Timeout(_REFERENCE_CACHE_HEAD_TIMEOUT_S),
-        ) as client:
-            resp = await client.head(url)
-        return 200 <= resp.status_code < 400
-    except (httpx.HTTPError, OSError) as exc:
+        target = await resolve_public_http_target(candidate, allow_http=True)
+        transport = (
+            pinned_async_http_transport(target)
+            if getattr(target, "resolved_ips", ())
+            else None
+        )
+        client_kwargs: dict[str, Any] = {
+            "follow_redirects": False,
+            "trust_env": False,
+            "timeout": httpx.Timeout(_REFERENCE_CACHE_HEAD_TIMEOUT_S),
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.head(target.url)
+        return 200 <= resp.status_code < 300
+    except (ValueError, httpx.HTTPError, OSError) as exc:
         logger.debug("reference cache HEAD failed url=%s err=%r", url, exc)
         return False
 

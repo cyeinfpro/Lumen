@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import email.utils
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -90,6 +93,13 @@ def test_max_attempts_for_5xx_is_three() -> None:
     assert upstream._max_attempts_for_exception(exc) == 3
 
 
+def test_parse_retry_after_accepts_http_date() -> None:
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+    parsed = upstream._parse_retry_after_seconds(email.utils.format_datetime(retry_at))
+
+    assert parsed == 15.0
+
+
 @pytest.mark.asyncio
 async def test_post_with_retry_honors_retry_after_header(
     monkeypatch: pytest.MonkeyPatch,
@@ -119,6 +129,76 @@ async def test_post_with_retry_honors_retry_after_header(
 
     assert resp.status_code == 200
     assert sleeps == [2.5]
+
+
+@pytest.mark.asyncio
+async def test_reference_url_live_resolves_public_target_before_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_resolve(url: str, *, allow_http: bool):
+        seen["resolved"] = (url, allow_http)
+        return SimpleNamespace(url="https://resolved.example/ref.png")
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def head(self, url: str) -> httpx.Response:
+            seen["head_url"] = url
+            return httpx.Response(204)
+
+    monkeypatch.setattr(upstream, "resolve_public_http_target", fake_resolve)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", _Client)
+
+    assert await upstream._reference_url_is_live("https://user.example/ref.png")
+    assert seen["resolved"] == ("https://user.example/ref.png", True)
+    assert seen["head_url"] == "https://resolved.example/ref.png"
+    assert seen["client_kwargs"]["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_reference_url_live_rejects_redirect_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_resolve(url: str, *, allow_http: bool):
+        seen["resolved"] = (url, allow_http)
+        return SimpleNamespace(url="https://resolved.example/ref.png")
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def head(self, url: str) -> httpx.Response:
+            seen["head_url"] = url
+            return httpx.Response(
+                302,
+                headers={"location": "http://169.254.169.254/latest/meta-data"},
+            )
+
+    monkeypatch.setattr(upstream, "resolve_public_http_target", fake_resolve)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", _Client)
+
+    assert not await upstream._reference_url_is_live(" https://user.example/ref.png ")
+    assert seen["resolved"] == ("https://user.example/ref.png", True)
+    assert seen["head_url"] == "https://resolved.example/ref.png"
+    assert seen["client_kwargs"]["follow_redirects"] is False
+    assert seen["client_kwargs"]["trust_env"] is False
 
 
 @pytest.mark.asyncio
@@ -254,6 +334,46 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     assert headers["Idempotency-Key"] == expected_key
     assert seen["timeout"].read == upstream._IMAGE_READ_TIMEOUT_MIN_S
     assert seen["retry_httpx_exceptions"] is False
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_uses_payload_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_post_with_retry(**kwargs: Any) -> httpx.Response:
+        seen["headers"] = dict(kwargs["headers"])
+        seen["json_body"] = dict(kwargs["json_body"])
+        return httpx.Response(
+            409,
+            json={"error": {"message": "conflict", "code": "conflict"}},
+        )
+
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+    monkeypatch.setattr(upstream, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(upstream, "_generate_trace_id", lambda: "trace-not-stable")
+
+    with pytest.raises(upstream.UpstreamError):
+        await upstream._submit_and_wait_image_job(
+            payload={
+                "endpoint": "/v1/images/generations",
+                "request_type": "generations",
+                "retention_days": 1,
+                "idempotency_key": "generation:stable",
+            },
+            base_url="https://jobs.example",
+            api_key="sk-test",
+            proxy=None,
+            progress_callback=None,
+        )
+
+    expected = upstream.hashlib.sha256(b"generation:stable").hexdigest()
+    assert seen["headers"]["Idempotency-Key"] == f"lumen-image-job-{expected[:32]}"
+    assert seen["headers"]["x-trace-id"] == "trace-not-stable"
 
 
 @pytest.mark.asyncio

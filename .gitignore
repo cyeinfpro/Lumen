@@ -58,6 +58,9 @@ docs/superpowers/
 
 # Internal planning / audit / fix-plans (本机保留，不入库)
 docs/internal/
+.audit_state/
+CODE_AUDIT_*.md
+bug_review_report.md
 
 # Desktop build artifacts
 apps/desktop/target/

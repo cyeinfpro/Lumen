@@ -8,7 +8,9 @@ Schema：
   HSET  tg:track:{gen_id}   chat_id / status_message_id / prompt / params_json / is_bonus
   EXPIRE tg:track:{gen_id}  48h
   SET   tg:track:delivering:{gen_id} 1 NX EX 5m  ← crash 后可重试的发送锁
-  SET   tg:track:notified:{gen_id} 1 EX 48h      ← 发送完成后置位，防重复推
+  SET   tg:track:notified:{gen_id} 1 EX 48h      ← 终态通知已计划/已发送，防重复推
+  SET   tg:batch:{batch_id}:remaining <n> EX 48h
+  SADD  tg:batch:{batch_id}:done <gen_id>         ← batch 终态按 gen 去重扣数
 
 48h TTL 兜住绝大多数任务（4K 上限 25 分钟）；过 48h 没结终态的任务视为僵尸，丢弃推送。
 """
@@ -47,6 +49,34 @@ def _delivering_key(gen_id: str) -> str:
 
 def _batch_key(batch_id: str) -> str:
     return f"{_BATCH_PREFIX}{batch_id}:remaining"
+
+
+def _batch_done_key(batch_id: str) -> str:
+    return f"{_BATCH_PREFIX}{batch_id}:done"
+
+
+_BATCH_DECR_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
+if ARGV[1] ~= '' then
+  if redis.call('SADD', KEYS[2], ARGV[1]) == 0 then
+    local current = redis.call('GET', KEYS[1])
+    if not current then
+      return -1
+    end
+    return tonumber(current)
+  end
+end
+local remaining = redis.call('DECR', KEYS[1])
+if remaining < 0 then
+  redis.call('SET', KEYS[1], 0, 'EX', tonumber(ARGV[2]))
+  remaining = 0
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+return remaining
+"""
 
 
 @dataclass
@@ -97,6 +127,28 @@ class Tracker:
         pipe.expire(_key(gen_id), _TRACK_TTL_SECONDS)
         await pipe.execute()
 
+    async def _drop_dirty(
+        self,
+        client: aioredis.Redis,
+        gen_id: str,
+        reason: str,
+        data: dict[str, str],
+    ) -> None:
+        logger.warning(
+            "tracker.get: dropping dirty track reason=%s gen=%s data=%r",
+            reason,
+            gen_id,
+            data,
+        )
+        try:
+            await client.delete(
+                _key(gen_id), _notified_key(gen_id), _delivering_key(gen_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tracker.get: dirty cleanup failed gen=%s err=%r", gen_id, exc
+            )
+
     async def get(self, gen_id: str) -> TaskTrack | None:
         client = self._client()
         raw = await client.hgetall(_key(gen_id))
@@ -113,15 +165,15 @@ class Tracker:
             chat_raw = d.get("chat_id")
             msg_raw = d.get("status_message_id")
             if not chat_raw or not msg_raw:
-                logger.warning("tracker.get: missing ids for %s: %r", gen_id, d)
+                await self._drop_dirty(client, gen_id, "missing_ids", d)
                 return None
             chat_id = int(chat_raw)
             msg_id = int(msg_raw)
         except ValueError:
-            logger.warning("tracker.get: bad ints for %s: %r", gen_id, d)
+            await self._drop_dirty(client, gen_id, "bad_ints", d)
             return None
         if chat_id <= 0 or msg_id <= 0:
-            logger.warning("tracker.get: non-positive ids for %s: %r", gen_id, d)
+            await self._drop_dirty(client, gen_id, "non_positive_ids", d)
             return None
         try:
             params: dict[str, object] = json.loads(d.get("params") or "{}")
@@ -146,12 +198,13 @@ class Tracker:
         )
         return bool(result)
 
-    async def mark_notified(self, gen_id: str) -> bool:
-        """Mark terminal delivery complete and release the short delivery lock."""
+    async def mark_notified(self, gen_id: str, *, release_lock: bool = True) -> bool:
+        """Mark terminal delivery planned/sent and optionally release the lock."""
         client = self._client()
         pipe = client.pipeline(transaction=True)
         pipe.set(_notified_key(gen_id), b"1", ex=_TRACK_TTL_SECONDS)
-        pipe.delete(_delivering_key(gen_id))
+        if release_lock:
+            pipe.delete(_delivering_key(gen_id))
         result = await pipe.execute()
         return bool(result and result[0])
 
@@ -159,9 +212,18 @@ class Tracker:
         client = self._client()
         await client.delete(_delivering_key(gen_id))
 
+    async def clear_terminal_delivery(self, gen_id: str) -> None:
+        client = self._client()
+        await client.delete(_notified_key(gen_id), _delivering_key(gen_id))
+
     async def is_notified(self, gen_id: str) -> bool:
         client = self._client()
         result = await client.exists(_notified_key(gen_id))
+        return bool(result)
+
+    async def is_delivery_active(self, gen_id: str) -> bool:
+        client = self._client()
+        result = await client.exists(_delivering_key(gen_id))
         return bool(result)
 
     async def remove(self, gen_id: str) -> None:
@@ -172,24 +234,41 @@ class Tracker:
         if not batch_id or count <= 0:
             return
         client = self._client()
-        await client.set(_batch_key(batch_id), str(count), ex=_TRACK_TTL_SECONDS)
+        pipe = client.pipeline(transaction=True)
+        pipe.delete(_batch_done_key(batch_id))
+        pipe.set(_batch_key(batch_id), str(count), ex=_TRACK_TTL_SECONDS)
+        await pipe.execute()
 
-    async def batch_decr(self, batch_id: str) -> int:
-        """终态事件触发：扣减 batch 剩余计数，返回剩余。<=0 时调用方应清理 placeholder。"""
+    async def batch_decr(self, batch_id: str, gen_id: str = "") -> int | None:
+        """终态事件触发：按 gen_id 去重扣减 batch 剩余计数。
+
+        返回 None 表示 batch counter 已不存在，调用方不应再主动删 placeholder；
+        返回 <=0 表示本次或之前已归零，调用方可以做最终清理。
+        """
         if not batch_id:
             return 0
         client = self._client()
         try:
-            return int(await client.decr(_batch_key(batch_id)))
+            result = int(
+                await client.eval(
+                    _BATCH_DECR_LUA,
+                    2,
+                    _batch_key(batch_id),
+                    _batch_done_key(batch_id),
+                    gen_id or "",
+                    str(_TRACK_TTL_SECONDS),
+                )
+            )
+            return None if result < 0 else result
         except Exception as exc:  # noqa: BLE001
             logger.warning("batch_decr failed batch=%s err=%s", batch_id, exc)
-            return 0
+            return None
 
     async def batch_remove(self, batch_id: str) -> None:
         if not batch_id:
             return
         client = self._client()
-        await client.delete(_batch_key(batch_id))
+        await client.delete(_batch_key(batch_id), _batch_done_key(batch_id))
 
 
 tracker = Tracker()

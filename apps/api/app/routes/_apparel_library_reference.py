@@ -36,6 +36,10 @@ from ..runtime_settings import get_setting
 logger = logging.getLogger(__name__)
 
 _REFERENCE_EXTRACT_TOTAL_TIMEOUT_S = 30.0
+_REFERENCE_STORAGE_MISSING_NOTE = (
+    "参考图文件仍在保存中或缺少存储路径，请稍后重试或重新上传。"
+)
+_REFERENCE_STORAGE_READ_FAILED_NOTE = "参考图文件读取失败，请重新上传后再试。"
 
 
 @dataclass(slots=True)
@@ -90,6 +94,10 @@ def _storage_path(storage_key: str) -> Path:
 async def _image_data_url(image: Image) -> str | None:
     storage_key = (image.storage_key or "").strip()
     if not storage_key:
+        logger.info(
+            "model_library reference extract: image has empty storage_key image_id=%s",
+            image.id,
+        )
         return None
     try:
         raw = await asyncio.to_thread(_storage_path(storage_key).read_bytes)
@@ -145,9 +153,18 @@ async def auto_tag_owned_model_library_image(
     ).scalar_one_or_none()
     if image is None:
         return AutoTagResult(image_id=image_id)
+    storage_key = (image.storage_key or "").strip()
+    if not storage_key:
+        return AutoTagResult(
+            image_id=image_id,
+            notes=_REFERENCE_STORAGE_MISSING_NOTE,
+        )
     image_url = await _image_data_url(image)
     if image_url is None:
-        return AutoTagResult(image_id=image_id)
+        return AutoTagResult(
+            image_id=image_id,
+            notes=_REFERENCE_STORAGE_READ_FAILED_NOTE,
+        )
     providers = await _ordered_response_providers(db)
     if not providers:
         return AutoTagResult(image_id=image_id)

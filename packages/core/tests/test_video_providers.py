@@ -201,6 +201,106 @@ def test_video_provider_config_can_reference_shared_proxy() -> None:
     assert providers[0].proxy is proxies[0]
 
 
+def test_video_provider_config_reports_disabled_shared_proxy_reference() -> None:
+    shared = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "sg-socks",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "chat",
+                    "base_url": "https://chat.example.com",
+                    "api_key": "sk-test",
+                }
+            ],
+        }
+    )
+    raw = json.dumps({"providers": [_provider_raw(proxy="sg-socks")]})
+
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw,
+        shared_provider_raw=shared,
+    )
+
+    assert providers[0].proxy is None
+    assert any("proxy sg-socks is disabled" in error for error in errors)
+
+
+def test_video_provider_config_reports_disabled_local_proxy_reference() -> None:
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "local-socks",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [_provider_raw(proxy="local-socks")],
+        }
+    )
+
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw,
+        allow_missing_proxy=True,
+    )
+
+    assert providers[0].proxy is None
+    assert any("proxy local-socks is disabled" in error for error in errors)
+
+
+def test_video_provider_config_allows_disabled_provider_stale_proxy() -> None:
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "local-socks",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                _provider_raw(
+                    name="parked",
+                    enabled=False,
+                    api_key="",
+                    proxy="local-socks",
+                )
+            ],
+        }
+    )
+
+    providers, _proxies, errors = parse_video_provider_config_json(raw)
+
+    assert errors == []
+    assert providers[0].enabled is False
+    assert providers[0].proxy is None
+
+
+def test_video_provider_config_can_defer_missing_proxy_validation() -> None:
+    raw = json.dumps({"providers": [_provider_raw(proxy="shared-socks")]})
+
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw,
+        allow_missing_proxy=True,
+    )
+
+    assert errors == []
+    assert providers[0].proxy_name == "shared-socks"
+    assert providers[0].proxy is None
+
+
 def test_select_video_provider_skips_disabled_and_unsupported_entries() -> None:
     raw = json.dumps(
         {

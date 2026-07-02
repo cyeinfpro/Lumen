@@ -435,6 +435,91 @@ async def test_update_providers_allows_disabled_provider_without_api_key(
 
 
 @pytest.mark.asyncio
+async def test_update_providers_rejects_enabled_provider_with_disabled_proxy() -> None:
+    from app.routes import providers
+
+    db = _FakeProvidersDb(json.dumps({"providers": [], "proxies": []}))
+
+    with pytest.raises(Exception) as excinfo:
+        await providers.update_providers(
+            ProvidersUpdateIn(
+                proxies=[
+                    {
+                        "name": "ssh-cn",
+                        "type": "ssh",
+                        "host": "203.0.113.10",
+                        "port": 22,
+                        "enabled": False,
+                    }
+                ],
+                items=[
+                    {
+                        "name": "primary",
+                        "base_url": "https://upstream.example",
+                        "api_key": "sk-test",
+                        "enabled": True,
+                        "proxy": "ssh-cn",
+                    }
+                ],
+            ),
+            _admin_request(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),
+            db,  # type: ignore[arg-type]
+    )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert "disabled proxy" in excinfo.value.detail["error"]["message"]
+    assert db.committed is False
+
+
+def test_video_provider_proxy_validation_rejects_disabled_shared_proxy() -> None:
+    from app.routes import providers
+
+    shared_raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "ssh-cn",
+                    "type": "ssh",
+                    "host": "203.0.113.10",
+                    "port": 22,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "disabled-placeholder",
+                    "base_url": "https://upstream.example",
+                    "api_key": "",
+                    "enabled": False,
+                }
+            ],
+        }
+    )
+    video_raw = json.dumps(
+        {
+            "providers": [
+                {
+                    "name": "video",
+                    "kind": "fake",
+                    "base_url": "https://video.example",
+                    "api_key": "",
+                    "enabled": True,
+                    "proxy": "ssh-cn",
+                    "models": {"seedance": "fake-model"},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="is disabled"):
+        providers.ensure_enabled_video_provider_proxies(
+            video_raw,
+            shared_provider_raw=shared_raw,
+        )
+
+
+@pytest.mark.asyncio
 async def test_manual_provider_probe_rejects_200_wrong_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

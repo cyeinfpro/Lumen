@@ -170,6 +170,17 @@ async def test_image_success_resets_consecutive_failures() -> None:
     assert h.image_last_used_at is not None
 
 
+@pytest.mark.asyncio
+async def test_image_failure_updates_attempted_timestamp_for_selection() -> None:
+    pool = _make_pool(_cfg("acc1"), _cfg("acc2"))
+
+    pool.report_image_failure("acc1")
+
+    providers = await pool.select(route="image", acquire_inflight=False)
+    assert [p.name for p in providers] == ["acc2", "acc1"]
+    assert pool._health["acc1"].image_last_attempted_at is not None
+
+
 # --- image rate limited ------------------------------------------------------
 
 
@@ -287,6 +298,47 @@ async def test_select_image_fail_closed_when_limiter_raises(
     assert exc_info.value.error_code == "all_accounts_failed"
     h_acc1 = pool._health["acc1"]
     assert h_acc1.image_rate_limited_until is not None
+
+
+@pytest.mark.asyncio
+async def test_select_image_reserves_quota_for_claimed_task_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import account_limiter
+
+    pool = _make_pool(
+        _cfg("acc1", rate_limit="1/min"),
+        _cfg("acc2", rate_limit="1/min"),
+    )
+    pool.attach_redis(object())
+
+    async def fake_check_quota(
+        _redis: Any, _name: str, _rl: str | None, _dq: int | None, **_kw: Any
+    ) -> tuple[bool, float]:
+        return True, 0.0
+
+    reserve_calls: list[str] = []
+
+    async def fake_reserve_quota(
+        _redis: Any,
+        name: str,
+        _rl: str | None,
+        _dq: int | None,
+        **_kw: Any,
+    ) -> tuple[bool, float, str]:
+        reserve_calls.append(name)
+        if name == "acc1":
+            return False, 20.0, "task-1"
+        return True, 0.0, "task-1"
+
+    monkeypatch.setattr(account_limiter, "check_quota", fake_check_quota)
+    monkeypatch.setattr(account_limiter, "reserve_quota", fake_reserve_quota)
+
+    providers = await pool.select(route="image", task_id="task-1")
+
+    assert [p.name for p in providers] == ["acc2", "acc1"]
+    assert reserve_calls == ["acc1", "acc2"]
+    assert pool._health["acc1"].image_rate_limited_until is not None
 
 
 # --- get_status 暴露 image 状态 ---------------------------------------------

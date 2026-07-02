@@ -246,6 +246,48 @@ class GarnetNoStreamRedis(GarnetLuaXaddRedis):
         raise RuntimeError("unknown command")
 
 
+class FallbackStoreFailureRedis(FakeRedis):
+    eval = None
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kv: dict[str, str] = {}
+        self.store_failures = 1
+
+    async def get(self, key: str) -> str | None:
+        return self.kv.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        xx: bool = False,
+        ex: int | None = None,
+    ) -> bool:
+        _ = ex
+        if nx and key in self.kv:
+            return False
+        if xx and key not in self.kv:
+            return False
+        if xx and self.store_failures:
+            self.store_failures -= 1
+            raise RuntimeError("connection dropped while storing dedupe stream id")
+        self.kv[key] = value
+        return True
+
+    async def xrevrange(self, key: str, *, count: int):
+        _ = count
+        return [
+            (f"1710000000000-{idx}", fields)
+            for idx, (stream_key, fields) in reversed(
+                list(enumerate(self.stream_entries))
+            )
+            if stream_key == key
+        ]
+
+
 @pytest.mark.asyncio
 async def test_publish_event_xadd_retry_is_idempotent_after_accepted_exception(
     monkeypatch,
@@ -268,6 +310,33 @@ async def test_publish_event_xadd_retry_is_idempotent_after_accepted_exception(
     assert len(redis.stream_entries) == 1
     payload = json.loads(redis.published[0][1])
     assert payload["sse_id"] == "1710000000000-42"
+
+
+@pytest.mark.asyncio
+async def test_publish_event_fallback_recovers_orphaned_empty_dedupe_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sse_publish, "_DEDUPE_RESERVATION_WAIT_SECONDS", 0.0)
+    redis = FallbackStoreFailureRedis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        {"generation_id": "gen-1", "event_id": "evt-stable"},
+    )
+
+    assert redis.xadd_calls == 1
+    assert len(redis.stream_entries) == 1
+    dedupe_key = "events:user:user-1:dedupe:evt-stable"
+    assert redis.kv[dedupe_key] == "1710000000000-0"
+    payload = json.loads(redis.published[0][1])
+    assert payload["sse_id"] == "1710000000000-0"
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,6 +48,45 @@ async def test_put_settings_rejects_empty_string_for_typed_setting() -> None:
     assert excinfo.value.detail["error"]["details"]["errors"][0]["key"] == (
         "context.summary_target_tokens"
     )
+
+
+@pytest.mark.asyncio
+async def test_put_settings_rejects_enabled_provider_with_disabled_proxy() -> None:
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "ssh-cn",
+                    "type": "ssh",
+                    "host": "203.0.113.10",
+                    "port": 22,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "primary",
+                    "base_url": "https://upstream.example",
+                    "api_key": "sk-test",
+                    "enabled": True,
+                    "proxy": "ssh-cn",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await system_settings.put_settings_endpoint(
+            SystemSettingsUpdateIn(items=[{"key": "providers", "value": raw}]),
+            _request(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    errors = excinfo.value.detail["error"]["details"]["errors"]
+    assert errors[0]["key"] == "providers"
+    assert "disabled proxy" in errors[0]["message"]
 
 
 @pytest.mark.asyncio

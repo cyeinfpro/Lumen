@@ -214,6 +214,49 @@ async def _existing_fingerprint_tx(
         return None
 
 
+async def _ensure_completion_image_charge_fundable(
+    session: AsyncSession,
+    *,
+    completion: Completion,
+    billing_ref_id: str,
+    image_output_cost_micro: int,
+    rate_multiplier_x10000: int,
+    allow_negative: bool,
+) -> None:
+    if allow_negative or not isinstance(session, AsyncSession):
+        return
+    image_cost = max(0, int(image_output_cost_micro or 0))
+    if image_cost <= 0:
+        return
+    image_charge_micro = (
+        image_cost * max(0, int(rate_multiplier_x10000 or 0))
+    ) // 10_000
+    if image_charge_micro <= 0:
+        return
+
+    wallet = await billing_core.get_wallet(
+        session,
+        completion.user_id,
+        lock=True,
+        create=False,
+    )
+    balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
+    held_micro = await billing_core._held_amount_for_ref(  # noqa: SLF001
+        session,
+        completion.user_id,
+        "completion",
+        billing_ref_id,
+    )
+    available_micro = balance_micro + int(held_micro or 0)
+    if available_micro >= image_charge_micro:
+        return
+    raise billing_core.BillingError(
+        "INSUFFICIENT_BALANCE",
+        "insufficient wallet balance for completion image output",
+        402,
+    )
+
+
 def _add_replay_audit(
     session: AsyncSession,
     *,
@@ -649,20 +692,29 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
                 )
             )
             return
+    allow_negative = await _allow_negative_balance()
+    await _ensure_completion_image_charge_fundable(
+        session,
+        completion=completion,
+        billing_ref_id=billing_ref_id,
+        image_output_cost_micro=breakdown.image_output_cost_micro,
+        rate_multiplier_x10000=rate_multiplier,
+        allow_negative=allow_negative,
+    )
     try:
         tx = await billing_core.settle(
-        session,
-        completion.user_id,
-        ref_type="completion",
-        ref_id=billing_ref_id,
-        actual_micro=cost,
-        idempotency_key=idempotency_key,
-        allow_negative=await _allow_negative_balance(),
-        meta={
-            "completion_id": completion.id,
-            "model": completion.model,
-            "tokens_in": usage.input_tokens,
-            "tokens_out": usage.output_tokens,
+            session,
+            completion.user_id,
+            ref_type="completion",
+            ref_id=billing_ref_id,
+            actual_micro=cost,
+            idempotency_key=idempotency_key,
+            allow_negative=allow_negative,
+            meta={
+                "completion_id": completion.id,
+                "model": completion.model,
+                "tokens_in": usage.input_tokens,
+                "tokens_out": usage.output_tokens,
                 "cache_read_tokens": usage.cache_read_tokens,
                 "cache_creation_tokens": usage.cache_creation_tokens,
                 "cache_creation_5m_tokens": usage.cache_creation_5m_tokens,

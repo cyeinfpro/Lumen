@@ -17,6 +17,7 @@ from lumen_core.image_signing import (
     ALLOWED_VARIANTS,
     DEFAULT_TTL_SEC,
     ImageSigningError,
+    MAX_TTL_MS,
     SIG_HEX_LEN,
     build_signed_path,
     compute_image_sig,
@@ -157,6 +158,28 @@ def test_verify_rejects_tampered_exp() -> None:
     assert (
         verify_image_sig(IMG, "orig", exp_ms + 1000, sig, SECRET, now_ms=now) is False
     )
+
+
+def test_verify_rejects_exp_beyond_max_ttl() -> None:
+    now = _now_ms()
+    exp_ms = now + MAX_TTL_MS + 10 * 60 * 1000
+    sig = compute_image_sig(IMG, "orig", exp_ms, SECRET)
+
+    assert verify_image_sig(IMG, "orig", exp_ms, sig, SECRET, now_ms=now) is False
+
+
+def test_verify_accepts_exp_at_max_ttl_boundary() -> None:
+    now = _now_ms()
+    exp_ms, sig = sign_image_url_query(
+        IMG,
+        "orig",
+        SECRET,
+        ttl_sec=30 * 24 * 60 * 60,
+        now_ms=now,
+    )
+
+    assert exp_ms == now + MAX_TTL_MS
+    assert verify_image_sig(IMG, "orig", exp_ms, sig, SECRET, now_ms=now) is True
 
 
 def test_verify_rejects_wrong_secret() -> None:

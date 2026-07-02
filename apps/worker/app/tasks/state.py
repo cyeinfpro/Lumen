@@ -21,6 +21,7 @@ from typing import Any
 
 from lumen_core.constants import CompletionStatus, GenerationStatus
 
+from .. import billing as worker_billing
 from ..db import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ async def _commit_or_rollback(session: Any) -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("mark_task_*: rollback failed")
         raise
+    await worker_billing.flush_balance_cache_refreshes(session)
 
 
 async def _run_self_managed(
@@ -114,6 +116,7 @@ async def _run_self_managed(
                 except Exception:  # noqa: BLE001
                     logger.exception("mark_task_*: self-managed rollback failed")
             raise
+        await worker_billing.flush_balance_cache_refreshes(db_session)
 
 
 # ---------------------------------------------------------------------------

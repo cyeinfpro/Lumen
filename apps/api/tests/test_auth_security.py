@@ -16,6 +16,16 @@ from app.security import make_session_cookie
 from lumen_core.schemas import LoginIn, SignupByokIn, SignupIn
 
 
+class _Orig:
+    def __init__(self, message: str, *, constraint_name: str | None = None) -> None:
+        self.message = message
+        if constraint_name is not None:
+            self.diag = SimpleNamespace(constraint_name=constraint_name)
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class _ScalarResult:
     def __init__(self, value):
         self.value = value
@@ -313,7 +323,14 @@ async def test_signup_integrity_error_returns_email_taken(
 ) -> None:
     class ConflictDb(_Db):
         async def flush(self):
-            raise IntegrityError("insert users", {}, Exception("duplicate"))
+            raise IntegrityError(
+                "insert users",
+                {},
+                _Orig(
+                    'duplicate key value violates unique constraint "uq_users_email_active"',
+                    constraint_name="uq_users_email_active",
+                ),
+            )
 
     monkeypatch.setattr(auth, "hash_password", lambda _plain: "hashed")
     db = ConflictDb(results=[None, SimpleNamespace(email="new@example.com")])
@@ -328,6 +345,95 @@ async def test_signup_integrity_error_returns_email_taken(
 
     assert getattr(excinfo.value, "status_code", None) == 409
     assert excinfo.value.detail["error"]["code"] == "email_taken"
+    assert db.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_signup_integrity_error_does_not_misclassify_non_email_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConflictDb(_Db):
+        async def flush(self):
+            raise IntegrityError(
+                "insert sessions",
+                {},
+                _Orig(
+                    'duplicate key value violates unique constraint "auth_sessions_pkey"',
+                    constraint_name="auth_sessions_pkey",
+                ),
+            )
+
+    monkeypatch.setattr(auth, "hash_password", lambda _plain: "hashed")
+    db = ConflictDb(results=[None, SimpleNamespace(email="new@example.com")])
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.signup(
+            SignupIn(email="new@example.com", password="password123"),
+            _request(method="POST"),
+            Response(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 503
+    assert excinfo.value.detail["error"]["code"] == "signup_unavailable"
+    assert db.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_integrity_error_returns_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_byok_settings(_db):
+        return SimpleNamespace(
+            mode_enabled=True,
+            byok_signup_enabled=True,
+            byok_signup_bypasses_allowlist=False,
+        )
+
+    async def no_audit(*_args, **_kwargs):
+        return True
+
+    class ConflictDb(_Db):
+        async def flush(self):
+            raise IntegrityError(
+                "insert users",
+                {},
+                _Orig(
+                    'duplicate key value violates unique constraint "uq_users_email_active"',
+                    constraint_name="uq_users_email_active",
+                ),
+            )
+
+    pending = SimpleNamespace(
+        consumed_at=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        supplier_id="supplier-1",
+        key_ciphertext="cipher",
+        key_hash="hash",
+        key_hint="sk-test",
+        verified_at=datetime.now(timezone.utc),
+    )
+    allow = SimpleNamespace(email="race-byok@example.com")
+    db = ConflictDb(results=[None, pending, allow])
+    monkeypatch.setattr(auth, "read_byok_settings", fake_byok_settings)
+    monkeypatch.setattr(auth, "hash_password", lambda _plain: "hashed")
+    monkeypatch.setattr(auth, "write_audit_isolated", no_audit)
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.signup_byok(
+            SignupByokIn(
+                email="race-byok@example.com",
+                password="password123",
+                verification_token="verify-token",
+            ),
+            _request(method="POST"),
+            Response(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    assert pending.consumed_at is None
     assert db.rolled_back is True
 
 
@@ -640,15 +746,27 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
     class Redis:
         def __init__(self) -> None:
             self.deleted = []
+            self.values = {}
 
         async def eval(self, *_args):
             return [1, 0]
 
         async def get(self, _key: str) -> str:
+            if _key in self.values:
+                return self.values[_key]
             return "user-1"
+
+        async def set(self, key: str, value: str, *, ex: int, nx: bool) -> bool:
+            assert ex == auth._PASSWORD_RESET_CLAIM_TTL_SECONDS
+            assert nx is True
+            if key in self.values:
+                return False
+            self.values[key] = value
+            return True
 
         async def delete(self, key: str) -> None:
             self.deleted.append(key)
+            self.values.pop(key, None)
 
         async def getdel(self, key: str) -> str:
             # 路由切换到原子 GETDEL（Redis 6.2+）；mock 返回模拟值并记录 delete。
@@ -690,7 +808,10 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
     assert db.user.password_hash == "hashed:new-password"
     assert db.revoked_sessions is True
     assert db.committed is True
-    assert redis.deleted == [auth._password_reset_key("reset-token")]
+    assert redis.deleted == [
+        auth._password_reset_key("reset-token"),
+        auth._password_reset_claim_key("reset-token"),
+    ]
     assert "FOR UPDATE" in str(db.user_select).upper()
 
 
@@ -770,6 +891,48 @@ async def test_password_reset_confirm_token_limiter_runs_before_redis_read(
 
     assert excinfo.value.status_code == 429
     assert redis.reads == 0
+    assert redis.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_claim_conflict_does_not_consume_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted = []
+
+        async def eval(self, *_args):
+            return [1, 0]
+
+        async def get(self, _key: str) -> str:
+            return "user-1"
+
+        async def set(self, _key: str, _value: str, *, ex: int, nx: bool) -> bool:
+            assert ex == auth._PASSWORD_RESET_CLAIM_TTL_SECONDS
+            assert nx is True
+            return False
+
+        async def getdel(self, _key: str) -> str:
+            raise AssertionError("contended reset token must not be consumed")
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+
+    redis = Redis()
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            _Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_token"
     assert redis.deleted == []
 
 

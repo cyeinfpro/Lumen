@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
 from app.routes import conversations
@@ -460,6 +461,33 @@ async def test_list_messages_cursor_page_returns_older_messages_chronological(
     rendered = str(db.statements[0])
     assert "messages.created_at <" in rendered
     assert "messages.created_at DESC" in rendered
+
+
+def test_conversation_cursor_ignores_invalid_payload() -> None:
+    assert conversations._dec_cursor("not-a-valid-cursor") is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_list_messages_rejects_cursor_with_invalid_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_owned_conv(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(id="conv-1")
+
+    monkeypatch.setattr(conversations, "_get_owned_conv", fake_get_owned_conv)
+    cursor = conversations._enc_cursor({"ca": "not-a-date", "id": "msg-1"})
+
+    with pytest.raises(HTTPException) as excinfo:
+        await conversations.list_messages(
+            "conv-1",
+            SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+            _Db([]),  # type: ignore[arg-type]
+            cursor=cursor,
+            include=None,
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
 
 
 @pytest.mark.asyncio

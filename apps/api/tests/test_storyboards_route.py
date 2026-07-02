@@ -32,7 +32,9 @@ def test_shots_from_script_splits_script_and_provides_fallback() -> None:
 
     assert [shot.title for shot in shots] == ["镜头 01", "镜头 02", "镜头 03"]
     assert shots[0].shot_type == "establishing shot"
-    assert all(shot.duration_s == storyboards.STORYBOARD_DEFAULT_DURATION_S for shot in shots)
+    assert all(
+        shot.duration_s == storyboards.STORYBOARD_DEFAULT_DURATION_S for shot in shots
+    )
 
     fallback = storyboards._shots_from_script("")  # noqa: SLF001
     assert len(fallback) == 3
@@ -92,12 +94,123 @@ def test_clear_shot_video_output_removes_stale_video_fields() -> None:
             "video_status": "running",
             "video_progress_stage": "fetching",
             "video_progress_pct": 80,
+            "video_submission": {"idempotency_key": "sb:old"},
             "keyframe_image_id": "image-1",
             "notes": "keep",
         }
     )
 
     assert cleaned == {"keyframe_image_id": "image-1", "notes": "keep"}
+
+
+def test_storyboard_video_idempotency_uses_submission_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(storyboards, "new_uuid7", lambda: "nonce-1")
+    step = SimpleNamespace(
+        id="shot-1",
+        input_json={"keyframe_source_hash": "mutable-source-hash"},
+        output_json={
+            "keyframe_generation_id": "keyframe-gen-1",
+            "keyframe_image_id": "image-1",
+        },
+    )
+
+    key, fingerprint = storyboards._resolve_storyboard_video_idempotency_key(  # noqa: SLF001
+        run_id="run-1",
+        step=step,  # type: ignore[arg-type]
+        keyframe_image_id="image-1",
+        requested_key=None,
+    )
+
+    assert key.startswith("sb:run-1:shot-1:v:")
+    assert "mutable-source-hash" not in key
+    assert len(key) <= 96
+
+    step.output_json["video_submission"] = {
+        "fingerprint": fingerprint,
+        "idempotency_key": key,
+    }
+    replay_key, replay_fingerprint = (
+        storyboards._resolve_storyboard_video_idempotency_key(  # noqa: SLF001
+            run_id="run-1",
+            step=step,  # type: ignore[arg-type]
+            keyframe_image_id="image-1",
+            requested_key=None,
+        )
+    )
+
+    assert replay_key == key
+    assert replay_fingerprint == fingerprint
+
+
+def test_generate_all_keyframes_validates_batch_before_creating_tasks() -> None:
+    source = inspect.getsource(storyboards.generate_all_keyframes)
+
+    assert "shots_not_approved" in source
+    assert source.index("shots_not_approved") < source.index(
+        "_create_storyboard_image_task"
+    )
+
+
+def test_storyboard_status_sync_recovers_orphan_video_generation() -> None:
+    source = inspect.getsource(storyboards._recover_storyboard_video_generations)  # noqa: SLF001
+
+    assert "workflow_run_id" in source
+    assert "workflow_step_key" in source
+    assert "as_string()" in source
+    assert "storyboard_video_submission_fingerprint" in source
+
+
+@pytest.mark.asyncio
+async def test_storyboard_video_recovery_requires_current_submission_fingerprint() -> None:
+    step = SimpleNamespace(
+        step_key="shot:1",
+        input_json={"keyframe_source_hash": "source-new"},
+        output_json={
+            "keyframe_generation_id": "keyframe-new",
+            "keyframe_image_id": "image-new",
+        },
+    )
+    expected_fingerprint = storyboards._storyboard_video_submission_fingerprint(  # noqa: SLF001
+        step=step,  # type: ignore[arg-type]
+        keyframe_image_id="image-new",
+    )
+    rows = [
+        SimpleNamespace(
+            id="video-old",
+            upstream_request={
+                "workflow_step_key": "shot:1",
+                "storyboard_video_submission_fingerprint": "old-fingerprint",
+            },
+        ),
+        SimpleNamespace(
+            id="video-new",
+            upstream_request={
+                "workflow_step_key": "shot:1",
+                "storyboard_video_submission_fingerprint": expected_fingerprint,
+            },
+        ),
+    ]
+
+    class Result:
+        def scalars(self) -> "Result":
+            return self
+
+        def all(self) -> list[SimpleNamespace]:
+            return rows
+
+    class Db:
+        async def execute(self, _stmt):
+            return Result()
+
+    recovered = await storyboards._recover_storyboard_video_generations(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
+        steps=[step],  # type: ignore[list-item]
+    )
+
+    assert recovered == {"shot:1": rows[1]}
 
 
 def test_storyboard_image_task_helper_does_not_commit_before_step_link() -> None:
