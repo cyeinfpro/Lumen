@@ -20,6 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Awaitable, Callable, Iterable
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 from fastapi import (
@@ -193,6 +194,13 @@ class WorkflowAssetsAddIn(BaseModel):
 
 
 _WORKFLOW_ASSET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,63}$")
+_GITHUB_API_HOST = "api.github.com"
+_GITHUB_RAW_HOSTS = frozenset(
+    {
+        "raw.githubusercontent.com",
+        "media.githubusercontent.com",
+    }
+)
 
 _SHOWCASE_GPT55_REFERENCE_MAX_BYTES = 900_000
 _SHOWCASE_PREFLIGHT_TIMEOUT_ENV = "LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC"
@@ -885,6 +893,23 @@ def _dedupe_nonempty(values: Iterable[str]) -> list[str]:
         seen.add(v)
         out.append(v)
     return out
+
+
+def _accessory_preview_request_key(
+    *, candidate_id: str, accessory_plan: dict[str, Any], style_prompt: str
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "accessory_plan": accessory_plan,
+        "style_prompt": style_prompt.strip(),
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:24]
 
 
 def _clean_optional_text(value: str | None, *, max_len: int = 120) -> str | None:
@@ -1706,9 +1731,11 @@ def _filter_library_items(
 async def _find_library_item(
     db: AsyncSession, *, user_id: str, item_id: str
 ) -> dict[str, Any] | None:
-    """Resolve a library item by id. Presets come from the global JSON
-    file; user items come from PostgreSQL. Hidden presets resolve to
-    None for the asking user (they were "deleted" at user level).
+    """Resolve a library item by id.
+
+    Presets are intentionally global, with user-level hide rows acting as
+    per-user deletes. User-owned rows must still point at a live image owned by
+    the same user; stale or tampered library rows are not usable.
     """
     await _ensure_legacy_user_library_migrated(db, user_id)
     if item_id.startswith("preset:") or not item_id.startswith("user:"):
@@ -1724,9 +1751,13 @@ async def _find_library_item(
     if item_id.startswith("user:"):
         row = (
             await db.execute(
-                select(ModelLibraryItem).where(
+                select(ModelLibraryItem)
+                .join(Image, Image.id == ModelLibraryItem.image_id)
+                .where(
                     ModelLibraryItem.id == item_id,
                     ModelLibraryItem.user_id == user_id,
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
                 )
             )
         ).scalar_one_or_none()
@@ -1828,19 +1859,86 @@ async def _fetch_bytes(client: httpx.AsyncClient, url: str) -> bytes:
     return resp.content
 
 
+async def _fetch_github_download_bytes(client: httpx.AsyncClient, url: str) -> bytes:
+    clean_url = _validate_github_download_url(url)
+    if clean_url is None:
+        raise ValueError("preset file download URL must be a GitHub raw URL")
+    return await _fetch_bytes(client, clean_url)
+
+
 def _github_api_child_url(base_url: str, child_name: str) -> str:
+    if (
+        not child_name
+        or child_name in {".", ".."}
+        or "/" in child_name
+        or "\\" in child_name
+    ):
+        raise ValueError("invalid GitHub child path")
     prefix, _, query = base_url.partition("?")
+    safe_child_name = quote(child_name, safe="")
     return (
-        f"{prefix.rstrip('/')}/{child_name}?{query}"
+        f"{prefix.rstrip('/')}/{safe_child_name}?{query}"
         if query
-        else f"{prefix.rstrip('/')}/{child_name}"
+        else f"{prefix.rstrip('/')}/{safe_child_name}"
     )
+
+
+def _decoded_url_path_segments(url: str) -> list[str]:
+    return [unquote(part) for part in urlsplit(url).path.split("/") if part]
+
+
+def _validate_github_contents_url(url: str) -> str:
+    clean = (url or "").strip()
+    parts = urlsplit(clean)
+    if (
+        parts.scheme != "https"
+        or (parts.hostname or "").lower() != _GITHUB_API_HOST
+        or parts.port is not None
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        raise _http(
+            "invalid_preset_sync_url",
+            "preset sync URL must be a GitHub contents API URL",
+            503,
+        )
+    segments = _decoded_url_path_segments(clean)
+    if (
+        len(segments) < 5
+        or segments[0] != "repos"
+        or segments[3] != "contents"
+        or any(segment in {"", ".", ".."} for segment in segments)
+    ):
+        raise _http(
+            "invalid_preset_sync_url",
+            "preset sync URL must be a GitHub contents API URL",
+            503,
+        )
+    return clean
+
+
+def _validate_github_download_url(url: str) -> str | None:
+    clean = (url or "").strip()
+    parts = urlsplit(clean)
+    if (
+        parts.scheme != "https"
+        or (parts.hostname or "").lower() not in _GITHUB_RAW_HOSTS
+        or parts.port is not None
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return None
+    segments = _decoded_url_path_segments(clean)
+    if len(segments) < 4 or any(segment in {"", ".", ".."} for segment in segments):
+        return None
+    return clean
 
 
 async def _walk_github_contents(
     client: httpx.AsyncClient,
     contents_url: str,
 ) -> list[dict[str, Any]]:
+    contents_url = _validate_github_contents_url(contents_url)
     resp = await client.get(
         contents_url,
         headers={"Accept": "application/vnd.github+json"},
@@ -1858,9 +1956,7 @@ async def _walk_github_contents(
         entry_type = entry.get("type")
         name = str(entry.get("name") or "")
         if entry_type == "dir":
-            child_url = str(entry.get("url") or "") or _github_api_child_url(
-                contents_url, name
-            )
+            child_url = _github_api_child_url(contents_url, name)
             files.extend(await _walk_github_contents(client, child_url))
         elif entry_type == "file":
             files.append(entry)
@@ -1879,6 +1975,7 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
     if stem.endswith(".thumb"):
         return None
     download_url = str(entry.get("download_url") or "").strip()
+    download_url = _validate_github_download_url(download_url) or ""
     if not download_url:
         return None
     path_parts = [
@@ -1976,6 +2073,7 @@ async def _sync_library_presets_from_github_folder(
         raise _http(
             "sync_not_configured", "preset GitHub folder url is not configured", 503
         )
+    contents_url = _validate_github_contents_url(contents_url)
     # _SYNC_LOCK 防同进程并发；cooldown 用 last_success_at（5min）和
     # last_attempt_at（30s 失败重试保护），避免失败被锁死或滥用 hammer GitHub。
     async with _SYNC_LOCK:
@@ -2053,7 +2151,7 @@ async def _do_sync_library_presets(
 
                 image_url = str(parsed["download_url"])
                 try:
-                    data = await _fetch_bytes(client, image_url)
+                    data = await _fetch_github_download_bytes(client, image_url)
                 except Exception as exc:  # noqa: BLE001
                     skipped += 1
                     errors.append(f"{preset_id}: image download failed: {exc!r}")
@@ -2071,7 +2169,9 @@ async def _do_sync_library_presets(
                     thumb_path = _storage_path(thumb_key)
                     thumb_url = str(thumb_entry.get("download_url") or "")
                     try:
-                        thumb_data = await _fetch_bytes(client, thumb_url)
+                        thumb_data = await _fetch_github_download_bytes(
+                            client, thumb_url
+                        )
                         thumb_sha = hashlib.sha256(thumb_data).hexdigest()
                         if not thumb_path.is_file() or (
                             previous and previous.get("thumb_sha256") != thumb_sha
@@ -2199,6 +2299,45 @@ def _showcase_reference_image_ids(
             model_reference_id or "",
         ]
     )
+
+
+async def _validate_accessory_preview_image(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    run_id: str,
+    approval_step: WorkflowStep,
+    image_id: str,
+) -> str:
+    if image_id not in set(_dedupe_nonempty(approval_step.image_ids or [])):
+        raise _http(
+            "invalid_accessory_image", "selected accessory preview is invalid", 400
+        )
+    valid_image_id = (
+        await db.execute(
+            select(Image.id)
+            .join(Generation, Generation.id == Image.owner_generation_id)
+            .where(
+                Image.id == image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+                Generation.user_id == user_id,
+                Generation.upstream_request["workflow_run_id"].astext == run_id,
+                Generation.upstream_request["workflow_step_key"].astext
+                == "model_approval",
+                or_(
+                    Generation.upstream_request["workflow_action"].astext
+                    == "accessory_preview",
+                    Generation.upstream_request["workflow_action"].astext.is_(None),
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if valid_image_id is None:
+        raise _http(
+            "invalid_accessory_image", "selected accessory preview is invalid", 400
+        )
+    return str(valid_image_id)
 
 
 def _showcase_target_image_count(
@@ -2647,16 +2786,16 @@ async def _get_run(
     return run
 
 
-async def _load_steps(db: AsyncSession, run_id: str) -> list[WorkflowStep]:
-    rows = (
-        (
-            await db.execute(
-                select(WorkflowStep).where(WorkflowStep.workflow_run_id == run_id)
-            )
-        )
-        .scalars()
-        .all()
-    )
+async def _load_steps(
+    db: AsyncSession,
+    run_id: str,
+    *,
+    lock: bool = False,
+) -> list[WorkflowStep]:
+    stmt = select(WorkflowStep).where(WorkflowStep.workflow_run_id == run_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    rows = ((await db.execute(stmt))).scalars().all()
     # apparel 与 poster 的 step_key 互不重叠；合并成一张顺序表，
     # 未识别的 key 保留尾部稳定顺序。
     order: dict[str, int] = {}
@@ -2665,6 +2804,25 @@ async def _load_steps(db: AsyncSession, run_id: str) -> list[WorkflowStep]:
     for idx, key in enumerate(POSTER_WORKFLOW_STEPS):
         order[key] = len(WORKFLOW_STEPS) + idx
     return sorted(rows, key=lambda s: order.get(s.step_key, 999))
+
+
+async def _lock_workflow_run_for_sync(
+    db: AsyncSession,
+    run: WorkflowRun,
+) -> WorkflowRun | None:
+    if not isinstance(run, WorkflowRun):
+        return run
+    return (
+        await db.execute(
+            select(WorkflowRun)
+            .where(
+                WorkflowRun.id == run.id,
+                WorkflowRun.user_id == run.user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
 
 
 async def _step(db: AsyncSession, run_id: str, step_key: str) -> WorkflowStep:
@@ -2865,6 +3023,18 @@ def _cleanup_string_list(cleanup: dict[str, Any], key: str) -> list[str]:
     return _dedupe_nonempty(value for value in values if isinstance(value, str))
 
 
+def _empty_workflow_generated_cleanup() -> dict[str, Any]:
+    return {
+        "images_deleted": 0,
+        "generations_canceled": 0,
+        "completions_canceled": 0,
+        "holds_released": 0,
+        "queued_generation_ids": [],
+        "running_generation_ids": [],
+        "streaming_completion_ids": [],
+    }
+
+
 async def _release_workflow_generation_queue_state(redis: Any, task_id: str) -> None:
     from .tasks import _release_generation_queue_state
 
@@ -2935,6 +3105,9 @@ async def _soft_delete_workflow_generated_images(
     Images explicitly saved into the user's model library are preserved; those
     are no longer just transient task outputs.
     """
+    if getattr(run, "deleted_at", None) is not None:
+        return _empty_workflow_generated_cleanup()
+
     steps, candidates = await _workflow_steps_and_candidates(db, run)
     task_ids = _workflow_direct_task_ids(steps, candidates)
     image_ids = _workflow_direct_image_ids(steps, candidates)
@@ -3064,15 +3237,19 @@ async def _soft_delete_workflow_generated_images(
         )
         deleted_images = int(result.rowcount or 0)
 
-    return {
-        "images_deleted": deleted_images,
-        "generations_canceled": canceled_generations,
-        "completions_canceled": canceled_completions,
-        "holds_released": released_holds,
-        "queued_generation_ids": queued_generation_ids,
-        "running_generation_ids": running_generation_ids,
-        "streaming_completion_ids": streaming_completion_ids,
-    }
+    cleanup = _empty_workflow_generated_cleanup()
+    cleanup.update(
+        {
+            "images_deleted": deleted_images,
+            "generations_canceled": canceled_generations,
+            "completions_canceled": canceled_completions,
+            "holds_released": released_holds,
+            "queued_generation_ids": queued_generation_ids,
+            "running_generation_ids": running_generation_ids,
+            "streaming_completion_ids": streaming_completion_ids,
+        }
+    )
+    return cleanup
 
 
 def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
@@ -5039,7 +5216,11 @@ async def _sync_workflow_outputs(
     db: AsyncSession,
     run: WorkflowRun,
 ) -> None:
-    steps = {step.step_key: step for step in await _load_steps(db, run.id)}
+    locked_run = await _lock_workflow_run_for_sync(db, run)
+    if locked_run is None:
+        return
+    run = locked_run
+    steps = {step.step_key: step for step in await _load_steps(db, run.id, lock=True)}
 
     product_step = steps.get("product_analysis")
     if product_step and product_step.status == "running" and product_step.task_ids:
@@ -5830,7 +6011,6 @@ async def _attach_workflow_assets(
             "image_not_found",
             "one or more images are not available for this workflow",
             404,
-            image_ids=missing,
         )
 
     step = await _step(db, run.id, clean_step_key)
@@ -6491,7 +6671,7 @@ async def get_workflow(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WorkflowRunOut:
-    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id)
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
     out = await _build_run_out(db, run)
     await db.commit()
     return out
@@ -6990,20 +7170,13 @@ async def approve_model_candidate(
     selected_accessory_image_id = body.selected_accessory_image_id
     approval = await _step(db, run.id, "model_approval")
     if selected_accessory_image_id:
-        valid_accessory_image_id = (
-            await db.execute(
-                select(Image.id).where(
-                    Image.id == selected_accessory_image_id,
-                    Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
-                    Image.id.in_(approval.image_ids or []),
-                )
-            )
-        ).scalar_one_or_none()
-        if valid_accessory_image_id is None:
-            raise _http(
-                "invalid_accessory_image", "selected accessory preview is invalid", 400
-            )
+        await _validate_accessory_preview_image(
+            db,
+            user_id=user.id,
+            run_id=run.id,
+            approval_step=approval,
+            image_id=selected_accessory_image_id,
+        )
     all_candidates = (
         (
             await db.execute(
@@ -7170,6 +7343,26 @@ async def create_accessory_previews(
             409,
         )
     approval = await _step(db, run.id, "model_approval")
+    accessory_plan_payload = body.accessory_plan.model_dump()
+    preview_request_key = _accessory_preview_request_key(
+        candidate_id=candidate.id,
+        accessory_plan=accessory_plan_payload,
+        style_prompt=body.style_prompt,
+    )
+    existing_task_ids = _dedupe_nonempty(approval.task_ids or [])
+    existing_input = approval.input_json or {}
+    if approval.status == "running" and existing_task_ids:
+        if existing_input.get("accessory_preview_request_key") == preview_request_key:
+            run.current_step = "model_approval"
+            run.status = "running"
+            out = await _build_run_out(db, run)
+            await db.commit()
+            return out
+        raise _http(
+            "already_running",
+            "accessory preview generation already running",
+            409,
+        )
     conv = await _get_owned_conversation(
         db, user_id=user.id, conversation_id=run.conversation_id or ""
     )
@@ -7189,7 +7382,7 @@ async def create_accessory_previews(
         conv=conv,
         intent=Intent.IMAGE_TO_IMAGE,
         text=_accessory_preview_prompt(
-            accessory_plan=body.accessory_plan.model_dump(),
+            accessory_plan=accessory_plan_payload,
             style_prompt=body.style_prompt,
             age_context=age_context,
         ),
@@ -7204,12 +7397,14 @@ async def create_accessory_previews(
         },
     )
     approval.status = "running"
-    approval.task_ids = _dedupe_nonempty([*(approval.task_ids or []), *gen_ids])
+    approval.task_ids = _dedupe_nonempty([*existing_task_ids, *gen_ids])
     approval.input_json = {
         **(approval.input_json or {}),
         "candidate_id": candidate.id,
-        "accessory_plan": body.accessory_plan.model_dump(),
+        "accessory_plan": accessory_plan_payload,
         "style_prompt": body.style_prompt,
+        "accessory_preview_request_key": preview_request_key,
+        "accessory_preview_started_at": _iso_now(),
     }
     run.current_step = "model_approval"
     run.status = "running"
@@ -7238,20 +7433,13 @@ async def save_accessory_selection(
     approval = await _step(db, run.id, "model_approval")
     selected_image_id = body.selected_accessory_image_id
     if selected_image_id:
-        valid_image_id = (
-            await db.execute(
-                select(Image.id).where(
-                    Image.id == selected_image_id,
-                    Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
-                    Image.id.in_(approval.image_ids or []),
-                )
-            )
-        ).scalar_one_or_none()
-        if valid_image_id is None:
-            raise _http(
-                "invalid_accessory_image", "selected accessory preview is invalid", 400
-            )
+        await _validate_accessory_preview_image(
+            db,
+            user_id=user.id,
+            run_id=run.id,
+            approval_step=approval,
+            image_id=selected_image_id,
+        )
     approval.input_json = {
         **(approval.input_json or {}),
         "selected_accessory_image_id": selected_image_id,
@@ -7424,6 +7612,9 @@ async def _showcase_generation_context(
     product_step = await _step(db, run.id, "product_analysis")
     if product_step.status != "approved":
         raise _http("product_not_approved", "approve product analysis first", 409)
+    approval = await _step(db, run.id, "model_approval")
+    if approval.status != "approved":
+        raise _http("model_not_approved", "approve a model candidate first", 409)
     candidate = await _selected_candidate(db, run.id)
     if not candidate.contact_sheet_image_id:
         raise _http(
@@ -7442,7 +7633,6 @@ async def _showcase_generation_context(
         seed_key=seed_key,
     )
 
-    approval = await _step(db, run.id, "model_approval")
     accessory_plan = (approval.input_json or {}).get("accessory_plan")
     if not isinstance(accessory_plan, dict):
         accessory_plan = AccessoryPlanIn().model_dump()
@@ -7454,6 +7644,14 @@ async def _showcase_generation_context(
         if isinstance(selected_accessory_image_id, str)
         else None
     )
+    if selected_accessory_ref_id:
+        selected_accessory_ref_id = await _validate_accessory_preview_image(
+            db,
+            user_id=user.id,
+            run_id=run.id,
+            approval_step=approval,
+            image_id=selected_accessory_ref_id,
+        )
     model_reference_image_id = (
         selected_accessory_ref_id or candidate.contact_sheet_image_id
     )
@@ -9233,6 +9431,7 @@ async def clear_apparel_model_library_jobs(
                     WorkflowRun.type == WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
                     WorkflowRun.status.in_(["completed", "failed", "canceled"]),
                 )
+                .with_for_update()
             )
         )
         .scalars()
@@ -10589,6 +10788,9 @@ async def create_poster_masters(
     existing_count = len(existing_masters)
 
     master_step.status = "running"
+    master_step.task_ids = []
+    master_step.image_ids = []
+    master_step.output_json = {}
     master_step.input_json = {
         "candidate_count": candidate_count,
         "size_mode": body.size_mode,

@@ -361,7 +361,7 @@ async def estimate_video_cost(
         pricing_variant=effective_pricing_variant,
         resolution=resolution,
     )
-    if unit_price is None:
+    if unit_price is None or int(unit_price) <= 0:
         raise VideoBillingError(
             "video_pricing_missing",
             f"missing enabled video pricing rule for {model}/{effective_pricing_variant}",
@@ -411,13 +411,19 @@ async def settle_video_cost(
         pricing_variant=effective_pricing_variant,
         resolution=resolution,
     )
-    if unit_price is None:
+    if unit_price is None or int(unit_price) <= 0:
         raise VideoBillingError(
             "video_pricing_missing",
             f"missing enabled video pricing rule for {model}/{effective_pricing_variant}",
             503,
         )
     actual_micro = round_micro_for_tokens(int(actual_total_tokens), int(unit_price))
+    if actual_micro <= 0:
+        raise VideoBillingError(
+            "video_invalid_settlement",
+            "actual video settlement cost must be positive",
+            500,
+        )
     if estimated_micro is not None:
         estimate = int(estimated_micro)
         if estimate > 0 and actual_micro > estimate * max(

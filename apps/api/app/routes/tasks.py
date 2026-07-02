@@ -747,6 +747,15 @@ async def _task_wallet_exists(db: AsyncSession, user_id: str) -> bool:
     return wallet is not None
 
 
+async def _task_should_release_wallet_hold(
+    db: AsyncSession,
+    user: Any,
+) -> bool:
+    if getattr(user, "account_mode", "wallet") == "wallet":
+        return True
+    return await _task_wallet_exists(db, user.id)
+
+
 # ---------- generations ----------
 
 @router.get("/generations/{gen_id}", response_model=GenerationOut)
@@ -806,9 +815,7 @@ async def cancel_generation(
     gen.status = GenerationStatus.CANCELED.value
     gen.finished_at = datetime.now(timezone.utc)
     released_hold = False
-    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
-        db, user.id
-    ):
+    if await _task_should_release_wallet_hold(db, user):
         released_hold = await _release_queued_task_hold(
             db,
             user_id=user.id,
@@ -891,9 +898,7 @@ async def retry_generation(
     gen.started_at = None
     gen.finished_at = None
     held_retry = False
-    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
-        db, user.id
-    ):
+    if await _task_should_release_wallet_hold(db, user):
         held_retry = await _hold_generation_retry_wallet(db, user.id, gen)
 
     payload = {"task_id": gen.id, "user_id": user.id, "kind": "generation"}
@@ -965,9 +970,7 @@ async def cancel_completion(
     comp.progress_stage = CompletionStage.FINALIZING.value
     comp.finished_at = datetime.now(timezone.utc)
     released_hold = False
-    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
-        db, user.id
-    ):
+    if await _task_should_release_wallet_hold(db, user):
         released_hold = await _release_queued_task_hold(
             db,
             user_id=user.id,
@@ -1015,9 +1018,7 @@ async def retry_completion(
     comp.finished_at = None
     previous_retry_count = _completion_billing_retry_count(comp)
     held_retry = False
-    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
-        db, user.id
-    ):
+    if await _task_should_release_wallet_hold(db, user):
         held_retry = await _hold_completion_retry_wallet(
             db,
             user.id,

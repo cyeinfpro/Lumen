@@ -189,7 +189,7 @@ async def _amain() -> None:
         await fsm_redis.ping()
         storage = RedisStorage(
             redis=fsm_redis,
-            key_builder=DefaultKeyBuilder(prefix="tg:bot:fsm"),
+            key_builder=DefaultKeyBuilder(prefix="tg:bot:fsm", with_bot_id=True),
             state_ttl=_FSM_STATE_TTL_SEC,
             data_ttl=_FSM_STATE_TTL_SEC,
         )

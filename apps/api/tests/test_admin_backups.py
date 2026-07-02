@@ -65,6 +65,18 @@ def test_chmod_tolerate_eperm_swallows_only_eperm(
     assert exc.value.errno == 28
 
 
+def test_try_write_pid_marker_replaces_corrupt_empty_marker(tmp_path: Path) -> None:
+    marker = tmp_path / ".backup.running"
+    marker.write_text("", encoding="utf-8")
+    started_at = datetime(2026, 7, 2, tzinfo=timezone.utc)
+
+    assert admin_backups._try_write_pid_marker(marker, 12345, started_at) is True
+
+    raw = marker.read_text(encoding="utf-8")
+    assert "pid=12345\n" in raw
+    assert f"started_at={started_at.isoformat()}\n" in raw
+
+
 def test_open_private_append_tolerates_fchmod_eperm_for_non_owner_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -233,6 +245,47 @@ async def test_find_latest_paired_backup_after_uses_filesystem_fallback(
     assert await admin_backups._find_latest_paired_backup_after(started_at) == ts
 
 
+def test_backup_pair_for_timestamp_rejects_symlinked_backup_leaf(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    pg_dir.mkdir(parents=True)
+    redis_dir.mkdir()
+    ts = "20260519-010203"
+    real_pg = pg_dir / "real.pg.dump.gz"
+    real_pg.write_bytes(b"pg")
+    (pg_dir / f"{ts}.pg.dump.gz").symlink_to(real_pg)
+    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+
+    with pytest.raises(ValueError):
+        admin_backups._backup_pair_for_timestamp(backup_root.resolve(), ts)
+
+
+@pytest.mark.asyncio
+async def test_list_backups_skips_symlinked_backup_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    pg_dir.mkdir(parents=True)
+    redis_dir.mkdir()
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    ts = "20260519-010203"
+    real_pg = pg_dir / "real.pg.dump.gz"
+    real_pg.write_bytes(b"pg")
+    (pg_dir / f"{ts}.pg.dump.gz").symlink_to(real_pg)
+    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+
+    out = await admin_backups.list_backups(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert out.items == []
+    assert out.total == 0
+
+
 @pytest.mark.asyncio
 async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     monkeypatch: pytest.MonkeyPatch,
@@ -287,6 +340,60 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     assert (backup_root / ".backup.trigger").is_file()
     assert not (backup_root / ".backup.running").exists()
     assert release_calls[-1] == {"succeeded": True, "reason": "backup_complete"}
+
+
+@pytest.mark.asyncio
+async def test_backup_now_refuses_existing_marker_before_writing_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (scripts_dir / "restore.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: True)
+    backup_root.mkdir()
+    (backup_root / ".backup.running").write_text(
+        "pid=0\n"
+        f"started_at={datetime.now(timezone.utc).isoformat()}\n"
+        "unit=lumen-backup-running.service\n",
+        encoding="utf-8",
+    )
+
+    release_calls: list[dict[str, object]] = []
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **kwargs) -> None:
+            release_calls.append(kwargs)
+
+    async def unexpected_wait_for_log_append(*_args, **_kwargs) -> bool:
+        raise AssertionError("trigger should not be written when marker exists")
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(
+        admin_backups,
+        "_wait_for_log_append",
+        unexpected_wait_for_log_append,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_backups.backup_now(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert release_calls == [{"succeeded": False, "reason": "maintenance_busy"}]
+    assert not (backup_root / ".backup.trigger").exists()
 
 
 @pytest.mark.asyncio

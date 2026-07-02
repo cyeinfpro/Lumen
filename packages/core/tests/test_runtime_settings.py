@@ -398,6 +398,60 @@ def test_validate_providers_rejects_unknown_proxy_reference():
         validate_providers(raw)
 
 
+def test_validate_providers_rejects_disabled_proxy_reference():
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "egress",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "primary",
+                    "base_url": "https://upstream.example/v1",
+                    "api_key": "sk-test",
+                    "proxy": "egress",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="references disabled proxy"):
+        validate_providers(raw)
+
+
+def test_validate_providers_allows_disabled_provider_stale_proxy_reference():
+    raw = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "egress",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "enabled": False,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "parked",
+                    "base_url": "https://upstream.example/v1",
+                    "api_key": "",
+                    "enabled": False,
+                    "proxy": "egress",
+                }
+            ],
+        }
+    )
+
+    assert validate_providers(raw) == raw
+
+
 @pytest.mark.parametrize(
     ("raw", "message"),
     [

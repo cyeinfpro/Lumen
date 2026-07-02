@@ -467,6 +467,47 @@ async def test_sync_short_circuits_on_recent_success(
     assert called == []
 
 
+@pytest.mark.asyncio
+async def test_sync_skips_duplicate_preset_id_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        poster_styles, "_global_preset_index_path", lambda: tmp_path / "index.json"
+    )
+    monkeypatch.setattr(
+        poster_styles, "_library_sync_state_path", lambda: tmp_path / "state.json"
+    )
+
+    async def fake_walk(_client: Any, _url: str) -> list[dict[str, str]]:
+        return [
+            {"path": "dir_a/meta.json"},
+            {"path": "dir_b/meta.json"},
+        ]
+
+    async def fake_meta(_client: Any, entry: dict[str, str]) -> dict[str, Any]:
+        return {
+            "preset_id": "duplicate_style",
+            "version": 1,
+            "title": f"Style {entry['path']}",
+            "category": "minimal",
+        }
+
+    monkeypatch.setattr(poster_styles, "_walk_github_contents", fake_walk)
+    monkeypatch.setattr(poster_styles, "_fetch_meta_json", fake_meta)
+
+    out = await poster_styles._do_sync_library_presets(  # noqa: SLF001
+        "https://api.example.test/contents",
+        poster_styles._default_sync_state(),  # noqa: SLF001
+        proxy_url=None,
+    )
+
+    assert out.status == "ok"
+    assert out.added == 1
+    assert out.skipped == 1
+    assert any("duplicate preset_id/version duplicate_style@1" in e for e in out.errors)
+
+
 # --------------------------- Delete semantics ------------------------------
 
 
@@ -605,6 +646,52 @@ async def test_auto_tag_persists_when_provider_returns_signal(
     assert row.palette == ["#FF6B6B"]
     assert row.auto_tagged_at is not None
     assert db.commits == 1
+
+
+def test_poster_style_auto_tag_concurrency_env_is_clamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POSTER_STYLE_AUTO_TAG_CONCURRENCY", "99")
+    assert poster_styles._poster_style_auto_tag_concurrency() == 4  # noqa: SLF001
+
+    monkeypatch.setenv("POSTER_STYLE_AUTO_TAG_CONCURRENCY", "bad")
+    assert poster_styles._poster_style_auto_tag_concurrency() == 2  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_auto_tag_runs_provider_call_inside_rate_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _user_item()
+    db = _StubDb(response_batches=[[row]])
+
+    class Gate:
+        def __init__(self) -> None:
+            self.entered = 0
+
+        async def __aenter__(self) -> None:
+            self.entered += 1
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    gate = Gate()
+    monkeypatch.setattr(poster_styles, "_poster_style_auto_tag_semaphore", lambda: gate)
+
+    async def _vision(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+        assert gate.entered == 1
+        return {"style_tags": ["扁平"], "notes": "ok"}
+
+    monkeypatch.setattr(
+        poster_styles, "_api_call_poster_style_tagging_upstream", _vision
+    )
+
+    out = await poster_styles._auto_tag_poster_style_item(  # noqa: SLF001
+        db=db, user_id="user-1", item_id="user:pstyle-1"
+    )
+
+    assert gate.entered == 1
+    assert out.style_tags == ["扁平"]
 
 
 # --------------------------- Generate prompt --------------------------------

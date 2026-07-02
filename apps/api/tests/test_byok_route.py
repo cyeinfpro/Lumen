@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.routes import byok
+from lumen_core.byok import ByokCryptoError
 
 
 class _Result:
@@ -175,3 +176,47 @@ async def test_probe_credential_rate_limit_runs_before_db_and_upstream(
 
     assert exc_info.value.status_code == 429
     assert db.statements == []
+
+
+@pytest.mark.asyncio
+async def test_probe_credential_masks_decrypt_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _credential()
+    supplier = _supplier()
+    db = _Db((credential, supplier))
+    user = SimpleNamespace(id="user-1", email="user@example.test")
+    audits: list[dict[str, Any]] = []
+
+    async def fake_audit(**kwargs: Any) -> None:
+        audits.append(kwargs)
+
+    def fail_decrypt(*_args: Any) -> str:
+        raise ByokCryptoError("bad master secret")
+
+    monkeypatch.setattr(byok, "get_redis", lambda: object())
+    monkeypatch.setattr(byok, "decrypt_api_key", fail_decrypt)
+    monkeypatch.setattr(byok, "byok_master_secret", lambda: "x" * 32)
+    monkeypatch.setattr(byok, "write_audit_isolated", fake_audit)
+    for name in (
+        "_PROBE_IP_LIMITER",
+        "_PROBE_USER_LIMITER",
+        "_PROBE_CREDENTIAL_LIMITER",
+        "_PROBE_SUPPLIER_LIMITER",
+    ):
+        monkeypatch.setattr(byok, name, _AllowLimiter())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await byok.probe_my_api_credential(
+            "cred-1",
+            _request(),
+            user,  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["error"]["code"] == "credential_unavailable"
+    assert "master" not in exc_info.value.detail["error"]["message"].lower()
+    assert audits
+    assert audits[0]["event_type"] == "me.api_credential.probe.decrypt_failed"
+    assert db.commits == 1

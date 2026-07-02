@@ -77,6 +77,20 @@ def _default_video_charge_micro(generation: VideoGeneration, held: int) -> int:
     return max(int(held), int(generation.est_cost_micro or 0))
 
 
+def _has_explicit_no_upstream_cost_receipt(poll_result: Any, reason: str) -> bool:
+    raw = _poll_attr(poll_result, "raw")
+    raw_reason = ""
+    if isinstance(raw, dict):
+        raw_reason = str(raw.get("reason") or "").strip()
+    safe_reasons = {
+        "pre_submit_cancel",
+        "pre_submit_expired",
+        "deadline_expired_before_submit",
+        "submit_failed_before_upstream_cost",
+    }
+    return reason in safe_reasons or raw_reason in safe_reasons
+
+
 async def _usage_charge_micro(
     session: AsyncSession,
     generation: VideoGeneration,
@@ -123,7 +137,11 @@ async def resolve_video_billing(
     pricing_variant = _generation_pricing_variant(generation)
     billing_model = _generation_billing_model(generation)
 
-    if status == "succeeded" and upstream_billable is False:
+    if (
+        status == "succeeded"
+        and upstream_billable is False
+        and _has_explicit_no_upstream_cost_receipt(poll_result, reason)
+    ):
         return await _release_video_hold(
             session,
             generation,
@@ -150,7 +168,9 @@ async def resolve_video_billing(
     elif status == "succeeded":
         actual_micro = _default_video_charge_micro(generation, held)
         decision = "missing_usage_default_charge"
-    elif upstream_billable is False:
+    elif upstream_billable is False and _has_explicit_no_upstream_cost_receipt(
+        poll_result, reason
+    ):
         return await _release_video_hold(
             session,
             generation,
@@ -173,6 +193,9 @@ async def resolve_video_billing(
         except VideoBillingError:
             actual_micro = _default_video_charge_micro(generation, held)
             decision = "failure_pricing_missing_default_charge"
+    elif upstream_billable is False:
+        actual_micro = _default_video_charge_micro(generation, held)
+        decision = "upstream_not_billable_untrusted_default_charge"
     elif upstream_billable is True:
         actual_micro = _default_video_charge_micro(generation, held)
         decision = "failure_billable_default_charge"

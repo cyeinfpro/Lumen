@@ -207,6 +207,7 @@ async def verify_csrf_session(
 
 BOT_TOKEN_HEADER = "X-Bot-Token"
 BOT_CHAT_ID_HEADER = "X-Telegram-Chat-Id"
+BOT_TG_USER_ID_HEADER = "X-Telegram-User-Id"
 BOT_TOKEN_FAILURE_LIMITER = RateLimiter(
     capacity=20,
     refill_per_sec=20 / 60,
@@ -262,6 +263,7 @@ async def get_bot_user(
     """
     await require_bot_token(request)
     chat_id = (request.headers.get(BOT_CHAT_ID_HEADER) or "").strip()
+    tg_user_id = (request.headers.get(BOT_TG_USER_ID_HEADER) or "").strip()
     if not chat_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -269,6 +271,17 @@ async def get_bot_user(
                 "error": {
                     "code": "missing_chat_id",
                     "message": "X-Telegram-Chat-Id header required",
+                }
+            },
+        )
+    if not tg_user_id:
+        await _record_bot_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": "missing_telegram_user_id",
+                    "message": "X-Telegram-User-Id header required",
                 }
             },
         )
@@ -290,6 +303,29 @@ async def get_bot_user(
             },
         )
     _binding, user = row
+    binding_tg_user_id = (_binding.tg_user_id or "").strip()
+    if not binding_tg_user_id:
+        await _record_bot_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": {
+                    "code": "telegram_rebind_required",
+                    "message": "telegram binding must be refreshed before bot access",
+                }
+            },
+        )
+    if tg_user_id and tg_user_id != binding_tg_user_id:
+        await _record_bot_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": {
+                    "code": "telegram_user_mismatch",
+                    "message": "telegram user id does not match bound chat",
+                }
+            },
+        )
     request.state.current_user = user
     return user
 

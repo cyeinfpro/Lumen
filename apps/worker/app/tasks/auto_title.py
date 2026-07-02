@@ -73,6 +73,7 @@ _RECONCILE_BATCH_LIMIT = 50          # 单轮最多 enqueue 50 个，限速
 _DEFAULT_RECONCILE_INTERVAL_S = 300  # 5 分钟一次
 _RECONCILE_LOCK_KEY = "lumen:auto_title:reconcile:lock"
 _RECONCILE_LOCK_TTL_S = 60           # 锁 TTL 必须比单轮巡检最坏耗时长（实测 < 5s）
+_AUTO_TITLE_JOB_PREFIX = "lumen:auto_title:"
 
 # 定义"默认 / 待生成"的 title 占位集合，DB 查询和 Python 校验共享一份真相源。
 # - ""：Conversation.title 的 DB 默认值（models.py:152 default=""）
@@ -135,7 +136,11 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
                     _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
                 return
         # enqueue 异步任务，避免阻塞 worker 当前任务收尾
-        await redis.enqueue_job("auto_title_conversation", conversation_id)
+        await redis.enqueue_job(
+            "auto_title_conversation",
+            conversation_id,
+            _job_id=f"{_AUTO_TITLE_JOB_PREFIX}{conversation_id}",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("maybe_enqueue_auto_title failed conv=%s err=%s", conversation_id, exc)
 
@@ -598,7 +603,11 @@ async def reconcile_default_titles(ctx: dict[str, Any]) -> int:
         for row in rows:
             conv_id = row[0] if isinstance(row, tuple) else row.id
             try:
-                await redis.enqueue_job("auto_title_conversation", conv_id)
+                await redis.enqueue_job(
+                    "auto_title_conversation",
+                    conv_id,
+                    _job_id=f"{_AUTO_TITLE_JOB_PREFIX}{conv_id}",
+                )
                 enqueued += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

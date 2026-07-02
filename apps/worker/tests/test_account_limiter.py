@@ -90,12 +90,46 @@ class FakeRedis:
             head = await self.zrange(key, 0, 0, withscores=True)
             return [used, head[0][1] if head else None]
         if keys == 2:
-            ts_key, day_key, member, now_raw, ttl_raw, expire_at_raw = args
-            await self.zadd(ts_key, {member: float(now_raw)})
-            await self.expire(ts_key, int(ttl_raw))
-            await self.incr(day_key)
-            await self.expireat(day_key, int(expire_at_raw))
-            return 1
+            if len(args) == 6:
+                ts_key, day_key, member, now_raw, ttl_raw, expire_at_raw = args
+                added = await self.zadd(ts_key, {member: float(now_raw)})
+                await self.expire(ts_key, int(ttl_raw))
+                if added:
+                    await self.incr(day_key)
+                    await self.expireat(day_key, int(expire_at_raw))
+                return added
+            if len(args) == 11:
+                (
+                    ts_key,
+                    day_key,
+                    cutoff_raw,
+                    limit_raw,
+                    has_rate_raw,
+                    daily_quota_raw,
+                    has_daily_raw,
+                    member,
+                    now_raw,
+                    ttl_raw,
+                    expire_at_raw,
+                ) = args
+                await self.zremrangebyscore(ts_key, 0, float(cutoff_raw))
+                if member in self.zsets.get(ts_key, {}):
+                    return [1, ""]
+                if int(has_daily_raw or 0):
+                    used_daily = int(self.kv.get(day_key) or 0)
+                    if used_daily >= int(daily_quota_raw or 0):
+                        return [0, "daily"]
+                if int(has_rate_raw or 0):
+                    used = await self.zcard(ts_key)
+                    if used >= int(limit_raw or 0):
+                        head = await self.zrange(ts_key, 0, 0, withscores=True)
+                        return [0, head[0][1] if head else ""]
+                added = await self.zadd(ts_key, {member: float(now_raw)})
+                await self.expire(ts_key, int(ttl_raw))
+                if added:
+                    await self.incr(day_key)
+                    await self.expireat(day_key, int(expire_at_raw))
+                return [1, ""]
         raise AssertionError(f"unexpected eval key count: {keys}")
 
 
@@ -259,6 +293,23 @@ async def test_check_quota_daily_redis_error_fails_closed_short_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wall_clock_now_rejects_implausible_large_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    monkeypatch.setattr(account_limiter.time, "time", lambda: 1_800_000_000.0)
+
+    await account_limiter.record_image_call(
+        redis,
+        "acc1",
+        task_id="task-wall",
+        now=1_100_000_000.0,
+    )
+
+    assert redis.zsets["lumen:acct:acc1:image:ts"]["task-wall"] == 1_800_000_000.0
+
+
+@pytest.mark.asyncio
 async def test_check_quota_fallback_zrange_error_returns_count_limit_retry() -> None:
     class NoEvalZRangeBrokenRedis(FakeRedis):
         eval = None
@@ -298,6 +349,56 @@ async def test_record_image_call_writes_zset_and_daily() -> None:
     # ZSET 和 daily 都设置了 expire
     assert ts_key in redis.expirations
     assert day_key in redis.expirations
+
+
+@pytest.mark.asyncio
+async def test_record_image_call_is_idempotent_for_same_task_id() -> None:
+    redis = FakeRedis()
+    now = 1_700_000_000.0
+
+    await account_limiter.record_image_call(redis, "acc1", task_id="task-abc", now=now)
+    await account_limiter.record_image_call(
+        redis,
+        "acc1",
+        task_id="task-abc",
+        now=now + 1.0,
+    )
+
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert redis.kv[day_key] == "1"
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_quota_check_and_record_are_atomic_for_window() -> None:
+    redis = FakeRedis()
+    now = 1_700_000_000.0
+
+    allowed, retry_after, member = await account_limiter.reserve_quota(
+        redis,
+        "acc1",
+        rate_limit="1/min",
+        daily_quota=80,
+        task_id="task-1",
+        now=now,
+    )
+    assert allowed is True
+    assert retry_after == 0.0
+    assert member == "task-1"
+
+    blocked, retry_after, _ = await account_limiter.reserve_quota(
+        redis,
+        "acc1",
+        rate_limit="1/min",
+        daily_quota=80,
+        task_id="task-2",
+        now=now + 0.1,
+    )
+    assert blocked is False
+    assert retry_after > 0.0
+
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert redis.kv[day_key] == "1"
 
 
 @pytest.mark.asyncio

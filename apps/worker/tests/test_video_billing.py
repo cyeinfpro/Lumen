@@ -323,7 +323,62 @@ async def test_resolve_video_billing_uses_mini_model_from_upstream_model(
 
 
 @pytest.mark.asyncio
-async def test_resolve_video_billing_releases_when_upstream_not_billable(
+async def test_resolve_video_billing_charges_untrusted_upstream_not_billable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=9_000, hold_after=0)
+
+    monkeypatch.setattr(
+        video_billing.worker_billing, "billing_enabled", billing_enabled
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={"status": "failed", "upstream_billable": False},
+        reason="failed",
+    )
+
+    assert resolution.decision == "upstream_not_billable_untrusted_default_charge"
+    assert resolution.actual_micro == 1_000
+    assert resolution.released is False
+    assert calls[0][0] == "settle"
+    assert calls[0][1]["idempotency_key"] == "video_generation:settle:video-gen-1"
+    assert (
+        calls[0][1]["meta"]["billing_decision"]
+        == "upstream_not_billable_untrusted_default_charge"
+    )
+    assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 9_000}
+    assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeSession()
@@ -352,8 +407,12 @@ async def test_resolve_video_billing_releases_when_upstream_not_billable(
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
         _generation(),
-        poll_result={"status": "failed", "upstream_billable": False},
-        reason="failed",
+        poll_result={
+            "status": "cancelled",
+            "upstream_billable": False,
+            "raw": {"reason": "pre_submit_cancel"},
+        },
+        reason="pre_submit_cancel",
     )
 
     assert resolution.decision == "upstream_not_billable_release"
@@ -363,7 +422,6 @@ async def test_resolve_video_billing_releases_when_upstream_not_billable(
     assert calls[0][1]["idempotency_key"] == "video_generation:release:video-gen-1"
     assert calls[0][1]["meta"]["billing_decision"] == "upstream_not_billable_release"
     assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 10_000}
-    assert len(session.added) == 1
 
 
 @pytest.mark.asyncio

@@ -349,7 +349,9 @@ async def test_sync_promotes_copy_analysis_to_needs_review(
     )
 
     # 模拟 _load_steps 返回我们的 steps
-    async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        db: Any, run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [copy_step]
 
     monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
@@ -408,7 +410,9 @@ async def test_sync_marks_master_step_needs_review_when_all_masters_ready(
         ),
     ]
 
-    async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        db: Any, run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [master_step, approval_step]
 
     monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
@@ -471,7 +475,9 @@ async def test_sync_master_generation_ignores_ready_masters_from_previous_batch(
         SimpleNamespace(id="g-new", status="running"),
     ]
 
-    async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        db: Any, run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [master_step, approval_step]
 
     monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
@@ -526,7 +532,9 @@ async def test_sync_render_generation_ignores_ready_renders_from_previous_batch(
     ]
     images = [SimpleNamespace(id="img-old", owner_generation_id="g-old")]
 
-    async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        db: Any, run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [multi_step]
 
     monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
@@ -572,7 +580,9 @@ async def test_sync_render_revision_waits_for_active_revision_image(
     ]
     images = [SimpleNamespace(id="img-old", owner_generation_id="g-old")]
 
-    async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        db: Any, run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [multi_step]
 
     monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
@@ -587,6 +597,93 @@ async def test_sync_render_revision_waits_for_active_revision_image(
 
 
 # ---------- endpoint-level monkeypatched integration ------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_poster_masters_allows_retry_after_failed_master_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-poster",
+        user_id="user-1",
+        conversation_id="conv-1",
+        type="poster_design",
+        status="failed",
+        current_step="master_generation",
+        quality_mode="premium",
+        metadata_jsonb={"style_summary": {"tone": "clean"}, "brand_assets": {}},
+    )
+    copy_step = SimpleNamespace(
+        step_key="copy_analysis",
+        status="approved",
+        output_json={"main_title": "Sale"},
+    )
+    master_step = SimpleNamespace(
+        step_key="master_generation",
+        status="failed",
+        task_ids=["old-gen"],
+        image_ids=["old-img"],
+        input_json={"candidate_count": 1},
+        output_json={"error_message": "old failure"},
+    )
+    conv = SimpleNamespace(id="conv-1", last_activity_at=None)
+    created_calls: list[dict[str, Any]] = []
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-poster"
+        return run
+
+    async def fake_sync_poster(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-poster"
+        return {"copy_analysis": copy_step, "master_generation": master_step}[step_key]
+
+    async def fake_conversation(db: Any, *, user_id: str, conversation_id: str) -> Any:
+        assert user_id == "user-1"
+        assert conversation_id == "conv-1"
+        return conv
+
+    async def fake_create_task(*args: Any, **kwargs: Any) -> tuple[Any, None, list[str]]:
+        created_calls.append(kwargs)
+        return SimpleNamespace(), None, ["retry-gen"]
+
+    async def fake_publish(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_build_run_out(db: Any, current_run: Any) -> Any:
+        return current_run
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(workflows, "_create_poster_workflow_task", fake_create_task)
+    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish)
+    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+
+    db = _Db(responses=[[]])
+    out = await workflows.create_poster_masters(
+        "run-poster",
+        PosterMastersCreateIn(candidate_count=1),
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is run
+    assert len(created_calls) == 1
+    assert master_step.status == "running"
+    assert master_step.task_ids == ["retry-gen"]
+    assert master_step.image_ids == []
+    assert master_step.output_json == {}
+    assert run.current_step == "master_generation"
+    assert run.status == "running"
+    assert conv.last_activity_at is not None
+    assert db.committed is True
 
 
 @pytest.mark.asyncio

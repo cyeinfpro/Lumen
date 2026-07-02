@@ -638,6 +638,8 @@ async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
         messages.Conversation.user_id,
         "user-1",
     )
+    assert "messages.deleted_at IS NULL" in str(db.statements[0])
+    assert "messages.deleted_at IS NULL" in str(db.statements[1])
 
 
 def test_idempotency_advisory_lock_key_is_conversation_scoped() -> None:

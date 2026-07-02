@@ -51,7 +51,14 @@ from lumen_core.models import (
 from lumen_core.schemas import ImageParamsIn, PostMessageIn
 
 from ..db import get_db
-from ..deps import BotUser, CurrentUser, require_bot_token, verify_csrf
+from ..deps import (
+    BOT_CHAT_ID_HEADER,
+    BOT_TG_USER_ID_HEADER,
+    BotUser,
+    CurrentUser,
+    require_bot_token,
+    verify_csrf,
+)
 from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
 from .messages import submit_user_message
@@ -287,6 +294,7 @@ class LinkCodeOut(BaseModel):
 class BindIn(BaseModel):
     chat_id: str = Field(min_length=1, max_length=64)
     code: str = Field(min_length=4, max_length=32)
+    tg_user_id: str | None = Field(default=None, min_length=1, max_length=64)
     tg_username: str | None = Field(default=None, max_length=64)
 
 
@@ -410,6 +418,24 @@ async def bind_telegram(
     body: BindIn,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BindOut:
+    header_chat_id = (request.headers.get(BOT_CHAT_ID_HEADER) or "").strip()
+    if header_chat_id and header_chat_id != body.chat_id:
+        raise _http("chat_id_mismatch", "telegram chat header does not match body", 400)
+    header_tg_user_id = (request.headers.get(BOT_TG_USER_ID_HEADER) or "").strip()
+    body_tg_user_id = (body.tg_user_id or "").strip()
+    if header_tg_user_id and body_tg_user_id and header_tg_user_id != body_tg_user_id:
+        raise _http(
+            "telegram_user_mismatch",
+            "telegram user header does not match body",
+            400,
+        )
+    tg_user_id = body_tg_user_id or header_tg_user_id or None
+    if not tg_user_id:
+        raise _http(
+            "missing_telegram_user_id",
+            "telegram user id is required for binding",
+            400,
+        )
     redis = get_redis()
     claim_owner = f"chat:{body.chat_id}"
     user_id = await _claim_link_code(
@@ -446,6 +472,7 @@ async def bind_telegram(
     ).scalar_one_or_none()
     if existing_chat is not None:
         existing_chat.user_id = user_id
+        existing_chat.tg_user_id = tg_user_id
         existing_chat.tg_username = body.tg_username
     else:
         # 同一 user 唯一绑定：先删旧，再插新
@@ -461,6 +488,7 @@ async def bind_telegram(
             TelegramBinding(
                 chat_id=body.chat_id,
                 user_id=user_id,
+                tg_user_id=tg_user_id,
                 tg_username=body.tg_username,
             )
         )

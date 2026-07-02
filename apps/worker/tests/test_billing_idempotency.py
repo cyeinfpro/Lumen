@@ -387,6 +387,101 @@ async def test_charge_completion_uses_retry_billing_ref(
 
 
 @pytest.mark.asyncio
+async def test_charge_completion_image_cost_guard_locks_wallet_before_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-1",
+        user_id="user-1",
+        model="gpt-5.5",
+        tokens_in=100,
+        tokens_out=200,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=200,
+        user_api_credential_id=None,
+        upstream_request={},
+    )
+    wallet_locks: list[tuple[bool, bool]] = []
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def cache_aware_enabled() -> bool:
+        return True
+
+    async def rate_multiplier(*_args: Any) -> int:
+        return 10_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def estimate_breakdown(*_args: Any, **_kwargs: Any) -> CostBreakdown:
+        return CostBreakdown(
+            input_cost_micro=0,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=100,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=10_000,
+            total_cost_micro=100,
+            actual_cost_micro=100,
+            pricing_source="db",
+        )
+
+    async def get_wallet(*_args: Any, **kwargs: Any) -> Any:
+        wallet_locks.append((bool(kwargs.get("lock")), bool(kwargs.get("create"))))
+        return SimpleNamespace(balance_micro=10)
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 20
+
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("insufficient image budget must fail before settle")
+
+    monkeypatch.setattr(worker_billing, "AsyncSession", _Session)
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_cache_aware_enabled", cache_aware_enabled)
+    monkeypatch.setattr(worker_billing, "_rate_multiplier_x10000", rate_multiplier)
+    monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(worker_billing.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(worker_billing.billing_core, "settle", fail_settle)
+    monkeypatch.setattr(worker_billing, "get_billing_cache", lambda: None)
+
+    with pytest.raises(worker_billing.billing_core.BillingError) as excinfo:
+        await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
+
+    assert excinfo.value.code == "INSUFFICIENT_BALANCE"
+    assert wallet_locks == [(True, False)]
+
+
+@pytest.mark.asyncio
 async def test_charge_completion_integrity_error_bubbles_after_billing_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

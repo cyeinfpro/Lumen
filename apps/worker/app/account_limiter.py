@@ -21,12 +21,14 @@ import math
 import time
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 # Redis key 模板（约定：lumen:acct:{name}:image:...）
 _KEY_TS = "lumen:acct:{name}:image:ts"
 _KEY_DAILY = "lumen:acct:{name}:image:daily:{day}"
 _TS_TTL_S = 86400 * 2
 REDIS_ERROR_RETRY_AFTER_S = 5.0
+_MAX_WALL_CLOCK_DRIFT_S = 10 * 366 * 86400.0
 
 _CHECK_WINDOW_LUA = """
 local key = KEYS[1]
@@ -52,11 +54,59 @@ local score = tonumber(ARGV[2])
 local ts_ttl_s = tonumber(ARGV[3])
 local day_expire_at = tonumber(ARGV[4])
 
-redis.call("ZADD", ts_key, score, member)
+local added = redis.call("ZADD", ts_key, "NX", score, member)
 redis.call("EXPIRE", ts_key, ts_ttl_s)
-redis.call("INCR", day_key)
-redis.call("EXPIREAT", day_key, day_expire_at)
-return 1
+if added == 1 then
+  redis.call("INCR", day_key)
+  redis.call("EXPIREAT", day_key, day_expire_at)
+end
+return added
+"""
+
+_RESERVE_IMAGE_CALL_LUA = """
+local ts_key = KEYS[1]
+local day_key = KEYS[2]
+local cutoff = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local has_rate = tonumber(ARGV[3])
+local daily_quota = tonumber(ARGV[4])
+local has_daily = tonumber(ARGV[5])
+local member = ARGV[6]
+local score = tonumber(ARGV[7])
+local ts_ttl_s = tonumber(ARGV[8])
+local day_expire_at = tonumber(ARGV[9])
+
+redis.call("ZREMRANGEBYSCORE", ts_key, 0, cutoff)
+
+if redis.call("ZSCORE", ts_key, member) then
+  return {1, ""}
+end
+
+if has_daily == 1 then
+  local used_daily = tonumber(redis.call("GET", day_key) or "0") or 0
+  if used_daily >= daily_quota then
+    return {0, "daily"}
+  end
+end
+
+if has_rate == 1 then
+  local used = redis.call("ZCARD", ts_key)
+  if used >= limit then
+    local oldest = redis.call("ZRANGE", ts_key, 0, 0, "WITHSCORES")
+    if oldest[2] then
+      return {0, oldest[2]}
+    end
+    return {0, ""}
+  end
+end
+
+local added = redis.call("ZADD", ts_key, "NX", score, member)
+redis.call("EXPIRE", ts_key, ts_ttl_s)
+if added == 1 then
+  redis.call("INCR", day_key)
+  redis.call("EXPIREAT", day_key, day_expire_at)
+end
+return {1, ""}
 """
 
 _UNIT_SECONDS: dict[str, int] = {
@@ -106,13 +156,18 @@ def _wall_clock_now(now: float | None = None) -> float:
     timestamps. A monotonic timestamp accidentally passed by a caller would
     otherwise create 1970-era day keys and corrupt quota accounting.
     """
-    raw_now = now if now is not None else time.time()
+    fallback_now = time.time()
+    raw_now = now if now is not None else fallback_now
     try:
         cur_now = float(raw_now)
     except (TypeError, ValueError):
-        return time.time()
-    if not math.isfinite(cur_now) or cur_now < 1_000_000_000:
-        return time.time()
+        return fallback_now
+    if (
+        not math.isfinite(cur_now)
+        or cur_now < 1_000_000_000
+        or abs(cur_now - fallback_now) > _MAX_WALL_CLOCK_DRIFT_S
+    ):
+        return fallback_now
     return cur_now
 
 
@@ -232,19 +287,15 @@ async def _record_image_call_fallback(
     member: str,
     cur_now: float,
 ) -> None:
-    pipe_fn = getattr(redis, "pipeline", None)
-    if callable(pipe_fn):
-        pipe = pipe_fn(transaction=True)
-        pipe.zadd(ts_key, {member: cur_now})
-        pipe.expire(ts_key, _TS_TTL_S)
-        pipe.incr(day_key)
-        pipe.expireat(day_key, _daily_expire_at(cur_now))
-        await pipe.execute()
-        return
-    await redis.zadd(ts_key, {member: cur_now})
+    added_raw = await redis.zadd(ts_key, {member: cur_now})
     await redis.expire(ts_key, _TS_TTL_S)
-    await redis.incr(day_key)
-    await redis.expireat(day_key, _daily_expire_at(cur_now))
+    try:
+        added = int(added_raw or 0)
+    except (TypeError, ValueError):
+        added = 1
+    if added > 0:
+        await redis.incr(day_key)
+        await redis.expireat(day_key, _daily_expire_at(cur_now))
 
 
 async def check_quota(
@@ -331,6 +382,99 @@ async def check_quota(
     return True, 0.0
 
 
+async def reserve_quota(
+    redis: Any,
+    account: str,
+    rate_limit: str | None,
+    daily_quota: int | None,
+    *,
+    task_id: str = "",
+    now: float | None = None,
+) -> tuple[bool, float, str]:
+    """Atomically check and reserve one image call for an account.
+
+    This is the race-free companion to ``check_quota`` for callers that are
+    about to reserve an execution slot. The reservation is represented by the
+    same ZSET/daily counters used by ``record_image_call`` so later recording
+    with the same task id is idempotent instead of double-counting.
+
+    Returns:
+        (allowed, retry_after_s, reservation_member)
+    """
+    parsed = parse_rate_limit(rate_limit)
+    has_daily = isinstance(daily_quota, int) and daily_quota > 0
+    if parsed is None and not has_daily:
+        return True, 0.0, ""
+    if redis is None:
+        return True, 0.0, ""
+
+    cur_now = _wall_clock_now(now)
+    member = task_id or f"reserve:{cur_now:.6f}:{uuid4().hex}"
+    ts_key = _KEY_TS.format(name=account)
+    day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
+    count_limit, window_s = parsed if parsed is not None else (0, _TS_TTL_S)
+    cutoff = cur_now - float(window_s)
+
+    eval_fn = getattr(redis, "eval", None)
+    if callable(eval_fn):
+        try:
+            raw = await eval_fn(
+                _RESERVE_IMAGE_CALL_LUA,
+                2,
+                ts_key,
+                day_key,
+                str(cutoff),
+                str(count_limit),
+                "1" if parsed is not None else "0",
+                str(int(daily_quota or 0)),
+                "1" if has_daily else "0",
+                member,
+                str(cur_now),
+                str(_TS_TTL_S),
+                str(_daily_expire_at(cur_now)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise AccountLimiterUnavailable("quota reservation unavailable") from exc
+        allowed_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else 0
+        reason_raw = raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else ""
+        try:
+            allowed = int(allowed_raw or 0) == 1
+        except (TypeError, ValueError):
+            allowed = False
+        if allowed:
+            return True, 0.0, member
+        if reason_raw == "daily" or reason_raw == b"daily":
+            return False, _seconds_until_next_utc_day(cur_now), member
+        retry_after = float(window_s)
+        if reason_raw not in (None, "", b""):
+            try:
+                retry_after = max(1.0, (float(reason_raw) + window_s) - cur_now)
+            except (TypeError, ValueError):
+                pass
+        return False, retry_after, member
+
+    allowed, retry_after = await check_quota(
+        redis,
+        account,
+        rate_limit,
+        daily_quota,
+        now=cur_now,
+    )
+    if not allowed:
+        return False, retry_after, member
+    try:
+        await _record_image_call_fallback(
+            redis,
+            ts_key=ts_key,
+            day_key=day_key,
+            member=member,
+            cur_now=cur_now,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota reservation unavailable") from exc
+    return True, 0.0, member
+
+
 async def record_image_call(
     redis: Any,
     account: str,
@@ -383,6 +527,7 @@ async def record_image_call(
 __all__ = [
     "parse_rate_limit",
     "check_quota",
+    "reserve_quota",
     "record_image_call",
     "AccountLimiterUnavailable",
     "REDIS_ERROR_RETRY_AFTER_S",

@@ -53,7 +53,11 @@ from lumen_core.schemas import (
     ByokPurpose,
     ByokSettingsOut,
 )
-from lumen_core.url_security import assert_public_http_target
+from lumen_core.url_security import (
+    assert_public_http_target,
+    pinned_async_http_transport,
+    resolve_public_http_target,
+)
 
 from .config import settings
 from .runtime_settings import get_setting  # type: ignore[attr-defined]
@@ -311,6 +315,12 @@ async def validate_api_key_with_supplier(
         )
     try:
         base_url = await normalize_base_url(supplier.base_url)
+        target = await resolve_public_http_target(
+            base_url,
+            allow_http=is_dev_env(),
+            allow_private=is_dev_env(),
+            allow_unresolved=is_dev_env(),
+        )
     except ValueError:
         return ValidationOutcome(
             ok=False,
@@ -338,12 +348,20 @@ async def validate_api_key_with_supplier(
     )
     http_status: int | None = None
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(effective_timeout / 1000),
-            proxy=proxy_url,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
+        transport = (
+            pinned_async_http_transport(target)
+            if target.resolved_ips and proxy_url is None
+            else None
+        )
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(effective_timeout / 1000),
+            "proxy": proxy_url,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post(
                 _responses_url(base_url),
                 json=body,

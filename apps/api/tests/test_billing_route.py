@@ -6,10 +6,16 @@ from typing import Any
 
 import pytest
 from fastapi import Request, Response
+from sqlalchemy.exc import IntegrityError
 
 from app.routes import billing
 from lumen_core import billing as billing_core
-from lumen_core.schemas import AdminBillingBootstrapIn, AdminRedemptionCodeCreateIn
+from lumen_core.schemas import (
+    AdminBillingBootstrapIn,
+    AdminRedemptionCodeCreateIn,
+    AdminWalletAdjustIn,
+    RedemptionIn,
+)
 
 
 def _request(
@@ -173,6 +179,14 @@ class _ScalarResult:
 
     def all(self) -> list[Any]:
         return self._values
+
+
+class _ScalarOneOrNoneResult:
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def scalar_one_or_none(self) -> Any:
+        return self._value
 
 
 class _FirstResult:
@@ -567,6 +581,164 @@ async def test_redemption_idempotency_rejects_reused_key_for_different_code() ->
     assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
 
 
+def test_redemption_integrity_constraint_name_uses_structured_diag() -> None:
+    class Orig(Exception):
+        diag = SimpleNamespace(constraint_name="uq_redeem_code_user")
+
+    exc = IntegrityError("insert usage", {}, Orig("duplicate"))
+
+    assert billing._integrity_constraint_name(exc) == "uq_redeem_code_user"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_redeem_code_cache_miss_replays_existing_usage_from_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = billing.RedemptionOut(
+        amount=billing._money(5_000_000),  # noqa: SLF001
+        balance=billing._money(12_000_000),  # noqa: SLF001
+    )
+    cached: list[billing.RedemptionOut] = []
+    locks: list[tuple[str, str]] = []
+
+    async def no_cached(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def lock_key(_db: Any, user_id: str, idempotency_key: str) -> None:
+        locks.append((user_id, idempotency_key))
+
+    async def existing_usage(
+        _db: Any,
+        *,
+        user_id: str,
+        usage_id: str,
+        request_hash: str,
+    ) -> billing.RedemptionOut:
+        assert user_id == "user-1"
+        assert usage_id
+        assert request_hash
+        return replay
+
+    async def cache_response(
+        _user_id: str,
+        _idempotency_key: str,
+        _request_hash: str,
+        response: billing.RedemptionOut,
+    ) -> None:
+        cached.append(response)
+
+    async def fail_operational(_db: Any) -> None:
+        raise AssertionError("DB idempotency fallback must avoid a second redeem")
+
+    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", lock_key)
+    monkeypatch.setattr(billing, "_redemption_out_for_usage", existing_usage)
+    monkeypatch.setattr(billing, "_cache_redemption_out", cache_response)
+    monkeypatch.setattr(billing, "_require_redemption_operational", fail_operational)
+
+    out = await billing.redeem_code(
+        RedemptionIn(code="LMN-AAAA-BBBB-CCCC"),
+        _request(method="POST", headers=[(b"idempotency-key", b"redeem-1")]),
+        SimpleNamespace(
+            id="user-1",
+            email="user@example.test",
+            account_mode="wallet",
+        ),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert out is replay
+    assert cached == [replay]
+    assert locks == [("user-1", "client:redeem-1")]
+
+
+@pytest.mark.asyncio
+async def test_redeem_code_integrity_error_replays_wallet_tx_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized = billing_core.normalize_redemption_code("LMN-AAAA-BBBB-CCCC")
+    code = SimpleNamespace(
+        id="code-1",
+        code_hash=billing_core.hash_redemption_code(normalized, "secret"),
+        revoked_at=None,
+        expires_at=None,
+        redeemed_count=0,
+        max_redemptions=1,
+        amount_micro=5_000_000,
+    )
+    replay = billing.RedemptionOut(
+        amount=billing._money(5_000_000),  # noqa: SLF001
+        balance=billing._money(12_000_000),  # noqa: SLF001
+    )
+    existing_calls = 0
+    cached: list[billing.RedemptionOut] = []
+
+    class Db(_Db):
+        async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+            return _ScalarResult([code])
+
+    class Limiter:
+        async def check(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    class Orig(Exception):
+        diag = SimpleNamespace(constraint_name="uq_wallet_tx_idemp")
+
+    async def no_cached(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def existing_usage(*_args: Any, **_kwargs: Any) -> billing.RedemptionOut | None:
+        nonlocal existing_calls
+        existing_calls += 1
+        if existing_calls == 1:
+            return None
+        return replay
+
+    async def fail_topup(*_args: Any, **_kwargs: Any) -> None:
+        raise IntegrityError("insert wallet tx", {}, Orig("duplicate"))
+
+    async def secrets(_db: Any) -> list[str]:
+        return ["secret"]
+
+    async def cache_response(
+        _user_id: str,
+        _idempotency_key: str,
+        _request_hash: str,
+        response: billing.RedemptionOut,
+    ) -> None:
+        cached.append(response)
+
+    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", noop)
+    monkeypatch.setattr(billing, "_redemption_out_for_usage", existing_usage)
+    monkeypatch.setattr(billing, "_cache_redemption_out", cache_response)
+    monkeypatch.setattr(billing, "_require_redemption_operational", noop)
+    monkeypatch.setattr(billing, "REDEMPTION_LIMITER", Limiter())
+    monkeypatch.setattr(billing, "get_redis", lambda: object())
+    monkeypatch.setattr(billing, "_redemption_secrets", secrets)
+    monkeypatch.setattr(billing.billing_core, "topup_redeem", fail_topup)
+
+    db = Db()
+    out = await billing.redeem_code(
+        RedemptionIn(code="LMN-AAAA-BBBB-CCCC"),
+        _request(method="POST", headers=[(b"idempotency-key", b"redeem-1")]),
+        SimpleNamespace(
+            id="user-1",
+            email="user@example.test",
+            account_mode="wallet",
+        ),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is replay
+    assert db.rolled_back is True
+    assert existing_calls == 2
+    assert cached == [replay]
+
+
 @pytest.mark.asyncio
 async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
     monkeypatch: pytest.MonkeyPatch,
@@ -754,3 +926,67 @@ def test_redemption_idempotency_key_rejects_blank_header() -> None:
         )
 
     assert getattr(excinfo.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_wallet_rejects_per_operation_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Db:
+        async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(account_mode="wallet")
+
+    async def fail_adjust(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("oversized adjustment must not mutate the wallet")
+
+    monkeypatch.setattr(billing.billing_core, "adjust", fail_adjust)
+
+    with pytest.raises(Exception) as excinfo:
+        await billing.admin_adjust_wallet(
+            "user-1",
+            AdminWalletAdjustIn(amount_rmb_signed="1000001", reason="test"),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "amount_too_large"
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_wallet_rejects_negative_balance_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Db:
+        async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(account_mode="wallet")
+
+    async def allow_negative(_db: Any) -> bool:
+        return True
+
+    seen_min_balance: list[int | None] = []
+
+    async def fail_adjust(*_args: Any, **kwargs: Any) -> None:
+        seen_min_balance.append(kwargs.get("min_balance_micro"))
+        raise billing.billing_core.BillingError(
+            "negative_balance_limit_exceeded",
+            "admin wallet adjustment would exceed the negative balance limit",
+            422,
+        )
+
+    monkeypatch.setattr(billing, "_allow_negative_balance", allow_negative)
+    monkeypatch.setattr(billing.billing_core, "adjust", fail_adjust)
+
+    with pytest.raises(Exception) as excinfo:
+        await billing.admin_adjust_wallet(
+            "user-1",
+            AdminWalletAdjustIn(amount_rmb_signed="-100001", reason="test"),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "negative_balance_limit_exceeded"
+    assert seen_min_balance == [-billing.MAX_ADMIN_NEGATIVE_BALANCE_MICRO]

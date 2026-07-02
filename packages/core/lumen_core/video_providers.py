@@ -257,10 +257,16 @@ def parse_video_provider_config_json(
         proxy = None
         if provider.proxy_name:
             proxy = proxy_by_name.get(provider.proxy_name)
-            if proxy is None and not allow_missing_proxy:
+            if proxy is None and provider.enabled and not allow_missing_proxy:
                 errors.append(
                     f"provider {provider.name}: proxy {provider.proxy_name} not found"
                 )
+            elif proxy is not None and not proxy.enabled:
+                if provider.enabled:
+                    errors.append(
+                        f"provider {provider.name}: proxy {provider.proxy_name} is disabled"
+                    )
+                proxy = None
         attached.append(replace(provider, proxy=proxy))
     return attached, proxies, errors
 

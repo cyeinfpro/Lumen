@@ -58,6 +58,17 @@ class _ConsumedDb(_Db):
         self.consumed = consumed
 
 
+class _ScalarResult:
+    def __init__(self, values: list[str]) -> None:
+        self.values = values
+
+    def scalars(self) -> "_ScalarResult":
+        return self
+
+    def all(self) -> list[str]:
+        return self.values
+
+
 @pytest.mark.asyncio
 async def test_undo_memory_write_keeps_token_when_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
@@ -171,6 +182,61 @@ async def test_undo_memory_write_is_db_idempotent_when_token_delete_failed(
     assert db.committed is False
     assert redis.deleted == ["memory:undo:undo-1"]
     assert memories._undo_token_claim_key("undo-1") not in redis.claims  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_undo_memory_write_returns_false_when_claim_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _Redis()
+    redis.claims[memories._undo_token_claim_key("undo-1")] = "other-user"  # noqa: SLF001
+    owned_calls: list[str] = []
+
+    async def fake_owned_memory(_db: Any, _user_id: str, memory_id: str) -> Any:
+        owned_calls.append(memory_id)
+        return SimpleNamespace(id=memory_id)
+
+    async def undo_token_consumed(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(memories, "get_redis", lambda: redis)
+    monkeypatch.setattr(memories, "_owned_memory", fake_owned_memory)
+    monkeypatch.setattr(memories, "_undo_token_consumed", undo_token_consumed)
+
+    out = await memories.undo_memory_write(
+        memories.MemoryUndoIn(undo_token="undo-1"),
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        _Db(),  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": False}
+    assert owned_calls == []
+    assert redis.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_filter_used_memories_keeps_only_owned_live_ids() -> None:
+    class Db:
+        async def execute(self, _stmt: Any) -> _ScalarResult:
+            return _ScalarResult(["mem-1", "mem-3"])
+
+    out = await memories._filter_owned_used_memory_payload(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        ids=["mem-1", "mem-2", "mem-1", 123, "mem-3"],
+        summary=[
+            {"id": "mem-1", "type": "profile", "content": "A", "extra": "drop"},
+            {"id": "mem-2", "type": "profile", "content": "B"},
+            {"id": "mem-3", "type": "avoid", "content": "C"},
+            {"type": "profile", "content": "missing id"},
+        ],
+    )
+
+    assert out.used_memory_ids == ["mem-1", "mem-3"]
+    assert out.used_memory_summary == [
+        {"id": "mem-1", "type": "profile", "content": "A"},
+        {"id": "mem-3", "type": "avoid", "content": "C"},
+    ]
 
 
 @pytest.mark.asyncio

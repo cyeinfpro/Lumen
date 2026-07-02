@@ -34,11 +34,17 @@ router = Router()
 async def cmd_start(message: Message, command: CommandObject, api: LumenApi) -> None:
     code = (command.args or "").strip()
     chat_id = message.chat.id
+    tg_user_id = message.from_user.id if message.from_user else chat_id
     username = message.from_user.username if message.from_user else None
 
     if code:
         try:
-            info = await api.bind(chat_id=chat_id, code=code, tg_username=username)
+            info = await api.bind(
+                chat_id=chat_id,
+                code=code,
+                tg_username=username,
+                tg_user_id=tg_user_id,
+            )
         except ApiError as exc:
             await message.answer(
                 f"❌ 绑定失败：{exc.message}\n\n"

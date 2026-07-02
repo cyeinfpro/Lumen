@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
@@ -77,15 +79,39 @@ def test_generation_feed_output_treats_string_false_fast_as_disabled() -> None:
     assert generations._bool_option("true") is True
 
 
-def test_generation_feed_cursor_carries_total_for_next_page() -> None:
+def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page() -> None:
     created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    filter_sig = generations._feed_filter_signature(
+        user_id="user-1",
+        ratio="1:1",
+        has_ref=True,
+        fast=False,
+        q="cat",
+        visible_after=None,
+    )
 
-    cursor = generations._encode_cursor(created_at, "gen-1", total=123)
+    cursor = generations._encode_cursor(
+        created_at,
+        "gen-1",
+        total=123,
+        filter_sig=filter_sig,
+    )
 
-    decoded_at, decoded_id, decoded_total = generations._decode_cursor(cursor)
+    decoded_at, decoded_id, decoded_total, decoded_filter_sig = (
+        generations._decode_cursor(cursor)
+    )
     assert decoded_at == created_at
     assert decoded_id == "gen-1"
     assert decoded_total == 123
+    assert decoded_filter_sig == filter_sig
+    assert (
+        generations._validated_cursor_total(
+            cursor_total=decoded_total,
+            cursor_filter_sig=decoded_filter_sig,
+            current_filter_sig=filter_sig,
+        )
+        == 123
+    )
 
 
 def test_generation_feed_cursor_decodes_legacy_v1_without_total() -> None:
@@ -93,10 +119,70 @@ def test_generation_feed_cursor_decodes_legacy_v1_without_total() -> None:
     raw = f"v1|{created_at.isoformat()}|gen-1".encode("utf-8")
     cursor = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
-    decoded_at, decoded_id, decoded_total = generations._decode_cursor(cursor)
+    decoded_at, decoded_id, decoded_total, decoded_filter_sig = (
+        generations._decode_cursor(cursor)
+    )
     assert decoded_at == created_at
     assert decoded_id == "gen-1"
     assert decoded_total is None
+    assert decoded_filter_sig is None
+
+
+def test_generation_feed_legacy_v2_total_is_not_trusted_without_filter_signature() -> None:
+    created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    raw = f"v2|{created_at.isoformat()}|gen-1|123".encode("utf-8")
+    cursor = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    _decoded_at, _decoded_id, decoded_total, decoded_filter_sig = (
+        generations._decode_cursor(cursor)
+    )
+
+    assert decoded_total == 123
+    assert decoded_filter_sig is None
+    assert (
+        generations._validated_cursor_total(
+            cursor_total=decoded_total,
+            cursor_filter_sig=decoded_filter_sig,
+            current_filter_sig="current",
+        )
+        is None
+    )
+
+
+def test_generation_feed_cursor_rejects_filter_mismatch() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        generations._validated_cursor_total(
+            cursor_total=123,
+            cursor_filter_sig="old-filter",
+            current_filter_sig="new-filter",
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
+
+
+def test_generation_feed_cursor_rejects_empty_id() -> None:
+    created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    raw = f"v3|{created_at.isoformat()}||123|sig".encode("utf-8")
+    cursor = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    with pytest.raises(HTTPException) as excinfo:
+        generations._decode_cursor(cursor)
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
+
+
+def test_generation_feed_v3_cursor_requires_filter_signature() -> None:
+    created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    raw = f"v3|{created_at.isoformat()}|gen-1|123|".encode("utf-8")
+    cursor = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    with pytest.raises(HTTPException) as excinfo:
+        generations._decode_cursor(cursor)
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
 
 
 def test_generation_feed_image_schema_exposes_original_mime() -> None:

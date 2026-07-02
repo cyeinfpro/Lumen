@@ -42,6 +42,27 @@ class _FakeSession:
         return None
 
 
+class _CasSession:
+    def __init__(self, conv: Conversation) -> None:
+        self.conv = conv
+        self.commits = 0
+        self.rollbacks = 0
+        self.execute_calls = 0
+        self.after_execute: Any | None = None
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+        self.execute_calls += 1
+        if self.after_execute is not None:
+            self.after_execute()
+        return _ScalarResult(self.conv)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self.kv: dict[str, str] = {}
@@ -367,6 +388,102 @@ async def test_renew_summary_lock_marks_lock_lost_when_key_expires(
 
 
 @pytest.mark.asyncio
+async def test_cas_write_refuses_equal_boundary_fallback_downgrade() -> None:
+    boundary_at = "2026-01-01T00:00:03+00:00"
+    current_summary = {
+        "version": SUMMARY_VERSION,
+        "kind": SUMMARY_KIND,
+        "up_to_message_id": "msg-003",
+        "up_to_created_at": boundary_at,
+        "first_user_message_id": "msg-001",
+        "text": "upstream summary",
+        "tokens": 20,
+        "compression_runs": 2,
+        "compressed_at": "2026-01-01T00:00:10+00:00",
+        "fallback_reason": None,
+    }
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=current_summary)
+    session = _CasSession(conv)
+    fallback_summary = {
+        **current_summary,
+        "text": "local fallback",
+        "tokens": 25,
+        "compressed_at": "2026-01-01T00:00:20+00:00",
+        "fallback_reason": "local_fallback",
+        "last_quality_signal": "local_fallback",
+    }
+
+    wrote = await context_summary._cas_write_summary(
+        session,
+        "conv-1",
+        fallback_summary,
+    )
+
+    assert wrote is False
+    assert conv.summary_jsonb == current_summary
+    assert session.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_cas_write_skips_db_when_redis_lease_already_lost() -> None:
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    session = _CasSession(conv)
+    lock = context_summary._SummaryLock("redis", "token-1", lost_reason="stolen")
+
+    wrote = await context_summary._cas_write_summary(
+        session,
+        "conv-1",
+        {
+            "version": SUMMARY_VERSION,
+            "kind": SUMMARY_KIND,
+            "up_to_message_id": "msg-003",
+            "up_to_created_at": "2026-01-01T00:00:03+00:00",
+            "first_user_message_id": "msg-001",
+            "text": "summary",
+            "tokens": 10,
+        },
+        lock=lock,
+    )
+
+    assert wrote is False
+    assert session.execute_calls == 0
+    assert session.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_cas_write_rolls_back_when_lease_lost_after_row_lock() -> None:
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    session = _CasSession(conv)
+    lock = context_summary._SummaryLock("redis", "token-1")
+
+    def lose_lock() -> None:
+        lock.lost_reason = "expired"
+
+    session.after_execute = lose_lock
+
+    wrote = await context_summary._cas_write_summary(
+        session,
+        "conv-1",
+        {
+            "version": SUMMARY_VERSION,
+            "kind": SUMMARY_KIND,
+            "up_to_message_id": "msg-003",
+            "up_to_created_at": "2026-01-01T00:00:03+00:00",
+            "first_user_message_id": "msg-001",
+            "text": "summary",
+            "tokens": 10,
+        },
+        lock=lock,
+    )
+
+    assert wrote is False
+    assert session.execute_calls == 1
+    assert session.rollbacks == 1
+    assert session.commits == 0
+    assert conv.summary_jsonb is None
+
+
+@pytest.mark.asyncio
 async def test_ensure_context_summary_dry_run_does_not_call_upstream_or_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -420,7 +537,12 @@ async def test_ensure_context_summary_writes_summary_and_returns_public_metadata
         assert kwargs["image_captions"] == {"img-1": "generated caption"}
         return "## Earlier Context Summary\nimportant facts"
 
-    async def fake_cas(_session: Any, _conv_id: str, summary: dict[str, Any]) -> bool:
+    async def fake_cas(
+        _session: Any,
+        _conv_id: str,
+        summary: dict[str, Any],
+        **_kwargs: Any,
+    ) -> bool:
         written.update(summary)
         return True
 
@@ -480,7 +602,12 @@ async def test_ensure_context_summary_writes_local_fallback_when_upstream_fails(
     async def fake_segment(**_kwargs: Any) -> None:
         return None
 
-    async def fake_cas(_session: Any, _conv_id: str, summary: dict[str, Any]) -> bool:
+    async def fake_cas(
+        _session: Any,
+        _conv_id: str,
+        summary: dict[str, Any],
+        **_kwargs: Any,
+    ) -> bool:
         written.update(summary)
         return True
 

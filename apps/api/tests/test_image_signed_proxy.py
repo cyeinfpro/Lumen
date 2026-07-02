@@ -48,8 +48,10 @@ class _SequencedDb:
 
     def __init__(self, results: list[Any]) -> None:
         self._results = list(results)
+        self.statements: list[Any] = []
 
-    async def execute(self, _stmt: Any) -> _ScalarResult:
+    async def execute(self, stmt: Any) -> _ScalarResult:
+        self.statements.append(stmt)
         if not self._results:
             return _ScalarResult(None)
         return _ScalarResult(self._results.pop(0))
@@ -177,6 +179,40 @@ async def test_returns_404_when_image_not_found(_signed_proxy_secret: str) -> No
     assert exc.value.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_signed_proxy_share_lookup_requires_primary_share_image_owner(
+    _signed_proxy_secret: str,
+) -> None:
+    img = SimpleNamespace(
+        id=_IMG_ID,
+        user_id="user-2",
+        storage_key="u/user-2/img.png",
+        mime="image/png",
+        sha256="abc123",
+        deleted_at=None,
+    )
+    exp_ms, sig = sign_image_url_query(
+        _IMG_ID, "orig", _SECRET.encode("utf-8"), ttl_sec=3600
+    )
+    db = _SequencedDb([img, None])
+
+    with pytest.raises(HTTPException) as exc:
+        await images.get_image_signed(
+            _IMG_ID,
+            "orig",
+            exp_ms,
+            sig,
+            _request(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 404
+    rendered = str(db.statements[1])
+    assert "JOIN images AS images_1" in rendered
+    assert "images_1.user_id = :user_id_1" in rendered
+    assert "images_1.deleted_at IS NULL" in rendered
+
+
 # --- 200 happy path: orig ---------------------------------------------------
 
 
@@ -191,6 +227,7 @@ async def test_returns_200_for_valid_orig(
 
     img = SimpleNamespace(
         id=_IMG_ID,
+        user_id="user-1",
         storage_key="u/user-1/img.png",
         mime="image/png",
         sha256="abc123",
@@ -228,6 +265,7 @@ async def test_returns_200_for_valid_variant(
 
     img = SimpleNamespace(
         id=_IMG_ID,
+        user_id="user-1",
         storage_key="u/user-1/img.png",
         mime="image/png",
         sha256="abc123",

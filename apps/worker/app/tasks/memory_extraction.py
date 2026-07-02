@@ -50,6 +50,7 @@ _LLM_EXTRACTION_TIMEOUT_S = 25.0
 _EMBEDDING_TIMEOUT_S = 15.0
 _CONFIRM_WEEKLY_LIMIT = 5
 _LAST_USED_PENDING_KEY = "memory:last_used_pending"
+_MAX_POSITIVE_SIGNAL = 20
 
 _logger = logging.getLogger(__name__)
 
@@ -197,6 +198,44 @@ def _append_path(base_url: str, path: str) -> str:
     return f"{base}/v1{path}"
 
 
+def _bump_positive_signal(memory: Any, amount: int = 1) -> None:
+    try:
+        current = int(getattr(memory, "positive_signal", 0) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    try:
+        delta = max(0, int(amount))
+    except (TypeError, ValueError):
+        delta = 0
+    memory.positive_signal = min(_MAX_POSITIVE_SIGNAL, current + delta)
+
+
+def _usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    return usage if isinstance(usage, dict) else {}
+
+
+def _log_llm_usage(provider_name: str, payload: dict[str, Any]) -> None:
+    usage = _usage_payload(payload)
+    if not usage:
+        return
+    try:
+        usage_text = json.dumps(
+            usage,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        usage_text = str(usage)
+    _logger.info(
+        "memory_extraction.llm_usage provider=%s usage=%.500s",
+        provider_name,
+        usage_text,
+    )
+
+
 async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[float]:
     try:
         from ..provider_pool import get_pool
@@ -205,10 +244,17 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
         if pool is None:
             pool = await get_pool()
         providers = await pool.select(purpose="embedding")
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "memory_extraction.embedding_provider_select_failed fallback=deterministic err=%s",
+            exc,
+        )
         return deterministic_embedding(content)
 
+    provider_names: list[str] = []
     for provider in providers:
+        provider_name = str(getattr(provider, "name", "<unknown>"))
+        provider_names.append(provider_name)
         try:
             proxy_url = await resolve_provider_proxy_url(
                 getattr(provider, "proxy", None)
@@ -231,6 +277,11 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
                     },
                 )
             if resp.status_code >= 400:
+                _logger.debug(
+                    "memory_extraction.embedding_provider_non_2xx provider=%s status=%s",
+                    provider_name,
+                    resp.status_code,
+                )
                 continue
             payload = resp.json()
             data = payload.get("data") if isinstance(payload, dict) else None
@@ -238,8 +289,22 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
             vector = first.get("embedding") if isinstance(first, dict) else None
             if isinstance(vector, list) and vector:
                 return [float(value) for value in vector]
-        except Exception:
+            _logger.debug(
+                "memory_extraction.embedding_provider_invalid_payload provider=%s",
+                provider_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug(
+                "memory_extraction.embedding_provider_failed provider=%s err=%s",
+                provider_name,
+                exc,
+            )
             continue
+    _logger.warning(
+        "memory_extraction.embedding_fallback provider_count=%d providers=%s fallback=deterministic",
+        len(provider_names),
+        ",".join(provider_names) or "<none>",
+    )
     return deterministic_embedding(content)
 
 
@@ -299,6 +364,7 @@ async def _try_llm_extract(
             if getattr(provider, "proxy", None) is not None:
                 kwargs["proxy_override"] = provider.proxy
             payload = await responses_call(body, **kwargs)
+            _log_llm_usage(str(getattr(provider, "name", "<unknown>")), payload)
             items = _parse_llm_candidates(_responses_text(payload))
             if explicit_only:
                 items = [item for item in items if item.intent_kind == "directive"]
@@ -776,7 +842,7 @@ async def memory_extract(
                 None,
             )
             if duplicate is not None:
-                duplicate.positive_signal += 1
+                _bump_positive_signal(duplicate)
                 session.add(
                     MemoryAudit(
                         user_id=user.id,

@@ -60,7 +60,22 @@ _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
 _LAST_EVENT_ID_MAX_AGE_MS = 24 * 60 * 60 * 1000  # 24h replay window cap
 
 
-def _sanitize_last_event_id(raw: Any) -> str | None:
+async def _redis_time_ms(redis: object) -> int | None:
+    try:
+        raw = await redis.time()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        return None
+    try:
+        seconds = int(raw[0])
+        micros = int(raw[1])
+    except (TypeError, ValueError):
+        return None
+    return seconds * 1000 + micros // 1000
+
+
+def _sanitize_last_event_id(raw: Any, *, now_ms: int | None = None) -> str | None:
     """Validate a client-provided ``Last-Event-ID`` against Redis Stream IDs.
 
     Why: the value is an attacker-controlled HTTP header. Forwarding a
@@ -89,7 +104,8 @@ def _sanitize_last_event_id(raw: Any) -> str | None:
         return None
     # Reject IDs from beyond a sane replay window: too far in the future
     # would skip everything; too old has nothing to replay.
-    now_ms = int(time.time() * 1000)
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
     if ms > now_ms + 60_000:  # tolerate small clock skew
         return None
     if now_ms - ms > _LAST_EVENT_ID_MAX_AGE_MS:
@@ -627,13 +643,21 @@ async def events(
         replay_requested_channels.discard(user_channel)
     include_user_channel = user_channel in replay_requested_channels
 
+    redis = get_redis()
     last_event_id = request.headers.get("Last-Event-ID") or last_event_id_query
     # Why: Last-Event-ID is attacker-controlled; an unsanitised value can
     # advance XREAD's cursor past the entire backlog so the client silently
-    # misses real events. Require strict `ms-seq` shape and a sane age window.
-    last_event_id = _sanitize_last_event_id(last_event_id)
+    # misses real events. Require strict `ms-seq` shape and a sane age window
+    # measured with Redis server time, because Redis Stream IDs are minted by
+    # Redis and the API process clock may move independently.
+    last_event_id_now_ms = (
+        await _redis_time_ms(redis) if last_event_id is not None else None
+    )
+    last_event_id = _sanitize_last_event_id(
+        last_event_id,
+        now_ms=last_event_id_now_ms,
+    )
     stream_key = f"{EVENTS_STREAM_PREFIX}{user.id}"
-    redis = get_redis()
     connection_slot_key = await _acquire_sse_connection_slot(redis, user.id)
 
     async def gen() -> AsyncIterator[dict]:

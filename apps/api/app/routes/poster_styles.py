@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -123,6 +124,38 @@ from ._poster_library import (
 
 router = APIRouter(prefix="/poster-styles", tags=["poster-styles"])
 logger = logging.getLogger(__name__)
+
+
+def _poster_style_auto_tag_concurrency() -> int:
+    try:
+        return max(
+            1,
+            min(
+                4,
+                int(os.environ.get("POSTER_STYLE_AUTO_TAG_CONCURRENCY", "2") or "2"),
+            ),
+        )
+    except (TypeError, ValueError):
+        return 2
+
+
+_POSTER_STYLE_AUTO_TAG_CONCURRENCY = _poster_style_auto_tag_concurrency()
+_POSTER_STYLE_AUTO_TAG_SEMAPHORE: asyncio.Semaphore | None = None
+_POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _poster_style_auto_tag_semaphore() -> asyncio.Semaphore:
+    global _POSTER_STYLE_AUTO_TAG_SEMAPHORE, _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP
+    loop = asyncio.get_running_loop()
+    if (
+        _POSTER_STYLE_AUTO_TAG_SEMAPHORE is None
+        or _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP is not loop
+    ):
+        _POSTER_STYLE_AUTO_TAG_SEMAPHORE = asyncio.Semaphore(
+            _POSTER_STYLE_AUTO_TAG_CONCURRENCY
+        )
+        _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP = loop
+    return _POSTER_STYLE_AUTO_TAG_SEMAPHORE
 
 
 # ----- 基础 helper（部分对齐 workflows.py，避免循环 import 拷贝过来） -----
@@ -884,6 +917,7 @@ async def _do_sync_library_presets(
                 if isinstance(item, dict)
             }
             next_items: dict[str, dict[str, Any]] = dict(existing_by_id)
+            seen_sync_keys: set[tuple[str, int]] = set()
 
             for dir_name, bucket in by_dir.items():
                 meta_entry = bucket["meta"]
@@ -902,6 +936,14 @@ async def _do_sync_library_presets(
                     continue
                 preset_id = parsed["preset_id"]
                 version = int(parsed["version"])
+                sync_key = (preset_id, version)
+                if sync_key in seen_sync_keys:
+                    skipped += 1
+                    errors.append(
+                        f"{dir_name}: duplicate preset_id/version {preset_id}@{version}"
+                    )
+                    continue
+                seen_sync_keys.add(sync_key)
                 item_id = _preset_item_id(preset_id, version)
                 previous = next_items.get(item_id)
 
@@ -2202,9 +2244,10 @@ async def _auto_tag_poster_style_item(
     if not cover_id:
         raise _http("invalid_item", "poster style item has no cover image", 422)
 
-    raw_payload = await _api_call_poster_style_tagging_upstream(
-        db, image_id=cover_id, user_id=user_id
-    )
+    async with _poster_style_auto_tag_semaphore():
+        raw_payload = await _api_call_poster_style_tagging_upstream(
+            db, image_id=cover_id, user_id=user_id
+        )
 
     # 解析字段（容忍多种 key 命名）
     style_tags_raw = (

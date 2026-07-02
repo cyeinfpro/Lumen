@@ -316,7 +316,13 @@ async def estimate_image_cost(
 ) -> tuple[int, str]:
     tier = tier_for_pixels(size_px, thresholds)
     unit = await pricing_price_micro(db, scope="image_size", key=tier, unit="per_image")
-    return int(unit or 0) * max(1, int(n)), tier
+    if unit is None or int(unit) <= 0:
+        raise BillingError(
+            "PRICING_MISSING",
+            f"missing enabled image pricing rule for {tier}",
+            503,
+        )
+    return int(unit) * max(1, int(n)), tier
 
 
 async def estimate_image_cost_for_tier(
@@ -326,7 +332,13 @@ async def estimate_image_cost_for_tier(
     n: int = 1,
 ) -> tuple[int, str]:
     unit = await pricing_price_micro(db, scope="image_size", key=tier, unit="per_image")
-    return int(unit or 0) * max(1, int(n)), tier
+    if unit is None or int(unit) <= 0:
+        raise BillingError(
+            "PRICING_MISSING",
+            f"missing enabled image pricing rule for {tier}",
+            503,
+        )
+    return int(unit) * max(1, int(n)), tier
 
 
 async def estimate_completion_cost(
@@ -501,6 +513,10 @@ async def settle(
         raise BillingError(
             "NEGATIVE_AMOUNT", "settle actual amount must not be negative", 422
         )
+    if raw_actual == 0:
+        raise BillingError(
+            "ZERO_SETTLEMENT", "settle actual amount must be positive", 422
+        )
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -509,6 +525,9 @@ async def settle(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
+    # The per-user wallet row lock serializes settle/release for the same ref.
+    # Once either path records a consumption transaction, later attempts return
+    # that transaction instead of mutating balances again.
     consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
     if consumed is not None:
         return consumed
@@ -523,7 +542,9 @@ async def settle(
         next_balance = 0
     wallet.balance_micro = next_balance
     wallet.hold_micro = max(0, wallet.hold_micro - held)
-    wallet.lifetime_spend_micro += max(0, actual - overdraw_micro)
+    # lifetime_spend_micro tracks gross consumed service cost. Overdraw remains
+    # visible in transaction metadata, but spend analytics must not hide it.
+    wallet.lifetime_spend_micro += max(0, actual)
     wallet.version += 1
     return await _insert_tx(
         db,
@@ -561,6 +582,8 @@ async def release(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
+    # Recompute after taking the wallet lock; a concurrent settle may have
+    # consumed the hold while this release was waiting.
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
     if held <= 0:
         consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
@@ -619,7 +642,7 @@ async def charge(
         wallet.balance_micro = 0
     else:
         wallet.balance_micro -= amount
-    wallet.lifetime_spend_micro += max(0, amount - overdraw_micro)
+    wallet.lifetime_spend_micro += max(0, amount)
     wallet.version += 1
     return await _insert_tx(
         db,
@@ -643,6 +666,7 @@ async def adjust(
     reason: str,
     idempotency_key: str | None = None,
     allow_negative: bool = False,
+    min_balance_micro: int | None = None,
 ) -> WalletTransaction:
     amount = int(amount_micro_signed)
     key = idempotency_key or f"adjust:{new_uuid7()}"
@@ -658,6 +682,12 @@ async def adjust(
     if next_balance < 0 and not allow_negative:
         raise BillingError(
             "INSUFFICIENT_BALANCE", "adjustment would make balance negative", 422
+        )
+    if min_balance_micro is not None and next_balance < min_balance_micro:
+        raise BillingError(
+            "negative_balance_limit_exceeded",
+            "admin wallet adjustment would exceed the negative balance limit",
+            422,
         )
     wallet.balance_micro = next_balance
     if amount > 0:

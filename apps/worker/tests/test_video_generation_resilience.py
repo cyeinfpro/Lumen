@@ -123,6 +123,45 @@ def test_video_poll_extends_running_provider_tasks_after_local_window() -> None:
     assert "poll_elapsed_s" in source
 
 
+def test_video_provider_slot_ttl_covers_tracking_window() -> None:
+    assert (
+        video_generation._VIDEO_PROVIDER_SLOT_STALE_AFTER_S  # noqa: SLF001
+        > _MAX_PROVIDER_POLL_DURATION_S
+    )
+    assert (
+        video_generation._VIDEO_PROVIDER_SLOT_TTL_S  # noqa: SLF001
+        > video_generation._VIDEO_PROVIDER_SLOT_STALE_AFTER_S  # noqa: SLF001
+    )
+
+
+def test_video_pre_submit_terminal_paths_flush_balance_cache() -> None:
+    run_source = inspect.getsource(video_generation.run_video_generation)
+    fail_source = inspect.getsource(video_generation._fail_before_submit)
+
+    expired_idx = run_source.index("await _mark_pre_submit_expired")
+    expired_commit_idx = run_source.index("await session.commit()", expired_idx)
+    expired_flush_idx = run_source.index(
+        "await worker_flush_balance_cache(session)",
+        expired_commit_idx,
+    )
+    assert expired_idx < expired_commit_idx < expired_flush_idx
+
+    canceled_idx = run_source.index("await _mark_pre_submit_canceled")
+    canceled_commit_idx = run_source.index("await session.commit()", canceled_idx)
+    canceled_flush_idx = run_source.index(
+        "await worker_flush_balance_cache(session)",
+        canceled_commit_idx,
+    )
+    assert canceled_idx < canceled_commit_idx < canceled_flush_idx
+
+    fail_commit_idx = fail_source.index("await session.commit()")
+    fail_flush_idx = fail_source.index(
+        "await worker_flush_balance_cache(session)",
+        fail_commit_idx,
+    )
+    assert fail_commit_idx < fail_flush_idx
+
+
 def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
     source = inspect.getsource(video_generation.run_video_poll)
     helper = inspect.getsource(video_generation._finish_cancelled_after_provider_poll_error)
@@ -133,7 +172,8 @@ def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
     )
     assert 'status="cancelled"' in helper
     assert 'failure_class="canceled"' in helper
-    assert "upstream_billable=False" in helper
+    assert "upstream_billable=None" in helper
+    assert "upstream_cost_ambiguous" in helper
     assert "cancel_sent_at" in helper
 
 
@@ -142,7 +182,7 @@ def test_retryable_poll_error_exhaustion_expires_without_billable_signal() -> No
 
     assert "retryable_poll_error = _is_retryable_video_exception(exc)" in source
     assert 'status="expired" if retryable_poll_error else "failed"' in source
-    assert "upstream_billable=False if retryable_poll_error else None" in source
+    assert "upstream_billable=None" in source
 
 
 def test_reconcile_expires_overdue_tasks_without_provider_task_id() -> None:

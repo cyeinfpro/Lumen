@@ -71,6 +71,36 @@ async def test_rate_limiter_fails_closed_in_test_env_when_redis_unavailable() ->
 
 
 @pytest.mark.asyncio
+async def test_rate_limiter_skips_disabled_dev_limiter_before_redis() -> None:
+    old_env = settings.app_env
+    old_enabled = settings.user_rate_limit_enabled
+    settings.app_env = "development"
+    settings.user_rate_limit_enabled = False
+    limiter = RateLimiter(capacity=1, refill_per_sec=1)
+    try:
+        await limiter.check(BadRedis(), "rl:test")
+    finally:
+        settings.app_env = old_env
+        settings.user_rate_limit_enabled = old_enabled
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_fails_closed_in_dev_when_explicitly_enabled() -> None:
+    old_env = settings.app_env
+    old_enabled = settings.user_rate_limit_enabled
+    settings.app_env = "development"
+    settings.user_rate_limit_enabled = True
+    limiter = RateLimiter(capacity=1, refill_per_sec=1)
+    try:
+        with pytest.raises(Exception) as excinfo:
+            await limiter.check(BadRedis(), "rl:test")
+    finally:
+        settings.app_env = old_env
+        settings.user_rate_limit_enabled = old_enabled
+    assert getattr(excinfo.value, "status_code", None) == 503
+
+
+@pytest.mark.asyncio
 async def test_retry_after_rounds_up() -> None:
     class LimitedRedis:
         async def eval(self, *_args) -> list[int]:

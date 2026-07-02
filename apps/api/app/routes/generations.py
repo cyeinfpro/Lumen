@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -45,7 +47,7 @@ from ..byok_service import read_byok_settings_cached, retention_policy_from_sett
 router = APIRouter()
 
 
-CURSOR_VERSION = "v2"
+CURSOR_VERSION = "v3"
 COUNT_CAP = 10_000
 
 
@@ -114,15 +116,49 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     )
 
 
-def _encode_cursor(created_at: datetime, gen_id: str, total: int | None = None) -> str:
+def _feed_filter_signature(
+    *,
+    user_id: str,
+    ratio: str | None,
+    has_ref: bool,
+    fast: bool,
+    q: str | None,
+    visible_after: datetime | None,
+) -> str:
+    payload = {
+        "user_id": user_id,
+        "runtime": settings.lumen_runtime.strip().lower(),
+        "ratio": ratio or "",
+        "has_ref": bool(has_ref),
+        "fast": bool(fast),
+        "q": (q or "").strip(),
+        "visible_after": (
+            visible_after.astimezone(timezone.utc).isoformat()
+            if visible_after is not None
+            else ""
+        ),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _encode_cursor(
+    created_at: datetime,
+    gen_id: str,
+    total: int | None = None,
+    filter_sig: str | None = None,
+) -> str:
     # 统一走 UTC ISO，解析端直接 fromisoformat。版本前缀用于未来演进。
     iso = created_at.astimezone(timezone.utc).isoformat()
     total_part = "" if total is None else str(max(0, total))
-    raw = f"{CURSOR_VERSION}|{iso}|{gen_id}|{total_part}".encode("utf-8")
+    filter_part = filter_sig or ""
+    raw = f"{CURSOR_VERSION}|{iso}|{gen_id}|{total_part}|{filter_part}".encode(
+        "utf-8"
+    )
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime, str, int | None]:
+def _decode_cursor(cursor: str) -> tuple[datetime, str, int | None, str | None]:
     # base64 补齐 padding
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
@@ -131,9 +167,23 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str, int | None]:
         raise _http("invalid_cursor", "invalid cursor", 400) from exc
     parts = raw.split("|")
     cursor_total: int | None = None
-    if len(parts) == 4:
-        version, iso, gen_id, raw_total = parts
+    cursor_filter_sig: str | None = None
+    if len(parts) == 5:
+        version, iso, gen_id, raw_total, raw_filter_sig = parts
         if version != CURSOR_VERSION:
+            raise _http("invalid_cursor", "unsupported cursor version", 400)
+        if not raw_filter_sig:
+            raise _http("invalid_cursor", "missing cursor filter", 400)
+        if raw_filter_sig:
+            cursor_filter_sig = raw_filter_sig
+        if raw_total:
+            try:
+                cursor_total = max(0, int(raw_total))
+            except ValueError as exc:
+                raise _http("invalid_cursor", "invalid cursor total", 400) from exc
+    elif len(parts) == 4:
+        version, iso, gen_id, raw_total = parts
+        if version not in {"v2", CURSOR_VERSION}:
             raise _http("invalid_cursor", "unsupported cursor version", 400)
         if raw_total:
             try:
@@ -149,6 +199,8 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str, int | None]:
         iso, gen_id = parts
     else:
         raise _http("invalid_cursor", "invalid cursor", 400)
+    if not gen_id:
+        raise _http("invalid_cursor", "invalid cursor id", 400)
     try:
         # 接受 Z 后缀 / +00:00；fromisoformat 在 3.11+ 已支持。
         ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -156,7 +208,20 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str, int | None]:
         raise _http("invalid_cursor", "invalid cursor timestamp", 400) from exc
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts, gen_id, cursor_total
+    return ts, gen_id, cursor_total, cursor_filter_sig
+
+
+def _validated_cursor_total(
+    *,
+    cursor_total: int | None,
+    cursor_filter_sig: str | None,
+    current_filter_sig: str,
+) -> int | None:
+    if cursor_filter_sig is None:
+        return None
+    if cursor_filter_sig != current_filter_sig:
+        raise _http("invalid_cursor", "cursor does not match current filters", 400)
+    return cursor_total
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -242,10 +307,11 @@ async def list_generation_feed(
         raise _http("invalid_ratio", f"unsupported ratio: {ratio}", 400)
 
     cursor_total: int | None = None
+    cursor_filter_sig: str | None = None
     cur_ts: datetime | None = None
     cur_id: str | None = None
     if cursor:
-        cur_ts, cur_id, cursor_total = _decode_cursor(cursor)
+        cur_ts, cur_id, cursor_total, cursor_filter_sig = _decode_cursor(cursor)
 
     visible_after: datetime | None = None
     if byok_retention_applies_to_user(user):
@@ -253,11 +319,25 @@ async def list_generation_feed(
         if policy.hide_enabled:
             visible_after = byok_retention_cutoffs(policy=policy).visible_after
 
+    current_filter_sig = _feed_filter_signature(
+        user_id=user.id,
+        ratio=ratio,
+        has_ref=has_ref,
+        fast=fast,
+        q=q,
+        visible_after=visible_after,
+    )
+
     # ---- total（不包括 cursor 分页条件；包括所有过滤）----
     # New cursors carry the first-page total so infinite-scroll page requests
     # don't pay a full COUNT(*) on every fetch.
-    if cursor_total is not None:
-        total = cursor_total
+    trusted_cursor_total = _validated_cursor_total(
+        cursor_total=cursor_total,
+        cursor_filter_sig=cursor_filter_sig,
+        current_filter_sig=current_filter_sig,
+    )
+    if trusted_cursor_total is not None:
+        total = trusted_cursor_total
     else:
         count_stmt: Select = select(Generation.id)  # type: ignore[assignment]
         count_stmt = _apply_filters(
@@ -438,6 +518,11 @@ async def list_generation_feed(
     next_cursor: str | None = None
     if has_more and items:
         last = gens[-1]
-        next_cursor = _encode_cursor(last.created_at, last.id, total=total)
+        next_cursor = _encode_cursor(
+            last.created_at,
+            last.id,
+            total=total,
+            filter_sig=current_filter_sig,
+        )
 
     return GenerationFeedOut(items=items, next_cursor=next_cursor, total=total)

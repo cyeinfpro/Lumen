@@ -5,15 +5,21 @@ callback_data 严格 ≤ 64 字节（TG 限制）。本文件全部 callback_dat
   cfg:start                — 提交，进入 awaiting_prompt
   cfg:cancel               — 退出菜单
   retry:<gen_id>           — 重试指定生成（gen_id 是 uuid7 字符串 36 字节）
-  task:<gen_id>            — 任务详情（暂未实装）
+  redo:<gen_id>            — 重画指定生成
+  iter:<gen_id>            — 以指定生成迭代
 """
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlsplit
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+logger = logging.getLogger(__name__)
+
+_CALLBACK_DATA_MAX_BYTES = 64
 
 
 # UI 选项 → API 值的映射
@@ -55,6 +61,20 @@ DEFAULT_PARAMS: dict[str, object] = {
     "fast": True,
     "enhance": False,  # 提交 prompt 后先调 /telegram/prompts/enhance 让你选用优化版/手改后的版本/原文
 }
+
+
+def _generation_callback_data(action: str, gen_id: str) -> str | None:
+    data = f"{action}:{gen_id}"
+    data_len = len(data.encode("utf-8"))
+    if data_len <= _CALLBACK_DATA_MAX_BYTES:
+        return data
+    logger.warning(
+        "telegram callback_data too long action=%s bytes=%d limit=%d",
+        action,
+        data_len,
+        _CALLBACK_DATA_MAX_BYTES,
+    )
+    return None
 
 
 def _row(builder: InlineKeyboardBuilder, label: str, options: list[tuple[str, object]], current: object, field: str) -> None:
@@ -123,10 +143,13 @@ def main_menu(params: dict[str, object]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def retry_keyboard(gen_id: str) -> InlineKeyboardMarkup:
+def retry_keyboard(gen_id: str) -> InlineKeyboardMarkup | None:
+    data = _generation_callback_data("retry", gen_id)
+    if data is None:
+        return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 重试", callback_data=f"retry:{gen_id}")]
+            [InlineKeyboardButton(text="🔄 重试", callback_data=data)]
         ]
     )
 
@@ -155,14 +178,18 @@ def post_success_keyboard(
     *,
     web_url: str | None = None,
     project_url: str | None = None,
-) -> InlineKeyboardMarkup:
+) -> InlineKeyboardMarkup | None:
     """成功生成后的操作面板：重画、迭代、回 Web 继续整理。"""
-    rows = [
-        [
-            InlineKeyboardButton(text="🔁 重画", callback_data=f"redo:{gen_id}"),
-            InlineKeyboardButton(text="✏️ 迭代", callback_data=f"iter:{gen_id}"),
-        ]
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    action_row: list[InlineKeyboardButton] = []
+    redo_data = _generation_callback_data("redo", gen_id)
+    iter_data = _generation_callback_data("iter", gen_id)
+    if redo_data is not None:
+        action_row.append(InlineKeyboardButton(text="🔁 重画", callback_data=redo_data))
+    if iter_data is not None:
+        action_row.append(InlineKeyboardButton(text="✏️ 迭代", callback_data=iter_data))
+    if action_row:
+        rows.append(action_row)
     link_row: list[InlineKeyboardButton] = []
     safe_web_url = _https_url_or_none(web_url)
     safe_project_url = _https_url_or_none(project_url)
@@ -172,6 +199,8 @@ def post_success_keyboard(
         link_row.append(InlineKeyboardButton(text="加入项目", url=safe_project_url))
     if link_row:
         rows.append(link_row)
+    if not rows:
+        return None
     return InlineKeyboardMarkup(
         inline_keyboard=rows
     )

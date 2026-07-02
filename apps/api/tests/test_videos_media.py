@@ -5,6 +5,7 @@ import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import HTTPException, Request
@@ -1496,6 +1497,23 @@ def test_create_video_generation_maps_billing_error() -> None:
     assert "except billing_core.BillingError as exc" in source
 
 
+def test_create_video_generation_commits_video_hold_and_outbox_together() -> None:
+    source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
+    hold_idx = source.index("await billing_core.hold")
+    try_idx = source.rfind("try:", 0, hold_idx)
+    except_idx = source.index("except billing_core.BillingError", hold_idx)
+    guarded = source[try_idx:except_idx]
+
+    assert "db.add(vg)" in guarded
+    assert "await billing_core.hold" in guarded
+    assert "db.add(outbox)" in guarded
+    assert "await db.flush()" in guarded
+    assert "await db.commit()" in guarded
+    assert guarded.index("db.add(vg)") < guarded.index("await billing_core.hold")
+    assert guarded.index("await billing_core.hold") < guarded.index("db.add(outbox)")
+    assert guarded.index("db.add(outbox)") < guarded.index("await db.commit()")
+
+
 def test_create_video_generation_reuses_request_fingerprint() -> None:
     source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
 
@@ -1645,6 +1663,15 @@ def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
     with pytest.raises(Exception) as excinfo:
         videos._validate_reference_url("ftp://example.com/ref.mp4")  # noqa: SLF001
     assert getattr(excinfo.value, "status_code", None) == 422
+    for url in (
+        "http://example.com/ref.mp4",
+        "https://127.0.0.1/ref.mp4",
+        "https://[::ffff:127.0.0.1]/ref.mp4",
+        "https://0177.0.0.1/ref.mp4",
+    ):
+        with pytest.raises(Exception) as excinfo:
+            videos._validate_reference_url(url)  # noqa: SLF001
+        assert getattr(excinfo.value, "status_code", None) == 422
 
 
 @pytest.mark.asyncio
@@ -1955,6 +1982,86 @@ def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
         "row.status == VideoGenerationStatus.QUEUED.value and not row.provider_task_id"
         in compact_source
     )
+    assert "tx = await billing_core.release" in source
+    assert "if tx is None:" in source
+    assert "await db.rollback()" in source
+    assert "if balance_changed:" in source
+
+
+@pytest.mark.asyncio
+async def test_cancel_video_generation_rolls_back_when_hold_release_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+            self.committed = False
+            self.rolled_back = False
+            self.refreshed = False
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.row)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+        async def refresh(self, _row: Any) -> None:
+            self.refreshed = True
+
+    async def missing_release(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fail_publish(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("cancel should not publish after release failure")
+
+    invalidated: list[str] = []
+
+    async def invalidate(user_id: str) -> None:
+        invalidated.append(user_id)
+
+    row = SimpleNamespace(
+        id="video-gen-1",
+        user_id="user-1",
+        status=videos.VideoGenerationStatus.QUEUED.value,
+        provider_task_id=None,
+        cancel_requested_at=None,
+        progress_stage=videos.VideoGenerationStage.QUEUED.value,
+        progress_pct=0,
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+        model="seedance",
+        action="text",
+        provider_name="provider-a",
+    )
+    db = Db(row)
+    monkeypatch.setattr(videos.billing_core, "release", missing_release)
+    monkeypatch.setattr(videos, "publish_sse_event", fail_publish)
+    monkeypatch.setattr(videos, "invalidate_balance_cache", invalidate)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos.cancel_video_generation(
+            "video-gen-1",
+            SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "video_hold_release_missing"
+    assert db.rolled_back is True
+    assert db.committed is False
+    assert db.refreshed is False
+    assert invalidated == []
 
 
 def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
@@ -1962,6 +2069,7 @@ def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
 
     assert "account_mode_forbidden" in source
     assert "video_retry_not_terminal" in source
+    assert ".with_for_update()" in source
     assert "row.updated_at.isoformat()" in source
     assert "valid_reference_snapshots.append(item)" in source
     assert "reference_media_snapshot=valid_reference_snapshots" in source

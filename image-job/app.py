@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import time
+import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,11 @@ CONCURRENCY = max(1, int(os.getenv("IMAGE_JOB_CONCURRENCY", "2")))
 UPSTREAM_TIMEOUT_S = float(os.getenv("IMAGE_JOB_UPSTREAM_TIMEOUT_S", "1800"))
 UPSTREAM_CONNECT_TIMEOUT_S = float(os.getenv("IMAGE_JOB_UPSTREAM_CONNECT_TIMEOUT_S", "5"))
 MAX_IMAGE_BYTES = int(os.getenv("IMAGE_JOB_MAX_IMAGE_BYTES", str(80 * 1024 * 1024)))
+MAX_IMAGE_PIXELS = max(
+    1,
+    int(os.getenv("IMAGE_JOB_MAX_IMAGE_PIXELS", str(100 * 1000 * 1000))),
+)
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 QUEUE_MAX = max(1, int(os.getenv("IMAGE_JOB_QUEUE_MAX", "1000")))
 RETRY_NETWORK_MAX = max(0, int(os.getenv("IMAGE_JOB_RETRY_NETWORK_MAX", "1")))
 RETRY_BACKOFF_S = float(os.getenv("IMAGE_JOB_RETRY_BACKOFF_S", "2"))
@@ -163,6 +169,24 @@ def json_dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def stable_json_dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def request_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(stable_json_dump(payload).encode("utf-8")).hexdigest()
+
+
+def request_idempotency_key(request: Request, raw_payload: Any) -> str | None:
+    raw = (request.headers.get("Idempotency-Key") or "").strip()
+    if not raw and isinstance(raw_payload, dict):
+        candidate = raw_payload.get("idempotency_key")
+        raw = candidate.strip() if isinstance(candidate, str) else ""
+    if not raw:
+        return None
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def normalize_image_edit_input_transport(value: Any) -> str:
     if isinstance(value, str) and value.strip().lower() == "file":
         return "file"
@@ -204,6 +228,48 @@ def _ensure_column(conn: sqlite3.Connection, table: str, name: str, decl: str) -
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def _create_refs_table_sql() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS refs (
+        auth_hash TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        token TEXT NOT NULL,
+        ext TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(auth_hash, sha256)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS refs_auth_sha_idx
+        ON refs(auth_hash, sha256);
+    CREATE INDEX IF NOT EXISTS refs_created_idx ON refs(created_at);
+    """
+
+
+def _ensure_refs_auth_schema(conn: sqlite3.Connection) -> None:
+    rows = list(conn.execute("PRAGMA table_info(refs)"))
+    if not rows:
+        conn.executescript(_create_refs_table_sql())
+        return
+    cols = {row["name"] for row in rows}
+    pk_cols = [row["name"] for row in rows if int(row["pk"] or 0) > 0]
+    if "auth_hash" in cols and pk_cols != ["sha256"]:
+        conn.executescript(_create_refs_table_sql())
+        return
+
+    legacy = "refs_legacy_auth_migration"
+    conn.execute(f"DROP TABLE IF EXISTS {legacy}")
+    conn.execute(f"ALTER TABLE refs RENAME TO {legacy}")
+    conn.executescript(_create_refs_table_sql())
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO refs (auth_hash, sha256, token, ext, size, created_at)
+        SELECT 'legacy:' || sha256, sha256, token, ext, size, created_at
+        FROM {legacy}
+        """
+    )
+    conn.execute(f"DROP TABLE {legacy}")
+
+
 def init_storage_sync() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REFS_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,6 +282,8 @@ def init_storage_sync() -> None:
                 job_id TEXT PRIMARY KEY,
                 auth_hash TEXT NOT NULL,
                 auth_header TEXT,
+                idempotency_key TEXT,
+                request_hash TEXT,
                 request_type TEXT NOT NULL,
                 endpoint TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
@@ -236,21 +304,21 @@ def init_storage_sync() -> None:
             CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status);
             CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_at);
             CREATE INDEX IF NOT EXISTS jobs_finished_idx ON jobs(finished_at);
-            -- refs 表：sha256 → token 映射用于去重；同 sha 第二次上传直接复用已有 URL。
-            -- 写盘 + 行落库要原子（不然 sweeper 可能清掉文件而 DB 行仍存在 → 复用时拿到失效 URL）。
-            CREATE TABLE IF NOT EXISTS refs (
-                sha256 TEXT PRIMARY KEY,
-                token TEXT NOT NULL,
-                ext TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS refs_created_idx ON refs(created_at);
             """
         )
+        _ensure_refs_auth_schema(conn)
         _ensure_column(conn, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "error_class", "TEXT")
         _ensure_column(conn, "jobs", "endpoint_used", "TEXT")
+        _ensure_column(conn, "jobs", "idempotency_key", "TEXT")
+        _ensure_column(conn, "jobs", "request_hash", "TEXT")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS jobs_auth_idempotency_idx
+                ON jobs(auth_hash, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+            """
+        )
     finally:
         conn.close()
 
@@ -436,19 +504,29 @@ def make_job_id() -> str:
 # --- Job CRUD ----------------------------------------------------------------
 
 
-async def insert_job(job_id: str, payload: dict[str, Any], auth_header: str) -> None:
+async def insert_job(
+    job_id: str,
+    payload: dict[str, Any],
+    auth_header: str,
+    *,
+    idempotency_key: str | None = None,
+    payload_hash: str | None = None,
+) -> None:
     now = iso()
     await db_exec(
         """
         INSERT INTO jobs (
-            job_id, auth_hash, auth_header, request_type, endpoint, payload_json,
-            status, relay_url, retention_days, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+            job_id, auth_hash, auth_header, idempotency_key, request_hash,
+            request_type, endpoint, payload_json, status, relay_url,
+            retention_days, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
         """,
         (
             job_id,
             auth_hash(auth_header),
             auth_header,
+            idempotency_key,
+            payload_hash,
             payload["request_type"],
             payload["endpoint"],
             json_dump(payload),
@@ -460,13 +538,25 @@ async def insert_job(job_id: str, payload: dict[str, Any], auth_header: str) -> 
     )
 
 
-async def mark_running(job_id: str) -> None:
+async def ensure_queued_job_scheduled(row: sqlite3.Row) -> None:
+    if row["status"] != "queued" or not row["auth_header"]:
+        return
+    result = await enqueue_job(row["job_id"])
+    if result == "enqueued":
+        await db_exec(
+            "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'queued'",
+            (iso(), row["job_id"]),
+        )
+
+
+async def mark_running(job_id: str) -> bool:
     now = iso()
-    await db_exec(
+    changed = await db_exec(
         "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), "
-        "updated_at = ?, attempts = attempts + 1 WHERE job_id = ?",
+        "updated_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
         (now, now, job_id),
     )
+    return changed == 1
 
 
 async def touch_running(job_id: str) -> None:
@@ -1158,12 +1248,25 @@ async def extract_responses_stream_images(
 
 def image_metadata(data: bytes, mime_type: str | None) -> tuple[int | None, int | None, str]:
     try:
-        with Image.open(BytesIO(data)) as image:
-            width, height = image.size
-            fmt = (image.format or "").lower()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                width, height = image.size
+                fmt = (image.format or "").lower()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise JobFailure(
+            f"图片像素超过限制（max {MAX_IMAGE_PIXELS} pixels）",
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        ) from exc
     except (UnidentifiedImageError, OSError):
         width = height = None
         fmt = ""
+
+    if width is not None and height is not None and width * height > MAX_IMAGE_PIXELS:
+        raise JobFailure(
+            f"图片像素超过限制（{width}x{height}, max {MAX_IMAGE_PIXELS} pixels）",
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        )
 
     if fmt in {"jpg", "jpeg"}:
         return width, height, "jpeg"
@@ -1679,11 +1782,12 @@ async def running_heartbeat(job_id: str) -> None:
 
 async def process_job(job_id: str) -> None:
     row = await db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
-    if row is None or row["status"] not in {"queued", "running"}:
+    if row is None or row["status"] != "queued":
         return
 
     LOG.info("starting image job %s endpoint=%s", job_id, row["endpoint"])
-    await mark_running(job_id)
+    if not await mark_running(job_id):
+        return
     started = time.monotonic()
     endpoint_used = row["endpoint"]
     heartbeat = asyncio.create_task(running_heartbeat(job_id), name=f"image-job-heartbeat-{job_id}")
@@ -2100,8 +2204,45 @@ async def create_image_job(request: Request) -> dict[str, Any]:
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body") from None
     payload = validate_payload(raw_payload)
+    auth_digest = auth_hash(auth_header)
+    idempotency_key = request_idempotency_key(request, raw_payload)
+    payload_hash = request_hash(payload)
+    if idempotency_key is not None:
+        existing = await db_one(
+            "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
+            (auth_digest, idempotency_key),
+        )
+        if existing is not None:
+            if existing["request_hash"] != payload_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency key already used for a different image job",
+                )
+            await ensure_queued_job_scheduled(existing)
+            return row_to_response(existing)
     job_id = make_job_id()
-    await insert_job(job_id, payload, auth_header)
+    try:
+        await insert_job(
+            job_id,
+            payload,
+            auth_header,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+        )
+    except sqlite3.IntegrityError:
+        if idempotency_key is None:
+            raise
+        existing = await db_one(
+            "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
+            (auth_digest, idempotency_key),
+        )
+        if existing is not None and existing["request_hash"] == payload_hash:
+            await ensure_queued_job_scheduled(existing)
+            return row_to_response(existing)
+        raise HTTPException(
+            status_code=409,
+            detail="idempotency key already used for a different image job",
+        ) from None
     result = await enqueue_job(job_id)
     if result == "full":
         await mark_failed(
@@ -2148,9 +2289,12 @@ def _refs_public_url(token: str, ext: str) -> str:
     return f"{PUBLIC_BASE_URL}/refs/{token}.{ext}"
 
 
-def _existing_ref_sync(sha: str) -> tuple[str, str] | None:
+def _existing_ref_sync(auth_digest: str, sha: str) -> tuple[str, str] | None:
     """返回 (token, ext) 或 None。如果 DB 有行但文件已被 sweep，则同时清 DB 行。"""
-    row = _db_one_sync("SELECT token, ext FROM refs WHERE sha256 = ?", (sha,))
+    row = _db_one_sync(
+        "SELECT token, ext FROM refs WHERE auth_hash = ? AND sha256 = ?",
+        (auth_digest, sha),
+    )
     if row is None:
         return None
     token = row["token"]
@@ -2158,11 +2302,20 @@ def _existing_ref_sync(sha: str) -> tuple[str, str] | None:
     if _refs_file_path(token, ext).exists():
         return token, ext
     # 文件已被 sweep，但 DB 行还在——清掉让上层重新写入。
-    _db_exec_sync("DELETE FROM refs WHERE sha256 = ?", (sha,))
+    _db_exec_sync(
+        "DELETE FROM refs WHERE auth_hash = ? AND sha256 = ?",
+        (auth_digest, sha),
+    )
     return None
 
 
-def _write_ref_sync(sha: str, token: str, ext: str, raw: bytes) -> None:
+def _write_ref_sync(
+    auth_digest: str,
+    sha: str,
+    token: str,
+    ext: str,
+    raw: bytes,
+) -> None:
     """原子写盘 + 落库：先写临时文件再 rename，再 INSERT。
     INSERT 失败（并发同 sha）→ 回退用已有 token；调用方 deduped。
     """
@@ -2180,12 +2333,15 @@ def _write_ref_sync(sha: str, token: str, ext: str, raw: bytes) -> None:
                 pass
     try:
         _db_exec_sync(
-            "INSERT INTO refs (sha256, token, ext, size, created_at) VALUES (?, ?, ?, ?, ?)",
-            (sha, token, ext, len(raw), iso()),
+            """
+            INSERT INTO refs (auth_hash, sha256, token, ext, size, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (auth_digest, sha, token, ext, len(raw), iso()),
         )
     except sqlite3.IntegrityError:
         # 并发场景：另一请求已经为同 sha 落库；保留我们的文件，但 DB 视图维持 first-writer-wins。
-        # 调用方下次查 _existing_ref_sync 会拿到 first writer 的 token。
+        # 调用方下次查 _existing_ref_sync 会拿到同 auth 下 first writer 的 token。
         # 我们这次写的文件是孤儿，retention sweeper 会按 mtime 清掉。
         pass
 
@@ -2195,13 +2351,13 @@ async def upload_reference(request: Request) -> dict[str, Any]:
     """接收参考图 raw bytes，返回公网 URL。
 
     Body：raw 图片 bytes（PNG / JPEG / WebP），由 Content-Type 决定扩展名。
-    Auth：与其他端点一致（Authorization: Bearer <api_key>）；这里不做 owner 隔离，
-        只把 auth 当限速凭据——参考图本质上是用户自己上传的素材，URL 一旦生成
-        谁拿到都能 GET（公网静态），所以 owner 检查没意义。
-    幂等：同 sha256 复用已有 URL；不重复写盘。
+    Auth：与其他端点一致（Authorization: Bearer <api_key>）；同一 auth 下同 sha256
+        复用已有 URL，不同 auth 会生成不同 token，避免跨 key 共享 bearer URL。
+    幂等：同 auth + 同 sha256 复用已有 URL；不重复写盘。
     TTL：与 jobs 共用 MAX_RETENTION_DAYS（默认 1d）。
     """
-    require_auth(request)
+    auth_header = require_auth(request)
+    auth_digest = auth_hash(auth_header)
     raw = await request.body()
     if not raw:
         raise HTTPException(status_code=400, detail="empty body")
@@ -2217,9 +2373,15 @@ async def upload_reference(request: Request) -> dict[str, Any]:
             status_code=400,
             detail=f"unsupported content-type {mime!r}; expected image/png|jpeg|webp",
         )
+    try:
+        width, height, fmt = await asyncio.to_thread(image_metadata, raw, mime)
+    except JobFailure as exc:
+        raise HTTPException(status_code=413, detail=exc.error) from exc
+    if width is None or height is None or fmt == "bin":
+        raise HTTPException(status_code=400, detail="reference is not a valid image")
 
     sha = hashlib.sha256(raw).hexdigest()
-    existing = await asyncio.to_thread(_existing_ref_sync, sha)
+    existing = await asyncio.to_thread(_existing_ref_sync, auth_digest, sha)
     if existing is not None:
         token, ext_existing = existing
         return {
@@ -2230,9 +2392,9 @@ async def upload_reference(request: Request) -> dict[str, Any]:
         }
 
     token = secrets.token_urlsafe(24)
-    await asyncio.to_thread(_write_ref_sync, sha, token, ext, raw)
+    await asyncio.to_thread(_write_ref_sync, auth_digest, sha, token, ext, raw)
     # 成功后 _existing_ref_sync 应总能命中（除非并发 race，那种情况下 token 用 first writer 的）
-    final = await asyncio.to_thread(_existing_ref_sync, sha)
+    final = await asyncio.to_thread(_existing_ref_sync, auth_digest, sha)
     if final is not None:
         token_final, ext_final = final
     else:

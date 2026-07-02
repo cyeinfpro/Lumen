@@ -276,9 +276,11 @@ def test_sanitize_title(raw: str, expected: str) -> None:
 class _FakeRedisEnqueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
+        self.enqueue_kwargs: list[dict[str, Any]] = []
 
-    async def enqueue_job(self, name: str, conv_id: str) -> None:
+    async def enqueue_job(self, name: str, conv_id: str, **kwargs: Any) -> None:
         self.enqueued.append((name, conv_id))
+        self.enqueue_kwargs.append(kwargs)
 
 
 @pytest.mark.asyncio
@@ -368,6 +370,9 @@ async def test_reconcile_proceeds_when_lock_acquired(
     n = await auto_title.reconcile_default_titles({"redis": redis})
     assert n == 1
     assert redis.enqueued == [("auto_title_conversation", "conv1")]
+    assert redis.enqueue_kwargs == [
+        {"_job_id": f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv1"}  # noqa: SLF001
+    ]
 
 
 @pytest.mark.asyncio
@@ -548,6 +553,37 @@ async def test_call_upstream_logs_attempted_providers_on_total_failure(
 
 
 @pytest.mark.asyncio
+async def test_maybe_enqueue_auto_title_uses_stable_cross_worker_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Result:
+        def scalar_one_or_none(self) -> str:
+            return ""
+
+    class _FakeSession:
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def execute(self, _stmt: Any) -> _Result:
+            return _Result()
+
+    with auto_title._title_cache_lock:  # noqa: SLF001
+        auto_title._title_cache.clear()  # noqa: SLF001
+    monkeypatch.setattr(auto_title, "SessionLocal", lambda: _FakeSession())
+    redis = _FakeRedisEnqueue()
+
+    await auto_title.maybe_enqueue_auto_title(redis, "conv-direct")
+
+    assert redis.enqueued == [("auto_title_conversation", "conv-direct")]
+    assert redis.enqueue_kwargs == [
+        {"_job_id": f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv-direct"}  # noqa: SLF001
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_enqueues_default_title_conversations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -581,6 +617,10 @@ async def test_reconcile_enqueues_default_title_conversations(
         ("auto_title_conversation", "conv1"),
         ("auto_title_conversation", "conv2"),
     ]
+    assert sorted(kw["_job_id"] for kw in redis.enqueue_kwargs) == [
+        f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv1",  # noqa: SLF001
+        f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv2",  # noqa: SLF001
+    ]
 
 
 @pytest.mark.asyncio
@@ -593,7 +633,7 @@ async def test_reconcile_enqueue_failures_are_logged_not_raised(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def enqueue_job(self, _name: str, _conv: str) -> None:
+        async def enqueue_job(self, _name: str, _conv: str, **_kwargs: Any) -> None:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("redis flake")

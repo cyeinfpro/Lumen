@@ -14,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import UserApiCredential, UserWallet
 
+# Bound only rate-limit window increments. Balance-cache decrements mirror the
+# ledger amount and should not silently skip legitimate large charges.
+MAX_WINDOW_INCREMENT_MICRO = 1_000_000_000_000
 
 _WINDOW_INCREMENT_LUA = """
 local key = KEYS[1]
@@ -23,6 +26,11 @@ local limit_5h = tonumber(ARGV[3]) or 0
 local limit_1d = tonumber(ARGV[4]) or 0
 local limit_7d = tonumber(ARGV[5]) or 0
 local expire_sec = tonumber(ARGV[6]) or 0
+local max_amount = tonumber(ARGV[7]) or 0
+
+if amount <= 0 or max_amount <= 0 or amount > max_amount then
+  return 0
+end
 
 local labels = {"5h", "1d", "7d"}
 local ttls = {5 * 3600, 24 * 3600, 7 * 24 * 3600}
@@ -169,7 +177,7 @@ class BillingCacheService:
         if self.redis is None:
             return
         amount = int(amount_micro)
-        if amount <= 0:
+        if amount <= 0 or amount > MAX_WINDOW_INCREMENT_MICRO:
             return
         current = now or datetime.now(timezone.utc)
         ts = int(current.timestamp())
@@ -186,6 +194,7 @@ class BillingCacheService:
                 int(limits.get("1d") or 0),
                 int(limits.get("7d") or 0),
                 7 * 24 * 3600 + self.window_ttl_sec,
+                MAX_WINDOW_INCREMENT_MICRO,
             )
         except Exception:
             return
@@ -325,7 +334,7 @@ class BillingCacheService:
         if self.redis is None:
             return
         amount = int(micro)
-        if amount <= 0:
+        if amount <= 0 or amount > MAX_WINDOW_INCREMENT_MICRO:
             return
         try:
             self._queue.put_nowait(("window", (key_id, amount, limits), {}))

@@ -3,6 +3,7 @@
 所有 bot → api 调用统一从这里出，自动带：
 - X-Bot-Token：service-to-service 共享密钥
 - X-Telegram-Chat-Id：标识当前 TG 用户（除 /telegram/bind 走显式 chat_id 之外）
+- X-Telegram-User-Id：TG from_user.id，用于 API 侧二次校验 chat 绑定
 
 错误处理：把 4xx/5xx 包成 ApiError(code, message, status)，handler 层再翻成中文给用户。
 """
@@ -31,6 +32,7 @@ _download_sem = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
 
 # 下载前最低空闲磁盘门槛。低于此值直接拒绝下载，避免撑爆 /tmp 后整个 bot 崩。
 _MIN_FREE_DISK_BYTES = 200 * 1024 * 1024  # 200 MB
+_DOWNLOAD_DISK_CHECK_INTERVAL_BYTES = 8 * 1024 * 1024
 
 
 def make_idempotency_key(scope: str, *parts: object) -> str:
@@ -57,10 +59,19 @@ class LumenApi:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    def _hdr(self, chat_id: int | str | None) -> dict[str, str]:
+    def _hdr(
+        self,
+        chat_id: int | str | None,
+        *,
+        tg_user_id: int | str | None = None,
+    ) -> dict[str, str]:
         if chat_id is None:
             return {}
-        return {"X-Telegram-Chat-Id": str(chat_id)}
+        user_id = tg_user_id if tg_user_id is not None else chat_id
+        return {
+            "X-Telegram-Chat-Id": str(chat_id),
+            "X-Telegram-User-Id": str(user_id),
+        }
 
     @staticmethod
     def _raise_for(resp: httpx.Response) -> None:
@@ -79,11 +90,22 @@ class LumenApi:
             pass
         raise ApiError(code="http_error", message=resp.text or resp.reason_phrase, status=resp.status_code)
 
-    async def bind(self, chat_id: int, code: str, tg_username: str | None) -> dict[str, Any]:
+    async def bind(
+        self,
+        chat_id: int,
+        code: str,
+        tg_username: str | None,
+        tg_user_id: int | str | None = None,
+    ) -> dict[str, Any]:
         resp = await self._client.post(
             "/telegram/bind",
-            json={"chat_id": str(chat_id), "code": code, "tg_username": tg_username},
-            headers=self._hdr(chat_id),
+            json={
+                "chat_id": str(chat_id),
+                "code": code,
+                "tg_user_id": str(tg_user_id if tg_user_id is not None else chat_id),
+                "tg_username": tg_username,
+            },
+            headers=self._hdr(chat_id, tg_user_id=tg_user_id),
         )
         self._raise_for(resp)
         return resp.json()
@@ -176,24 +198,13 @@ class LumenApi:
         韧性保护：
         - 全局 _download_sem 限并发，避免 batch 任务一次性下 16 张把 socket / IO 排满
         - 下载前 shutil.disk_usage 检查 free，低于 _MIN_FREE_DISK_BYTES 直接拒绝，
+          若响应带 Content-Length，还会预留整个文件大小；无长度的流式响应每 8MB
+          复查一次空闲空间，
           避免把 /tmp 撑爆导致整个 bot 进程后续操作（FSM redis 写入 / 日志）连带崩
         """
         tmp_root = (settings.download_tmp_dir or "").strip() or tempfile.gettempdir()
         Path(tmp_root).mkdir(parents=True, exist_ok=True)
-        try:
-            usage = shutil.disk_usage(tmp_root)
-        except OSError as exc:
-            logger.warning("disk_usage check failed dir=%s err=%s", tmp_root, exc)
-        else:
-            if usage.free < _MIN_FREE_DISK_BYTES:
-                raise ApiError(
-                    code="disk_full",
-                    message=(
-                        f"临时目录空间不足（剩 {usage.free // (1024 * 1024)} MB），"
-                        "请稍后再试或联系管理员清理。"
-                    ),
-                    status=507,
-                )
+        _ensure_download_space(tmp_root)
         path = Path(tmp_root) / f"lumen-{image_id[:12]}-{uuid.uuid4().hex[:8]}.bin"
         size = 0
         mime = "image/jpeg"
@@ -208,10 +219,23 @@ class LumenApi:
                         await resp.aread()
                         self._raise_for(resp)
                     mime = resp.headers.get("content-type", "image/jpeg")
+                    content_length = _parse_content_length(
+                        resp.headers.get("content-length")
+                    )
+                    if content_length is not None:
+                        _ensure_download_space(tmp_root, required_bytes=content_length)
+                    next_disk_check = _DOWNLOAD_DISK_CHECK_INTERVAL_BYTES
                     with path.open("wb") as fp:
                         async for chunk in resp.aiter_bytes():
+                            projected = size + len(chunk)
+                            if projected >= next_disk_check:
+                                _ensure_download_space(
+                                    tmp_root, required_bytes=len(chunk)
+                                )
+                                while projected >= next_disk_check:
+                                    next_disk_check += _DOWNLOAD_DISK_CHECK_INTERVAL_BYTES
                             fp.write(chunk)
-                            size += len(chunk)
+                            size = projected
             except Exception:
                 try:
                     if path.exists():
@@ -220,3 +244,31 @@ class LumenApi:
                     pass
                 raise
         return path, mime, size
+
+
+def _parse_content_length(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _ensure_download_space(tmp_root: str, *, required_bytes: int = 0) -> None:
+    try:
+        usage = shutil.disk_usage(tmp_root)
+    except OSError as exc:
+        logger.warning("disk_usage check failed dir=%s err=%s", tmp_root, exc)
+        return
+    required = max(0, int(required_bytes))
+    if usage.free - required < _MIN_FREE_DISK_BYTES:
+        raise ApiError(
+            code="disk_full",
+            message=(
+                f"临时目录空间不足（剩 {usage.free // (1024 * 1024)} MB），"
+                "请稍后再试或联系管理员清理。"
+            ),
+            status=507,
+        )

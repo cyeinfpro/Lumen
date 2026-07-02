@@ -24,6 +24,10 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from .providers import (
+    ensure_enabled_provider_proxies,
+    ensure_enabled_video_provider_proxies,
+)
 from ..runtime_settings import get_setting, get_settings_view, update_settings
 from ..services.redemption_secret import (
     PreviousRedemptionSecretLocked,
@@ -79,6 +83,52 @@ async def _validate_threshold_pricing_alignment(
             "every image size threshold must have an enabled pricing rule",
             422,
             missing=missing,
+        )
+
+
+async def _validate_provider_setting_semantics(
+    db: AsyncSession,
+    pair_map: dict[str, str],
+) -> None:
+    errors: list[dict[str, str]] = []
+    providers_raw = pair_map.get("providers")
+    if providers_raw is not None:
+        try:
+            ensure_enabled_provider_proxies(providers_raw)
+        except ValueError as exc:
+            errors.append(
+                {
+                    "key": "providers",
+                    "reason": "invalid_provider_proxy",
+                    "message": str(exc),
+                }
+            )
+    video_raw = pair_map.get("video.providers")
+    if video_raw is not None:
+        shared_raw = providers_raw
+        if shared_raw is None:
+            providers_spec = get_spec("providers")
+            if providers_spec is not None:
+                shared_raw = await get_setting(db, providers_spec)
+        try:
+            ensure_enabled_video_provider_proxies(
+                video_raw,
+                shared_provider_raw=shared_raw,
+            )
+        except ValueError as exc:
+            errors.append(
+                {
+                    "key": "video.providers",
+                    "reason": "invalid_provider_proxy",
+                    "message": str(exc),
+                }
+            )
+    if errors:
+        raise _http(
+            "invalid_request",
+            "one or more setting items are invalid",
+            422,
+            errors=errors,
         )
 
 
@@ -144,6 +194,7 @@ async def put_settings_endpoint(
         )
 
     pair_map = {key: value for key, value in pairs}
+    await _validate_provider_setting_semantics(db, pair_map)
     if "billing.image_size_thresholds" in pair_map:
         await _validate_threshold_pricing_alignment(
             db, pair_map["billing.image_size_thresholds"]

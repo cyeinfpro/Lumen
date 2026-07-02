@@ -121,9 +121,19 @@ _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER = RateLimiter(
 _PASSWORD_RESET_CONFIRM_USER_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 3600, always_on=True
 )
+_PASSWORD_RESET_CLAIM_TTL_SECONDS = 60
 _DEV_ENVS = {"dev", "development", "local", "test"}
 _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE = (
     "verification failed; please verify your API key again"
+)
+_USER_EMAIL_INTEGRITY_MARKERS = (
+    "uq_users_email_active",
+    "users_email_key",
+    "users.email",
+)
+_ALLOWED_EMAIL_INTEGRITY_MARKERS = (
+    "allowed_emails.email",
+    "allowed_emails_email_key",
 )
 
 
@@ -162,6 +172,10 @@ def _password_reset_key(token: str) -> str:
     return f"{_PASSWORD_RESET_KEY_PREFIX}:{hash_token(token)}"
 
 
+def _password_reset_claim_key(token: str) -> str:
+    return f"{_PASSWORD_RESET_KEY_PREFIX}:claim:{hash_token(token)}"
+
+
 def _password_reset_url(token: str, public_base_url: str) -> str:
     return f"{public_base_url.rstrip('/')}/reset-password/{token}"
 
@@ -172,6 +186,48 @@ def _redis_text(value: Any) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value)
+
+
+def _integrity_error_text(exc: IntegrityError) -> str:
+    parts: list[str] = [str(exc)]
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        parts.append(str(orig))
+        diag = getattr(orig, "diag", None)
+        if diag is not None:
+            for attr in ("constraint_name", "table_name", "column_name"):
+                value = getattr(diag, attr, None)
+                if value:
+                    parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _integrity_error_matches(exc: IntegrityError, markers: tuple[str, ...]) -> bool:
+    text = _integrity_error_text(exc)
+    return any(marker in text for marker in markers)
+
+
+async def _claim_password_reset_token(
+    redis: Any, claim_key: str, *, owner: str
+) -> bool:
+    claimed = await redis.set(
+        claim_key,
+        owner,
+        ex=_PASSWORD_RESET_CLAIM_TTL_SECONDS,
+        nx=True,
+    )
+    return claimed is not None and claimed is not False and claimed != 0
+
+
+async def _release_password_reset_claim(
+    redis: Any, claim_key: str, *, owner: str
+) -> None:
+    try:
+        raw = _redis_text(await redis.get(claim_key))
+        if raw == owner:
+            await redis.delete(claim_key)
+    except Exception:
+        logger.warning("password_reset_claim_release_failed", exc_info=True)
 
 
 def _is_dev_env() -> bool:
@@ -465,18 +521,53 @@ async def signup(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        logger.info(
-            "signup_rejected",
-            extra={"email_hash": _log_hash(email), "reason": "integrity_conflict"},
+        if _integrity_error_matches(exc, _USER_EMAIL_INTEGRITY_MARKERS):
+            logger.info(
+                "signup_rejected",
+                extra={"email_hash": _log_hash(email), "reason": "email_taken_race"},
+            )
+            await write_audit_isolated(
+                event_type="auth.signup.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": "email_taken"},
+            )
+            raise _bad(
+                "email_taken", "an account with this email already exists", 409
+            ) from exc
+        if _integrity_error_matches(exc, _ALLOWED_EMAIL_INTEGRITY_MARKERS):
+            logger.info(
+                "signup_rejected",
+                extra={
+                    "email_hash": _log_hash(email),
+                    "reason": "allowlist_integrity_conflict",
+                },
+            )
+            await write_audit_isolated(
+                event_type="auth.signup.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": "allowlist_integrity_conflict"},
+            )
+            raise _bad(
+                "signup_conflict",
+                "signup could not be completed; please retry",
+                409,
+            ) from exc
+        logger.exception(
+            "signup_integrity_error",
+            extra={"email_hash": _log_hash(email)},
         )
         await write_audit_isolated(
             event_type="auth.signup.fail",
             actor_email=email,
             actor_ip_hash=request_ip_hash(request),
-            details={"reason": "integrity_conflict"},
+            details={"reason": "integrity_conflict_unclassified"},
         )
         raise _bad(
-            "email_taken", "an account with this email already exists", 409
+            "signup_unavailable",
+            "signup is temporarily unavailable",
+            503,
         ) from exc
 
     logger.info(
@@ -708,10 +799,12 @@ async def signup_byok(
             event_type="auth.signup.byok.fail",
             actor_email=email,
             actor_ip_hash=request_ip_hash(request),
-            details={"reason": "integrity_conflict"},
+            details={"reason": "integrity_conflict_masked_as_invalid_token"},
         )
         raise _bad(
-            "email_taken", "an account with this email already exists", 409
+            "invalid_verification_token",
+            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
+            400,
         ) from exc
 
     _set_auth_cookies(response, session.id, csrf)
@@ -874,32 +967,50 @@ async def password_reset_confirm(
     await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
         redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
     )
+    claim_key = _password_reset_claim_key(token)
+    claim_owner = f"user:{raw_user_id}:{secrets.token_urlsafe(16)}"
     try:
-        consumed_user_id = _redis_text(await redis.getdel(key))
+        claim_acquired = await _claim_password_reset_token(
+            redis, claim_key, owner=claim_owner
+        )
     except Exception as exc:
-        logger.error("password_reset_token_consume_failed", exc_info=True)
+        logger.error("password_reset_token_claim_failed", exc_info=True)
         raise _bad(
             "reset_unavailable",
             "password reset is temporarily unavailable",
             503,
         ) from exc
-    if consumed_user_id != raw_user_id:
+    if not claim_acquired:
         raise _bad("invalid_token", "reset token is invalid or expired", 400)
+    try:
+        try:
+            consumed_user_id = _redis_text(await redis.getdel(key))
+        except Exception as exc:
+            logger.error("password_reset_token_consume_failed", exc_info=True)
+            raise _bad(
+                "reset_unavailable",
+                "password reset is temporarily unavailable",
+                503,
+            ) from exc
+        if consumed_user_id != raw_user_id:
+            raise _bad("invalid_token", "reset token is invalid or expired", 400)
 
-    user = (
-        await db.execute(select(User).where(User.id == raw_user_id).with_for_update())
-    ).scalar_one_or_none()
-    if user is None or user.deleted_at is not None:
-        raise _bad("invalid_token", "reset token is invalid or expired", 400)
+        user = (
+            await db.execute(select(User).where(User.id == raw_user_id).with_for_update())
+        ).scalar_one_or_none()
+        if user is None or user.deleted_at is not None:
+            raise _bad("invalid_token", "reset token is invalid or expired", 400)
 
-    now = datetime.now(timezone.utc)
-    user.password_hash = hash_password(body.new_password)
-    await db.execute(
-        update(AuthSession)
-        .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
-        .values(revoked_at=now)
-    )
-    await db.commit()
+        now = datetime.now(timezone.utc)
+        user.password_hash = hash_password(body.new_password)
+        await db.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        await db.commit()
+    finally:
+        await _release_password_reset_claim(redis, claim_key, owner=claim_owner)
     return OkOut(ok=True)
 
 

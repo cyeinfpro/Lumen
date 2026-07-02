@@ -8,12 +8,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.routes import _apparel_scene_planner as scene_planner
+from app.routes import _showcase_shot_pool as shot_pool
 from app.routes import workflows
 from lumen_core.constants import CompletionStatus, GenerationStatus, MAX_PROMPT_CHARS
 from lumen_core.schemas import (
+    AccessoryPreviewCreateIn,
     ApparelModelLibraryBatchDeleteIn,
     ApparelModelLibraryGenerateIn,
     ModelCandidatesCreateIn,
@@ -161,8 +164,14 @@ def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
             {
                 "type": "file",
                 "name": f"adult-minimal-studio-001.{suffix}",
-                "path": f"assets/apparel-model-presets/05_adult/male/adult-minimal-studio-001.{suffix}",
-                "download_url": f"https://example.invalid/adult-minimal-studio-001.{suffix}",
+                "path": (
+                    "assets/apparel-model-presets/05_adult/male/"
+                    f"adult-minimal-studio-001.{suffix}"
+                ),
+                "download_url": (
+                    "https://raw.githubusercontent.com/cyeinfpro/Lumen/main/"
+                    f"assets/apparel-model-presets/05_adult/male/adult-minimal-studio-001.{suffix}"
+                ),
             }
         )
 
@@ -181,12 +190,51 @@ def test_github_folder_metadata_keeps_fine_grained_appearance() -> None:
                 "assets/apparel-model-presets/05_adult/female/"
                 "adult-female-southeast-asian-001.webp"
             ),
-            "download_url": "https://example.invalid/model.webp",
+            "download_url": (
+                "https://raw.githubusercontent.com/cyeinfpro/Lumen/main/"
+                "assets/apparel-model-presets/05_adult/female/"
+                "adult-female-southeast-asian-001.webp"
+            ),
         }
     )
 
     assert item is not None
     assert item["appearance_direction"] == "southeast_asian"
+
+
+def test_github_folder_metadata_rejects_non_github_download_url() -> None:
+    item = workflows._metadata_from_github_file(  # noqa: SLF001
+        {
+            "type": "file",
+            "name": "adult-minimal-studio-001.webp",
+            "path": (
+                "assets/apparel-model-presets/05_adult/male/"
+                "adult-minimal-studio-001.webp"
+            ),
+            "download_url": "https://169.254.169.254/latest/meta-data",
+        }
+    )
+
+    assert item is None
+
+
+def test_github_contents_url_validator_rejects_private_or_non_github_urls() -> None:
+    with pytest.raises(Exception) as excinfo:
+        workflows._validate_github_contents_url(  # noqa: SLF001
+            "http://127.0.0.1:8080/repos/cyeinfpro/Lumen/contents/assets"
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 503
+    assert excinfo.value.detail["error"]["code"] == "invalid_preset_sync_url"
+
+
+def test_github_contents_url_validator_accepts_api_contents_url() -> None:
+    url = (
+        "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
+        "assets/apparel-model-presets?ref=main"
+    )
+
+    assert workflows._validate_github_contents_url(url) == url  # noqa: SLF001
 
 
 def test_preset_title_uses_updated_age_labels() -> None:
@@ -429,6 +477,33 @@ async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -
 
 
 @pytest.mark.asyncio
+async def test_soft_delete_workflow_generated_images_skips_already_deleted_run() -> (
+    None
+):
+    deleted_at = datetime.now(timezone.utc)
+    db = _WorkflowDeleteDb(responses=[[SimpleNamespace(step_key="unused")]])
+
+    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=SimpleNamespace(id="run-1", user_id="user-1", deleted_at=deleted_at),  # type: ignore[arg-type]
+        deleted_at=deleted_at,
+        cancel_message="workflow deleted",
+    )
+
+    assert out == {
+        "images_deleted": 0,
+        "generations_canceled": 0,
+        "completions_canceled": 0,
+        "holds_released": 0,
+        "queued_generation_ids": [],
+        "running_generation_ids": [],
+        "streaming_completion_ids": [],
+    }
+    assert db.statements == []
+    assert db.release_calls == []
+
+
+@pytest.mark.asyncio
 async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -506,7 +581,9 @@ async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
         "_release_soft_deleted_task_hold",
         release_soft_deleted_task_hold,
     )
-    monkeypatch.setattr(workflows, "_workflow_wallet_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        workflows, "_workflow_wallet_exists", lambda *_args, **_kwargs: False
+    )
 
     out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
@@ -568,6 +645,7 @@ async def test_soft_delete_workflow_generated_images_skips_holds_for_byok(
         "_release_soft_deleted_task_hold",
         release_soft_deleted_task_hold,
     )
+
     async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
@@ -1135,6 +1213,185 @@ async def test_validate_owned_images_rejects_missing_or_foreign_image() -> None:
     assert excinfo.value.detail["error"]["code"] == "invalid_image"
 
 
+@pytest.mark.asyncio
+async def test_find_library_item_requires_user_item_live_owned_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.dialects import postgresql
+
+    async def noop_migrate(_db: Any, _user_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workflows, "_ensure_legacy_user_library_migrated", noop_migrate)
+    row = SimpleNamespace(
+        id="user:item-1",
+        source="favorite",
+        image_id="img-1",
+        title="Saved",
+        age_segment="adult",
+        gender="female",
+        appearance_direction="asian",
+        style_tags=[],
+        library_folder=None,
+        prompt_hint=None,
+        auto_tagged_at=None,
+        auto_tag_notes=None,
+        metadata_jsonb={},
+        user_id="user-1",
+        created_at=None,
+        updated_at=None,
+    )
+    db = _Db([row])
+
+    out = await workflows._find_library_item(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        item_id="user:item-1",
+    )
+
+    assert out is not None
+    assert out["image_id"] == "img-1"
+    rendered = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "JOIN images ON images.id = model_library_items.image_id" in rendered
+    assert "model_library_items.user_id = 'user-1'" in rendered
+    assert "images.user_id = 'user-1'" in rendered
+    assert "images.deleted_at IS NULL" in rendered
+
+
+@pytest.mark.asyncio
+async def test_find_library_item_falls_back_for_unprefixed_global_item_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def noop_migrate(_db: Any, _user_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workflows, "_ensure_legacy_user_library_migrated", noop_migrate)
+    monkeypatch.setattr(
+        workflows,
+        "_load_global_library_index",
+        lambda: {"preset_items": [{"id": "legacy-global", "title": "legacy"}]},
+    )
+
+    out = await workflows._find_library_item(  # noqa: SLF001
+        _Db([]),  # type: ignore[arg-type]
+        user_id="user-1",
+        item_id="legacy-global",
+    )
+
+    assert out == {"id": "legacy-global", "title": "legacy"}
+
+
+@pytest.mark.asyncio
+async def test_attach_workflow_assets_masks_invalid_image_ids() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        type=workflows.WORKFLOW_TYPE,
+        title="Project",
+        metadata_jsonb={},
+    )
+    db = _Db([])
+
+    with pytest.raises(Exception) as excinfo:
+        await workflows._attach_workflow_assets(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            run=run,  # type: ignore[arg-type]
+            user_id="user-1",
+            image_ids=["missing-image"],
+            asset_type="project_asset",
+            source_step_key="product_analysis",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 404
+    assert excinfo.value.detail["error"]["code"] == "image_not_found"
+    assert "details" not in excinfo.value.detail["error"]
+
+
+@pytest.mark.asyncio
+async def test_validate_accessory_preview_image_requires_workflow_generation() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    approval = SimpleNamespace(image_ids=["img-accessory"])
+    db = _Db(["img-accessory"])
+
+    out = await workflows._validate_accessory_preview_image(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        run_id="run-1",
+        approval_step=approval,  # type: ignore[arg-type]
+        image_id="img-accessory",
+    )
+
+    assert out == "img-accessory"
+    rendered = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "JOIN generations ON generations.id = images.owner_generation_id" in rendered
+    assert "images.user_id = 'user-1'" in rendered
+    assert "images.deleted_at IS NULL" in rendered
+    assert "generations.user_id = 'user-1'" in rendered
+    assert "(generations.upstream_request ->> 'workflow_run_id') = 'run-1'" in rendered
+    assert (
+        "(generations.upstream_request ->> 'workflow_step_key') = 'model_approval'"
+        in rendered
+    )
+    assert (
+        "(generations.upstream_request ->> 'workflow_action') = 'accessory_preview'"
+        in rendered
+    )
+    assert "(generations.upstream_request ->> 'workflow_action') IS NULL" in rendered
+
+
+@pytest.mark.asyncio
+async def test_validate_accessory_preview_image_rejects_tampered_step_membership() -> (
+    None
+):
+    db = _Db(["img-accessory"])
+
+    with pytest.raises(Exception) as excinfo:
+        await workflows._validate_accessory_preview_image(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            user_id="user-1",
+            run_id="run-1",
+            approval_step=SimpleNamespace(  # type: ignore[arg-type]
+                image_ids=["other-image"]
+            ),
+            image_id="img-accessory",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_accessory_image"
+    assert db.statements == []
+
+
+@pytest.mark.asyncio
+async def test_validate_accessory_preview_image_rejects_missing_generation_link() -> (
+    None
+):
+    db = _Db([])
+
+    with pytest.raises(Exception) as excinfo:
+        await workflows._validate_accessory_preview_image(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            user_id="user-1",
+            run_id="run-1",
+            approval_step=SimpleNamespace(  # type: ignore[arg-type]
+                image_ids=["img-accessory"]
+            ),
+            image_id="img-accessory",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_accessory_image"
+
+
 def test_product_analysis_json_fallback_keeps_reviewable_constraints() -> None:
     out = workflows._try_parse_json_text("This looks like an ivory blazer.")  # noqa: SLF001
 
@@ -1326,6 +1583,7 @@ async def test_create_showcase_images_queues_gpt55_preflight_in_background(
     )
     approval = SimpleNamespace(
         step_key="model_approval",
+        status="approved",
         input_json={
             "accessory_plan": {
                 "enabled": False,
@@ -1424,6 +1682,148 @@ async def test_create_showcase_images_queues_gpt55_preflight_in_background(
     assert args[3] == showcase.input_json["generation_request_id"]
 
 
+@pytest.mark.asyncio
+async def test_showcase_generation_context_requires_approved_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        conversation_id="conv-1",
+        user_prompt="自然街拍",
+        product_image_ids=["product-1"],
+        current_step="model_approval",
+        status="needs_review",
+    )
+    steps = {
+        "product_analysis": SimpleNamespace(
+            step_key="product_analysis",
+            status="approved",
+            output_json={"category": "衬衫"},
+        ),
+        "model_approval": SimpleNamespace(
+            step_key="model_approval",
+            status="needs_review",
+            input_json={"accessory_plan": {"enabled": False, "items": []}},
+        ),
+    }
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_sync(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-1"
+        return steps[step_key]
+
+    async def fail_selected_candidate(db: Any, run_id: str) -> Any:
+        raise AssertionError("selected candidate must not bypass model_approval")
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_selected_candidate", fail_selected_candidate)
+
+    with pytest.raises(HTTPException) as exc:
+        await workflows._showcase_generation_context(  # noqa: SLF001
+            db=_Db([]),  # type: ignore[arg-type]
+            user=SimpleNamespace(id="user-1"),
+            workflow_run_id="run-1",
+            body=ShowcaseImagesCreateIn(output_count=1),
+            lock_run=True,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["code"] == "model_not_approved"
+
+
+@pytest.mark.asyncio
+async def test_create_accessory_previews_reuses_matching_running_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = AccessoryPreviewCreateIn(
+        candidate_id="cand-1",
+        accessory_plan={"enabled": True, "items": ["bag"], "strength": "subtle"},
+        style_prompt="clean studio",
+    )
+    request_key = workflows._accessory_preview_request_key(  # noqa: SLF001
+        candidate_id="cand-1",
+        accessory_plan=body.accessory_plan.model_dump(),
+        style_prompt=body.style_prompt,
+    )
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        conversation_id="conv-1",
+        current_step="model_approval",
+        status="running",
+    )
+    candidate = SimpleNamespace(
+        id="cand-1",
+        status="selected",
+        contact_sheet_image_id="model-1",
+        model_brief_json={},
+    )
+    approval = SimpleNamespace(
+        step_key="model_approval",
+        status="running",
+        task_ids=["gen-existing"],
+        image_ids=[],
+        input_json={"accessory_preview_request_key": request_key},
+        output_json={},
+    )
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_sync(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-1"
+        assert step_key == "model_approval"
+        return approval
+
+    async def fake_build_run_out(db: Any, current_run: Any) -> Any:
+        return current_run
+
+    async def fail_create_task(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("duplicate running accessory preview must not enqueue")
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(workflows, "_create_workflow_task", fail_create_task)
+
+    db = _Db([], responses=[[candidate]])
+
+    out = await workflows.create_accessory_previews(
+        "run-1",
+        body,
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is run
+    assert approval.task_ids == ["gen-existing"]
+    assert run.current_step == "model_approval"
+    assert run.status == "running"
+    assert db.committed is True
+
+
 def test_showcase_preflight_timeout_scales_for_large_gpt55_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1457,14 +1857,16 @@ def test_showcase_gpt_provider_limit_caps_fanout(
 ) -> None:
     monkeypatch.setenv("LUMEN_SHOWCASE_GPT_PROVIDER_LIMIT", "2")
 
-    assert (
-        [p.name for p in scene_planner._limit_gpt55_providers([  # noqa: SLF001
-            SimpleNamespace(name="p1"),
-            SimpleNamespace(name="p2"),
-            SimpleNamespace(name="p3"),
-        ])]
-        == ["p1", "p2"]
-    )
+    assert [
+        p.name
+        for p in scene_planner._limit_gpt55_providers(
+            [  # noqa: SLF001
+                SimpleNamespace(name="p1"),
+                SimpleNamespace(name="p2"),
+                SimpleNamespace(name="p3"),
+            ]
+        )
+    ] == ["p1", "p2"]
 
 
 @pytest.mark.asyncio
@@ -1559,6 +1961,8 @@ async def test_mark_showcase_generation_failed_records_background_error(
 
 @pytest.mark.asyncio
 async def test_sync_showcase_completion_advances_to_quality_review() -> None:
+    from sqlalchemy.dialects import postgresql
+
     run = SimpleNamespace(
         id="run-1",
         user_id="user-1",
@@ -1604,6 +2008,8 @@ async def test_sync_showcase_completion_advances_to_quality_review() -> None:
 
     await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
 
+    rendered = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in rendered
     assert showcase_step.status == "completed"
     assert showcase_step.image_ids == ["image-1"]
     assert quality_step.status == "needs_review"
@@ -1669,7 +2075,9 @@ async def test_build_run_out_includes_model_library_reference_images(
     async def fake_sync(_db: Any, _run: Any) -> None:
         return None
 
-    async def fake_load_steps(_db: Any, _run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        _db: Any, _run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [step]
 
     async def fake_load_quality_reports(_db: Any, _run_id: str) -> list[Any]:
@@ -1765,7 +2173,9 @@ async def test_build_run_out_includes_dual_race_bonus_generations(
     async def fake_sync(_db: Any, _run: Any) -> None:
         return None
 
-    async def fake_load_steps(_db: Any, _run_id: str) -> list[Any]:
+    async def fake_load_steps(
+        _db: Any, _run_id: str, *, lock: bool = False
+    ) -> list[Any]:
         return [step]
 
     async def fake_load_quality_reports(_db: Any, _run_id: str) -> list[Any]:
@@ -2936,9 +3346,7 @@ async def test_prepare_showcase_preflight_reports_composer_review_progress(
 def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None:
     guarded = workflows._guarded_shooting_brief(  # noqa: SLF001
         "咖啡店窗边拍摄，模特拿咖啡杯靠近胸前，窗边侧光。",
-        rewrite_instruction=(
-            "更换场景和构图以避免重复，改为图书馆过道自然整理衣袖。"
-        ),
+        rewrite_instruction=("更换场景和构图以避免重复，改为图书馆过道自然整理衣袖。"),
     )
 
     assert "咖啡店窗边" not in guarded
@@ -3507,6 +3915,16 @@ def test_pick_shot_variants_counts_match_output_count() -> None:
             )
         else:
             assert product_count >= 1
+
+
+def test_select_shot_variants_skips_empty_required_pool() -> None:
+    picks = shot_pool.select_variants(
+        pool={"natural_pose": [{"label": "自然走近", "framing": "product_first"}]},
+        plan=["front_full_body", "natural_pose"],
+        seed_key="missing-front",
+    )
+
+    assert picks == [{"label": "自然走近", "framing": "product_first"}]
 
 
 def test_default_showcase_pools_avoid_high_risk_motion_terms() -> None:

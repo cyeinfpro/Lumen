@@ -32,6 +32,7 @@ from lumen_core.providers import (
     endpoint_kind_allowed,
     normalize_provider_purposes,
     normalize_image_edit_input_transport,
+    parse_provider_config_json,
     parse_proxy_item,
     resolve_provider_proxy_url,
 )
@@ -470,6 +471,47 @@ def _parse_video_raw_config(raw: str | None) -> tuple[list[dict], list[dict]]:
     )
 
 
+def ensure_enabled_provider_proxies(raw: str) -> None:
+    providers, _proxies, errors = parse_provider_config_json(raw)
+    if errors:
+        raise ValueError("; ".join(errors))
+    for provider in providers:
+        if not provider.enabled or not provider.proxy_name:
+            continue
+        if provider.proxy is None:
+            raise ValueError(
+                f"provider「{provider.name}」引用了不存在的代理：{provider.proxy_name}"
+            )
+        if not provider.proxy.enabled:
+            raise ValueError(
+                f"provider「{provider.name}」引用了已禁用的代理：{provider.proxy_name}"
+            )
+
+
+def ensure_enabled_video_provider_proxies(
+    raw: str,
+    *,
+    shared_provider_raw: str | None,
+) -> None:
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw,
+        shared_provider_raw=shared_provider_raw,
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+    for provider in providers:
+        if not provider.enabled or not provider.proxy_name:
+            continue
+        if provider.proxy is None:
+            raise ValueError(
+                f"视频供应商「{provider.name}」引用了不存在的代理：{provider.proxy_name}"
+            )
+        if not provider.proxy.enabled:
+            raise ValueError(
+                f"视频供应商「{provider.name}」引用了已禁用的代理：{provider.proxy_name}"
+            )
+
+
 def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
     return VideoProviderItemOut(
         name=provider.name,
@@ -650,6 +692,13 @@ async def update_video_providers(
             raise _http("invalid_request", "; ".join(errors), 422)
         if not parsed:
             raise _http("invalid_request", "video.providers 缺少供应商", 422)
+        try:
+            ensure_enabled_video_provider_proxies(
+                raw_json,
+                shared_provider_raw=raw_shared,
+            )
+        except ValueError as exc:
+            raise _http("invalid_request", str(exc), 422) from exc
 
     await _upsert_setting_value(db, "video.enabled", "1" if body.enabled else "0")
     if rows:
@@ -838,6 +887,7 @@ async def update_providers(
 
     try:
         validate_providers(raw_json)
+        ensure_enabled_provider_proxies(raw_json)
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 
@@ -954,6 +1004,7 @@ async def patch_provider_enabled(
         )
     try:
         validate_providers(raw_json)
+        ensure_enabled_provider_proxies(raw_json)
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 

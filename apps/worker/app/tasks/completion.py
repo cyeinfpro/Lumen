@@ -91,6 +91,7 @@ from lumen_core.models import (
     new_uuid7,
 )
 from lumen_core.pricing import parse_usage
+from lumen_core.pricing_resolver import PricingResolver
 from lumen_core.queue_metadata import completion_queue_metadata, merge_queue_metadata
 
 from .. import runtime_settings
@@ -622,6 +623,54 @@ def _fallback_completion_usage_tokens(
     return next_in, next_out
 
 
+def _image_output_tokens_for_budget(
+    budget_micro: int,
+    *,
+    image_output_per_1k_micro: int,
+    rate_multiplier_x10000: int = 10_000,
+) -> int:
+    budget = max(0, int(budget_micro or 0))
+    rate = max(0, int(image_output_per_1k_micro or 0))
+    multiplier = max(0, int(rate_multiplier_x10000 or 0))
+    if budget <= 0:
+        return 0
+    if rate <= 0 or multiplier <= 0:
+        return 1
+    denom = rate * multiplier
+    return max(1, (budget * 1000 * 10_000 + denom - 1) // denom)
+
+
+async def _fallback_completion_tool_image_tokens(
+    session: Any,
+    completion: Completion,
+    *,
+    budget_micro: int,
+) -> int:
+    budget = max(0, int(budget_micro or 0))
+    if budget <= 0:
+        return 0
+    try:
+        pricing = (
+            await PricingResolver().resolve(session, getattr(completion, "model", ""))
+        ).with_defaults()
+        rate_multiplier = await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+            session,
+            completion.user_id,
+        )
+        return _image_output_tokens_for_budget(
+            budget,
+            image_output_per_1k_micro=pricing.image_output_per_1k_micro,
+            rate_multiplier_x10000=rate_multiplier,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "completion tool image fallback usage estimate failed comp=%s",
+            getattr(completion, "id", None),
+            exc_info=True,
+        )
+        return 1
+
+
 def _tool_display_label(tool_type: str, name: str | None = None) -> str:
     if tool_type == _WEB_SEARCH_TOOL_TYPE:
         return "联网搜索"
@@ -874,6 +923,7 @@ async def _publish_completion_tool_updates(
 
 def _tool_limited_completion_body(body: dict[str, Any]) -> dict[str, Any]:
     fallback = dict(body)
+    fallback.pop("tools", None)
     fallback["tool_choice"] = "none"
     fallback["parallel_tool_calls"] = False
     input_items = list(body.get("input") or [])
@@ -1281,13 +1331,16 @@ async def _ensure_completion_tool_image_wallet_budget(
     *,
     user_id: str,
     task_id: str,
-) -> None:
+    reserved_micro: int = 0,
+) -> int:
     budget_micro = await runtime_settings.resolve_int(
         _CHAT_TOOL_IMAGE_BUDGET_SETTING,
         0,
     )
     if budget_micro <= 0:
-        return
+        return 0
+    already_reserved_micro = max(0, int(reserved_micro or 0))
+    required_micro = already_reserved_micro + int(budget_micro)
     async with SessionLocal() as session:
         comp = await session.get(Completion, task_id)
         billing_ref_id = (
@@ -1301,10 +1354,10 @@ async def _ensure_completion_tool_image_wallet_budget(
             ref_type="completion",
             ref_id=billing_ref_id,
         ):
-            return
+            return 0
         if not await worker_billing.billing_enabled():
-            return
-        wallet = await billing_core.get_wallet(session, user_id, lock=False, create=False)
+            return 0
+        wallet = await billing_core.get_wallet(session, user_id, lock=True, create=False)
         balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
         held_micro = await worker_billing.held_amount_for_ref(
             session,
@@ -1314,18 +1367,20 @@ async def _ensure_completion_tool_image_wallet_budget(
         )
         available_micro = balance_micro + int(held_micro or 0)
         if (
-            available_micro >= budget_micro
+            available_micro >= required_micro
             or await worker_billing.allow_negative_balance()
         ):
-            return
+            return int(budget_micro)
         raise _CompletionToolInsufficientBalance(
             "insufficient wallet balance for image_generation tool",
             error_code="INSUFFICIENT_BALANCE",
             status_code=402,
             payload={
                 "required_micro": int(budget_micro),
+                "cumulative_required_micro": int(required_micro),
                 "balance_micro": balance_micro,
                 "held_micro": int(held_micro or 0),
+                "reserved_micro": already_reserved_micro,
                 "completion_id": task_id,
             },
         )
@@ -1342,10 +1397,12 @@ async def _store_and_publish_completion_tool_image(
     attempt_epoch: int,
     b64_image: str,
     revised_prompt: str | None,
-) -> dict[str, Any] | None:
-    await _ensure_completion_tool_image_wallet_budget(
+    reserved_tool_image_micro: int = 0,
+) -> tuple[dict[str, Any] | None, int]:
+    budget_reserved_micro = await _ensure_completion_tool_image_wallet_budget(
         user_id=user_id,
         task_id=task_id,
+        reserved_micro=reserved_tool_image_micro,
     )
     try:
         raw_image = _decode_upstream_image_b64(b64_image)
@@ -1379,7 +1436,7 @@ async def _store_and_publish_completion_tool_image(
             "images": [image_payload],
         },
     )
-    return image_payload
+    return image_payload, budget_reserved_micro
 
 
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
@@ -2788,6 +2845,13 @@ def _classify_exception(exc: BaseException, has_partial: bool) -> RetryDecision:
         return is_retriable(
             exc.error_code, exc.status_code, has_partial, error_message=str(exc)
         )
+    if isinstance(exc, billing_core.BillingError):
+        return is_retriable(
+            exc.code,
+            exc.status_code,
+            has_partial,
+            error_message=exc.message,
+        )
     if isinstance(
         exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
     ):
@@ -2971,6 +3035,8 @@ async def _flush_completion_text(
                 await session.commit()
                 return
         except _CompletionEpochSuperseded:
+            # Keep stale-worker fencing strict: run_completion catches this
+            # sentinel and exits without writing terminal state.
             raise
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
@@ -3160,6 +3226,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     has_partial = False
     tool_images: list[dict[str, Any]] = []
     stored_image_call_ids: set[str] = set()
+    reserved_tool_image_budget_micro = 0
     tool_tracker = _CompletionToolTracker()
     tokens_in = 0
     tokens_out = 0
@@ -3437,12 +3504,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             if image_b64:
                 image_dedupe_key = _tool_image_dedupe_key(ev, image_b64)
                 if image_dedupe_key not in stored_image_call_ids:
+                    has_partial = True
                     # 图片存储是 base64 解码 + PIL 处理 + 多 storage 写 + DB
                     # insert，最长可达数秒；进入前再卡一道 lease，避免 lease 已
                     # 被接管 worker 抢走时这边继续写图。
                     if lease_lost.is_set():
                         raise _LeaseLost("lease lost before tool image store")
-                    image_payload = await _store_and_publish_completion_tool_image(
+                    (
+                        image_payload,
+                        image_budget_micro,
+                    ) = await _store_and_publish_completion_tool_image(
                         redis=redis,
                         user_id=user_id,
                         channel=channel,
@@ -3452,10 +3523,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         attempt_epoch=attempt_epoch,
                         b64_image=image_b64,
                         revised_prompt=_extract_response_revised_prompt(ev),
+                        reserved_tool_image_micro=reserved_tool_image_budget_micro,
                     )
                     if image_payload is not None:
                         tool_images.append(image_payload)
                         stored_image_call_ids.add(image_dedupe_key)
+                        reserved_tool_image_budget_micro += image_budget_micro
 
             if ev_type == "response.output_text.delta":
                 delta = ev.get("delta") or ""
@@ -3496,6 +3569,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     },
                 )
             elif ev_type == "response.completed":
+                has_partial = True
                 raw_resp = ev.get("response")
                 resp = raw_resp if isinstance(raw_resp, dict) else {}
                 completed_response = resp
@@ -3536,7 +3610,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     image_dedupe_key = _tool_image_dedupe_key(image_event, image_b64)
                     if image_dedupe_key in stored_image_call_ids:
                         continue
-                    image_payload = await _store_and_publish_completion_tool_image(
+                    (
+                        image_payload,
+                        image_budget_micro,
+                    ) = await _store_and_publish_completion_tool_image(
                         redis=redis,
                         user_id=user_id,
                         channel=channel,
@@ -3546,10 +3623,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         attempt_epoch=attempt_epoch,
                         b64_image=image_b64,
                         revised_prompt=_extract_response_revised_prompt(image_event),
+                        reserved_tool_image_micro=reserved_tool_image_budget_micro,
                     )
                     if image_payload is not None:
                         tool_images.append(image_payload)
                         stored_image_call_ids.add(image_dedupe_key)
+                        reserved_tool_image_budget_micro += image_budget_micro
                 await _publish_completion_tool_updates(
                     redis=redis,
                     user_id=user_id,
@@ -3651,9 +3730,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 if image_b64:
                     image_dedupe_key = _tool_image_dedupe_key(ev, image_b64)
                     if image_dedupe_key not in stored_image_call_ids:
+                        has_partial = True
                         if lease_lost.is_set():
                             raise _LeaseLost("lease lost before tool image store")
-                        image_payload = await _store_and_publish_completion_tool_image(
+                        (
+                            image_payload,
+                            image_budget_micro,
+                        ) = await _store_and_publish_completion_tool_image(
                             redis=redis,
                             user_id=user_id,
                             channel=channel,
@@ -3663,10 +3746,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             attempt_epoch=attempt_epoch,
                             b64_image=image_b64,
                             revised_prompt=_extract_response_revised_prompt(ev),
+                            reserved_tool_image_micro=reserved_tool_image_budget_micro,
                         )
                         if image_payload is not None:
                             tool_images.append(image_payload)
                             stored_image_call_ids.add(image_dedupe_key)
+                            reserved_tool_image_budget_micro += image_budget_micro
 
                 if ev_type == "response.output_text.delta":
                     delta = ev.get("delta") or ""
@@ -3702,6 +3787,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         },
                     )
                 elif ev_type == "response.completed":
+                    has_partial = True
                     raw_resp = ev.get("response")
                     resp = raw_resp if isinstance(raw_resp, dict) else {}
                     completed_response = resp
@@ -3751,7 +3837,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         )
                         if image_dedupe_key in stored_image_call_ids:
                             continue
-                        image_payload = await _store_and_publish_completion_tool_image(
+                        (
+                            image_payload,
+                            image_budget_micro,
+                        ) = await _store_and_publish_completion_tool_image(
                             redis=redis,
                             user_id=user_id,
                             channel=channel,
@@ -3763,10 +3852,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             revised_prompt=_extract_response_revised_prompt(
                                 image_event
                             ),
+                            reserved_tool_image_micro=reserved_tool_image_budget_micro,
                         )
                         if image_payload is not None:
                             tool_images.append(image_payload)
                             stored_image_call_ids.add(image_dedupe_key)
+                            reserved_tool_image_budget_micro += image_budget_micro
                     await _publish_completion_tool_updates(
                         redis=redis,
                         user_id=user_id,
@@ -3881,6 +3972,21 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             updates=tool_tracker.finalize_active(ToolStatus.SUCCEEDED.value),
         )
         async with SessionLocal() as session:
+            comp_for_usage = await session.get(Completion, task_id)
+            if (
+                comp_for_usage is not None
+                and comp_for_usage.attempt == attempt_epoch
+                and comp_for_usage.status in _RUNNING_COMPLETION_STATUSES
+                and tool_images
+                and image_output_tokens <= 0
+                and reserved_tool_image_budget_micro > 0
+            ):
+                image_output_tokens = await _fallback_completion_tool_image_tokens(
+                    session,
+                    comp_for_usage,
+                    budget_micro=reserved_tool_image_budget_micro,
+                )
+                tokens_out = max(tokens_out, image_output_tokens)
             res = await session.execute(
                 update(Completion)
                 .where(
@@ -4151,7 +4257,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         if user_api_credential_id and byok_error:
             await record_user_credential_runtime_error(user_api_credential_id, exc)
             decision = RetryDecision(False, f"byok {byok_error}")
-        _err_code_log = getattr(exc, "error_code", None) or type(exc).__name__
+        _err_code_log = (
+            getattr(exc, "error_code", None)
+            or getattr(exc, "code", None)
+            or type(exc).__name__
+        )
         _http_status_log = getattr(exc, "status_code", None)
         logger.warning(
             "completion failed task=%s attempt=%s retriable=%s reason=%s "
@@ -4168,12 +4278,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         err_code = (
             byok_error_to_generation_code(byok_error)
             if user_api_credential_id and byok_error
-            else getattr(exc, "error_code", None) or type(exc).__name__
+            else (
+                getattr(exc, "error_code", None)
+                or getattr(exc, "code", None)
+                or type(exc).__name__
+            )
         )
         err_msg = (
             byok_error_message(byok_error)
             if user_api_credential_id and byok_error
-            else str(exc)[:2000]
+            else str(getattr(exc, "message", None) or exc)[:2000]
         )
         _task_outcome = (
             "retry" if (decision.retriable and attempt < _MAX_ATTEMPTS) else "failed"
@@ -4339,12 +4453,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     content["tool_calls"] = tool_calls
                     msg.content = content
                 msg.status = MessageStatus.FAILED
-            # Why: partial-stream failures (has_partial=True) already consumed
-            # upstream tokens; charge what the user actually used so they
-            # don't get a free response on intermittent network errors.
-            # tokens_in/out default to 0 and stay 0 if no usage frame ever
-            # arrived — `charge` short-circuits on amount<=0.
-            if has_partial and tokens_out <= 0 and accumulated_text:
+            # Why: partial-stream or completed-response failures already consumed
+            # upstream work. Preserve parsed usage buckets when available, and
+            # estimate a minimum input/text/image usage only when the provider
+            # never sent a usage frame.
+            if has_partial:
                 if "input_list" in locals():
                     tokens_in, tokens_out = _fallback_completion_usage_tokens(
                         input_list,
@@ -4354,16 +4467,51 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                 else:
                     tokens_out = max(1, count_tokens(accumulated_text))
-            if has_partial and (tokens_in > 0 or tokens_out > 0):
                 comp_partial = await session.get(Completion, task_id)
                 if comp_partial is not None:
+                    if (
+                        tool_images
+                        and image_output_tokens <= 0
+                        and reserved_tool_image_budget_micro > 0
+                    ):
+                        image_output_tokens = await (
+                            _fallback_completion_tool_image_tokens(
+                                session,
+                                comp_partial,
+                                budget_micro=reserved_tool_image_budget_micro,
+                            )
+                        )
+                        tokens_out = max(tokens_out, image_output_tokens)
                     comp_partial.tokens_in = tokens_in
                     comp_partial.tokens_out = tokens_out
-                    try:
-                        await worker_billing.charge_completion(session, comp_partial)
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "partial-stream charge failed comp=%s", task_id
+                    comp_partial.cache_read_tokens = cache_read_tokens
+                    comp_partial.cache_creation_tokens = cache_creation_tokens
+                    comp_partial.cache_creation_5m_tokens = cache_creation_5m_tokens
+                    comp_partial.cache_creation_1h_tokens = cache_creation_1h_tokens
+                    comp_partial.reasoning_tokens = reasoning_tokens
+                    comp_partial.image_output_tokens = image_output_tokens
+                    usage_values = (
+                        tokens_in,
+                        tokens_out,
+                        cache_read_tokens,
+                        cache_creation_tokens,
+                        cache_creation_5m_tokens,
+                        cache_creation_1h_tokens,
+                        reasoning_tokens,
+                        image_output_tokens,
+                    )
+                    if any(int(value or 0) > 0 for value in usage_values):
+                        try:
+                            await worker_billing.charge_completion(session, comp_partial)
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "partial-stream charge failed comp=%s", task_id
+                            )
+                    else:
+                        await worker_billing.release_completion(
+                            session,
+                            comp_partial,
+                            reason=str(err_code),
                         )
             else:
                 comp_failed = await session.get(Completion, task_id)

@@ -26,6 +26,8 @@ SIG_HEX_LEN = 24
 
 # 默认 24h；调用方可缩短（短期分享）或延长（永久 embed，但仍受 secret 轮转影响）。
 DEFAULT_TTL_SEC = 24 * 60 * 60
+MAX_TTL_SEC = 30 * 24 * 60 * 60
+MAX_TTL_MS = MAX_TTL_SEC * 1000
 
 # 调用方显式传入 now_ms 时，最多允许和本机时钟相差 5 分钟。
 MAX_NOW_MS_SKEW_MS = 5 * 60 * 1000
@@ -115,7 +117,7 @@ def sign_image_url_query(
     """
     if ttl_sec <= 0:
         raise ImageSigningError(f"ttl_sec must be positive, got {ttl_sec}")
-    if ttl_sec > 30 * 24 * 60 * 60:
+    if ttl_sec > MAX_TTL_SEC:
         raise ImageSigningError(f"ttl_sec must be <= 30 days, got {ttl_sec}")
     base_ms = _validated_signing_now_ms(now_ms)
     exp_ms = base_ms + ttl_sec * 1000
@@ -143,6 +145,8 @@ def verify_image_sig(
             return False
         cur_ms = now_ms if now_ms is not None else int(time.time() * 1000)
         if exp_ms <= cur_ms:
+            return False
+        if exp_ms > cur_ms + MAX_TTL_MS + MAX_NOW_MS_SKEW_MS:
             return False
         want = compute_image_sig(image_id, variant, exp_ms, secret)
         return hmac.compare_digest(sig, want)
@@ -174,6 +178,8 @@ __all__ = [
     "DEFAULT_TTL_SEC",
     "ImageSigningError",
     "MAX_NOW_MS_SKEW_MS",
+    "MAX_TTL_MS",
+    "MAX_TTL_SEC",
     "SIG_HEX_LEN",
     "build_signed_path",
     "compute_image_sig",

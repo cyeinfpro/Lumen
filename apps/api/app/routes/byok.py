@@ -664,9 +664,9 @@ async def probe_my_api_credential(
             details={"credential_id": credential_id, "supplier_id": supplier_id},
         )
         raise _http(
-            "byok_master_secret_mismatch",
-            "credential cannot be decrypted; check BYOK master secret",
-            500,
+            "credential_unavailable",
+            "credential is temporarily unavailable",
+            503,
         ) from exc
     try:
         key_hash_for_limit = api_key_rate_limit_hash(api_key)

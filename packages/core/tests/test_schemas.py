@@ -526,8 +526,11 @@ def test_video_reference_media_rejects_unsafe_url_sources():
     for url in (
         "file:///etc/passwd",
         "asset://",
+        "http://cdn.example.com/ref.png",
         "http://169.254.169.254/latest/meta-data",
         "https://127.0.0.1/ref.png",
+        "https://[::ffff:127.0.0.1]/ref.png",
+        "https://0177.0.0.1/ref.png",
         "https://localhost/ref.png",
         "https://user:pass@example.com/ref.png",
     ):

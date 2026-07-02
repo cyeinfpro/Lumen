@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import Request
@@ -43,6 +44,20 @@ class _Db:
 
     async def commit(self):
         self.committed = True
+
+
+class _UploadFile:
+    filename = "reference.png"
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._read = False
+
+    async def read(self, _size: int) -> bytes:
+        if self._read:
+            return b""
+        self._read = True
+        return self._data
 
 
 def _request(method: str = "DELETE") -> Request:
@@ -225,6 +240,51 @@ def test_upload_write_falls_back_when_hardlink_unsupported(
     with pytest.raises(FileExistsError):
         images._write_new_file_atomic(path, b"second")
     assert path.read_bytes() == b"first"
+
+
+@pytest.mark.asyncio
+async def test_upload_rolls_back_original_and_normalized_ref_on_commit_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingCommitDb:
+        def __init__(self) -> None:
+            self.added: list[Any] = []
+            self.rolled_back = False
+
+        def add(self, value: Any) -> None:
+            self.added.append(value)
+
+        async def flush(self) -> None:
+            self.added[-1].id = "img-upload"
+
+        async def commit(self) -> None:
+            raise RuntimeError("commit failed")
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
+    monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
+    db = _FailingCommitDb()
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await images.upload_image(
+            SimpleNamespace(id="user-1"),
+            db,  # type: ignore[arg-type]
+            file=_UploadFile(_png_bytes("RGB", (16, 16), (10, 20, 30))),  # type: ignore[arg-type]
+            purpose=None,
+        )
+
+    assert db.rolled_back is True
+    assert not (tmp_path / "u" / "user-1" / "uploads" / "img-upload.png").exists()
+    assert not (
+        tmp_path / "u" / "user-1" / "uploads" / "img-upload.ref.webp"
+    ).exists()
 
 
 def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
