@@ -401,6 +401,47 @@ async def test_seedance_submit_forwards_asset_reference_url() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seedance_submit_forwards_video_asset_reference_url() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "dreamina-seedance-2-0-260128"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.0",
+            upstream_model="dreamina-seedance-2-0-260128",
+            prompt="[Video 1]",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="video",
+                    url="asset://asset-20260708222515-xggv2",
+                    ref_id="ref:video:1",
+                )
+            ],
+        )
+    )
+
+    assert client.body["content"][1] == {
+        "type": "video_url",
+        "role": "reference_video",
+        "video_url": {"url": "asset://asset-20260708222515-xggv2"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -> None:
     provider = VideoProviderDefinition(
         name="moyu",
@@ -454,6 +495,48 @@ async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -
     assert client.body["metadata"]["content"][1]["image_url"]["url"].startswith(
         "data:image/jpeg;base64,"
     )
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_submit_forwards_video_asset_reference_url() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.0",
+            upstream_model="doubao-seedance-2-0-260128",
+            prompt="根据参考视频生成稳定器效果",
+            duration_s=6,
+            resolution="1080p",
+            aspect_ratio="16:9",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="video",
+                    url="asset://asset-20260708222515-xggv2",
+                    label="视频 1",
+                    ref_id="ref:video:1",
+                )
+            ],
+        )
+    )
+
+    assert client.body["metadata"]["content"][1] == {
+        "type": "video_url",
+        "role": "reference_video",
+        "video_url": {"url": "asset://asset-20260708222515-xggv2"},
+    }
 
 
 @pytest.mark.asyncio
