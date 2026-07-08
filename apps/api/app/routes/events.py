@@ -347,6 +347,19 @@ def _normalize_event_id(raw: object) -> str | None:
     return str(raw)
 
 
+def _normalize_recoverable_sse_id(raw: object) -> str | None:
+    value = _normalize_event_id(raw)
+    if value is None or len(value) > 64:
+        return None
+    parts = value.split("-")
+    if len(parts) != 2:
+        return None
+    ms_str, seq_str = parts
+    if not ms_str.isdigit() or not seq_str.isdigit():
+        return None
+    return value
+
+
 def _is_stream_command_unsupported(exc: Exception) -> bool:
     message = str(exc).lower()
     return (
@@ -356,10 +369,6 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
             "xadd" in message and ("unsupported" in message or "not allowed" in message)
         )
     )
-
-
-def _live_only_sse_id() -> str:
-    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
 
 
 def _is_compaction_channel(channel: object, bridge_channels: dict[str, str]) -> bool:
@@ -428,7 +437,12 @@ async def _stream_id_for_pubsub_event(
         )
     except Exception as exc:  # noqa: BLE001
         if _is_stream_command_unsupported(exc):
-            return _live_only_sse_id()
+            logger.warning(
+                "sse pubsub event has no recoverable id because redis streams are unsupported stream=%s event=%s",
+                stream_key,
+                event_name,
+            )
+            return None
         logger.warning(
             "sse pubsub event missing sse_id and xadd fallback failed stream=%s event=%s",
             stream_key,
@@ -831,9 +845,9 @@ async def events(
                             ev_name = "message"
                             payload = {"raw": data}
                         # GEN-P0-7: publisher 在 XADD 之后把 stream msg_id 写进 envelope.sse_id
-                        # 再 PUBLISH——这里直接透传，绝不本地生成。重连时浏览器的
-                        # Last-Event-ID 即为这个 id，下次 XREAD 严格 resume。
-                        event_id = _normalize_event_id(
+                        # 再 PUBLISH。这里只透传 Redis Stream 形态的 id，避免浏览器
+                        # 把 live/dlq 等不可回放 id 当成 Last-Event-ID。
+                        event_id = _normalize_recoverable_sse_id(
                             parsed.get("sse_id") if isinstance(parsed, dict) else None
                         )
                         envelope_event_id = _normalize_event_id(

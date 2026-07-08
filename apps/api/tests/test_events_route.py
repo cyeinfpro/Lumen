@@ -40,6 +40,29 @@ def test_sanitize_last_event_id_uses_supplied_server_time() -> None:
     )
 
 
+def test_normalize_recoverable_sse_id_accepts_only_redis_stream_ids() -> None:
+    assert (
+        events._normalize_recoverable_sse_id("1710000000000-0")  # noqa: SLF001
+        == "1710000000000-0"
+    )
+    assert (
+        events._normalize_recoverable_sse_id("live-1710000000000-abc")  # noqa: SLF001
+        is None
+    )
+    assert (
+        events._normalize_recoverable_sse_id("dlq-1710000000000-abc")  # noqa: SLF001
+        is None
+    )
+    assert (
+        events._normalize_recoverable_sse_id("1710000000000")  # noqa: SLF001
+        is None
+    )
+    assert (
+        events._normalize_recoverable_sse_id("1710000000000-x")  # noqa: SLF001
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_sse_connection_slot_limits_and_releases() -> None:
     class Redis:
@@ -225,7 +248,7 @@ async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pubsub_event_without_sse_id_uses_live_id_when_streams_are_missing(
+async def test_pubsub_event_without_sse_id_has_no_id_when_streams_are_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class Redis:
@@ -246,8 +269,8 @@ async def test_pubsub_event_without_sse_id_uses_live_id_when_streams_are_missing
             payload={"generation_id": "gen-1"},
         )
 
-    assert isinstance(stream_id, str)
-    assert stream_id.startswith("live-")
+    assert stream_id is None
+    assert "has no recoverable id" in caplog.text
     assert "xadd fallback failed" not in caplog.text
 
 

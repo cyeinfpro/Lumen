@@ -143,10 +143,6 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
     )
 
 
-def _live_only_sse_id() -> str:
-    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
-
-
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
     get_fn = getattr(redis, "get", None)
     if not callable(get_fn):
@@ -365,11 +361,11 @@ async def _xadd_event_without_lua(
             approximate=True,
         )
     except Exception as exc:  # noqa: BLE001
-        if not _is_stream_command_unsupported(exc):
-            raise
-        stream_id = _live_only_sse_id()
-        await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=stream_id)
-        return stream_id
+        if _is_stream_command_unsupported(exc):
+            raise RuntimeError(
+                "redis stream xadd unsupported; cannot create recoverable sse id"
+            ) from exc
+        raise
     decoded = _decode_redis_value(stream_id)
     await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
     return decoded
@@ -483,7 +479,8 @@ async def publish_event(
     if stream_id is not None:
         envelope["sse_id"] = stream_id
     else:
-        envelope["sse_id"] = f"dlq-{envelope['ts_ms']}-{uuid.uuid4().hex[:12]}"
+        envelope["dlq_id"] = f"dlq-{envelope['ts_ms']}-{uuid.uuid4().hex[:12]}"
+        envelope["recoverable"] = False
         redis_dlq_ok = False
         try:
             await redis.lpush(
@@ -547,9 +544,9 @@ async def _persist_sse_dlq(
 ) -> bool:
     """把彻底失败的 SSE 发布事件写入 PG outbox_dead_letter（独立事务）。
 
-    P3-9: insert 前用 (event_type, sse_id, ts_ms) 三元组 dedupe。XADD 全部重试
-    失败后该路径可能被外层 publisher 重新触发（network jitter），不去重会导致
-    DLQ 重复行膨胀，监控告警重复触发。dedupe 走 PG 一次 SELECT，命中则跳过。
+    P3-9: insert 前用可恢复 sse_id（如有）和 ts_ms 做 dedupe。XADD 全部重试失败后
+    该路径可能被外层 publisher 重新触发（network jitter），不去重会导致 DLQ 重复
+    行膨胀，监控告警重复触发。dedupe 走 PG 一次 SELECT，命中则跳过。
     """
     from sqlalchemy import select
 

@@ -361,7 +361,21 @@ async def test_publish_event_falls_back_when_lua_cannot_xadd() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_event_uses_live_id_when_stream_commands_are_missing() -> None:
+async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: dict = {}
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_persist_sse_dlq(**kwargs) -> bool:
+        persisted.update(kwargs)
+        return True
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sse_publish, "_persist_sse_dlq", fake_persist_sse_dlq)
+
     redis = GarnetNoStreamRedis()
 
     await sse_publish.publish_event(
@@ -373,17 +387,24 @@ async def test_publish_event_uses_live_id_when_stream_commands_are_missing() -> 
     )
 
     dedupe_key = next(iter(redis.kv))
-    assert redis.xadd_calls == 2
-    assert redis.deleted == [dedupe_key]
-    assert redis.kv[dedupe_key].startswith("live-")
+    assert redis.xadd_calls == 6
+    assert redis.deleted == [dedupe_key, dedupe_key, dedupe_key]
+    assert redis.kv[dedupe_key] == ""
     assert redis.stream_entries == []
-    assert redis.dlq == []
+    assert len(redis.dlq) == 1
+    dlq_payload = json.loads(redis.dlq[0][1])
+    assert "sse_id" not in dlq_payload
+    assert dlq_payload["recoverable"] is False
+    assert dlq_payload["dlq_id"].startswith("dlq-")
+    assert persisted["payload"]["envelope"]["dlq_id"] == dlq_payload["dlq_id"]
     payload = json.loads(redis.published[0][1])
-    assert payload["sse_id"] == redis.kv[dedupe_key]
+    assert "sse_id" not in payload
+    assert payload["recoverable"] is False
+    assert payload["dlq_id"] == dlq_payload["dlq_id"]
 
 
 @pytest.mark.asyncio
-async def test_publish_event_dlq_payload_has_fallback_sse_id(monkeypatch):
+async def test_publish_event_dlq_payload_uses_non_recoverable_dlq_id(monkeypatch):
     persisted: dict = {}
 
     async def fake_sleep(_delay: float) -> None:
@@ -407,9 +428,11 @@ async def test_publish_event_dlq_payload_has_fallback_sse_id(monkeypatch):
 
     assert len(redis.dlq) == 1
     payload = json.loads(redis.dlq[0][1])
-    assert payload["sse_id"].startswith("dlq-")
-    assert persisted["payload"]["envelope"]["sse_id"] == payload["sse_id"]
-    assert len(payload["sse_id"].split("-")) >= 3
+    assert "sse_id" not in payload
+    assert payload["dlq_id"].startswith("dlq-")
+    assert payload["recoverable"] is False
+    assert persisted["payload"]["envelope"]["dlq_id"] == payload["dlq_id"]
+    assert len(payload["dlq_id"].split("-")) >= 3
 
 
 @pytest.mark.asyncio

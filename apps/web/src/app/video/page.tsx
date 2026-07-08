@@ -994,6 +994,7 @@ export default function VideoPage() {
   const [referencePreviewItem, setReferencePreviewItem] = useState<ReferenceDraft | null>(null);
   const referenceMediaRef = useRef<ReferenceDraft[]>([]);
   const [assetUrlInput, setAssetUrlInput] = useState("");
+  const [assetReferenceKind, setAssetReferenceKind] = useState<ReferenceKind>("video");
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState("");
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
@@ -1312,6 +1313,16 @@ export default function VideoPage() {
     () => referenceLimitsForModel(selectedModel),
     [selectedModel],
   );
+  const assetReferenceKindOptions = useMemo<ReferenceKind[]>(
+    () =>
+      isNewApiVideoModel(selectedModel) ? REFERENCE_KINDS : ["image", "video"],
+    [selectedModel],
+  );
+  const selectedAssetReferenceKind = assetReferenceKindOptions.includes(
+    assetReferenceKind,
+  )
+    ? assetReferenceKind
+    : "video";
   const referenceCounts = useMemo(
     () => referenceCountsFor(referenceMedia),
     [referenceMedia],
@@ -1454,6 +1465,7 @@ export default function VideoPage() {
 
   const addAssetReference = useCallback(() => {
     const url = normalizeAssetUrl(assetUrlInput);
+    const kind = selectedAssetReferenceKind;
     if (!url) {
       if (assetUrlInput.trim()) {
         toast.error("请输入 asset-* 或 asset://asset-* 官方素材 ID");
@@ -1461,20 +1473,20 @@ export default function VideoPage() {
       return;
     }
     if (
-      referenceMedia.filter((item) => item.kind === "image").length >=
-      referenceLimits.image
+      referenceMedia.filter((item) => item.kind === kind).length >=
+      referenceLimits[kind]
     ) {
-      toast.error(referenceLimitMessage("image", referenceLimits.image));
+      toast.error(referenceLimitMessage(kind, referenceLimits[kind]));
       return;
     }
     clearPromptEnhanceChoices();
     setReferenceMedia((prev) => [
       ...prev,
       (() => {
-        const identity = nextReferenceIdentity("image", prev);
+        const identity = nextReferenceIdentity(kind, prev);
         return {
           _key: uuid(),
-          kind: "image" as const,
+          kind,
           url,
           label: identity.label,
           ref_id: identity.refId,
@@ -1484,8 +1496,14 @@ export default function VideoPage() {
       })(),
     ]);
     setAssetUrlInput("");
-    toast.success("官方素材已添加");
-  }, [assetUrlInput, clearPromptEnhanceChoices, referenceLimits, referenceMedia]);
+    toast.success(`官方${referenceKindNoun(kind)}已添加`);
+  }, [
+    assetUrlInput,
+    clearPromptEnhanceChoices,
+    referenceLimits,
+    referenceMedia,
+    selectedAssetReferenceKind,
+  ]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -2018,6 +2036,27 @@ export default function VideoPage() {
                             音频 {referenceCounts.audio}/{referenceLimits.audio}
                           </span>
                           <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto lg:min-w-[360px] lg:flex-1">
+                            <div className="inline-flex h-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-0.5">
+                              {assetReferenceKindOptions.map((kind) => {
+                                const active = selectedAssetReferenceKind === kind;
+                                return (
+                                  <button
+                                    key={kind}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => setAssetReferenceKind(kind)}
+                                    className={cn(
+                                      "inline-flex min-w-12 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
+                                      active
+                                        ? "bg-[var(--accent)] text-[var(--accent-on)]"
+                                        : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                                    )}
+                                  >
+                                    {referenceKindNoun(kind)}
+                                  </button>
+                                );
+                              })}
+                            </div>
                             <div className="relative min-w-[180px] flex-1">
                               <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                               <input

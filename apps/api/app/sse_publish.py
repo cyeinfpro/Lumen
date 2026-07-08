@@ -129,10 +129,6 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
     )
 
 
-def _live_only_sse_id() -> str:
-    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
-
-
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
     get_fn = getattr(redis, "get", None)
     if not callable(get_fn):
@@ -213,11 +209,11 @@ async def _xadd_event_without_lua(
             approximate=True,
         )
     except Exception as exc:  # noqa: BLE001
-        if not _is_stream_command_unsupported(exc):
-            raise
-        stream_id = _live_only_sse_id()
-        await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=stream_id)
-        return stream_id
+        if _is_stream_command_unsupported(exc):
+            raise RuntimeError(
+                "redis stream xadd unsupported; cannot create recoverable sse id"
+            ) from exc
+        raise
     decoded = _decode_redis_value(stream_id)
     await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
     return decoded

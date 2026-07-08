@@ -80,6 +80,25 @@ test("video reference chips render material thumbnails", () => {
   match(source, /promptContainsReferenceMention\(prompt, item\)/);
 });
 
+test("official asset references keep the selected media kind", () => {
+  match(
+    source,
+    /const \[assetReferenceKind, setAssetReferenceKind\] = useState<ReferenceKind>\("video"\)/,
+  );
+  match(source, /const assetReferenceKindOptions = useMemo<ReferenceKind\[\]>/);
+  match(
+    source,
+    /isNewApiVideoModel\(selectedModel\) \? REFERENCE_KINDS : \["image", "video"\]/,
+  );
+  match(source, /aria-pressed=\{active\}/);
+  match(source, /onClick=\{\(\) => setAssetReferenceKind\(kind\)\}/);
+  match(source, /const selectedAssetReferenceKind = assetReferenceKindOptions\.includes\(/);
+  match(source, /const kind = selectedAssetReferenceKind/);
+  match(source, /const identity = nextReferenceIdentity\(kind, prev\)/);
+  match(source, /kind,/);
+  match(source, /toast\.success\(`官方\$\{referenceKindNoun\(kind\)\}已添加`\)/);
+});
+
 test("video prompt enhancement respects Vibe Creating non-rewrite actions", () => {
   match(source, /type PromptEnhanceAction =/);
   match(source, /action === "ask_first"/);

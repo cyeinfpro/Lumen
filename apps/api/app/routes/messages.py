@@ -199,12 +199,22 @@ _CONFIRM_REPLY_NO_RE = re.compile(
 _TRANSPARENT_BACKGROUND_RE = re.compile(
     r"透明(?:底|背景|底色)|去背|抠图|免抠|无背景|"
     r"transparent\s+(?:background|bg)|background\s+transparent|"
-    r"(?:no|without)\s+(?:a\s+)?background|cutout|isolated\s+subject",
+    r"cutout|isolated\s+subject|"
+    r"(?<!\w)(?:no|without)\s+(?:a\s+)?background\b",
     re.IGNORECASE,
 )
 _TRANSPARENT_BACKGROUND_NEGATIVE_RE = re.compile(
-    r"不(?:要|需要|用)?透明(?:底|背景|底色)?|非透明|opaque\s+background|"
-    r"no\s+transparent\s+(?:background|bg)",
+    r"不(?:要|需要|用)?透明(?:底|背景|底色)?|非透明|"
+    r"不要(?:去背|抠图|免抠|无背景|移除背景|去掉背景)|"
+    r"保留背景|不要(?:删除|移除|去掉).{0,6}背景|"
+    r"opaque\s+background|no\s+transparent\s+(?:background|bg)",
+    re.IGNORECASE,
+)
+_TRANSPARENT_BACKGROUND_NEGATIVE_CONTEXT_RE = re.compile(
+    r"(?<!\w)(?:no|without)\s+(?:a\s+)?background\s+"
+    r"(?:blur|bokeh|noise|characters?|people|persons?|subjects?|"
+    r"objects?|details?|change|changes|music|story|context|scene|"
+    r"scenery|lighting|shadows?|text|pattern|elements?)\b",
     re.IGNORECASE,
 )
 # 去除 C0 控制字符（\x00-\x1f）+ DEL（\x7f），但保留 \t (9) / \n (10) / \r (13)
@@ -212,6 +222,8 @@ _TRANSPARENT_BACKGROUND_NEGATIVE_RE = re.compile(
 # 终端转义、\x00 空字节注入，而不是把用户合法的换行也搞丢。
 _SYSTEM_PROMPT_CONTROL_TRANSLATION = {i: " " for i in range(32) if i not in (9, 10, 13)}
 _SYSTEM_PROMPT_CONTROL_TRANSLATION[127] = " "
+_SYSTEM_PROMPT_SECTION_TAG_RE = re.compile(r"(\[/?)(SYSTEM_[A-Z0-9_]+)(\])")
+_SYSTEM_PROMPT_SECTION_TAG_ESCAPE = "\u200b"
 _CHAT_TOOL_BUDGET_SETTINGS: dict[str, tuple[str, str]] = {
     "web_search": ("chat.tool_web_search_micro", "CHAT_TOOL_WEB_SEARCH_MICRO"),
     "file_search": ("chat.tool_file_search_micro", "CHAT_TOOL_FILE_SEARCH_MICRO"),
@@ -486,9 +498,11 @@ def _chat_params_with_fast_default(
 def _wants_transparent_background(prompt: str | None) -> bool:
     if not prompt:
         return False
-    return bool(_TRANSPARENT_BACKGROUND_RE.search(prompt)) and not bool(
-        _TRANSPARENT_BACKGROUND_NEGATIVE_RE.search(prompt)
-    )
+    if _TRANSPARENT_BACKGROUND_NEGATIVE_RE.search(prompt):
+        return False
+    if _TRANSPARENT_BACKGROUND_NEGATIVE_CONTEXT_RE.search(prompt):
+        return False
+    return bool(_TRANSPARENT_BACKGROUND_RE.search(prompt))
 
 
 def _resolve_image_background(image_params: ImageParamsIn, prompt: str | None) -> str:
@@ -770,6 +784,17 @@ def _sanitize_system_prompt_source(text: str | None) -> str | None:
     return cleaned
 
 
+def _escape_system_prompt_section_body(text: str) -> str:
+    """Prevent prompt text from closing or opening structured system sections."""
+    return _SYSTEM_PROMPT_SECTION_TAG_RE.sub(
+        lambda match: (
+            f"{match.group(1)}{_SYSTEM_PROMPT_SECTION_TAG_ESCAPE}"
+            f"{match.group(2)}{match.group(3)}"
+        ),
+        text,
+    )
+
+
 def choose_system_prompt(
     *,
     explicit_prompt: str | None,
@@ -805,7 +830,8 @@ def build_structured_system_prompt(
     ):
         prompt = _sanitize_system_prompt_source(candidate)
         if prompt is not None:
-            sections.append(f"[{tag}]\n{prompt}\n[/{tag}]")
+            safe_prompt = _escape_system_prompt_section_body(prompt)
+            sections.append(f"[{tag}]\n{safe_prompt}\n[/{tag}]")
     if not sections:
         return None
     return "\n".join(("[SYSTEM_PROMPTS]", *sections, "[/SYSTEM_PROMPTS]"))

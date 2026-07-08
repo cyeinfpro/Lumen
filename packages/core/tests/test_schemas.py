@@ -517,6 +517,13 @@ def test_video_reference_media_rejects_unsafe_url_sources():
     )
     assert ref.ref_id == "ref:image:1"
     VideoReferenceMediaIn(kind="image", url="asset://asset-20260609161523-stlqd")
+    video_asset = VideoReferenceMediaIn(
+        kind="video",
+        url="asset://asset-20260708222515-xggv2",
+        ref_id=" REF:VIDEO:1 ",
+    )
+    assert video_asset.url == "asset://asset-20260708222515-xggv2"
+    assert video_asset.ref_id == "ref:video:1"
     mixed_asset = VideoReferenceMediaIn(
         kind="image",
         url=" `Asset : //ASSET-20260609161523-STLQD` ",
