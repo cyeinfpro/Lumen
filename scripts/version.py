@@ -14,6 +14,12 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - compatibility with older python3
+    tomllib = None  # type: ignore[assignment]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +34,18 @@ PYPROJECT_FILES = [
 ]
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
 WEB_PACKAGE_LOCK = ROOT / "apps/web/package-lock.json"
+UV_LOCK = ROOT / "uv.lock"
 DESKTOP_CARGO_TOML = ROOT / "apps/desktop/Cargo.toml"
 DESKTOP_CARGO_LOCK = ROOT / "apps/desktop/Cargo.lock"
 DESKTOP_TAURI_CONFIG = ROOT / "apps/desktop/tauri.conf.json"
 CORE_INIT = ROOT / "packages/core/lumen_core/__init__.py"
+UV_LOCK_PACKAGE_NAMES = {
+    "lumen",
+    "lumen-api",
+    "lumen-worker",
+    "lumen-tgbot",
+    "lumen-core",
+}
 CURRENT_RELEASE_JSON_CANDIDATES = (
     ROOT / ".lumen_release.json",
     ROOT / "current" / ".lumen_release.json",
@@ -116,6 +130,29 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def read_uv_lock_packages(path: Path) -> list[dict[str, Any]]:
+    text = path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        data = tomllib.loads(text)
+        packages = data.get("package", [])
+        return [item for item in packages if isinstance(item, dict)]
+
+    packages: list[dict[str, Any]] = []
+    for block in re.split(r"(?m)^\[\[package\]\]\s*$", text):
+        if not block.strip():
+            continue
+        name_match = re.search(r'(?m)^name\s*=\s*"([^"]+)"', block)
+        version_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', block)
+        if name_match:
+            packages.append(
+                {
+                    "name": name_match.group(1),
+                    "version": version_match.group(1) if version_match else None,
+                }
+            )
+    return packages
+
+
 def current_release_json_path() -> Path | None:
     for path in CURRENT_RELEASE_JSON_CANDIDATES:
         if path.exists():
@@ -181,6 +218,27 @@ def check() -> int:
             f"{root_package.get('version')} != {version}"
         )
 
+    if UV_LOCK.exists():
+        try:
+            lock_packages = read_uv_lock_packages(UV_LOCK)
+        except Exception as exc:
+            mismatches.append(f"{UV_LOCK.relative_to(ROOT)}: cannot parse ({exc})")
+        else:
+            seen_lock_packages: set[str] = set()
+            for item in lock_packages:
+                name = item.get("name")
+                if name not in UV_LOCK_PACKAGE_NAMES:
+                    continue
+                seen_lock_packages.add(str(name))
+                if item.get("version") != version:
+                    mismatches.append(
+                        f"{UV_LOCK.relative_to(ROOT)} package {name}: "
+                        f"{item.get('version')} != {version}"
+                    )
+            missing = UV_LOCK_PACKAGE_NAMES - seen_lock_packages
+            for name in sorted(missing):
+                mismatches.append(f"{UV_LOCK.relative_to(ROOT)} package {name}: missing")
+
     current_release_json = current_release_json_path()
     if current_release_json is not None:
         try:
@@ -214,6 +272,8 @@ def check() -> int:
         for item in mismatches:
             print(f"  - {item}", file=sys.stderr)
         print("Run: python3 scripts/version.py sync", file=sys.stderr)
+        if any(item.startswith(str(UV_LOCK.relative_to(ROOT))) for item in mismatches):
+            print("Run: uv lock", file=sys.stderr)
         return 1
 
     print(f"version ok: {version}")

@@ -8,7 +8,7 @@ Type=simple
 User=lumen
 Group=lumen
 WorkingDirectory=/opt/lumen/current/apps/worker
-EnvironmentFile=-/opt/lumen/.env
+EnvironmentFile=-/opt/lumen/shared/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
 # 同 lumen-api.service：CIFS forceuid remount，确保 lumen 进程能写

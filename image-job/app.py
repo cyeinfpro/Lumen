@@ -6,19 +6,23 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
 import sqlite3
 import time
 import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from ipaddress import IPv4Address, IPv6Address
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -86,6 +90,7 @@ JOB_TTL_DAYS = max(1, int(os.getenv("IMAGE_JOB_JOB_TTL_DAYS", "30")))
 GRACEFUL_SHUTDOWN_S = max(0, int(os.getenv("IMAGE_JOB_GRACEFUL_SHUTDOWN_S", "60")))
 HTTP_POOL_KEEPALIVE = max(1, int(os.getenv("IMAGE_JOB_HTTP_POOL_KEEPALIVE", "8")))
 HTTP_POOL_MAX = max(HTTP_POOL_KEEPALIVE, int(os.getenv("IMAGE_JOB_HTTP_POOL_MAX", "32")))
+MAX_IMAGE_URL_REDIRECTS = max(0, int(os.getenv("IMAGE_JOB_MAX_IMAGE_URL_REDIRECTS", "5")))
 SQLITE_JOURNAL_MODE = os.getenv("IMAGE_JOB_SQLITE_JOURNAL_MODE", "WAL").strip().upper()
 STUCK_RECONCILE_INTERVAL_S = max(
     15, int(os.getenv("IMAGE_JOB_STUCK_RECONCILE_INTERVAL_S", "60"))
@@ -115,6 +120,22 @@ ERROR_CLASS_NO_IMAGE = "no_image"          # 200 but no image extractable — sw
 ERROR_CLASS_IMAGE_SAVE = "image_save"      # save/decode failure — switch provider
 ERROR_CLASS_INTERNAL = "internal"          # sidecar bug — switch provider
 ERROR_CLASS_VALIDATION = "validation"      # bad input from caller — terminal
+
+_PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
+_FORBIDDEN_HOST_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+_IMAGE_DOWNLOAD_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 @dataclass
@@ -175,6 +196,126 @@ def stable_json_dump(value: Any) -> str:
 
 def request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(stable_json_dump(payload).encode("utf-8")).hexdigest()
+
+
+def canonical_host(host: str) -> str:
+    return host.strip().strip("[]").rstrip(".").lower()
+
+
+def _is_forbidden_ip_address(ip: IPv4Address | IPv6Address) -> bool:
+    embedded_ipv4: list[IPv4Address] = []
+    if isinstance(ip, IPv6Address):
+        if ip.ipv4_mapped is not None:
+            embedded_ipv4.append(ip.ipv4_mapped)
+        if ip.sixtofour is not None:
+            embedded_ipv4.append(ip.sixtofour)
+        if ip.teredo is not None:
+            embedded_ipv4.append(ip.teredo[1])
+
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or any(ip in network for network in _FORBIDDEN_HOST_NETWORKS)
+        or any(_is_forbidden_ip_address(item) for item in embedded_ipv4)
+    )
+
+
+def is_forbidden_ip(value: str) -> bool:
+    return _is_forbidden_ip_address(
+        ipaddress.ip_address(value.strip().strip("[]").split("%", 1)[0])
+    )
+
+
+def _parse_legacy_ipv4_part(part: str) -> int | None:
+    if not part:
+        return None
+    try:
+        if part.lower().startswith("0x"):
+            return int(part[2:], 16)
+        if len(part) > 1 and part.startswith("0"):
+            return int(part[1:] or "0", 8)
+        return int(part, 10)
+    except ValueError:
+        return None
+
+
+def _parse_legacy_ipv4_host(host: str) -> IPv4Address | None:
+    parts = host.split(".")
+    if len(parts) > 4:
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        number = _parse_legacy_ipv4_part(part)
+        if number is None:
+            return None
+        numbers.append(number)
+    if len(numbers) == 1:
+        if numbers[0] > 0xFFFFFFFF:
+            return None
+        return IPv4Address(numbers[0])
+    if any(part > 0xFF for part in numbers[:-1]):
+        return None
+    last_bits = 8 * (5 - len(numbers))
+    if numbers[-1] >= 1 << last_bits:
+        return None
+    value = numbers[-1]
+    shift = last_bits
+    for part in reversed(numbers[:-1]):
+        value |= part << shift
+        shift += 8
+    return IPv4Address(value)
+
+
+def is_private_host(host: str) -> bool:
+    clean = canonical_host(host)
+    if not clean or clean in _PRIVATE_HOSTS:
+        return True
+    if clean.endswith(".localhost") or clean.endswith(".local"):
+        return True
+    if clean.isdigit():
+        return True
+    legacy_ipv4 = _parse_legacy_ipv4_host(clean)
+    if legacy_ipv4 is not None:
+        if clean != str(legacy_ipv4):
+            return True
+        return is_forbidden_ip(str(legacy_ipv4))
+    try:
+        return is_forbidden_ip(clean)
+    except ValueError:
+        return False
+
+
+async def assert_public_image_download_url(url: str) -> str:
+    value = url.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("image URL must be http(s)")
+    if parsed.username or parsed.password:
+        raise ValueError("image URL must not contain username or password")
+    host = canonical_host(parsed.hostname or "")
+    if is_private_host(host):
+        raise ValueError("image URL host is not allowed")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
+            timeout=2.0,
+        )
+    except (socket.gaierror, TimeoutError) as exc:
+        raise ValueError("image URL host cannot be resolved") from exc
+
+    ips = {str(info[4][0]) for info in infos if info and info[4]}
+    if not ips:
+        raise ValueError("image URL host cannot be resolved")
+    if any(is_forbidden_ip(ip) for ip in ips):
+        raise ValueError("image URL resolves to a private address")
+    return value
 
 
 def request_idempotency_key(request: Request, raw_payload: Any) -> str | None:
@@ -849,55 +990,93 @@ async def download_image_url(
     cached = cache.get(url)
     if cached is not None:
         return cached
+    try:
+        current_url = await assert_public_image_download_url(url)
+    except ValueError as exc:
+        raise JobFailure(
+            f"图片 URL 不允许下载: {exc}",
+            upstream_status=400,
+            error_class=ERROR_CLASS_VALIDATION,
+        ) from exc
     # image-stability-hardening §image-job：用 streaming 边读边累计，超
     # MAX_IMAGE_BYTES 立即中断，避免恶意 URL 返回巨型 body 把 sidecar 内存撑爆
     # （旧实现 client.get 全量缓存后才检查大小）。Content-Length 提前可信时直接拒。
     try:
-        async with client.stream(
-            "GET",
-            url,
-            timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S),
-        ) as resp:
-            if not resp.is_success:
-                # 错误体不会很大（一般 JSON），可以全读
-                err_content = await resp.aread()
-                ec = (
-                    ERROR_CLASS_UPSTREAM_5XX
-                    if resp.status_code >= 500
-                    else ERROR_CLASS_UPSTREAM_4XX
-                )
-                raise JobFailure(
-                    f"下载上游图片失败 HTTP {resp.status_code}",
-                    upstream_status=resp.status_code,
-                    upstream_body=body_preview(err_content),
-                    error_class=ec,
-                )
-            # Content-Length 已超 → 不下载
-            cl_raw = resp.headers.get("content-length")
-            if cl_raw:
-                try:
-                    if int(cl_raw) > MAX_IMAGE_BYTES:
+        redirects = 0
+        while True:
+            async with client.stream(
+                "GET",
+                current_url,
+                timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S),
+                follow_redirects=False,
+            ) as resp:
+                if resp.status_code in _IMAGE_DOWNLOAD_REDIRECT_STATUSES:
+                    location = resp.headers.get("location")
+                    if not location:
                         raise JobFailure(
-                            "上游图片超过大小限制（Content-Length 预检）",
+                            "上游图片重定向缺少 Location",
+                            upstream_status=resp.status_code,
+                            error_class=ERROR_CLASS_UPSTREAM_4XX,
+                        )
+                    if redirects >= MAX_IMAGE_URL_REDIRECTS:
+                        raise JobFailure(
+                            "上游图片重定向次数过多",
+                            upstream_status=resp.status_code,
+                            error_class=ERROR_CLASS_UPSTREAM_4XX,
+                        )
+                    redirects += 1
+                    next_url = urljoin(current_url, location)
+                    try:
+                        current_url = await assert_public_image_download_url(next_url)
+                    except ValueError as exc:
+                        raise JobFailure(
+                            f"图片重定向目标不允许下载: {exc}",
+                            upstream_status=resp.status_code,
+                            error_class=ERROR_CLASS_VALIDATION,
+                        ) from exc
+                    continue
+
+                if not resp.is_success:
+                    # 错误体不会很大（一般 JSON），可以全读
+                    err_content = await resp.aread()
+                    ec = (
+                        ERROR_CLASS_UPSTREAM_5XX
+                        if resp.status_code >= 500
+                        else ERROR_CLASS_UPSTREAM_4XX
+                    )
+                    raise JobFailure(
+                        f"下载上游图片失败 HTTP {resp.status_code}",
+                        upstream_status=resp.status_code,
+                        upstream_body=body_preview(err_content),
+                        error_class=ec,
+                    )
+                # Content-Length 已超 → 不下载
+                cl_raw = resp.headers.get("content-length")
+                if cl_raw:
+                    try:
+                        if int(cl_raw) > MAX_IMAGE_BYTES:
+                            raise JobFailure(
+                                "上游图片超过大小限制（Content-Length 预检）",
+                                upstream_status=resp.status_code,
+                                error_class=ERROR_CLASS_IMAGE_SAVE,
+                            )
+                    except ValueError:
+                        pass
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    if not chunk:
+                        continue
+                    # 累计判，超阈值立即中断 stream（async with 退出会 aclose）
+                    if len(buf) + len(chunk) > MAX_IMAGE_BYTES:
+                        raise JobFailure(
+                            "上游图片超过大小限制",
                             upstream_status=resp.status_code,
                             error_class=ERROR_CLASS_IMAGE_SAVE,
                         )
-                except ValueError:
-                    pass
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                if not chunk:
-                    continue
-                # 累计判，超阈值立即中断 stream（async with 退出会 aclose）
-                if len(buf) + len(chunk) > MAX_IMAGE_BYTES:
-                    raise JobFailure(
-                        "上游图片超过大小限制",
-                        upstream_status=resp.status_code,
-                        error_class=ERROR_CLASS_IMAGE_SAVE,
-                    )
-                buf.extend(chunk)
-            content = bytes(buf)
-            content_type = resp.headers.get("content-type")
+                    buf.extend(chunk)
+                content = bytes(buf)
+                content_type = resp.headers.get("content-type")
+                break
     except JobFailure:
         raise
     except httpx.HTTPError as exc:
@@ -908,6 +1087,7 @@ async def download_image_url(
         ) from exc
     candidate = ImageCandidate(content, content_type)
     cache[url] = candidate
+    cache[current_url] = candidate
     return candidate
 
 
@@ -2119,6 +2299,7 @@ async def lifespan(app: FastAPI):
         limits=limits,
         follow_redirects=True,
         http2=False,
+        trust_env=False,
         headers={"User-Agent": "lumen-image"},
     )
 
@@ -2182,17 +2363,6 @@ async def health() -> dict[str, Any]:
         "queue_max": QUEUE_MAX,
         "inflight": len(inflight),
         "concurrency": CONCURRENCY,
-        "upstream_base_url": UPSTREAM_BASE_URL,
-        "data_dir": str(DATA_DIR),
-        "db_path": str(DB_PATH),
-        "sqlite_journal_mode": SQLITE_JOURNAL_MODE,
-        "default_retention_days": DEFAULT_RETENTION_DAYS,
-        "max_retention_days": MAX_RETENTION_DAYS,
-        "stuck_reconciler": {
-            "interval_s": STUCK_RECONCILE_INTERVAL_S,
-            "queued_after_s": STUCK_QUEUED_AFTER_S,
-            "running_after_s": STUCK_RUNNING_AFTER_S,
-        },
     }
 
 

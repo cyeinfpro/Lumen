@@ -1260,7 +1260,7 @@ if [ "${RELEASE_SOURCE_IMAGE_EXTRACT:-0}" = "1" ]; then
     log_info "[fetch_release] image_extract 已验证 ${TARGET_TAG} 可拉取，跳过 GHCR manifest 探测。"
     emit_info fetch_release tag_probe "skipped_image_extract_verified"
 elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
-    if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
+    if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-0}" = "1" ]; then
         log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在，自动回退到 main。"
         emit_info fetch_release target_tag_fallback "main"
         TARGET_TAG="main"
@@ -1268,6 +1268,10 @@ elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
             enable_local_build_fallback
         fi
     else
+        if [ "${TARGET_TAG}" != "main" ]; then
+            log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在；stable 通道不会自动回退 main。"
+            emit_info fetch_release target_tag_fallback "disabled"
+        fi
         enable_local_build_fallback
     fi
 fi
@@ -1363,7 +1367,7 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # 网络抖动是 pull 失败最常见原因，先重试 3 次（指数退避 5/10/20s），仍失败再走 fallback。
     if ! lumen_retry 3 5 "docker compose pull tag=${TARGET_TAG}" \
             lumen_compose_in "${NEW_RELEASE}" pull; then
-        if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
+        if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-0}" = "1" ]; then
             log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
             emit_info pull_images target_tag_fallback "main"
             TARGET_TAG="main"
@@ -1383,6 +1387,13 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
                 emit_fail pull_images 1
                 exit 1
             fi
+        elif [ "${TARGET_TAG}" != "main" ]; then
+            log_error "[pull_images] docker compose pull tag=${TARGET_TAG} 失败；stable 通道不会自动回退 main。"
+            log_error "  如需跟随 rolling main，请显式设置 LUMEN_UPDATE_CHANNEL=main。"
+            log_error "  如需临时允许 fallback，请显式设置 LUMEN_UPDATE_FALLBACK_MAIN=1。"
+            log_error "  当前服务保持不变。"
+            emit_fail pull_images 1
+            exit 1
         else
             log_error "[pull_images] docker compose pull 失败。"
             log_error "  请检查 GHCR 可达性或代理配置。"

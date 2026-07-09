@@ -14,8 +14,8 @@ Lumen 产品版本的唯一源是仓库根目录 `VERSION`，格式为不带 `v`
 
 ```bash
 python3 scripts/version.py sync
-python3 scripts/version.py check
 uv lock
+python3 scripts/version.py check
 ```
 
 `sync` 会把版本同步到：
@@ -29,12 +29,17 @@ uv lock
 - `apps/web/package.json`
 - `apps/web/package-lock.json`
 
+`check` 还会检查 `uv.lock` 里的 workspace package 版本。若 lockfile 漂移，先运行 `uv lock`，否则 Dockerfile 里的 `uv sync --frozen` 会在 release 构建阶段失败。
+
 ## 发布 Tag
 
 正式发布 tag 必须和 `VERSION` 一致：
 
 ```bash
 VERSION=1.2.3
+python3 scripts/version.py sync
+uv lock
+python3 scripts/version.py check
 git tag v1.2.3
 git push origin v1.2.3
 ```
@@ -45,6 +50,8 @@ CI 会检查：
 python3 scripts/version.py check
 python3 scripts/version.py assert-tag "$GITHUB_REF_NAME"
 ```
+
+`Docker Release` 的 `workflow_dispatch.ref` 只能用于 branch/SHA 重建，不能用来制造 tag release 语义。正式稳定发布必须通过 push `v*` tag 触发。
 
 ## Docker Tag 规则
 
@@ -90,6 +97,8 @@ main
 | `main` | 目标镜像 tag 固定为 `main`，无法精确比较 SemVer，适合跟随主干环境。 |
 | `pinned` | 由运维在触发更新时传 `target_tag`，API 和 `update.sh` 都会校验 tag 形态。 |
 | `minor` / `major` | 预留给分支升级策略；未配置时按 stable 处理。 |
+
+`stable` 解析或拉取失败时不能静默回退 `main`。需要 rolling 更新时显式设置 `LUMEN_UPDATE_CHANNEL=main`；临时允许 fallback 时显式设置 `LUMEN_UPDATE_FALLBACK_MAIN=1`。
 
 相关设置：
 

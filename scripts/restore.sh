@@ -284,16 +284,13 @@ restore_pg_archive_to_db() {
     gunzip_rc=${pipe_status[0]}
     pg_restore_rc=${pipe_status[1]}
     set -e
-    if [ "$pg_restore_rc" -ge 2 ]; then
+    if [ "$pg_restore_rc" -ne 0 ]; then
         log "ERROR: pg_restore into $label failed with exit $pg_restore_rc"
         return 1
     fi
     if [ "$gunzip_rc" -ne 0 ]; then
         log "ERROR: failed to read pg dump during restore into $label (gunzip exit $gunzip_rc)"
         return 1
-    fi
-    if [ "$pg_restore_rc" -eq 1 ]; then
-        log "WARN: pg_restore into $label returned non-zero (common with FKs); continuing and letting app validate"
     fi
 }
 

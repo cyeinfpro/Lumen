@@ -306,7 +306,9 @@ export function StoryboardIndexPage() {
                   {item.thumbnail_url ? (
                     <img
                       src={item.thumbnail_url}
-                      alt=""
+                      alt={`${item.title} 缩略图`}
+                      loading="lazy"
+                      decoding="async"
                       className="h-28 w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
                     />
                   ) : (
@@ -690,7 +692,13 @@ function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset 
         <StatusPill status={asset.status} />
       </div>
       {asset.display_url || asset.image_url ? (
-        <img src={asset.display_url || asset.image_url || ""} alt="" className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover" />
+        <img
+          src={asset.display_url || asset.image_url || ""}
+          alt={`${asset.name} 设定图`}
+          loading="lazy"
+          decoding="async"
+          className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
+        />
       ) : (
         <div className="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]">
           <ImageIcon className="h-6 w-6" />
@@ -822,7 +830,13 @@ function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot 
         <StatusPill status={shot.status} />
       </div>
       {shot.keyframe_display_url || shot.keyframe_image_url ? (
-        <img src={shot.keyframe_display_url || shot.keyframe_image_url || ""} alt="" className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover" />
+        <img
+          src={shot.keyframe_display_url || shot.keyframe_image_url || ""}
+          alt={`${shot.title} 关键帧`}
+          loading="lazy"
+          decoding="async"
+          className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
+        />
       ) : (
         <div className="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]">
           <ImageIcon className="h-6 w-6" />
@@ -860,7 +874,13 @@ function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot
   return (
     <article className="grid gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-3 md:grid-cols-[88px_minmax(0,1fr)_auto] md:items-center">
       {shot.keyframe_display_url || shot.keyframe_image_url ? (
-        <img src={shot.keyframe_display_url || shot.keyframe_image_url || ""} alt="" className="aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] object-cover md:w-20" />
+        <img
+          src={shot.keyframe_display_url || shot.keyframe_image_url || ""}
+          alt={`${shot.title} 视频参考帧`}
+          loading="lazy"
+          decoding="async"
+          className="aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] object-cover md:w-20"
+        />
       ) : (
         <div className="grid aspect-video place-items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] md:w-20">
           <ImageIcon className="h-5 w-5 text-[var(--fg-2)]" />

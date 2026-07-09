@@ -179,10 +179,10 @@ export function MobileStream() {
 
   const selectedImageIds = useMemo(() => {
     if (selectedIds.size === 0) return [];
-    return items
+    return filteredItems
       .map((it) => it.image.id)
       .filter((imageId) => selectedIds.has(imageId));
-  }, [items, selectedIds]);
+  }, [filteredItems, selectedIds]);
 
   const selectionActive = selectionMode || selectedImageIds.length > 0;
   const toggleSelectedImage = useCallback((imageId: string) => {

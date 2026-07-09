@@ -1590,16 +1590,16 @@ Browser -> Web /api/* -> api:8000
 
 | 服务 | 容器内 uid:gid | 来源 | 对应 bind mount |
 | --- | --- | --- | --- |
-| `postgres` | `70:70` | `postgres:16-alpine` 内置 `postgres` 用户 | `${LUMEN_DB_ROOT:-/opt/lumendata}/postgres` |
+| `postgres` | `999:999` | `pgvector/pgvector:pg16` 内置 `postgres` 用户 | `${LUMEN_DB_ROOT:-/opt/lumendata}/postgres` |
 | `redis` | `999:999` | `redis:7-alpine` 内置 `redis` 用户 | `${LUMEN_DB_ROOT:-/opt/lumendata}/redis` |
 | `api` / `worker` | `${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}` + `${LUMEN_APP_STORAGE_GID:-10001}` 补充组 | 自建 `lumen` 用户（§7.1），CIFS/NAS 可只覆盖 storage gid | `/opt/lumendata/storage`、`/opt/lumendata/backup` |
 | `web` / `tgbot` | `10001:10001` | 自建 `lumen` / `nextjs` 用户 | 无持久写入 bind mount |
 
-postgres / redis 的 uid 是 alpine 镜像内置约定，不可改（改了会失去 PGDATA 兼容性）。当前 `docker-compose.yml:20,46` 已经显式 `user: "70:70"` / `user: "999:999"`，新 compose 必须保留。
+postgres / redis 的 uid 是镜像内置约定，不可改（改了会失去 PGDATA / dump 兼容性）。当前 compose 显式使用 `999:999` / `999:999`，新 compose 必须保留。
 
 ### 15.2 数据目录权限设置
 
-按服务分别 chown，**禁止整体 `chown -R 10001:10001`**——否则 postgres 以 uid 70 启动会读不了 PGDATA，redis 以 uid 999 启动同样失败。`LUMEN_DB_ROOT` 未设置时默认等于 `LUMEN_DATA_ROOT`；CIFS/NAS 场景建议拆开：
+按服务分别 chown，**禁止整体 `chown -R 10001:10001`**——否则 postgres/redis 以 uid 999 启动会读不了数据目录。`LUMEN_DB_ROOT` 未设置时默认等于 `LUMEN_DATA_ROOT`；CIFS/NAS 场景建议拆开：
 
 ```bash
 sudo mkdir -p /var/lib/lumen-data
@@ -1609,7 +1609,7 @@ sudo mkdir -p \
   /opt/lumendata/storage \
   /opt/lumendata/backup
 
-sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/postgres
 sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage
 sudo chown -R 10001:10001 /opt/lumendata/backup
@@ -1726,7 +1726,7 @@ docker run --rm -v "$OLD_REDIS_VOL":/src alpine du -sh /src
 
 # 4. 创建 bind mount 目标目录与权限（§15.2）
 sudo mkdir -p /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
-sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/postgres
 sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 
@@ -2107,7 +2107,7 @@ docker compose --profile tgbot up -d tgbot
 | `.env` 仍使用 localhost | 容器连不上 DB/Redis/API | §21.1 白名单 dry-run 替换，禁全局 sed |
 | `PUBLIC_BASE_URL`/`CORS_ALLOW_ORIGINS` 被误改 | 前端 CSP / CORS 失败 | §21.1 显式排除清单 |
 | 已有 named volume 在切 `COMPOSE_PROJECT_NAME` 后失联 | PG/Redis 看似启动但数据全空 | §17.0 显式迁移 SOP，禁止隐式切换 |
-| `/opt/lumendata` 全局 chown 10001 | postgres(uid 70) / redis(uid 999) 启动失败 | §15.2 按服务分别 chown |
+| `/opt/lumendata` 全局 chown 10001 | postgres(uid 999) / redis(uid 999) 启动失败 | §15.2 按服务分别 chown |
 | `WEB_BIND_HOST=0.0.0.0` 默认值 | 绕过 nginx 直连 3000，frps 隧道架构下出网 | §8.3 默认 `127.0.0.1` |
 | `LUMEN_IMAGE_TAG` 未在 pull 前写入 | pull 拉到旧 tag，更新看似成功实际未变 | §6.4.1 + §11.3.1 `set_image_tag` 阶段 |
 | `lumen-update-runner.service` 写死 `LUMEN_UPDATE_BUILD=1` | 后台一键更新仍触发宿主 build | §12.3.2 改 `0`，build 仅经 EnvironmentFile 注入 |
