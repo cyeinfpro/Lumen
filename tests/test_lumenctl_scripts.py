@@ -107,8 +107,10 @@ def test_restore_success_path_drops_postgres_rollback_database() -> None:
     assert "previous active database retained" not in text
 
 
+@pytest.mark.parametrize("pg_restore_rc", ["1", "2"])
 def test_restore_pg_restore_failure_before_stop_leaves_active_db_unmutated(
     tmp_path: Path,
+    pg_restore_rc: str,
 ) -> None:
     ts = "20260529-010203"
     backup_root = tmp_path / "backup"
@@ -187,7 +189,7 @@ exit 0
             "DB_NAME": "lumen",
             "TEST_DOCKER_LOG": str(docker_log),
             "TEST_REDIS_HOST_DIR": str(redis_host),
-            "TEST_PG_RESTORE_RC": "2",
+            "TEST_PG_RESTORE_RC": pg_restore_rc,
         }
     )
     (tmp_path / "tmp").mkdir()
@@ -249,12 +251,14 @@ def test_install_failure_cleanup_array_length_is_bash_safe() -> None:
     assert "${#INSTALL_STARTED_SERVICES[@]}" in text
 
 
-def test_install_pull_failure_falls_back_to_main_for_default_tag() -> None:
+def test_install_pull_failure_fallback_to_main_requires_opt_in() -> None:
     text = INSTALL.read_text(encoding="utf-8")
+    assert 'LUMEN_INSTALL_FALLBACK_MAIN:-0' in text
     assert "回退到 main 后重试一次" in text
     assert 'env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"' in text
     assert "fallback main 后仍失败" in text
     assert "main 镜像也未发布 → 使用 --build 本地构建" in text
+    assert "stable 安装不会自动回退 main" in text
 
 
 def test_install_generates_all_required_compose_secrets() -> None:
@@ -569,6 +573,8 @@ def test_update_preserves_web_bind_and_proxy_env() -> None:
     assert "sync_repo_to_release" in update
     assert "git archive" in update
     assert "target_tag_fallback" in update
+    assert 'LUMEN_UPDATE_FALLBACK_MAIN:-0' in update
+    assert "stable 通道不会自动回退 main" in update
     assert "fallback main 后 docker compose pull 仍失败" in update
     assert 'if lumen_configure_proxy_env "${SHARED_ENV}"' in update
     assert "config_changed_redeploy" in update
@@ -2268,6 +2274,10 @@ def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     assert "docker buildx imagetools create" in workflow, (
         "expected merge-web to assemble multi-arch manifest list"
     )
+    assert "GITHUB_REF_NAME#v" in workflow, (
+        "tag builds should pass the product version without a leading v"
+    )
+    assert "workflow_dispatch.ref cannot create release semantics" in workflow
     assert "needs: build-web" in workflow
     assert "needs: [build, merge-web]" in workflow
     assert "needs: quality-gate" in workflow

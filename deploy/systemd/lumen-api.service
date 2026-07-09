@@ -11,7 +11,7 @@ User=lumen
 Group=lumen
 # release 布局：current 是软链，systemd 在 chdir 时按 cwd= 软链解引用进入物理 release 目录。
 WorkingDirectory=/opt/lumen/current/apps/api
-EnvironmentFile=-/opt/lumen/.env
+EnvironmentFile=-/opt/lumen/shared/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
 # /opt/lumendata 在生产用 CIFS forceuid 挂载；CIFS 重启后 uid/gid 可能回到

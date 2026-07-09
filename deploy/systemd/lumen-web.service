@@ -8,7 +8,7 @@ Type=simple
 User=lumen
 Group=lumen
 WorkingDirectory=/opt/lumen/current/apps/web
-EnvironmentFile=-/opt/lumen/.env
+EnvironmentFile=-/opt/lumen/shared/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=NODE_ENV=production
 ExecStart=/opt/lumen/current/apps/web/node_modules/.bin/next start -H 127.0.0.1 -p 3000

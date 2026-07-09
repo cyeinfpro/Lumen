@@ -57,7 +57,7 @@ export function StreamSearchBar({
               value={value}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={handleKey}
-              placeholder="搜索提示词…"
+              placeholder="搜索已加载作品…"
               aria-label="搜索已加载作品"
               className={[
                 "flex-1 min-h-11 bg-transparent border-none outline-none",
@@ -88,7 +88,7 @@ export function StreamSearchBar({
               <span className="inline-flex h-5 items-center rounded-full bg-[var(--bg-2)] px-2 tabular-nums">
                 {resultCount} / {loadedCount ?? resultCount}
               </span>
-              <span>条匹配</span>
+              <span>条已加载匹配</span>
             </div>
           )}
         </div>

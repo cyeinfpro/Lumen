@@ -310,6 +310,16 @@ class _FakeStreamClient:
         return self._response
 
 
+class _SequenceStreamClient:
+    def __init__(self, responses: list[_StreamGetResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> _StreamGetResponse:
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return self._responses.pop(0)
+
+
 def test_download_image_url_rejects_via_content_length(monkeypatch) -> None:
     app = load_app_module()
     monkeypatch.setattr(app, "MAX_IMAGE_BYTES", 1024)
@@ -325,7 +335,7 @@ def test_download_image_url_rejects_via_content_length(monkeypatch) -> None:
         asyncio.run(
             app.download_image_url(
                 client,  # type: ignore[arg-type]
-                "https://cdn.example/big.png",
+                "https://93.184.216.34/big.png",
                 cache={},
             )
         )
@@ -349,7 +359,7 @@ def test_download_image_url_aborts_when_streaming_exceeds_limit(monkeypatch) -> 
         asyncio.run(
             app.download_image_url(
                 client,  # type: ignore[arg-type]
-                "https://cdn.example/medium.png",
+                "https://93.184.216.34/medium.png",
                 cache={},
             )
         )
@@ -371,13 +381,66 @@ def test_download_image_url_succeeds_under_limit(monkeypatch) -> None:
     candidate = asyncio.run(
         app.download_image_url(
             client,  # type: ignore[arg-type]
-            "https://cdn.example/ok.png",
+            "https://93.184.216.34/ok.png",
             cache={},
         )
     )
     assert candidate is not None
     assert candidate.data == payload
     assert candidate.mime_type == "image/png"
+    assert client.calls[0]["follow_redirects"] is False
+
+
+def test_download_image_url_rejects_private_network_target() -> None:
+    app = load_app_module()
+    resp = _StreamGetResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},
+        chunks=[_png_bytes()],
+    )
+    client = _FakeStreamClient(resp)
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.download_image_url(
+                client,  # type: ignore[arg-type]
+                "http://169.254.169.254/latest/meta-data",
+                cache={},
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_VALIDATION
+    assert not client.calls
+
+
+def test_download_image_url_rejects_redirect_to_private_network() -> None:
+    app = load_app_module()
+    client = _SequenceStreamClient(
+        [
+            _StreamGetResponse(
+                status_code=302,
+                headers={"location": "http://127.0.0.1/private.png"},
+                chunks=[],
+            ),
+            _StreamGetResponse(
+                status_code=200,
+                headers={"content-type": "image/png"},
+                chunks=[_png_bytes()],
+            ),
+        ]
+    )
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.download_image_url(
+                client,  # type: ignore[arg-type]
+                "https://93.184.216.34/redirect.png",
+                cache={},
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_VALIDATION
+    assert len(client.calls) == 1
 
 
 def test_download_image_url_retries_on_http_error(monkeypatch) -> None:
@@ -391,7 +454,7 @@ def test_download_image_url_retries_on_http_error(monkeypatch) -> None:
         asyncio.run(
             app.download_image_url(
                 _RaisingStreamClient(),  # type: ignore[arg-type]
-                "https://cdn.example/err.png",
+                "https://93.184.216.34/err.png",
                 cache={},
             )
         )

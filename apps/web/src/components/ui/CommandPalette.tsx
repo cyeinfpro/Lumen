@@ -199,8 +199,13 @@ export function CommandPalette() {
     [navVisibility],
   );
   const commands = useMemo(
-    () => [...navCommands, ...STATIC_COMMANDS],
-    [navCommands],
+    () => [
+      ...navCommands,
+      ...STATIC_COMMANDS.filter(
+        (item) => item.action !== "toggle-sidebar" || pathname === "/",
+      ),
+    ],
+    [navCommands, pathname],
   );
   const filteredCommands = useMemo(() => {
     const tokens = normalizeSearchValue(query).split(" ").filter(Boolean);

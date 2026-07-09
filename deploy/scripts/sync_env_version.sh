@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 把当前 git commit 的短 hash 写入 /opt/lumen/.env 的 LUMEN_VERSION 字段。
-# 在发布脚本（rsync 之后、systemctl restart 之前）调用一次。
+# Legacy helper: 把当前 git commit 的短 hash 写入 release shared .env 的
+# LUMEN_VERSION 字段。正式发布应走 VERSION/tag/GitHub Release 流程。
 #
 # 用法：
-#   sudo deploy/scripts/sync_env_version.sh             # 默认写到 /opt/lumen/.env
+#   sudo deploy/scripts/sync_env_version.sh             # 默认写到 /opt/lumen/shared/.env
 #   sudo deploy/scripts/sync_env_version.sh /custom/.env
 
 set -euo pipefail
 
-ENV_FILE="${1:-/opt/lumen/.env}"
+ENV_FILE="${1:-/opt/lumen/shared/.env}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "error: $ENV_FILE not found" >&2

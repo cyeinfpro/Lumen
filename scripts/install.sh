@@ -12,7 +12,7 @@
 #   B. 准备数据目录（PG/Redis 可通过 LUMEN_DB_ROOT 与 storage/backup 分离）
 #   C. 准备 release 布局（${LUMEN_DEPLOY_ROOT:-/opt/lumen}/{releases,shared,current}）
 #   D. 生成或合并 shared/.env（强随机替换 placeholder；symlink release/.env -> shared/.env）
-#   E. 探测 GHCR 镜像可用性，未发布 latest 时回退到 main
+#   E. 探测 GHCR 镜像可用性，默认 stable/latest 失败不回退 main
 #   F. docker compose pull && 起 PG/Redis -> migrate -> 可选 bootstrap -> api/worker/web (+tgbot)
 #   G. 切 current symlink
 #   H. HTTP + compose 健康检查
@@ -346,7 +346,7 @@ Lumen 安装入口（Docker Compose 全栈版）
   bash scripts/install.sh --uninstall        卸载 Lumen
 
 --install 可选参数：
-  --image-tag=vX.Y.Z      钉死镜像 tag（默认探测 GHCR latest，找不到回退 main）
+  --image-tag=vX.Y.Z      钉死镜像 tag（默认探测 GHCR latest，不自动回退 main）
   --data-root=/path       LUMEN_DATA_ROOT 文件/备份根目录（默认 /opt/lumendata）
   --db-root=/path         LUMEN_DB_ROOT 数据库根目录（默认跟随 LUMEN_DATA_ROOT）
   --build                 用本地 Dockerfile 构建而不是 pull GHCR（等价 LUMEN_INSTALL_BUILD=1）
@@ -1614,8 +1614,10 @@ probe_ghcr_image_tag() {
     if [ "${http_code}" = "200" ] && printf '%s' "${resp}" | grep -q "\"${tag}\""; then
         log_info "GHCR 上存在 tag=${tag}，使用配置值。"
     elif [ "${http_code}" = "200" ]; then
-        # 探测到 tags 列表但缺 ${tag}：尝试 fallback 到 main
-        if printf '%s' "${resp}" | grep -q '"main"'; then
+        # 探测到 tags 列表但缺 ${tag}：stable 默认 fail-closed；只有显式
+        # LUMEN_INSTALL_FALLBACK_MAIN=1 才允许回退 rolling main。
+        if [ "${LUMEN_INSTALL_FALLBACK_MAIN:-0}" = "1" ] \
+                && printf '%s' "${resp}" | grep -q '"main"'; then
             log_warn "GHCR 上未找到 tag=${tag}，回退到 main。v1.0.0 发布后请改回 latest。"
             env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
             # 在 .env 顶部追加一行注释（如果还没加过）
@@ -1623,7 +1625,8 @@ probe_ghcr_image_tag() {
                 printf '\n# install.sh: fallback to main; v1.0.0 发布后改回 latest\n' >> "${shared_env}"
             fi
         else
-            log_warn "GHCR 上既无 ${tag} 也无 main。保留配置，pull 时可能失败。"
+            log_warn "GHCR 上未找到 tag=${tag}。stable 安装不会自动回退 main；保留配置，pull 时可能失败。"
+            log_warn "如需 rolling main，请显式设置 LUMEN_IMAGE_TAG=main；如需本地构建，用 --build。"
         fi
     else
         # API 探测失败但 .env 已有 tag → 不动
@@ -1653,7 +1656,8 @@ pull_or_build_images() {
             current_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
             if [ -z "${INSTALL_IMAGE_TAG_OVERRIDE}" ] \
                 && [[ "${registry}" == ghcr.io/cyeinfpro* ]] \
-                && [ "${current_tag}" != "main" ]; then
+                && [ "${current_tag}" != "main" ] \
+                && [ "${LUMEN_INSTALL_FALLBACK_MAIN:-0}" = "1" ]; then
                 log_warn "docker compose pull 失败，疑似默认镜像 tag=${current_tag} 尚未发布；回退到 main 后重试一次。"
                 env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
                 if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then

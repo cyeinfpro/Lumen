@@ -36,7 +36,7 @@ bash scripts/lumenctl.sh install-lumen
 
 ## 数据目录与权限
 
-默认 `/opt/lumendata` 是所有持久化数据根目录（`LUMEN_DATA_ROOT` 可改）。如果它是 CIFS/NAS，使用 `LUMEN_DB_ROOT` 把 PostgreSQL / Redis 单独放到本机 Linux 文件系统，storage/backup 仍留在 CIFS。**按服务分别 chown，禁止整体 `chown -R 10001:10001`**——否则 PostgreSQL（uid 70）和 Redis（uid 999）启动会失败（参考 `docs/docker-full-stack-cutover-plan.md` §15.2）：
+默认 `/opt/lumendata` 是所有持久化数据根目录（`LUMEN_DATA_ROOT` 可改）。如果它是 CIFS/NAS，使用 `LUMEN_DB_ROOT` 把 PostgreSQL / Redis 单独放到本机 Linux 文件系统，storage/backup 仍留在 CIFS。**按服务分别 chown，禁止整体 `chown -R 10001:10001`**——否则 PostgreSQL（uid 999）和 Redis（uid 999）启动会失败（参考 `docs/docker-full-stack-cutover-plan.md` §15.2）：
 
 ```bash
 sudo mkdir -p \
@@ -93,7 +93,7 @@ bash scripts/lumenctl.sh restore <ts>     # 等价 scripts/restore.sh <timestamp
 /opt/lumendata/backup/redis/<timestamp>.redis.tgz
 ```
 
-`lumen-backup.timer` 默认每 4 小时跑一次，保留最近 `MAX_KEEP=40` 份。
+`lumen-backup.timer` 默认每 4 小时跑一次，保留最近 `MAX_KEEP=56` 份。`backup.sh` 只覆盖 PostgreSQL + Redis；`/opt/lumendata/storage` 需要文件系统、NAS 或对象存储级快照。
 
 ## 后台一键更新（update-runner）
 
@@ -205,13 +205,30 @@ Docker 全栈模式下，宿主机不需要 `uv / node / npm / build-essential /
 
 ## 发布流程（Docker 全栈）
 
-1. rsync 代码到目标机（**必须排除 `apps/worker/var/` 整目录**，否则会覆盖用户数据）
-2. **`sudo deploy/scripts/sync_env_version.sh`**（刷新 `LUMEN_VERSION` 为当次 commit hash）
-3. `bash scripts/lumenctl.sh update-lumen`（默认 pull GHCR；按阶段执行 set_image_tag -> pull_images -> migrate_db -> switch -> restart_services）
-4. 如果改了 `image-job/app.py`：`cp image-job/app.py /opt/image-job/ && systemctl restart image-job`
-5. 验证：`grep '^LUMEN_VERSION=' /opt/lumen/shared/.env` 应为当次 commit 短 hash；`bash scripts/lumenctl.sh status` 全部 healthy
+正式发布不是 rsync 当前 main。稳定更新通道读取 GitHub latest Release tag，`latest` 镜像也只由成功的 `v*` tag 发布更新。
 
-无 GHCR 访问或本地有改动时改用本地构建：
+维护者发布流程：
+
+```bash
+$EDITOR VERSION
+python3 scripts/version.py sync
+uv lock
+python3 scripts/version.py check
+bash scripts/test.sh -q
+git add .
+git commit -m "Release vX.Y.Z"
+git push origin main
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+然后等待 tag-triggered GitHub Actions `Docker Release` 成功。线上机器通过：
+
+```bash
+bash scripts/lumenctl.sh update-lumen
+```
+
+默认 stable 安装/更新不会自动回退 rolling `main`。无 GHCR 访问或本地有改动时改用本地构建：
 
 ```bash
 LUMEN_UPDATE_BUILD=1 bash scripts/lumenctl.sh update-lumen

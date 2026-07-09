@@ -37,7 +37,8 @@ import { AccountRow } from "./AccountRow";
 
 type AuthUserMaybeAdmin = AuthUser & { role?: "admin" | "member" };
 
-const APP_VERSION = `v${process.env.NEXT_PUBLIC_LUMEN_VERSION ?? pkg.version}`;
+const rawAppVersion = process.env.NEXT_PUBLIC_LUMEN_VERSION ?? pkg.version;
+const APP_VERSION = rawAppVersion.startsWith("v") ? rawAppVersion : `v${rawAppVersion}`;
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (

@@ -14,7 +14,7 @@ Type=simple
 User=lumen
 Group=lumen
 WorkingDirectory=/opt/lumen/current/apps/tgbot
-EnvironmentFile=-/opt/lumen/.env
+EnvironmentFile=-/opt/lumen/shared/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/lumen/current/.venv/bin/python -m app.main
 # 改 always 而非 on-failure：管理后台「重启 bot」按钮触发 sys.exit(0) 是 clean exit，

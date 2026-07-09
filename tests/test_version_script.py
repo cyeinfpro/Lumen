@@ -117,3 +117,37 @@ def test_version_check_requires_explicit_gate_for_main_image_tag(
     assert "image_tag" in denied.stderr
     assert "LUMEN_ALLOW_ROLLING_TAG=1" in denied.stderr
     assert allowed.returncode == 0, allowed.stderr + allowed.stdout
+
+
+def test_version_check_catches_uv_lock_drift(tmp_path: Path) -> None:
+    root = _write_minimal_version_tree(tmp_path, version="1.2.43")
+    (root / "uv.lock").write_text(
+        """
+[[package]]
+name = "lumen"
+version = "1.2.42"
+
+[[package]]
+name = "lumen-api"
+version = "1.2.43"
+
+[[package]]
+name = "lumen-core"
+version = "1.2.43"
+
+[[package]]
+name = "lumen-tgbot"
+version = "1.2.43"
+
+[[package]]
+name = "lumen-worker"
+version = "1.2.43"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = _run_check(root)
+
+    assert result.returncode == 1
+    assert "uv.lock package lumen: 1.2.42 != 1.2.43" in result.stderr
+    assert "Run: uv lock" in result.stderr
