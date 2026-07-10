@@ -10,13 +10,15 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import {
+  AlertCircle,
   Clapperboard,
+  ChevronDown,
   CircleCheck,
   Copy,
   Download,
   Film,
-  Gauge,
   ImageIcon,
+  ListVideo,
   Maximize2,
   PencilLine,
   Play,
@@ -29,9 +31,10 @@ import {
   Trash2,
   Upload,
   Video as VideoIcon,
+  X,
   XCircle,
 } from "lucide-react";
-import { motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 import {
   cancelVideoGeneration,
@@ -64,8 +67,9 @@ import type {
   VideoOptionsOut,
   VideoReferenceMediaIn,
 } from "@/lib/types";
-import { Button, Card, toast } from "@/components/ui/primitives";
+import { Button, IconButton, toast } from "@/components/ui/primitives";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { formatRmb } from "@/lib/money";
 import { DURATION, EASE } from "@/lib/motion";
 import { cn, uuid } from "@/lib/utils";
@@ -138,6 +142,8 @@ const VIDEO_PROMPT_VARIANT_COUNT = 3;
 const VIDEO_HISTORY_PAGE_SIZE = 12;
 const VIDEO_SEED_MIN = -1;
 const VIDEO_SEED_MAX = 4_294_967_295;
+const VIDEO_DRAWER_FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
 const VIDEO_PROMPT_VARIANT_TITLES = [
   "推荐镜头版",
   "动作节奏版",
@@ -306,6 +312,53 @@ function videoHistoryFilterLabel(filter: VideoHistoryFilter): string {
   return "全部";
 }
 
+function nestedVideoErrorText(value: unknown, depth = 0): string | null {
+  if (depth > 4 || value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (/^[{["]/.test(trimmed)) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        const nested = nestedVideoErrorText(parsed, depth + 1);
+        if (nested) return nested;
+      } catch {
+        // Keep the original upstream text when it is not valid JSON.
+      }
+    }
+    return trimmed;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = nestedVideoErrorText(item, depth + 1);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["message", "detail", "error_description", "error"]) {
+      const nested = nestedVideoErrorText(record[key], depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function taskErrorSummary(raw: string): string {
+  const extracted = nestedVideoErrorText(raw) ?? raw;
+  if (/specified asset is not an image/i.test(extracted)) {
+    return "参考素材不是有效图片，请检查素材类型或重新上传后再试。";
+  }
+  const normalized = extracted
+    .replace(/\\n/g, " ")
+    .replace(/\s*Request id:\s*[A-Za-z0-9_-]+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= 180) return normalized;
+  return `${normalized.slice(0, 177)}...`;
+}
+
 function actionLabel(action: VideoAction): string {
   return MODE_COPY[action]?.title ?? action.toUpperCase();
 }
@@ -358,6 +411,15 @@ function resolutionOptionsForModel(
   return options?.resolutions?.length ? options.resolutions : ["480p", "720p", "1080p"];
 }
 
+function firstAvailableDurationOptions(
+  candidates: Array<number[] | undefined>,
+): number[] {
+  for (const candidate of candidates) {
+    if (candidate?.length) return candidate;
+  }
+  return VIDEO_DURATION_OPTIONS;
+}
+
 function durationOptionsForModel(
   options: VideoOptionsOut | undefined,
   model: string,
@@ -367,11 +429,13 @@ function durationOptionsForModel(
   const modelOptions = options?.models.find((item) => item.model === model);
   const actionResolutionDurations =
     modelOptions?.durations_by_action_resolution?.[action]?.[resolution];
-  if (actionResolutionDurations?.length) return actionResolutionDurations;
   const actionDurations = modelOptions?.durations_by_action?.[action];
-  if (actionDurations?.length) return actionDurations;
-  if (modelOptions?.durations_s?.length) return modelOptions.durations_s;
-  return options?.durations_s?.length ? options.durations_s : VIDEO_DURATION_OPTIONS;
+  return firstAvailableDurationOptions([
+    actionResolutionDurations,
+    actionDurations,
+    modelOptions?.durations_s,
+    options?.durations_s,
+  ]);
 }
 
 function billingModelForAction(
@@ -398,6 +462,77 @@ function durationOrPreferred(current: number, options: number[]): number {
   return options.includes(current) ? current : preferredDuration(options);
 }
 
+type VideoPricingAction = VideoOptionsOut["pricing"][number]["action"];
+
+function estimateActionsFor(
+  action: VideoAction,
+  referenceHasVideo: boolean,
+): string[] {
+  if (action !== "reference") return [action];
+  return referenceHasVideo
+    ? ["reference_video"]
+    : ["reference_image", "reference", "i2v", "t2v"];
+}
+
+function pricingActionsFor(
+  action: VideoAction,
+  referenceHasVideo: boolean,
+): VideoPricingAction[] {
+  if (action !== "reference") return [action];
+  return referenceHasVideo
+    ? ["reference_video", "reference"]
+    : ["reference_image", "reference", "i2v"];
+}
+
+function findHoldEstimateTokens(
+  options: VideoOptionsOut | undefined,
+  modelCandidates: string[],
+  estimateActions: string[],
+  estimateKey: string,
+): unknown {
+  for (const modelCandidate of modelCandidates) {
+    const tokenMap = options?.hold_estimates?.[modelCandidate];
+    if (!tokenMap || typeof tokenMap !== "object") continue;
+    const tokenRecord = tokenMap as Record<string, unknown>;
+    for (const estimateAction of estimateActions) {
+      const actionMap = tokenRecord[estimateAction];
+      if (!actionMap || typeof actionMap !== "object") continue;
+      const tokens = (actionMap as Record<string, unknown>)[estimateKey];
+      if (tokens != null) return tokens;
+    }
+  }
+  return undefined;
+}
+
+function findVideoPrice(
+  options: VideoOptionsOut | undefined,
+  modelCandidates: string[],
+  priceActions: VideoPricingAction[],
+  resolution: string,
+): VideoOptionsOut["pricing"][number] | undefined {
+  for (const priceAction of priceActions) {
+    for (const modelCandidate of modelCandidates) {
+      const exact = options?.pricing.find(
+        (item) =>
+          item.model === modelCandidate &&
+          item.action === priceAction &&
+          item.resolution === resolution &&
+          item.enabled,
+      );
+      if (exact) return exact;
+      const generic = options?.pricing.find(
+        (item) =>
+          item.model === modelCandidate &&
+          item.action === priceAction &&
+          !item.resolution &&
+          item.enabled,
+      );
+      if (generic) return generic;
+    }
+  }
+  return undefined;
+}
+
 function estimateHoldMicro(
   options: VideoOptionsOut | undefined,
   {
@@ -419,59 +554,21 @@ function estimateHoldMicro(
   const modelCandidates = Array.from(
     new Set([billingModel, model].filter(Boolean) as string[]),
   );
-  const estimateActions =
-    action === "reference"
-      ? referenceHasVideo
-        ? ["reference_video"]
-        : ["reference_image", "reference", "i2v", "t2v"]
-      : [action];
   const estimateKey = `${resolution}:${holdEstimateDurationS(durationS)}`;
-  let tokensRaw: unknown;
-  for (const modelCandidate of modelCandidates) {
-    const tokenMap = options?.hold_estimates?.[modelCandidate];
-    if (!tokenMap || typeof tokenMap !== "object") continue;
-    const tokenRecord = tokenMap as Record<string, unknown>;
-    for (const estimateAction of estimateActions) {
-      const actionMap = tokenRecord[estimateAction];
-      if (!actionMap || typeof actionMap !== "object") continue;
-      tokensRaw = (actionMap as Record<string, unknown>)[estimateKey];
-      if (tokensRaw != null) break;
-    }
-    if (tokensRaw != null) break;
-  }
+  const tokensRaw = findHoldEstimateTokens(
+    options,
+    modelCandidates,
+    estimateActionsFor(action, Boolean(referenceHasVideo)),
+    estimateKey,
+  );
   const tokens = Number(tokensRaw);
   if (!Number.isFinite(tokens) || tokens <= 0) return null;
-  const pricingAction =
-    action === "reference"
-      ? referenceHasVideo
-        ? "reference_video"
-        : "reference_image"
-      : action;
-  const findPrice = (priceAction: VideoAction | "reference_image" | "reference_video") => {
-    for (const modelCandidate of modelCandidates) {
-      const price =
-        options?.pricing.find(
-          (item) =>
-            item.model === modelCandidate &&
-            item.action === priceAction &&
-            item.resolution === resolution &&
-            item.enabled,
-        ) ??
-        options?.pricing.find(
-          (item) =>
-            item.model === modelCandidate &&
-            item.action === priceAction &&
-            (item.resolution == null || item.resolution === "") &&
-            item.enabled,
-        );
-      if (price) return price;
-    }
-    return undefined;
-  };
-  const price =
-    findPrice(pricingAction) ??
-    (action === "reference" ? findPrice("reference") : undefined) ??
-    (action === "reference" && !referenceHasVideo ? findPrice("i2v") : undefined);
+  const price = findVideoPrice(
+    options,
+    modelCandidates,
+    pricingActionsFor(action, Boolean(referenceHasVideo)),
+    resolution,
+  );
   if (!price) return null;
   return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
 }
@@ -593,8 +690,8 @@ function promptEnhanceCandidateButtonText(
   selected: boolean,
 ): string {
   if (!canApplyPromptEnhanceCandidate(candidate)) return "仅查看";
-  if (selected) return "已用";
-  return "使用";
+  if (selected) return "已应用";
+  return "应用此版本";
 }
 
 function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
@@ -750,6 +847,81 @@ function referenceDisplayAliases(item: ReferenceDraft): string[] {
   ];
 }
 
+function referenceRoleAliases(kind: ReferenceKind, index: number): string[] {
+  if (kind === "video") {
+    return [
+      `视频素材 ${index}`,
+      `视频素材${index}`,
+      `参考视频 ${index}`,
+      `参考视频${index}`,
+      `动作参考 ${index}`,
+      `动作参考${index}`,
+      `运动参考 ${index}`,
+      `运动参考${index}`,
+    ];
+  }
+  if (kind === "audio") {
+    return [
+      `音频素材 ${index}`,
+      `音频素材${index}`,
+      `参考音频 ${index}`,
+      `参考音频${index}`,
+    ];
+  }
+  return [];
+}
+
+function numberedReferenceAliases(
+  kind: ReferenceKind,
+  index: number,
+  noun: string,
+  shortNoun: string,
+): string[] {
+  if (kind === "image") {
+    return [`第${index}张${noun}`, `第${index}张${shortNoun}`];
+  }
+  if (kind === "video") {
+    return [
+      `第${index}个${noun}`,
+      `第${index}段${noun}`,
+      `第${index}段素材`,
+      `第${index}个视频素材`,
+    ];
+  }
+  return [
+    `第${index}个${noun}`,
+    `第${index}段${noun}`,
+    `第${index}段音频素材`,
+    `第${index}个音频素材`,
+  ];
+}
+
+function chineseNumberedReferenceAliases(
+  kind: ReferenceKind,
+  zh: string | undefined,
+  noun: string,
+  shortNoun: string,
+): string[] {
+  if (!zh) return [];
+  if (kind === "image") {
+    return [`第${zh}张${noun}`, `第${zh}张${shortNoun}`];
+  }
+  if (kind === "video") {
+    return [
+      `第${zh}个${noun}`,
+      `第${zh}段${noun}`,
+      `第${zh}段素材`,
+      `第${zh}个视频素材`,
+    ];
+  }
+  return [
+    `第${zh}个${noun}`,
+    `第${zh}段${noun}`,
+    `第${zh}段音频素材`,
+    `第${zh}个音频素材`,
+  ];
+}
+
 function referenceMentionAliases(item: ReferenceDraft): string[] {
   const index = referenceRefIndex(item.ref_id, item.kind);
   if (!index) return [];
@@ -757,54 +929,16 @@ function referenceMentionAliases(item: ReferenceDraft): string[] {
   const noun = referenceKindNoun(item.kind);
   const shortNoun = referenceKindShortNoun(item.kind);
   const zh = CHINESE_DIGITS[index];
-  const videoRoleAliases =
-    item.kind === "video"
-      ? [
-          `视频素材 ${index}`,
-          `视频素材${index}`,
-          `参考视频 ${index}`,
-          `参考视频${index}`,
-          `动作参考 ${index}`,
-          `动作参考${index}`,
-          `运动参考 ${index}`,
-          `运动参考${index}`,
-        ]
-      : [];
-  const audioRoleAliases =
-    item.kind === "audio"
-      ? [
-          `音频素材 ${index}`,
-          `音频素材${index}`,
-          `参考音频 ${index}`,
-          `参考音频${index}`,
-        ]
-      : [];
   for (const alias of [
     item.label,
     `[${item.label}]`,
     `${noun} ${index}`,
     `${noun}${index}`,
     `${shortNoun}${index}`,
-    ...videoRoleAliases,
-    ...audioRoleAliases,
-    item.kind === "image" ? `第${index}张${noun}` : `第${index}个${noun}`,
-    item.kind === "image" ? `第${index}张${shortNoun}` : `第${index}段${noun}`,
-    item.kind === "video" ? `第${index}段素材` : "",
-    item.kind === "video" ? `第${index}个视频素材` : "",
-    item.kind === "audio" ? `第${index}段音频素材` : "",
-    item.kind === "audio" ? `第${index}个音频素材` : "",
-    zh && item.kind === "image" ? `第${zh}张${noun}` : "",
-    zh && item.kind === "image" ? `第${zh}张${shortNoun}` : "",
-    zh && item.kind === "video" ? `第${zh}个${noun}` : "",
-    zh && item.kind === "video" ? `第${zh}段${noun}` : "",
-    zh && item.kind === "video" ? `第${zh}段素材` : "",
-    zh && item.kind === "video" ? `第${zh}个视频素材` : "",
-    zh && item.kind === "audio" ? `第${zh}个${noun}` : "",
-    zh && item.kind === "audio" ? `第${zh}段${noun}` : "",
-    zh && item.kind === "audio" ? `第${zh}段音频素材` : "",
-    zh && item.kind === "audio" ? `第${zh}个音频素材` : "",
+    ...referenceRoleAliases(item.kind, index),
+    ...numberedReferenceAliases(item.kind, index, noun, shortNoun),
+    ...chineseNumberedReferenceAliases(item.kind, zh, noun, shortNoun),
   ]) {
-    if (typeof alias !== "string") continue;
     const clean = alias.trim();
     if (clean) aliases.add(clean);
   }
@@ -944,6 +1078,72 @@ function anchorPromptEnhanceCandidates(
   }));
 }
 
+function buildPromptEnhanceCandidates(
+  raw: string,
+  sourceText: string,
+  references: ReferenceDraft[],
+): PromptEnhanceCandidate[] {
+  return displayPromptEnhanceCandidates(
+    anchorPromptEnhanceCandidates(
+      parsePromptEnhanceCandidates(raw),
+      sourceText,
+      references,
+    ),
+    references,
+  );
+}
+
+function applyPromptEnhanceCandidateState(
+  candidates: PromptEnhanceCandidate[],
+  setPrompt: (value: string) => void,
+  setCandidates: (value: PromptEnhanceCandidate[]) => void,
+  setSelectedId: (value: string) => void,
+): { recommended: PromptEnhanceCandidate; autoApply: boolean } | null {
+  const recommended = candidates[0];
+  if (!recommended) return null;
+  const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
+  if (autoApply) setPrompt(recommended.prompt);
+  setCandidates(candidates);
+  setSelectedId(autoApply ? recommended.id : "");
+  return { recommended, autoApply };
+}
+
+function notifyCompletedPromptEnhancement(
+  recommended: PromptEnhanceCandidate,
+  autoApply: boolean,
+  candidateCount: number,
+): void {
+  if (recommended.action === "ask_first") {
+    toast.success("需要补充信息", {
+      description: "已保留原描述，请根据补问补齐后再优化。",
+    });
+    return;
+  }
+  if (recommended.action === "keep_original") {
+    toast.success("已判断为原样保留", {
+      description: "这个需求更适合保留原工作流，不自动改写。",
+    });
+    return;
+  }
+  if (recommended.action === "optional_vc" && !autoApply) {
+    toast.success("已生成可选 VC 版", {
+      description: "未自动替换原描述，可手动选择使用。",
+    });
+    return;
+  }
+  toast.success(
+    candidateCount > 1
+      ? `已生成 ${candidateCount} 个优化方案`
+      : "提示词已优化",
+  );
+}
+
+function interruptedPromptEnhanceDescription(description?: string): string {
+  return description
+    ? `${description} 已保留已生成内容，可继续编辑或重试。`
+    : "已保留已生成内容，可继续编辑或重试。";
+}
+
 function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
   if (item.url) {
     return {
@@ -960,6 +1160,195 @@ function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
     label: item.label,
     ref_id: item.ref_id,
   };
+}
+
+function referencesForVideoAction(
+  action: VideoAction,
+  references: ReferenceDraft[],
+): ReferenceDraft[] {
+  return action === "reference" ? references : [];
+}
+
+function promptForVideoAction(
+  action: VideoAction,
+  prompt: string,
+  references: ReferenceDraft[],
+): string {
+  const trimmed = prompt.trim();
+  return action === "reference"
+    ? serializePromptReferenceMentions(trimmed, references)
+    : trimmed;
+}
+
+function inputImageForVideoAction(
+  action: VideoAction,
+  inputImageId: string,
+): string | null {
+  return action === "i2v" ? inputImageId.trim() || null : null;
+}
+
+function referencePayloadForVideoAction(
+  action: VideoAction,
+  references: ReferenceDraft[],
+): VideoReferenceMediaIn[] {
+  return referencesForVideoAction(action, references).map(referenceMediaPayload);
+}
+
+type VideoHistoryReference = VideoGenerationOut["reference_media"][number];
+
+function historyReferenceDisplay(ref: VideoHistoryReference): string {
+  if (ref.url) return ref.url.replace(/^asset:\/\//i, "asset://");
+  if (ref.kind === "image") return ref.image_id?.slice(0, 8) ?? "图片";
+  if (ref.kind === "video") return ref.video_id?.slice(0, 8) ?? "视频";
+  return "音频";
+}
+
+function historyReferencePreviewUrl(ref: VideoHistoryReference): string | null {
+  if (ref.kind === "image") {
+    return (
+      cleanReferencePreviewUrl(ref.url) ??
+      (ref.image_id ? imageVariantUrl(ref.image_id, "display2048") : null)
+    );
+  }
+  if (ref.kind === "video" && ref.video_id) {
+    return videoPosterUrl(ref.video_id);
+  }
+  return null;
+}
+
+function referenceDraftFromHistory(
+  ref: VideoHistoryReference,
+  index: number,
+  references: VideoHistoryReference[],
+): ReferenceDraft {
+  const kindIndex = references
+    .slice(0, index + 1)
+    .filter((current) => current.kind === ref.kind).length;
+  const fallbackLabel = referenceLabel(ref.kind, kindIndex);
+  return {
+    _key: uuid(),
+    kind: ref.kind,
+    image_id: ref.kind === "image" ? ref.image_id ?? null : null,
+    video_id: ref.kind === "video" ? ref.video_id ?? null : null,
+    url: ref.url ?? null,
+    label: ref.label || fallbackLabel,
+    ref_id: ref.ref_id || referenceRefId(ref.kind, kindIndex),
+    display: historyReferenceDisplay(ref),
+    previewUrl: historyReferencePreviewUrl(ref),
+  };
+}
+
+function videoConfigurationIssue({
+  createPending,
+  optionsLoading,
+  options,
+  selectedModel,
+  availableResolutions,
+  resolution,
+  availableDurations,
+  durationS,
+}: {
+  createPending: boolean;
+  optionsLoading: boolean;
+  options: VideoOptionsOut | undefined;
+  selectedModel: string;
+  availableResolutions: string[];
+  resolution: string;
+  availableDurations: number[];
+  durationS: number;
+}): string | null {
+  if (createPending) return "正在提交";
+  if (optionsLoading) return "正在读取配置";
+  if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
+  if (!selectedModel) return "没有可用模型";
+  if (!availableResolutions.includes(resolution)) return "当前模型不支持该分辨率";
+  if (!availableDurations.includes(durationS)) return "当前模型不支持该时长";
+  return null;
+}
+
+function videoInputIssue({
+  prompt,
+  action,
+  inputImageId,
+  referenceCount,
+  referenceLimitError,
+}: {
+  prompt: string;
+  action: VideoAction;
+  inputImageId: string;
+  referenceCount: number;
+  referenceLimitError: string | null;
+}): string | null {
+  if (!prompt.trim()) return "先填写描述";
+  if (action === "i2v" && !inputImageId.trim()) return "需要上传首帧或填写图片 ID";
+  if (action === "reference" && referenceCount === 0) return "先添加参考素材";
+  if (action === "reference" && referenceLimitError) return referenceLimitError;
+  return null;
+}
+
+function videoEstimateIssue(
+  seedIsValid: boolean,
+  estimate: { tokens: number; micro: number } | null,
+): string | null {
+  if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
+  if (estimate === null) return "缺少预扣估算";
+  return null;
+}
+
+function videoSubmitDisabledReason({
+  createPending,
+  optionsLoading,
+  options,
+  selectedModel,
+  availableResolutions,
+  resolution,
+  availableDurations,
+  durationS,
+  prompt,
+  action,
+  inputImageId,
+  referenceCount,
+  referenceLimitError,
+  seedIsValid,
+  estimate,
+}: {
+  createPending: boolean;
+  optionsLoading: boolean;
+  options: VideoOptionsOut | undefined;
+  selectedModel: string;
+  availableResolutions: string[];
+  resolution: string;
+  availableDurations: number[];
+  durationS: number;
+  prompt: string;
+  action: VideoAction;
+  inputImageId: string;
+  referenceCount: number;
+  referenceLimitError: string | null;
+  seedIsValid: boolean;
+  estimate: { tokens: number; micro: number } | null;
+}): string {
+  return (
+    videoConfigurationIssue({
+      createPending,
+      optionsLoading,
+      options,
+      selectedModel,
+      availableResolutions,
+      resolution,
+      availableDurations,
+      durationS,
+    }) ??
+    videoInputIssue({
+      prompt,
+      action,
+      inputImageId,
+      referenceCount,
+      referenceLimitError,
+    }) ??
+    videoEstimateIssue(seedIsValid, estimate) ??
+    "可以提交"
+  );
 }
 
 export default function VideoPage() {
@@ -1000,10 +1389,15 @@ export default function VideoPage() {
   const [selectedPromptEnhanceCandidateId, setSelectedPromptEnhanceCandidateId] =
     useState("");
   const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
+  const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
   const promptEnhancePanelVisible =
     isEnhancingPrompt ||
     Boolean(promptEnhancePreview.trim()) ||
     promptEnhanceCandidates.length > 0;
+  useBodyScrollLock(isTaskPanelOpen, {
+    bodyOverscrollBehavior: "none",
+    documentOverscrollBehavior: "none",
+  });
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -1470,15 +1864,9 @@ export default function VideoPage() {
       createVideoGeneration({
         action,
         model: selectedModel,
-        prompt:
-          action === "reference"
-            ? serializePromptReferenceMentions(prompt.trim(), referenceMedia)
-            : prompt.trim(),
-        input_image_id: action === "i2v" ? inputImageId.trim() : null,
-        reference_media:
-          action === "reference"
-            ? referenceMedia.map(referenceMediaPayload)
-            : [],
+        prompt: promptForVideoAction(action, prompt, referenceMedia),
+        input_image_id: inputImageForVideoAction(action, inputImageId),
+        reference_media: referencePayloadForVideoAction(action, referenceMedia),
         duration_s: effectiveDurationS,
         resolution: toVideoResolution(effectiveResolution),
         aspect_ratio: aspectRatio,
@@ -1489,6 +1877,7 @@ export default function VideoPage() {
     onSuccess: (gen) => {
       terminalHistorySyncedRef.current.delete(gen.id);
       setItems((prev) => mergeById(prev, [gen]));
+      setIsTaskPanelOpen(true);
       toast.success("任务已提交");
       scheduleGenerationRefresh(gen.id, { delayMs: 800 });
       void qc.invalidateQueries({ queryKey: ["video", "generations"] });
@@ -1548,38 +1937,9 @@ export default function VideoPage() {
     setSeed(item.seed != null ? String(item.seed) : "");
     setInputImageId(item.input_image_id ?? "");
     setUploadedLabel(item.input_image_id ? "已从历史任务载入" : "");
-    const draftReferenceMedia = item.reference_media.map((ref, index) => {
-        const kindIndex =
-          item.reference_media
-            .slice(0, index + 1)
-            .filter((current) => current.kind === ref.kind).length;
-        const fallbackLabel = referenceLabel(ref.kind, kindIndex);
-        const label = ref.label || fallbackLabel;
-        return {
-          _key: uuid(),
-          kind: ref.kind,
-          image_id: ref.kind === "image" ? ref.image_id ?? null : null,
-          video_id: ref.kind === "video" ? ref.video_id ?? null : null,
-          url: ref.url ?? null,
-          label,
-          ref_id: ref.ref_id || referenceRefId(ref.kind, kindIndex),
-          display:
-            ref.url
-              ? ref.url.replace(/^asset:\/\//i, "asset://")
-              : ref.kind === "image"
-              ? ref.image_id?.slice(0, 8) ?? "图片"
-              : ref.kind === "video"
-              ? ref.video_id?.slice(0, 8) ?? "视频"
-              : "音频",
-          previewUrl:
-            ref.kind === "image"
-              ? cleanReferencePreviewUrl(ref.url) ??
-                (ref.image_id ? imageVariantUrl(ref.image_id, "display2048") : null)
-              : ref.kind === "video" && ref.video_id
-              ? videoPosterUrl(ref.video_id)
-              : null,
-        };
-      });
+    const draftReferenceMedia = item.reference_media.map((ref, index) =>
+      referenceDraftFromHistory(ref, index, item.reference_media),
+    );
     setReferenceMedia(draftReferenceMedia);
     setPrompt(displayPromptReferenceMentions(item.prompt, draftReferenceMedia));
     requestAnimationFrame(() => promptRef.current?.focus());
@@ -1595,11 +1955,8 @@ export default function VideoPage() {
   const enhancePromptAction = useCallback(async () => {
     if (isEnhancingPrompt || !canEnhancePrompt) return;
     const original = prompt;
-    const activeReferenceMedia = action === "reference" ? referenceMedia : [];
-    const current =
-      action === "reference"
-        ? serializePromptReferenceMentions(prompt.trim(), activeReferenceMedia)
-        : prompt.trim();
+    const activeReferenceMedia = referencesForVideoAction(action, referenceMedia);
+    const current = promptForVideoAction(action, prompt, activeReferenceMedia);
     const ctl = new AbortController();
     promptEnhanceAbortRef.current?.abort();
     promptEnhanceAbortRef.current = ctl;
@@ -1616,12 +1973,9 @@ export default function VideoPage() {
           resolution: effectiveResolution,
           aspect_ratio: aspectRatio,
           generate_audio: generateAudio,
-          input_image_id: action === "i2v" ? inputImageId.trim() || null : null,
+          input_image_id: inputImageForVideoAction(action, inputImageId),
           variant_count: VIDEO_PROMPT_VARIANT_COUNT,
-          reference_media:
-            action === "reference"
-              ? referenceMedia.map(referenceMediaPayload)
-              : [],
+          reference_media: referencePayloadForVideoAction(action, referenceMedia),
         },
         (delta) => {
           if (ctl.signal.aborted || promptEnhanceAbortRef.current !== ctl) return;
@@ -1632,42 +1986,24 @@ export default function VideoPage() {
         },
         ctl.signal,
       );
-      const candidates = displayPromptEnhanceCandidates(
-        anchorPromptEnhanceCandidates(
-          parsePromptEnhanceCandidates(accumulated),
-          current,
-          activeReferenceMedia,
-        ),
+      const candidates = buildPromptEnhanceCandidates(
+        accumulated,
+        current,
         activeReferenceMedia,
       );
-      const recommended = candidates[0];
-      if (recommended) {
-        const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
-        if (autoApply) {
-          setPrompt(recommended.prompt);
-        }
-        setPromptEnhanceCandidates(candidates);
-        setSelectedPromptEnhanceCandidateId(autoApply ? recommended.id : "");
+      const applied = applyPromptEnhanceCandidateState(
+        candidates,
+        setPrompt,
+        setPromptEnhanceCandidates,
+        setSelectedPromptEnhanceCandidateId,
+      );
+      if (applied) {
         setPromptEnhancePreview("");
-        if (recommended.action === "ask_first") {
-          toast.success("需要补充信息", {
-            description: "已保留原描述，请根据补问补齐后再优化。",
-          });
-        } else if (recommended.action === "keep_original") {
-          toast.success("已判断为原样保留", {
-            description: "这个需求更适合保留原工作流，不自动改写。",
-          });
-        } else if (recommended.action === "optional_vc" && !autoApply) {
-          toast.success("已生成可选 VC 版", {
-            description: "未自动替换原描述，可手动选择使用。",
-          });
-        } else {
-          toast.success(
-            candidates.length > 1
-              ? `已生成 ${candidates.length} 个优化方案`
-              : "提示词已优化",
-          );
-        }
+        notifyCompletedPromptEnhancement(
+          applied.recommended,
+          applied.autoApply,
+          candidates.length,
+        );
       } else {
         setPromptEnhancePreview("");
         toast.error("优化失败", { description: "没有收到有效提示词" });
@@ -1677,23 +2013,18 @@ export default function VideoPage() {
       if (!ctl.signal.aborted) {
         const description = err instanceof Error ? err.message : undefined;
         if (accumulated.trim()) {
-          const candidates = displayPromptEnhanceCandidates(
-            anchorPromptEnhanceCandidates(
-              parsePromptEnhanceCandidates(accumulated),
-              current,
-              activeReferenceMedia,
-            ),
+          const candidates = buildPromptEnhanceCandidates(
+            accumulated,
+            current,
             activeReferenceMedia,
           );
-          const recommended = candidates[0];
-          if (recommended) {
-            const autoApply = shouldAutoApplyPromptEnhanceCandidate(recommended);
-            if (autoApply) {
-              setPrompt(recommended.prompt);
-            }
-            setPromptEnhanceCandidates(candidates);
-            setSelectedPromptEnhanceCandidateId(autoApply ? recommended.id : "");
-          } else {
+          const applied = applyPromptEnhanceCandidateState(
+            candidates,
+            setPrompt,
+            setPromptEnhanceCandidates,
+            setSelectedPromptEnhanceCandidateId,
+          );
+          if (!applied) {
             setPrompt(
               displayPromptReferenceMentions(
                 cleanPromptEnhanceText(accumulated),
@@ -1703,9 +2034,7 @@ export default function VideoPage() {
           }
           setPromptEnhancePreview("");
           toast.error("优化中断", {
-            description: description
-              ? `${description} 已保留已生成内容，可继续编辑或重试。`
-              : "已保留已生成内容，可继续编辑或重试。",
+            description: interruptedPromptEnhanceDescription(description),
           });
         } else {
           toast.error("优化失败", { description });
@@ -1745,7 +2074,7 @@ export default function VideoPage() {
       if (!canApplyPromptEnhanceCandidate(candidate)) return;
       setPrompt(candidate.prompt);
       setSelectedPromptEnhanceCandidateId(candidate.id);
-      requestAnimationFrame(() => promptRef.current?.focus());
+      requestAnimationFrame(() => promptRef.current?.focus({ preventScroll: true }));
     },
     [],
   );
@@ -1762,24 +2091,47 @@ export default function VideoPage() {
     [action, clearPromptEnhanceSelection, referenceMedia],
   );
 
+  const resizePromptEditor = useCallback(() => {
+    const target = promptRef.current;
+    if (!target) return;
+    target.style.height = "0px";
+    target.style.height = `${target.scrollHeight}px`;
+  }, []);
+
+  useEffect(() => {
+    resizePromptEditor();
+  }, [prompt, resizePromptEditor]);
+
+  useEffect(() => {
+    window.addEventListener("resize", resizePromptEditor);
+    return () => window.removeEventListener("resize", resizePromptEditor);
+  }, [resizePromptEditor]);
+
+  const scrollParametersIntoView = useCallback(() => {
+    document.getElementById("video-generation-settings")?.scrollIntoView({
+      behavior: motionSafeScrollBehavior(),
+      block: "start",
+    });
+  }, []);
+
   const submitDisabledReason = useMemo(() => {
-    if (createMut.isPending) return "正在提交";
-    if (optionsQ.isLoading) return "正在读取配置";
-    if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
-    if (!selectedModel) return "没有可用模型";
-    if (!availableResolutions.includes(effectiveResolution)) return "当前模型不支持该分辨率";
-    if (!availableDurations.includes(effectiveDurationS)) return "当前模型不支持该时长";
-    if (!prompt.trim()) return "先填写描述";
-    if (action === "i2v" && !inputImageId.trim()) return "需要上传首帧或填写图片 ID";
-    if (action === "reference" && referenceMedia.length === 0) {
-      return "先添加参考素材";
-    }
-    if (action === "reference" && referenceLimitError) {
-      return referenceLimitError;
-    }
-    if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
-    if (estimate === null) return "缺少预扣估算";
-    return "可以提交";
+    return videoSubmitDisabledReason({
+      createPending: createMut.isPending,
+      optionsLoading: optionsQ.isLoading,
+      options,
+      selectedModel,
+      availableResolutions,
+      resolution: effectiveResolution,
+      availableDurations,
+      durationS: effectiveDurationS,
+      prompt,
+      action,
+      inputImageId,
+      referenceCount: referenceMedia.length,
+      referenceLimitError,
+      seedIsValid,
+      estimate,
+    });
   }, [
     action,
     availableDurations,
@@ -1788,8 +2140,7 @@ export default function VideoPage() {
     effectiveDurationS,
     estimate,
     inputImageId,
-    options?.enabled,
-    options?.unavailable_reason,
+    options,
     optionsQ.isLoading,
     prompt,
     referenceLimitError,
@@ -1837,7 +2188,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1520px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[calc(var(--mobile-tabbar-height)+1rem)] pt-2 md:h-[calc(100dvh-3rem)] md:overflow-y-auto md:px-5 md:pb-4 xl:overflow-hidden">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[calc(var(--mobile-tabbar-height)+1rem)] pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1845,502 +2196,423 @@ export default function VideoPage() {
           enabled={serviceEnabled}
           loading={optionsQ.isLoading}
           activeCount={activeItems.length}
-          completedCount={completedVideoItems.length}
+          historyCount={settledHistoryItems.length}
           serviceSummary={serviceSummary}
           submitState={submitDisabledReason}
+          onOpenParameters={scrollParametersIntoView}
+          onOpenTasks={() => setIsTaskPanelOpen(true)}
         />
 
-        <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] xl:items-stretch">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_300px] md:items-start lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="min-w-0">
-            <Card
-              variant="subtle"
-              elevation={2}
-              padding="none"
-              className="flex h-full min-h-0 flex-col overflow-hidden border-[var(--border)]"
-            >
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 pb-[calc(var(--mobile-tabbar-height)+2rem)] sm:p-4 sm:pb-[calc(var(--mobile-tabbar-height)+2rem)] md:pb-4 xl:pb-6">
-                <div className="space-y-1.5">
-                  <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
-                    {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
-                      <ModeCard
-                        key={key}
-                        actionKey={key}
-                        selected={action === key}
-                        onSelect={() => {
-                          clearPromptEnhanceChoices();
-                          const nextModel = firstModelForAction(options, key);
-                          const nextResolutions = resolutionOptionsForModel(
-                            options,
-                            nextModel,
-                          );
-                          const nextResolution = nextResolutions.includes(resolution)
-                            ? resolution
-                            : preferredResolution(nextResolutions);
-                          const nextDurations = durationOptionsForModel(
-                            options,
-                            nextModel,
-                            key,
-                            nextResolution,
-                          );
-                          setAction(key);
-                          setModel(nextModel);
-                          setDurationS((prev) =>
-                            durationOrPreferred(prev, nextDurations),
-                          );
-                        }}
-                      />
-                    ))}
+            <div className="flex flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 shadow-[var(--shadow-2)] backdrop-blur-xl">
+              <div className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/86 p-2.5 sm:p-3">
+                <div className="mb-2 flex flex-wrap items-end justify-between gap-2 px-1">
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--fg-0)]">生成方式</p>
+                    <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                      {MODE_COPY[action].description}
+                    </p>
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-[var(--fg-2)]">
-                    <span className="min-w-0 flex-1">{MODE_COPY[action].description}</span>
-                    <span className="shrink-0 font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
-                  </div>
+                  <span className="text-xs font-medium text-[var(--fg-1)]">
+                    {MODE_COPY[action].requirement}
+                  </span>
                 </div>
-
-                <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)] xl:items-start">
-                  <div className="min-w-0 space-y-3">
-                    {action === "i2v" && (
-                      <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-2.5 shadow-[var(--shadow-1)]">
-                        <input
-                          ref={fileRef}
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/mpo"
-                          className="hidden"
-                          onChange={(event) => {
-                            const file = event.target.files?.[0];
-                            if (file) uploadMut.mutate(file);
-                            event.target.value = "";
-                          }}
-                        />
-                        <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.38fr)] lg:items-end">
-                          <button
-                            type="button"
-                            onClick={() => fileRef.current?.click()}
-                            disabled={uploadMut.isPending}
-                            className="group flex min-h-14 items-center gap-3 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-3 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
-                          >
-                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-                              {uploadMut.isPending ? (
-                                <RefreshCw className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <Upload className="h-4 w-4" />
-                              )}
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-sm font-semibold text-[var(--fg-0)]">
-                                {inputImageId ? "替换首帧" : "上传首帧图片"}
-                              </span>
-                              <span className="mt-1 block truncate text-xs font-medium text-[var(--fg-1)]">
-                                {uploadedLabel || inputImageId
-                                  ? uploadedLabel || "已填写图片 ID"
-                                  : "尚未选择首帧"}
-                              </span>
-                            </span>
-                          </button>
-                          <label className="space-y-1.5">
-                            <span className="type-caption text-[var(--fg-2)]">已有图片 ID</span>
-                            <input
-                              value={inputImageId}
-                              onChange={(event) => {
-                                clearPromptEnhanceChoices();
-                                setInputImageId(event.target.value);
-                                setUploadedLabel("");
-                              }}
-                              placeholder="image_id"
-                              className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                            />
-                            <span className="block text-xs leading-5 text-[var(--fg-2)]">
-                              从历史或接口复制 ID 时可直接粘贴。
-                            </span>
-                          </label>
-                        </div>
-                      </div>
-                    )}
-
-                    {action === "reference" && (
-                      <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-2.5 shadow-[var(--shadow-1)]">
-                        <input
-                          ref={referenceFileRef}
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/mpo,video/mp4,video/quicktime"
-                          className="hidden"
-                          onChange={(event) => {
-                            const file = event.target.files?.[0];
-                            if (file) referenceUploadMut.mutate(file);
-                            event.target.value = "";
-                          }}
-                        />
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => referenceFileRef.current?.click()}
-                            disabled={referenceUploadMut.isPending}
-                            className="group inline-flex min-h-10 shrink-0 items-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 px-3 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
-                          >
-                            {referenceUploadMut.isPending ? (
-                              <RefreshCw className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
-                            ) : (
-                              <Upload className="h-3.5 w-3.5 text-[var(--accent)]" />
-                            )}
-                            <span className="text-sm font-semibold text-[var(--fg-0)]">
-                              上传参考
-                            </span>
-                          </button>
-                          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                            图片 {referenceCounts.image}/{referenceLimits.image}
-                          </span>
-                          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                            视频 {referenceCounts.video}/{referenceLimits.video}
-                          </span>
-                          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                            音频 {referenceCounts.audio}/{referenceLimits.audio}
-                          </span>
-                          <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto lg:min-w-[360px] lg:flex-1">
-                            <div className="inline-flex h-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-0.5">
-                              {assetReferenceKindOptions.map((kind) => {
-                                const active = selectedAssetReferenceKind === kind;
-                                return (
-                                  <button
-                                    key={kind}
-                                    type="button"
-                                    aria-pressed={active}
-                                    onClick={() => setAssetReferenceKind(kind)}
-                                    className={cn(
-                                      "inline-flex min-w-12 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
-                                      active
-                                        ? "bg-[var(--accent)] text-[var(--accent-on)]"
-                                        : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-                                    )}
-                                  >
-                                    {referenceKindNoun(kind)}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            <div className="relative min-w-[180px] flex-1">
-                              <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
-                              <input
-                                value={assetUrlInput}
-                                onChange={(event) => setAssetUrlInput(event.target.value)}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    addAssetReference();
-                                  }
-                                }}
-                                placeholder="asset://asset-..."
-                                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                              />
-                            </div>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={!assetUrlInput.trim()}
-                              onClick={addAssetReference}
-                            >
-                              添加官方素材
-                            </Button>
-                          </div>
-                          <div className="flex min-w-[180px] flex-1 gap-2 overflow-x-auto py-1">
-                            {referenceMedia.map((item) => (
-                              <ReferenceChip
-                                key={item._key}
-                                item={item}
-                                active={promptContainsReferenceMention(prompt, item)}
-                                onInsert={() => insertReferenceTag(item)}
-                                onPreview={() => setReferencePreviewItem(item)}
-                                onRemove={() => {
-                                  clearPromptEnhanceChoices();
-                                  setReferencePreviewItem((current) =>
-                                    current?._key === item._key ? null : current,
-                                  );
-                                  setReferenceMedia((prev) =>
-                                    prev.filter((ref) => ref._key !== item._key),
-                                  );
-                                }}
-                              />
-                            ))}
-                            {referenceMedia.length === 0 && (
-                              <span className="shrink-0 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
-                                未添加参考素材
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="type-caption text-[var(--fg-2)]">提示词</span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                            {prompt.length.toLocaleString()} / 10,000
-                          </span>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            loading={isEnhancingPrompt}
-                            disabled={!canEnhancePrompt}
-                            onClick={() => void enhancePromptAction()}
-                            leftIcon={<PencilLine className="h-3.5 w-3.5" />}
-                          >
-                            优化
-                          </Button>
-                        </div>
-                      </div>
-                      <textarea
-                        ref={promptRef}
-                        value={prompt}
-                        onChange={(event) => handlePromptChange(event.target.value)}
-                        readOnly={isEnhancingPrompt}
-                        rows={6}
-                        maxLength={10000}
-                        placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
-                        className={cn(
-                          "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[240px]",
-                          isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
-                        )}
-                      />
-                      {promptEnhancePanelVisible && (
-                        <div className="scroll-mt-4 md:scroll-mt-6">
-                          <PromptEnhanceChooser
-                            loading={isEnhancingPrompt}
-                            preview={promptEnhancePreview}
-                            candidates={promptEnhanceCandidates}
-                            selectedId={selectedPromptEnhanceCandidateId}
-                            onSelect={applyPromptEnhanceCandidate}
-                            onDismiss={clearPromptEnhanceChoices}
-                            onReturnToEditor={scrollPromptEditorIntoView}
-                          />
-                        </div>
-                      )}
-                      <div className="flex flex-wrap gap-2 pb-1">
-                        {PROMPT_CHIPS.map((chip) => (
-                          <button
-                            key={chip}
-                            type="button"
-                            disabled={isEnhancingPrompt}
-                            onClick={() => insertPromptText(chip)}
-                            className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
-                          >
-                            {chip}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <VideoParameterPanel
-                    className="xl:sticky xl:top-4"
-                    selectedModel={selectedModel}
-                    modelOptions={modelOptionValues}
-                    durationS={effectiveDurationS}
-                    durationOptions={durationOptionValues}
-                    resolution={effectiveResolution}
-                    resolutionOptions={availableResolutions}
-                    aspectRatio={aspectRatio}
-                    aspectRatioOptions={aspectRatioOptionValues}
-                    seed={seed}
-                    generateAudio={generateAudio}
-                    estimate={estimate}
-                    canSubmit={canSubmit}
-                    reason={submitDisabledReason}
-                    loading={createMut.isPending}
-                    sourceReady={sourceReady}
-                    onSubmit={() => createMut.mutate()}
-                    onModelChange={(value) => {
-                      clearPromptEnhanceChoices();
-                      const nextResolutions = resolutionOptionsForModel(
-                        options,
-                        value,
-                      );
-                      const nextResolution = nextResolutions.includes(resolution)
-                        ? resolution
-                        : preferredResolution(nextResolutions);
-                      const nextDurations = durationOptionsForModel(
-                        options,
-                        value,
-                        action,
-                        nextResolution,
-                      );
-                      setModel(value);
-                      setDurationS((prev) =>
-                        durationOrPreferred(prev, nextDurations),
-                      );
-                    }}
-                    onDurationChange={(value) => {
-                      clearPromptEnhanceChoices();
-                      setDurationS(Number(value));
-                    }}
-                    onResolutionChange={(value) => {
-                      clearPromptEnhanceChoices();
-                      const nextDurations = durationOptionsForModel(
-                        options,
-                        selectedModel,
-                        action,
-                        value,
-                      );
-                      setResolution(value);
-                      setDurationS((prev) =>
-                        durationOrPreferred(prev, nextDurations),
-                      );
-                    }}
-                    onAspectRatioChange={(value) => {
-                      clearPromptEnhanceChoices();
-                      setAspectRatio(value);
-                    }}
-                    onSeedChange={setSeed}
-                    onGenerateAudioChange={(value) => {
-                      clearPromptEnhanceChoices();
-                      setGenerateAudio(value);
-                    }}
-                  />
+                <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/74 p-1">
+                  {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
+                    <ModeCard
+                      key={key}
+                      actionKey={key}
+                      selected={action === key}
+                      onSelect={() => {
+                        clearPromptEnhanceChoices();
+                        const nextModel = firstModelForAction(options, key);
+                        const nextResolutions = resolutionOptionsForModel(
+                          options,
+                          nextModel,
+                        );
+                        const nextResolution = nextResolutions.includes(resolution)
+                          ? resolution
+                          : preferredResolution(nextResolutions);
+                        const nextDurations = durationOptionsForModel(
+                          options,
+                          nextModel,
+                          key,
+                          nextResolution,
+                        );
+                        setAction(key);
+                        setModel(nextModel);
+                        setDurationS((prev) =>
+                          durationOrPreferred(prev, nextDurations),
+                        );
+                      }}
+                    />
+                  ))}
                 </div>
               </div>
-            </Card>
-          </section>
 
-          <section className="min-w-0 space-y-4 xl:sticky xl:top-4">
-            <Card
-              variant="subtle"
-              elevation={2}
-              padding="none"
-              className="flex min-h-[420px] flex-col border-[var(--border)] xl:h-[min(720px,calc(100dvh-5rem))] xl:overflow-hidden"
-            >
-              <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3 sm:p-4">
-                <span aria-hidden="true" className="absolute left-0 top-3 h-7 w-1 rounded-r-full bg-[var(--accent)]" />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Clapperboard className="h-4 w-4 text-[var(--fg-2)]" />
-                    <p className="type-card-title">任务</p>
-                  </div>
-                  <p className="mt-1 text-xs text-[var(--fg-2)]">
-                    进行中与历史记录
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
-                    {activeItems.length} 活跃
-                  </span>
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
-                    {historyQ.isLoading
-                      ? "读取中"
-                      : `${settledHistoryItems.length}${historyQ.hasNextPage ? "+" : ""} 历史`}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void historyQ.refetch()}
-                    leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-                  >
-                    刷新
-                  </Button>
-                </div>
-              </div>
-              <div className="space-y-5 p-4 pr-3 sm:p-5 sm:pr-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
-                {activeItems.length > 0 && (
-                  <section className="space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="type-caption text-[var(--fg-2)]">正在进行</p>
-                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                        {activeItems.length} 条
+              <div className="space-y-3 p-3 pb-[calc(var(--mobile-tabbar-height)+2rem)] sm:p-4 sm:pb-[calc(var(--mobile-tabbar-height)+2rem)] md:pb-5 lg:pb-6">
+                {action === "i2v" && (
+                  <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/66">
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/mpo"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) uploadMut.mutate(file);
+                        event.target.value = "";
+                      }}
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <ImageIcon className="h-4 w-4 text-[var(--accent)]" />
+                        <p className="text-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
+                      </div>
+                      <span className="text-xs text-[var(--fg-2)]">
+                        用图片确定构图与起始状态
                       </span>
                     </div>
-                    <div className="grid gap-3">
-                      {activeItems.map((item) => (
-                        <TaskRow
-                          key={item.id}
-                          item={item}
-                          onCancel={() => cancelMut.mutate(item.id)}
-                          onRetry={() => retryMut.mutate(item.id)}
-                          retryDisabled={retryMut.isPending}
-                          onCopy={() => {
-                            void navigator.clipboard?.writeText(item.prompt);
-                            toast.success("描述已复制");
+                    <div className="grid gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.42fr)] lg:items-end">
+                      <button
+                        type="button"
+                        onClick={() => fileRef.current?.click()}
+                        disabled={uploadMut.isPending}
+                        className="group flex min-h-16 items-center gap-3 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/72 p-3 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+                      >
+                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                          {uploadMut.isPending ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Upload className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-[var(--fg-0)]">
+                            {inputImageId ? "替换首帧" : "上传首帧图片"}
+                          </span>
+                          <span className="mt-1 block truncate text-xs text-[var(--fg-2)]">
+                            {uploadedLabel || inputImageId
+                              ? uploadedLabel || "已填写图片 ID"
+                              : "PNG、JPEG、WEBP"}
+                          </span>
+                        </span>
+                      </button>
+                      <label className="space-y-1.5">
+                        <span className="type-caption text-[var(--fg-2)]">或粘贴图片 ID</span>
+                        <input
+                          value={inputImageId}
+                          onChange={(event) => {
+                            clearPromptEnhanceChoices();
+                            setInputImageId(event.target.value);
+                            setUploadedLabel("");
                           }}
-                          onUseDraft={() => loadAsDraft(item)}
-                          showPreview={false}
+                          placeholder="image_id"
+                          className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
                         />
-                      ))}
+                      </label>
                     </div>
                   </section>
                 )}
 
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="type-caption text-[var(--fg-2)]">历史记录</p>
-                    <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                      {historyQ.isLoading
-                        ? "读取中"
-                        : `${filteredHistoryItems.length}${historyQ.hasNextPage ? "+" : ""} 条`}
-                    </span>
-                  </div>
-                  <HistoryFilterTabs
-                    value={historyFilter}
-                    counts={{
-                      all: settledHistoryItems.length,
-                      succeeded: succeededHistoryItems.length,
-                      failed: failedHistoryItems.length,
-                    }}
-                    loading={historyQ.isLoading}
-                    onChange={setHistoryFilter}
-                  />
-                  <div className="grid gap-3">
-                    {filteredHistoryItems.map((item) => (
-                      <TaskRow
-                        key={item.id}
-                        item={item}
-                        onCancel={() => cancelMut.mutate(item.id)}
-                        onRetry={() => retryMut.mutate(item.id)}
-                        retryDisabled={retryMut.isPending}
-                        onCopy={() => {
-                          void navigator.clipboard?.writeText(item.prompt);
-                          toast.success("描述已复制");
-                        }}
-                        onUseDraft={() => loadAsDraft(item)}
-                        onDelete={() => item.video && deleteMut.mutate(item.video.id)}
-                        onPreview={hasVideo(item) ? () => setSelectedVideoId(item.video.id) : undefined}
-                        selected={selectedVideoId === item.video?.id}
-                        showPreview={false}
-                      />
-                    ))}
-                    {filteredHistoryItems.length === 0 && (
-                      <EmptyPanel
-                        icon={<Film className="h-5 w-5" />}
-                        title={
-                          historyQ.isLoading
-                            ? "读取中"
-                            : `暂无${videoHistoryFilterLabel(historyFilter)}记录`
-                        }
-                        description={
-                          activeItems.length > 0
-                            ? "当前任务完成后会进入历史。"
-                            : historyFilter === "all"
-                              ? "提交记录会保留状态、参数和结果。"
-                              : "切换标签可查看其他状态的记录。"
-                        }
-                      />
-                    )}
-                    {historyQ.hasNextPage && (
+                {action === "reference" && (
+                  <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/66">
+                    <input
+                      ref={referenceFileRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/mpo,video/mp4,video/quicktime"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) referenceUploadMut.mutate(file);
+                        event.target.value = "";
+                      }}
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <VideoIcon className="h-4 w-4 text-[var(--accent)]" />
+                        <p className="text-sm font-semibold text-[var(--fg-0)]">参考素材</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--fg-2)]">
+                        <span>图片 {referenceCounts.image}/{referenceLimits.image}</span>
+                        <span>视频 {referenceCounts.video}/{referenceLimits.video}</span>
+                        <span>音频 {referenceCounts.audio}/{referenceLimits.audio}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-3 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          loading={referenceUploadMut.isPending}
+                          onClick={() => referenceFileRef.current?.click()}
+                          leftIcon={<Upload className="h-3.5 w-3.5" />}
+                        >
+                          上传参考
+                        </Button>
+                        <p className="min-w-0 flex-1 text-xs leading-5 text-[var(--fg-2)]">
+                          点击素材可预览，点击文字可将 @图片1 / @视频1 插入描述。
+                        </p>
+                      </div>
+                      <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
+                        {referenceMedia.map((item) => (
+                          <ReferenceChip
+                            key={item._key}
+                            item={item}
+                            active={promptContainsReferenceMention(prompt, item)}
+                            onInsert={() => insertReferenceTag(item)}
+                            onPreview={() => setReferencePreviewItem(item)}
+                            onRemove={() => {
+                              clearPromptEnhanceChoices();
+                              setReferencePreviewItem((current) =>
+                                current?._key === item._key ? null : current,
+                              );
+                              setReferenceMedia((prev) =>
+                                prev.filter((ref) => ref._key !== item._key),
+                              );
+                            }}
+                          />
+                        ))}
+                        {referenceMedia.length === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => referenceFileRef.current?.click()}
+                            className="flex min-h-24 min-w-[240px] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]"
+                          >
+                            <Upload className="h-4 w-4" />
+                            添加图片或视频参考
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <details className="group border-t border-[var(--border-subtle)]">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+                        <span className="inline-flex items-center gap-2">
+                          <Tags className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+                          添加官方素材 ID
+                        </span>
+                        <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                      </summary>
+                      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/56 p-3">
+                        <div className="inline-flex h-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-0.5">
+                          {assetReferenceKindOptions.map((kind) => {
+                            const active = selectedAssetReferenceKind === kind;
+                            return (
+                              <button
+                                key={kind}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setAssetReferenceKind(kind)}
+                                className={cn(
+                                  "inline-flex min-w-12 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
+                                  active
+                                    ? "bg-[var(--accent)] text-[var(--accent-on)]"
+                                    : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                                )}
+                              >
+                                {referenceKindNoun(kind)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="relative min-w-[190px] flex-1">
+                          <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
+                          <input
+                            value={assetUrlInput}
+                            onChange={(event) => setAssetUrlInput(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                addAssetReference();
+                              }
+                            }}
+                            placeholder="asset://asset-..."
+                            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+                          />
+                        </div>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={!assetUrlInput.trim()}
+                          onClick={addAssetReference}
+                        >
+                          添加素材
+                        </Button>
+                      </div>
+                    </details>
+                  </section>
+                )}
+
+                <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/72 shadow-[var(--shadow-1)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5 sm:px-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[var(--fg-0)]">镜头描述</p>
+                      <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                        描述主体、动作、运镜与时间推进
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                        {prompt.length.toLocaleString()} / 10,000
+                      </span>
                       <Button
-                        variant="outline"
+                        variant="secondary"
                         size="sm"
-                        className="w-full"
-                        loading={historyQ.isFetchingNextPage}
-                        onClick={() => void historyQ.fetchNextPage()}
-                        leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+                        loading={isEnhancingPrompt}
+                        disabled={!canEnhancePrompt}
+                        onClick={() => void enhancePromptAction()}
+                        leftIcon={<Sparkles className="h-3.5 w-3.5" />}
                       >
-                        {historyQ.isFetchingNextPage ? "加载中" : "加载更早记录"}
+                        优化描述
                       </Button>
+                    </div>
+                  </div>
+                  <textarea
+                    ref={promptRef}
+                    value={prompt}
+                    onChange={(event) => handlePromptChange(event.target.value)}
+                    readOnly={isEnhancingPrompt}
+                    rows={9}
+                    maxLength={10000}
+                    placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
+                    className={cn(
+                      "min-h-[240px] w-full resize-none overflow-y-hidden bg-transparent px-3 py-3 text-sm leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] sm:min-h-[320px] sm:px-4 sm:py-4 lg:min-h-[360px]",
+                      isEnhancingPrompt && "cursor-wait",
                     )}
+                  />
+                  <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/62 px-3 py-2.5 sm:px-4">
+                    <div className="flex gap-2 overflow-x-auto pb-0.5">
+                      {PROMPT_CHIPS.map((chip) => (
+                        <button
+                          key={chip}
+                          type="button"
+                          disabled={isEnhancingPrompt}
+                          onClick={() => insertPromptText(chip)}
+                          className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          {chip}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </section>
+
+                {promptEnhancePanelVisible && (
+                  <div className="scroll-mt-4 md:scroll-mt-6">
+                    <PromptEnhanceChooser
+                      loading={isEnhancingPrompt}
+                      preview={promptEnhancePreview}
+                      candidates={promptEnhanceCandidates}
+                      selectedId={selectedPromptEnhanceCandidateId}
+                      onSelect={applyPromptEnhanceCandidate}
+                      onDismiss={clearPromptEnhanceChoices}
+                      onReturnToEditor={scrollPromptEditorIntoView}
+                    />
+                  </div>
+                )}
               </div>
-            </Card>
+            </div>
           </section>
+
+          <VideoParameterPanel
+            className="scroll-mt-20 md:sticky md:top-[76px]"
+            selectedModel={selectedModel}
+            modelOptions={modelOptionValues}
+            durationS={effectiveDurationS}
+            durationOptions={durationOptionValues}
+            resolution={effectiveResolution}
+            resolutionOptions={availableResolutions}
+            aspectRatio={aspectRatio}
+            aspectRatioOptions={aspectRatioOptionValues}
+            seed={seed}
+            generateAudio={generateAudio}
+            estimate={estimate}
+            canSubmit={canSubmit}
+            reason={submitDisabledReason}
+            loading={createMut.isPending}
+            sourceReady={sourceReady}
+            onSubmit={() => createMut.mutate()}
+            onModelChange={(value) => {
+              clearPromptEnhanceChoices();
+              const nextResolutions = resolutionOptionsForModel(options, value);
+              const nextResolution = nextResolutions.includes(resolution)
+                ? resolution
+                : preferredResolution(nextResolutions);
+              const nextDurations = durationOptionsForModel(
+                options,
+                value,
+                action,
+                nextResolution,
+              );
+              setModel(value);
+              setDurationS((prev) => durationOrPreferred(prev, nextDurations));
+            }}
+            onDurationChange={(value) => {
+              clearPromptEnhanceChoices();
+              setDurationS(Number(value));
+            }}
+            onResolutionChange={(value) => {
+              clearPromptEnhanceChoices();
+              const nextDurations = durationOptionsForModel(
+                options,
+                selectedModel,
+                action,
+                value,
+              );
+              setResolution(value);
+              setDurationS((prev) => durationOrPreferred(prev, nextDurations));
+            }}
+            onAspectRatioChange={(value) => {
+              clearPromptEnhanceChoices();
+              setAspectRatio(value);
+            }}
+            onSeedChange={setSeed}
+            onGenerateAudioChange={(value) => {
+              clearPromptEnhanceChoices();
+              setGenerateAudio(value);
+            }}
+          />
         </div>
       </main>
+      <VideoTaskDrawer
+        open={isTaskPanelOpen}
+        onClose={() => setIsTaskPanelOpen(false)}
+        activeItems={activeItems}
+        historyItems={filteredHistoryItems}
+        historyFilter={historyFilter}
+        historyCounts={{
+          all: settledHistoryItems.length,
+          succeeded: succeededHistoryItems.length,
+          failed: failedHistoryItems.length,
+        }}
+        historyLoading={historyQ.isLoading}
+        historyHasNextPage={Boolean(historyQ.hasNextPage)}
+        historyFetchingNextPage={historyQ.isFetchingNextPage}
+        retryDisabled={retryMut.isPending}
+        selectedVideoId={selectedVideoId}
+        onHistoryFilterChange={setHistoryFilter}
+        onRefresh={() => void historyQ.refetch()}
+        onLoadMore={() => void historyQ.fetchNextPage()}
+        onCancel={(item) => cancelMut.mutate(item.id)}
+        onRetry={(item) => retryMut.mutate(item.id)}
+        onCopy={(item) => {
+          void navigator.clipboard?.writeText(item.prompt);
+          toast.success("描述已复制");
+        }}
+        onUseDraft={(item) => {
+          loadAsDraft(item);
+          setIsTaskPanelOpen(false);
+        }}
+        onDelete={(item) => {
+          if (item.video) deleteMut.mutate(item.video.id);
+        }}
+        onPreview={(item) => {
+          if (!hasVideo(item)) return;
+          setSelectedVideoId(item.video.id);
+          setIsTaskPanelOpen(false);
+        }}
+      />
       {playbackVideoItem && (
         <VideoPreviewDialog
           item={playbackVideoItem}
@@ -2371,6 +2643,381 @@ export default function VideoPage() {
   );
 }
 
+function activeVideoTaskSummary(
+  activeCount: number,
+  historyCount: number,
+): string {
+  return activeCount > 0
+    ? `${activeCount} 个任务正在处理`
+    : `${historyCount} 条历史记录`;
+}
+
+function videoHistoryCountText({
+  loading,
+  count,
+  hasNextPage,
+}: {
+  loading: boolean;
+  count: number;
+  hasNextPage: boolean;
+}): string {
+  if (loading) return "读取中";
+  return `${count}${hasNextPage ? "+" : ""} 条`;
+}
+
+function videoHistoryEmptyCopy(
+  historyFilter: VideoHistoryFilter,
+  activeCount: number,
+  loading: boolean,
+): { title: string; description: string } {
+  if (loading) {
+    return { title: "读取中", description: "正在读取视频任务记录。" };
+  }
+  if (activeCount > 0) {
+    return {
+      title: `暂无${videoHistoryFilterLabel(historyFilter)}记录`,
+      description: "当前任务完成后会进入历史。",
+    };
+  }
+  return {
+    title: `暂无${videoHistoryFilterLabel(historyFilter)}记录`,
+    description:
+      historyFilter === "all"
+        ? "提交后的任务会在这里保留参数、状态和结果。"
+        : "切换筛选可查看其他状态。",
+  };
+}
+
+function ActiveVideoTaskSection({
+  items,
+  retryDisabled,
+  onCancel,
+  onRetry,
+  onCopy,
+  onUseDraft,
+}: {
+  items: VideoGenerationOut[];
+  retryDisabled: boolean;
+  onCancel: (item: VideoGenerationOut) => void;
+  onRetry: (item: VideoGenerationOut) => void;
+  onCopy: (item: VideoGenerationOut) => void;
+  onUseDraft: (item: VideoGenerationOut) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section className="space-y-2.5">
+      <div className="flex items-center justify-between gap-3 px-1">
+        <p className="type-caption text-[var(--fg-2)]">正在进行</p>
+        <span className="text-xs tabular-nums text-[var(--fg-2)]">
+          {items.length} 条
+        </span>
+      </div>
+      <div className="grid gap-2.5">
+        {items.map((item) => (
+          <TaskRow
+            key={item.id}
+            item={item}
+            onCancel={() => onCancel(item)}
+            onRetry={() => onRetry(item)}
+            retryDisabled={retryDisabled}
+            onCopy={() => onCopy(item)}
+            onUseDraft={() => onUseDraft(item)}
+            showPreview={false}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function VideoTaskHistorySection({
+  items,
+  activeCount,
+  historyFilter,
+  historyCounts,
+  loading,
+  hasNextPage,
+  fetchingNextPage,
+  retryDisabled,
+  selectedVideoId,
+  onHistoryFilterChange,
+  onLoadMore,
+  onCancel,
+  onRetry,
+  onCopy,
+  onUseDraft,
+  onDelete,
+  onPreview,
+}: {
+  items: VideoGenerationOut[];
+  activeCount: number;
+  historyFilter: VideoHistoryFilter;
+  historyCounts: Record<VideoHistoryFilter, number>;
+  loading: boolean;
+  hasNextPage: boolean;
+  fetchingNextPage: boolean;
+  retryDisabled: boolean;
+  selectedVideoId: string;
+  onHistoryFilterChange: (value: VideoHistoryFilter) => void;
+  onLoadMore: () => void;
+  onCancel: (item: VideoGenerationOut) => void;
+  onRetry: (item: VideoGenerationOut) => void;
+  onCopy: (item: VideoGenerationOut) => void;
+  onUseDraft: (item: VideoGenerationOut) => void;
+  onDelete: (item: VideoGenerationOut) => void;
+  onPreview: (item: VideoGenerationOut) => void;
+}) {
+  const emptyCopy = videoHistoryEmptyCopy(historyFilter, activeCount, loading);
+  return (
+    <section className="space-y-2.5">
+      <div className="flex items-center justify-between gap-3 px-1">
+        <p className="type-caption text-[var(--fg-2)]">历史记录</p>
+        <span className="text-xs tabular-nums text-[var(--fg-2)]">
+          {videoHistoryCountText({
+            loading,
+            count: items.length,
+            hasNextPage,
+          })}
+        </span>
+      </div>
+      <HistoryFilterTabs
+        value={historyFilter}
+        counts={historyCounts}
+        loading={loading}
+        onChange={onHistoryFilterChange}
+      />
+      <div className="grid gap-2.5">
+        {items.map((item) => (
+          <TaskRow
+            key={item.id}
+            item={item}
+            onCancel={() => onCancel(item)}
+            onRetry={() => onRetry(item)}
+            retryDisabled={retryDisabled}
+            onCopy={() => onCopy(item)}
+            onUseDraft={() => onUseDraft(item)}
+            onDelete={() => onDelete(item)}
+            onPreview={hasVideo(item) ? () => onPreview(item) : undefined}
+            selected={selectedVideoId === item.video?.id}
+            showPreview={false}
+          />
+        ))}
+        {items.length === 0 && (
+          <EmptyPanel
+            icon={<Film className="h-5 w-5" />}
+            title={emptyCopy.title}
+            description={emptyCopy.description}
+          />
+        )}
+        {hasNextPage && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            loading={fetchingNextPage}
+            onClick={onLoadMore}
+            leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          >
+            {fetchingNextPage ? "加载中" : "加载更早记录"}
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function VideoTaskDrawer({
+  open,
+  onClose,
+  activeItems,
+  historyItems,
+  historyFilter,
+  historyCounts,
+  historyLoading,
+  historyHasNextPage,
+  historyFetchingNextPage,
+  retryDisabled,
+  selectedVideoId,
+  onHistoryFilterChange,
+  onRefresh,
+  onLoadMore,
+  onCancel,
+  onRetry,
+  onCopy,
+  onUseDraft,
+  onDelete,
+  onPreview,
+}: {
+  open: boolean;
+  onClose: () => void;
+  activeItems: VideoGenerationOut[];
+  historyItems: VideoGenerationOut[];
+  historyFilter: VideoHistoryFilter;
+  historyCounts: Record<VideoHistoryFilter, number>;
+  historyLoading: boolean;
+  historyHasNextPage: boolean;
+  historyFetchingNextPage: boolean;
+  retryDisabled: boolean;
+  selectedVideoId: string;
+  onHistoryFilterChange: (value: VideoHistoryFilter) => void;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+  onCancel: (item: VideoGenerationOut) => void;
+  onRetry: (item: VideoGenerationOut) => void;
+  onCopy: (item: VideoGenerationOut) => void;
+  onUseDraft: (item: VideoGenerationOut) => void;
+  onDelete: (item: VideoGenerationOut) => void;
+  onPreview: (item: VideoGenerationOut) => void;
+}) {
+  const reduceMotion = useReducedMotion();
+  const panelRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(
+          VIDEO_DRAWER_FOCUSABLE,
+        ) ?? [],
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [onClose, open]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-[var(--surface-scrim)] sm:p-3"
+          initial={{ opacity: reduceMotion ? 1 : 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: reduceMotion ? 1 : 0 }}
+          transition={{ duration: reduceMotion ? 0 : DURATION.quick }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) onClose();
+          }}
+        >
+          <motion.section
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="video-task-panel-title"
+            className="mobile-dialog-panel ml-auto flex h-full w-full max-w-[460px] flex-col overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)]"
+            initial={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
+            transition={{
+              duration: reduceMotion ? 0 : DURATION.normal,
+              ease: EASE.develop,
+            }}
+          >
+            <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                    <ListVideo className="h-4 w-4" />
+                  </span>
+                  <div>
+                    <h2
+                      id="video-task-panel-title"
+                      className="text-sm font-semibold text-[var(--fg-0)]"
+                    >
+                      视频任务
+                    </h2>
+                    <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                      {activeVideoTaskSummary(
+                        activeItems.length,
+                        historyCounts.all,
+                      )}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label="刷新视频任务"
+                  tooltip="刷新"
+                  onClick={onRefresh}
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </IconButton>
+                <IconButton
+                  autoFocus
+                  variant="ghost"
+                  size="sm"
+                  aria-label="关闭视频任务"
+                  tooltip="关闭"
+                  onClick={onClose}
+                >
+                  <X className="h-4 w-4" />
+                </IconButton>
+              </div>
+            </header>
+
+            <div className="mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-3 sm:p-4">
+              <ActiveVideoTaskSection
+                items={activeItems}
+                retryDisabled={retryDisabled}
+                onCancel={onCancel}
+                onRetry={onRetry}
+                onCopy={onCopy}
+                onUseDraft={onUseDraft}
+              />
+              <VideoTaskHistorySection
+                items={historyItems}
+                activeCount={activeItems.length}
+                historyFilter={historyFilter}
+                historyCounts={historyCounts}
+                loading={historyLoading}
+                hasNextPage={historyHasNextPage}
+                fetchingNextPage={historyFetchingNextPage}
+                retryDisabled={retryDisabled}
+                selectedVideoId={selectedVideoId}
+                onHistoryFilterChange={onHistoryFilterChange}
+                onLoadMore={onLoadMore}
+                onCancel={onCancel}
+                onRetry={onRetry}
+                onCopy={onCopy}
+                onUseDraft={onUseDraft}
+                onDelete={onDelete}
+                onPreview={onPreview}
+              />
+            </div>
+          </motion.section>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 function SelectField({
   label,
   value,
@@ -2386,11 +3033,11 @@ function SelectField({
 }) {
   return (
     <label className="block min-w-0 space-y-1.5">
-      <span className="type-caption text-[var(--fg-2)]">{label}</span>
+      {label && <span className="type-caption text-[var(--fg-2)]">{label}</span>}
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+        className="h-10 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
       >
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
@@ -2453,23 +3100,22 @@ function VideoParameterPanel({
 }) {
   return (
     <aside
+      id="video-generation-settings"
       className={cn(
-        "min-w-0 space-y-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/88 p-2.5 shadow-[var(--shadow-2)] backdrop-blur-xl sm:p-3",
+        "flex min-w-0 flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/82 shadow-[var(--shadow-2)] backdrop-blur-xl",
         className,
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-              <Settings2 className="h-4 w-4" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-[var(--fg-0)]">生成参数</p>
-              <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
-                {selectedModel || "未选择模型"}
-              </p>
-            </div>
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/90 p-3.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+            <Settings2 className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-[var(--fg-0)]">视频生成参数</p>
+            <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+              {selectedModel || "未选择模型"}
+            </p>
           </div>
         </div>
         <span
@@ -2486,80 +3132,112 @@ function VideoParameterPanel({
         </span>
       </div>
 
-      <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-1">
-        <SelectField
-          label="模型"
-          value={selectedModel}
-          onChange={onModelChange}
-          options={modelOptions}
-        />
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+      <div className="min-w-0 flex-1 space-y-4 p-3.5">
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="type-caption text-[var(--fg-2)]">模型</p>
+            <span className="text-[11px] text-[var(--fg-2)]">
+              自动匹配当前生成方式
+            </span>
+          </div>
           <SelectField
-            label="分辨率"
-            value={resolution}
-            onChange={onResolutionChange}
-            options={resolutionOptions}
+            label=""
+            value={selectedModel}
+            onChange={onModelChange}
+            options={modelOptions}
           />
+        </section>
+
+        <section className="space-y-2.5">
+          <p className="type-caption text-[var(--fg-2)]">画面与时长</p>
+          <div className="grid min-w-0 grid-cols-2 gap-2">
+            <SelectField
+              label="分辨率"
+              value={resolution}
+              onChange={onResolutionChange}
+              options={resolutionOptions}
+            />
+            <SelectField
+              label="画面比例"
+              value={aspectRatio}
+              onChange={onAspectRatioChange}
+              options={aspectRatioOptions}
+            />
+          </div>
           <SelectField
-            label="比例"
-            value={aspectRatio}
-            onChange={onAspectRatioChange}
-            options={aspectRatioOptions}
-          />
-        </div>
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
-          <SelectField
-            label="时长"
+            label="视频时长"
             value={String(durationS)}
             onChange={onDurationChange}
             options={durationOptions}
             renderOption={(value) => formatDurationLabel(Number(value))}
           />
-          <label className="block min-w-0 space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">Seed</span>
-            <input
-              value={seed}
-              onChange={(event) => onSeedChange(event.target.value)}
-              inputMode="numeric"
-              placeholder="随机"
-              className="h-10 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
-        </div>
-        <label className="flex min-h-10 min-w-0 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
-          <span className="font-medium text-[var(--fg-0)]">生成音频</span>
+        </section>
+
+        <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/72 px-3">
+          <span className="min-w-0">
+            <span className="block text-sm font-medium text-[var(--fg-0)]">
+              生成音频
+            </span>
+            <span className="mt-0.5 block text-xs text-[var(--fg-2)]">
+              同步生成环境声或对白
+            </span>
+          </span>
           <input
             type="checkbox"
             checked={generateAudio}
             onChange={(event) => onGenerateAudioChange(event.target.checked)}
+            className="peer sr-only"
           />
+          <span className="relative h-6 w-10 shrink-0 rounded-full border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors peer-checked:border-[var(--accent-border)] peer-checked:bg-[var(--accent)] peer-checked:[&>span]:translate-x-4">
+            <span className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--fg-0)] shadow-[var(--shadow-1)] transition-transform" />
+          </span>
         </label>
+
+        <details className="group overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/48">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+            <span>高级设置</span>
+            <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="border-t border-[var(--border-subtle)] p-3">
+            <label className="block min-w-0 space-y-1.5">
+              <span className="type-caption text-[var(--fg-2)]">Seed</span>
+              <input
+                value={seed}
+                onChange={(event) => onSeedChange(event.target.value)}
+                inputMode="numeric"
+                placeholder="留空为随机"
+                className="h-10 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+              />
+            </label>
+            <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">
+              使用相同 Seed 可提高同一模型与参数下的结果可复现性。
+            </p>
+          </div>
+        </details>
       </div>
 
-      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3">
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+      <div className="mt-auto shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/94 p-3.5">
+        <div className="mb-3 grid grid-cols-2 gap-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3">
           <div className="min-w-0">
-            <p className="type-caption text-[var(--fg-2)]">预扣</p>
-            <p className="mt-1 truncate text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="type-caption text-[var(--fg-2)]">预计预扣</p>
+            <p className="mt-1 truncate text-lg font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
             </p>
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 border-l border-[var(--border-subtle)] pl-3">
             <p className="type-caption text-[var(--fg-2)]">Token 上限</p>
-            <p className="mt-1 truncate text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="mt-1 truncate text-sm font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? estimate.tokens.toLocaleString() : "-"}
             </p>
           </div>
         </div>
+        <SubmitPanel
+          canSubmit={canSubmit}
+          reason={reason}
+          loading={loading}
+          onSubmit={onSubmit}
+        />
       </div>
-
-      <SubmitPanel
-        canSubmit={canSubmit}
-        reason={reason}
-        loading={loading}
-        onSubmit={onSubmit}
-        compact
-      />
     </aside>
   );
 }
@@ -2571,9 +3249,11 @@ function VideoWorkbenchHeader({
   enabled,
   loading,
   activeCount,
-  completedCount,
+  historyCount,
   serviceSummary,
   submitState,
+  onOpenParameters,
+  onOpenTasks,
 }: {
   mode: string;
   profile: string;
@@ -2581,111 +3261,82 @@ function VideoWorkbenchHeader({
   enabled: boolean;
   loading: boolean;
   activeCount: number;
-  completedCount: number;
+  historyCount: number;
   serviceSummary: string;
   submitState: string;
+  onOpenParameters: () => void;
+  onOpenTasks: () => void;
 }) {
   const serviceValue = loading ? "读取中" : enabled ? "在线" : "离线";
-  const serviceDetail = loading ? "读取配置" : serviceSummary;
-  const queueValue = activeCount > 0 ? `${activeCount} 进行中` : `${completedCount} 已完成`;
-  const queueDetail = activeCount > 0 ? "任务队列" : "最近结果";
 
   return (
-    <section className="grid shrink-0 gap-2 border-b border-[var(--border)] pb-2 lg:grid-cols-[minmax(0,1fr)_minmax(520px,0.86fr)] lg:items-center">
-      <div className="min-w-0">
-        <div className="hidden max-w-full items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2.5 py-1 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)] sm:inline-flex">
-          <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
-          <span className="truncate">Lumen 视频工作台</span>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 sm:mt-1.5">
-          <h1 className="text-2xl font-semibold leading-tight tracking-normal text-[var(--fg-0)] sm:type-page-title-sm">
-            视频工作台
-          </h1>
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2 py-0.5 text-xs text-[var(--fg-2)]">
-            {submitState}
-          </span>
+    <section className="sticky top-0 z-30 -mx-1 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-0)]/92 px-1 pb-2.5 pt-1 backdrop-blur-xl">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--shadow-1)] sm:flex">
+          <Clapperboard className="h-5 w-5" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h1 className="text-xl font-semibold leading-tight tracking-normal text-[var(--fg-0)] sm:text-2xl">
+              AI 视频
+            </h1>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                enabled
+                  ? "border-success-border bg-success-soft text-success"
+                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+              )}
+            >
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 rounded-full",
+                  enabled ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
+                )}
+              />
+              {serviceValue}
+            </span>
+          </div>
+          <p className="mt-1 truncate text-xs text-[var(--fg-2)]">
+            {loading ? "正在读取视频服务" : serviceSummary}
+          </p>
         </div>
       </div>
-      <div className="hidden min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] gap-1.5 sm:grid sm:gap-2">
-        <StatusStripItem
-          label="服务"
-          value={serviceValue}
-          detail={serviceDetail}
-          icon={<Clapperboard className="h-3.5 w-3.5" />}
-          active={enabled}
-        />
-        <StatusStripItem
-          label="模式"
-          value={mode}
-          detail={audio ? "含音频" : "无音频"}
-          icon={<Film className="h-3.5 w-3.5" />}
-          active
-        />
-        <StatusStripItem
-          label="规格"
-          value={profile}
-          detail={`${queueValue} · ${queueDetail}`}
-          icon={<Gauge className="h-3.5 w-3.5" />}
-          active={activeCount > 0}
-        />
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-none">
+        <div className="hidden items-center gap-1.5 lg:flex">
+          <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/72 px-2.5 py-1.5 text-xs text-[var(--fg-1)]">
+            <Film className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+            {mode}
+          </span>
+          <span className="max-w-[160px] truncate px-1 text-xs text-[var(--fg-2)]">
+            {audio ? "含音频" : "无音频"} · {submitState}
+          </span>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onOpenParameters}
+          leftIcon={<Settings2 className="h-4 w-4" />}
+          className="shrink-0"
+        >
+          <span className="sm:hidden">参数</span>
+          <span className="hidden sm:inline">参数 · {profile}</span>
+        </Button>
+        <Button
+          variant={activeCount > 0 ? "secondary" : "outline"}
+          size="sm"
+          onClick={onOpenTasks}
+          leftIcon={<ListVideo className="h-4 w-4" />}
+          className="shrink-0"
+        >
+          {activeCount > 0
+            ? `${activeCount} 进行中`
+            : historyCount > 0
+              ? `任务 ${historyCount}`
+              : "任务"}
+        </Button>
       </div>
     </section>
-  );
-}
-
-function StatusStripItem({
-  label,
-  value,
-  detail,
-  icon,
-  active = false,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  icon: React.ReactNode;
-  active?: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2 py-1.5 sm:px-2.5 sm:py-2",
-        active
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/64",
-      )}
-    >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "absolute inset-y-2 left-0 w-0.5 rounded-r-full",
-          active ? "bg-[var(--accent)]" : "bg-[var(--border-strong)]",
-        )}
-      />
-      <div className="flex min-w-0 items-start gap-1.5 sm:gap-2.5">
-        <span
-          className={cn(
-            "mt-0.5 hidden h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
-            active
-              ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
-              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
-          )}
-        >
-          {icon}
-        </span>
-        <span className="min-w-0">
-          <span className="block truncate text-[11px] leading-tight text-[var(--fg-2)] sm:type-caption">
-            {label}
-          </span>
-          <span className="mt-0.5 block truncate text-[10px] font-semibold text-[var(--fg-0)] sm:text-xs">
-            {value}
-          </span>
-          <span className="mt-0.5 hidden truncate text-[11px] text-[var(--fg-2)] sm:block">
-            {detail}
-          </span>
-        </span>
-      </div>
-    </div>
   );
 }
 
@@ -2713,44 +3364,240 @@ function ModeCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        "group relative min-h-[54px] min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-[background-color,border-color,color] duration-[var(--dur-normal)]",
+        "group flex min-h-12 min-w-0 items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-[background-color,border-color,color,box-shadow] duration-[var(--dur-normal)] sm:px-3",
         selected
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
           : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
       <span
-        aria-hidden="true"
         className={cn(
-          "absolute inset-x-2 bottom-0 h-0.5 rounded-t-full transition-colors",
-          selected ? "bg-[var(--accent)]" : "bg-transparent",
+          "hidden h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
+          selected
+            ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
+            : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
         )}
-      />
-      <div className="flex items-center justify-between gap-2">
+      >
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-xs font-semibold text-[var(--fg-0)] sm:text-sm">
+          {copy.title}
+        </span>
+        <span className="mt-0.5 hidden truncate text-[11px] text-[var(--fg-2)] md:block">
+          {copy.eyebrow}
+        </span>
+      </span>
+      {selected && (
+        <CircleCheck className="h-4 w-4 shrink-0 text-[var(--accent)]" />
+      )}
+    </button>
+  );
+}
+
+function promptEnhancePreviewCandidateId(
+  candidates: PromptEnhanceCandidate[],
+  previewCandidateId: string,
+  selectedId: string,
+): string {
+  if (candidates.some((candidate) => candidate.id === previewCandidateId)) {
+    return previewCandidateId;
+  }
+  if (candidates.some((candidate) => candidate.id === selectedId)) {
+    return selectedId;
+  }
+  return candidates[0]?.id ?? "";
+}
+
+function promptEnhanceChooserSubtitle({
+  loading,
+  candidateCount,
+  autoApplied,
+}: {
+  loading: boolean;
+  candidateCount: number;
+  autoApplied: boolean;
+}): string {
+  if (candidateCount > 1) {
+    return autoApplied
+      ? `${candidateCount} 个候选，已应用推荐版`
+      : `${candidateCount} 个候选，未自动替换`;
+  }
+  if (loading) return "按火山视频结构补动作、运镜和参考一致性";
+  return autoApplied ? "已应用到描述" : "已保留原描述";
+}
+
+function promptEnhanceActionLabel(action: PromptEnhanceAction): string {
+  if (action === "light_refine") return "轻度优化";
+  if (action === "direct_pass") return "直接优化";
+  if (action === "ask_first") return "需要补充";
+  if (action === "keep_original") return "建议保留原稿";
+  if (action === "optional_vc") return "可选改写";
+  return "完整改写";
+}
+
+function PromptEnhanceLoadingState({ preview }: { preview: string }) {
+  return (
+    <div className="space-y-3 p-3 sm:p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-[var(--fg-0)]">
+            正在生成可比较版本
+          </p>
+          <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+            完成后可逐个预览，不会直接覆盖当前描述。
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-medium text-[var(--accent)]">
+          AI 整理中
+        </span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-[var(--bg-2)]">
+        <div className="h-full w-1/2 animate-pulse rounded-full bg-[var(--accent)]" />
+      </div>
+      <div
+        role="status"
+        aria-live="polite"
+        className="min-h-36 whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-7 text-[var(--fg-1)]"
+      >
+        {preview || "等待模型返回优化方案..."}
+      </div>
+    </div>
+  );
+}
+
+function PromptEnhanceCandidateCard({
+  candidate,
+  index,
+  selected,
+  previewing,
+  onPreview,
+}: {
+  candidate: PromptEnhanceCandidate;
+  index: number;
+  selected: boolean;
+  previewing: boolean;
+  onPreview: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={previewing}
+      onClick={onPreview}
+      className={cn(
+        "flex min-h-32 w-[min(82vw,20rem)] shrink-0 flex-col rounded-[var(--radius-control)] border p-3 text-left transition-[background-color,border-color,box-shadow] lg:w-auto lg:min-w-0",
+        selected
+          ? "border-success-border bg-success-soft shadow-[var(--shadow-1)]"
+          : previewing
+            ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
+            : "border-[var(--border-subtle)] bg-[var(--bg-0)]/72 hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2">
         <span
           className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border font-mono text-[10px]",
             selected
-              ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
-              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+              ? "border-success-border text-success"
+              : previewing
+                ? "border-[var(--accent-border)] text-[var(--accent)]"
+                : "border-[var(--border)] text-[var(--fg-2)]",
           )}
         >
-          {icon}
+          {String(index + 1).padStart(2, "0")}
         </span>
-        <span
-          className={cn(
-            "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-            selected ? "bg-[var(--accent)]" : "bg-[var(--fg-3)]",
-          )}
-        />
-      </div>
-      <p className="mt-1.5 text-sm font-semibold text-[var(--fg-0)]">
-        {copy.title}
-      </p>
-      <p className="mt-0.5 truncate text-[11px] font-medium text-[var(--fg-2)]">
-        {copy.eyebrow}
-      </p>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--fg-0)]">
+              {candidate.title}
+            </span>
+            {index === 0 && (
+              <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                推荐
+              </span>
+            )}
+          </span>
+          <span className="mt-0.5 block text-[11px] text-[var(--fg-2)]">
+            {promptEnhanceActionLabel(candidate.action)}
+          </span>
+        </span>
+        {selected && <CircleCheck className="h-4 w-4 shrink-0 text-success" />}
+      </span>
+      <span className="mt-2 line-clamp-2 text-xs leading-5 text-[var(--fg-1)]">
+        {candidate.prompt}
+      </span>
+      <span className="mt-auto flex items-center justify-between gap-2 pt-2 text-[10px] text-[var(--fg-2)]">
+        <span>{candidate.prompt.length.toLocaleString()} 字</span>
+        <span className={selected ? "text-success" : previewing ? "text-[var(--accent)]" : ""}>
+          {selected ? "已应用" : previewing ? "正在预览" : "查看方案"}
+        </span>
+      </span>
     </button>
+  );
+}
+
+function PromptEnhanceCandidatePreview({
+  candidate,
+  selected,
+  onApply,
+  onCopy,
+}: {
+  candidate: PromptEnhanceCandidate;
+  selected: boolean;
+  onApply: () => void;
+  onCopy: () => void;
+}) {
+  const applicable = canApplyPromptEnhanceCandidate(candidate);
+  return (
+    <article className="overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/68 px-3 py-2.5 sm:px-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold text-[var(--fg-0)]">
+              {candidate.title}
+            </h3>
+            <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-0.5 text-[10px] text-[var(--fg-2)]">
+              {promptEnhanceActionLabel(candidate.action)}
+            </span>
+            {selected && (
+              <span className="rounded-full border border-success-border bg-success-soft px-2 py-0.5 text-[10px] font-medium text-success">
+                当前已应用
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-[var(--fg-2)]">
+            {applicable
+              ? "先完整预览，再决定是否替换编辑器中的描述。"
+              : "这是 AI 的判断与补充建议，仅供查看。"}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            variant={selected ? "secondary" : "primary"}
+            size="sm"
+            disabled={selected || !applicable}
+            onClick={onApply}
+          >
+            {promptEnhanceCandidateButtonText(candidate, selected)}
+          </Button>
+          <IconButton
+            variant="ghost"
+            size="sm"
+            onClick={onCopy}
+            aria-label="复制优化提示词"
+            tooltip="复制提示词"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </IconButton>
+        </div>
+      </header>
+      <div className="whitespace-pre-wrap break-words px-3 py-3 text-sm leading-7 text-[var(--fg-1)] sm:px-4 sm:py-4">
+        {candidate.prompt}
+      </div>
+      <footer className="border-t border-[var(--border-subtle)] px-3 py-2 text-[10px] tabular-nums text-[var(--fg-2)] sm:px-4">
+        完整提示词 · {candidate.prompt.length.toLocaleString()} 字
+      </footer>
+    </article>
   );
 }
 
@@ -2775,13 +3622,11 @@ function PromptEnhanceChooser({
   const visibleCandidates = candidates;
   const firstCandidate = visibleCandidates[0];
   const [previewCandidateId, setPreviewCandidateId] = useState("");
-  const effectivePreviewCandidateId = visibleCandidates.some(
-    (candidate) => candidate.id === previewCandidateId,
-  )
-    ? previewCandidateId
-    : visibleCandidates.some((candidate) => candidate.id === selectedId)
-      ? selectedId
-      : firstCandidate?.id ?? "";
+  const effectivePreviewCandidateId = promptEnhancePreviewCandidateId(
+    visibleCandidates,
+    previewCandidateId,
+    selectedId,
+  );
   const previewCandidate =
     visibleCandidates.find((candidate) => candidate.id === effectivePreviewCandidateId) ??
     firstCandidate ??
@@ -2801,8 +3646,8 @@ function PromptEnhanceChooser({
   };
 
   return (
-    <div className="sticky bottom-3 z-20 flex max-h-[min(72dvh,36rem)] min-h-0 flex-col gap-2 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/95 p-3 shadow-[var(--shadow-2)] backdrop-blur-xl">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+    <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/88 shadow-[var(--shadow-2)] backdrop-blur-xl">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5 sm:px-4">
         <div className="flex min-w-0 items-center gap-2">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
             {loading ? (
@@ -2813,18 +3658,14 @@ function PromptEnhanceChooser({
           </span>
           <span className="min-w-0">
             <span className="block text-sm font-semibold text-[var(--fg-0)]">
-              {loading ? "正在优化提示词" : "优化方案"}
+              {loading ? "正在优化提示词" : "AI 优化结果"}
             </span>
             <span className="block truncate text-xs text-[var(--fg-2)]">
-              {visibleCandidates.length > 1
-                ? autoApplied
-                  ? `${visibleCandidates.length} 个候选，已应用推荐版`
-                  : `${visibleCandidates.length} 个候选，未自动替换`
-                : loading
-                  ? "按火山视频结构补动作、运镜和参考一致性"
-                  : autoApplied
-                    ? "已应用到描述"
-                    : "已保留原描述"}
+              {promptEnhanceChooserSubtitle({
+                loading,
+                candidateCount: visibleCandidates.length,
+                autoApplied,
+              })}
             </span>
           </span>
         </div>
@@ -2838,119 +3679,52 @@ function PromptEnhanceChooser({
             >
               回到编辑
             </Button>
-            <Button
+            <IconButton
               variant="ghost"
               size="sm"
               onClick={onDismiss}
-              leftIcon={<XCircle className="h-3.5 w-3.5" />}
+              aria-label="关闭优化结果"
+              tooltip="关闭优化结果"
             >
-              清除
-            </Button>
+              <X className="h-4 w-4" />
+            </IconButton>
           </div>
         )}
-      </div>
+      </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
-        {loading && (
-          <div className="h-[min(32dvh,18rem)] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
-            {cleanPreview || "等待上游返回..."}
+      {loading && <PromptEnhanceLoadingState preview={cleanPreview} />}
+
+      {!loading && visibleCandidates.length > 0 && previewCandidate && (
+        <div className="space-y-3 p-3 sm:p-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs font-medium text-[var(--fg-1)]">
+              选择一个优化方向
+            </p>
+            <p className="text-[10px] text-[var(--fg-2)]">
+              点击卡片切换完整预览
+            </p>
           </div>
-        )}
-
-        {!loading && visibleCandidates.length > 0 && previewCandidate && (
-          <div className="grid min-h-0 gap-2 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
-            <div className="flex min-w-0 shrink-0 gap-2 overflow-x-auto pb-1 xl:max-h-[min(42dvh,24rem)] xl:flex-col xl:overflow-y-auto xl:overscroll-contain xl:pb-0 xl:pr-1">
-              {visibleCandidates.map((candidate) => {
-                const selected = candidate.id === selectedId;
-                const previewing = candidate.id === previewCandidate.id;
-                return (
-                  <button
-                    key={candidate.id}
-                    type="button"
-                    onClick={() => setPreviewCandidateId(candidate.id)}
-                    className={cn(
-                      "min-h-16 w-[min(78vw,18rem)] shrink-0 rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-2.5 text-left transition-[background-color,border-color] xl:w-full",
-                      previewing
-                        ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
-                        : "border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
-                    )}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span
-                        className={cn(
-                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
-                          selected
-                            ? "border-[var(--accent-border)] text-[var(--accent)]"
-                            : "border-[var(--border)] text-[var(--fg-2)]",
-                        )}
-                      >
-                        {selected ? (
-                          <CircleCheck className="h-3.5 w-3.5" />
-                        ) : (
-                          <PencilLine className="h-3 w-3" />
-                        )}
-                      </span>
-                      <p className="min-w-0 truncate text-sm font-semibold text-[var(--fg-0)]">
-                        {candidate.title}
-                      </p>
-                      {selected && (
-                        <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
-                          已应用
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
-                      {candidate.prompt}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] xl:min-h-0">
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
-                    {previewCandidate.title}
-                  </p>
-                  <p className="text-xs text-[var(--fg-2)]">
-                    {previewCandidate.id === selectedId ? "当前已应用到编辑器" : "预览当前候选"}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    variant={previewCandidate.id === selectedId ? "secondary" : "outline"}
-                    size="sm"
-                    disabled={
-                      previewCandidate.id === selectedId ||
-                      !canApplyPromptEnhanceCandidate(previewCandidate)
-                    }
-                    onClick={() => onSelect(previewCandidate)}
-                  >
-                    {promptEnhanceCandidateButtonText(
-                      previewCandidate,
-                      previewCandidate.id === selectedId,
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-9 w-9 px-0"
-                    onClick={() => void copyCandidate(previewCandidate)}
-                    aria-label="复制优化提示词"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              </div>
-              <div className="max-h-[min(42dvh,24rem)] min-h-[9rem] flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words px-3 py-3 text-sm leading-6 text-[var(--fg-1)]">
-                {previewCandidate.prompt}
-              </div>
-            </div>
+          <div className="flex gap-2 overflow-x-auto pb-1 lg:grid lg:grid-cols-3 lg:overflow-visible">
+            {visibleCandidates.map((candidate, index) => (
+              <PromptEnhanceCandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                index={index}
+                selected={candidate.id === selectedId}
+                previewing={candidate.id === previewCandidate.id}
+                onPreview={() => setPreviewCandidateId(candidate.id)}
+              />
+            ))}
           </div>
-        )}
-      </div>
-    </div>
+          <PromptEnhanceCandidatePreview
+            candidate={previewCandidate}
+            selected={previewCandidate.id === selectedId}
+            onApply={() => onSelect(previewCandidate)}
+            onCopy={() => void copyCandidate(previewCandidate)}
+          />
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3177,42 +3951,39 @@ function SubmitPanel({
   reason,
   loading,
   onSubmit,
-  compact = false,
 }: {
   canSubmit: boolean;
   reason: string;
   loading: boolean;
   onSubmit: () => void;
-  compact?: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        "rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/95 shadow-[var(--shadow-2)] backdrop-blur-xl",
-        compact ? "p-2.5" : "p-3",
-      )}
-    >
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <p
+    <div className="space-y-2">
+      <p
+        className={cn(
+          "flex min-w-0 items-center gap-2 text-xs leading-5",
+          canSubmit ? "text-success" : "text-[var(--fg-2)]",
+        )}
+      >
+        <span
           className={cn(
-            "min-w-0 flex-1 text-xs leading-5",
-            canSubmit ? "text-success" : "text-[var(--fg-2)]",
+            "h-1.5 w-1.5 shrink-0 rounded-full",
+            canSubmit ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
           )}
-        >
-          {reason}
-        </p>
-        <Button
-          variant="primary"
-          size={compact ? "sm" : "md"}
-          disabled={!canSubmit}
-          loading={loading}
-          onClick={onSubmit}
-          leftIcon={<Send className="h-4 w-4" />}
-          className="w-full sm:w-auto"
-        >
-          提交
-        </Button>
-      </div>
+        />
+        <span className="truncate">{reason}</span>
+      </p>
+      <Button
+        variant="primary"
+        size="lg"
+        fullWidth
+        disabled={!canSubmit}
+        loading={loading}
+        onClick={onSubmit}
+        leftIcon={<Send className="h-4 w-4" />}
+      >
+        生成视频
+      </Button>
     </div>
   );
 }
@@ -3644,6 +4415,133 @@ function HistoryFilterTabs({
   );
 }
 
+function TaskErrorDetails({
+  raw,
+  summary,
+}: {
+  raw: string;
+  summary: string;
+}) {
+  return (
+    <details className="group mt-2 overflow-hidden rounded-[var(--radius-control)] border border-danger-border bg-danger-soft">
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-2.5 py-2 text-xs leading-5 text-[var(--danger-fg)]">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">{summary}</span>
+        <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="border-t border-danger-border px-2.5 py-2">
+        <p className="type-caption text-[var(--danger-fg)]">技术详情</p>
+        <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-2 font-mono text-[10px] leading-4 text-[var(--fg-1)]">
+          {raw}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
+function TaskRowActions({
+  item,
+  active,
+  retryable,
+  retryDisabled,
+  videoItem,
+  selected,
+  showPreview,
+  canDownload,
+  onCancel,
+  onRetry,
+  onCopy,
+  onUseDraft,
+  onDelete,
+  onPreview,
+}: {
+  item: VideoGenerationOut;
+  active: boolean;
+  retryable: boolean;
+  retryDisabled: boolean;
+  videoItem: VideoGenerationWithVideo | null;
+  selected: boolean;
+  showPreview: boolean;
+  canDownload: boolean;
+  onCancel: () => void;
+  onRetry: () => void;
+  onCopy: () => void;
+  onUseDraft?: () => void;
+  onDelete?: () => void;
+  onPreview?: () => void;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      {active && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onCancel}
+          leftIcon={<XCircle className="h-3.5 w-3.5" />}
+        >
+          取消
+        </Button>
+      )}
+      {retryable && (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={retryDisabled}
+          loading={retryDisabled}
+          onClick={onRetry}
+          leftIcon={<Play className="h-3.5 w-3.5" />}
+        >
+          重新生成
+        </Button>
+      )}
+      {!showPreview && videoItem && onPreview && (
+        <Button
+          variant={selected ? "secondary" : "outline"}
+          size="sm"
+          onClick={onPreview}
+          leftIcon={<Play className="h-3.5 w-3.5" />}
+        >
+          预览
+        </Button>
+      )}
+      {canDownload && <VideoDownloadLink item={item} />}
+      {onUseDraft && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onUseDraft}
+          leftIcon={<RotateCw className="h-3.5 w-3.5" />}
+        >
+          套用参数
+        </Button>
+      )}
+      <div className="ml-auto flex items-center gap-1">
+        <IconButton
+          variant="ghost"
+          size="sm"
+          onClick={onCopy}
+          aria-label="复制视频描述"
+          tooltip="复制描述"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </IconButton>
+        {onDelete && videoItem && (
+          <IconButton
+            variant="ghost"
+            size="sm"
+            onClick={onDelete}
+            aria-label="删除视频"
+            tooltip="删除"
+            className="text-[var(--danger-fg)] hover:text-[var(--danger-fg)]"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </IconButton>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaskRow({
   item,
   onCancel,
@@ -3676,6 +4574,9 @@ function TaskRow({
   const retryable = isFailedHistoryVideo(item);
   const canDownload = videoItem != null || activeTemporaryDownload(item) != null;
   const elapsedLabel = taskElapsedLabel(item);
+  const errorSummary = item.error_message
+    ? taskErrorSummary(item.error_message)
+    : null;
   return (
     <article
       className={cn(
@@ -3720,72 +4621,25 @@ function TaskRow({
           onPreview={onPreview}
         />
       )}
-      {item.error_message && (
-        <p className="mt-2 text-xs text-[var(--danger-fg)]">{item.error_message}</p>
+      {item.error_message && errorSummary && (
+        <TaskErrorDetails raw={item.error_message} summary={errorSummary} />
       )}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {active && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onCancel}
-            leftIcon={<XCircle className="h-3.5 w-3.5" />}
-          >
-            取消
-          </Button>
-        )}
-        {retryable && (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={retryDisabled}
-            loading={retryDisabled}
-            onClick={onRetry}
-            leftIcon={<Play className="h-3.5 w-3.5" />}
-          >
-            重新生成
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onCopy}
-          leftIcon={<Copy className="h-3.5 w-3.5" />}
-        >
-          复制
-        </Button>
-        {!showPreview && videoItem && onPreview && (
-          <Button
-            variant={selected ? "secondary" : "outline"}
-            size="sm"
-            onClick={onPreview}
-            leftIcon={<Play className="h-3.5 w-3.5" />}
-          >
-            预览
-          </Button>
-        )}
-        {canDownload && <VideoDownloadLink item={item} />}
-        {onUseDraft && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onUseDraft}
-            leftIcon={<RotateCw className="h-3.5 w-3.5" />}
-          >
-            套用参数
-          </Button>
-        )}
-        {onDelete && videoItem && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onDelete}
-            leftIcon={<Trash2 className="h-3.5 w-3.5" />}
-          >
-            删除
-          </Button>
-        )}
-      </div>
+      <TaskRowActions
+        item={item}
+        active={active}
+        retryable={retryable}
+        retryDisabled={retryDisabled}
+        videoItem={videoItem}
+        selected={selected}
+        showPreview={showPreview}
+        canDownload={canDownload}
+        onCancel={onCancel}
+        onRetry={onRetry}
+        onCopy={onCopy}
+        onUseDraft={onUseDraft}
+        onDelete={onDelete}
+        onPreview={onPreview}
+      />
     </article>
   );
 }

@@ -4,32 +4,64 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
 
-test("video history remains reachable below xl layouts", () => {
-  match(source, /md:overflow-y-auto/);
-  match(source, /xl:overflow-hidden/);
-  match(source, /xl:grid-cols-\[minmax\(0,1fr\)_minmax\(320px,380px\)\]/);
-  match(source, /xl:sticky xl:top-4/);
+test("video workspace keeps history reachable through a responsive task drawer", () => {
+  doesNotMatch(source, /xl:overflow-hidden/);
+  match(source, /overflow-y-auto overscroll-contain/);
+  match(source, /md:grid-cols-\[minmax\(0,1fr\)_300px\]/);
+  match(source, /xl:grid-cols-\[minmax\(0,1fr\)_340px\]/);
+  match(source, /function VideoTaskDrawer\(/);
+  match(source, /useBodyScrollLock\(isTaskPanelOpen/);
+  match(source, /mobile-dialog-panel ml-auto flex h-full w-full max-w-\[460px\]/);
+  match(source, /onOpenTasks=\{\(\) => setIsTaskPanelOpen\(true\)\}/);
 });
 
-test("video task list only becomes an internal scroller in xl side-panel layouts", () => {
-  doesNotMatch(source, /max-h-\[720px\][^"]*overflow-hidden/);
-  match(source, /xl:h-\[min\(720px,calc\(100dvh-5rem\)\)\] xl:overflow-hidden/);
-  match(source, /xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain/);
+test("video task drawer owns its scroll surface instead of shrinking the canvas", () => {
+  doesNotMatch(source, /xl:grid-cols-\[minmax\(0,1fr\)_minmax\(320px,380px\)\]/);
+  match(source, /<AnimatePresence>/);
+  match(source, /mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto/);
+  match(source, /activeItems=\{activeItems\}/);
+  match(source, /historyItems=\{filteredHistoryItems\}/);
+});
+
+test("video prompt and parameter panel use one discoverable workspace scroll", () => {
+  match(source, /const resizePromptEditor = useCallback\(\(\) =>/);
+  match(source, /target\.style\.height = "0px"/);
+  match(source, /target\.style\.height = `\$\{target\.scrollHeight\}px`/);
+  match(source, /resize-none overflow-y-hidden/);
+  match(source, /className="scroll-mt-20 md:sticky md:top-\[76px\]"/);
+  match(source, /id="video-generation-settings"/);
+  match(source, /onOpenParameters=\{scrollParametersIntoView\}/);
+  match(source, />视频生成参数</);
+});
+
+test("video task errors show a readable summary with optional technical details", () => {
+  match(source, /function nestedVideoErrorText\(/);
+  match(source, /function taskErrorSummary\(/);
+  match(source, /参考素材不是有效图片/);
+  match(source, /<details className="group mt-2 overflow-hidden/);
+  match(source, /技术详情/);
 });
 
 test("video prompt enhancement candidates do not trap editor scrolling", () => {
   doesNotMatch(source, /promptEnhancePanelRef/);
-  doesNotMatch(source, /block: "start"/);
+  doesNotMatch(
+    source,
+    /target\.scrollIntoView\(\{ behavior: motionSafeScrollBehavior\(\), block: "start" \}\)/,
+  );
   match(source, /function PromptEnhanceChooser\(/);
+  match(source, /function PromptEnhanceCandidateCard\(/);
+  match(source, /function PromptEnhanceCandidatePreview\(/);
+  match(source, /function PromptEnhanceLoadingState\(/);
   match(source, /onReturnToEditor=\{scrollPromptEditorIntoView\}/);
   match(source, /function motionSafeScrollBehavior\(\): ScrollBehavior/);
   match(source, /target\.scrollIntoView\(\{ behavior: motionSafeScrollBehavior\(\), block: "center" \}\)/);
-  match(source, /sticky bottom-3/);
-  match(source, /max-h-\[min\(72dvh,36rem\)\]/);
-  match(source, /min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1/);
-  match(source, /xl:grid-cols-\[minmax\(220px,280px\)_minmax\(0,1fr\)\]/);
-  match(source, /h-\[min\(32dvh,18rem\)\] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
-  match(source, /max-h-\[min\(42dvh,24rem\)\] min-h-\[9rem\] flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words/);
+  doesNotMatch(source, /sticky bottom-3/);
+  doesNotMatch(source, /max-h-\[min\(72dvh,36rem\)\]/);
+  doesNotMatch(source, /max-h-\[min\(42dvh,24rem\)\]/);
+  match(source, /选择一个优化方向/);
+  match(source, /lg:grid lg:grid-cols-3 lg:overflow-visible/);
+  match(source, /完整提示词 · \{candidate\.prompt\.length\.toLocaleString\(\)\} 字/);
+  match(source, /focus\(\{ preventScroll: true \}\)/);
   match(source, /回到编辑/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
@@ -50,7 +82,9 @@ test("video reference prompts use stable anchor ids through enhancement", () => 
   match(source, /function normalizePromptReferenceMentions\(/);
   match(source, /function preservePromptReferenceTokens\(/);
   match(source, /anchorPromptEnhanceCandidates\(/);
-  match(source, /serializePromptReferenceMentions\(prompt\.trim\(\), referenceMedia\)/);
+  match(source, /function promptForVideoAction\(/);
+  match(source, /serializePromptReferenceMentions\(trimmed, references\)/);
+  match(source, /prompt: promptForVideoAction\(action, prompt, referenceMedia\)/);
   match(source, /referencePromptToken\(item\)/);
   match(source, /insertPromptText\(referenceDisplayToken\(item\)\)/);
   match(source, /return `@/);
