@@ -124,6 +124,39 @@ test("desktop image composer keeps high-frequency settings inline", () => {
   match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
 });
 
+test("desktop studio uses one compact control family and aligned content rails", () => {
+  const segmented = source(
+    "src/components/ui/primitives/mobile/SegmentedControl.tsx",
+  );
+  const contextBar = source("src/components/ui/shell/StudioContextBar.tsx");
+  const composer = source(
+    "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+  );
+  const canvas = source(
+    "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+  );
+  const divider = source(
+    "src/components/ui/chat/desktop/DesktopSceneDivider.tsx",
+  );
+
+  match(segmented, /density\?: "default" \| "compact"/);
+  match(segmented, /aria-orientation="horizontal"/);
+  match(segmented, /tabIndex=\{index === tabStopIndex \? 0 : -1\}/);
+  match(segmented, /case "ArrowRight":/);
+  match(segmented, /case "Home":/);
+  match(
+    segmented,
+    /focus-visible:shadow-\[var\(--ring\)\]/,
+  );
+  match(contextBar, /density="compact"/);
+  match(contextBar, /<span>图库<\/span>/);
+  match(composer, /density="compact"/);
+  match(canvas, /max-w-\[var\(--content-composer\)\]/);
+  match(canvas, /aria-label="回到最新"/);
+  match(canvas, /var\(--studio-sidebar-offset, 0px\) \/ 2/);
+  match(divider, /max-w-\[var\(--content-composer\)\]/);
+});
+
 test("desktop web build uses runtime env without unsupported config flag", () => {
   const buildDesktop = source("scripts/build-desktop.mjs");
   const nextConfig = source("next.config.ts");

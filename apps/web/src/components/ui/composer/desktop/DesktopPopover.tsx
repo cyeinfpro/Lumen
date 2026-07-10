@@ -10,12 +10,17 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { DURATION, EASE } from "@/lib/motion";
+import {
+  calculateDesktopPopoverPosition,
+  type DesktopPopoverAlign,
+} from "./desktopPopoverPosition";
 
 export interface DesktopPopoverProps {
   open: boolean;
@@ -27,7 +32,9 @@ export interface DesktopPopoverProps {
   /** 可访问名 */
   ariaLabel?: string;
   /** 对齐方式：相对 trigger 的 left / center / right */
-  align?: "left" | "center" | "right";
+  align?: DesktopPopoverAlign;
+  /** 内容最大高度；最终仍会受视口安全边距约束 */
+  maxHeight?: string;
   className?: string;
 }
 
@@ -47,6 +54,7 @@ export function DesktopPopover({
   children,
   ariaLabel,
   align = "left",
+  maxHeight = "360px",
   className,
 }: DesktopPopoverProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -54,7 +62,6 @@ export function DesktopPopover({
   const [position, setPosition] = useState<{
     left: number;
     top: number;
-    translateX: string;
   } | null>(null);
 
   useEffect(() => {
@@ -67,46 +74,24 @@ export function DesktopPopover({
     if (!anchor || !panel) return;
 
     const anchorRect = anchor.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-    const gutter = 12;
-    let left = anchorRect.left;
-    let translateX = "0";
+    // Framer Motion 会在入场时缩放面板；offset 尺寸不受 transform 影响，
+    // 避免按 0.96 倍宽度定位后，动画结束又越出视口。
+    const panelWidth = panel.offsetWidth;
+    const panelHeight = panel.offsetHeight;
+    const nextPosition = calculateDesktopPopoverPosition({
+      anchorRect,
+      panelWidth,
+      panelHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      align,
+    });
 
-    if (align === "center") {
-      left = anchorRect.left + anchorRect.width / 2;
-      translateX = "-50%";
-    } else if (align === "right") {
-      left = anchorRect.right;
-      translateX = "-100%";
-    }
-
-    if (align === "left") {
-      left = Math.min(
-        Math.max(left, gutter),
-        Math.max(gutter, viewportW - panelRect.width - gutter),
-      );
-    } else if (align === "center") {
-      left = Math.min(
-        Math.max(left, gutter + panelRect.width / 2),
-        Math.max(gutter + panelRect.width / 2, viewportW - gutter - panelRect.width / 2),
-      );
-    } else {
-      left = Math.min(
-        Math.max(left, gutter + panelRect.width),
-        Math.max(gutter + panelRect.width, viewportW - gutter),
-      );
-    }
-
-    const topAbove = anchorRect.top - panelRect.height - 8;
-    const topBelow = anchorRect.bottom + 8;
-    const top =
-      topAbove >= gutter
-        ? topAbove
-        : Math.min(topBelow, Math.max(gutter, viewportH - panelRect.height - gutter));
-
-    setPosition({ left, top, translateX });
+    setPosition((current) =>
+      current?.left === nextPosition.left && current.top === nextPosition.top
+        ? current
+        : nextPosition,
+    );
   }, [align, anchorRef]);
 
   // ESC 关闭
@@ -133,7 +118,6 @@ export function DesktopPopover({
       if (!target) return;
       if (panel.contains(target)) return;
       if (anchor?.contains(target)) return;
-      // trigger 也算外部——关闭；若外层希望 trigger 切换 open，调用方已在 onClick 处 setOpen
       onCloseRef.current();
     };
     // 用 mousedown 而不是 click：避免 trigger 的 click toggle 后立刻关闭
@@ -141,18 +125,35 @@ export function DesktopPopover({
     return () => document.removeEventListener("mousedown", onDown);
   }, [anchorRef, open]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open, updatePosition]);
+
   useEffect(() => {
     if (!open) return;
-    const frame = window.requestAnimationFrame(() => updatePosition());
     const onViewportChange = () => updatePosition();
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => updatePosition())
+        : null;
+    const panel = panelRef.current;
+    const anchor = anchorRef.current;
+    if (panel) resizeObserver?.observe(panel);
+    if (anchor) resizeObserver?.observe(anchor);
+    const visualViewport = window.visualViewport;
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
+    visualViewport?.addEventListener("resize", onViewportChange);
+    visualViewport?.addEventListener("scroll", onViewportChange);
     return () => {
-      window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
+      visualViewport?.removeEventListener("resize", onViewportChange);
+      visualViewport?.removeEventListener("scroll", onViewportChange);
     };
-  }, [open, updatePosition]);
+  }, [anchorRef, open, updatePosition]);
 
   const originClass = useCallback(() => {
     if (align === "right") return "origin-bottom-right";
@@ -177,7 +178,7 @@ export function DesktopPopover({
           className={cn(
             "fixed z-[var(--z-tray,50)]",
             originClass(),
-            "min-w-[220px] max-h-[360px] overflow-auto",
+            "min-w-[220px] overflow-auto",
             "rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
             "shadow-[var(--shadow-2)] backdrop-blur-xl",
             "p-1",
@@ -186,7 +187,9 @@ export function DesktopPopover({
           style={{
             left: position?.left ?? -9999,
             top: position?.top ?? -9999,
-            transform: `translate(${position?.translateX ?? "0"}, 0)`,
+            minWidth: "min(220px, calc(100vw - 24px))",
+            maxWidth: "calc(100vw - 24px)",
+            maxHeight: `min(${maxHeight}, calc(100dvh - 24px))`,
           }}
         >
           {children}

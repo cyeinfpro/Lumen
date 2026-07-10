@@ -932,7 +932,8 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             anchorRef={advancedTriggerRef}
             ariaLabel="高级执行设置"
             align="right"
-            className="w-[min(720px,calc(100vw-32px))] max-h-[min(72vh,620px)] p-0"
+            maxHeight="min(72vh, 620px)"
+            className="w-[min(720px,calc(100vw-32px))] p-0"
           >
             <AdvancedComposerSettings
               mode={mode}
@@ -1083,6 +1084,7 @@ function ModeSegment({
         value={value}
         onChange={onChange}
         ariaLabel="模式"
+        density="compact"
         items={[
           {
             value: "chat",

@@ -15,6 +15,7 @@ import {
 
 import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
+import { SegmentedControl } from "@/components/ui/primitives/mobile";
 import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
 import { cn } from "@/lib/utils";
 
@@ -70,22 +71,32 @@ export function StudioContextBar({
           className="hidden h-4 w-px bg-[var(--border-subtle)] sm:block"
         />
 
-        <div
-          role="tablist"
-          aria-label="会话视图"
-          className="hidden shrink-0 items-center gap-0.5 sm:flex"
-        >
-          <ViewButton
-            active={view === "chat"}
-            label="对话"
-            onClick={() => onViewChange("chat")}
-            icon={<MessageSquareText className="h-3.5 w-3.5" aria-hidden />}
-          />
-          <ViewButton
-            active={view === "images"}
-            label="图片"
-            onClick={() => onViewChange("images")}
-            icon={<Images className="h-3.5 w-3.5" aria-hidden />}
+        <div className="hidden shrink-0 sm:block">
+          <SegmentedControl<"chat" | "images">
+            value={view}
+            onChange={onViewChange}
+            ariaLabel="会话视图"
+            density="compact"
+            items={[
+              {
+                value: "chat",
+                label: (
+                  <span className="inline-flex items-center gap-1">
+                    <MessageSquareText className="h-3.5 w-3.5" aria-hidden />
+                    <span>对话</span>
+                  </span>
+                ),
+              },
+              {
+                value: "images",
+                label: (
+                  <span className="inline-flex items-center gap-1">
+                    <Images className="h-3.5 w-3.5" aria-hidden />
+                    <span>图库</span>
+                  </span>
+                ),
+              },
+            ]}
           />
         </div>
       </div>
@@ -181,36 +192,5 @@ export function StudioContextBar({
         )}
       </div>
     </div>
-  );
-}
-
-function ViewButton({
-  active,
-  label,
-  icon,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  icon: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={cn(
-        "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-control)] px-2 text-[11px] font-medium",
-        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-        active
-          ? "bg-[var(--bg-2)]/72 text-[var(--fg-0)]"
-          : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
-      )}
-    >
-      {icon}
-      <span className="hidden lg:inline">{label}</span>
-    </button>
   );
 }

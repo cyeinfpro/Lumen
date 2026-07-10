@@ -26,7 +26,7 @@ import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
-  ArrowDownToLine,
+  ArrowDown,
   Check,
   Clipboard,
   Copy,
@@ -38,7 +38,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Button, toast } from "@/components/ui/primitives";
+import { Button, IconButton, toast } from "@/components/ui/primitives";
 import { Markdown } from "@/components/ui/Markdown";
 import { ViewportImage } from "@/components/ui/ViewportImage";
 import { useChatStore } from "@/store/useChatStore";
@@ -66,6 +66,8 @@ const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 const STICK_TO_BOTTOM_PX = 120;
 // 与移动会话画布一致：从 80 降到 50（P2-UX）。
 const VIRTUALIZE_AFTER = 50;
+const CONVERSATION_TEXT_RAIL =
+  "mx-auto w-full max-w-[var(--content-composer)]";
 
 interface DesktopConversationCanvasProps {
   messages: Message[];
@@ -597,16 +599,22 @@ function JumpToLatestButton({
   if (!visible) return null;
 
   return (
-    <div className="fixed left-1/2 bottom-[calc(96px+env(safe-area-inset-bottom,0px))] z-30 -translate-x-1/2">
-      <Button
+    <div
+      className="pointer-events-none fixed bottom-[calc(84px+env(safe-area-inset-bottom,0px))] z-30 -translate-x-1/2"
+      style={{
+        left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
+      }}
+    >
+      <IconButton
         size="sm"
         variant="secondary"
-        leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
+        aria-label="回到最新"
+        tooltip="回到最新"
         onClick={onClick}
-        className="border-[var(--border)] bg-[var(--bg-1)]/88 shadow-lg backdrop-blur-xl"
+        className="pointer-events-auto rounded-full border-[var(--border)] bg-[var(--bg-1)]/92 shadow-[var(--shadow-2)] backdrop-blur-xl"
       >
-        最新
-      </Button>
+        <ArrowDown className="h-4 w-4" aria-hidden />
+      </IconButton>
     </div>
   );
 }
@@ -667,7 +675,7 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   return (
     <div
       id={`msg-${msg.id}`}
-      className="group/turn relative mx-auto w-full max-w-[760px]"
+      className={cn("group/turn relative", CONVERSATION_TEXT_RAIL)}
     >
       <div className="flex items-start gap-3 border-l border-[var(--accent-border)] pl-4">
         <div className="min-w-0 flex-1">
@@ -744,12 +752,12 @@ const AssistantTurn = memo(function AssistantTurn({
 
   return (
     <div id={`msg-${msg.id}`} className="group/turn flex flex-col gap-2">
-      <div className="mx-auto w-full max-w-[760px]">
+      <div className={CONVERSATION_TEXT_RAIL}>
         <CompletionStatusLine msg={msg} />
       </div>
 
       {(msg.text || isFailedText) && (
-        <div className="mx-auto flex w-full max-w-[760px] items-start gap-2">
+        <div className={cn(CONVERSATION_TEXT_RAIL, "flex items-start gap-2")}>
           <div
             className={cn(
               "text-body-lg min-w-0 max-w-[var(--content-text)] break-words [overflow-wrap:anywhere] flex-1",
@@ -783,7 +791,7 @@ const AssistantTurn = memo(function AssistantTurn({
       )}
 
       {isFailedText && (
-        <div className="mx-auto w-full max-w-[760px]">
+        <div className={CONVERSATION_TEXT_RAIL}>
           <button
             type="button"
             onClick={() => onRetryText(msg.id)}
