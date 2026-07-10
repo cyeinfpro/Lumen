@@ -1,3 +1,10 @@
+---
+status: current
+owner: web
+last_reviewed: 2026-07-10
+supersedes_frontend_guidance: docs/DESIGN.md
+---
+
 # Lumen 设计语言（SoT）
 
 本文件是 `apps/web` 的设计语言**唯一来源**。所有颜色、排版、圆角、阴影、文案规范都在此约定。底层值在 `apps/web/src/app/globals.css`，本文档只描述「何时用、怎么用」。
@@ -249,7 +256,12 @@ Composer 必须按三层渐进披露：
 1. **强调色**：禁用 `\b(text|bg|border|ring)-(red|emerald|amber|sky|blue|green|yellow|orange|rose|pink|fuchsia|violet|indigo|cyan|teal|lime)-\d+\b`
 2. **圆角**：禁用 `\brounded-(xl|2xl|3xl|md|lg|sm|xs)\b`
 3. **阴影**：禁用 `\bshadow-\[`
-4. **裸 button**：禁用 `<button` 直接挂 `className`（用 `Button` / `IconButton` primitive）
+4. **中性色阶**：禁用 `text-neutral-* / bg-neutral-*`，改用 `--fg-* / --bg-*`
+
+`Button` / `IconButton` / `Pressable` 仍是默认选择。原生 `<button>` 可用于
+组件内部的专用语义控件（例如拖拽把手、媒体覆盖操作、复合输入器子控件），但必须
+保留正确的 `type`、可访问名称、Disabled 状态，并继承全局 Focus Outline；因此不再
+把所有 Raw Button 写成无法执行的绝对禁令。
 
 例外：图表、第三方库子组件可用 `// eslint-disable-next-line` 显式豁免。
 

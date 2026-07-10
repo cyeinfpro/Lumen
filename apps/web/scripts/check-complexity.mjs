@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 import { ESLint } from "eslint";
 
@@ -9,6 +10,52 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, "..");
 const baselinePath = path.join(scriptDir, "complexity-baseline.json");
 const updateBaseline = process.argv.includes("--update-baseline");
+
+function gitChangedFiles() {
+  const run = (args) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((value) => value.replaceAll("\\", "/"));
+    } catch {
+      return [];
+    }
+  };
+
+  const working = new Set([
+    ...run(["diff", "--name-only", "--diff-filter=ACMR"]),
+    ...run(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]),
+  ]);
+  if (working.size > 0) return { files: working, baseRef: "HEAD" };
+  return {
+    files: new Set(
+      run(["diff", "--name-only", "--diff-filter=ACMR", "HEAD^", "HEAD"]),
+    ),
+    baseRef: "HEAD^",
+  };
+}
+
+function loadPreviousBaseline(baseRef, fallback) {
+  try {
+    const raw = execFileSync(
+      "git",
+      ["show", `${baseRef}:apps/web/scripts/complexity-baseline.json`],
+      {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
 
 function findingLabel(message) {
   const labelMatch = message.message.match(
@@ -87,12 +134,34 @@ if (
 }
 
 const errors = [];
+const changed = gitChangedFiles();
+const changedFiles = changed.files;
+const previousBaseline = loadPreviousBaseline(changed.baseRef, baseline);
 for (const [key, complexity] of Object.entries(current)) {
   const allowed = baseline.violations[key];
+  const previousAllowed = previousBaseline.violations?.[key];
+  const sourcePath = key.split("::", 1)[0];
+  const touched =
+    changedFiles.has(`apps/web/${sourcePath}`) || changedFiles.has(sourcePath);
   if (allowed === undefined) {
     errors.push(`new complexity violation: ${key} (${complexity})`);
   } else if (complexity > allowed) {
     errors.push(`complexity grew: ${key} ${allowed} -> ${complexity}`);
+  }
+  if (
+    touched &&
+    previousAllowed !== undefined &&
+    complexity >= previousAllowed
+  ) {
+    errors.push(
+      `touched complexity debt must decrease: ${key} ${previousAllowed} -> ${complexity}`,
+    );
+  } else if (
+    touched &&
+    previousAllowed === undefined &&
+    complexity > MAX_COMPLEXITY
+  ) {
+    errors.push(`new touched complexity debt: ${key} (${complexity})`);
   }
 }
 

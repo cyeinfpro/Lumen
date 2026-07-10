@@ -7,12 +7,14 @@ interface UseConversationRouteSyncOptions {
   currentConvId: string | null;
   loadHistoricalMessages: (convId: string) => Promise<void>;
   setCurrentConv: (id: string | null) => void;
+  rootStartsNew?: boolean;
 }
 
 export function useConversationRouteSync({
   currentConvId,
   loadHistoricalMessages,
   setCurrentConv,
+  rootStartsNew = false,
 }: UseConversationRouteSyncOptions): string | null {
   const router = useRouter();
   const pathname = usePathname();
@@ -26,14 +28,27 @@ export function useConversationRouteSync({
 
   const pendingConversationIdRef = useRef<string | null>(null);
   const syncedConversationIdRef = useRef<string | null>(null);
+  const currentConversationIdRef = useRef(currentConvId);
+  const suppressRouteWriteRef = useRef(false);
+
+  useEffect(() => {
+    currentConversationIdRef.current = currentConvId;
+  }, [currentConvId]);
 
   useEffect(() => {
     if (!urlConversationId) {
       pendingConversationIdRef.current = null;
       syncedConversationIdRef.current = null;
+      if (rootStartsNew) {
+        suppressRouteWriteRef.current = true;
+        if (currentConversationIdRef.current) {
+          setCurrentConv(null);
+        }
+      }
       return;
     }
 
+    suppressRouteWriteRef.current = false;
     if (urlConversationId === syncedConversationIdRef.current) {
       return;
     }
@@ -41,9 +56,21 @@ export function useConversationRouteSync({
     pendingConversationIdRef.current = urlConversationId;
     setCurrentConv(urlConversationId);
     void loadHistoricalMessages(urlConversationId).catch(() => {});
-  }, [loadHistoricalMessages, setCurrentConv, urlConversationId]);
+  }, [
+    loadHistoricalMessages,
+    rootStartsNew,
+    setCurrentConv,
+    urlConversationId,
+  ]);
 
   useEffect(() => {
+    if (suppressRouteWriteRef.current) {
+      if (currentConvId === null) {
+        suppressRouteWriteRef.current = false;
+      }
+      return;
+    }
+
     if (pendingConversationIdRef.current) {
       if (currentConvId !== pendingConversationIdRef.current) return;
       pendingConversationIdRef.current = null;

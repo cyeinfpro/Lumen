@@ -1,4 +1,15 @@
+---
+status: legacy-architecture-reference
+owner: product-architecture
+last_reviewed: 2026-07-10
+frontend_design_system: apps/web/DESIGN.md
+---
+
 # Lumen — 多模态 AI 工作室 设计文档
+
+> **状态说明：** 本文保留早期产品架构、数据模型和历史决策。当前 Web
+> 视觉、主题、组件、响应式与可访问性规范以 `apps/web/DESIGN.md` 和
+> `apps/web/src/app/globals.css` 为准；本文中的 V1 前端范围不再作为实现验收依据。
 
 > 产品代号：**Lumen**（意为「光」）
 > **使用范围**：**自用 + 少量朋友内部使用**（非商业、非公开运营）。

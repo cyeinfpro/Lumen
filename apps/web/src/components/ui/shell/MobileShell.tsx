@@ -29,12 +29,13 @@ export interface MobileShellProps {
 function insetStyle(mode: "tabbar" | "composer" | "none") {
   if (mode === "tabbar") {
     return {
-      paddingBottom: "calc(56px + env(safe-area-inset-bottom, 0px))",
+      paddingBottom: "var(--mobile-tabbar-height)",
     } as const;
   }
   if (mode === "composer") {
     return {
-      paddingBottom: "calc(56px + 56px + 12px + env(safe-area-inset-bottom, 0px))",
+      paddingBottom:
+        "var(--bottom-overlay-stack, calc(var(--mobile-tabbar-height) + var(--mobile-composer-height, var(--mobile-topbar-h)) + var(--space-3)))",
     } as const;
   }
   return undefined;
@@ -50,21 +51,18 @@ export function MobileShell({
 }: MobileShellProps) {
   return (
     <div
+      data-app-viewport
       className={[
         "relative flex min-h-0 flex-col bg-[var(--bg-0)]",
         className,
       ].join(" ")}
-      // 100dvh 在 iOS 地址栏伸缩时会抖动；用 min-height 配 -webkit-fill-available
-      // 作为渐进增强 fallback，保证内容溢出时也能撑满整个屏幕。
-      style={{
-        minHeight: "100dvh",
-      }}
     >
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       {showLandscapeBanner && <LandscapeBanner />}
       {topBar}
 
       <main
+        data-app-scroll
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         style={insetStyle(bottomInset)}
       >

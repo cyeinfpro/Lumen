@@ -5,7 +5,7 @@ This document is the implementation standard for new frontend features. It turns
 Source of truth:
 
 - Theme tokens and utilities: `apps/web/src/app/globals.css`
-- Product design system: `docs/DESIGN.md`, section 15
+- Current Web design system: `apps/web/DESIGN.md`
 - Long-term memory rule: `MEMORY.md`, "Lumen UI Theme and Dialog Standards"
 
 ## 1. Token-First Rule
@@ -16,14 +16,14 @@ Use semantic CSS variables for every normal interface surface.
 |---|---|
 | Page background | `bg-[var(--bg-0)]` |
 | Panels, cards, dialog bodies | `bg-[var(--bg-1)]` or `bg-[var(--bg-1)]/90` |
-| Nested surfaces | `bg-[var(--bg-2)]` or low-opacity `bg-white/[0.04]` with `border-[var(--border)]` |
+| Nested surfaces | `bg-[var(--bg-2)]` with `border-[var(--border)]` |
 | Primary text | `text-[var(--fg-0)]` |
 | Secondary text | `text-[var(--fg-1)]` |
 | Tertiary/help text | `text-[var(--fg-2)]` |
 | Borders | `border-[var(--border)]`, `border-[var(--border-subtle)]`, `border-[var(--border-strong)]` |
 | Elevation | `shadow-[var(--shadow-2)]`, `shadow-[var(--shadow-3)]`, `shadow-lumen-card`, `shadow-lumen-pop` |
-| Brand action | `bg-[var(--color-lumen-amber)] text-black` |
-| Danger action | red/danger background with `text-white` is allowed |
+| Brand action | `bg-[var(--accent)] text-[var(--accent-on)]` |
+| Danger action | `bg-[var(--danger)] text-[var(--danger-on)]` |
 
 Do not create a new local palette unless the feature introduces a real semantic state that the design system does not cover.
 
@@ -42,7 +42,7 @@ Allowed exceptions:
 
 - Image, video, canvas, and lightbox surfaces where the content needs a dark stage.
 - Small controls drawn on top of image thumbnails or lightbox media.
-- Backdrop/scrim layers behind modals, for example `bg-black/60` or `backdrop:bg-black/40`.
+- Backdrop/scrim layers behind modals should use `var(--surface-scrim)`.
 - Code blocks and terminal/log surfaces when a dark code theme is intentional.
 - Destructive buttons and status badges on strongly colored backgrounds.
 - White icons on success/danger/accent filled badges when contrast requires it.
@@ -56,7 +56,7 @@ All non-media floating UI follows the theme.
 Panel shell:
 
 ```tsx
-className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-[var(--shadow-3)] backdrop-blur-xl"
+className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-[var(--shadow-3)] backdrop-blur-xl"
 ```
 
 Header/footer dividers:
@@ -69,7 +69,7 @@ className="border-t border-[var(--border)] bg-[var(--bg-1)]/72"
 Close/secondary buttons:
 
 ```tsx
-className="text-[var(--fg-1)] hover:bg-white/8 hover:text-[var(--fg-0)]"
+className="text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
 ```
 
 Inputs inside dialogs:

@@ -67,6 +67,13 @@
     --fg-1: #C2BCAF;
     --fg-2: #8A8378;
     --fg-3: #5E5951;
+    --fg-muted-aa: #918A7F;
+    --fg-muted: var(--fg-muted-aa);
+    --fg-disabled: var(--fg-3);
+    --text-primary: var(--fg-0);
+    --text-secondary: var(--fg-1);
+    --text-muted: var(--fg-muted-aa);
+    --text-disabled: var(--fg-disabled);
 
     /* Luminous Darkroom 2.0 surface roles */
     --surface-canvas: var(--bg-0);
@@ -118,6 +125,8 @@
 
     /* 焦点环（双层：暗房底 + 琥珀光晕） */
     --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--amber-glow-strong);
+    --focus-outline: var(--amber-300);
+    --focus-halo: var(--amber-glow);
 
     /* 兼容别名（旧组件依赖 & spec 4.1 语义映射） */
     --color-lumen-amber: var(--amber-400);
@@ -127,11 +136,24 @@
     --accent-border: var(--border-amber);
     --surface:       rgba(18, 19, 24, 0.94);
 
-    /* Stable content geometry */
+    /* Stable application geometry */
+    --appbar-h: 56px;
+    --mobile-topbar-h: 56px;
+    --mobile-tabbar-h: 56px;
+    --sidebar-rail-w: 64px;
+    --sidebar-panel-w: 248px;
+    --overlay-gap: 8px;
     --content-text: 800px;
-    --content-composer: 760px;
-    --content-media: 1040px;
-    --content-workbench: 1240px;
+    --content-composer: 880px;
+    --content-media: 1160px;
+    --content-workbench: 1440px;
+
+    /* Theme-aware infrastructure colors */
+    --scroll-thumb: rgba(245, 242, 235, 0.18);
+    --scroll-thumb-hover: rgba(245, 242, 235, 0.28);
+    --surface-scrim: rgba(0, 0, 0, 0.56);
+    --media-control-bg: rgba(0, 0, 0, 0.70);
+    --media-control-fg: #FFFFFF;
 
     /* 字体家族（spec §4.2）
        --font-body / --font-mono / --font-serif 由 next/font 在 body class
@@ -242,7 +264,7 @@
     --mobile-dialog-viewport-height: 100vh;
     --mobile-dialog-max-height: calc(var(--mobile-dialog-viewport-height) - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
     --mobile-dialog-sheet-max-height: min(88vh, var(--mobile-dialog-max-height));
-    --mobile-tabbar-height: calc(56px + env(safe-area-inset-bottom, 0px));
+    --mobile-tabbar-height: calc(var(--mobile-tabbar-h) + env(safe-area-inset-bottom, 0px));
     --project-mobile-cta-height: calc(84px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -265,6 +287,12 @@
     --fg-1: #C2BCAF;
     --fg-2: #8A8378;
     --fg-3: #5E5951;
+    --fg-muted-aa: #918A7F;
+    --fg-disabled: var(--fg-3);
+    --text-primary: var(--fg-0);
+    --text-secondary: var(--fg-1);
+    --text-muted: var(--fg-muted-aa);
+    --text-disabled: var(--fg-disabled);
     --surface-canvas: var(--bg-0);
     --surface-chrome: var(--bg-1);
     --surface-panel: var(--bg-2);
@@ -276,6 +304,8 @@
     --border:        rgba(245, 242, 235, 0.13);
     --border-strong: rgba(245, 242, 235, 0.20);
     --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--amber-glow-strong);
+    --focus-outline: var(--amber-300);
+    --focus-halo: var(--amber-glow);
     --color-lumen-dark: var(--bg-0);
     --surface: rgba(18, 19, 24, 0.94);
     --shadow-1: 0 1px 0 rgba(255,255,255,0.035) inset, 0 4px 14px rgba(0,0,0,0.24);
@@ -291,8 +321,14 @@
     --bg-3: #DED3C0;
     --fg-0: #211F1A;
     --fg-1: #5D574C;
-    --fg-2: #8B8375;
+    --fg-2: #6F685C;
     --fg-3: #BDB3A3;
+    --fg-muted-aa: #625B50;
+    --fg-disabled: #BDB3A3;
+    --text-primary: var(--fg-0);
+    --text-secondary: var(--fg-1);
+    --text-muted: var(--fg-muted-aa);
+    --text-disabled: var(--fg-disabled);
     --surface-canvas: var(--bg-0);
     --surface-chrome: var(--bg-1);
     --surface-panel: var(--bg-2);
@@ -304,6 +340,11 @@
     --border:        rgba(33, 31, 26, 0.12);
     --border-strong: rgba(33, 31, 26, 0.20);
     --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px rgba(184, 117, 29, 0.34);
+    --focus-outline: #9F5700;
+    --focus-halo: rgba(184, 117, 29, 0.24);
+    --scroll-thumb: rgba(33, 31, 26, 0.22);
+    --scroll-thumb-hover: rgba(33, 31, 26, 0.34);
+    --surface-scrim: rgba(33, 31, 26, 0.32);
     --color-lumen-dark: var(--bg-0);
     --surface: rgba(255, 253, 248, 0.72);
     --shadow-1: 0 1px 2px rgba(72, 54, 31, 0.12);
@@ -330,8 +371,14 @@
       --bg-3: #DED3C0;
       --fg-0: #211F1A;
       --fg-1: #5D574C;
-      --fg-2: #8B8375;
+      --fg-2: #6F685C;
       --fg-3: #BDB3A3;
+      --fg-muted-aa: #625B50;
+      --fg-disabled: #BDB3A3;
+      --text-primary: var(--fg-0);
+      --text-secondary: var(--fg-1);
+      --text-muted: var(--fg-muted-aa);
+      --text-disabled: var(--fg-disabled);
       --surface-canvas: var(--bg-0);
       --surface-chrome: var(--bg-1);
       --surface-panel: var(--bg-2);
@@ -343,6 +390,11 @@
       --border:        rgba(33, 31, 26, 0.12);
       --border-strong: rgba(33, 31, 26, 0.20);
       --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px rgba(184, 117, 29, 0.34);
+      --focus-outline: #9F5700;
+      --focus-halo: rgba(184, 117, 29, 0.24);
+      --scroll-thumb: rgba(33, 31, 26, 0.22);
+      --scroll-thumb-hover: rgba(33, 31, 26, 0.34);
+      --surface-scrim: rgba(33, 31, 26, 0.32);
       --color-lumen-dark: var(--bg-0);
       --surface: rgba(255, 253, 248, 0.72);
       --shadow-1: 0 1px 2px rgba(72, 54, 31, 0.12);
@@ -366,7 +418,7 @@
     border-color: var(--border);
   }
   html {
-    overflow-x: hidden;
+    overflow-x: clip;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     min-height: 100%;
@@ -387,12 +439,11 @@
   body {
     background-color: var(--bg-0);
     color: var(--fg-0);
-    overflow-x: hidden;
+    overflow-x: clip;
     min-height: 100%;
     font-family: var(--font-body, "Geist", -apple-system, system-ui, sans-serif);
     font-feature-settings: "ss01", "ss03";
     font-optical-sizing: auto;
-    overscroll-behavior-y: none;
     -webkit-overflow-scrolling: touch;
     position: relative;
   }
@@ -407,40 +458,22 @@
     body { min-height: 100lvh; }
   }
 
-  /* ——— 全屏 noise grain（Darkroom 胶片感） ——— */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 1;
-    opacity: 0.035;
-    mix-blend-mode: overlay;
-    background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/%3E%3CfeColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  }
-  @supports not (mix-blend-mode: overlay) {
-    body::before { display: none; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    body::before { opacity: 0.015; }
-  }
-  @media (max-width: 767px) {
-    body::before {
-      display: none;
-    }
-  }
-
-  :focus-visible {
-    outline: none;
+  :where(
+    a,
+    button,
+    input,
+    textarea,
+    select,
+    summary,
+    [tabindex]:not([tabindex="-1"])
+  ):focus-visible {
+    outline: 2px solid var(--focus-outline) !important;
+    outline-offset: 2px !important;
     box-shadow: var(--ring);
     border-radius: inherit;
   }
-  button:focus,
-  a:focus,
-  input:focus,
-  textarea:focus,
-  select:focus {
-    outline: none;
+  [data-focus-inset="true"]:focus-visible {
+    outline-offset: -3px !important;
   }
 
   ::selection {
@@ -729,16 +762,35 @@
   /* 细滚动条 */
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+    scrollbar-color: var(--scroll-thumb) transparent;
   }
   .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 9999px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 9999px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
   .no-scrollbar {
     scrollbar-width: none;
   }
   .no-scrollbar::-webkit-scrollbar { display: none; }
+  .mobile-tool-scroller {
+    scroll-snap-type: x proximity;
+    padding-inline-end: 28px;
+    -webkit-mask-image: linear-gradient(
+      to right,
+      #000 0,
+      #000 calc(100% - 28px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      #000 0,
+      #000 calc(100% - 28px),
+      transparent 100%
+    );
+  }
+  .mobile-tool-scroller > * {
+    scroll-snap-align: start;
+  }
 
   /* 卡片阴影兼容别名 */
   .shadow-lumen-card { box-shadow: var(--shadow-2); }
@@ -781,6 +833,7 @@
 
   .lumen-studio-bg {
     background:
+      url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/%3E%3CfeColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.28 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
       linear-gradient(180deg, color-mix(in srgb, var(--bg-1) 58%, transparent), transparent 18rem),
       var(--bg-0);
   }
@@ -790,23 +843,26 @@
   }
   @media (min-width: 1120px) {
     .studio-shell {
-      --studio-sidebar-offset: 64px;
+      --studio-sidebar-offset: var(--sidebar-rail-w);
     }
   }
   @media (min-width: 1440px) {
     .studio-shell[data-sidebar-open="true"] {
-      --studio-sidebar-offset: 248px;
+      --studio-sidebar-offset: var(--sidebar-panel-w);
     }
   }
 
-  .lumen-bottom-fade {
-    pointer-events: none;
-    position: sticky;
-    bottom: 0;
-    height: 4rem;
-    margin-top: -4rem;
-    background: linear-gradient(to top, var(--bg-0), transparent);
-    z-index: 20;
+  [data-app-viewport] {
+    min-height: 100svh;
+    height: 100dvh;
+    min-width: 0;
+    overflow: hidden;
+  }
+  [data-app-scroll] {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block-end: var(--bottom-overlay-stack, 0px);
   }
 
   .mobile-dialog-shell {
@@ -1063,8 +1119,13 @@
   }
 
   /* ——— SafeArea 扩展 ——— */
-  .safe-tabbar   { padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
-  .safe-composer { padding-bottom: calc(56px + 56px + 12px + env(safe-area-inset-bottom, 0px)); }
+  .safe-tabbar   { padding-bottom: var(--mobile-tabbar-height); }
+  .safe-composer {
+    padding-bottom: calc(
+      var(--mobile-tabbar-height) + var(--mobile-composer-height, var(--mobile-topbar-h)) +
+      var(--space-3)
+    );
+  }
 
   @media (max-width: 767px) {
     .mobile-perf-surface {

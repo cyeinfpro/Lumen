@@ -1,4 +1,5 @@
 export { ShellSkeleton } from "./ShellSkeleton";
+export { ResponsiveStudio } from "./ResponsiveStudio";
 export { MobileShell } from "./MobileShell";
 export type { MobileShellProps } from "./MobileShell";
 export { MobileTabBar } from "./MobileTabBar";

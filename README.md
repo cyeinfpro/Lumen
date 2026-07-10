@@ -347,7 +347,8 @@ See `docs/runbooks/update-troubleshooting.md`.
 
 ## Documentation Map
 
-- `docs/DESIGN.md`: product architecture and data model.
+- `apps/web/DESIGN.md`: current Web design system and UI implementation rules.
+- `docs/DESIGN.md`: legacy product architecture, data model and historical decisions.
 - `docs/docker-full-stack-cutover-plan.md`: Docker compose design, migration and rollback details.
 - `deploy/README.md`: deployment templates, nginx, systemd backup/update runner and image-job notes.
 - `docs/runbooks/update-troubleshooting.md`: update failures.

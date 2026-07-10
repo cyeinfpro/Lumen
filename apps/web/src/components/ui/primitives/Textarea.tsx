@@ -21,7 +21,7 @@ const FIELD =
   "border border-[var(--border)] resize-y " +
   "transition-[border-color,box-shadow,background-color] duration-150 " +
   "hover:bg-[var(--bg-1)]/75 " +
-  "focus:outline-none focus:bg-[var(--bg-1)]/75 " +
+  "focus:bg-[var(--bg-1)]/75 " +
   "focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 " +
   "disabled:opacity-50 disabled:cursor-not-allowed";
 
@@ -34,12 +34,16 @@ export function Textarea({
   className,
   id,
   rows = 3,
+  "aria-describedby": ariaDescribedBy,
   ref,
   ...props
 }: TextareaProps & { ref?: React.Ref<HTMLTextAreaElement> }) {
   const reactId = useId();
   const fieldId = id ?? reactId;
-  const describedBy = error ? `${fieldId}-err` : hint ? `${fieldId}-hint` : undefined;
+  const hintId = hint ? `${fieldId}-hint` : undefined;
+  const errorId = error ? `${fieldId}-err` : undefined;
+  const describedBy =
+    [ariaDescribedBy, errorId, hintId].filter(Boolean).join(" ") || undefined;
   const isInvalid = invalid || !!error;
 
   return (
@@ -67,11 +71,16 @@ export function Textarea({
         {...props}
       />
       {error ? (
-        <p id={`${fieldId}-err`} className="text-[11px] text-[var(--danger)]">
+        <p
+          id={errorId}
+          role="alert"
+          className="type-caption text-[var(--danger-fg)]"
+        >
           {error}
         </p>
-      ) : hint ? (
-        <p id={`${fieldId}-hint`} className="text-[11px] text-[var(--fg-1)]/80">
+      ) : null}
+      {hint ? (
+        <p id={hintId} className="type-caption text-[var(--text-muted)]">
           {hint}
         </p>
       ) : null}

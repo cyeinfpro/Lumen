@@ -7,6 +7,9 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -43,7 +46,6 @@ declare global {
 export function DesktopStudio() {
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
   const studioView = useUiStore((s) => s.studioView);
   const setStudioView = useUiStore((s) => s.setStudioView);
 
@@ -63,67 +65,54 @@ export function DesktopStudio() {
   const fast = useChatStore((s) => s.composer.fast);
   const setFast = useChatStore((s) => s.setFast);
   const isWideSidebar = useMediaQuery("(min-width: 1440px)");
-
-  // 宽屏默认固定侧栏，中屏/窄屏默认窄栏或抽屉。
-  useEffect(() => {
-    const wide = window.matchMedia("(min-width: 1440px)");
-    const sync = () => setSidebarOpen(wide.matches);
-    sync();
-    wide.addEventListener("change", sync);
-    return () => wide.removeEventListener("change", sync);
-  }, [setSidebarOpen]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [composerMetrics, setComposerMetrics] = useState({
+    height: 56,
+    bottom: 16,
+  });
+  const sidebarTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
 
   const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
   const {
     data: contextStats,
     refetch: refetchContextStats,
   } = useConversationContextQuery(currentConvId, { refetchInterval: 30_000 });
-  const urlConversationId = useConversationRouteSync({
+  useConversationRouteSync({
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
+    rootStartsNew: true,
   });
-
-  useEffect(() => {
-    if (currentConvId) return;
-    if (urlConversationId) return;
-    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
-    const first = items.find((c) => !c.archived);
-    if (!first) return;
-    setCurrentConv(first.id);
-    void loadHistoricalMessages(first.id).catch(() => {});
-  }, [
-    currentConvId,
-    convsQuery.data,
-    loadHistoricalMessages,
-    setCurrentConv,
-    urlConversationId,
-  ]);
-
-  useEffect(() => {
-    if (currentConvId || urlConversationId) return;
-    if (!convsQuery.hasNextPage || convsQuery.isFetchingNextPage) return;
-    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
-    if (items.some((c) => !c.archived)) return;
-    void convsQuery.fetchNextPage();
-  }, [
-    currentConvId,
-    convsQuery,
-    convsQuery.data,
-    convsQuery.hasNextPage,
-    convsQuery.isFetchingNextPage,
-    urlConversationId,
-  ]);
 
   useEffect(() => {
     if (!currentConvId) return;
     void refetchContextStats();
   }, [currentConvId, messages.length, refetchContextStats]);
 
-  const toggleSidebarRef = useRef(toggleSidebar);
+  const handleSidebarToggle = useCallback(() => {
+    if (isWideSidebar === true) {
+      toggleSidebar();
+      return;
+    }
+    setDrawerOpen((open) => !open);
+  }, [isWideSidebar, toggleSidebar]);
+
   useEffect(() => {
-    toggleSidebarRef.current = toggleSidebar;
-  }, [toggleSidebar]);
+    const wide = window.matchMedia("(min-width: 1440px)");
+    const closeDrawerOnWide = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setDrawerOpen(false);
+      }
+    };
+    wide.addEventListener("change", closeDrawerOnWide);
+    return () => wide.removeEventListener("change", closeDrawerOnWide);
+  }, []);
+
+  const toggleSidebarRef = useRef(handleSidebarToggle);
+  useEffect(() => {
+    toggleSidebarRef.current = handleSidebarToggle;
+  }, [handleSidebarToggle]);
 
   // ⌘/Ctrl+B：切换侧栏抽屉；同时监听 Command Palette 派发的自定义事件。
   useEffect(() => {
@@ -189,112 +178,153 @@ export function DesktopStudio() {
     },
   });
 
+  const handleComposerMetricsChange = useCallback(
+    (next: { height: number; bottom: number }) => {
+      setComposerMetrics((previous) =>
+        Math.abs(previous.height - next.height) < 1 &&
+        Math.abs(previous.bottom - next.bottom) < 1
+          ? previous
+          : next,
+      );
+    },
+    [],
+  );
+
   return (
     <div
       className="studio-shell relative flex h-[100dvh] min-h-0 flex-col bg-[var(--bg-0)]"
-      data-sidebar-open={sidebarOpen ? "true" : "false"}
+      data-sidebar-open={
+        isWideSidebar === true && sidebarOpen ? "true" : "false"
+      }
+      style={
+        {
+          "--desktop-composer-height": `${composerMetrics.height}px`,
+          "--desktop-composer-bottom": `${composerMetrics.bottom}px`,
+        } as CSSProperties
+      }
     >
-      <DesktopTopNav
-        active="studio"
-        onToggleSidebar={toggleSidebar}
-      />
-
-      <div className="flex min-h-0 flex-1">
-        <DesktopSidebarDock
-          expanded={sidebarOpen}
-          onToggle={toggleSidebar}
-          onCreate={() => !createMut.isPending && createMut.mutate({})}
-          creating={createMut.isPending}
+      <div ref={workspaceRef} className="flex min-h-0 flex-1 flex-col">
+        <DesktopTopNav
+          active="studio"
+          onToggleSidebar={handleSidebarToggle}
+          sidebarTriggerRef={sidebarTriggerRef}
+          sidebarExpanded={
+            isWideSidebar === true ? sidebarOpen : drawerOpen
+          }
         />
 
-        <section className="flex min-w-0 flex-1 flex-col">
-          <StudioContextBar
-            title={currentTitle}
-            view={studioView}
-            onViewChange={setStudioView}
-            fast={fast}
-            onFastChange={setFast}
-            contextStats={contextStats}
+        <div className="flex min-h-0 flex-1">
+          <DesktopSidebarDock
+            expanded={isWideSidebar === true && sidebarOpen}
+            onToggle={handleSidebarToggle}
+            onCreate={() => !createMut.isPending && createMut.mutate({})}
+            creating={createMut.isPending}
           />
 
-          <main
-            ref={scrollRef}
-            className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
-          >
-            <div
-              className="mx-auto w-full max-w-[var(--content-workbench)] px-3 py-2 xl:px-5"
+          <section className="flex min-w-0 flex-1 flex-col">
+            <StudioContextBar
+              title={currentTitle}
+              view={studioView}
+              onViewChange={setStudioView}
+              fast={fast}
+              onFastChange={setFast}
+              contextStats={contextStats}
+            />
+
+            <main
+              ref={scrollRef}
+              data-app-scroll
+              className="lumen-studio-bg relative min-h-0 flex-1 overflow-x-clip overflow-y-auto"
               style={{
-                paddingBottom:
-                  "calc(120px + env(safe-area-inset-bottom, 0px))",
+                scrollPaddingBottom:
+                  "calc(var(--desktop-composer-height, 56px) + var(--desktop-composer-bottom, 16px) + 24px)",
               }}
             >
-              <AnimatePresence mode="sync" initial={false}>
-                {studioView === "images" ? (
-                  <motion.div
-                    key="conversation-images"
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: DURATION.page, ease: EASE.develop }}
-                  >
-                    <ConversationImageGallery
-                      messages={messages}
-                      generations={generations}
-                    />
-                  </motion.div>
-                ) : isEmpty ? (
-                  <motion.div
-                    key="onboarding"
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: DURATION.page, ease: EASE.develop }}
-                  >
-                    <Onboarding
-                      onPick={(text, m) => {
-                        setText(text);
-                        setMode(m);
-                      }}
-                    />
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key="conversation"
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: DURATION.page, ease: EASE.develop }}
-                  >
-                    <DesktopConversationCanvas
-                      messages={messages}
-                      generations={generations}
-                      scrollRef={scrollRef}
-                      onEditImage={promoteImageToReference}
-                      onRetryGen={handleRetryGen}
-                      onRetryText={(assistantId) => void retryAssistant(assistantId)}
-                      onRegenerate={(assistantId, newIntent) => {
-                        if (!newIntent) return;
-                        return regenerateAssistant(assistantId, newIntent);
-                      }}
-                    />
-                  </motion.div>
+              <div
+                className={cn(
+                  "mx-auto w-full px-3 py-2 xl:px-5",
+                  studioView === "images"
+                    ? "max-w-[var(--content-workbench)]"
+                    : isEmpty
+                      ? "max-w-[var(--content-composer)]"
+                      : "max-w-[var(--content-media)]",
                 )}
-              </AnimatePresence>
-            </div>
+                style={{
+                  paddingBottom:
+                    "calc(var(--desktop-composer-height, 56px) + var(--desktop-composer-bottom, 16px) + 24px + env(safe-area-inset-bottom, 0px))",
+                }}
+              >
+                <AnimatePresence mode="sync" initial={false}>
+                  {studioView === "images" ? (
+                    <motion.div
+                      key="conversation-images"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                    >
+                      <ConversationImageGallery
+                        messages={messages}
+                        generations={generations}
+                      />
+                    </motion.div>
+                  ) : isEmpty ? (
+                    <motion.div
+                      key="onboarding"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                    >
+                      <Onboarding
+                        onPick={(text, m) => {
+                          setText(text);
+                          setMode(m);
+                        }}
+                      />
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="conversation"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                    >
+                      <DesktopConversationCanvas
+                        messages={messages}
+                        generations={generations}
+                        scrollRef={scrollRef}
+                        onEditImage={promoteImageToReference}
+                        onRetryGen={handleRetryGen}
+                        onRetryText={(assistantId) => void retryAssistant(assistantId)}
+                        onRegenerate={(assistantId, newIntent) => {
+                          if (!newIntent) return;
+                          return regenerateAssistant(assistantId, newIntent);
+                        }}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </main>
+          </section>
+        </div>
 
-            {!isEmpty && <div className="lumen-bottom-fade" aria-hidden />}
-          </main>
-        </section>
+        <DesktopComposerPill
+          onSubmit={() => sendMessage()}
+          onMetricsChange={handleComposerMetricsChange}
+        />
       </div>
 
       <DesktopSidebarDrawer
-        open={sidebarOpen && isWideSidebar === false}
-        onClose={() => setSidebarOpen(false)}
+        open={drawerOpen && isWideSidebar !== true}
+        onClose={() => setDrawerOpen(false)}
+        backgroundRef={workspaceRef}
+        returnFocusRef={sidebarTriggerRef}
       >
         <Sidebar embedded showBrand />
       </DesktopSidebarDrawer>
-
-      <DesktopComposerPill onSubmit={() => sendMessage()} />
     </div>
   );
 }
@@ -306,24 +336,89 @@ export function DesktopStudio() {
 function DesktopSidebarDrawer({
   open,
   onClose,
+  backgroundRef,
+  returnFocusRef,
   children,
 }: {
   open: boolean;
   onClose: () => void;
+  backgroundRef: RefObject<HTMLElement | null>;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
   children: ReactNode;
 }) {
-  // ESC 关闭
+  const panelRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
+    const panel = panelRef.current;
+    const background = backgroundRef.current;
+    const returnFocusTarget = returnFocusRef.current;
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousBackgroundInert = background?.inert ?? false;
+    const previousBackgroundAriaHidden =
+      background?.getAttribute("aria-hidden") ?? null;
+
+    if (background) {
+      background.inert = true;
+      background.setAttribute("aria-hidden", "true");
+    }
+    document.body.style.overflow = "hidden";
+
+    const focusFrame = window.requestAnimationFrame(() => panel?.focus());
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(
+        (element) =>
+          !element.hasAttribute("hidden") && element.getClientRects().length > 0,
+      );
+      if (focusable.length === 0) {
+        e.preventDefault();
+        panel.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (
+        e.shiftKey &&
+        (document.activeElement === first || document.activeElement === panel)
+      ) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousBodyOverflow;
+      if (background) {
+        background.inert = previousBackgroundInert;
+        if (previousBackgroundAriaHidden === null) {
+          background.removeAttribute("aria-hidden");
+        } else {
+          background.setAttribute(
+            "aria-hidden",
+            previousBackgroundAriaHidden,
+          );
+        }
+      }
+      window.requestAnimationFrame(() => returnFocusTarget?.focus());
+    };
+  }, [backgroundRef, open, onClose, returnFocusRef]);
 
   return (
     <AnimatePresence>
@@ -331,7 +426,10 @@ function DesktopSidebarDrawer({
         <>
           <motion.div
             key="drawer-backdrop"
-            className="fixed inset-0 z-[calc(var(--z-dialog)-1)] bg-black/50 min-[1440px]:hidden"
+            className="fixed inset-x-0 bottom-0 z-[calc(var(--z-dialog)-1)] bg-[var(--surface-scrim)] min-[1440px]:hidden"
+            style={{
+              top: "calc(var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))",
+            }}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -340,16 +438,24 @@ function DesktopSidebarDrawer({
             aria-hidden
           />
           <motion.aside
+            ref={panelRef}
             key="drawer-panel"
-            className="fixed bottom-0 left-0 top-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] min-[1440px]:hidden"
+            tabIndex={-1}
+            className="fixed bottom-0 left-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] pb-[env(safe-area-inset-bottom,0px)] min-[1440px]:hidden"
+            style={{
+              top: "calc(var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))",
+            }}
             initial={{ x: -288 }}
             animate={{ x: 0 }}
             exit={{ x: -288 }}
             transition={SPRING.sheet}
             role="dialog"
             aria-modal="true"
-            aria-label="会话侧栏"
+            aria-labelledby="desktop-sidebar-drawer-title"
           >
+            <h2 id="desktop-sidebar-drawer-title" className="sr-only">
+              会话侧栏
+            </h2>
             <IconButton
               size="sm"
               variant="ghost"
@@ -384,7 +490,9 @@ function DesktopSidebarDock({
       className={cn(
         "hidden min-[1120px]:flex shrink-0 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
         "transition-[width] duration-[var(--dur-panel)]",
-        expanded ? "w-16 min-[1440px]:w-[248px]" : "w-16",
+        expanded
+          ? "w-[var(--sidebar-rail-w)] min-[1440px]:w-[var(--sidebar-panel-w)]"
+          : "w-[var(--sidebar-rail-w)]",
       )}
     >
       {expanded ? (
@@ -394,7 +502,7 @@ function DesktopSidebarDock({
       ) : null}
       <div
         className={cn(
-          "flex h-full w-16 shrink-0 flex-col items-center gap-2 px-2 py-3",
+          "flex h-full w-[var(--sidebar-rail-w)] shrink-0 flex-col items-center gap-2 px-2 py-3",
           expanded && "min-[1440px]:hidden",
         )}
       >
