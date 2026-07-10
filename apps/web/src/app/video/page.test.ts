@@ -2,7 +2,10 @@ import { doesNotMatch, match } from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+const source = [
+  readFileSync(new URL("./page.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./video-workbench-ui.tsx", import.meta.url), "utf8"),
+].join("\n");
 
 test("video workspace keeps history reachable through a responsive task drawer", () => {
   doesNotMatch(source, /xl:overflow-hidden/);
