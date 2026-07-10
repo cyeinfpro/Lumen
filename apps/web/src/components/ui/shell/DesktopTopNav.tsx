@@ -76,7 +76,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
   return (
     <header
       className={[
-        "sticky top-0 grid h-14 w-full items-center gap-3 px-4 md:px-6",
+        "sticky top-0 grid h-[52px] w-full items-center gap-3 px-4 md:px-6",
         "grid-cols-[auto_minmax(0,1fr)_auto]",
         "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 backdrop-blur-lg",
       ].join(" ")}
@@ -116,7 +116,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
         <ul
           ref={tabsRef}
           onKeyDown={onTabsKeyDown}
-          className="flex items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/78 p-1"
+          className="flex items-center gap-1"
         >
           {navItems.map((tab) => {
             const isActive = tab.key === currentActive;
@@ -128,18 +128,18 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
                   onClick={() => onTap(tab)}
                   aria-current={isActive ? "page" : undefined}
                   className={[
-                    "relative inline-flex h-8 cursor-pointer items-center rounded-[var(--radius-control)] px-3 text-[13px] font-medium leading-none transition-colors whitespace-nowrap",
+                    "relative inline-flex h-9 cursor-pointer items-center px-3 text-[13px] font-medium leading-none transition-colors whitespace-nowrap",
                     "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
                     isActive
                       ? "text-[var(--fg-0)]"
-                      : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                      : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                   ].join(" ")}
                 >
                   {isActive && (
                     <motion.span
                       layoutId="desktop-nav-active"
                       aria-hidden
-                      className="absolute inset-0 rounded-[var(--radius-control)] bg-[var(--surface-selected)]"
+                      className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-[var(--accent)]"
                       transition={SPRING.snap}
                     />
                   )}

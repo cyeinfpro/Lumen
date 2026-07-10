@@ -1,7 +1,17 @@
 "use client";
 
-import { Images, MessageSquareText, Zap } from "lucide-react";
-import type { ComponentProps } from "react";
+import {
+  Images,
+  MessageSquareText,
+  Settings2,
+  Zap,
+} from "lucide-react";
+import {
+  type ComponentProps,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
@@ -25,53 +35,150 @@ export function StudioContextBar({
   onFastChange: (next: boolean) => void;
   contextStats: ContextStats;
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const root = settingsRef.current;
+      if (!root || !(event.target instanceof Node) || root.contains(event.target)) {
+        return;
+      }
+      setSettingsOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [settingsOpen]);
+
   return (
-    <div className="flex h-11 shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 md:px-4">
-      <div className="min-w-0 flex-1">
+    <div className="flex h-10 shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/94 px-3 md:px-4">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
         <p className="truncate text-[13px] font-medium text-[var(--fg-0)]">
           {title}
         </p>
+
+        <span
+          aria-hidden
+          className="hidden h-4 w-px bg-[var(--border-subtle)] sm:block"
+        />
+
+        <div
+          role="tablist"
+          aria-label="会话视图"
+          className="hidden shrink-0 items-center gap-0.5 sm:flex"
+        >
+          <ViewButton
+            active={view === "chat"}
+            label="对话"
+            onClick={() => onViewChange("chat")}
+            icon={<MessageSquareText className="h-3.5 w-3.5" aria-hidden />}
+          />
+          <ViewButton
+            active={view === "images"}
+            label="图片"
+            onClick={() => onViewChange("images")}
+            icon={<Images className="h-3.5 w-3.5" aria-hidden />}
+          />
+        </div>
       </div>
 
-      <div
-        role="tablist"
-        aria-label="会话视图"
-        className="flex shrink-0 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-0.5"
-      >
-        <ViewButton
-          active={view === "chat"}
-          label="对话"
-          onClick={() => onViewChange("chat")}
-          icon={<MessageSquareText className="h-3.5 w-3.5" aria-hidden />}
-        />
-        <ViewButton
-          active={view === "images"}
-          label="图片"
-          onClick={() => onViewChange("images")}
-          icon={<Images className="h-3.5 w-3.5" aria-hidden />}
-        />
-      </div>
-
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div ref={settingsRef} className="relative shrink-0">
         <button
           type="button"
-          onClick={() => onFastChange(!fast)}
-          aria-pressed={fast}
-          aria-label={fast ? "关闭快速模式" : "开启快速模式"}
+          onClick={() => setSettingsOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={settingsOpen}
+          aria-label="会话设置"
           className={cn(
-            "inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 text-[11px] font-medium",
+            "relative inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)]",
             "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-            fast
-              ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+            settingsOpen
+              ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
+              : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
           )}
         >
-          <Zap className="h-3.5 w-3.5" fill={fast ? "currentColor" : "none"} aria-hidden />
-          <span className="hidden xl:inline">Fast</span>
+          <Settings2 className="h-4 w-4" aria-hidden />
+          {fast && (
+            <span
+              aria-hidden
+              className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+            />
+          )}
         </button>
-        <ContextWindowMeter stats={contextStats} compact />
-        <ConversationMemoryButton compact />
-        <SystemPromptManager compact />
+
+        {settingsOpen && (
+          <div
+            role="menu"
+            aria-label="会话设置"
+            className="absolute right-0 top-10 z-40 w-[320px] rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/96 p-2 shadow-[var(--shadow-3)] backdrop-blur-xl"
+          >
+            <div className="px-2 pb-2 pt-1">
+              <p className="text-[12px] font-medium text-[var(--fg-0)]">
+                会话设置
+              </p>
+            </div>
+
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={fast}
+              onClick={() => onFastChange(!fast)}
+              className={cn(
+                "flex h-9 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
+                "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+                fast
+                  ? "bg-[var(--accent-soft)] text-[var(--fg-0)]"
+                  : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+              )}
+            >
+              <Zap
+                className={cn(
+                  "h-4 w-4",
+                  fast ? "text-[var(--accent)]" : "text-[var(--fg-2)]",
+                )}
+                fill={fast ? "currentColor" : "none"}
+                aria-hidden
+              />
+              <span className="min-w-0 flex-1 text-[12px] font-medium">
+                Fast
+              </span>
+              <span
+                aria-hidden
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  fast ? "bg-[var(--accent)]" : "bg-[var(--fg-3)]",
+                )}
+              />
+            </button>
+
+            <div className="my-2 h-px bg-[var(--border-subtle)]" />
+
+            <div className="grid gap-2 px-1 pb-1">
+              <div className="flex items-center justify-between gap-3 px-1">
+                <span className="text-[11px] text-[var(--fg-2)]">上下文</span>
+                <ContextWindowMeter stats={contextStats} compact />
+              </div>
+              <div className="flex items-center justify-between gap-3 px-1">
+                <span className="text-[11px] text-[var(--fg-2)]">记忆</span>
+                <ConversationMemoryButton />
+              </div>
+              <div className="flex items-center justify-between gap-3 px-1">
+                <span className="text-[11px] text-[var(--fg-2)]">
+                  系统提示词
+                </span>
+                <SystemPromptManager compact />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -95,10 +202,10 @@ function ViewButton({
       aria-selected={active}
       onClick={onClick}
       className={cn(
-        "inline-flex h-7 items-center gap-1.5 rounded-[calc(var(--radius-control)-2px)] px-2.5 text-[11px] font-medium",
+        "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-control)] px-2 text-[11px] font-medium",
         "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         active
-          ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
+          ? "bg-[var(--bg-2)]/72 text-[var(--fg-0)]"
           : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
       )}
     >

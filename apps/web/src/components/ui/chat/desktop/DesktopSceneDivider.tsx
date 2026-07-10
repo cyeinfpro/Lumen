@@ -1,7 +1,6 @@
 "use client";
 
-// Scene NN 分隔条（桌面版）：mono meta label + 两侧 1px 细线。
-// 跟 mobile 视觉一致，仅字号略大、上下间距更舒朗。
+// Scene NN 分隔条（桌面版）：左侧 meta label + 单条延伸线。
 
 import { cn } from "@/lib/utils";
 
@@ -19,16 +18,12 @@ export function DesktopSceneDivider({
   const label = `Scene ${String(index).padStart(2, "0")}`;
   return (
     <div
-      className="flex items-center gap-3 my-2 select-none"
+      className="mx-auto my-3 flex w-full max-w-[760px] items-center gap-3 select-none"
       onDoubleClick={onToggle}
       role="separator"
       aria-label={label}
       title="双击折叠/展开"
     >
-      <span
-        aria-hidden="true"
-        className="flex-1 h-px bg-[var(--border-subtle)]"
-      />
       <span
         aria-hidden="true"
         className={cn(
@@ -41,7 +36,7 @@ export function DesktopSceneDivider({
       </span>
       <span
         aria-hidden="true"
-        className="flex-1 h-px bg-[var(--border-subtle)]"
+        className="h-px flex-1 bg-[var(--border-subtle)]"
       />
     </div>
   );

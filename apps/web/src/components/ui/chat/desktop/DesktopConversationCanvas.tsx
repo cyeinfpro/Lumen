@@ -1,14 +1,15 @@
 "use client";
 
-// Darkroom 桌面端画布：无气泡 + Scene 胶片竖线 + DevelopingCard 显影扫光。
+// 桌面端创作画布：单一内容轴 + Scene 分隔 + DevelopingCard 显影扫光。
 // 按 messages 顺序两两配对（user → assistant），渲染 Scene NN 分隔条。
 // 跟移动端 MobileConversationCanvas 设计哲学一致，差异：
-//   - 贯穿竖线距左 24px（移动端 20px）
-//   - 内容 pl-10 pr-3（移动端 pl-10 pr-1）
+//   - 桌面端提示词、文本和单图统一到 760px 内容轴
+//   - 单图按视口高度限制，优先完整显示
 //   - 右键 / hover"···" 触发上下文菜单（移动端长按）
 //   - 保留虚拟化（messages > 80）
 
 import {
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefObject,
@@ -140,11 +141,20 @@ function aspectRatioNumber(
   return w > 0 && h > 0 ? w / h : null;
 }
 
-function singleImageWidthClass(ratio: number | null): string {
-  if (ratio !== null && ratio < 0.58) return "max-w-[320px]";
-  if (ratio !== null && ratio < 0.9) return "max-w-[440px]";
-  if (ratio !== null && ratio > 1.7) return "max-w-[720px]";
-  return "max-w-[620px]";
+function singleImageFrameStyle(ratio: number | null): CSSProperties {
+  if (ratio === null) {
+    return { width: "min(100%, 620px)" };
+  }
+
+  const maxWidth =
+    ratio < 0.75 ? 480
+    : ratio <= 1.2 ? 580
+    : ratio <= 1.8 ? 780
+    : 860;
+  const viewportHeightWidth = `${(ratio * 58).toFixed(2)}dvh`;
+  return {
+    width: `min(100%, ${maxWidth}px, ${viewportHeightWidth})`,
+  };
 }
 
 function gridWidthClass(count: number): string {
@@ -454,7 +464,7 @@ export function DesktopConversationCanvas({
           id={`scene-${scene.anchorId}`}
           data-history-scroll-anchor={scene.anchorId}
           aria-label={`Scene ${String(scene.index).padStart(2, "0")}`}
-          className="relative py-3"
+          className="relative py-2"
           style={
             shouldVirtualize
               ? undefined
@@ -470,7 +480,7 @@ export function DesktopConversationCanvas({
             onToggle={() => toggleCollapse(scene.anchorId)}
           />
           {!isCollapsed && (
-            <div className="flex flex-col gap-5 pl-10 pr-3 pb-4">
+            <div className="flex flex-col gap-4 px-2 pb-5">
               {scene.user && <UserTurn msg={scene.user} />}
               {scene.assistant && (
                 <AssistantTurn
@@ -548,13 +558,6 @@ export function DesktopConversationCanvas({
       aria-relevant="additions"
       className="relative mx-auto w-full max-w-[var(--content-media)]"
     >
-      {/* 贯穿竖线：margin-left 36px, 1px */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 bottom-0 w-px bg-[var(--border-subtle)]"
-        style={{ left: "24px" }}
-      />
-
       <HistoryLoadControl
         sentinelRef={historyPaging.topSentinelRef}
         hasMore={historyPaging.hasMore}
@@ -664,42 +667,44 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   return (
     <div
       id={`msg-${msg.id}`}
-      className="group/turn relative flex flex-col items-end gap-2"
+      className="group/turn relative mx-auto w-full max-w-[760px]"
     >
-      <div className="max-w-[680px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--surface-selected)] px-4 py-3 shadow-[var(--shadow-1)]">
-        {msg.attachments.length > 0 && (
-          <div className="mb-3 flex flex-wrap justify-end gap-2">
-            {msg.attachments.map((att) => (
-              <div
-                key={att.id}
-                className="relative h-12 w-12 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={att.data_url}
-                  alt=""
-                  className="h-full w-full object-cover"
-                  loading="lazy"
-                />
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="flex items-start gap-3 border-l border-[var(--accent-border)] pl-4">
+        <div className="min-w-0 flex-1">
+          {msg.attachments.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {msg.attachments.map((att) => (
+                <div
+                  key={att.id}
+                  className="relative h-11 w-11 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={att.data_url}
+                    alt=""
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
 
-        {msg.text && (
-          <div className="flex items-start gap-2">
-            <CopyButton text={msg.text} className="mt-1" />
-            <p
-              className={cn(
-                "text-right text-[15px] font-medium leading-[1.6]",
-                "text-[var(--fg-0)] whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
-              )}
-              style={{ fontFamily: "var(--font-zh-display)" }}
-            >
-              {msg.text}
-            </p>
-          </div>
-        )}
+          {msg.text && (
+            <div className="flex items-start gap-2">
+              <p
+                className={cn(
+                  "min-w-0 flex-1 whitespace-pre-wrap break-words text-left text-[14px] font-normal leading-[1.65]",
+                  "text-[var(--fg-0)] [overflow-wrap:anywhere]",
+                )}
+                style={{ fontFamily: "var(--font-zh-body)" }}
+              >
+                {msg.text}
+              </p>
+              <CopyButton text={msg.text} className="mt-0.5" />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -739,10 +744,12 @@ const AssistantTurn = memo(function AssistantTurn({
 
   return (
     <div id={`msg-${msg.id}`} className="group/turn flex flex-col gap-2">
-      <CompletionStatusLine msg={msg} />
+      <div className="mx-auto w-full max-w-[760px]">
+        <CompletionStatusLine msg={msg} />
+      </div>
 
       {(msg.text || isFailedText) && (
-        <div className="flex items-start gap-2">
+        <div className="mx-auto flex w-full max-w-[760px] items-start gap-2">
           <div
             className={cn(
               "text-body-lg min-w-0 max-w-[var(--content-text)] break-words [overflow-wrap:anywhere] flex-1",
@@ -776,20 +783,22 @@ const AssistantTurn = memo(function AssistantTurn({
       )}
 
       {isFailedText && (
-        <button
-          type="button"
-          onClick={() => onRetryText(msg.id)}
-          className={cn(
-            "self-start inline-flex items-center gap-1 px-2.5 h-7 rounded-full",
-            "bg-[var(--bg-2)] border border-[var(--border)] text-[11px] text-[var(--fg-0)]",
-            "hover:bg-[var(--bg-3)] transition-colors",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          )}
-          aria-label="重试"
-        >
-          <RotateCcw className="w-3 h-3" aria-hidden />
-          重试
-        </button>
+        <div className="mx-auto w-full max-w-[760px]">
+          <button
+            type="button"
+            onClick={() => onRetryText(msg.id)}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-full px-2.5",
+              "bg-[var(--bg-2)] border border-[var(--border)] text-[11px] text-[var(--fg-0)]",
+              "hover:bg-[var(--bg-3)] transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+            )}
+            aria-label="重试"
+          >
+            <RotateCcw className="w-3 h-3" aria-hidden />
+            重试
+          </button>
+        </div>
       )}
 
       {gens.length > 0 && (
@@ -836,7 +845,7 @@ function areAssistantTurnPropsEqual(
 
 function ImageGrid({ count, children }: { count: number; children: React.ReactNode }) {
   if (count === 1) {
-    return <div className="flex w-full flex-col gap-2">{children}</div>;
+    return <div className="flex w-full flex-col items-center gap-2">{children}</div>;
   }
 
   const cols =
@@ -874,7 +883,6 @@ const FinalImage = memo(function FinalImage({
 
   const ratioCss = aspectRatioToCss(gen.aspect_ratio);
   const ratio = aspectRatioNumber(image, gen.aspect_ratio);
-  const isLongImage = ratio !== null && ratio < 0.58;
   const cardSrc = conversationImageSrc(image);
   const lightboxPreview =
     image.display_url ?? imageVariantUrl(image.id, "display2048");
@@ -933,8 +941,9 @@ const FinalImage = memo(function FinalImage({
     <div
       className={cn(
         "flex w-full flex-col gap-1 group",
-        inGrid ? "justify-self-stretch" : singleImageWidthClass(ratio),
+        inGrid ? "justify-self-stretch" : "mx-auto",
       )}
+      style={inGrid ? undefined : singleImageFrameStyle(ratio)}
     >
       <div
         className={cn(
@@ -942,13 +951,8 @@ const FinalImage = memo(function FinalImage({
           "rounded-[var(--radius-md)] bg-[var(--bg-1)]",
           "border border-[var(--border-subtle)]/70 shadow-[var(--shadow-1)]",
           "transition-[border-color,opacity] duration-150 group-hover:border-[var(--fg-3)]/35",
-          isLongImage && (inGrid ? "h-[min(20vh,180px)] min-h-[108px]" : "h-[min(24vh,220px)] min-h-[132px]"),
         )}
-        style={
-          isLongImage
-            ? { contain: "layout paint" }
-            : { aspectRatio: ratioCss, contain: "layout paint" }
-        }
+        style={{ aspectRatio: ratioCss, contain: "layout paint" }}
       >
         <button
           type="button"
@@ -978,21 +982,10 @@ const FinalImage = memo(function FinalImage({
             onLoad={() => setLoaded(true)}
             className={cn(
               "w-full h-full transition-opacity duration-300",
-              isLongImage ? "object-contain" : "object-cover",
+              "object-contain",
               loaded ? "opacity-100" : "opacity-0",
             )}
           />
-          {isLongImage && (
-            <>
-              <span
-                aria-hidden
-                className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/70 to-transparent"
-              />
-              <span className="absolute bottom-3 left-3 rounded-full border border-[var(--border)] bg-black/45 px-2.5 py-1 text-[11px] text-[var(--fg-0)] backdrop-blur">
-                长图 · 点击查看完整
-              </span>
-            </>
-          )}
         </button>
 
         {free && (

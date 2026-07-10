@@ -107,6 +107,23 @@ test("composer pills abort prompt enhancement and guard duplicate submits", () =
   }
 });
 
+test("desktop image composer keeps high-frequency settings inline", () => {
+  const desktop = source("src/components/ui/composer/desktop/DesktopComposerPill.tsx");
+  const quickSettings = source(
+    "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx",
+  );
+
+  match(desktop, /<ComposerExecutionControls/);
+  match(quickSettings, /function ImageQuickSettingsBar/);
+  match(quickSettings, /ariaLabel="生成数量"/);
+  match(quickSettings, /aria-label="宽高比"/);
+  match(quickSettings, /aria-haspopup="dialog"/);
+  match(quickSettings, /<AspectRatioPicker/);
+  match(quickSettings, /ariaLabel="输出尺寸"/);
+  match(quickSettings, /ariaLabel="生成质量"/);
+  match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
+});
+
 test("desktop web build uses runtime env without unsupported config flag", () => {
   const buildDesktop = source("scripts/build-desktop.mjs");
   const nextConfig = source("next.config.ts");
