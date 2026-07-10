@@ -141,19 +141,17 @@ function aspectRatioNumber(
 }
 
 function singleImageWidthClass(ratio: number | null): string {
-  if (ratio !== null && ratio < 0.58) return "max-w-[min(18%,180px)]";
-  if (ratio !== null && ratio < 0.9) return "max-w-[min(26%,280px)]";
-  if (ratio !== null && ratio > 1.7) return "max-w-[min(38%,440px)]";
-  return "max-w-[min(30%,340px)]";
+  if (ratio !== null && ratio < 0.58) return "max-w-[320px]";
+  if (ratio !== null && ratio < 0.9) return "max-w-[440px]";
+  if (ratio !== null && ratio > 1.7) return "max-w-[720px]";
+  return "max-w-[620px]";
 }
 
 function gridWidthClass(count: number): string {
-  if (count === 2) return "max-w-[560px]";
-  if (count === 3) return "max-w-[720px]";
-  if (count === 4) return "max-w-[760px]";
-  if (count === 5) return "max-w-[900px]";
-  if (count === 6) return "max-w-[960px]";
-  return "max-w-[760px]";
+  if (count === 2) return "max-w-[720px]";
+  if (count === 3 || count === 4) return "max-w-[960px]";
+  if (count >= 5) return "max-w-[1080px]";
+  return "max-w-[960px]";
 }
 
 function openLightbox(items: LightboxItem[], initialId: string) {
@@ -456,7 +454,7 @@ export function DesktopConversationCanvas({
           id={`scene-${scene.anchorId}`}
           data-history-scroll-anchor={scene.anchorId}
           aria-label={`Scene ${String(scene.index).padStart(2, "0")}`}
-          className="relative"
+          className="relative py-3"
           style={
             shouldVirtualize
               ? undefined
@@ -472,7 +470,7 @@ export function DesktopConversationCanvas({
             onToggle={() => toggleCollapse(scene.anchorId)}
           />
           {!isCollapsed && (
-            <div className="flex flex-col gap-3 pl-10 pr-3 pb-2">
+            <div className="flex flex-col gap-5 pl-10 pr-3 pb-4">
               {scene.user && <UserTurn msg={scene.user} />}
               {scene.assistant && (
                 <AssistantTurn
@@ -548,7 +546,7 @@ export function DesktopConversationCanvas({
       role="log"
       aria-live="polite"
       aria-relevant="additions"
-      className="relative mx-auto w-full max-w-[1680px]"
+      className="relative mx-auto w-full max-w-[var(--content-media)]"
     >
       {/* 贯穿竖线：margin-left 36px, 1px */}
       <div
@@ -660,7 +658,7 @@ function CopyButton({
 }
 
 // ———————————————————————————————————————————————————
-// 用户 turn：右对齐，霞鹜文楷，左侧 2px × 40% 琥珀竖条
+// 用户 turn：右对齐的轻量 raised surface。
 // ———————————————————————————————————————————————————
 const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   return (
@@ -668,55 +666,41 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
       id={`msg-${msg.id}`}
       className="group/turn relative flex flex-col items-end gap-2"
     >
-      <span
-        aria-hidden
-        className="absolute bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
-        style={{
-          left: "-24px",
-          top: "30%",
-          height: "40%",
-          width: "2px",
-          borderRadius: "1px",
-        }}
-      />
+      <div className="max-w-[680px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--surface-selected)] px-4 py-3 shadow-[var(--shadow-1)]">
+        {msg.attachments.length > 0 && (
+          <div className="mb-3 flex flex-wrap justify-end gap-2">
+            {msg.attachments.map((att) => (
+              <div
+                key={att.id}
+                className="relative h-12 w-12 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={att.data_url}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              </div>
+            ))}
+          </div>
+        )}
 
-      {msg.attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2 justify-end">
-          {msg.attachments.map((att, idx) => (
-            <div
-              key={att.id}
+        {msg.text && (
+          <div className="flex items-start gap-2">
+            <CopyButton text={msg.text} className="mt-1" />
+            <p
               className={cn(
-                "relative w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
-                "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                idx === 0 && "ring-1 ring-[var(--amber-400)]/60",
+                "text-right text-[15px] font-medium leading-[1.6]",
+                "text-[var(--fg-0)] whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
               )}
+              style={{ fontFamily: "var(--font-zh-display)" }}
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={att.data_url}
-                alt=""
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {msg.text && (
-        <div className="flex items-start gap-2 max-w-[980px]">
-          <CopyButton text={msg.text} className="mt-1" />
-          <p
-            className={cn(
-              "text-right text-[15px] leading-[1.42] font-medium",
-              "text-[var(--fg-0)] whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
-            )}
-            style={{ fontFamily: "var(--font-zh-display)" }}
-          >
-            {msg.text}
-          </p>
-        </div>
-      )}
+              {msg.text}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 });
@@ -761,7 +745,7 @@ const AssistantTurn = memo(function AssistantTurn({
         <div className="flex items-start gap-2">
           <div
             className={cn(
-              "text-body-lg min-w-0 max-w-[1120px] break-words [overflow-wrap:anywhere] flex-1",
+              "text-body-lg min-w-0 max-w-[var(--content-text)] break-words [overflow-wrap:anywhere] flex-1",
               "text-[var(--fg-0)]",
               "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
               isFailedText && "text-[var(--danger)]",

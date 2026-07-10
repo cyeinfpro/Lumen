@@ -1,7 +1,6 @@
 "use client";
 
-// Darkroom 移动端 Composer Pill：折叠 48px，展开态向上生长。
-// 展开态沿用桌面 composer 的工具条顺序，参数区换行展示，避免横向滚动。
+// 移动 Composer：56px 核心输入层 + 执行摘要 + BottomSheet 高级设置。
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -16,11 +15,6 @@ import {
 } from "react";
 import {
   ArrowUp,
-  ChevronDown,
-  Code2,
-  FileSearch,
-  Globe2,
-  ImagePlus,
   Loader2,
   MessageSquare,
   Palette,
@@ -29,17 +23,14 @@ import {
   Sparkles,
   Undo2,
   X,
-  Zap,
 } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   BottomSheet,
-  Chip,
   SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
-import { useChatStore, type ReasoningEffort } from "@/store/useChatStore";
-import type { Quality, RenderQualityChoice } from "@/lib/types";
+import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
 import { enhancePrompt } from "@/lib/apiClient";
@@ -62,6 +53,10 @@ import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import { LazyMaskCanvas } from "../LazyMaskCanvas";
+import {
+  MOBILE_REASONING_OPTIONS,
+  MobileAdvancedSettings,
+} from "./MobileAdvancedSettings";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -69,28 +64,6 @@ interface MobileComposerPillProps {
 }
 
 type ComposerMode = "chat" | "image";
-
-const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }[] = [
-  { value: "none", label: "最快", hint: "直接回复" },
-  { value: "low", label: "低", hint: "轻量思考" },
-  { value: "medium", label: "中", hint: "平衡" },
-  { value: "high", label: "高", hint: "多想一步" },
-  { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
-];
-
-const COUNT_OPTIONS = [1, 2, 4, 8, 10] as const;
-
-const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
-  { value: "1k", label: "1K" },
-  { value: "2k", label: "2K" },
-  { value: "4k", label: "4K" },
-];
-
-const RENDER_QUALITY_OPTIONS: { value: RenderQualityChoice; label: string }[] = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
 
 const ATTACHMENT_REORDER_LONG_PRESS_MS = 220;
 const ATTACHMENT_REORDER_MOVE_SLOP_PX = 10;
@@ -157,6 +130,7 @@ export function MobileComposerPill({
   const keyboardOffset = keyboardInset > 60 ? keyboardInset : 0;
   const [aspectSheetOpen, setAspectSheetOpen] = useState(false);
   const [reasoningSheetOpen, setReasoningSheetOpen] = useState(false);
+  const [advancedSheetOpen, setAdvancedSheetOpen] = useState(false);
   const [shutterBurst, setShutterBurst] = useState(false);
   const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
     null,
@@ -305,7 +279,14 @@ export function MobileComposerPill({
   }, []);
 
   useEffect(() => {
-    if (!expanded || aspectSheetOpen || reasoningSheetOpen) return;
+    if (
+      !expanded ||
+      aspectSheetOpen ||
+      reasoningSheetOpen ||
+      advancedSheetOpen
+    ) {
+      return;
+    }
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
@@ -319,7 +300,7 @@ export function MobileComposerPill({
 
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [aspectSheetOpen, expanded, reasoningSheetOpen]);
+  }, [advancedSheetOpen, aspectSheetOpen, expanded, reasoningSheetOpen]);
 
   useEffect(() => {
     if (promptTooLong) {
@@ -674,11 +655,13 @@ export function MobileComposerPill({
 
   const openAspectSheet = useCallback(() => {
     textareaRef.current?.blur();
+    setAdvancedSheetOpen(false);
     setAspectSheetOpen(true);
   }, []);
 
   const openReasoningSheet = useCallback(() => {
     textareaRef.current?.blur();
+    setAdvancedSheetOpen(false);
     setReasoningSheetOpen(true);
   }, []);
 
@@ -695,21 +678,19 @@ export function MobileComposerPill({
         className={cn(
           "fixed inset-x-3 mx-auto max-w-[616px]",
           "overflow-hidden",
-          "rounded-[var(--radius-panel)] backdrop-blur-xl mobile-perf-surface",
-          "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
-          "border transition-[border-color,box-shadow] duration-200",
+          "rounded-[var(--radius-sheet)] mobile-perf-surface",
+          "bg-[var(--bg-1)]/96",
+          "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
           isDragActive
-            ? "border-[var(--amber-400)] ring-2 ring-[var(--amber-400)]/25"
-            : isImageMode
-            ? "border-[var(--border-amber)]"
-            : "border-[var(--border-subtle)]",
+            ? "border-[var(--accent)]"
+            : "border-[var(--border)] focus-within:border-[var(--accent-border)]",
           "shadow-[var(--shadow-2)]",
         )}
         style={{
           bottom: keyboardOffset
             ? `calc(${keyboardOffset}px + 8px)`
-            : "calc(48px + 6px + env(safe-area-inset-bottom, 0px))",
-          maxHeight: expanded ? expandedMaxHeight : 48,
+            : "calc(var(--mobile-tabbar-height, 56px) + 6px)",
+          maxHeight: expanded ? expandedMaxHeight : 56,
           zIndex: expanded
             ? ("var(--z-composer-expanded, 45)" as unknown as number)
             : ("var(--z-composer, 40)" as unknown as number),
@@ -717,7 +698,7 @@ export function MobileComposerPill({
       >
         {/* 折叠态：单行 */}
         {!expanded && (
-          <div className="flex items-center h-12 px-2.5 gap-1.5">
+          <div className="flex h-14 items-center gap-1.5 px-2.5">
             <IconBtn
               label="添加参考图"
               onClick={openFilePicker}
@@ -1081,7 +1062,14 @@ export function MobileComposerPill({
               />
             </div>
 
-            <ExecutionSummaryBar summary={executionSummary} compact />
+            <ExecutionSummaryBar
+              summary={executionSummary}
+              compact
+              onAdjust={() => {
+                textareaRef.current?.blur();
+                setAdvancedSheetOpen(true);
+              }}
+            />
 
             {/* 分隔线 */}
             <div className="mx-3 h-px bg-[var(--border-subtle)]" />
@@ -1124,180 +1112,6 @@ export function MobileComposerPill({
                     className="mx-0.5 h-5 w-px shrink-0 bg-[var(--border-subtle)]"
                     aria-hidden
                   />
-
-                  {isImageMode && (
-                    <div className="relative shrink-0">
-                      <select
-                        data-inline
-                        aria-label="尺寸选择"
-                        value={quality}
-                        onChange={(event) =>
-                          setQuality(event.target.value as Quality)
-                        }
-                        className={cn(
-                          "h-8 min-w-[70px] appearance-none rounded-full pl-3 pr-7",
-                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                          "text-xs text-[var(--fg-1)] tabular-nums",
-                          "active:text-[var(--fg-0)] focus-visible:outline-none",
-                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                        )}
-                        style={{ fontFamily: "var(--font-mono)" }}
-                      >
-                        {QUALITY_OPTIONS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                        aria-hidden
-                      />
-                    </div>
-                  )}
-
-                  {isImageMode && (
-                    <div className="relative shrink-0">
-                      <select
-                        data-inline
-                        aria-label="渲染质量"
-                        value={renderQuality}
-                        onChange={(event) =>
-                          setRenderQuality(
-                            event.target.value as RenderQualityChoice,
-                          )
-                        }
-                        className={cn(
-                          "h-8 min-w-[68px] appearance-none rounded-full pl-3 pr-7",
-                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                          "text-xs text-[var(--fg-1)]",
-                          "active:text-[var(--fg-0)] focus-visible:outline-none",
-                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                        )}
-                      >
-                        {RENDER_QUALITY_OPTIONS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                        aria-hidden
-                      />
-                    </div>
-                  )}
-
-                  {isImageMode && (
-                    <button
-                      type="button"
-                      data-inline
-                      onClick={openAspectSheet}
-                      className={cn(
-                        "shrink-0 inline-flex items-center gap-1 h-8 px-2.5 rounded-full",
-                        "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                        "text-xs text-[var(--fg-1)] active:text-[var(--fg-0)]",
-                        "whitespace-nowrap active:scale-[0.96] transition-all duration-150",
-                      )}
-                      aria-label={`宽高比 ${aspect}`}
-                      style={{ fontFamily: "var(--font-mono)" }}
-                    >
-                      {aspect}
-                      <ChevronDown className="w-3 h-3" aria-hidden />
-                    </button>
-                  )}
-
-                  {isImageMode && (
-                    <div className="relative shrink-0">
-                      <select
-                        data-inline
-                        aria-label="图像数量"
-                        value={count}
-                        onChange={(event) =>
-                          setImageCount(Number(event.target.value))
-                        }
-                        className={cn(
-                          "h-8 min-w-[64px] appearance-none rounded-full pl-3 pr-7",
-                          "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                          "text-xs text-[var(--fg-1)] tabular-nums",
-                          "active:text-[var(--fg-0)] focus-visible:outline-none",
-                          "focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                        )}
-                        style={{ fontFamily: "var(--font-mono)" }}
-                      >
-                        {COUNT_OPTIONS.map((n) => (
-                          <option key={n} value={n}>
-                            x{n}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                        aria-hidden
-                      />
-                    </div>
-                  )}
-
-                  {!isImageMode && (
-                    <button
-                      type="button"
-                      data-inline
-                      onClick={openReasoningSheet}
-                      className={cn(
-                        "shrink-0 inline-flex items-center gap-1 h-8 px-2.5 rounded-full",
-                        "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                        "text-xs text-[var(--fg-1)] active:text-[var(--fg-0)]",
-                        "whitespace-nowrap active:scale-[0.96] transition-all duration-150",
-                      )}
-                      aria-label="推理强度"
-                    >
-                      {REASONING_OPTIONS.find((r) => r.value === reasoningEffort)?.label ??
-                        "默认"}
-                      <ChevronDown className="w-3 h-3" aria-hidden />
-                    </button>
-                  )}
-
-                  {!isImageMode && (
-                    <>
-                      <Chip
-                        active={webSearch}
-                        onClick={() => setWebSearch(!webSearch)}
-                        icon={<Globe2 className="w-3.5 h-3.5" aria-hidden />}
-                      >
-                        搜索
-                      </Chip>
-                      <Chip
-                        active={fileSearch}
-                        onClick={() => setFileSearch(!fileSearch)}
-                        icon={<FileSearch className="w-3.5 h-3.5" aria-hidden />}
-                        title="需要配置 vector store"
-                      >
-                        文件
-                      </Chip>
-                      <Chip
-                        active={codeInterpreter}
-                        onClick={() => setCodeInterpreter(!codeInterpreter)}
-                        icon={<Code2 className="w-3.5 h-3.5" aria-hidden />}
-                      >
-                        代码
-                      </Chip>
-                      <Chip
-                        active={imageGeneration}
-                        onClick={() => setImageGeneration(!imageGeneration)}
-                        icon={<ImagePlus className="w-3.5 h-3.5" aria-hidden />}
-                      >
-                        生图
-                      </Chip>
-                    </>
-                  )}
-
-                  <Chip
-                    active={fast}
-                    onClick={() => setFast(!fast)}
-                    icon={<Zap className="w-3.5 h-3.5" aria-hidden />}
-                  >
-                    Fast
-                  </Chip>
 
                   {(text.length > 0 || shouldShowCount) && (
                     <span
@@ -1342,6 +1156,37 @@ export function MobileComposerPill({
         />
       </div>
 
+      <BottomSheet
+        open={advancedSheetOpen}
+        onClose={() => setAdvancedSheetOpen(false)}
+        ariaLabel="执行设置"
+        snapPoints={["80%"]}
+      >
+        <MobileAdvancedSettings
+          mode={mode}
+          quality={quality}
+          onQualityChange={setQuality}
+          renderQuality={renderQuality}
+          onRenderQualityChange={setRenderQuality}
+          aspect={aspect}
+          onOpenAspect={openAspectSheet}
+          count={count}
+          onCountChange={setImageCount}
+          reasoningEffort={reasoningEffort ?? "medium"}
+          onOpenReasoning={openReasoningSheet}
+          webSearch={webSearch}
+          onWebSearchChange={setWebSearch}
+          fileSearch={fileSearch}
+          onFileSearchChange={setFileSearch}
+          codeInterpreter={codeInterpreter}
+          onCodeInterpreterChange={setCodeInterpreter}
+          imageGeneration={imageGeneration}
+          onImageGenerationChange={setImageGeneration}
+          fast={fast}
+          onFastChange={setFast}
+        />
+      </BottomSheet>
+
       {/* 宽高比 BottomSheet */}
       <BottomSheet
         open={aspectSheetOpen}
@@ -1364,7 +1209,7 @@ export function MobileComposerPill({
       >
         <SheetList
           title="推理强度"
-          items={REASONING_OPTIONS.map((o) => ({
+          items={MOBILE_REASONING_OPTIONS.map((o) => ({
             key: o.value,
             label: o.label,
             hint: o.hint,
@@ -1414,10 +1259,10 @@ function IconBtn({
       aria-label={label}
       title={label}
       className={cn(
-        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-full",
+        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-[var(--radius-control)]",
         "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-        "active:scale-[0.94] transition-all duration-150",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
+        "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         "disabled:opacity-40 disabled:cursor-not-allowed",
       )}
     >
@@ -1455,7 +1300,7 @@ function SendButton({
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
                 ? "shadow-[var(--shadow-amber)]"
-                : "shadow-[var(--shadow-shutter)]",
+                : "shadow-[var(--shadow-1)]",
             ].join(" ")
           : "bg-[var(--bg-3)] text-[var(--fg-3)] cursor-not-allowed",
       )}
@@ -1549,7 +1394,7 @@ function SheetList({
               {it.selected && (
                 <span
                   aria-hidden
-                  className="w-2.5 h-2.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
+                  className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]"
                 />
               )}
             </button>

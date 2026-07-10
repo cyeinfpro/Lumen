@@ -64,6 +64,12 @@ def pricing_from_rules(
     *,
     source: str = PRICING_SOURCE_DB,
 ) -> ModelPricing | None:
+    keys = {str(rule.key) for rule in rules}
+    if len(keys) > 1:
+        raise ValueError("pricing rules must belong to exactly one model pattern")
+    priorities = {int(getattr(rule, "priority", 0) or 0) for rule in rules}
+    if len(priorities) > 1:
+        raise ValueError("pricing rules in one model pattern must share one priority")
     values: dict[str, Any] = {}
     for rule in rules:
         field = UNIT_FIELD_MAP.get(rule.unit)
@@ -74,6 +80,48 @@ def pricing_from_rules(
         return None
     values.setdefault("pricing_source", source)
     return ModelPricing(**values).with_defaults()
+
+
+def _select_rule_group(
+    rules: list[PricingRule],
+    model: str,
+) -> list[PricingRule]:
+    exact = [row for row in rules if row.key == model]
+    if exact:
+        return exact
+
+    grouped: dict[str, list[PricingRule]] = {}
+    normalized_model = model.lower()
+    for row in rules:
+        key = str(row.key)
+        if ("*" not in key and "?" not in key) or not fnmatchcase(
+            normalized_model, key.lower()
+        ):
+            continue
+        grouped.setdefault(key, []).append(row)
+    if not grouped:
+        return []
+
+    def rank(item: tuple[str, list[PricingRule]]) -> tuple[int, int, int, str, str]:
+        key, rows = item
+        priorities = {int(getattr(row, "priority", 0) or 0) for row in rows}
+        if len(priorities) != 1:
+            raise ValueError(
+                f"pricing rules for model pattern {key!r} have mixed priorities"
+            )
+        priority = next(iter(priorities))
+        wildcard_count = key.count("*") + key.count("?")
+        literal_specificity = len(key) - wildcard_count
+        return (
+            -priority,
+            -literal_specificity,
+            wildcard_count,
+            key.lower(),
+            key,
+        )
+
+    _key, selected = min(grouped.items(), key=rank)
+    return selected
 
 
 class PricingResolver:
@@ -159,19 +207,16 @@ class PricingResolver:
                         PricingRule.variant == variant,
                         PricingRule.enabled.is_(True),
                     )
+                    .order_by(
+                        PricingRule.priority.desc(),
+                        PricingRule.key.asc(),
+                        PricingRule.unit.asc(),
+                        PricingRule.id.asc(),
+                    )
                 )
             ).scalars().all()
-            exact = [row for row in rows if row.key == model]
-            pricing = pricing_from_rules(exact, source=PRICING_SOURCE_DB)
-            if pricing is not None:
-                return pricing
-            wildcard = [
-                row
-                for row in rows
-                if ("*" in row.key or "?" in row.key)
-                and fnmatchcase(model.lower(), row.key.lower())
-            ]
-            pricing = pricing_from_rules(wildcard, source=PRICING_SOURCE_DB)
+            selected = _select_rule_group(list(rows), model)
+            pricing = pricing_from_rules(selected, source=PRICING_SOURCE_DB)
             if pricing is not None:
                 return pricing
         return None

@@ -246,7 +246,7 @@ export function PopoverList({
               {it.selected && (
                 <span
                   aria-hidden
-                  className="w-1.5 h-1.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
+                  className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
                 />
               )}
             </button>

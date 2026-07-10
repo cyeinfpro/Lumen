@@ -284,9 +284,16 @@ export function CommandPalette() {
         openPalette();
       }
     };
+    const onOpenRequest = () => {
+      if (!open) openPalette();
+    };
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
-    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+    window.addEventListener("lumen:command-palette-open", onOpenRequest);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+      window.removeEventListener("lumen:command-palette-open", onOpenRequest);
+    };
   }, [closePalette, open, openPalette]);
 
   useEffect(() => {

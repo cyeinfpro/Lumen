@@ -11,12 +11,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app import account_limiter, upstream
-from lumen_core.constants import GenerationErrorCode as EC
 
 
 class FakeRedis:
@@ -72,6 +72,23 @@ class FakeRedis:
         self.kv[key] = str(cur)
         return cur
 
+    async def decr(self, key: str) -> int:
+        cur = int(self.kv.get(key) or 0) - 1
+        self.kv[key] = str(cur)
+        return cur
+
+    async def delete(self, key: str) -> int:
+        existed = key in self.kv
+        self.kv.pop(key, None)
+        return int(existed)
+
+    async def zrem(self, key: str, member: str) -> int:
+        zset = self.zsets.get(key, {})
+        if member not in zset:
+            return 0
+        del zset[member]
+        return 1
+
     async def expire(self, key: str, seconds: int) -> int:
         self.expirations[key] = int(seconds)
         return 1
@@ -90,6 +107,16 @@ class FakeRedis:
             head = await self.zrange(key, 0, 0, withscores=True)
             return [used, head[0][1] if head else None]
         if keys == 2:
+            if len(args) == 3:
+                ts_key, day_key, member = args
+                removed = await self.zrem(ts_key, member)
+                if removed:
+                    used_daily = int(self.kv.get(day_key) or 0)
+                    if used_daily > 1:
+                        await self.decr(day_key)
+                    elif used_daily == 1:
+                        await self.delete(day_key)
+                return removed
             if len(args) == 6:
                 ts_key, day_key, member, now_raw, ttl_raw, expire_at_raw = args
                 added = await self.zadd(ts_key, {member: float(now_raw)})
@@ -402,6 +429,33 @@ async def test_reserve_quota_check_and_record_are_atomic_for_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_release_quota_removes_unused_reservation_atomically() -> None:
+    redis = FakeRedis()
+    now = 1_700_000_000.0
+    allowed, _, member = await account_limiter.reserve_quota(
+        redis,
+        "acc1",
+        rate_limit="1/min",
+        daily_quota=80,
+        task_id="task-1:1:1",
+        now=now,
+    )
+    assert allowed is True
+
+    released = await account_limiter.release_quota(
+        redis,
+        "acc1",
+        member,
+        reserved_at=now,
+    )
+
+    assert released is True
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert day_key not in redis.kv
+
+
+@pytest.mark.asyncio
 async def test_record_image_call_daily_expireat_is_future_at_utc_boundary() -> None:
     redis = FakeRedis()
     now = 1_704_067_199.9  # 2023-12-31T23:59:59.900Z
@@ -460,7 +514,7 @@ async def test_record_image_call_fails_closed_on_redis_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upstream_accounting_unavailable_becomes_task_retry(
+async def test_upstream_accounting_unavailable_does_not_discard_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_record_image_call(*_args: Any, **_kwargs: Any) -> None:
@@ -472,24 +526,121 @@ async def test_upstream_accounting_unavailable_becomes_task_retry(
 
     monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
 
-    with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream._record_admin_image_call_or_raise(
-            Pool(),
-            "acc1",
-            task_id="task-1",
-        )
+    recorded = await upstream._record_admin_image_call_or_raise(
+        Pool(),
+        SimpleNamespace(
+            name="acc1",
+            image_rate_limit="1/min",
+            image_daily_quota=None,
+        ),
+        task_id="task-1",
+    )
 
-    assert exc_info.value.error_code == EC.QUOTA_ACCOUNTING_UNAVAILABLE.value
-    assert exc_info.value.payload["retry_after"] == (
-        account_limiter.REDIS_ERROR_RETRY_AFTER_S
+    assert recorded is False
+
+
+@pytest.mark.asyncio
+async def test_upstream_reservation_uses_stable_task_attempt_call_identity() -> None:
+    redis = FakeRedis()
+
+    class Pool:
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    provider = SimpleNamespace(
+        name="acc1",
+        image_rate_limit="2/min",
+        image_daily_quota=80,
+        purposes=("image",),
     )
-    assert (
-        upstream._should_continue_image_provider_failover(
-            exc_info.value,
-            retriable=True,
+    token = upstream.push_image_quota_context("task-1", 3)
+    try:
+        first = await upstream._reserve_admin_image_call(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="responses",
         )
-        is False
+        second = await upstream._reserve_admin_image_call(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="generations",
+        )
+    finally:
+        upstream.pop_image_quota_context(token)
+
+    assert first is not None
+    assert second is not None
+    assert first.member == "task-1:3:1:acc1:responses"
+    assert second.member == "task-1:3:2:acc1:generations"
+
+
+@pytest.mark.asyncio
+async def test_upstream_quota_claim_confirms_without_post_success_redis_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+
+    class Pool:
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    provider = SimpleNamespace(
+        name="acc1",
+        image_rate_limit="1/min",
+        image_daily_quota=80,
     )
+
+    async def fail_record(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("reserved success must not perform a second Redis write")
+
+    monkeypatch.setattr(account_limiter, "record_image_call", fail_record)
+    scope_token = upstream.push_image_quota_context("task-1", 1)
+    try:
+        async with upstream._image_quota_claim(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="responses",
+        ) as reservation:
+            assert reservation is not None
+            reservation.state = "started"
+            confirmed = await upstream._record_admin_image_call_or_raise(
+                Pool(),
+                provider,
+                task_id="task-1",
+            )
+            assert confirmed is True
+            assert reservation.state == "confirmed"
+    finally:
+        upstream.pop_image_quota_context(scope_token)
+
+
+@pytest.mark.asyncio
+async def test_upstream_quota_claim_releases_when_request_never_started() -> None:
+    redis = FakeRedis()
+
+    class Pool:
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    provider = SimpleNamespace(
+        name="acc1",
+        image_rate_limit="1/min",
+        image_daily_quota=80,
+    )
+    scope_token = upstream.push_image_quota_context("task-1", 1)
+    try:
+        async with upstream._image_quota_claim(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="responses",
+        ) as reservation:
+            assert reservation is not None
+            assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
+        assert reservation.state == "released"
+    finally:
+        upstream.pop_image_quota_context(scope_token)
+
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
 
 
 # --- pytest-asyncio 兼容 ----------------------------------------------------

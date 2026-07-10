@@ -44,6 +44,7 @@ class VideoProviderDefinition:
     priority: int = 0
     weight: int = 1
     concurrency: int = 1
+    supports_idempotency: bool = False
     models: dict[str, str] | None = None
     proxy_name: str | None = None
     proxy: ProviderProxyDefinition | None = None
@@ -170,6 +171,10 @@ def parse_video_provider_item(
         weight=_parse_weight(item.get("weight", 1)),
         concurrency=_parse_int(
             item.get("concurrency", 1), default=1, minimum=1, maximum=32
+        ),
+        supports_idempotency=parse_provider_bool(
+            item.get("supports_idempotency"),
+            default=False,
         ),
         models=models,
         proxy_name=proxy_name.strip()

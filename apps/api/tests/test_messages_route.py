@@ -16,6 +16,7 @@ from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     MAX_PROMPT_CHARS,
 )
+from lumen_core.pricing import CostBreakdown
 from lumen_core.schemas import ChatParamsIn, ImageParamsIn, PostMessageIn
 
 
@@ -73,6 +74,47 @@ class _Db:
     async def refresh(self, item: Any) -> None:
         if getattr(item, "created_at", None) is None:
             item.created_at = datetime.now(timezone.utc)
+
+
+def _patch_chat_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cost_micro: int,
+    calls: dict[str, Any] | None = None,
+) -> None:
+    async def snapshot(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if calls is not None:
+            calls["estimate"] = kwargs
+        return {"model": kwargs["model"]}
+
+    def breakdown(
+        _snapshot: dict[str, Any],
+        **kwargs: Any,
+    ) -> CostBreakdown:
+        actual_cost_micro = (
+            0 if kwargs.get("rate_multiplier_x10000") == 0 else cost_micro
+        )
+        return CostBreakdown(
+            input_cost_micro=cost_micro,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=kwargs.get("rate_multiplier_x10000", 10_000),
+            total_cost_micro=cost_micro,
+            actual_cost_micro=actual_cost_micro,
+            pricing_source="snapshot",
+        )
+
+    monkeypatch.setattr(messages.billing_core, "completion_pricing_snapshot", snapshot)
+    monkeypatch.setattr(
+        messages.billing_core,
+        "completion_breakdown_from_snapshot",
+        breakdown,
+    )
 
 
 def _statement_has_eq_filter(statement: Any, column: Any, expected: Any) -> bool:
@@ -278,13 +320,9 @@ async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
         calls["wallet"] = {"user_id": user_id, "lock": lock}
         return SimpleNamespace(balance_micro=10_000)
 
-    async def estimate(*_args: Any, **kwargs: Any) -> int:
-        calls["estimate"] = kwargs
-        return 1
-
     monkeypatch.setattr(messages, "_billing_enabled", enabled)
     monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
-    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    _patch_chat_pricing(monkeypatch, cost_micro=1, calls=calls)
 
     await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
         object(),  # type: ignore[arg-type]
@@ -299,6 +337,143 @@ async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
 
 
 @pytest.mark.asyncio
+async def test_chat_wallet_preflight_freezes_user_rate_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(
+            balance_micro=50_000,
+            billing_rate_multiplier=9,
+        )
+
+    async def user_rate(*_args: Any) -> int:
+        return 15_000
+
+    async def snapshot(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"model": kwargs["model"]}
+
+    def breakdown(_snapshot: dict[str, Any], **kwargs: Any) -> CostBreakdown:
+        calls["breakdown"] = kwargs
+        return CostBreakdown(
+            input_cost_micro=15,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=kwargs["rate_multiplier_x10000"],
+            total_cost_micro=15,
+            actual_cost_micro=15,
+            pricing_source="snapshot",
+        )
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_user_rate_multiplier_x10000", user_rate)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "completion_pricing_snapshot", snapshot)
+    monkeypatch.setattr(
+        messages.billing_core,
+        "completion_breakdown_from_snapshot",
+        breakdown,
+    )
+
+    preflight = await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        account_mode="wallet",
+        model="gpt-task",
+    )
+
+    assert preflight is not None
+    assert preflight.rate_multiplier_x10000 == 15_000
+    assert calls["breakdown"]["rate_multiplier_x10000"] == 15_000
+
+
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_zero_rate_needs_no_balance_or_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=0)
+
+    async def user_rate(*_args: Any) -> int:
+        return 0
+
+    async def tool_budget(_db: Any, _tool_name: str) -> int:
+        return 7_000
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_user_rate_multiplier_x10000", user_rate)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages, "_chat_tool_budget_setting_micro", tool_budget)
+    _patch_chat_pricing(monkeypatch, cost_micro=3_000)
+
+    preflight = await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        account_mode="wallet",
+        model="gpt-task",
+        chat_params=ChatParamsIn(web_search=True),
+    )
+
+    assert preflight is not None
+    assert preflight.rate_multiplier_x10000 == 0
+    assert preflight.estimated_model_micro == 0
+    assert preflight.tool_budget_micro == 0
+    assert preflight.tool_budget_by_tool == {"web_search": 0}
+    assert preflight.preauth_micro == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_rejects_missing_pricing_before_task_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=50_000)
+
+    async def snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise messages.billing_core.BillingError(
+            "PRICING_MISSING",
+            "missing enabled chat pricing rule",
+            503,
+        )
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "completion_pricing_snapshot", snapshot)
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            user_id="user-1",
+            user_email="u@example.com",
+            account_mode="wallet",
+            model="unpriced-model",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 503
+    assert excinfo.value.detail["error"]["code"] == "PRICING_MISSING"
+
+
+@pytest.mark.asyncio
 async def test_chat_wallet_preflight_includes_enabled_tool_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,9 +484,6 @@ async def test_chat_wallet_preflight_includes_enabled_tool_budget(
         assert lock is True
         return SimpleNamespace(balance_micro=50_000)
 
-    async def estimate(*_args: Any, **_kwargs: Any) -> int:
-        return 3_000
-
     async def tool_budget(_db: Any, tool_name: str) -> int:
         return {"web_search": 7_000, "code_interpreter": 11_000}.get(tool_name, 0)
 
@@ -320,7 +492,7 @@ async def test_chat_wallet_preflight_includes_enabled_tool_budget(
 
     monkeypatch.setattr(messages, "_billing_enabled", enabled)
     monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
-    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    _patch_chat_pricing(monkeypatch, cost_micro=3_000)
     monkeypatch.setattr(messages, "_chat_tool_budget_setting_micro", tool_budget)
     monkeypatch.setattr(messages, "_chat_max_tool_invocations", max_tool_invocations)
 
@@ -401,6 +573,8 @@ async def test_create_assistant_task_holds_chat_wallet_preauth(
         tool_budget_micro=8_000,
         preauth_micro=20_000,
         tool_budget_by_tool={"web_search": 8_000},
+        pricing_snapshot={"model": "gpt-5.5"},
+        rate_multiplier_x10000=15_000,
     )
 
     result = await messages._create_assistant_task(  # noqa: SLF001
@@ -433,9 +607,15 @@ async def test_create_assistant_task_holds_chat_wallet_preauth(
                 "estimated_model_micro": 12_000,
                 "tool_budget_micro": 8_000,
                 "tool_budget_by_tool": {"web_search": 8_000},
+                "pricing_snapshot": {"model": "gpt-5.5"},
+                "rate_multiplier_x10000": 15_000,
             },
         }
     ]
+    completion = next(
+        item for item in db.added if item.__class__.__name__ == "Completion"
+    )
+    assert completion.upstream_request["billing_rate_multiplier_x10000"] == 15_000
     audit = next(item for item in db.added if item.__class__.__name__ == "AuditLog")
     assert audit.event_type == "wallet.hold.chat"
     assert audit.details["completion_id"] == result.completion_id
@@ -454,9 +634,6 @@ async def test_create_assistant_task_chat_caller_without_preflight_still_holds(
         assert lock is True
         return SimpleNamespace(balance_micro=50_000)
 
-    async def estimate(*_args: Any, **_kwargs: Any) -> int:
-        return 15_000
-
     async def allow_negative(_db: Any) -> bool:
         return False
 
@@ -467,7 +644,7 @@ async def test_create_assistant_task_chat_caller_without_preflight_still_holds(
     monkeypatch.setattr(messages, "_billing_enabled", enabled)
     monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
     monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
-    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    _patch_chat_pricing(monkeypatch, cost_micro=15_000)
     monkeypatch.setattr(messages.billing_core, "hold", hold)
 
     result = await messages._create_assistant_task(  # noqa: SLF001
@@ -508,12 +685,16 @@ async def test_create_assistant_task_splits_image_count_into_wallet_holds(
         estimate_calls.append(dict(kwargs))
         return 7_000, kwargs["tier"]
 
+    async def user_rate(*_args: Any) -> int:
+        return 15_000
+
     async def hold(_db: Any, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
         hold_calls.append({"user_id": user_id, "amount_micro": amount_micro, **kwargs})
         return SimpleNamespace(balance_after=100_000, hold_after=amount_micro)
 
     monkeypatch.setattr(messages, "_billing_enabled", enabled)
     monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(messages, "_user_rate_multiplier_x10000", user_rate)
     monkeypatch.setattr(
         messages.billing_core,
         "estimate_image_cost_for_tier",
@@ -542,11 +723,19 @@ async def test_create_assistant_task_splits_image_count_into_wallet_holds(
     assert len(gens) == 3
     assert estimate_calls == [{"tier": "2k", "n": 1}]
     assert [call["ref_id"] for call in hold_calls] == result.generation_ids
-    assert all(call["amount_micro"] == 7_000 for call in hold_calls)
+    assert all(call["amount_micro"] == 10_500 for call in hold_calls)
     assert all(call["allow_negative"] is False for call in hold_calls)
     assert [call["meta"]["image_count"] for call in hold_calls] == [1, 1, 1]
     assert [call["meta"]["batch_task_index"] for call in hold_calls] == [1, 2, 3]
     assert [gen.upstream_request["n"] for gen in gens] == [1, 1, 1]
+    assert all(
+        gen.upstream_request["billing_rate_multiplier_x10000"] == 15_000
+        for gen in gens
+    )
+    assert all(
+        gen.upstream_request["billing_pricing_snapshot"]["unit_price_micro"] == 7_000
+        for gen in gens
+    )
 
 
 def test_structured_system_prompt_escapes_nested_system_tags() -> None:
@@ -603,9 +792,6 @@ async def test_post_message_wallet_preflight_failure_rolls_back_flushed_rows(
         assert lock is True
         return SimpleNamespace(balance_micro=1)
 
-    async def estimate(*_args: Any, **_kwargs: Any) -> int:
-        return 20_000
-
     async def allow_negative(_db: Any) -> bool:
         return False
 
@@ -614,7 +800,7 @@ async def test_post_message_wallet_preflight_failure_rolls_back_flushed_rows(
     monkeypatch.setattr(messages, "_billing_enabled", enabled)
     monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
     monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
-    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    _patch_chat_pricing(monkeypatch, cost_micro=20_000)
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     with pytest.raises(Exception) as excinfo:
@@ -1426,7 +1612,9 @@ async def test_post_message_persists_image_render_options(
         )
     assert len(trace_ids) == 10
     outboxes = [item for item in db.added if item.__class__.__name__ == "OutboxEvent"]
-    assert [outbox.payload["task_id"] for outbox in outboxes] == [gen.id for gen in gens]
+    assert [outbox.payload["task_id"] for outbox in outboxes] == [
+        gen.id for gen in gens
+    ]
     assert "defer_s" not in outboxes[0].payload
     assert [outbox.payload.get("defer_s") for outbox in outboxes[1:]] == [
         min(

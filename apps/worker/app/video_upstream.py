@@ -61,6 +61,7 @@ class VideoSubmitRequest:
     input_image_mime: str | None = None
     reference_media: list[VideoReferenceMedia] = field(default_factory=list)
     callback_url: str | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -531,9 +532,10 @@ _VIDEO_FETCH_MIN_MAGIC_BYTES = 12
 
 
 def _submit_headers(req: VideoSubmitRequest) -> dict[str, str]:
+    idempotency_key = req.idempotency_key or req.task_id
     return {
-        "Idempotency-Key": req.task_id,
-        "X-Request-ID": req.task_id,
+        "Idempotency-Key": idempotency_key,
+        "X-Request-ID": idempotency_key,
         "X-Lumen-Task-ID": req.task_id,
     }
 

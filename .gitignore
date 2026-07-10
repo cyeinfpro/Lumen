@@ -61,6 +61,8 @@ docs/internal/
 .audit_state/
 CODE_AUDIT_*.md
 bug_review_report.md
+docs/audits/local/*
+!docs/audits/local/README.md
 
 # Desktop build artifacts
 apps/desktop/target/

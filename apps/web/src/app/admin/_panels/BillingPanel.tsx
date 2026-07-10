@@ -618,6 +618,7 @@ function PricingSubpanel() {
   const [videoNewNote, setVideoNewNote] = useState("需按火山最新价格复核");
   const [bulkModel, setBulkModel] = useState("");
   const [bulkChannel, setBulkChannel] = useState("");
+  const [bulkPriority, setBulkPriority] = useState("0");
   const [bulkRates, setBulkRates] = useState<Record<string, string>>({});
 
   const settingsByKey = useMemo(
@@ -761,6 +762,7 @@ function PricingSubpanel() {
       return bulkUpdateAdminPricing({
         model: bulkModel.trim(),
         channel: bulkChannel.trim() || null,
+        priority: Number.parseInt(bulkPriority, 10) || 0,
         rates: {
           input: rateValue("input"),
           output: rateValue("output"),
@@ -783,6 +785,7 @@ function PricingSubpanel() {
       toast.success("批量模型定价已保存");
       setBulkModel("");
       setBulkChannel("");
+      setBulkPriority("0");
       setBulkRates({});
       await invalidateBilling();
     },
@@ -800,6 +803,7 @@ function PricingSubpanel() {
             variant: row.input.variant,
             unit: "per_1k_tokens_in",
             price_rmb: modelDrafts[`${row.model}:in`] ?? row.input.price.rmb,
+            priority: row.input.priority,
             enabled: row.input.enabled,
             note: row.input.note,
           });
@@ -811,6 +815,7 @@ function PricingSubpanel() {
             variant: row.output.variant,
             unit: "per_1k_tokens_out",
             price_rmb: modelDrafts[`${row.model}:out`] ?? row.output.price.rmb,
+            priority: row.output.priority,
             enabled: row.output.enabled,
             note: row.output.note,
           });
@@ -836,6 +841,7 @@ function PricingSubpanel() {
           variant: row.input.variant,
           unit: "per_1k_tokens_in",
           price_rmb: row.input.price.rmb,
+          priority: row.input.priority,
           enabled: false,
           note: row.input.note,
         });
@@ -847,6 +853,7 @@ function PricingSubpanel() {
           variant: row.output.variant,
           unit: "per_1k_tokens_out",
           price_rmb: row.output.price.rmb,
+          priority: row.output.priority,
           enabled: false,
           note: row.output.note,
         });
@@ -1142,7 +1149,7 @@ function PricingSubpanel() {
             批量保存
           </Button>
         </div>
-        <div className="grid gap-3 md:grid-cols-[1fr_180px]">
+        <div className="grid gap-3 md:grid-cols-[1fr_180px_140px]">
           <label className="space-y-1.5">
             <span className="type-caption text-[var(--fg-2)]">模型</span>
             <input
@@ -1158,6 +1165,15 @@ function PricingSubpanel() {
               value={bulkChannel}
               onChange={(e) => setBulkChannel(e.target.value)}
               placeholder="可空"
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">匹配优先级</span>
+            <input
+              value={bulkPriority}
+              onChange={(e) => setBulkPriority(e.target.value)}
+              inputMode="numeric"
               className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
             />
           </label>

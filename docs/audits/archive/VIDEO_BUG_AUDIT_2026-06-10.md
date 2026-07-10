@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@5fdc18c3517767bd0a7a6f1e3e0451ad8fe85c99"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：2026-06-10 工作树快照。
+>
+> **记录提交**：`5fdc18c3517767bd0a7a6f1e3e0451ad8fe85c99`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # AI 视频功能深度 Bug 审计（2026-06-10）
 
 审查范围（全量通读）：

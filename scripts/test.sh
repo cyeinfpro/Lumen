@@ -25,6 +25,10 @@ echo
 echo "==> python ruff"
 uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests
 
+echo
+echo "==> python complexity budget"
+uv run python scripts/check_complexity.py
+
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
        [ -x "apps/web/node_modules/.bin/tsc" ] &&

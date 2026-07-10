@@ -48,7 +48,7 @@ const FEATURES = [
     en: "海报工作流",
     description: "从商品素材、风格和营销文案生成主视觉，再导出多尺寸成品。",
     flow: "上传商品/素材 → 选择风格 → 生成母版 → 多尺寸导出",
-    input: "文案 + 风格 + 可选品牌资产",
+    input: "文案 + 风格 + 可选品牌素材",
     output: "1:1 / 4:5 / 9:16 / 16:9 海报",
     eta: "约 2-6 分钟",
     primaryHref: "/projects/poster-design/new",
@@ -60,17 +60,17 @@ const FEATURES = [
   },
   {
     title: "风格库",
-    en: "风格资产",
+    en: "风格素材",
     description: "管理海报视觉风格预设，为海报项目准备可复用的视觉方向。",
     flow: "选择预设 → 生成样图 → 保存风格 → 用于海报",
     input: "风格描述或参考方向",
-    output: "海报风格资产",
+    output: "海报风格素材",
     eta: "按需维护",
     primaryHref: "/poster-styles",
     primaryLabel: "打开风格库",
     icon: Palette,
     available: true,
-    badge: "资产",
+    badge: "素材",
   },
   {
     title: "分镜制作",
@@ -131,10 +131,10 @@ export function ProjectFunctionHub() {
                 项目工作台
               </p>
               <h1 className="type-page-title mt-3">
-                从模板开始，交付一个完整项目
+                继续最近项目，保持创作节奏
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-                选择有步骤、有交付物的创作任务；服饰、海报和风格资产会沉淀为可继续、可交付、可复用的项目记录。
+                先回到仍在进行的工作；需要开启新任务时，再从下方模板创建。
               </p>
             </div>
             <div className="grid gap-2 sm:grid-cols-4">
@@ -165,7 +165,7 @@ export function ProjectFunctionHub() {
             <p className="type-page-kicker">项目中心</p>
             <h1 className="type-page-title">项目工作台</h1>
             <p className="text-[13px] leading-[1.6] text-[var(--fg-1)]">
-              从服饰模特图、海报制作或风格资产开始；已有项目可在下方继续。
+              先继续最近项目，也可以从模板开启新的工作流。
             </p>
             <div className="mt-2 grid grid-cols-3 gap-2">
               <MobileMetric label="模板" value={FEATURES.filter((feature) => feature.available).length} />
@@ -174,7 +174,14 @@ export function ProjectFunctionHub() {
             </div>
           </section>
 
-          <section className="grid gap-3">
+          <RecentProjects
+            items={recentProjects}
+            loading={workflowsQuery.isLoading}
+            error={workflowsQuery.isError}
+            onRetry={() => workflowsQuery.refetch()}
+          />
+
+          <section className="grid gap-3 border-t border-[var(--border-subtle)] pt-4">
             <div className="flex min-w-0 items-end justify-between gap-3">
               <div className="min-w-0">
                 <p className="type-page-kicker">工作流模板</p>
@@ -200,12 +207,6 @@ export function ProjectFunctionHub() {
             </div>
           </section>
 
-          <RecentProjects
-            items={recentProjects}
-            loading={workflowsQuery.isLoading}
-            error={workflowsQuery.isError}
-            onRetry={() => workflowsQuery.refetch()}
-          />
         </div>
       </main>
 
@@ -247,7 +248,7 @@ function FeatureCard({
       className={cn(
         "group flex min-w-0 flex-col rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/82 p-4 shadow-[var(--shadow-1)] transition-[border-color,box-shadow,background-color] duration-[var(--dur-base)] focus-within:shadow-[var(--ring)]",
         feature.available
-          ? "border-[var(--border)] hover:border-[var(--border-amber)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]"
+          ? "border-[var(--border)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]"
           : "border-[var(--border-subtle)] opacity-72",
       )}
       aria-disabled={feature.available ? undefined : "true"}
@@ -272,7 +273,7 @@ function FeatureCard({
               className={cn(
                 "mt-1 text-[18px] font-semibold leading-tight tracking-tight transition-colors duration-[var(--dur-base)]",
                 feature.available
-                  ? "text-[var(--fg-0)] group-hover:text-[var(--accent)]"
+                  ? "text-[var(--fg-0)]"
                   : "text-[var(--fg-2)]",
               )}
             >
@@ -335,7 +336,7 @@ function FeatureCard({
         {feature.available && "primaryHref" in feature ? (
           <Link
             href={feature.primaryHref}
-            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] duration-[var(--dur-base)] hover:shadow-[var(--shadow-amber)] active:scale-[0.98]"
+            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)]"
           >
             {feature.primaryLabel}
             <ArrowRight className="h-3.5 w-3.5" />

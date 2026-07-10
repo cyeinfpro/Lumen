@@ -15,7 +15,6 @@ import {
   Loader2,
   Plus,
   Search,
-  Sparkles,
   X,
 } from "lucide-react";
 import {
@@ -33,6 +32,7 @@ import {
 } from "@/components/ui/primitives/mobile";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { Spinner } from "@/components/ui/primitives";
+import { LumenMark } from "@/components/ui/brand/LumenMark";
 import {
   useCreateConversationMutation,
   useDeleteConversationMutation,
@@ -300,12 +300,7 @@ export function MobileConversationDrawer({
             {/* Header */}
             <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)] flex items-center justify-center shadow-[var(--shadow-amber)]">
-                  <Sparkles
-                    className="w-3 h-3 text-black/80"
-                    strokeWidth={2.5}
-                  />
-                </span>
+                <LumenMark className="h-6 w-6 text-[var(--accent)]" />
                 <span className="text-[16px] font-semibold tracking-tight text-[var(--fg-0)]">
                   会话
                 </span>
@@ -332,16 +327,15 @@ export function MobileConversationDrawer({
             <div className="shrink-0 px-4 pb-3">
               <Pressable
                 size="default"
-                minHit={false}
+                minHit
                 pressScale="soft"
                 haptic="medium"
                 onPress={handleCreate}
                 disabled={createMut.isPending}
                 className={cn(
                   "h-12 w-full gap-2 rounded-[var(--radius-card)]",
-                  "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
-                  "text-black text-[15px] font-medium",
-                  "shadow-[var(--shadow-amber)]",
+                  "bg-[var(--accent)] text-[var(--accent-on)] text-[15px] font-medium",
+                  "shadow-[var(--shadow-1)]",
                   "disabled:opacity-60 disabled:cursor-wait",
                 )}
               >
@@ -582,7 +576,7 @@ function EmptyState({
   return (
     <div className="px-6 py-12 text-center">
       <div className="mx-auto w-12 h-12 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
-        <Sparkles className="w-5 h-5 text-[var(--amber-400)]" />
+        <LumenMark className="h-5 w-5 text-[var(--accent)]" />
       </div>
       <p className="text-[14px] text-[var(--fg-1)]">还没有会话</p>
       <p className="text-[12px] text-[var(--fg-2)] mt-1 mb-4">

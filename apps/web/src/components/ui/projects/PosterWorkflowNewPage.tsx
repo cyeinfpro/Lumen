@@ -411,7 +411,7 @@ export function PosterWorkflowNewPage() {
                   <div className="min-w-0">
                     <p className="type-page-kicker">N°04 — 品牌（可选）</p>
                     <h2 className="type-section-title mt-2 md:text-[22px]">
-                      品牌资产
+                      品牌素材
                     </h2>
                   </div>
                   <ChevronDown

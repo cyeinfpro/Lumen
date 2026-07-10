@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from alembic.config import Config
+
 
 def test_alembic_commits_timeout_setup_before_migration_transaction() -> None:
     """Guard against SQLAlchemy 2 autobegin rolling back successful migrations."""
@@ -13,6 +15,19 @@ def test_alembic_commits_timeout_setup_before_migration_transaction() -> None:
     configure_pos = source.index("context.configure(connection=connection", timeout_pos)
 
     assert timeout_pos < commit_pos < configure_pos
+
+
+def test_alembic_escapes_percent_encoded_socket_urls() -> None:
+    source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'sync_url.replace("%", "%%")' in source
+
+    config = Config()
+    url = "postgresql+psycopg2://user@/db?host=%2Ftmp"
+    config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+
+    assert config.get_main_option("sqlalchemy.url") == url
 
 
 def test_users_active_email_unique_migration_uses_safe_postgres_ordering() -> None:

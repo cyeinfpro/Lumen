@@ -109,6 +109,23 @@ end
 return {1, ""}
 """
 
+_RELEASE_IMAGE_CALL_LUA = """
+local ts_key = KEYS[1]
+local day_key = KEYS[2]
+local member = ARGV[1]
+
+local removed = redis.call("ZREM", ts_key, member)
+if removed == 1 then
+  local used_daily = tonumber(redis.call("GET", day_key) or "0") or 0
+  if used_daily > 1 then
+    redis.call("DECR", day_key)
+  elseif used_daily == 1 then
+    redis.call("DEL", day_key)
+  end
+end
+return removed
+"""
+
 _UNIT_SECONDS: dict[str, int] = {
     "s": 1,
     "sec": 1,
@@ -524,10 +541,50 @@ async def record_image_call(
         raise AccountLimiterUnavailable("quota accounting unavailable") from exc
 
 
+async def release_quota(
+    redis: Any,
+    account: str,
+    reservation_member: str,
+    *,
+    reserved_at: float | None = None,
+) -> bool:
+    """Release a reservation only when no upstream request was started."""
+    if redis is None or not reservation_member:
+        return False
+    cur_now = _wall_clock_now(reserved_at)
+    ts_key = _KEY_TS.format(name=account)
+    day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
+    eval_fn = getattr(redis, "eval", None)
+    if callable(eval_fn):
+        try:
+            removed = await eval_fn(
+                _RELEASE_IMAGE_CALL_LUA,
+                2,
+                ts_key,
+                day_key,
+                reservation_member,
+            )
+            return int(removed or 0) == 1
+        except Exception as exc:  # noqa: BLE001
+            raise AccountLimiterUnavailable("quota release unavailable") from exc
+    try:
+        removed = int(await redis.zrem(ts_key, reservation_member) or 0)
+        if removed:
+            used_daily = int(await redis.get(day_key) or 0)
+            if used_daily > 1:
+                await redis.decr(day_key)
+            elif used_daily == 1:
+                await redis.delete(day_key)
+        return removed == 1
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota release unavailable") from exc
+
+
 __all__ = [
     "parse_rate_limit",
     "check_quota",
     "reserve_quota",
+    "release_quota",
     "record_image_call",
     "AccountLimiterUnavailable",
     "REDIS_ERROR_RETRY_AFTER_S",

@@ -78,6 +78,12 @@ import {
   type PostMessageIn,
 } from "@/lib/apiClient";
 import { errorCodeToFullText, recommendedActionsForError } from "@/lib/errors";
+import {
+  coerceGenerationStage,
+  coerceGenerationStatus,
+  coerceGenerationSubstage,
+  reduceGenerationLifecycleEvent,
+} from "./chatGenerationEvents";
 
 type ComposerMode = "image" | "chat";
 
@@ -514,68 +520,6 @@ function coerceAspectRatio(
     : fallback;
 }
 
-const GENERATION_STATUSES = new Set<Generation["status"]>([
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-  "canceled",
-]);
-
-function coerceGenerationStatus(
-  value: unknown,
-  fallback: Generation["status"],
-): Generation["status"] {
-  return typeof value === "string" &&
-    GENERATION_STATUSES.has(value as Generation["status"])
-    ? (value as Generation["status"])
-    : fallback;
-}
-
-const GENERATION_STAGES = new Set<Generation["stage"]>([
-  "queued",
-  "understanding",
-  "rendering",
-  "finalizing",
-]);
-
-function coerceGenerationStage(
-  value: unknown,
-  fallback: Generation["stage"],
-): Generation["stage"] {
-  return typeof value === "string" &&
-    GENERATION_STAGES.has(value as Generation["stage"])
-    ? (value as Generation["stage"])
-    : fallback;
-}
-
-const GENERATION_SUBSTAGES = new Set<NonNullable<Generation["substage"]>>([
-  "waiting_queue",
-  "waiting_provider",
-  "preparing_refs",
-  "upstream_started",
-  "upstream_retrying",
-  "postprocessing",
-  "display_ready",
-  "retryable",
-  "terminal",
-  "cancelled",
-  "completed",
-  "provider_selected",
-  "stream_started",
-  "partial_received",
-  "final_received",
-  "processing",
-  "storing",
-]);
-
-function coerceGenerationSubstage(value: unknown): Generation["substage"] | undefined {
-  return typeof value === "string" &&
-    GENERATION_SUBSTAGES.has(value as NonNullable<Generation["substage"]>)
-    ? (value as Generation["substage"])
-    : undefined;
-}
-
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
@@ -644,14 +588,6 @@ function recordBoolean(
 ): boolean | undefined {
   const value = record[key];
   return typeof value === "boolean" ? value : undefined;
-}
-
-function recordNumber(
-  record: Record<string, unknown>,
-  key: string,
-): number | undefined {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function recommendedActionsFromUnknown(
@@ -3998,70 +3934,14 @@ function createChatStore() {
               };
             }
             const patch: Partial<Generation> = {};
-            if (eventName === "generation.queued") {
-              patch.status = "queued";
-              patch.stage = "queued";
-              patch.substage =
-                coerceGenerationSubstage(payload.substage) ??
-                (payload.reason === "image_provider_unavailable"
-                  ? "waiting_provider"
-                  : "waiting_queue");
-              patch.queue_position =
-                recordNumber(payload, "queue_position") ?? gen.queue_position ?? null;
-              patch.retrying = payload.retrying === true || false;
-              patch.waiting_provider =
-                payload.waiting_provider === true ||
-                payload.reason === "image_provider_unavailable" ||
-                patch.substage === "waiting_provider";
-              patch.cancelled = false;
-              patch.started_at = 0;
-            } else if (eventName === "generation.started") {
-              patch.status = "running";
-              patch.stage = "understanding";
-              patch.substage =
-                coerceGenerationSubstage(payload.substage) ?? "upstream_started";
-              patch.started_at = gen.started_at > 0 ? gen.started_at : eventNow;
-              const att = payload.attempt;
-              if (typeof att === "number") patch.attempt = att;
-              patch.retry_eta = undefined;
-              patch.retry_error = undefined;
-              patch.retrying = false;
-              patch.waiting_provider = false;
-              patch.cancelled = false;
-            } else if (eventName === "generation.progress") {
-              const stage = payload.stage;
-              if (
-                stage === "queued" ||
-                stage === "understanding" ||
-                stage === "rendering" ||
-                stage === "finalizing"
-              ) {
-                patch.stage = stage;
-              }
-              // P1 细颗粒子阶段：worker 在 RENDERING/FINALIZING 内打了多个里程碑，
-              // 让 DevelopingCard 等组件可读取 substage 切换更精细的视觉。
-              // 旧消息（不含 substage）保持 undefined，行为同当前。
-              const substage = coerceGenerationSubstage(payload.substage);
-              if (substage) patch.substage = substage;
-              patch.queue_position =
-                recordNumber(payload, "queue_position") ?? gen.queue_position ?? null;
-              if (payload.retrying === true) patch.retrying = true;
-              if (payload.waiting_provider === true) patch.waiting_provider = true;
-              if (payload.cancelled === true) patch.cancelled = true;
-              // P2 worker 内 failover：上游切到下一个 provider 时携带 provider_failover=true。
-              // 累加计数到 Generation 上，DevelopingCard 可显示"换号重试 N 次"。
-              if (payload.provider_failover === true) {
-                patch.failover_count = (gen.failover_count ?? 0) + 1;
-              }
-              patch.status = "running";
-              if (!(gen.started_at > 0)) patch.started_at = eventNow;
-            } else if (eventName === "generation.partial_image") {
-              patch.status = "running";
-              patch.stage = "rendering";
-              patch.substage = "partial_received";
-              patch.retrying = false;
-              patch.waiting_provider = false;
-              if (!(gen.started_at > 0)) patch.started_at = eventNow;
+            const lifecyclePatch = reduceGenerationLifecycleEvent(
+              eventName,
+              payload,
+              gen,
+              eventNow,
+            );
+            if (lifecyclePatch) {
+              Object.assign(patch, lifecyclePatch);
             } else if (eventName === "generation.succeeded" && pendingImage) {
               const generationExplainability =
                 generationExplainabilityFromPayload(payload);
@@ -4109,26 +3989,6 @@ function createChatStore() {
               patch.cancelled = false;
               patch.finished_at = eventNow;
               Object.assign(patch, generationExplainability);
-            } else if (eventName === "generation.retrying") {
-              patch.status = "queued";
-              patch.stage = "queued";
-              patch.substage = "upstream_retrying";
-              patch.retrying = true;
-              patch.waiting_provider = payload.reason === "image_provider_unavailable";
-              patch.cancelled = false;
-              patch.started_at = 0;
-              const att = payload.attempt;
-              if (typeof att === "number") patch.attempt = att;
-              const maxAtt = payload.max_attempts;
-              if (typeof maxAtt === "number") patch.max_attempts = maxAtt;
-              const delaySec = payload.retry_delay_seconds;
-              if (typeof delaySec === "number") {
-                patch.retry_eta = eventNow + delaySec * 1000;
-              }
-              patch.retry_error =
-                get_id("error_message") ?? get_id("message") ?? undefined;
-              patch.error_code = get_id("error_code") ?? patch.error_code;
-              patch.error_message = patch.retry_error;
             }
             const nextGen = { ...gen, ...patch };
             const nextGenerations = { ...s.generations, [id]: nextGen };

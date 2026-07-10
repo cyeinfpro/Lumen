@@ -15,6 +15,7 @@ import { MobileTabBar } from "./MobileTabBar";
 import { MobileConversationCanvas } from "@/components/ui/chat/mobile/MobileConversationCanvas";
 import { MobileComposerPill } from "@/components/ui/composer/mobile/MobileComposerPill";
 import { MobileEmptyStudio } from "@/components/ui/chat/mobile/MobileEmptyStudio";
+import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useChatStore } from "@/store/useChatStore";
 import { useListConversationsInfiniteQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -37,8 +38,8 @@ export function MobileStudio() {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [composerMetrics, setComposerMetrics] = useState({
-    height: 48,
-    bottom: 54,
+    height: 56,
+    bottom: 62,
   });
   const handleComposerMetricsChange = useCallback(
     (next: { height: number; bottom: number }) => {
@@ -213,6 +214,9 @@ export function MobileStudio() {
         </div>
       </main>
 
+      <TaskIsland
+        className="fixed bottom-[calc(var(--mobile-composer-bottom,54px)+var(--mobile-composer-height,48px)+8px)] left-1/2 z-[calc(var(--z-composer)+1)] max-w-[calc(100vw-32px)] -translate-x-1/2 shadow-[var(--shadow-2)]"
+      />
       <MobileComposerPill
         onSubmit={() => sendMessage()}
         onMetricsChange={handleComposerMetricsChange}

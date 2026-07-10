@@ -1,3 +1,18 @@
+---
+baseline_commit: "b6e4004"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：`v1.1.71` / `b6e4004`。
+>
+> **记录提交**：`e5776aa53109cf73124ea509383ee54c995bd64a`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # 服务端 Bug 审计（非客户端）— 2026-05-29
 
 > 范围：`packages/core`、`apps/api`、`apps/worker`、`apps/web`、部署/脚本/CI、`apps/tgbot`。
@@ -155,4 +170,3 @@
 - 采用"风险模式 grep 扫描 + 高风险文件全读 + 调用链溯源验证"。**累计完整读**：`billing.py`(core/worker)、`pricing.py`、`billing_cache.py`、`byok.py`、`url_security.py`、`image_signing.py`、`security.py`、`deps.py`、`restore.sh`、`update_check.py`、`MarkdownPreview.tsx`+`UpdateAvailableCard.tsx`、tgbot `middlewares.py`、各分布式锁 Lua；**本轮新增全读**：`invites.py`、`generations.py`、`shares.py`、`regenerate.py`、`me.py`、`events.py`、`account_limiter.py`、`retry.py`、`tasks/outbox.py`。
 - **本轮新增的横切复核**：(1) 枚举全仓 **全部 `create_task`/`ensure_future` 站点**，逐一判定引用持有情况（仅 WORKER-1 的 6 处未持有）；(2) 对 `workflows/conversations/messages/poster_styles` 的 **`db.get()` PK 直加载**逐处溯源，确认 id 均来自服务端新建行或带 `user_id` 复核——无 IDOR；(3) 复核 `apps/web` 唯一 `dangerouslySetInnerHTML`（`MarkdownPreview.tsx:18`）的喂入链：`releaseHtml←check.release.body_html←_release_html()`，服务端逐行 `html.escape`（含 `quote=True`）后才套固定标签，XSS 链完整闭合。
 - **仍未逐行精读**（采样/grep + 模式复核覆盖，可能存在盲区）：`workflows.py`(11135 行)/`conversations.py`/`messages.py`/`poster_styles.py` 在**归属过滤与 PK 加载之外**的业务主体；`apps/worker/app/tasks/completion.py|generation.py|provider_pool.py` 在**计费与异步任务生命周期之外**的主体；前端绝大多数组件状态逻辑。如需对其中某块做逐行精读，请指定。
-

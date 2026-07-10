@@ -519,7 +519,7 @@ export function ConversationImageGallery({
     <section
       id="conversation-image-gallery"
       aria-label="本会话图片"
-      className="mx-auto w-full max-w-[1400px] px-4 py-5 xl:px-6"
+      className="mx-auto w-full max-w-[var(--content-media)] px-4 py-5 xl:px-6"
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div>
@@ -664,7 +664,7 @@ export function ConversationImageGallery({
             className="flex min-w-0 flex-col"
             style={{ gap: 6 }}
           >
-            {column.map(({ image, index, estimatedHeight }) => {
+            {column.map(({ image, estimatedHeight }) => {
               const longImage = isLongImage(image);
               const Icon = image.source === "upload" ? Upload : Sparkles;
               const selected = selectedIds.has(image.shareImageId);
@@ -685,12 +685,11 @@ export function ConversationImageGallery({
                     "group block w-full overflow-hidden rounded-[var(--radius-card)]",
                     "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-left",
                     "shadow-[var(--shadow-1)] transition-colors duration-200",
-                    "hover:border-[var(--amber-400)]/45 hover:bg-[var(--bg-2)]",
+                    "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                     selected && "border-[var(--amber-400)] ring-2 ring-[var(--amber-400)]/45",
                   )}
                   style={{
-                    animationDelay: `${Math.min(index * 22, 300)}ms`,
                     containIntrinsicSize: `1px ${Math.max(150, Math.min(360, estimatedHeight / 4))}px`,
                   }}
                 >
@@ -706,7 +705,7 @@ export function ConversationImageGallery({
                       alt=""
                       loading="lazy"
                       decoding="async"
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.025]"
+                      className="h-full w-full object-cover transition-opacity duration-[var(--dur-normal)] group-hover:opacity-95"
                     />
                     <span className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/60 to-transparent" />
                     <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-black/45 px-1.5 py-0.5 text-[10px] text-white/80 backdrop-blur">

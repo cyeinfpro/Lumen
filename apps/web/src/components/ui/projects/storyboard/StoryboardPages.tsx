@@ -1033,7 +1033,16 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function StatusPill({ status }: { status: string }) {
   const success = ["approved", "keyframe_approved", "done", "completed"].includes(status);
-  const busy = ["generating", "keyframe_generating", "compositing", "running", "queued", "submitted"].includes(status);
+  const busy = [
+    "generating",
+    "keyframe_generating",
+    "compositing",
+    "running",
+    "queued",
+    "submitting",
+    "submit_unknown",
+    "submitted",
+  ].includes(status);
   return (
     <span
       className={cn(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
 
@@ -18,6 +18,7 @@ PRICING_SOURCE_REDIS = "redis"
 PRICING_SOURCE_PROCESS = "process"
 PRICING_SOURCE_FALLBACK = "fallback"
 PRICING_SOURCE_MISSING = "missing"
+PRICING_SOURCE_SNAPSHOT = "snapshot"
 
 
 def _nonnegative(value: Any) -> int:
@@ -89,6 +90,9 @@ class ModelPricing:
     supports_cache_breakdown: bool = True
     pricing_source: str = PRICING_SOURCE_MISSING
 
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
     def with_defaults(self) -> "ModelPricing":
         input_rate = max(0, int(self.input_per_1k_micro))
         output_rate = max(0, int(self.output_per_1k_micro))
@@ -146,6 +150,18 @@ class ModelPricing:
             supports_cache_breakdown=bool(self.supports_cache_breakdown),
             pricing_source=self.pricing_source,
         )
+
+
+def model_pricing_from_snapshot(snapshot: dict[str, Any]) -> ModelPricing:
+    if not isinstance(snapshot, dict):
+        raise ValueError("pricing snapshot must be an object")
+    field_names = {field.name for field in fields(ModelPricing)}
+    values = {key: value for key, value in snapshot.items() if key in field_names}
+    try:
+        pricing = ModelPricing(**values).with_defaults()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid pricing snapshot") from exc
+    return replace(pricing, pricing_source=PRICING_SOURCE_SNAPSHOT)
 
 
 @dataclass(frozen=True)
@@ -272,11 +288,98 @@ def parse_usage(provider: str, usage: dict[str, Any] | None) -> UsageTokens:
 
 
 def _cost(tokens: int, rate_per_1k_micro: int) -> int:
-    return (max(0, int(tokens)) * max(0, int(rate_per_1k_micro)) + 500) // 1000
+    normalized_tokens = max(0, int(tokens))
+    normalized_rate = max(0, int(rate_per_1k_micro))
+    if normalized_tokens <= 0 or normalized_rate <= 0:
+        return 0
+    return max(1, (normalized_tokens * normalized_rate + 500) // 1000)
 
 
 def _apply_multiplier(value: int, multiplier_x10000: int) -> int:
     return (max(0, int(value)) * max(0, int(multiplier_x10000))) // 10_000
+
+
+def _usage_for_pricing(
+    pricing: ModelPricing,
+    usage: UsageTokens,
+) -> UsageTokens:
+    normalized = usage.normalized()
+    if pricing.supports_cache_breakdown:
+        return normalized
+    cache_creation_total = max(
+        normalized.cache_creation_tokens,
+        normalized.cache_creation_5m_tokens
+        + normalized.cache_creation_1h_tokens,
+    )
+    return UsageTokens(
+        input_tokens=(
+            normalized.input_tokens
+            + normalized.cache_read_tokens
+            + cache_creation_total
+        ),
+        output_tokens=normalized.output_tokens,
+        reasoning_tokens=normalized.reasoning_tokens,
+        image_output_tokens=normalized.image_output_tokens,
+    ).normalized()
+
+
+def missing_pricing_buckets(
+    pricing: ModelPricing,
+    usage: UsageTokens,
+    *,
+    service_tier: str = "standard",
+) -> tuple[str, ...]:
+    """Return billable usage buckets that have no positive configured rate."""
+    pricing = pricing.with_defaults()
+    usage = _usage_for_pricing(pricing, usage)
+    priority = service_tier.lower() in {"priority", "flex_priority", "premium"}
+    input_rate = (
+        pricing.input_priority_per_1k_micro
+        if priority and pricing.input_priority_per_1k_micro > 0
+        else pricing.input_per_1k_micro
+    )
+    output_rate = (
+        pricing.output_priority_per_1k_micro
+        if priority and pricing.output_priority_per_1k_micro > 0
+        else pricing.output_per_1k_micro
+    )
+    cache_read_rate = (
+        pricing.cache_read_priority_per_1k_micro
+        if priority and pricing.cache_read_priority_per_1k_micro > 0
+        else pricing.cache_read_per_1k_micro
+    )
+    output_text_tokens = max(
+        0, usage.output_tokens - usage.image_output_tokens - usage.reasoning_tokens
+    )
+    cache_creation_bucketed = (
+        usage.cache_creation_5m_tokens + usage.cache_creation_1h_tokens
+    )
+    cache_creation_unbucketed = max(
+        0, usage.cache_creation_tokens - cache_creation_bucketed
+    )
+    checks = (
+        ("input", usage.input_tokens, input_rate),
+        ("output", output_text_tokens, output_rate),
+        ("cache_read", usage.cache_read_tokens, cache_read_rate),
+        (
+            "cache_creation",
+            cache_creation_unbucketed,
+            pricing.cache_creation_per_1k_micro,
+        ),
+        (
+            "cache_creation_5m",
+            usage.cache_creation_5m_tokens,
+            pricing.cache_creation_5m_per_1k_micro,
+        ),
+        (
+            "cache_creation_1h",
+            usage.cache_creation_1h_tokens,
+            pricing.cache_creation_1h_per_1k_micro,
+        ),
+        ("image_output", usage.image_output_tokens, pricing.image_output_per_1k_micro),
+        ("reasoning", usage.reasoning_tokens, pricing.reasoning_per_1k_micro),
+    )
+    return tuple(name for name, tokens, rate in checks if tokens > 0 and rate <= 0)
 
 
 def compute_breakdown(
@@ -287,7 +390,7 @@ def compute_breakdown(
     service_tier: str = "standard",
 ) -> CostBreakdown:
     pricing = pricing.with_defaults()
-    usage = usage.normalized()
+    usage = _usage_for_pricing(pricing, usage)
     priority = service_tier.lower() in {"priority", "flex_priority", "premium"}
 
     input_rate = pricing.input_per_1k_micro
@@ -351,6 +454,8 @@ def compute_breakdown(
     )
     multiplier = max(0, int(rate_multiplier_x10000))
     actual = _apply_multiplier(total, multiplier)
+    if total > 0 and multiplier > 0:
+        actual = max(1, actual)
     return CostBreakdown(
         input_cost_micro=input_cost,
         output_cost_micro=output_cost,

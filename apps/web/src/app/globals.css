@@ -13,8 +13,8 @@
   --color-lumen-amber: #F2A93A;
   --color-lumen-amber-soft: rgba(242, 169, 58, 0.12);
   --color-lumen-amber-border: rgba(242, 169, 58, 0.28);
-  --color-lumen-dark: #08080A;
-  --color-lumen-surface: rgba(24, 24, 24, 0.6);
+  --color-lumen-dark: #09090B;
+  --color-lumen-surface: rgba(18, 19, 24, 0.94);
 
   /* === 语义色 utility（V1 设计语言统一, 2026-05-09） ===
      5 槽：accent / danger / success / warning / info，每槽 base / soft / border。
@@ -57,16 +57,25 @@
     color-scheme: dark;
 
     /* 底层 4 阶 */
-    --bg-0: #08080A;
-    --bg-1: #0F0F12;
-    --bg-2: #17181C;
-    --bg-3: #1F2025;
+    --bg-0: #09090B;
+    --bg-1: #0D0E11;
+    --bg-2: #121318;
+    --bg-3: #191A20;
 
     /* 前景 4 阶（略偏暖，银盐感） */
-    --fg-0: #F5F1EA;
-    --fg-1: #B8B1A4;
-    --fg-2: #6B675F;
-    --fg-3: #3E3B36;
+    --fg-0: #F5F2EB;
+    --fg-1: #C2BCAF;
+    --fg-2: #8A8378;
+    --fg-3: #5E5951;
+
+    /* Luminous Darkroom 2.0 surface roles */
+    --surface-canvas: var(--bg-0);
+    --surface-chrome: var(--bg-1);
+    --surface-panel: var(--bg-2);
+    --surface-raised: var(--bg-3);
+    --surface-overlay: #202229;
+    --surface-media: #050506;
+    --surface-selected: rgba(245, 242, 235, 0.075);
 
     /* 琥珀 7 档 */
     --amber-100: #FDEBC8;
@@ -102,9 +111,9 @@
     --info-on:    #08080A;
 
     /* 描边（带暖色） */
-    --border-subtle: rgba(245, 241, 234, 0.06);
-    --border:        rgba(245, 241, 234, 0.10);
-    --border-strong: rgba(245, 241, 234, 0.18);
+    --border-subtle: rgba(245, 242, 235, 0.08);
+    --border:        rgba(245, 242, 235, 0.13);
+    --border-strong: rgba(245, 242, 235, 0.20);
     --border-amber:  rgba(242, 169, 58, 0.30);
 
     /* 焦点环（双层：暗房底 + 琥珀光晕） */
@@ -116,7 +125,13 @@
     --accent:        var(--amber-400);
     --accent-soft:   rgba(242, 169, 58, 0.12);
     --accent-border: var(--border-amber);
-    --surface:       rgba(24, 24, 24, 0.6);
+    --surface:       rgba(18, 19, 24, 0.94);
+
+    /* Stable content geometry */
+    --content-text: 800px;
+    --content-composer: 880px;
+    --content-media: 1160px;
+    --content-workbench: 1440px;
 
     /* 字体家族（spec §4.2）
        --font-body / --font-mono / --font-serif 由 next/font 在 body class
@@ -162,9 +177,9 @@
     --radius-pill: 999px;
 
     /* 阴影（暗房浓度） */
-    --shadow-1: 0 1px 2px rgba(0,0,0,0.60);
-    --shadow-2: 0 8px 24px -6px rgba(0,0,0,0.65), 0 0 0 1px rgba(245,241,234,0.04);
-    --shadow-3: 0 24px 64px -12px rgba(0,0,0,0.80), 0 0 0 1px rgba(245,241,234,0.06);
+    --shadow-1: 0 1px 0 rgba(255,255,255,0.035) inset, 0 4px 14px rgba(0,0,0,0.24);
+    --shadow-2: 0 1px 0 rgba(255,255,255,0.035) inset, 0 10px 30px rgba(0,0,0,0.32);
+    --shadow-3: 0 1px 0 rgba(255,255,255,0.045) inset, 0 24px 64px -12px rgba(0,0,0,0.72);
     --shadow-amber: 0 0 24px -4px var(--amber-glow), 0 0 0 1px var(--border-amber);
     --shadow-shutter: 0 0 0 1px rgba(242,169,58,0.60), 0 0 28px 4px var(--amber-glow-strong);
 
@@ -178,18 +193,19 @@
     --ease-develop: cubic-bezier(0.22, 1, 0.36, 1);
     --ease-curtain: cubic-bezier(0.80, 0, 0.20, 1);
     --dur-fast: 140ms;
-    --dur-base: 220ms;
-    --dur-slow: 420ms;
+    --dur-base: 180ms;
+    --dur-slow: 320ms;
     --dur-develop: 2400ms;
 
 /* === Duration 补档（V1 Polish, 2026-04-24） === */
---dur-instant: 80ms;    /* 微反馈：pressable / 光标切换 */
+--dur-instant: 90ms;    /* 微反馈：pressable / 光标切换 */
     --dur-quick:   140ms;   /* 别名 = --dur-fast */
-    --dur-normal:  220ms;   /* 别名 = --dur-base */
-    --dur-page:    280ms;   /* Tab 路由切换 */
-    --dur-enter:   280ms;
+    --dur-normal:  180ms;   /* 别名 = --dur-base */
+    --dur-page:    180ms;   /* Tab 路由切换 */
+    --dur-panel:   240ms;
+    --dur-enter:   180ms;
     --dur-dialog:  180ms;
-    --dur-collapse: 250ms;
+    --dur-collapse: 220ms;
     --dur-shimmer: 1800ms;
     --dur-pulse:   2000ms;
 
@@ -241,23 +257,30 @@
   .theme-dark,
   .dark {
     color-scheme: dark;
-    --bg-0: #08080A;
-    --bg-1: #0F0F12;
-    --bg-2: #17181C;
-    --bg-3: #1F2025;
-    --fg-0: #F5F1EA;
-    --fg-1: #B8B1A4;
-    --fg-2: #6B675F;
-    --fg-3: #3E3B36;
-    --border-subtle: rgba(245, 241, 234, 0.06);
-    --border:        rgba(245, 241, 234, 0.10);
-    --border-strong: rgba(245, 241, 234, 0.18);
+    --bg-0: #09090B;
+    --bg-1: #0D0E11;
+    --bg-2: #121318;
+    --bg-3: #191A20;
+    --fg-0: #F5F2EB;
+    --fg-1: #C2BCAF;
+    --fg-2: #8A8378;
+    --fg-3: #5E5951;
+    --surface-canvas: var(--bg-0);
+    --surface-chrome: var(--bg-1);
+    --surface-panel: var(--bg-2);
+    --surface-raised: var(--bg-3);
+    --surface-overlay: #202229;
+    --surface-media: #050506;
+    --surface-selected: rgba(245, 242, 235, 0.075);
+    --border-subtle: rgba(245, 242, 235, 0.08);
+    --border:        rgba(245, 242, 235, 0.13);
+    --border-strong: rgba(245, 242, 235, 0.20);
     --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--amber-glow-strong);
     --color-lumen-dark: var(--bg-0);
-    --surface: rgba(24, 24, 24, 0.6);
-    --shadow-1: 0 1px 2px rgba(0,0,0,0.60);
-    --shadow-2: 0 8px 24px -6px rgba(0,0,0,0.65), 0 0 0 1px rgba(245,241,234,0.04);
-    --shadow-3: 0 24px 64px -12px rgba(0,0,0,0.80), 0 0 0 1px rgba(245,241,234,0.06);
+    --surface: rgba(18, 19, 24, 0.94);
+    --shadow-1: 0 1px 0 rgba(255,255,255,0.035) inset, 0 4px 14px rgba(0,0,0,0.24);
+    --shadow-2: 0 1px 0 rgba(255,255,255,0.035) inset, 0 10px 30px rgba(0,0,0,0.32);
+    --shadow-3: 0 1px 0 rgba(255,255,255,0.045) inset, 0 24px 64px -12px rgba(0,0,0,0.72);
   }
 
   .theme-light {
@@ -270,6 +293,13 @@
     --fg-1: #5D574C;
     --fg-2: #8B8375;
     --fg-3: #BDB3A3;
+    --surface-canvas: var(--bg-0);
+    --surface-chrome: var(--bg-1);
+    --surface-panel: var(--bg-2);
+    --surface-raised: var(--bg-3);
+    --surface-overlay: #E4DAC8;
+    --surface-media: #17130E;
+    --surface-selected: rgba(33, 31, 26, 0.075);
     --border-subtle: rgba(33, 31, 26, 0.08);
     --border:        rgba(33, 31, 26, 0.12);
     --border-strong: rgba(33, 31, 26, 0.20);
@@ -302,6 +332,13 @@
       --fg-1: #5D574C;
       --fg-2: #8B8375;
       --fg-3: #BDB3A3;
+      --surface-canvas: var(--bg-0);
+      --surface-chrome: var(--bg-1);
+      --surface-panel: var(--bg-2);
+      --surface-raised: var(--bg-3);
+      --surface-overlay: #E4DAC8;
+      --surface-media: #17130E;
+      --surface-selected: rgba(33, 31, 26, 0.075);
       --border-subtle: rgba(33, 31, 26, 0.08);
       --border:        rgba(33, 31, 26, 0.12);
       --border-strong: rgba(33, 31, 26, 0.20);
@@ -622,9 +659,8 @@
   .surface-card {
     border-radius: var(--radius-card);
     border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg-1) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-1) 92%, transparent);
     box-shadow: var(--shadow-1);
-    backdrop-filter: blur(12px);
     isolation: isolate;
   }
   .surface-card-hover {
@@ -635,7 +671,7 @@
   }
   .surface-card-hover:hover {
     border-color: var(--border-strong);
-    background: color-mix(in srgb, var(--bg-1) 84%, transparent);
+    background: var(--bg-2);
     box-shadow: var(--shadow-2);
   }
   [data-lumen-card="true"]:focus-within,
@@ -745,10 +781,22 @@
 
   .lumen-studio-bg {
     background:
-      radial-gradient(circle at 50% -10%, rgba(242, 169, 58, 0.14), transparent 30rem),
-      radial-gradient(circle at 88% 12%, rgba(255, 255, 255, 0.05), transparent 22rem),
-      linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 18rem),
+      linear-gradient(180deg, color-mix(in srgb, var(--bg-1) 58%, transparent), transparent 18rem),
       var(--bg-0);
+  }
+
+  .studio-shell {
+    --studio-sidebar-offset: 0px;
+  }
+  @media (min-width: 1120px) {
+    .studio-shell {
+      --studio-sidebar-offset: 64px;
+    }
+  }
+  @media (min-width: 1440px) {
+    .studio-shell[data-sidebar-open="true"] {
+      --studio-sidebar-offset: 264px;
+    }
   }
 
   .lumen-bottom-fade {

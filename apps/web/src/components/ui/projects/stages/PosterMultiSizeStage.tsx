@@ -107,7 +107,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
       toast.error("完成交付失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       }),
-    onSuccess: () => toast.success("海报已完成交付，成品已加入项目资产"),
+    onSuccess: () => toast.success("海报已完成交付，成品已加入项目素材"),
   });
 
   const onTriggerGenerate = () => {
@@ -283,7 +283,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
                 Delivery Ready
               </p>
               <p className="mt-1 text-[13px] leading-[1.7] text-[var(--fg-1)]">
-                {readyRenderCount} 个尺寸已就绪。完成后会进入交付页，并把海报成品写入项目资产。
+                {readyRenderCount} 个尺寸已就绪。完成后会进入交付页，并把海报成品写入项目素材。
               </p>
             </div>
             <Button
@@ -293,7 +293,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
               leftIcon={<Check className="h-4 w-4" />}
               className="w-full sm:w-auto"
             >
-              完成交付并保存资产
+              完成交付并保存素材
             </Button>
           </div>
         </div>

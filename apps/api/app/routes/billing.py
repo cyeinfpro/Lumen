@@ -90,6 +90,9 @@ from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
 from ..services.billing_cache import BillingCacheService
 from ..services.idempotency import cache_json, get_cached_json
+from ..services.pricing_cache import (
+    invalidate_pricing_cache as _invalidate_pricing_cache,
+)
 from ..services.redemption_secret import (
     PreviousRedemptionSecretLocked,
     previous_redemption_secret,
@@ -149,6 +152,7 @@ _BULK_RATE_UNITS: dict[str, str] = {
     "output_priority": "per_1k_tokens_output_priority",
     "cache_read_priority": "per_1k_tokens_cache_read_priority",
 }
+_ZERO_PRICE_ALLOWED_UNITS = {"long_context_threshold"}
 
 
 def configure_billing_cache(service: BillingCacheService | None) -> None:
@@ -424,6 +428,7 @@ def _pricing_rule_out(rule: PricingRule) -> PricingRuleOut:
         variant=rule.variant,
         unit=rule.unit,  # type: ignore[arg-type]
         price=_money(rule.price_micro),
+        priority=rule.priority,
         enabled=rule.enabled,
         note=rule.note,
         created_at=rule.created_at,
@@ -1007,15 +1012,64 @@ def _bulk_multiplier_x10000(value: float | None, *, field: str) -> int | None:
     return int((dec * Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
-async def _invalidate_pricing_cache(model: str, variant: str) -> None:
-    try:
-        redis = get_redis()
-        await redis.delete(
-            f"lumen:pricing:v1:{variant}:{model}",
-            f"lumen:pricing:v1:default:{model}",
+def _validate_enabled_pricing_value(
+    *,
+    unit: str,
+    price_micro: int,
+    enabled: bool,
+    field: str,
+) -> None:
+    if enabled and unit not in _ZERO_PRICE_ALLOWED_UNITS and int(price_micro) <= 0:
+        raise _http(
+            "invalid_amount",
+            f"{field}: enabled pricing must be positive",
+            422,
         )
-    except Exception:  # noqa: BLE001
-        return
+
+
+def _pricing_group_priorities(
+    values: list[dict[str, Any]],
+) -> dict[tuple[str, str, str], int]:
+    grouped: dict[tuple[str, str, str], set[int]] = {}
+    for value in values:
+        group = (
+            str(value["scope"]),
+            str(value["key"]),
+            str(value["variant"]),
+        )
+        grouped.setdefault(group, set()).add(int(value["priority"]))
+    mixed = [group for group, priorities in grouped.items() if len(priorities) > 1]
+    if mixed:
+        scope, key, variant = mixed[0]
+        raise _http(
+            "pricing_priority_mismatch",
+            "all units in one pricing rule group must share one priority",
+            422,
+            scope=scope,
+            key=key,
+            variant=variant,
+        )
+    return {group: next(iter(priorities)) for group, priorities in grouped.items()}
+
+
+async def _align_pricing_group_priorities(
+    db: AsyncSession,
+    values: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> None:
+    priorities = _pricing_group_priorities(values)
+    await db.flush()
+    for (scope, key, variant), priority in priorities.items():
+        await db.execute(
+            update(PricingRule)
+            .where(
+                PricingRule.scope == scope,
+                PricingRule.key == key,
+                PricingRule.variant == variant,
+            )
+            .values(priority=priority, updated_at=now)
+        )
 
 
 @router.get("/me/wallet", response_model=WalletOut)
@@ -1453,14 +1507,20 @@ async def admin_billing_bootstrap(
     for tier, threshold in body.image_size_thresholds.items():
         if threshold < 0:
             raise _http("invalid_request", "thresholds must be non-negative", 422)
-        price_rmb = body.image_prices_rmb.get(tier, "0")
-        price_micro = _rmb_to_micro_or_422(price_rmb, field=f"image_prices_rmb.{tier}")
-        if price_micro < 0:
+        price_rmb = body.image_prices_rmb.get(tier)
+        if price_rmb is None:
             raise _http(
-                "invalid_amount",
-                f"image_prices_rmb.{tier}: price must be non-negative",
+                "invalid_request",
+                f"image_prices_rmb.{tier}: enabled tier price is required",
                 422,
             )
+        price_micro = _rmb_to_micro_or_422(price_rmb, field=f"image_prices_rmb.{tier}")
+        _validate_enabled_pricing_value(
+            unit="per_image",
+            price_micro=price_micro,
+            enabled=True,
+            field=f"image_prices_rmb.{tier}",
+        )
         pricing_items.append(
             {
                 "id": new_uuid7(),
@@ -1801,7 +1861,11 @@ async def admin_list_pricing(
         (
             await db.execute(
                 select(PricingRule).order_by(
-                    PricingRule.scope, PricingRule.key, PricingRule.unit
+                    PricingRule.scope,
+                    PricingRule.variant,
+                    PricingRule.priority.desc(),
+                    PricingRule.key,
+                    PricingRule.unit,
                 )
             )
         )
@@ -1845,6 +1909,12 @@ async def admin_update_pricing(
         price = _rmb_to_micro_or_422(item.price_rmb, field="price_rmb")
         if price < 0:
             raise _http("invalid_amount", "price must be non-negative", 422)
+        _validate_enabled_pricing_value(
+            unit=item.unit,
+            price_micro=price,
+            enabled=item.enabled,
+            field="price_rmb",
+        )
         values.append(
             {
                 "id": new_uuid7(),
@@ -1853,6 +1923,7 @@ async def admin_update_pricing(
                 "variant": item.variant,
                 "unit": item.unit,
                 "price_micro": price,
+                "priority": item.priority,
                 "enabled": item.enabled,
                 "note": item.note,
                 "updated_at": now,
@@ -1874,6 +1945,7 @@ async def admin_update_pricing(
                 constraint="uq_pricing_scope_key_variant_unit",
                 set_={
                     "price_micro": insert_stmt.excluded.price_micro,
+                    "priority": insert_stmt.excluded.priority,
                     "enabled": insert_stmt.excluded.enabled,
                     "note": insert_stmt.excluded.note,
                     "updated_at": now,
@@ -1896,9 +1968,11 @@ async def admin_update_pricing(
                 db.add(PricingRule(**value))
             else:
                 existing.price_micro = value["price_micro"]
+                existing.priority = value["priority"]
                 existing.enabled = value["enabled"]
                 existing.note = value["note"]
                 existing.updated_at = now
+    await _align_pricing_group_priorities(db, values, now=now)
     if thresholds_to_write is not None:
         await update_settings(
             db,
@@ -1960,6 +2034,7 @@ async def admin_bulk_pricing(
                 "variant": variant,
                 "unit": unit,
                 "price_micro": micro,
+                "priority": body.priority,
                 "enabled": body.enabled,
                 "note": body.note,
                 "updated_at": now,
@@ -1981,6 +2056,7 @@ async def admin_bulk_pricing(
                 "variant": variant,
                 "unit": "long_context_threshold",
                 "price_micro": threshold,
+                "priority": body.priority,
                 "enabled": body.enabled,
                 "note": body.note,
                 "updated_at": now,
@@ -2001,6 +2077,7 @@ async def admin_bulk_pricing(
                 "variant": variant,
                 "unit": unit,
                 "price_micro": multiplier,
+                "priority": body.priority,
                 "enabled": body.enabled,
                 "note": body.note,
                 "updated_at": now,
@@ -2008,6 +2085,13 @@ async def admin_bulk_pricing(
         )
     if not values:
         raise _http("invalid_request", "at least one pricing rate is required", 422)
+    for value in values:
+        _validate_enabled_pricing_value(
+            unit=str(value["unit"]),
+            price_micro=int(value["price_micro"]),
+            enabled=bool(value["enabled"]),
+            field=f"rates.{value['unit']}",
+        )
 
     bind = await db.connection()
     if bind.dialect.name == "postgresql":
@@ -2017,6 +2101,7 @@ async def admin_bulk_pricing(
                 constraint="uq_pricing_scope_key_variant_unit",
                 set_={
                     "price_micro": insert_stmt.excluded.price_micro,
+                    "priority": insert_stmt.excluded.priority,
                     "enabled": insert_stmt.excluded.enabled,
                     "note": insert_stmt.excluded.note,
                     "updated_at": now,
@@ -2039,9 +2124,11 @@ async def admin_bulk_pricing(
                 db.add(PricingRule(**value))
             else:
                 existing.price_micro = value["price_micro"]
+                existing.priority = value["priority"]
                 existing.enabled = value["enabled"]
                 existing.note = value["note"]
                 existing.updated_at = now
+    await _align_pricing_group_priorities(db, values, now=now)
     await write_audit(
         db,
         event_type="pricing.bulk_update",
@@ -2051,6 +2138,7 @@ async def admin_bulk_pricing(
         details={
             "model": model,
             "channel": None if variant == "default" else variant,
+            "priority": body.priority,
             "count": len(values),
             "units": [value["unit"] for value in values],
         },

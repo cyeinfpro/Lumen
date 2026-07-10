@@ -729,6 +729,7 @@ export interface VideoProviderItemOut {
   priority: number;
   weight: number;
   concurrency: number;
+  supports_idempotency: boolean;
   proxy: string | null;
   models: Record<string, string>;
 }
@@ -749,6 +750,7 @@ export interface VideoProviderItemIn {
   priority: number;
   weight: number;
   concurrency: number;
+  supports_idempotency: boolean;
   proxy?: string | null;
   models: Record<string, string>;
 }
@@ -1075,6 +1077,7 @@ export interface PricingRuleOut {
     | "long_context_output_multiplier"
     | "per_mtoken";
   price: MoneyOut;
+  priority: number;
   enabled: boolean;
   note: string | null;
   created_at: string;
@@ -1092,6 +1095,7 @@ export type VideoAction = "t2v" | "i2v" | "reference";
 export type VideoStatus =
   | "queued"
   | "submitting"
+  | "submit_unknown"
   | "submitted"
   | "running"
   | "succeeded"
@@ -1228,6 +1232,7 @@ export interface VideoGenerationOut {
   status: VideoStatus;
   progress_stage: VideoStage;
   progress_pct: number;
+  submission_epoch?: number;
   provider_name?: string | null;
   provider_kind?: string | null;
   est_token_upper: number;
@@ -1243,6 +1248,7 @@ export interface VideoGenerationOut {
   created_at: string;
   updated_at: string;
   started_at?: string | null;
+  submit_started_at?: string | null;
   submitted_at?: string | null;
   finished_at?: string | null;
 }
@@ -1274,6 +1280,7 @@ export interface PricingRuleUpsertIn {
     | "long_context_output_multiplier"
     | "per_mtoken";
   price_rmb: string;
+  priority?: number;
   enabled?: boolean;
   note?: string | null;
 }
@@ -1299,6 +1306,7 @@ export interface AdminPricingBulkIn {
   model: string;
   channel?: string | null;
   rates: AdminPricingBulkRatesIn;
+  priority?: number;
   enabled?: boolean;
   note?: string | null;
 }

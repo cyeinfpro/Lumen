@@ -1,10 +1,10 @@
-"""arq WorkerSettings 入口。实际任务函数由 Agent C 在 tasks/ 下填充。
+"""arq worker entrypoint and lifecycle hooks.
 
-DESIGN §6.1：两条 Redis Stream `queue:generations` / `queue:completions`。
-arq 内置用自己的队列；Agent C 可以选择：
-(a) 用 arq 的 default queue 作为任务调度，把 task_id 当入参；或
-(b) 用原生 Redis Stream + XAUTOCLAIM 自写消费循环。
-本骨架用 (a) 起步，符合 DESIGN 的 `task_id` 传递精神；Agent C 可在 V1.1 升级到 (b)。"""
+Task functions receive durable database task IDs through the arq Redis queue.
+Startup initializes observability, tokenization, and billing-cache services;
+shutdown drains their process resources. Business state remains authoritative in
+PostgreSQL, while Redis provides dispatch, leases, counters, and event delivery.
+"""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class WorkerSettings:
     # Redis
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
-    # 注册任务（Agent C 填充）
+    # Registered task entry points.
     functions = [
         generation_tasks.run_generation,
         video_generation_tasks.run_video_generation,

@@ -43,9 +43,9 @@
 
 本方案以下三处既有报告为基线，**不重复修补已记录但未完成的项**，仅整合到统一时间线：
 
-- `BUG_REVIEW.md` P1-43（composer 浅拷贝）、L481（SSE 跨 tab 双投）。
-- `DEEP_BUG_AUDIT.md` P1-1（钱包检查非原子）、P1-4（SSE 缺 event ID 重连重放）、P1-13（Redis cancel 静默吞错）。
-- `ISSUES.md` L67-86、L1431-1465、L1604-1735、L1989-2076（前端 store / composer / hook race）、L1147-1216（upstream SSE 不关 / 字节计数 / failover 误计）。
+- `docs/audits/archive/BUG_REVIEW.md` P1-43（composer 浅拷贝）、L481（SSE 跨 tab 双投）。
+- `docs/audits/archive/DEEP_BUG_AUDIT.md` P1-1（钱包检查非原子）、P1-4（SSE 缺 event ID 重连重放）、P1-13（Redis cancel 静默吞错）。
+- 本机历史审计 `docs/audits/local/ISSUES.md` L67-86、L1431-1465、L1604-1735、L1989-2076（前端 store / composer / hook race）、L1147-1216（upstream SSE 不关 / 字节计数 / failover 误计）。
 
 ---
 
@@ -64,7 +64,7 @@
 
 | # | 文件:行 | 问题 | 症状 | 优先级 |
 | - | -- | -- | -- | -- |
-| B1 | `apps/api/app/routes/events.py:307-388`（见 ISSUES.md L365） | SSE replay 不按 client 请求的 channel 过滤 | A 会话页面会收到 B 会话事件，触发误更新 | P1 |
+| B1 | `apps/api/app/routes/events.py:307-388`（见本机归档 `docs/audits/local/ISSUES.md` L365） | SSE replay 不按 client 请求的 channel 过滤 | A 会话页面会收到 B 会话事件，触发误更新 | P1 |
 | B2 | `apps/api/app/routes/events.py:532-558`（DEEP_BUG_AUDIT.md P1-4） | publisher 未给 `sse_id` 时 SSE 不下发 `id:` 字段，浏览器重连后无 `Last-Event-ID` 锚点 | 网络抖动后中间所有无 ID 事件被重放，文本翻倍 | P1 |
 | B3 | `apps/api/app/sse_publish.py:56-79` | `_LAST_TS_MS` 无锁更新，并发 worker 可产出同 `ts_ms` | 重连时事件顺序错乱 | P2 |
 | B4 | `apps/api/app/sse_publish.py:85-130` | 失败时 fallback Redis-DLQ + PG-DLQ，但都失败仅 log；下游消费者不知道有事件丢失 | 极端故障下静默丢消息 | P2 |
@@ -363,7 +363,7 @@ SSEProvider 内：
 - [ ] 断网 10s 重连：文本无重复，无丢失。
 - [ ] 两个 tab：delta 一致，无双投。
 - [ ] 余额刚好 / 余额不足 / Redis 闪断 / PG 闪断：分别走对应错误码并可恢复。
-- [ ] 全部 P0/P1 项在 `BUG_REVIEW.md` / `DEEP_BUG_AUDIT.md` / `ISSUES.md` 中已划线。
+- [ ] 全部 P0/P1 项在 `docs/audits/archive/BUG_REVIEW.md`、`docs/audits/archive/DEEP_BUG_AUDIT.md` 和本机 `docs/audits/local/ISSUES.md` 中已复核。
 - [ ] `npm run build` 与 `uv run pytest` 通过。
 
 ---

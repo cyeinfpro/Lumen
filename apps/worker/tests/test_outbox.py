@@ -11,7 +11,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lumen_core.constants import CompletionStatus, GenerationStatus, MessageStatus
-from lumen_core.models import Completion, Generation, Message, OutboxEvent
+from lumen_core.models import (
+    Completion,
+    Generation,
+    Message,
+    OutboxDeadLetter,
+    OutboxEvent,
+)
 from app.tasks import outbox
 
 
@@ -81,6 +87,7 @@ class FakeUpdateResult:
 class FakeSession:
     def __init__(self, events: list[OutboxEvent]) -> None:
         self.events = events
+        self.added: list[object] = []
 
     async def __aenter__(self):
         return self
@@ -106,6 +113,9 @@ class FakeSession:
 
     async def commit(self) -> None:
         return None
+
+    def add(self, row: object) -> None:
+        self.added.append(row)
 
 
 class FakeReconSession:
@@ -151,12 +161,15 @@ class FakeReconSession:
 
 def _patch_session_local(
     monkeypatch: pytest.MonkeyPatch, events: list[OutboxEvent]
-) -> None:
+) -> FakeSession:
+    fake_session = FakeSession(events)
+
     @asynccontextmanager
     async def session_local():
-        yield FakeSession(events)
+        yield fake_session
 
     monkeypatch.setattr(outbox, "SessionLocal", session_local)
+    return fake_session
 
 
 def _patch_recon_session_local(
@@ -214,6 +227,47 @@ async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeyp
     assert processed == 1
     assert redis.enqueued == [("run_generation", "gen-1")]
     assert events[0].published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_delivers_sse_with_stable_outbox_id(monkeypatch):
+    event = OutboxEvent(
+        id="event-sse-1",
+        kind="sse",
+        payload={
+            "user_id": "user-1",
+            "channel": "task:video-1",
+            "event_name": "video.failed",
+            "data": {
+                "video_generation_id": "video-1",
+                "status": "failed",
+                "submission_epoch": 2,
+            },
+        },
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    _patch_session_local(monkeypatch, [event])
+    published = _patch_publish_event(monkeypatch)
+    redis = FakeRedis()
+
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == 1
+    assert redis.enqueued == []
+    assert event.published_at is not None
+    assert published == [
+        {
+            "user_id": "user-1",
+            "channel": "task:video-1",
+            "event_name": "video.failed",
+            "data": {
+                "video_generation_id": "video-1",
+                "status": "failed",
+                "submission_epoch": 2,
+                "outbox_id": "event-sse-1",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -330,7 +384,7 @@ async def test_publish_outbox_malformed_payload_goes_to_dlq_and_logs(
     event = _event(task_id="gen-1")
     event.payload = ["bad"]
     events = [event]
-    _patch_session_local(monkeypatch, events)
+    session = _patch_session_local(monkeypatch, events)
     redis = FakeRedis()
 
     processed = await outbox.publish_outbox({"redis": redis})
@@ -338,7 +392,61 @@ async def test_publish_outbox_malformed_payload_goes_to_dlq_and_logs(
     assert processed == 0
     assert redis.enqueued == []
     assert events[0].published_at is not None
+    assert len(session.added) == 1
+    dead_letter = session.added[0]
+    assert isinstance(dead_letter, OutboxDeadLetter)
+    assert dead_letter.outbox_id == event.id
+    assert dead_letter.error_class == "OutboxMalformedPayload"
+    assert dead_letter.error_message == "malformed_payload"
+    assert redis.keys == {}
     assert "malformed payload" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_dlq_uses_only_parent_locking_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(task_id="gen-1")
+    event.payload = []
+    session = FakeSession([event])
+    session_local_calls = 0
+
+    @asynccontextmanager
+    async def session_local():
+        nonlocal session_local_calls
+        session_local_calls += 1
+        if session_local_calls > 1:
+            raise AssertionError("DLQ persistence must not open a nested transaction")
+        yield session
+
+    monkeypatch.setattr(outbox, "SessionLocal", session_local)
+
+    await outbox.publish_outbox({"redis": FakeRedis()})
+
+    assert session_local_calls == 1
+    assert len(session.added) == 1
+    assert event.published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_redis_dlq_failure_does_not_roll_back_pg(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenDlqRedis(FakeRedis):
+        async def lpush(self, _key: str, _payload: str) -> int:
+            raise RuntimeError("redis unavailable")
+
+    event = _event(task_id="gen-1")
+    event.payload = ["bad"]
+    session = _patch_session_local(monkeypatch, [event])
+
+    processed = await outbox.publish_outbox({"redis": BrokenDlqRedis()})
+
+    assert processed == 0
+    assert event.published_at is not None
+    assert len(session.added) == 1
+    assert "Redis DLQ mirror failed" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,12 @@ import {
 } from "@/lib/apiClient";
 import { prewarmImage, prewarmVideoMetadata } from "@/lib/imagePreload";
 import { useSSE } from "@/lib/useSSE";
+import {
+  isTerminalVideoEvent,
+  mergeVideoGenerationEvent,
+  mergeVideoGenerationLists as mergeById,
+  videoGenerationEventId,
+} from "@/lib/videoEventSnapshot";
 import type {
   VideoAction,
   VideoCreateIn,
@@ -115,7 +121,13 @@ const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
   "1080p",
   "4k",
 ]);
-const ACTIVE_VIDEO_STATUSES = ["queued", "submitting", "submitted", "running"] as const;
+const ACTIVE_VIDEO_STATUSES = [
+  "queued",
+  "submitting",
+  "submit_unknown",
+  "submitted",
+  "running",
+] as const;
 const TERMINAL_VIDEO_STATUSES = ["succeeded", "failed", "canceled", "expired"] as const;
 const SETTLING_VIDEO_STAGES = ["fetching"] as const;
 const VIDEO_ACTIVE_POLL_MS = 2500;
@@ -284,12 +296,6 @@ function isTerminalVideo(item: VideoGenerationOut): boolean {
   );
 }
 
-function isTerminalVideoStatus(status: string | undefined): boolean {
-  return TERMINAL_VIDEO_STATUSES.includes(
-    status as (typeof TERMINAL_VIDEO_STATUSES)[number],
-  );
-}
-
 function isFailedHistoryVideo(item: VideoGenerationOut): boolean {
   return ["failed", "canceled", "expired"].includes(item.status);
 }
@@ -390,17 +396,6 @@ function preferredDuration(options: number[]): number {
 
 function durationOrPreferred(current: number, options: number[]): number {
   return options.includes(current) ? current : preferredDuration(options);
-}
-
-function mergeById(
-  current: VideoGenerationOut[],
-  updates: VideoGenerationOut[],
-): VideoGenerationOut[] {
-  const map = new Map(current.map((item) => [item.id, item]));
-  for (const item of updates) map.set(item.id, item);
-  return Array.from(map.values()).sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-  );
 }
 
 function estimateHoldMicro(
@@ -1192,49 +1187,14 @@ export default function VideoPage() {
 
   const applyVideoEventSnapshot = useCallback(
     (data: unknown): { id: string; terminal: boolean } | null => {
-      if (typeof data !== "object" || data === null) return null;
-      const raw = data as {
-        video_generation_id?: unknown;
-        status?: unknown;
-        stage?: unknown;
-        progress_pct?: unknown;
-        error_code?: unknown;
-      };
-      const id =
-        typeof raw.video_generation_id === "string" ? raw.video_generation_id : "";
+      const id = videoGenerationEventId(data);
       if (!id) return null;
-
-      const status = typeof raw.status === "string" ? raw.status : undefined;
-      const stage = typeof raw.stage === "string" ? raw.stage : undefined;
-      const progressPct =
-        typeof raw.progress_pct === "number" ? raw.progress_pct : undefined;
-      const errorCode =
-        typeof raw.error_code === "string" ? raw.error_code : undefined;
-
-      if (status || stage || progressPct !== undefined || errorCode) {
-        setItems((prev) =>
-          prev.map((item) =>
-            item.id === id
-              ? {
-                  ...item,
-                  ...(status
-                    ? { status: status as VideoGenerationOut["status"] }
-                    : {}),
-                  ...(stage
-                    ? {
-                        progress_stage:
-                          stage as VideoGenerationOut["progress_stage"],
-                      }
-                    : {}),
-                  ...(progressPct !== undefined ? { progress_pct: progressPct } : {}),
-                  ...(errorCode ? { error_code: errorCode } : {}),
-                }
-              : item,
-          ),
-        );
-      }
-
-      return { id, terminal: isTerminalVideoStatus(status) };
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === id ? mergeVideoGenerationEvent(item, data) : item,
+        ),
+      );
+      return { id, terminal: isTerminalVideoEvent(data) };
     },
     [],
   );

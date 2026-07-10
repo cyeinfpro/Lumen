@@ -97,7 +97,7 @@ export function MobileMe() {
                   "bg-gradient-to-br from-[var(--amber-300)] via-[var(--amber-400)] to-[var(--amber-600)]",
                   "flex items-center justify-center",
                   "text-[18px] font-bold text-[var(--bg-0)]",
-                  "shadow-[var(--shadow-amber)]",
+                  "shadow-[var(--shadow-1)]",
                 )}
               >
                 {avatarChar}

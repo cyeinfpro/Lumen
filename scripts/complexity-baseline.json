@@ -1,0 +1,320 @@
+{
+  "max_complexity": 15,
+  "max_file_lines": 1500,
+  "oversized_files": {
+    "apps/api/app/routes/_apparel_scene_planner.py": 2327,
+    "apps/api/app/routes/admin.py": 2127,
+    "apps/api/app/routes/admin_update.py": 1950,
+    "apps/api/app/routes/billing.py": 2935,
+    "apps/api/app/routes/conversations.py": 2666,
+    "apps/api/app/routes/messages.py": 2532,
+    "apps/api/app/routes/poster_styles.py": 2355,
+    "apps/api/app/routes/prompts.py": 1623,
+    "apps/api/app/routes/storyboards.py": 2583,
+    "apps/api/app/routes/videos.py": 2937,
+    "apps/api/app/routes/workflows.py": 11337,
+    "apps/web/src/app/admin/_panels/BillingPanel.tsx": 1649,
+    "apps/web/src/app/admin/_panels/ProvidersPanel.tsx": 2229,
+    "apps/web/src/app/admin/_panels/SettingsPanel.tsx": 2575,
+    "apps/web/src/app/admin/_panels/VideoProvidersPanel.tsx": 1921,
+    "apps/web/src/app/video/page.tsx": 3821,
+    "apps/web/src/components/ui/composer/mobile/MobileComposerPill.tsx": 1561,
+    "apps/web/src/components/ui/lightbox/DesktopLightbox.tsx": 2019,
+    "apps/web/src/components/ui/lightbox/MobileLightbox.tsx": 1563,
+    "apps/web/src/lib/apiClient.ts": 4415,
+    "apps/web/src/lib/queries.ts": 2542,
+    "apps/web/src/store/useChatStore.ts": 4871,
+    "apps/worker/app/provider_pool.py": 1994,
+    "apps/worker/app/tasks/completion.py": 4584,
+    "apps/worker/app/tasks/context_summary.py": 2050,
+    "apps/worker/app/tasks/generation.py": 6630,
+    "apps/worker/app/tasks/video_generation.py": 2277,
+    "apps/worker/app/upstream.py": 8235,
+    "apps/worker/app/video_upstream.py": 2106,
+    "packages/core/lumen_core/models.py": 2158,
+    "packages/core/lumen_core/schemas.py": 2736
+  },
+  "version": 4,
+  "violations": {
+    "apps/api/app/config.py::Settings.validate_production_secrets": {
+      "count": 1,
+      "max_complexity": 31
+    },
+    "apps/api/app/routes/_apparel_scene_planner.py::_normalize_scene_cards": {
+      "count": 1,
+      "max_complexity": 18
+    },
+    "apps/api/app/routes/admin.py::list_request_events": {
+      "count": 1,
+      "max_complexity": 32
+    },
+    "apps/api/app/routes/admin_update.py::_stream_update_events": {
+      "count": 1,
+      "max_complexity": 20
+    },
+    "apps/api/app/routes/admin_update.py::trigger_update": {
+      "count": 1,
+      "max_complexity": 25
+    },
+    "apps/api/app/routes/auth.py::signup_byok": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/api/app/routes/conversations.py::_estimate_context_window": {
+      "count": 1,
+      "max_complexity": 20
+    },
+    "apps/api/app/routes/conversations.py::list_messages": {
+      "count": 1,
+      "max_complexity": 28
+    },
+    "apps/api/app/routes/events.py::_validate_channels": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/api/app/routes/events.py::events": {
+      "count": 1,
+      "max_complexity": 37
+    },
+    "apps/api/app/routes/events.py::events.gen": {
+      "count": 1,
+      "max_complexity": 34
+    },
+    "apps/api/app/routes/generations.py::_decode_cursor": {
+      "count": 1,
+      "max_complexity": 18
+    },
+    "apps/api/app/routes/generations.py::list_generation_feed": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "apps/api/app/routes/memories.py::undo_memory_write": {
+      "count": 1,
+      "max_complexity": 21
+    },
+    "apps/api/app/routes/messages.py::_create_assistant_task": {
+      "count": 1,
+      "max_complexity": 27
+    },
+    "apps/api/app/routes/messages.py::submit_user_message": {
+      "count": 1,
+      "max_complexity": 36
+    },
+    "apps/api/app/routes/poster_styles.py::_api_call_poster_style_tagging_upstream": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/api/app/routes/poster_styles.py::_do_sync_library_presets": {
+      "count": 1,
+      "max_complexity": 26
+    },
+    "apps/api/app/routes/prompts.py::_build_video_enhance_content": {
+      "count": 1,
+      "max_complexity": 20
+    },
+    "apps/api/app/routes/prompts.py::_stream_enhance": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/api/app/routes/prompts.py::_stream_enhance_one": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/api/app/routes/providers.py::update_providers": {
+      "count": 1,
+      "max_complexity": 29
+    },
+    "apps/api/app/routes/providers.py::update_video_providers": {
+      "count": 1,
+      "max_complexity": 18
+    },
+    "apps/api/app/routes/regenerate.py::regenerate_message": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/api/app/routes/storyboards.py::_sync_storyboard_outputs": {
+      "count": 1,
+      "max_complexity": 32
+    },
+    "apps/api/app/routes/storyboards.py::patch_storyboard": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/api/app/routes/tasks.py::list_tasks": {
+      "count": 1,
+      "max_complexity": 27
+    },
+    "apps/api/app/routes/videos.py::_reference_media_snapshots": {
+      "count": 1,
+      "max_complexity": 25
+    },
+    "apps/api/app/routes/workflows.py::_prepare_showcase_preflight_impl": {
+      "count": 1,
+      "max_complexity": 24
+    },
+    "apps/api/app/routes/workflows.py::_showcase_prompt": {
+      "count": 1,
+      "max_complexity": 18
+    },
+    "apps/api/app/routes/workflows.py::_showcase_visibility_policy": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "apps/api/app/routes/workflows.py::_sync_poster_workflow_outputs": {
+      "count": 1,
+      "max_complexity": 38
+    },
+    "apps/api/app/routes/workflows.py::_sync_workflow_outputs": {
+      "count": 1,
+      "max_complexity": 46
+    },
+    "apps/worker/app/background_removal/local_chroma.py::recover_solid_background_transparency": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/worker/app/provider_pool.py::ProviderPool._select_for_image": {
+      "count": 1,
+      "max_complexity": 27
+    },
+    "apps/worker/app/retry.py::is_retriable": {
+      "count": 1,
+      "max_complexity": 22
+    },
+    "apps/worker/app/tasks/auto_title.py::_parse_response_text": {
+      "count": 1,
+      "max_complexity": 33
+    },
+    "apps/worker/app/tasks/completion.py::_pack_recent_history": {
+      "count": 1,
+      "max_complexity": 31
+    },
+    "apps/worker/app/tasks/completion.py::run_completion": {
+      "count": 1,
+      "max_complexity": 131
+    },
+    "apps/worker/app/tasks/context_image_caption.py::batch_caption_images": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/worker/app/tasks/context_summary.py::_message_to_summary_line": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "apps/worker/app/tasks/context_summary.py::ensure_context_summary": {
+      "count": 1,
+      "max_complexity": 25
+    },
+    "apps/worker/app/tasks/generation.py::_build_generation_diagnostics": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/worker/app/tasks/generation.py::_handle_dual_race_bonus_image": {
+      "count": 1,
+      "max_complexity": 27
+    },
+    "apps/worker/app/tasks/generation.py::_maybe_record_poster_style_library_generate_image": {
+      "count": 1,
+      "max_complexity": 20
+    },
+    "apps/worker/app/tasks/generation.py::_reserve_image_queue_slot": {
+      "count": 1,
+      "max_complexity": 27
+    },
+    "apps/worker/app/tasks/generation.py::run_generation": {
+      "count": 1,
+      "max_complexity": 156
+    },
+    "apps/worker/app/tasks/generation.py::run_generation.publish_image_progress": {
+      "count": 1,
+      "max_complexity": 24
+    },
+    "apps/worker/app/tasks/memory_extraction.py::assemble_user_memory_prompt": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/worker/app/tasks/outbox.py::reconcile_tasks": {
+      "count": 1,
+      "max_complexity": 18
+    },
+    "apps/worker/app/upstream.py::_dual_race_image_action": {
+      "count": 1,
+      "max_complexity": 24
+    },
+    "apps/worker/app/upstream.py::_dual_race_image_jobs_action": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "apps/worker/app/upstream.py::_extract_image_b64_from_payload": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "apps/worker/app/upstream.py::_image_job_with_failover": {
+      "count": 1,
+      "max_complexity": 29
+    },
+    "apps/worker/app/upstream.py::_iter_sse_curl": {
+      "count": 1,
+      "max_complexity": 55
+    },
+    "apps/worker/app/upstream.py::_iter_sse_with_runtime": {
+      "count": 1,
+      "max_complexity": 25
+    },
+    "apps/worker/app/upstream.py::_pool_select_compat": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/worker/app/upstream.py::_race_responses_image": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "apps/worker/app/upstream.py::_responses_image_stream": {
+      "count": 1,
+      "max_complexity": 45
+    },
+    "apps/worker/app/upstream.py::_run_image_once_for_provider": {
+      "count": 1,
+      "max_complexity": 37
+    },
+    "apps/worker/app/upstream.py::_submit_and_wait_image_job": {
+      "count": 1,
+      "max_complexity": 21
+    },
+    "apps/worker/app/upstream.py::responses_call": {
+      "count": 1,
+      "max_complexity": 37
+    },
+    "apps/worker/app/video_upstream.py::_explicit_video_result_url": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "apps/worker/app/video_upstream.py::_video_url": {
+      "count": 1,
+      "max_complexity": 22
+    },
+    "packages/core/lumen_core/providers.py::_ensure_ssh_socks_proxy": {
+      "count": 1,
+      "max_complexity": 17
+    },
+    "packages/core/lumen_core/providers.py::parse_provider_item": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "packages/core/lumen_core/runtime_settings.py::parse_value": {
+      "count": 1,
+      "max_complexity": 16
+    },
+    "packages/core/lumen_core/runtime_settings.py::validate_providers": {
+      "count": 1,
+      "max_complexity": 22
+    },
+    "packages/core/lumen_core/schemas.py::VideoReferenceMediaIn.validate_reference_source": {
+      "count": 1,
+      "max_complexity": 19
+    },
+    "packages/core/lumen_core/video_providers.py::parse_video_provider_config_json": {
+      "count": 1,
+      "max_complexity": 16
+    }
+  }
+}

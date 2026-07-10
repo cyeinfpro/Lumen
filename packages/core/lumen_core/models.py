@@ -1142,6 +1142,9 @@ class VideoGeneration(Base, TimestampMixin):
     attempt: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    submission_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     poll_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
@@ -1157,6 +1160,9 @@ class VideoGeneration(Base, TimestampMixin):
     submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    submit_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -1165,6 +1171,9 @@ class VideoGeneration(Base, TimestampMixin):
     )
 
     idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider_idempotency_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     est_token_upper: Mapped[int] = mapped_column(BigInteger, nullable=False)
     est_cost_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1601,6 +1610,34 @@ class WalletTransaction(Base):
     )
 
 
+class BillingWindowUsageEvent(Base):
+    """Durable source of truth for per-credential billing windows."""
+
+    __tablename__ = "billing_window_usage_events"
+    __table_args__ = (
+        Index(
+            "ix_billing_window_credential_created",
+            "credential_id",
+            "created_at",
+        ),
+        Index("ix_billing_window_user_created", "user_id", "created_at"),
+    )
+
+    wallet_transaction_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("wallet_transactions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    credential_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PricingRule(Base, TimestampMixin):
     __tablename__ = "pricing_rules"
     __table_args__ = (
@@ -1622,6 +1659,9 @@ class PricingRule(Base, TimestampMixin):
     )
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
     price_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, server_default=text("true")
     )

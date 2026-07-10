@@ -19,6 +19,7 @@ def _provider_raw(**overrides):
         "priority": 10,
         "weight": 2,
         "concurrency": 3,
+        "supports_idempotency": True,
         "models": {
             "seedance-2.0:t2v": "doubao-seedance-2-0",
             "seedance-2.0:i2v": "doubao-seedance-2-0-i2v",
@@ -37,6 +38,7 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
     assert provider.priority == 10
     assert provider.weight == 2
     assert provider.concurrency == 3
+    assert provider.supports_idempotency is True
     assert provider.supports("seedance-2.0", "t2v")
     assert provider.supports("seedance-2.0", "i2v")
     assert provider.supports("seedance-2.0", "reference")
