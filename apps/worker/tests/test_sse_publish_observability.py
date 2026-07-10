@@ -404,6 +404,30 @@ async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
 
 
 @pytest.mark.asyncio
+async def test_publish_event_uses_live_only_id_for_desktop_garnet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUMEN_RUNTIME", "desktop")
+    redis = GarnetNoStreamRedis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        {"generation_id": "gen-1"},
+    )
+
+    dedupe_key = next(iter(redis.kv))
+    payload = json.loads(redis.published[0][1])
+    assert redis.xadd_calls == 2
+    assert redis.deleted == [dedupe_key]
+    assert redis.kv[dedupe_key].startswith("live-")
+    assert payload["sse_id"] == redis.kv[dedupe_key]
+    assert redis.dlq == []
+
+
+@pytest.mark.asyncio
 async def test_publish_event_dlq_payload_uses_non_recoverable_dlq_id(monkeypatch):
     persisted: dict = {}
 
