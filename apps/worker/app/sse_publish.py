@@ -19,6 +19,7 @@ import uuid
 from typing import Any
 
 from lumen_core.constants import EVENTS_STREAM_MAXLEN, EVENTS_STREAM_PREFIX
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import OutboxDeadLetter
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,10 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
             "xadd" in message and ("unsupported" in message or "not allowed" in message)
         )
     )
+
+
+def _live_only_sse_id() -> str:
+    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
 
 
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
@@ -362,6 +367,20 @@ async def _xadd_event_without_lua(
         )
     except Exception as exc:  # noqa: BLE001
         if _is_stream_command_unsupported(exc):
+            if is_desktop_runtime():
+                # Desktop bundles Garnet without Streams. The SSE gateway drops
+                # live-* from Last-Event-ID, so this remains explicitly live-only.
+                stream_id = _live_only_sse_id()
+                await _store_dedupe_stream_id(
+                    redis,
+                    dedupe_key=dedupe_key,
+                    stream_id=stream_id,
+                )
+                logger.info(
+                    "desktop redis streams unavailable; using live-only event id key=%s",
+                    stream_key,
+                )
+                return stream_id
             raise RuntimeError(
                 "redis stream xadd unsupported; cannot create recoverable sse id"
             ) from exc
