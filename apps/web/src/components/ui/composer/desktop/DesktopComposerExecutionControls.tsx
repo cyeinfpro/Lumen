@@ -235,7 +235,8 @@ function ImageQuickSettingsBar({
         anchorRef={aspectAnchorRef}
         ariaLabel="选择宽高比"
         align="left"
-        className="w-auto max-h-[min(72vh,560px)] p-0"
+        maxHeight="min(72vh, 560px)"
+        className="w-auto p-0"
       >
         <AspectRatioPicker
           value={aspect}

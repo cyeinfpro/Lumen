@@ -18,7 +18,7 @@ export function DesktopSceneDivider({
   const label = `Scene ${String(index).padStart(2, "0")}`;
   return (
     <div
-      className="mx-auto my-3 flex w-full max-w-[760px] items-center gap-3 select-none"
+      className="mx-auto my-3 flex w-full max-w-[var(--content-composer)] items-center gap-3 select-none"
       onDoubleClick={onToggle}
       role="separator"
       aria-label={label}
@@ -27,8 +27,8 @@ export function DesktopSceneDivider({
       <span
         aria-hidden="true"
         className={cn(
-          "font-mono text-[10px] uppercase tracking-[0.14em] leading-none",
-          "text-[var(--fg-3)]",
+          "type-mono-meta shrink-0 leading-none",
+          "text-[var(--fg-2)]",
         )}
       >
         {label}
