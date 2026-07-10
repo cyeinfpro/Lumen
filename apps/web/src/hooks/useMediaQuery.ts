@@ -62,6 +62,13 @@ function getServerSnapshot(): boolean | null {
 // 因此用 module 级 cache 兜底；subscribe 时同步刷新 cache 再 onStoreChange，确保后续 read 读到新值。
 const mediaQueryCache = new Map<string, boolean>();
 
+function syncMediaQuerySnapshot(query: string, next: boolean): void {
+  mediaQueryCache.set(query, next);
+  if (query === MOBILE_QUERY) {
+    writeViewportCookie(next ? "mobile" : "desktop");
+  }
+}
+
 function getMediaQuerySnapshot(query: string): boolean | null {
   if (typeof window === "undefined") return null;
   const cached = mediaQueryCache.get(query);
@@ -78,24 +85,21 @@ function subscribeMediaQuery(
   if (typeof window === "undefined") return () => {};
 
   const publish = (next: boolean) => {
-    mediaQueryCache.set(query, next);
-    if (query === MOBILE_QUERY) {
-      writeViewportCookie(next ? "mobile" : "desktop");
-    }
+    syncMediaQuerySnapshot(query, next);
     onStoreChange();
   };
 
   if (typeof window.matchMedia !== "function") {
     const update = () => publish(readMediaQuery(query));
     // 订阅时立即同步一次 cache，避免首屏从 null 跳过初值。
-    mediaQueryCache.set(query, readMediaQuery(query));
+    syncMediaQuerySnapshot(query, readMediaQuery(query));
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }
 
   const mql = window.matchMedia(query);
   // 订阅瞬间立即同步 cache（不触发 onStoreChange，让首次 getSnapshot 返回真值）。
-  mediaQueryCache.set(query, mql.matches);
+  syncMediaQuerySnapshot(query, mql.matches);
   const update = () => publish(mql.matches);
   mql.addEventListener("change", update);
   return () => mql.removeEventListener("change", update);

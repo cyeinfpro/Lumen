@@ -64,6 +64,7 @@ interface MobileComposerPillProps {
 }
 
 type ComposerMode = "chat" | "image";
+type ComposerPanel = "none" | "advanced" | "aspect" | "reasoning";
 
 const ATTACHMENT_REORDER_LONG_PRESS_MS = 220;
 const ATTACHMENT_REORDER_MOVE_SLOP_PX = 10;
@@ -126,11 +127,13 @@ export function MobileComposerPill({
   const [isSending, setIsSending] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [originalText, setOriginalText] = useState<string | null>(null);
-  const { inset: keyboardInset } = useKeyboardInset();
+  const {
+    inset: keyboardInset,
+    viewportBottom,
+    viewportHeight,
+  } = useKeyboardInset();
   const keyboardOffset = keyboardInset > 60 ? keyboardInset : 0;
-  const [aspectSheetOpen, setAspectSheetOpen] = useState(false);
-  const [reasoningSheetOpen, setReasoningSheetOpen] = useState(false);
-  const [advancedSheetOpen, setAdvancedSheetOpen] = useState(false);
+  const [panel, setPanel] = useState<ComposerPanel>("none");
   const [shutterBurst, setShutterBurst] = useState(false);
   const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
     null,
@@ -139,9 +142,11 @@ export function MobileComposerPill({
     string | null
   >(null);
   const { haptic } = useHaptic();
+  const visibleViewportHeight =
+    viewportHeight > 0 ? `${viewportHeight}px` : "100dvh";
   const expandedMaxHeight = keyboardOffset
-    ? `calc(100dvh - ${keyboardOffset}px - env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px) - 56px)`
-    : "calc(100dvh - env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px) - 96px - env(safe-area-inset-bottom, 0px))";
+    ? `calc(${visibleViewportHeight} - var(--mobile-topbar-h) - var(--system-banner-height, 0px) - env(safe-area-inset-top, 0px) - var(--overlay-gap) - var(--overlay-gap))`
+    : `calc(${visibleViewportHeight} - var(--mobile-topbar-h) - var(--mobile-tabbar-height) - var(--system-banner-height, 0px) - env(safe-area-inset-top, 0px) - var(--overlay-gap) - var(--overlay-gap))`;
   const promptTooLong = isPromptTooLong(text);
   const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
 
@@ -216,29 +221,32 @@ export function MobileComposerPill({
       raf = window.requestAnimationFrame(() => {
         raf = 0;
         const rect = root.getBoundingClientRect();
+        const visualBottom =
+          viewportBottom > 0 ? viewportBottom : window.innerHeight;
         onMetricsChange({
           height: Math.ceil(rect.height),
-          bottom: Math.ceil(Math.max(0, window.innerHeight - rect.bottom)),
+          bottom: Math.ceil(Math.max(0, visualBottom - rect.bottom)),
         });
       });
     };
 
     const ro = new ResizeObserver(measure);
     ro.observe(root);
-    const vv = window.visualViewport;
     window.addEventListener("resize", measure);
-    vv?.addEventListener("resize", measure);
-    vv?.addEventListener("scroll", measure);
     measure();
 
     return () => {
       if (raf) window.cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener("resize", measure);
-      vv?.removeEventListener("resize", measure);
-      vv?.removeEventListener("scroll", measure);
     };
-  }, [expanded, keyboardOffset, onMetricsChange]);
+  }, [
+    expanded,
+    keyboardOffset,
+    onMetricsChange,
+    viewportBottom,
+    viewportHeight,
+  ]);
 
   // ———— textarea 自动增高（展开态）———— rAF 防抖避免每次击键都强制 reflow
   useEffect(() => {
@@ -279,12 +287,7 @@ export function MobileComposerPill({
   }, []);
 
   useEffect(() => {
-    if (
-      !expanded ||
-      aspectSheetOpen ||
-      reasoningSheetOpen ||
-      advancedSheetOpen
-    ) {
+    if (!expanded || panel !== "none") {
       return;
     }
 
@@ -300,7 +303,7 @@ export function MobileComposerPill({
 
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [advancedSheetOpen, aspectSheetOpen, expanded, reasoningSheetOpen]);
+  }, [expanded, panel]);
 
   useEffect(() => {
     if (promptTooLong) {
@@ -655,14 +658,12 @@ export function MobileComposerPill({
 
   const openAspectSheet = useCallback(() => {
     textareaRef.current?.blur();
-    setAdvancedSheetOpen(false);
-    setAspectSheetOpen(true);
+    setPanel("aspect");
   }, []);
 
   const openReasoningSheet = useCallback(() => {
     textareaRef.current?.blur();
-    setAdvancedSheetOpen(false);
-    setReasoningSheetOpen(true);
+    setPanel("reasoning");
   }, []);
 
   const isImageMode = mode === "image";
@@ -896,7 +897,7 @@ export function MobileComposerPill({
                         aria-label="移除参考图"
                         className={cn(
                           "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                          "bg-black/70 backdrop-blur-sm text-white",
+                          "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
                           "flex items-center justify-center",
                           "active:scale-[0.92] transition-transform",
                         )}
@@ -950,10 +951,11 @@ export function MobileComposerPill({
                   className="overflow-hidden"
                 >
                   <div
+                    role="alert"
                     className={cn(
                       "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-[var(--radius-card)]",
-                      "bg-[rgba(229,72,77,0.12)] border border-[rgba(229,72,77,0.4)]",
-                      "text-xs text-[var(--danger)]",
+                      "bg-danger-soft border border-danger-border",
+                      "type-caption text-[var(--danger-fg)]",
                     )}
                   >
                     <span className="flex-1 break-words">{composerError}</span>
@@ -1067,7 +1069,7 @@ export function MobileComposerPill({
               compact
               onAdjust={() => {
                 textareaRef.current?.blur();
-                setAdvancedSheetOpen(true);
+                setPanel("advanced");
               }}
             />
 
@@ -1157,8 +1159,8 @@ export function MobileComposerPill({
       </div>
 
       <BottomSheet
-        open={advancedSheetOpen}
-        onClose={() => setAdvancedSheetOpen(false)}
+        open={panel === "advanced"}
+        onClose={() => setPanel("none")}
         ariaLabel="执行设置"
         snapPoints={["80%"]}
       >
@@ -1189,22 +1191,22 @@ export function MobileComposerPill({
 
       {/* 宽高比 BottomSheet */}
       <BottomSheet
-        open={aspectSheetOpen}
-        onClose={() => setAspectSheetOpen(false)}
+        open={panel === "aspect"}
+        onClose={() => setPanel("none")}
         ariaLabel="选择宽高比"
       >
         <AspectRatioPicker
           value={aspect}
           onChange={setAspectRatio}
-          onClose={() => setAspectSheetOpen(false)}
+          onClose={() => setPanel("none")}
           variant="sheet"
         />
       </BottomSheet>
 
       {/* 推理强度 BottomSheet */}
       <BottomSheet
-        open={reasoningSheetOpen}
-        onClose={() => setReasoningSheetOpen(false)}
+        open={panel === "reasoning"}
+        onClose={() => setPanel("none")}
         ariaLabel="选择推理强度"
       >
         <SheetList
@@ -1216,7 +1218,7 @@ export function MobileComposerPill({
             selected: o.value === reasoningEffort,
             onSelect: () => {
               setReasoningEffort(o.value);
-              setReasoningSheetOpen(false);
+              setPanel("none");
             },
           }))}
         />

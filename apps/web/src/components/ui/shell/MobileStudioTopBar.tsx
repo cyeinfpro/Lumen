@@ -1,6 +1,13 @@
 "use client";
 
-import { ChevronDown, PanelLeft, Plus, Settings, Zap } from "lucide-react";
+import {
+  ChevronDown,
+  MessageSquare,
+  Palette,
+  Plus,
+  Settings,
+  Zap,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MobileTopBar } from "./MobileTopBar";
@@ -13,7 +20,10 @@ import {
   useConversationContextQuery,
   useListConversationsQuery,
 } from "@/lib/queries";
-import { pushMobileToast } from "@/components/ui/primitives/mobile";
+import {
+  SegmentedControl,
+  pushMobileToast,
+} from "@/components/ui/primitives/mobile";
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
 import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 
@@ -74,28 +84,17 @@ export function MobileStudioTopBar() {
       <MobileTopBar
         showWallet={false}
         left={
-          <div className="flex min-w-0 items-center gap-1">
-            <Pressable
-              size="default"
-              minHit
-              pressScale="tight"
-              haptic="light"
-              onPress={() => setDrawerOpen(true)}
-              aria-label="打开会话列表"
-              className="-ml-1 h-10 w-10 shrink-0 rounded-[var(--radius-control)] text-[var(--fg-1)]"
-            >
-              <PanelLeft className="w-[18px] h-[18px]" />
-            </Pressable>
+          <div className="flex min-w-0 flex-1 items-center">
             <Pressable
               size="default"
               minHit
               pressScale="soft"
               haptic="light"
               onPress={() => setDrawerOpen(true)}
-              aria-label="切换会话"
-              className="flex h-10 min-w-0 max-w-full items-center gap-1 rounded-[var(--radius-control)] px-1.5"
+              aria-label="打开会话侧栏"
+              className="-ml-1 flex h-10 min-w-0 max-w-full flex-1 items-center gap-1 rounded-[var(--radius-control)] px-2"
             >
-              <span className="max-w-[58vw] truncate text-[15px] font-medium text-[var(--fg-0)] [@media(max-width:390px)]:max-w-[52vw]">
+              <span className="min-w-0 flex-1 truncate text-left text-[15px] font-medium text-[var(--fg-0)]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
@@ -113,19 +112,34 @@ export function MobileStudioTopBar() {
           />
         }
         below={
-          <div className="flex min-h-10 items-center gap-1.5 overflow-x-auto no-scrollbar">
-            <Pressable
-              size="default"
-              minHit
-              pressScale="soft"
-              haptic="light"
-              onPress={() => setMode(mode === "image" ? "chat" : "image")}
-              aria-label={mode === "image" ? "切换到对话" : "切换到生图"}
-              className="h-10 shrink-0 gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 text-[12px] font-medium text-[var(--fg-0)]"
-            >
-              {mode === "image" ? "生图" : "对话"}
-              <ChevronDown className="h-3.5 w-3.5 text-[var(--fg-2)]" aria-hidden />
-            </Pressable>
+          <div className="mobile-tool-scroller flex min-h-10 items-center gap-1.5 overflow-x-auto no-scrollbar">
+            <SegmentedControl<"chat" | "image">
+              value={mode}
+              onChange={setMode}
+              ariaLabel="创作模式"
+              density="compact"
+              className="w-[132px] shrink-0"
+              items={[
+                {
+                  value: "chat",
+                  label: (
+                    <>
+                      <MessageSquare className="h-3.5 w-3.5" aria-hidden />
+                      <span>对话</span>
+                    </>
+                  ),
+                },
+                {
+                  value: "image",
+                  label: (
+                    <>
+                      <Palette className="h-3.5 w-3.5" aria-hidden />
+                      <span>生图</span>
+                    </>
+                  ),
+                },
+              ]}
+            />
             <ContextWindowMeter stats={contextStats} compact />
             <ConversationMemoryButton compact />
             <Pressable

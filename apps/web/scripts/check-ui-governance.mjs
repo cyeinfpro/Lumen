@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +31,32 @@ const LIVE_REGION_RE = /\b(?:role=(?:"|')?(?:alert|status)|aria-live=)/;
 
 const files = [];
 const findings = [];
+
+function gitChangedFiles() {
+  const run = (args) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: APP_ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((path) => path.replaceAll("\\", "/"));
+    } catch {
+      return [];
+    }
+  };
+
+  const working = new Set([
+    ...run(["diff", "--name-only", "--diff-filter=ACMR"]),
+    ...run(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]),
+  ]);
+  if (working.size > 0) return working;
+  return new Set(
+    run(["diff", "--name-only", "--diff-filter=ACMR", "HEAD^", "HEAD"]),
+  );
+}
 
 function walk(dir) {
   for (const name of readdirSync(dir)) {
@@ -253,6 +280,24 @@ function scanSharedA11yContracts(root) {
       message: "ErrorState must expose role=\"alert\".",
     },
     {
+      path: "src/components/ui/primitives/Input.tsx",
+      test: (src) =>
+        /role="alert"/.test(src) &&
+        /aria-invalid=\{isInvalid \|\| undefined\}/.test(src) &&
+        /aria-describedby=\{describedBy\}/.test(src),
+      message:
+        "Shared Input errors must be announced and associated with the field.",
+    },
+    {
+      path: "src/components/ui/primitives/Textarea.tsx",
+      test: (src) =>
+        /role="alert"/.test(src) &&
+        /aria-invalid=\{isInvalid \|\| undefined\}/.test(src) &&
+        /aria-describedby=\{describedBy\}/.test(src),
+      message:
+        "Shared Textarea errors must be announced and associated with the field.",
+    },
+    {
       path: "src/components/OfflineBanner.tsx",
       test: (src) => /aria-live="assertive"/.test(src) && /role="status"/.test(src),
       message: "OfflineBanner must remain a live announced connectivity status.",
@@ -357,6 +402,11 @@ if (updateBaseline) {
 
 const baseline = loadBaseline();
 const { newItems, knownItems, reducedCount } = compareToBaseline(current, baseline);
+const changedFiles = gitChangedFiles();
+const touchedKnownItems = knownItems.filter(
+  (item) =>
+    changedFiles.has(`apps/web/${item.path}`) || changedFiles.has(item.path),
+);
 
 const byRule = new Map();
 for (const item of current) byRule.set(item.rule, (byRule.get(item.rule) ?? 0) + item.count);
@@ -365,7 +415,7 @@ const ruleSummary = [...byRule.entries()]
   .map(([rule, count]) => `${rule}=${count}`)
   .join(", ");
 
-if (newItems.length === 0) {
+if (newItems.length === 0 && touchedKnownItems.length === 0) {
   console.log(
     `✓ UI governance check passed: no new findings (${knownItems.length} known fingerprints; ${ruleSummary || "0 findings"}).`,
   );
@@ -381,7 +431,7 @@ if (newItems.length === 0) {
 }
 
 console.error(
-  `✗ UI governance check failed: ${newItems.length} new fingerprint(s) beyond baseline.`,
+  `✗ UI governance check failed: ${newItems.length} new fingerprint(s), ${touchedKnownItems.length} touched debt fingerprint(s).`,
 );
 for (const item of newItems.slice(0, 30)) {
   console.error(
@@ -391,6 +441,14 @@ for (const item of newItems.slice(0, 30)) {
 }
 if (newItems.length > 30) {
   console.error(`  ...and ${newItems.length - 30} more.`);
+}
+for (const item of touchedKnownItems.slice(0, 30)) {
+  console.error(
+    `  touched debt ${item.rule} ${item.path}:${item.lines[0]} ${item.message}`,
+  );
+}
+if (touchedKnownItems.length > 30) {
+  console.error(`  ...and ${touchedKnownItems.length - 30} more touched debt findings.`);
 }
 console.error(
   "\nFix the UI, add a narrow @ui-governance-allow media/code/danger/scrim comment for true exceptions, or intentionally refresh the baseline.",

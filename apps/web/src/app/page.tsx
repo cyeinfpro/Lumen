@@ -1,28 +1,22 @@
-"use client";
+import { cookies, headers } from "next/headers";
 
-// 顶层分流：< 768px → MobileStudio；≥ 768px → DesktopStudio（原桌面逻辑不动）。
-// useMediaQuery 首次返回 null，渲染 <ShellSkeleton/> 避免 hydration mismatch。
+import { ResponsiveStudio } from "@/components/ui/shell/ResponsiveStudio";
 
-import { useIsMobile } from "@/hooks/useMediaQuery";
-import { ShellSkeleton } from "@/components/ui/shell/ShellSkeleton";
-import dynamic from "next/dynamic";
+function mobileUserAgent(value: string): boolean {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(value);
+}
 
-const MobileStudio = dynamic(
-  () =>
-    import("@/components/ui/shell/MobileStudio").then((mod) => mod.MobileStudio),
-  { ssr: false, loading: () => <ShellSkeleton /> },
-);
+export default async function Page() {
+  const [cookieStore, headerStore] = await Promise.all([cookies(), headers()]);
+  const rememberedViewport = cookieStore.get("lumen.viewport")?.value;
+  const mobileClientHint = headerStore.get("sec-ch-ua-mobile");
+  const initialMobile =
+    rememberedViewport === "mobile"
+      ? true
+      : rememberedViewport === "desktop"
+        ? false
+        : mobileClientHint === "?1" ||
+          mobileUserAgent(headerStore.get("user-agent") ?? "");
 
-const DesktopStudio = dynamic(
-  () =>
-    import("@/components/ui/shell/DesktopStudio").then(
-      (mod) => mod.DesktopStudio,
-    ),
-  { ssr: false, loading: () => <ShellSkeleton /> },
-);
-
-export default function Page() {
-  const isMobile = useIsMobile();
-  if (isMobile === null) return <ShellSkeleton />;
-  return isMobile ? <MobileStudio /> : <DesktopStudio />;
+  return <ResponsiveStudio initialMobile={initialMobile} />;
 }

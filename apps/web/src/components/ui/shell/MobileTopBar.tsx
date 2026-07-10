@@ -67,8 +67,8 @@ export function MobileTopBar({
         paddingTop: "calc(env(safe-area-inset-top, 0px) + var(--system-banner-height, 0px))",
       }}
     >
-      <div className="relative flex min-h-12 items-center max-w-[640px] mx-auto px-3 gap-2 [@media(max-width:390px)]:gap-1.5">
-        <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+      <div className="relative mx-auto flex min-h-[var(--mobile-topbar-h)] max-w-[640px] items-center gap-2 px-3 [@media(max-width:390px)]:gap-1.5">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {left}
         </div>
         <div className="flex min-w-0 shrink-0 items-center justify-end gap-1 [@media(max-width:390px)]:gap-0.5">

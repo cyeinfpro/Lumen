@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-06-06T17:14:40.495Z",
+  "generatedAt": "2026-07-10T12:11:46.163Z",
   "note": "Known frontend UI-governance debt. The checker fails only when current count exceeds a baseline count for the same fingerprint.",
   "findings": [
     {
@@ -73,22 +73,6 @@
       "path": "src/components/ui/poster-styles/PosterStyleJobsPanel.tsx",
       "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
       "snippet": "{job.error_message ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/primitives/Input.tsx|4ba9062f0fc37dc0",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/primitives/Input.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{error ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/primitives/Textarea.tsx|4ba9062f0fc37dc0",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/primitives/Textarea.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{error ? (",
       "count": 1
     },
     {
@@ -193,22 +177,6 @@
       "path": "src/app/settings/memory/page.tsx",
       "message": "Hard-coded dark utility \"bg-black/80\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
       "snippet": "\"inline-block h-4 w-4 rounded-full bg-black/80 transition-transform\",",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/composer/desktop/DesktopComposerPill.tsx|9573256eb096d1b7",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
-      "message": "Hard-coded dark utility \"text-white\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "\"bg-black/70 backdrop-blur-sm text-white\",",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/composer/mobile/MobileComposerPill.tsx|9573256eb096d1b7",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/composer/mobile/MobileComposerPill.tsx",
-      "message": "Hard-coded dark utility \"text-white\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "\"bg-black/70 backdrop-blur-sm text-white\",",
       "count": 1
     },
     {

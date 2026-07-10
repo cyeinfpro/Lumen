@@ -17,8 +17,8 @@ import { MobileComposerPill } from "@/components/ui/composer/mobile/MobileCompos
 import { MobileEmptyStudio } from "@/components/ui/chat/mobile/MobileEmptyStudio";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useChatStore } from "@/store/useChatStore";
-import { useListConversationsInfiniteQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useElementBlockSize } from "@/hooks/useElementBlockSize";
 import { useConversationRouteSync } from "./useConversationRouteSync";
 
 export function MobileStudio() {
@@ -41,6 +41,8 @@ export function MobileStudio() {
     height: 56,
     bottom: 62,
   });
+  const [taskIslandRef, taskIslandHeight] =
+    useElementBlockSize<HTMLDivElement>();
   const handleComposerMetricsChange = useCallback(
     (next: { height: number; bottom: number }) => {
       setComposerMetrics((prev) =>
@@ -82,54 +84,34 @@ export function MobileStudio() {
     return last?.role === "assistant" && last.status === "streaming";
   }, [messages]);
 
-  // 首次进入自动挂到最近一条活跃会话，与 DesktopStudio 对齐。
-  const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
-  const urlConversationId = useConversationRouteSync({
+  useConversationRouteSync({
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
+    rootStartsNew: true,
   });
 
-  useEffect(() => {
-    if (currentConvId) return;
-    if (urlConversationId) return;
-    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
-    const first = items.find((c) => !c.archived);
-    if (!first) return;
-    setCurrentConv(first.id);
-    void loadHistoricalMessages(first.id).catch(() => {});
-  }, [
-    currentConvId,
-    convsQuery.data,
-    loadHistoricalMessages,
-    setCurrentConv,
-    urlConversationId,
-  ]);
-
-  useEffect(() => {
-    if (currentConvId || urlConversationId) return;
-    if (!convsQuery.hasNextPage || convsQuery.isFetchingNextPage) return;
-    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
-    if (items.some((c) => !c.archived)) return;
-    void convsQuery.fetchNextPage();
-  }, [
-    currentConvId,
-    convsQuery,
-    convsQuery.data,
-    convsQuery.hasNextPage,
-    convsQuery.isFetchingNextPage,
-    urlConversationId,
-  ]);
-
-  // Stick-to-bottom：切换会话 / 新消息到达时滚到底，除非用户向上滚了一段。
-  // 与桌面会话画布行为一致（stickToBottomRef）。
   const stickToBottomRef = useRef(true);
+  const userScrolledUpRef = useRef(false);
+  const previousScrollTopRef = useRef(0);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
-      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      stickToBottomRef.current = distance < 120;
+      const top = el.scrollTop;
+      const distance = el.scrollHeight - top - el.clientHeight;
+      const movingUp = top < previousScrollTopRef.current - 1;
+
+      if (movingUp && distance > 24) {
+        userScrolledUpRef.current = true;
+      }
+      if (distance < 24) {
+        userScrolledUpRef.current = false;
+      }
+
+      stickToBottomRef.current =
+        distance < 32 && !userScrolledUpRef.current;
+      previousScrollTopRef.current = top;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
@@ -139,6 +121,8 @@ export function MobileStudio() {
   // 切换会话：强制回到底部；之后新消息到达只在"贴底"状态下才滚。
   useEffect(() => {
     stickToBottomRef.current = true;
+    userScrolledUpRef.current = false;
+    previousScrollTopRef.current = 0;
   }, [currentConvId]);
 
   useEffect(() => {
@@ -146,6 +130,14 @@ export function MobileStudio() {
     const el = scrollRef.current;
     if (!el) return;
     if (!stickToBottomRef.current) return;
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLElement &&
+      activeElement !== el &&
+      el.contains(activeElement)
+    ) {
+      return;
+    }
     const prefersReduced =
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
@@ -159,14 +151,22 @@ export function MobileStudio() {
   }, [currentConvId, generations, latestIsStreaming, scrollSignature, scrollTo]);
 
   const isEmpty = messages.length === 0;
+  const bottomStack =
+    composerMetrics.bottom +
+    composerMetrics.height +
+    taskIslandHeight +
+    (taskIslandHeight > 0 ? 20 : 12);
 
   return (
     <div
-      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
+      data-app-viewport
+      className="relative flex min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]"
       style={
         {
           "--mobile-composer-height": `${composerMetrics.height}px`,
           "--mobile-composer-bottom": `${composerMetrics.bottom}px`,
+          "--mobile-task-island-height": `${taskIslandHeight}px`,
+          "--bottom-overlay-stack": `${bottomStack}px`,
         } as CSSProperties
       }
     >
@@ -176,12 +176,12 @@ export function MobileStudio() {
 
       <main
         ref={scrollRef}
+        data-app-scroll
+        data-testid="conversation-scroll"
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y"
         style={{
-          paddingBottom:
-            "calc(var(--mobile-composer-bottom, 54px) + var(--mobile-composer-height, 48px) + 12px)",
-          scrollPaddingBottom:
-            "calc(var(--mobile-composer-bottom, 54px) + var(--mobile-composer-height, 48px) + 20px)",
+          paddingBottom: "var(--bottom-overlay-stack)",
+          scrollPaddingBottom: "var(--bottom-overlay-stack)",
         }}
       >
         <div
@@ -214,9 +214,13 @@ export function MobileStudio() {
         </div>
       </main>
 
-      <TaskIsland
-        className="fixed bottom-[calc(var(--mobile-composer-bottom,54px)+var(--mobile-composer-height,48px)+8px)] left-1/2 z-[calc(var(--z-composer)+1)] max-w-[calc(100vw-32px)] -translate-x-1/2 shadow-[var(--shadow-2)]"
-      />
+      <div
+        ref={taskIslandRef}
+        data-testid="task-island"
+        className="fixed bottom-[calc(var(--mobile-composer-bottom,54px)+var(--mobile-composer-height,48px)+var(--overlay-gap))] left-1/2 z-[calc(var(--z-composer)+1)] max-w-[calc(100vw-32px)] -translate-x-1/2"
+      >
+        <TaskIsland className="max-w-full shadow-[var(--shadow-2)]" />
+      </div>
       <MobileComposerPill
         onSubmit={() => sendMessage()}
         onMetricsChange={handleComposerMetricsChange}

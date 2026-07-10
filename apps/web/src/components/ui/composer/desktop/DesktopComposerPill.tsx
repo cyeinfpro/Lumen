@@ -66,6 +66,7 @@ import { LazyMaskCanvas } from "../LazyMaskCanvas";
 
 interface DesktopComposerPillProps {
   onSubmit: () => void | Promise<void>;
+  onMetricsChange?: (metrics: { height: number; bottom: number }) => void;
 }
 
 type ComposerMode = "chat" | "image";
@@ -95,7 +96,7 @@ function parseSlash(text: string): {
 function composerFrameClass(expanded: boolean, isDragActive: boolean): string {
   return cn(
     "fixed bottom-4 -translate-x-1/2",
-    "max-w-[880px]",
+    "max-w-[var(--content-composer)]",
     "overflow-visible",
     "rounded-[var(--radius-panel)]",
     "bg-[var(--bg-1)]/97",
@@ -107,13 +108,14 @@ function composerFrameClass(expanded: boolean, isDragActive: boolean): string {
   );
 }
 
-function composerFrameWidth(expanded: boolean): string {
-  return expanded
-    ? "min(880px, calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))"
-    : "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))";
+function composerFrameWidth(): string {
+  return "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))";
 }
 
-export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
+export function DesktopComposerPill({
+  onSubmit,
+  onMetricsChange,
+}: DesktopComposerPillProps) {
   const text = useChatStore((s) => s.composer.text);
   const setText = useChatStore((s) => s.setText);
   const setForceIntent = useChatStore((s) => s.setForceIntent);
@@ -174,6 +176,29 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepthRef = useRef(0);
   const draggingAttachmentIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!node || !onMetricsChange) return;
+
+    const measure = () => {
+      const rect = node.getBoundingClientRect();
+      onMetricsChange({
+        height: Math.ceil(rect.height),
+        bottom: Math.max(0, Math.ceil(window.innerHeight - rect.bottom)),
+      });
+    };
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    window.addEventListener("resize", measure);
+    measure();
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [onMetricsChange]);
 
   // 展开/折叠 haptic（桌面无感，保留兼容）
   useEffect(() => {
@@ -545,7 +570,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       className={composerFrameClass(expanded, isDragActive)}
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
-        width: composerFrameWidth(expanded),
+        width: composerFrameWidth(),
         zIndex: expanded
           ? ("var(--z-composer-expanded, 45)" as unknown as number)
           : ("var(--z-composer, 40)" as unknown as number),
@@ -707,7 +732,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                       aria-label="移除参考图"
                       className={cn(
                         "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                        "bg-black/70 backdrop-blur-sm text-white",
+                        "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
                         "flex items-center justify-center",
                         "active:scale-[0.92] transition-transform",
                       )}
@@ -763,10 +788,11 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                 className="overflow-hidden"
               >
                 <div
+                  role="alert"
                   className={cn(
                     "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-[var(--radius-card)]",
-                    "bg-[rgba(229,72,77,0.12)] border border-[rgba(229,72,77,0.4)]",
-                    "text-xs text-[var(--danger)]",
+                    "bg-danger-soft border border-danger-border",
+                    "type-caption text-[var(--danger-fg)]",
                   )}
                 >
                   <span className="flex-1 break-words">{composerError}</span>

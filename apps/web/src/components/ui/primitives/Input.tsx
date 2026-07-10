@@ -26,7 +26,7 @@ const FIELD =
   "border border-[var(--border)] " +
   "transition-[border-color,box-shadow,background-color] duration-150 " +
   "hover:bg-[var(--bg-1)]/75 " +
-  "focus:outline-none focus:bg-[var(--bg-1)]/75 " +
+  "focus:bg-[var(--bg-1)]/75 " +
   "focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 " +
   "disabled:opacity-50 disabled:cursor-not-allowed";
 
@@ -40,12 +40,16 @@ export function Input({
   wrapperClassName,
   className,
   id,
+  "aria-describedby": ariaDescribedBy,
   ref,
   ...props
 }: InputProps & { ref?: React.Ref<HTMLInputElement> }) {
   const reactId = useId();
   const inputId = id ?? reactId;
-  const describedBy = error ? `${inputId}-err` : hint ? `${inputId}-hint` : undefined;
+  const hintId = hint ? `${inputId}-hint` : undefined;
+  const errorId = error ? `${inputId}-err` : undefined;
+  const describedBy =
+    [ariaDescribedBy, errorId, hintId].filter(Boolean).join(" ") || undefined;
   const isInvalid = invalid || !!error;
 
   return (
@@ -87,15 +91,17 @@ export function Input({
       </div>
       {error ? (
         <p
-          id={`${inputId}-err`}
-          className="text-[11px] text-[var(--danger)]"
+          id={errorId}
+          role="alert"
+          className="type-caption text-[var(--danger-fg)]"
         >
           {error}
         </p>
-      ) : hint ? (
+      ) : null}
+      {hint ? (
         <p
-          id={`${inputId}-hint`}
-          className="text-[11px] text-[var(--fg-1)]/80"
+          id={hintId}
+          className="type-caption text-[var(--text-muted)]"
         >
           {hint}
         </p>
