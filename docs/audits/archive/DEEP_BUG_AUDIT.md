@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@f811ec4c04b48c4484628e73fdcd4030920612fa"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：2026-05-25 工作树快照。
+>
+> **记录提交**：`f811ec4c04b48c4484628e73fdcd4030920612fa`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # 全代码深度 Bug 审查报告
 
 > 扫描范围：全仓库 Python、Shell、Docker/Infra 配置，约 180+ 文件

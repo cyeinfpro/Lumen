@@ -70,6 +70,16 @@ _RECON_TIMEOUT_CODE = "timeout"
 _RECON_TIMEOUT_MESSAGE = "task stuck; reconciler timed out"
 _EV_GEN_REQUEUED = "generation.requeued"
 _EV_COMP_REQUEUED = "completion.requeued"
+_OUTBOX_TASK_JOBS = {
+    "generation": "run_generation",
+    "completion": "run_completion",
+    "video_generation": "run_video_generation",
+    "storyboard_assembly": "run_storyboard_assembly",
+}
+
+
+class _OutboxPayloadError(ValueError):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +118,68 @@ async def publish_outbox(ctx: dict[str, Any]) -> int:
     return processed
 
 
+async def _deliver_outbox_event(
+    redis: Any,
+    *,
+    event_id: str,
+    kind: str,
+    payload: dict[str, Any],
+) -> tuple[str, str, bool]:
+    dedupe_key = f"{_OUTBOX_ENQUEUE_DEDUPE_PREFIX}{event_id}"
+    marker = str(payload.get("task_id") or payload.get("user_id") or event_id)
+    existing_delivery = await redis.get(dedupe_key)
+    if existing_delivery:
+        logger.info(
+            "outbox delivery deduped event=%s marker=%s kind=%s",
+            event_id,
+            marker,
+            kind,
+        )
+        return dedupe_key, marker, False
+
+    if kind == "sse":
+        user_id = payload.get("user_id")
+        channel = payload.get("channel")
+        event_name = payload.get("event_name")
+        data = payload.get("data")
+        if (
+            not isinstance(user_id, str)
+            or not user_id
+            or not isinstance(channel, str)
+            or not channel
+            or not isinstance(event_name, str)
+            or not event_name
+            or not isinstance(data, dict)
+        ):
+            raise _OutboxPayloadError("invalid SSE payload")
+        event_data = dict(data)
+        event_data.setdefault("outbox_id", event_id)
+        await publish_event(
+            redis,
+            user_id,
+            channel,
+            event_name,
+            event_data,
+        )
+        return dedupe_key, user_id, True
+
+    job_name = _OUTBOX_TASK_JOBS.get(kind)
+    task_id = payload.get("task_id") or payload.get("id")
+    if job_name is None or not task_id:
+        raise _OutboxPayloadError("invalid task payload")
+    defer_s = payload.get("defer_s")
+    enqueue_kwargs: dict[str, Any] = {}
+    if isinstance(defer_s, (int, float)) and defer_s > 0:
+        enqueue_kwargs["_defer_by"] = float(defer_s)
+    enqueue_kwargs["_job_id"] = arq_job_id(
+        kind,
+        str(task_id),
+        str(payload.get("outbox_id") or event_id),
+    )
+    await redis.enqueue_job(job_name, task_id, **enqueue_kwargs)
+    return dedupe_key, str(task_id), True
+
+
 async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int:
     """GEN-P0-5: 批事务内 "claim → enqueue → commit published_at"。
 
@@ -118,6 +190,8 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
     processed = 0
     # 收集本批内 enqueue 成功的事件，commit 完成后统一写入去重 key。
     dedupe_keys_to_set: list[tuple[str, str]] = []
+    dlq_records_to_mirror: list[dict[str, Any]] = []
+    fail_counts_to_clear: list[str] = []
     async with SessionLocal() as session:
         try:
             async with session.begin():
@@ -151,12 +225,14 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                             type(raw_payload).__name__,
                             raw_payload,
                         )
-                        await _write_outbox_dlq(
-                            redis,
-                            ev_id,
-                            ev_kind,
-                            {"raw_payload": repr(raw_payload)},
-                            reason="malformed_payload",
+                        dlq_records_to_mirror.append(
+                            _persist_outbox_dlq(
+                                session,
+                                event_id=ev_id,
+                                kind=ev_kind,
+                                payload={"raw_payload": repr(raw_payload)},
+                                reason="malformed_payload",
+                            )
                         )
                         row.published_at = datetime.now(timezone.utc)
                         continue
@@ -165,89 +241,61 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     payload.setdefault("outbox_id", str(ev_id))
                     if payload != raw_payload:
                         row.payload = payload
-                    task_id = payload.get("task_id") or payload.get("id")
-                    if not task_id or ev_kind not in {
-                        "generation",
-                        "completion",
-                        "video_generation",
-                        "storyboard_assembly",
-                    }:
+                    try:
+                        dedupe_key, marker, should_set_dedupe = (
+                            await _deliver_outbox_event(
+                                redis,
+                                event_id=str(ev_id),
+                                kind=ev_kind,
+                                payload=payload,
+                            )
+                        )
+                    except _OutboxPayloadError:
                         logger.warning(
                             "outbox event invalid id=%s kind=%s payload=%s",
                             ev_id,
                             ev_kind,
                             payload,
                         )
-                        await _write_outbox_dlq(
-                            redis,
-                            ev_id,
-                            ev_kind,
-                            payload,
-                            reason="invalid_payload",
+                        dlq_records_to_mirror.append(
+                            _persist_outbox_dlq(
+                                session,
+                                event_id=ev_id,
+                                kind=ev_kind,
+                                payload=payload,
+                                reason="invalid_payload",
+                            )
                         )
                         row.published_at = datetime.now(timezone.utc)
                         continue
-
-                    job_name = {
-                        "generation": "run_generation",
-                        "completion": "run_completion",
-                        "video_generation": "run_video_generation",
-                        "storyboard_assembly": "run_storyboard_assembly",
-                    }[ev_kind]
-                    dedupe_key = f"{_OUTBOX_ENQUEUE_DEDUPE_PREFIX}{ev_id}"
-
-                    # 多图 stagger：messages.py 给 i>=1 的 generation row 在 payload 里加 defer_s，
-                    # 让 arq 延迟 N 秒后才让 worker 拉起来跑。避免同 prompt 同账号同时撞 ChatGPT codex
-                    # 引发 OpenAI 内部 race condition（一败一成稳定模式）。
-                    defer_s = payload.get("defer_s")
-                    enqueue_kwargs: dict[str, Any] = {}
-                    if isinstance(defer_s, (int, float)) and defer_s > 0:
-                        enqueue_kwargs["_defer_by"] = float(defer_s)
-                    enqueue_kwargs["_job_id"] = arq_job_id(
-                        ev_kind,
-                        str(task_id),
-                        str(payload.get("outbox_id") or ev_id),
-                    )
-
-                    try:
-                        existing_enqueue = await redis.get(dedupe_key)
-                        if existing_enqueue:
-                            logger.info(
-                                "outbox enqueue deduped event=%s task=%s kind=%s",
-                                ev_id,
-                                task_id,
-                                ev_kind,
-                            )
-                        else:
-                            await redis.enqueue_job(job_name, task_id, **enqueue_kwargs)
-                            dedupe_keys_to_set.append((dedupe_key, str(task_id)))
                     except Exception as exc:
                         fail_count = await _increment_outbox_fail_count(redis, ev_id)
                         logger.warning(
                             "outbox enqueue failed; leaving unpublished for retry "
-                            "event=%s task=%s kind=%s fail_count=%d err=%s",
+                            "event=%s marker=%s kind=%s fail_count=%d err=%s",
                             ev_id,
-                            task_id,
+                            payload.get("task_id") or payload.get("user_id"),
                             ev_kind,
                             fail_count,
                             exc,
                         )
                         if fail_count >= _OUTBOX_MAX_FAIL_COUNT:
-                            await _write_outbox_dlq(
-                                redis,
-                                ev_id,
-                                ev_kind,
-                                payload,
-                                reason="max_fail_count",
-                                fail_count=fail_count,
+                            dlq_records_to_mirror.append(
+                                _persist_outbox_dlq(
+                                    session,
+                                    event_id=ev_id,
+                                    kind=ev_kind,
+                                    payload=payload,
+                                    reason="max_fail_count",
+                                    fail_count=fail_count,
+                                )
                             )
                             row.published_at = datetime.now(timezone.utc)
-                            try:
-                                await redis.hdel(_OUTBOX_FAIL_COUNT_HASH, ev_id)
-                            except Exception:  # noqa: BLE001
-                                pass
+                            fail_counts_to_clear.append(ev_id)
                         continue
 
+                    if should_set_dedupe:
+                        dedupe_keys_to_set.append((dedupe_key, marker))
                     # enqueue 成功或已被 dedupe key 证明之前成功 → 标 published_at；commit 由 context manager
                     row.published_at = datetime.now(timezone.utc)
                     processed += 1
@@ -268,6 +316,17 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                 dedupe_key,
                 exc,
             )
+    for event_id in fail_counts_to_clear:
+        try:
+            await redis.hdel(_OUTBOX_FAIL_COUNT_HASH, event_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "outbox post-commit fail-count cleanup failed event=%s err=%s",
+                event_id,
+                exc,
+            )
+    for record in dlq_records_to_mirror:
+        await _mirror_outbox_dlq(redis, record)
     return processed
 
 
@@ -303,50 +362,60 @@ async def _increment_outbox_fail_count(redis: Any, event_id: str) -> int:
         return 0
 
 
-async def _write_outbox_dlq(
-    redis: Any,
+def _persist_outbox_dlq(
+    session: Any,
+    *,
     event_id: str,
     kind: str,
     payload: dict[str, Any],
-    *,
     reason: str = "unspecified",
     fail_count: int = 0,
-) -> None:
+) -> dict[str, Any]:
+    """Persist a poison event using the transaction that owns its parent lock."""
+    record = {
+        "event_id": event_id,
+        "kind": kind,
+        "payload": payload,
+        "reason": reason,
+        "fail_count": fail_count,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    error_class = {
+        "malformed_payload": "OutboxMalformedPayload",
+        "invalid_payload": "OutboxInvalidPayload",
+        "max_fail_count": "OutboxEnqueueFailed",
+    }.get(reason, "OutboxPublishFailed")
+    session.add(
+        OutboxDeadLetter(
+            outbox_id=event_id,
+            event_type=f"outbox.{kind}",
+            payload=payload,
+            error_class=error_class,
+            error_message=reason,
+            retry_count=fail_count,
+        )
+    )
+    return record
+
+
+async def _mirror_outbox_dlq(redis: Any, record: dict[str, Any]) -> None:
+    """Best-effort Redis mirror after the PostgreSQL transaction commits."""
     try:
         await redis.lpush(
             _OUTBOX_DLQ_KEY,
             json.dumps(
-                {
-                    "event_id": event_id,
-                    "kind": kind,
-                    "payload": payload,
-                    "reason": reason,
-                    "fail_count": fail_count,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                },
+                record,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
         )
         await redis.ltrim(_OUTBOX_DLQ_KEY, 0, _OUTBOX_DLQ_MAXLEN - 1)
     except Exception as exc:  # noqa: BLE001
-        logger.error("outbox DLQ write failed event=%s err=%s", event_id, exc)
-
-    # 追加：持久化到 PG outbox_dead_letter（独立短事务，失败仅记日志）
-    try:
-        async with SessionLocal() as session, session.begin():
-            session.add(
-                OutboxDeadLetter(
-                    outbox_id=event_id,
-                    event_type=f"outbox.{kind}",
-                    payload=payload,
-                    error_class="OutboxEnqueueFailed",
-                    error_message=reason,
-                    retry_count=fail_count,
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("outbox PG DLQ persist failed event=%s err=%s", event_id, exc)
+        logger.error(
+            "outbox Redis DLQ mirror failed event=%s err=%s",
+            record.get("event_id"),
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------

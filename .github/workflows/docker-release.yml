@@ -50,6 +50,22 @@ jobs:
     name: Release quality gate
     runs-on: ubuntu-latest
     needs: version-check
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lumen_test
+          POSTGRES_PASSWORD: lumen_test
+          POSTGRES_DB: lumen_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lumen_test -d lumen_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LUMEN_TEST_POSTGRES_URL: postgresql+asyncpg://lumen_test:lumen_test@127.0.0.1:5432/lumen_test
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -425,43 +441,57 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Install Alembic environment
+        run: uv sync --frozen --package lumen-api
+
+      - name: Capture Alembic head
+        run: |
+          set -euo pipefail
+          (
+            cd apps/api
+            uv run alembic heads
+          ) | tee alembic_heads.txt
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute short sha
         id: sha
         run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build release notes body
+      - name: Build release manifest and notes
         id: body
         run: |
-          version="${GITHUB_REF_NAME}"
-          short_sha="${{ steps.sha.outputs.short_sha }}"
-          registry="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}"
-          {
-            echo "## Lumen ${version}"
-            echo ""
-            echo "Commit: \`${GITHUB_SHA}\` (sha-${short_sha})"
-            echo ""
-            echo "### images"
-            echo ""
-            echo "\`\`\`"
-            for svc in api worker tgbot web; do
-              echo "${registry}/lumen-${svc}:${version}"
-            done
-            echo ""
-            for svc in api worker tgbot web; do
-              echo "${registry}/lumen-${svc}:sha-${short_sha}"
-            done
-            echo "\`\`\`"
-            echo ""
-            # TODO: emit alembic_heads once we can run python in this job
-            # (requires uv sync + scripts to import lumen_core / alembic config).
-            echo "### alembic_heads"
-            echo ""
-            echo "_TODO: populate alembic heads in a follow-up CI step._"
-          } > release_body.md
+          set -euo pipefail
+          uv run python scripts/build_release_manifest.py \
+            --version "${GITHUB_REF_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --short-sha "${{ steps.sha.outputs.short_sha }}" \
+            --registry "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}" \
+            --alembic-heads-file alembic_heads.txt \
+            --resolve-images \
+            --output release-manifest.json \
+            --notes-output release_body.md
           echo "path=release_body.md" >> "$GITHUB_OUTPUT"
 
       - name: Create / update GitHub Release
@@ -470,5 +500,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: ${{ steps.body.outputs.path }}
+          files: release-manifest.json
           draft: false
           prerelease: false

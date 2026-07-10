@@ -9,7 +9,12 @@ from sqlalchemy import CheckConstraint
 from lumen_core import billing
 from lumen_core.billing_cache import BillingCacheService, MAX_WINDOW_INCREMENT_MICRO
 from lumen_core.models import UserWallet
-from lumen_core.pricing import CostBreakdown, UsageTokens, build_request_fingerprint
+from lumen_core.pricing import (
+    CostBreakdown,
+    ModelPricing,
+    UsageTokens,
+    build_request_fingerprint,
+)
 
 
 def test_rmb_micro_conversion_is_decimal_safe():
@@ -37,6 +42,55 @@ def test_parse_thresholds_keeps_custom_tiers():
     )
     assert thresholds["8k"] == 800
     assert billing.tier_for_pixels(900, thresholds) == "8k"
+
+
+def test_completion_breakdown_uses_captured_pricing_snapshot() -> None:
+    snapshot = ModelPricing(
+        input_per_1k_micro=1_000,
+        output_per_1k_micro=2_000,
+        pricing_source="db",
+    ).model_dump()
+
+    breakdown = billing.completion_breakdown_from_snapshot(
+        snapshot,
+        model="gpt-test",
+        tokens=UsageTokens(input_tokens=100, output_tokens=50),
+    )
+
+    assert breakdown.input_cost_micro == 100
+    assert breakdown.output_cost_micro == 100
+    assert breakdown.actual_cost_micro == 200
+    assert breakdown.pricing_source == "snapshot"
+
+
+def test_completion_breakdown_allows_zero_rate_multiplier() -> None:
+    snapshot = ModelPricing(
+        input_per_1k_micro=1_000,
+        output_per_1k_micro=2_000,
+        pricing_source="db",
+    ).model_dump()
+
+    breakdown = billing.completion_breakdown_from_snapshot(
+        snapshot,
+        model="gpt-test",
+        tokens=UsageTokens(input_tokens=100, output_tokens=50),
+        rate_multiplier_x10000=0,
+    )
+
+    assert breakdown.total_cost_micro == 200
+    assert breakdown.actual_cost_micro == 0
+    assert breakdown.rate_multiplier_x10000 == 0
+
+
+def test_completion_breakdown_rejects_incomplete_snapshot() -> None:
+    with pytest.raises(billing.BillingError) as exc_info:
+        billing.completion_breakdown_from_snapshot(
+            {"input_per_1k_micro": 1_000},
+            model="gpt-test",
+            tokens=UsageTokens(input_tokens=1, output_tokens=1),
+        )
+
+    assert exc_info.value.code == "PRICING_SNAPSHOT_INVALID"
 
 
 @pytest.mark.asyncio
@@ -79,6 +133,24 @@ async def test_estimate_image_cost_for_tier_fails_closed_for_zero_pricing(
         )
 
     assert exc.value.code == "PRICING_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_estimate_completion_breakdown_fails_closed_for_missing_rates() -> None:
+    class Resolver:
+        async def resolve(self, *_args: Any, **_kwargs: Any) -> ModelPricing:
+            return ModelPricing(pricing_source="missing")
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.estimate_completion_breakdown(
+            object(),  # type: ignore[arg-type]
+            model="unpriced-model",
+            tokens=UsageTokens(input_tokens=10, output_tokens=5),
+            resolver=Resolver(),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.code == "PRICING_MISSING"
+    assert exc.value.status_code == 503
 
 
 def test_parse_thresholds_logs_invalid_json(caplog: pytest.LogCaptureFixture):
@@ -262,7 +334,6 @@ async def test_billing_cache_window_increment_ignores_nonpositive_amounts():
     await service.queue_window_increment("cred-1", 0)
 
     assert redis.calls == []
-    assert service._queue.qsize() == 0  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -283,28 +354,65 @@ async def test_billing_cache_window_increment_rejects_excessive_amounts():
     await service.queue_window_increment("cred-1", too_large)
 
     assert redis.calls == []
-    assert service._queue.qsize() == 0  # noqa: SLF001
 
 
 @pytest.mark.asyncio
-async def test_billing_cache_balance_deduct_allows_large_ledger_amounts():
+async def test_billing_cache_window_increment_is_applied_before_returning():
     class Redis:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
+            self.calls: list[tuple[Any, ...]] = []
 
-        async def decrby(self, key: str, amount: int) -> int:
-            self.calls.append((key, amount))
-            return 0
+        async def eval(self, *args: Any) -> int:
+            self.calls.append(args)
+            return 1
 
     redis = Redis()
     service = BillingCacheService(redis=redis)
-    large_amount = MAX_WINDOW_INCREMENT_MICRO + 1
 
-    await service._apply_decr("user-1", large_amount)  # noqa: SLF001
-    await service.queue_deduct("user-1", large_amount)
+    await service.increment_window_usage("cred-1", 25, {"5h": 100})
+    await service.stop_workers()
 
-    assert redis.calls == [("lumen:billing:balance:user-1", large_amount)]
-    assert service._queue.qsize() == 1  # noqa: SLF001
+    assert len(redis.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_rate_limits_read_durable_window_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = BillingCacheService(redis=None)
+    calls: list[tuple[str, str, int]] = []
+
+    async def credential_limits(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        return {"5h": 100, "1d": 0, "7d": 0}
+
+    async def ledger_usage(
+        _db: Any,
+        key_id: str,
+        window: str,
+        *,
+        limit_micro: int,
+        now: datetime | None = None,
+    ) -> Any:
+        calls.append((key_id, window, limit_micro))
+        return SimpleNamespace(
+            used_micro=80,
+            limit_micro=limit_micro,
+            resets_at=now,
+        )
+
+    monkeypatch.setattr(service, "credential_limits", credential_limits)
+    monkeypatch.setattr(service, "ledger_window_usage", ledger_usage)
+
+    allowed, window, usage = await service.evaluate_rate_limits(
+        object(),  # type: ignore[arg-type]
+        "cred-1",
+        25,
+    )
+
+    assert allowed is False
+    assert window == "5h"
+    assert usage.used_micro == 80
+    assert calls == [("cred-1", "5h", 100)]
 
 
 @pytest.mark.asyncio
@@ -418,88 +526,6 @@ async def test_get_wallet_lock_refreshes_existing_identity_map():
 
     assert wallet is not None
     assert session.statements[0].get_execution_options()["populate_existing"] is True
-
-
-@pytest.mark.asyncio
-async def test_billing_cache_deduct_lock_refreshes_existing_identity_map():
-    row = SimpleNamespace(balance_micro=100, version=0)
-
-    class Result:
-        def scalar_one_or_none(self) -> Any:
-            return row
-
-    class Session:
-        def __init__(self) -> None:
-            self.statements: list[Any] = []
-
-        async def execute(self, stmt: Any) -> Result:
-            self.statements.append(stmt)
-            return Result()
-
-        async def flush(self) -> None:
-            return None
-
-    session = Session()
-    service = BillingCacheService(redis=None)
-
-    balance = await service.deduct_sync(session, "user-1", 10)  # type: ignore[arg-type]
-
-    assert balance == 90
-    assert row.version == 1
-    assert session.statements[0].get_execution_options()["populate_existing"] is True
-
-
-@pytest.mark.asyncio
-async def test_billing_cache_queue_deduct_ignores_nonpositive_amounts():
-    class Redis:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
-
-        async def decrby(self, key: str, amount: int) -> None:
-            self.calls.append((key, amount))
-
-    redis = Redis()
-    service = BillingCacheService(redis=redis)
-
-    await service._apply_decr("user-1", -10)  # noqa: SLF001
-    await service.queue_deduct("user-1", -10)
-    await service.queue_deduct("user-1", 0)
-
-    assert redis.calls == []
-    assert service._queue.qsize() == 0  # noqa: SLF001
-
-
-@pytest.mark.asyncio
-async def test_billing_cache_deduct_sync_does_not_credit_negative_amount():
-    class Result:
-        def scalar_one_or_none(self) -> int:
-            return 100
-
-    class Session:
-        def __init__(self) -> None:
-            self.statements: list[Any] = []
-            self.added: list[Any] = []
-            self.flushed = False
-
-        async def execute(self, stmt: Any) -> Result:
-            self.statements.append(stmt)
-            return Result()
-
-        def add(self, row: Any) -> None:
-            self.added.append(row)
-
-        async def flush(self) -> None:
-            self.flushed = True
-
-    session = Session()
-    service = BillingCacheService(redis=None)
-
-    balance = await service.deduct_sync(session, "user-1", -10)  # type: ignore[arg-type]
-
-    assert balance == 100
-    assert len(session.statements) == 1
-    assert session.added == []
-    assert session.flushed is False
 
 
 @pytest.mark.asyncio
@@ -694,6 +720,132 @@ async def test_settle_rejects_zero_actual_amount(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_settle_records_explicit_zero_rate_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = SimpleNamespace(
+        balance_micro=100,
+        hold_micro=0,
+        lifetime_spend_micro=7,
+        version=0,
+    )
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def no_hold(*_args: Any) -> int:
+        return 0
+
+    async def no_consumption(*_args: Any) -> None:
+        return None
+
+    async def insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", no_existing)
+    monkeypatch.setattr(billing, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", no_hold)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", no_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="completion",
+        ref_id="completion-1",
+        actual_micro=0,
+        idempotency_key="complete:completion-1",
+        record_zero=True,
+    )
+
+    assert tx.amount_micro == 0
+    assert tx.meta["actual_micro"] == 0
+    assert wallet.balance_micro == 100
+    assert wallet.hold_micro == 0
+    assert wallet.lifetime_spend_micro == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("allow_negative", "cap_overdraw", "expected_balance", "expected_overdraw"),
+    [
+        (False, True, 0, 5),
+        (True, True, -5, 0),
+        (True, False, -5, 0),
+    ],
+)
+async def test_charge_insufficient_balance_policy_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    allow_negative: bool,
+    cap_overdraw: bool,
+    expected_balance: int,
+    expected_overdraw: int,
+) -> None:
+    wallet = SimpleNamespace(balance_micro=5, lifetime_spend_micro=0, version=0)
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", no_existing)
+    monkeypatch.setattr(billing, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing, "_insert_tx", insert)
+
+    tx = await billing.charge(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        10,
+        ref_type="test",
+        ref_id="ref-1",
+        idempotency_key="charge-1",
+        allow_negative=allow_negative,
+        cap_overdraw=cap_overdraw,
+    )
+
+    assert wallet.balance_micro == expected_balance
+    assert tx is not None
+    assert tx.meta["overdraw_micro"] == expected_overdraw
+
+
+@pytest.mark.asyncio
+async def test_charge_rejects_insufficient_balance_without_cap_or_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = SimpleNamespace(balance_micro=5, lifetime_spend_micro=0, version=0)
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    monkeypatch.setattr(billing, "_existing_tx", no_existing)
+    monkeypatch.setattr(billing, "get_wallet", get_wallet)
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.charge(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            10,
+            ref_type="test",
+            ref_id="ref-1",
+            idempotency_key="charge-1",
+            allow_negative=False,
+            cap_overdraw=False,
+        )
+
+    assert exc.value.code == "INSUFFICIENT_BALANCE"
+
+
+@pytest.mark.asyncio
 async def test_release_recomputes_held_amount_after_wallet_lock(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -796,7 +948,7 @@ async def test_charge_rejects_negative_amount(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_charge_cap_overdraw_applies_even_when_negative_balance_allowed(
+async def test_charge_allow_negative_takes_precedence_over_cap_overdraw(
     monkeypatch: pytest.MonkeyPatch,
 ):
     wallet = SimpleNamespace(
@@ -830,10 +982,10 @@ async def test_charge_cap_overdraw_applies_even_when_negative_balance_allowed(
         cap_overdraw=True,
     )
 
-    assert wallet.balance_micro == 0
+    assert wallet.balance_micro == -70
     assert wallet.lifetime_spend_micro == 105
-    assert tx.amount_micro == -30
-    assert tx.meta["overdraw_micro"] == 70
+    assert tx.amount_micro == -100
+    assert tx.meta["overdraw_micro"] == 0
 
 
 @pytest.mark.asyncio

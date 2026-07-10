@@ -1,6 +1,5 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown, PanelLeft, Plus, Settings, Zap } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -9,7 +8,6 @@ import { MobileConversationDrawer } from "./MobileConversationDrawer";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { useChatStore } from "@/store/useChatStore";
-import { useUiStore } from "@/store/useUiStore";
 import {
   useCreateConversationMutation,
   useConversationContextQuery,
@@ -21,12 +19,12 @@ import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemor
 
 export function MobileStudioTopBar() {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const setTaskTrayMinimized = useUiStore((s) => s.setTaskTrayMinimized);
 
   const currentConvId = useChatStore((s) => s.currentConvId);
   const messages = useChatStore((s) => s.messages);
-  const generations = useChatStore((s) => s.generations);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
+  const mode = useChatStore((s) => s.composer.mode);
+  const setMode = useChatStore((s) => s.setMode);
   const fast = useChatStore((s) => s.composer.fast);
   const setFast = useChatStore((s) => s.setFast);
 
@@ -71,44 +69,33 @@ export function MobileStudioTopBar() {
     return "新对话";
   }, [convsQuery.data, currentConvId, messages]);
 
-  // 生成环
-  const running = useMemo(() => {
-    const list = Object.values(generations);
-    const r = list.filter((g) => g.status === "running" || g.status === "queued");
-    const done = list.filter((g) => g.status === "succeeded").length;
-    return {
-      total: r.length,
-      pct: r.length ? Math.round((done / (done + r.length)) * 100) : 0,
-      any: r.length > 0,
-    };
-  }, [generations]);
-
   return (
     <>
       <MobileTopBar
+        showWallet={false}
         left={
           <div className="flex min-w-0 items-center gap-1">
             <Pressable
               size="default"
-              minHit={false}
+              minHit
               pressScale="tight"
               haptic="light"
               onPress={() => setDrawerOpen(true)}
               aria-label="打开会话列表"
-              className="rounded-full w-9 h-9 -ml-1 shrink-0 text-[var(--fg-1)]"
+              className="-ml-1 h-10 w-10 shrink-0 rounded-[var(--radius-control)] text-[var(--fg-1)]"
             >
               <PanelLeft className="w-[18px] h-[18px]" />
             </Pressable>
             <Pressable
               size="default"
-              minHit={false}
+              minHit
               pressScale="soft"
               haptic="light"
               onPress={() => setDrawerOpen(true)}
               aria-label="切换会话"
-              className="flex h-9 min-w-0 max-w-full items-center gap-1 -mx-1 rounded-[var(--radius-control)] pl-1 pr-1.5"
+              className="flex h-10 min-w-0 max-w-full items-center gap-1 rounded-[var(--radius-control)] px-1.5"
             >
-              <span className="max-w-[42vw] truncate text-[15px] font-medium text-[var(--fg-0)] [@media(max-width:390px)]:max-w-[30vw]">
+              <span className="max-w-[58vw] truncate text-[15px] font-medium text-[var(--fg-0)] [@media(max-width:390px)]:max-w-[52vw]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
@@ -116,64 +103,56 @@ export function MobileStudioTopBar() {
           </div>
         }
         right={
-          <>
+          <MobileIconButton
+            icon={<Plus className="w-5 h-5" />}
+            label="新建对话"
+            onPress={handleNewConv}
+            disabled={createMut.isPending}
+            minHit
+            className="h-10 w-10 rounded-[var(--radius-control)] disabled:opacity-50"
+          />
+        }
+        below={
+          <div className="flex min-h-10 items-center gap-1.5 overflow-x-auto no-scrollbar">
             <Pressable
               size="default"
-              minHit={false}
+              minHit
+              pressScale="soft"
+              haptic="light"
+              onPress={() => setMode(mode === "image" ? "chat" : "image")}
+              aria-label={mode === "image" ? "切换到对话" : "切换到生图"}
+              className="h-10 shrink-0 gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 text-[12px] font-medium text-[var(--fg-0)]"
+            >
+              {mode === "image" ? "生图" : "对话"}
+              <ChevronDown className="h-3.5 w-3.5 text-[var(--fg-2)]" aria-hidden />
+            </Pressable>
+            <ContextWindowMeter stats={contextStats} compact />
+            <ConversationMemoryButton compact />
+            <Pressable
+              size="default"
+              minHit
               pressScale="tight"
               haptic="light"
               onPress={() => setFast(!fast)}
               aria-label={fast ? "关闭 Fast 模式" : "开启 Fast 模式"}
-              className="rounded-full w-9 h-9"
+              aria-pressed={fast}
+              className={[
+                "h-10 w-10 shrink-0 rounded-[var(--radius-control)] border",
+                fast
+                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
+                  : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
+              ].join(" ")}
             >
               <FastLamp on={fast} />
             </Pressable>
-            {!running.any && (
-              <ContextWindowMeter
-                stats={contextStats}
-                compact
-                className="hidden min-[430px]:inline-flex"
-              />
-            )}
-            <ConversationMemoryButton compact />
-            <AnimatePresence>
-              {running.any && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  className="ml-0.5"
-                >
-                  <Pressable
-                    size="default"
-                    minHit={false}
-                    pressScale="tight"
-                    haptic="light"
-                    onPress={() => setTaskTrayMinimized(false)}
-                    aria-label={`生成中 ${running.total} 张，点击查看任务面板`}
-                    className="rounded-full w-9 h-9"
-                  >
-                    <GenerationRing pct={running.pct} total={running.total} />
-                  </Pressable>
-                </motion.div>
-              )}
-            </AnimatePresence>
-            <MobileIconButton
-              icon={<Plus className="w-5 h-5" />}
-              label="新建对话"
-              onPress={handleNewConv}
-              disabled={createMut.isPending}
-              minHit={false}
-              className="ml-0.5 h-9 w-9 disabled:opacity-50"
-            />
             <Link
               href="/me"
-              aria-label="设置"
-              className="inline-flex items-center justify-center w-9 h-9 rounded-full text-[var(--fg-1)] active:bg-[var(--bg-2)]"
+              aria-label="会话与账户设置"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)]"
             >
               <Settings className="w-[18px] h-[18px]" />
             </Link>
-          </>
+          </div>
         }
       />
 
@@ -192,39 +171,8 @@ function FastLamp({ on }: { on: boolean }) {
         "inline-flex items-center justify-center",
         on ? "text-[var(--amber-400)]" : "text-[var(--fg-3)]",
       ].join(" ")}
-      style={on ? { filter: "drop-shadow(0 0 6px var(--amber-glow-strong))" } : undefined}
     >
       <Zap className="w-4 h-4" fill={on ? "currentColor" : "none"} strokeWidth={1.8} />
-    </span>
-  );
-}
-
-function GenerationRing({ pct, total }: { pct: number; total: number }) {
-  const R = 10;
-  const C = 2 * Math.PI * R;
-  const off = C * (1 - Math.max(0, Math.min(pct, 100)) / 100);
-  return (
-    <span
-      className="inline-flex relative w-6 h-6 items-center justify-center text-[9px] font-mono text-[var(--amber-300)]"
-      aria-label={`生成中 ${total} 张`}
-    >
-      <svg width={24} height={24} viewBox="0 0 24 24" className="absolute inset-0">
-        <circle cx={12} cy={12} r={R} stroke="var(--border-subtle)" strokeWidth={2} fill="none" />
-        <circle
-          cx={12}
-          cy={12}
-          r={R}
-          stroke="var(--amber-400)"
-          strokeWidth={2}
-          fill="none"
-          strokeLinecap="round"
-          strokeDasharray={C}
-          strokeDashoffset={off}
-          transform="rotate(-90 12 12)"
-          style={{ transition: "stroke-dashoffset 300ms ease" }}
-        />
-      </svg>
-      <span className="relative">{total}</span>
     </span>
   );
 }

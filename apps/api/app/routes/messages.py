@@ -111,6 +111,13 @@ from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import embedding_provider_available, get_setting
 from ..sse_publish import publish_sse_event, publish_sse_events
+from ..task_billing import (
+    ChatWalletPreflight as _ChatWalletPreflight,
+    apply_rate_multiplier_micro as _apply_rate_multiplier_micro,
+    requested_image_billing_tier as _requested_image_billing_tier,
+    resolve_image_render_quality as _resolve_image_render_quality,
+    user_rate_multiplier_x10000 as _user_rate_multiplier_x10000,
+)
 
 
 router = APIRouter()
@@ -178,13 +185,11 @@ def _idempotency_lookup_keys(conv_id: str, idempotency_key: str) -> tuple[str, s
 SYSTEM_PROMPT_SOURCE_LIMIT = MAX_PROMPT_CHARS
 ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 _VECTOR_STORE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_IMAGE_RENDER_QUALITY_VALUES = {"low", "medium", "high"}
 _IMAGE_OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
 _DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
 _IMAGE_MODERATION_VALUES = {"auto", "low"}
-_IMAGE_BILLING_TIER_VALUES = {"1k", "2k", "4k"}
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
 _CONFIRM_REPLY_YES_RE = re.compile(
     r"^\s*(对|是|嗯|可以|继续|好|yes|yep|yeah|ok|okay)\b|按.*来",
@@ -237,14 +242,6 @@ _CHAT_TOOL_BUDGET_SETTINGS: dict[str, tuple[str, str]] = {
     ),
 }
 _MAX_TOOL_INVOCATIONS_DEFAULT = 8
-
-
-@dataclass(frozen=True)
-class _ChatWalletPreflight:
-    estimated_model_micro: int
-    tool_budget_micro: int
-    preauth_micro: int
-    tool_budget_by_tool: dict[str, int]
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
@@ -400,7 +397,8 @@ async def _ensure_chat_wallet_preflight(
     if account_mode != "wallet" or not await _billing_enabled(db):
         return None
     wallet = await billing_core.get_wallet(db, user_id, lock=True)
-    if wallet.balance_micro < 10_000:
+    rate_multiplier_x10000 = await _user_rate_multiplier_x10000(db, user_id)
+    if rate_multiplier_x10000 > 0 and wallet.balance_micro < 10_000:
         raise _http(
             "INSUFFICIENT_BALANCE",
             "insufficient wallet balance",
@@ -408,29 +406,40 @@ async def _ensure_chat_wallet_preflight(
             required_micro=10_000,
             balance_micro=int(wallet.balance_micro),
         )
-    cost_preview = await billing_core.estimate_completion_cost(
-        db,
-        model=model,
-        tokens_in=1,
-        tokens_out=1,
-    )
+    try:
+        pricing_snapshot = await billing_core.completion_pricing_snapshot(
+            db,
+            model=model,
+        )
+        cost_preview = billing_core.completion_breakdown_from_snapshot(
+            pricing_snapshot,
+            model=model,
+            tokens=billing_core.UsageTokens(input_tokens=1, output_tokens=1),
+            rate_multiplier_x10000=rate_multiplier_x10000,
+        ).actual_cost_micro
+    except billing_core.BillingError as exc:
+        raise _billing_http_error(exc) from exc
+    if cost_preview <= 0 and rate_multiplier_x10000 > 0:
+        raise _billing_http_error(
+            billing_core.BillingError(
+                "PRICING_MISSING",
+                f"missing enabled chat pricing rule for {model}",
+                503,
+            )
+        )
     tool_budget_micro, budget_by_tool = await _estimate_chat_tool_budget_micro(
         db, chat_params
     )
-    if cost_preview <= 0:
-        await write_audit(
-            db,
-            event_type="pricing.not_configured",
-            user_id=user_id,
-            actor_email_hash=hash_email(user_email),
-            details={
-                "scope": "chat_model",
-                "model": model,
-                "route": "messages.preflight",
-            },
-            autocommit=False,
-        )
-    preauth_micro = max(10_000, int(cost_preview or 0) + tool_budget_micro)
+    budget_by_tool = {
+        tool_name: _apply_rate_multiplier_micro(amount, rate_multiplier_x10000)
+        for tool_name, amount in budget_by_tool.items()
+    }
+    tool_budget_micro = sum(budget_by_tool.values())
+    preauth_micro = (
+        0
+        if rate_multiplier_x10000 == 0
+        else max(10_000, int(cost_preview or 0) + tool_budget_micro)
+    )
     if wallet.balance_micro < preauth_micro and not await _billing_allow_negative(db):
         raise _http(
             "INSUFFICIENT_BALANCE",
@@ -446,25 +455,9 @@ async def _ensure_chat_wallet_preflight(
         tool_budget_micro=tool_budget_micro,
         preauth_micro=preauth_micro,
         tool_budget_by_tool=budget_by_tool,
+        pricing_snapshot=pricing_snapshot,
+        rate_multiplier_x10000=rate_multiplier_x10000,
     )
-
-
-def _requested_image_billing_tier(image_params: ImageParamsIn) -> str | None:
-    return (
-        image_params.quality
-        if image_params.quality in _IMAGE_BILLING_TIER_VALUES
-        else None
-    )
-
-
-def _resolve_image_render_quality(
-    image_params: ImageParamsIn,
-    resolved_size: ResolvedSize,
-) -> str:
-    _ = resolved_size
-    if image_params.render_quality in _IMAGE_RENDER_QUALITY_VALUES:
-        return image_params.render_quality
-    return "medium"
 
 
 async def _resolve_fast_default(db: AsyncSession) -> bool:
@@ -568,7 +561,10 @@ def _image_upstream_request(
     if billing_tier is not None:
         upstream_request["billing_tier"] = billing_tier
         upstream_request["billing_tier_source"] = "request_quality"
-    if output_format in {"jpeg", "webp"} and image_params.output_compression is not None:
+    if (
+        output_format in {"jpeg", "webp"}
+        and image_params.output_compression is not None
+    ):
         upstream_request["output_compression"] = image_params.output_compression
     return upstream_request
 
@@ -1413,10 +1409,21 @@ async def _create_assistant_task(
     await db.flush()
 
     if intent in (Intent.CHAT, Intent.VISION_QA):
+        if not chat_wallet_preflight_done:
+            chat_wallet_preflight = await _ensure_chat_wallet_preflight(
+                db,
+                user_id=user_id,
+                user_email=user_email,
+                account_mode=account_mode,
+                model=task_chat_model,
+                chat_params=chat_params,
+            )
         comp_upstream_request = _merge_request_metadata(
             _chat_upstream_request(chat_params),
             request_metadata,
         )
+        if chat_wallet_preflight is not None:
+            comp_upstream_request.update(chat_wallet_preflight.upstream_metadata())
         comp = Completion(
             message_id=assistant_msg.id,
             user_id=user_id,
@@ -1437,15 +1444,6 @@ async def _create_assistant_task(
         db.add(comp)
         await db.flush()
         completion_id = comp.id
-        if not chat_wallet_preflight_done:
-            chat_wallet_preflight = await _ensure_chat_wallet_preflight(
-                db,
-                user_id=user_id,
-                user_email=user_email,
-                account_mode=account_mode,
-                model=task_chat_model,
-                chat_params=chat_params,
-            )
         if (
             chat_wallet_preflight is not None
             and chat_wallet_preflight.preauth_micro > 0
@@ -1459,15 +1457,7 @@ async def _create_assistant_task(
                     ref_id=comp.id,
                     idempotency_key=f"hold:{comp.id}",
                     allow_negative=await _billing_allow_negative(db),
-                    meta={
-                        "estimated_model_micro": (
-                            chat_wallet_preflight.estimated_model_micro
-                        ),
-                        "tool_budget_micro": chat_wallet_preflight.tool_budget_micro,
-                        "tool_budget_by_tool": (
-                            chat_wallet_preflight.tool_budget_by_tool
-                        ),
-                    },
+                    meta=chat_wallet_preflight.hold_metadata(),
                 )
             except billing_core.BillingError as exc:
                 raise _billing_http_error(exc)
@@ -1479,10 +1469,7 @@ async def _create_assistant_task(
                     details={
                         "completion_id": comp.id,
                         "amount_micro": chat_wallet_preflight.preauth_micro,
-                        "estimated_model_micro": (
-                            chat_wallet_preflight.estimated_model_micro
-                        ),
-                        "tool_budget_micro": chat_wallet_preflight.tool_budget_micro,
+                        **chat_wallet_preflight.audit_metadata(),
                         "balance_after": tx.balance_after,
                         "hold_after": tx.hold_after,
                     },
@@ -1537,9 +1524,10 @@ async def _create_assistant_task(
         )
         if not billing_enabled:
             estimated_micro, estimated_tier = (0, "free")
+            base_estimated_micro = 0
         elif billing_tier is not None:
             (
-                estimated_micro,
+                base_estimated_micro,
                 estimated_tier,
             ) = await billing_core.estimate_image_cost_for_tier(
                 db,
@@ -1547,11 +1535,29 @@ async def _create_assistant_task(
                 n=1,
             )
         else:
-            estimated_micro, estimated_tier = await billing_core.estimate_image_cost(
+            (
+                base_estimated_micro,
+                estimated_tier,
+            ) = await billing_core.estimate_image_cost(
                 db,
                 size_px=size_px,
                 n=1,
                 thresholds=billing_thresholds or None,
+            )
+        if billing_enabled:
+            rate_multiplier_x10000 = await _user_rate_multiplier_x10000(db, user_id)
+            estimated_micro = _apply_rate_multiplier_micro(
+                base_estimated_micro,
+                rate_multiplier_x10000,
+            )
+            base_upstream_request["billing_pricing_snapshot"] = {
+                "kind": "image",
+                "tier": estimated_tier,
+                "unit_price_micro": int(base_estimated_micro),
+                "captured_size_px": int(size_px),
+            }
+            base_upstream_request["billing_rate_multiplier_x10000"] = (
+                rate_multiplier_x10000
             )
         if credential_pin:
             # Why: image tasks must use the supplier's image model when
@@ -1629,6 +1635,9 @@ async def _create_assistant_task(
                             "image_count": 1,
                             "batch_task_index": image_index,
                             "batch_task_count": requested_count,
+                            "pricing_snapshot": gen_upstream_request.get(
+                                "billing_pricing_snapshot"
+                            ),
                         },
                     )
                 except billing_core.BillingError as exc:

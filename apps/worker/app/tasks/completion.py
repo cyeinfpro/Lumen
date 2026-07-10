@@ -91,10 +91,9 @@ from lumen_core.models import (
     new_uuid7,
 )
 from lumen_core.pricing import parse_usage
-from lumen_core.pricing_resolver import PricingResolver
 from lumen_core.queue_metadata import completion_queue_metadata, merge_queue_metadata
 
-from .. import runtime_settings
+from .. import completion_billing, runtime_settings
 from ..config import settings
 from ..db import SessionLocal
 from ..byok_runtime import (
@@ -133,6 +132,10 @@ from .generation import (
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("lumen.worker.completion")
+_fallback_completion_tool_image_tokens = (
+    completion_billing.fallback_completion_tool_image_tokens
+)
+_image_output_tokens_for_budget = completion_billing.image_output_tokens_for_budget
 
 
 async def _resolve_byok_retention_policy() -> ByokRetentionPolicy:
@@ -161,6 +164,7 @@ async def _message_retention_filter_for_account(account_mode: str | None):
     if not policy.hide_enabled:
         return None
     return Message.created_at >= byok_retention_cutoffs(policy=policy).visible_after
+
 
 try:
     from . import context_summary
@@ -368,8 +372,7 @@ class _CompletionToolTracker:
     @property
     def has_active(self) -> bool:
         return any(
-            state.status not in TOOL_TERMINAL_STATUSES
-            for state in self._calls.values()
+            state.status not in TOOL_TERMINAL_STATUSES for state in self._calls.values()
         )
 
     def idle_timeout_remaining(self, timeout_s: float) -> float | None:
@@ -621,54 +624,6 @@ def _fallback_completion_usage_tokens(
         except Exception:  # noqa: BLE001
             next_in = 1
     return next_in, next_out
-
-
-def _image_output_tokens_for_budget(
-    budget_micro: int,
-    *,
-    image_output_per_1k_micro: int,
-    rate_multiplier_x10000: int = 10_000,
-) -> int:
-    budget = max(0, int(budget_micro or 0))
-    rate = max(0, int(image_output_per_1k_micro or 0))
-    multiplier = max(0, int(rate_multiplier_x10000 or 0))
-    if budget <= 0:
-        return 0
-    if rate <= 0 or multiplier <= 0:
-        return 1
-    denom = rate * multiplier
-    return max(1, (budget * 1000 * 10_000 + denom - 1) // denom)
-
-
-async def _fallback_completion_tool_image_tokens(
-    session: Any,
-    completion: Completion,
-    *,
-    budget_micro: int,
-) -> int:
-    budget = max(0, int(budget_micro or 0))
-    if budget <= 0:
-        return 0
-    try:
-        pricing = (
-            await PricingResolver().resolve(session, getattr(completion, "model", ""))
-        ).with_defaults()
-        rate_multiplier = await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
-            session,
-            completion.user_id,
-        )
-        return _image_output_tokens_for_budget(
-            budget,
-            image_output_per_1k_micro=pricing.image_output_per_1k_micro,
-            rate_multiplier_x10000=rate_multiplier,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "completion tool image fallback usage estimate failed comp=%s",
-            getattr(completion, "id", None),
-            exc_info=True,
-        )
-        return 1
 
 
 def _tool_display_label(tool_type: str, name: str | None = None) -> str:
@@ -1333,14 +1288,12 @@ async def _ensure_completion_tool_image_wallet_budget(
     task_id: str,
     reserved_micro: int = 0,
 ) -> int:
-    budget_micro = await runtime_settings.resolve_int(
+    base_budget_micro = await runtime_settings.resolve_int(
         _CHAT_TOOL_IMAGE_BUDGET_SETTING,
         0,
     )
-    if budget_micro <= 0:
+    if base_budget_micro <= 0:
         return 0
-    already_reserved_micro = max(0, int(reserved_micro or 0))
-    required_micro = already_reserved_micro + int(budget_micro)
     async with SessionLocal() as session:
         comp = await session.get(Completion, task_id)
         billing_ref_id = (
@@ -1357,7 +1310,27 @@ async def _ensure_completion_tool_image_wallet_budget(
             return 0
         if not await worker_billing.billing_enabled():
             return 0
-        wallet = await billing_core.get_wallet(session, user_id, lock=True, create=False)
+        snapshot_multiplier = (
+            worker_billing._snapshot_rate_multiplier_x10000(comp)  # noqa: SLF001
+            if comp is not None
+            else None
+        )
+        rate_multiplier = (
+            snapshot_multiplier
+            if snapshot_multiplier is not None
+            else await worker_billing._rate_multiplier_x10000(session, user_id)  # noqa: SLF001
+        )
+        budget_micro = worker_billing._apply_rate_multiplier_micro(  # noqa: SLF001
+            base_budget_micro,
+            rate_multiplier,
+        )
+        if budget_micro <= 0:
+            return 0
+        already_reserved_micro = max(0, int(reserved_micro or 0))
+        required_micro = already_reserved_micro + int(budget_micro)
+        wallet = await billing_core.get_wallet(
+            session, user_id, lock=True, create=False
+        )
         balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
         held_micro = await worker_billing.held_amount_for_ref(
             session,
@@ -1381,6 +1354,7 @@ async def _ensure_completion_tool_image_wallet_budget(
                 "balance_micro": balance_micro,
                 "held_micro": int(held_micro or 0),
                 "reserved_micro": already_reserved_micro,
+                "rate_multiplier_x10000": rate_multiplier,
                 "completion_id": task_id,
             },
         )
@@ -1504,9 +1478,7 @@ async def _watch_completion_cancel(
             cancel_requested.set()
             return
         try:
-            await asyncio.wait_for(
-                stop_requested.wait(), timeout=poll_interval_s
-            )
+            await asyncio.wait_for(stop_requested.wait(), timeout=poll_interval_s)
         except TimeoutError:
             continue
 
@@ -3064,6 +3036,28 @@ async def _flush_completion_text(
 # ---------------------------------------------------------------------------
 
 
+async def _completion_preflight_failure(
+    session: Any,
+    completion: Completion,
+) -> tuple[int, tuple[str, str] | None]:
+    window_failure = await worker_billing.completion_window_rate_limit_failure(
+        session,
+        completion,
+    )
+    if window_failure is not None:
+        return int(completion.attempt or 0), window_failure
+    attempt, may_run = _bounded_next_attempt(completion.attempt)
+    if may_run:
+        return attempt, None
+    return (
+        attempt,
+        (
+            "max_attempts_exceeded",
+            f"completion exceeded max attempts ({_MAX_ATTEMPTS})",
+        ),
+    )
+
+
 async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PLR0915, PLR0912
     redis = ctx["redis"]
     worker_id = str(ctx.get("worker_id") or ctx.get("job_id") or "worker")
@@ -3109,11 +3103,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 而 UPSTREAM_MODEL 是图像模型 gpt-image-2，不能跨用
         chat_model = comp.model or DEFAULT_CHAT_MODEL
 
-        attempt, attempt_may_run = _bounded_next_attempt(comp.attempt)
+        attempt, preflight_failure = await _completion_preflight_failure(session, comp)
         attempt_epoch = attempt
-        if not attempt_may_run:
-            err_code = "max_attempts_exceeded"
-            err_msg = f"completion exceeded max attempts ({_MAX_ATTEMPTS})"
+        if preflight_failure is not None:
+            err_code, err_msg = preflight_failure
             comp.status = CompletionStatus.FAILED.value
             comp.progress_stage = CompletionStage.FINALIZING
             comp.attempt = attempt
@@ -3802,9 +3795,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     reasoning_tokens = parsed_usage.reasoning_tokens
                     image_output_tokens = parsed_usage.image_output_tokens
                     completed_text = _extract_completed_output_text(resp)
-                    if completed_text and not accumulated_text.endswith(
-                        completed_text
-                    ):
+                    if completed_text and not accumulated_text.endswith(completed_text):
                         accumulated_text = (
                             f"{accumulated_text}\n\n{completed_text}"
                             if accumulated_text
@@ -4502,7 +4493,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                     if any(int(value or 0) > 0 for value in usage_values):
                         try:
-                            await worker_billing.charge_completion(session, comp_partial)
+                            await worker_billing.charge_completion(
+                                session, comp_partial
+                            )
                         except Exception:  # noqa: BLE001
                             logger.exception(
                                 "partial-stream charge failed comp=%s", task_id

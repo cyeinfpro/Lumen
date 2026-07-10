@@ -26,7 +26,7 @@ export function MobileStreamTopBar({
         compact ? (
           <div className="min-w-0 flex items-baseline gap-2">
             <span className="type-card-title shrink-0">
-              资产
+              素材
             </span>
             {countLabel && (
               <span className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono truncate">
@@ -37,7 +37,7 @@ export function MobileStreamTopBar({
         ) : (
           <div className="min-w-0">
             <div className="type-page-title">
-              资产
+              素材
             </div>
             {countLabel && (
               <div className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono mt-0.5 truncate">

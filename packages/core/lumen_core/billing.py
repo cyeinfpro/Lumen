@@ -21,7 +21,14 @@ from .models import (
     WalletTransaction,
     new_uuid7,
 )
-from .pricing import CostBreakdown, UsageTokens, compute_breakdown
+from .pricing import (
+    CostBreakdown,
+    ModelPricing,
+    UsageTokens,
+    compute_breakdown,
+    missing_pricing_buckets,
+    model_pricing_from_snapshot,
+)
 from .pricing_resolver import PricingResolver
 
 
@@ -386,6 +393,105 @@ async def estimate_completion_breakdown(
     resolver: PricingResolver | None = None,
 ) -> CostBreakdown:
     pricing = await (resolver or PricingResolver()).resolve(db, model, channel=channel)
+    missing_buckets = missing_pricing_buckets(
+        pricing,
+        tokens,
+        service_tier=service_tier,
+    )
+    if pricing.pricing_source == "missing" or missing_buckets:
+        detail = (
+            f"; missing rates for {', '.join(missing_buckets)}"
+            if missing_buckets
+            else ""
+        )
+        raise BillingError(
+            "PRICING_MISSING",
+            f"missing enabled chat pricing rule for {model}{detail}",
+            503,
+        )
+    if int(rate_multiplier_x10000) < 0:
+        raise BillingError(
+            "PRICING_MISSING",
+            f"negative billing multiplier for {model}",
+            503,
+        )
+    return compute_breakdown(
+        pricing,
+        tokens,
+        rate_multiplier_x10000=rate_multiplier_x10000,
+        service_tier=service_tier,
+    )
+
+
+async def completion_pricing_snapshot(
+    db: AsyncSession,
+    *,
+    model: str,
+    service_tier: str = "standard",
+    channel: str | None = None,
+    resolver: PricingResolver | None = None,
+) -> dict[str, Any]:
+    pricing = await (resolver or PricingResolver()).resolve(
+        db,
+        model,
+        channel=channel,
+    )
+    probe_usage = UsageTokens(input_tokens=1, output_tokens=1)
+    missing_buckets = missing_pricing_buckets(
+        pricing,
+        probe_usage,
+        service_tier=service_tier,
+    )
+    if pricing.pricing_source == "missing" or missing_buckets:
+        detail = (
+            f"; missing rates for {', '.join(missing_buckets)}"
+            if missing_buckets
+            else ""
+        )
+        raise BillingError(
+            "PRICING_MISSING",
+            f"missing enabled chat pricing rule for {model}{detail}",
+            503,
+        )
+    return pricing.with_defaults().model_dump()
+
+
+def completion_breakdown_from_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    model: str,
+    tokens: UsageTokens,
+    rate_multiplier_x10000: int = 10_000,
+    service_tier: str = "standard",
+) -> CostBreakdown:
+    try:
+        pricing: ModelPricing = model_pricing_from_snapshot(snapshot)
+    except ValueError as exc:
+        raise BillingError(
+            "PRICING_SNAPSHOT_INVALID",
+            f"invalid billing pricing snapshot for {model}",
+            500,
+        ) from exc
+    missing_buckets = missing_pricing_buckets(
+        pricing,
+        tokens,
+        service_tier=service_tier,
+    )
+    if missing_buckets:
+        raise BillingError(
+            "PRICING_SNAPSHOT_INVALID",
+            (
+                f"billing pricing snapshot for {model} is missing rates for "
+                f"{', '.join(missing_buckets)}"
+            ),
+            500,
+        )
+    if int(rate_multiplier_x10000) < 0:
+        raise BillingError(
+            "PRICING_SNAPSHOT_INVALID",
+            f"negative billing multiplier for {model}",
+            500,
+        )
     return compute_breakdown(
         pricing,
         tokens,
@@ -506,6 +612,7 @@ async def settle(
     actual_micro: int,
     idempotency_key: str,
     allow_negative: bool = False,
+    record_zero: bool = False,
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
     raw_actual = int(actual_micro)
@@ -513,7 +620,7 @@ async def settle(
         raise BillingError(
             "NEGATIVE_AMOUNT", "settle actual amount must not be negative", 422
         )
-    if raw_actual == 0:
+    if raw_actual == 0 and not record_zero:
         raise BillingError(
             "ZERO_SETTLEMENT", "settle actual amount must be positive", 422
         )
@@ -637,7 +744,9 @@ async def charge(
     if wallet.balance_micro < amount and not allow_negative and not cap_overdraw:
         raise BillingError("INSUFFICIENT_BALANCE", "insufficient wallet balance", 402)
     overdraw_micro = 0
-    if wallet.balance_micro < amount and cap_overdraw:
+    if wallet.balance_micro < amount and allow_negative:
+        wallet.balance_micro -= amount
+    elif wallet.balance_micro < amount and cap_overdraw:
         overdraw_micro = amount - wallet.balance_micro
         wallet.balance_micro = 0
     else:

@@ -86,8 +86,10 @@ interface UiState {
   taskTray: {
     minimized: boolean;
   };
+  taskIslandMounted: boolean;
   setTaskTrayMinimized: (minimized: boolean) => void;
   toggleTaskTray: () => void;
+  setTaskIslandMounted: (mounted: boolean) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -155,6 +157,7 @@ export const useUiStore = create<UiState>((set) => ({
   taskTray: {
     minimized: true,
   },
+  taskIslandMounted: false,
   setTaskTrayMinimized: (minimized) =>
     set({
       taskTray: { minimized },
@@ -163,4 +166,5 @@ export const useUiStore = create<UiState>((set) => ({
     set((state) => ({
       taskTray: { minimized: !state.taskTray.minimized },
     })),
+  setTaskIslandMounted: (mounted) => set({ taskIslandMounted: mounted }),
 }));

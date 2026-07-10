@@ -638,7 +638,7 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
         assert ("report_image_rate_limited", "acc1", {"retry_after_s": 12.0}) in pool.calls
     else:
         assert ("report_image_failure", "acc1", {}) in pool.calls
-    assert ("report_image_success", "acc2", {}) in pool.calls
+    assert pool.calls.count(("report_image_success", "acc2", {})) == 1
 
 
 async def _resolved_job_base() -> str:

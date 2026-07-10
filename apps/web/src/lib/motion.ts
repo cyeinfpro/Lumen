@@ -8,9 +8,9 @@
 
 export const SPRING = {
   /** Tab / Segmented / 短距位移 */
-  snap:    { type: "spring" as const, stiffness: 420, damping: 32, mass: 0.9 },
+  snap:    { type: "spring" as const, stiffness: 460, damping: 38, mass: 0.7 },
   /** Bottom sheet / tray / 中距面板 */
-  sheet:   { type: "spring" as const, stiffness: 380, damping: 32, mass: 1.0 },
+  sheet:   { type: "spring" as const, stiffness: 360, damping: 34, mass: 0.85 },
   /** 手势拖拽回弹 / Lightbox dismiss */
   gesture: { type: "spring" as const, stiffness: 300, damping: 28, mass: 1.0 },
   /** 长距 hero、低频入场 */
@@ -18,11 +18,13 @@ export const SPRING = {
 } as const;
 
 export const DURATION = {
-  instant: 0.08,  // --dur-instant
+  instant: 0.09,  // --dur-instant
   quick:   0.14,  // --dur-quick
-  normal:  0.22,  // --dur-normal
-  page:    0.28,  // --dur-page
-  slow:    0.42,  // --dur-slow
+  normal:  0.18,  // --dur-normal
+  page:    0.18,  // --dur-page
+  panel:   0.24,
+  sheet:   0.28,
+  slow:    0.32,  // --dur-slow
 } as const;
 
 /** cubic-bezier 形式的 easing，与 --ease-* CSS var 数值一致 */

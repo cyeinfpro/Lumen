@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 
 from app.routes import billing
+from app.services import pricing_cache
 from lumen_core import billing as billing_core
 from lumen_core.schemas import (
     AdminBillingBootstrapIn,
@@ -101,6 +102,49 @@ def test_bulk_multiplier_converts_to_x10000() -> None:
         )  # noqa: SLF001
         == 22_500
     )
+
+
+def test_enabled_pricing_rejects_zero_billable_rate() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        billing._validate_enabled_pricing_value(  # noqa: SLF001
+            unit="per_1k_tokens_in",
+            price_micro=0,
+            enabled=True,
+            field="price_rmb",
+        )
+
+    assert exc_info.value.detail["error"]["code"] == "invalid_amount"
+
+
+def test_zero_long_context_threshold_can_remain_enabled() -> None:
+    billing._validate_enabled_pricing_value(  # noqa: SLF001
+        unit="long_context_threshold",
+        price_micro=0,
+        enabled=True,
+        field="rates.long_context_threshold",
+    )
+
+
+def test_pricing_group_rejects_mixed_priorities() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        billing._pricing_group_priorities(  # noqa: SLF001
+            [
+                {
+                    "scope": "chat_model",
+                    "key": "gpt-*",
+                    "variant": "default",
+                    "priority": 10,
+                },
+                {
+                    "scope": "chat_model",
+                    "key": "gpt-*",
+                    "variant": "default",
+                    "priority": 20,
+                },
+            ]
+        )
+
+    assert exc_info.value.detail["error"]["code"] == "pricing_priority_mismatch"
 
 
 def test_wallet_search_escapes_like_wildcards() -> None:
@@ -333,6 +377,53 @@ async def test_billing_bootstrap_rejects_negative_image_price() -> None:
 
     assert getattr(excinfo.value, "status_code", None) == 422
     assert excinfo.value.detail["error"]["code"] == "invalid_amount"
+
+
+@pytest.mark.asyncio
+async def test_billing_bootstrap_rejects_zero_or_missing_enabled_tier_price() -> None:
+    for prices in ({"1k": "0"}, {}):
+        with pytest.raises(Exception) as excinfo:
+            await billing.admin_billing_bootstrap(
+                AdminBillingBootstrapIn(
+                    image_size_thresholds={"1k": 1_572_864},
+                    image_prices_rmb=prices,
+                ),
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                object(),  # type: ignore[arg-type]
+            )
+
+        assert getattr(excinfo.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_wildcard_pricing_update_invalidates_all_resolved_model_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def scan_iter(self, *, match: str):
+            assert match == "lumen:pricing:v1:*"
+            for key in (
+                "lumen:pricing:v1:default:gpt-5.4",
+                "lumen:pricing:v1:priority:gpt-5.5",
+            ):
+                yield key
+
+        async def delete(self, *keys: str) -> None:
+            self.deleted.extend(keys)
+
+    redis = Redis()
+    monkeypatch.setattr(pricing_cache, "get_redis", lambda: redis)
+
+    await billing._invalidate_pricing_cache("gpt-*", "default")  # noqa: SLF001
+
+    assert redis.deleted == [
+        "lumen:pricing:v1:default:gpt-5.4",
+        "lumen:pricing:v1:priority:gpt-5.5",
+    ]
 
 
 @pytest.mark.asyncio
@@ -690,7 +781,9 @@ async def test_redeem_code_integrity_error_replays_wallet_tx_race(
     async def noop(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def existing_usage(*_args: Any, **_kwargs: Any) -> billing.RedemptionOut | None:
+    async def existing_usage(
+        *_args: Any, **_kwargs: Any
+    ) -> billing.RedemptionOut | None:
         nonlocal existing_calls
         existing_calls += 1
         if existing_calls == 1:

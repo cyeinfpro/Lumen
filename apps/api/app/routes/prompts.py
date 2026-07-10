@@ -51,6 +51,12 @@ from ..public_urls import resolve_public_base_url
 from ..ratelimit import RateLimiter
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..task_billing import (
+    EnhanceBillingContext as _EnhanceBillingContext,
+    EnhanceUsageCapture as _EnhanceUsageCapture,
+    enhance_pricing_snapshot_key as _enhance_pricing_snapshot_key,
+    rate_multiplier_x10000 as _rate_multiplier_x10000,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,27 +184,6 @@ class _EnhanceAttempt:
     service_tier: str | None = "priority"
 
 
-@dataclass
-class _EnhanceBillingContext:
-    db: AsyncSession
-    user_id: str
-    user_email: str | None
-    request_id: str
-    rate_multiplier_x10000: int
-    cache_aware: bool
-    allow_negative: bool
-    hold_amount_micro: int = 0
-
-
-@dataclass
-class _EnhanceUsageCapture:
-    provider_name: str | None = None
-    model: str | None = None
-    service_tier: str = "standard"
-    response_id: str | None = None
-    usage: dict[str, Any] | None = None
-
-
 _ENHANCE_ATTEMPTS = (
     _EnhanceAttempt(name="primary", model="gpt-5.5", reasoning_effort="low"),
     _EnhanceAttempt(
@@ -211,7 +196,6 @@ _ENHANCE_ATTEMPTS = (
         service_tier=None,
     ),
 )
-
 
 class EnhanceIn(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
@@ -768,14 +752,6 @@ async def _billing_allow_negative(db: AsyncSession) -> bool:
     )
 
 
-def _rate_multiplier_x10000(user: Any) -> int:
-    raw = getattr(user, "billing_rate_multiplier", 1)
-    try:
-        return max(0, int(float(raw if raw is not None else 1) * 10_000))
-    except (TypeError, ValueError):
-        return 10_000
-
-
 async def _prepare_prompt_enhance_billing(
     db: AsyncSession,
     user: Any,
@@ -789,52 +765,76 @@ async def _prepare_prompt_enhance_billing(
     rate_multiplier_x10000 = _rate_multiplier_x10000(user)
     cache_aware = await _billing_cache_aware(db)
     allow_negative = await _billing_allow_negative(db)
-    preview = await billing_core.estimate_completion_cost(
-        db,
-        model=_ENHANCE_ATTEMPTS[0].model,
-        tokens_in=1,
-        tokens_out=1,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        service_tier=_ENHANCE_ATTEMPTS[0].service_tier or "standard",
-    )
-    if preview <= 0:
-        await write_audit(
-            db,
-            event_type="pricing.not_configured",
-            user_id=user.id,
-            actor_email_hash=hash_email(getattr(user, "email", None)),
-            details={
-                "scope": "chat_model",
-                "model": _ENHANCE_ATTEMPTS[0].model,
-                "route": "prompts.enhance.preflight",
-            },
-            autocommit=False,
-        )
-    hold_amount = max(10_000, int(preview or 0))
-    try:
-        await billing_core.hold(
-            db,
-            user.id,
-            hold_amount,
-            ref_type="prompt_enhance",
-            ref_id=request_id,
-            idempotency_key=f"prompt_enhance:hold:{request_id}",
-            allow_negative=allow_negative,
-            meta={
-                "route": "prompts.enhance",
-                "model": _ENHANCE_ATTEMPTS[0].model,
-                "service_tier": _ENHANCE_ATTEMPTS[0].service_tier or "standard",
-                "estimated_cost_micro": preview,
-                "preauth_micro": hold_amount,
-            },
-        )
-    except billing_core.BillingError as exc:
+    pricing_snapshots: dict[str, dict[str, Any]] = {}
+    preview = 0
+    for attempt in _ENHANCE_ATTEMPTS:
+        service_tier = attempt.service_tier or "standard"
+        snapshot_key = _enhance_pricing_snapshot_key(attempt.model, service_tier)
+        if snapshot_key in pricing_snapshots:
+            continue
+        try:
+            snapshot = await billing_core.completion_pricing_snapshot(
+                db,
+                model=attempt.model,
+                service_tier=service_tier,
+            )
+            attempt_preview = billing_core.completion_breakdown_from_snapshot(
+                snapshot,
+                model=attempt.model,
+                tokens=billing_core.UsageTokens(input_tokens=1, output_tokens=1),
+                rate_multiplier_x10000=rate_multiplier_x10000,
+                service_tier=service_tier,
+            ).actual_cost_micro
+        except billing_core.BillingError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"error": {"code": exc.code, "message": exc.message}},
+            ) from exc
+        pricing_snapshots[snapshot_key] = snapshot
+        preview = max(preview, int(attempt_preview))
+    if preview <= 0 and rate_multiplier_x10000 > 0:
         raise HTTPException(
-            status_code=exc.status_code,
-            detail={"error": {"code": exc.code, "message": exc.message}},
-        ) from exc
-    await db.commit()
-    await invalidate_balance_cache(user.id)
+            status_code=503,
+            detail={
+                "error": {
+                    "code": "PRICING_MISSING",
+                    "message": (
+                        "missing enabled chat pricing rule for "
+                        f"{_ENHANCE_ATTEMPTS[0].model}"
+                    ),
+                }
+            },
+        )
+    hold_amount = (
+        0 if rate_multiplier_x10000 == 0 else max(10_000, int(preview or 0))
+    )
+    if hold_amount > 0:
+        try:
+            await billing_core.hold(
+                db,
+                user.id,
+                hold_amount,
+                ref_type="prompt_enhance",
+                ref_id=request_id,
+                idempotency_key=f"prompt_enhance:hold:{request_id}",
+                allow_negative=allow_negative,
+                meta={
+                    "route": "prompts.enhance",
+                    "model": _ENHANCE_ATTEMPTS[0].model,
+                    "service_tier": _ENHANCE_ATTEMPTS[0].service_tier or "standard",
+                    "estimated_cost_micro": preview,
+                    "preauth_micro": hold_amount,
+                    "pricing_snapshots": pricing_snapshots,
+                    "rate_multiplier_x10000": rate_multiplier_x10000,
+                },
+            )
+        except billing_core.BillingError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"error": {"code": exc.code, "message": exc.message}},
+            ) from exc
+        await db.commit()
+        await invalidate_balance_cache(user.id)
     return _EnhanceBillingContext(
         db=db,
         user_id=user.id,
@@ -844,6 +844,7 @@ async def _prepare_prompt_enhance_billing(
         cache_aware=cache_aware,
         allow_negative=allow_negative,
         hold_amount_micro=hold_amount,
+        pricing_snapshots=pricing_snapshots,
     )
 
 
@@ -869,6 +870,10 @@ def _capture_enhance_usage(
     capture.provider_name = provider.name
     capture.model = model if isinstance(model, str) and model.strip() else attempt.model
     capture.service_tier = attempt.service_tier or "standard"
+    capture.pricing_snapshot_key = _enhance_pricing_snapshot_key(
+        attempt.model,
+        capture.service_tier,
+    )
     capture.response_id = (
         response_id if isinstance(response_id, str) and response_id.strip() else None
     )
@@ -916,36 +921,81 @@ async def _charge_prompt_enhance(
         await _release_prompt_enhance_hold(billing, reason="zero_usage")
         return
 
-    breakdown = await billing_core.estimate_completion_breakdown(
-        billing.db,
-        model=model,
-        tokens=usage,
-        rate_multiplier_x10000=billing.rate_multiplier_x10000,
-        service_tier=capture.service_tier,
-    )
-    cost = breakdown.actual_cost_micro
-    response_id = capture.response_id or billing.request_id
-    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
-    if cost <= 0 and (usage.input_tokens > 0 or usage.output_tokens > 0):
+    try:
+        snapshot = billing.pricing_snapshots.get(
+            capture.pricing_snapshot_key
+            or _enhance_pricing_snapshot_key(model, capture.service_tier)
+        )
+        if snapshot is not None:
+            breakdown = billing_core.completion_breakdown_from_snapshot(
+                snapshot,
+                model=model,
+                tokens=usage,
+                rate_multiplier_x10000=billing.rate_multiplier_x10000,
+                service_tier=capture.service_tier,
+            )
+        else:
+            breakdown = await billing_core.estimate_completion_breakdown(
+                billing.db,
+                model=model,
+                tokens=usage,
+                rate_multiplier_x10000=billing.rate_multiplier_x10000,
+                service_tier=capture.service_tier,
+            )
+    except billing_core.BillingError as exc:
+        if exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}:
+            raise
+        if billing.hold_amount_micro <= 0:
+            raise
+        breakdown = billing_core.CostBreakdown(
+            input_cost_micro=billing.hold_amount_micro,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=billing.rate_multiplier_x10000,
+            total_cost_micro=billing.hold_amount_micro,
+            actual_cost_micro=billing.hold_amount_micro,
+            pricing_source="held_amount_fallback",
+        )
         await write_audit(
             billing.db,
-            event_type=(
-                "billing.pricing.missing"
-                if breakdown.pricing_source == "missing"
-                else "pricing.not_configured"
-            ),
+            event_type="billing.pricing.hold_fallback_after_upstream",
             user_id=billing.user_id,
             actor_email_hash=hash_email(billing.user_email),
             details={
                 "scope": "chat_model",
                 "model": model,
-                "prompt_enhance_id": ref_id,
+                "prompt_enhance_id": billing.request_id,
                 "usage": usage.model_dump(),
-                "pricing_source": breakdown.pricing_source,
+                "actual_micro": billing.hold_amount_micro,
+                "error": exc.message,
             },
             autocommit=False,
         )
-    elif breakdown.pricing_source == "fallback":
+    cost = breakdown.actual_cost_micro
+    response_id = capture.response_id or billing.request_id
+    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
+    if cost <= 0 and billing.hold_amount_micro > 0:
+        cost = billing.hold_amount_micro
+        breakdown = billing_core.CostBreakdown(
+            input_cost_micro=cost,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=billing.rate_multiplier_x10000,
+            total_cost_micro=cost,
+            actual_cost_micro=cost,
+            pricing_source="held_amount_fallback",
+        )
+    if breakdown.pricing_source == "fallback":
         await write_audit(
             billing.db,
             event_type="billing.pricing.fallback_used",
@@ -1020,6 +1070,22 @@ async def _charge_prompt_enhance(
             },
             autocommit=False,
         )
+        if cost == 0 and billing.rate_multiplier_x10000 == 0:
+            await write_audit(
+                billing.db,
+                event_type="wallet.charge.zero_rate",
+                user_id=billing.user_id,
+                actor_email_hash=hash_email(billing.user_email),
+                details={
+                    "prompt_enhance_id": ref_id,
+                    "response_id": response_id,
+                    "tx_id": tx.id,
+                    "ref_type": "prompt_enhance",
+                    "ref_id": ref_id,
+                    "rate_multiplier_x10000": 0,
+                },
+                autocommit=False,
+            )
     await billing.db.commit()
     if tx is not None:
         await invalidate_balance_cache(billing.user_id)

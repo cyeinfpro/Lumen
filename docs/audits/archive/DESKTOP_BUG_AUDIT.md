@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@c164460470840a98720fe4afb02d218b4aad7ed1"
+status: superseded
+resolved_by: null
+superseded_by: "docs/audits/archive/DESKTOP_BUG_AUDIT_2026-05-29.md"
+---
+
+> **归档状态**：历史报告，已被后续桌面审计取代。
+>
+> **审计基线**：2026-05-28 之前的桌面工作树。
+>
+> **记录提交**：`c164460470840a98720fe4afb02d218b4aad7ed1`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # Lumen Desktop（macOS / Windows）深度审计与修复方案
 
 > 审计范围：`apps/desktop/`（Tauri Rust 监管器、子进程、备份、Docker 导入、电源、签名/打包脚本、smoke 脚本）+ 桌面侧 Web 外壳（`apps/web/src/components/desktop`、`apps/web/src/lib/desktop`、`apps/web/src/app/settings/{storage,update,diagnostics}`、`apps/web/src/lib/api/http.ts`、`apps/web/src/app/admin/_panels/ProvidersPanel.tsx`）+ 后端 `apps/api/app/routes/desktop.py`、`providers.py`。

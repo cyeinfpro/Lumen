@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@cbf2815ffe5271343f428d454696e030645d638f"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：2026-05-16 未提交工作树快照。
+>
+> **记录提交**：`cbf2815ffe5271343f428d454696e030645d638f`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # 未提交变更 Bug 审查报告
 
 > 范围：当前 working tree 全部 modified / untracked 文件（约 100 个文件，3700+ 增行）。

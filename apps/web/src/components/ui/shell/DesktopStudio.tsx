@@ -1,10 +1,6 @@
 "use client";
 
-// 桌面端创作外壳（V1.0 重设计版）——对齐移动 Darkroom 逻辑：
-//   · 顶部主导航四入口 (创作 / 项目 / 资产 / 我的) 替代原 Header
-//   · Sidebar 从固定侧栏改为按需抽屉，由 ⌘B 或顶部 ≡ 触发
-//   · 底部 Composer 改为居中 Pill（max-w 720，由 Agent 1 提供）
-//   · 会话画布改用 Scene 无气泡（由 Agent 2 提供）
+// 桌面创作外壳：全局 App Bar + 会话 Context Bar + 三态侧栏。
 
 import {
   useCallback,
@@ -13,23 +9,18 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import Link from "next/link";
 import { AnimatePresence, motion } from "framer-motion";
-import { Plus, Zap } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { Images, MessageSquareText, PanelLeftOpen, Plus, X } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell/DesktopTopNav";
 import { Sidebar } from "@/components/ui/Sidebar";
-import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
 import { Onboarding } from "@/components/Onboarding";
 import { DesktopComposerPill } from "@/components/ui/composer/desktop";
 import { IconButton } from "@/components/ui/primitives";
 import {
   ConversationImageGallery,
-  ContextWindowMeter,
   DesktopConversationCanvas,
 } from "@/components/ui/chat/desktop";
-import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import {
@@ -37,8 +28,10 @@ import {
   useConversationContextQuery,
   useListConversationsInfiniteQuery,
 } from "@/lib/queries";
-import { getMe, type AuthUser } from "@/lib/apiClient";
-import { SPRING } from "@/lib/motion";
+import { DURATION, EASE, SPRING } from "@/lib/motion";
+import { cn } from "@/lib/utils";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { StudioContextBar } from "./StudioContextBar";
 import { useConversationRouteSync } from "./useConversationRouteSync";
 
 declare global {
@@ -53,7 +46,6 @@ export function DesktopStudio() {
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
   const studioView = useUiStore((s) => s.studioView);
   const setStudioView = useUiStore((s) => s.setStudioView);
-  const setTaskTrayMinimized = useUiStore((s) => s.setTaskTrayMinimized);
 
   const messages = useChatStore((s) => s.messages);
   const generations = useChatStore((s) => s.generations);
@@ -70,21 +62,15 @@ export function DesktopStudio() {
   const setMode = useChatStore((s) => s.setMode);
   const fast = useChatStore((s) => s.composer.fast);
   const setFast = useChatStore((s) => s.setFast);
+  const isWideSidebar = useMediaQuery("(min-width: 1440px)");
 
-  // me query 同名 key 与 RuntimeDefaultsBootstrap 共享缓存（TanStack 自动去重），
-  // 不会触发额外请求；这里仅取 role 用于 isAdmin。
-  const meQuery = useQuery<AuthUser & { role?: "admin" | "member" }>({
-    queryKey: ["me"],
-    queryFn: () =>
-      getMe() as Promise<AuthUser & { role?: "admin" | "member" }>,
-    retry: false,
-    staleTime: 60_000,
-  });
-  const isAdmin = meQuery.data?.role === "admin";
-
-  // 默认收起抽屉（移动端跳到 MobileStudio，不会走此分支；桌面首次进入也收起）。
+  // 宽屏默认固定侧栏，中屏/窄屏默认窄栏或抽屉。
   useEffect(() => {
-    setSidebarOpen(false);
+    const wide = window.matchMedia("(min-width: 1440px)");
+    const sync = () => setSidebarOpen(wide.matches);
+    sync();
+    wide.addEventListener("change", sync);
+    return () => wide.removeEventListener("change", sync);
   }, [setSidebarOpen]);
 
   const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
@@ -171,6 +157,13 @@ export function DesktopStudio() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const imageViewScrollKeyRef = useRef<string | null>(null);
   const isEmpty = messages.length === 0;
+  const currentTitle = useMemo(() => {
+    const items = convsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+    const current = items.find((item) => item.id === currentConvId);
+    if (current?.title) return current.title;
+    const firstUser = messages.find((message) => message.role === "user");
+    return firstUser?.text?.slice(0, 48) || "新对话";
+  }, [convsQuery.data, currentConvId, messages]);
 
   useEffect(() => {
     if (studioView !== "images") {
@@ -188,21 +181,7 @@ export function DesktopStudio() {
     return () => window.cancelAnimationFrame(raf);
   }, [currentConvId, studioView]);
 
-  // 生成环数据
-  const running = useMemo(() => {
-    const list = Object.values(generations);
-    const r = list.filter(
-      (g) => g.status === "running" || g.status === "queued",
-    );
-    const done = list.filter((g) => g.status === "succeeded").length;
-    return {
-      total: r.length,
-      pct: r.length ? Math.round((done / (done + r.length)) * 100) : 0,
-      any: r.length > 0,
-    };
-  }, [generations]);
-
-  // 新建会话（桌面 TopNav slot 右侧按钮）
+  // 侧栏窄栏中的新建动作。
   const createMut = useCreateConversationMutation({
     onSuccess: (conv) => {
       setStudioView("chat");
@@ -210,155 +189,114 @@ export function DesktopStudio() {
     },
   });
 
-  const topNavRight = (
-    <>
-      <IconButton
-        size="md"
-        variant="ghost"
-        onClick={() => setFast(!fast)}
-        aria-label={fast ? "关闭快速模式" : "开启快速模式"}
-        title={fast ? "快速模式 · 已开启" : "快速模式 · 点击开启"}
-        className="rounded-full"
-      >
-        <FastLamp on={fast} />
-      </IconButton>
-      <AnimatePresence initial={false}>
-        {running.any && (
-          /* 28×28 任务环：framer-motion 进出场需要 motion.button，保留原生 */
-          <motion.button
-            key="gen-ring"
-            type="button"
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            onClick={() => setTaskTrayMinimized(false)}
-            aria-label={`生成中 ${running.total} 张，点击查看任务面板`}
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full hover:bg-white/8"
-          >
-            <GenerationRing pct={running.pct} total={running.total} />
-          </motion.button>
-        )}
-      </AnimatePresence>
-      <span className="hidden lg:inline-flex">
-        <ContextWindowMeter stats={contextStats} />
-      </span>
-      <span className="inline-flex lg:hidden">
-        <ContextWindowMeter stats={contextStats} compact />
-      </span>
-      <span className="hidden lg:inline-flex">
-        <ConversationMemoryButton />
-      </span>
-      <span className="inline-flex lg:hidden">
-        <ConversationMemoryButton compact />
-      </span>
-      <SystemPromptManager compact />
-      {isAdmin && (
-        <Link
-          href="/admin"
-          className="cursor-pointer hover:text-[var(--fg-0)] transition-colors hidden lg:inline text-xs"
-        >
-          管理
-        </Link>
-      )}
-      <IconButton
-        size="md"
-        variant="ghost"
-        onClick={() => !createMut.isPending && createMut.mutate({})}
-        aria-label="新建对话"
-        title="新建对话"
-        disabled={createMut.isPending}
-        className="rounded-full"
-      >
-        <Plus className="w-4 h-4" />
-      </IconButton>
-      <Link
-        href="/me"
-        className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/15"
-        aria-label="我的账号"
-        title="我的账号"
-      >
-        <span className="text-xs font-medium text-[var(--fg-1)]">
-          {(meQuery.data?.name ?? meQuery.data?.email)?.charAt(0)?.toUpperCase() || "U"}
-        </span>
-      </Link>
-    </>
-  );
-
   return (
-    <div className="relative flex h-[100dvh] min-h-0 flex-col bg-[var(--bg-0)]">
+    <div
+      className="studio-shell relative flex h-[100dvh] min-h-0 flex-col bg-[var(--bg-0)]"
+      data-sidebar-open={sidebarOpen ? "true" : "false"}
+    >
       <DesktopTopNav
         active="studio"
-        right={topNavRight}
         onToggleSidebar={toggleSidebar}
       />
 
-      <main
-        ref={scrollRef}
-        className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
-      >
-        <div
-          className="mx-auto w-full max-w-[1680px] px-3 py-2 xl:px-4 2xl:px-6"
-          style={{
-            paddingBottom: "calc(84px + env(safe-area-inset-bottom, 0px))",
-          }}
-        >
-          <AnimatePresence mode="wait" initial={false}>
-            {studioView === "images" ? (
-              <motion.div
-                key="conversation-images"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.24 }}
-              >
-                <ConversationImageGallery
-                  messages={messages}
-                  generations={generations}
-                />
-              </motion.div>
-            ) : isEmpty ? (
-              <motion.div
-                key="onboarding"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.24 }}
-              >
-                <Onboarding
-                  onPick={(text, m) => {
-                    setText(text);
-                    setMode(m);
-                  }}
-                />
-              </motion.div>
-            ) : (
-              <DesktopConversationCanvas
-                messages={messages}
-                generations={generations}
-                scrollRef={scrollRef}
-                onEditImage={promoteImageToReference}
-                onRetryGen={handleRetryGen}
-                onRetryText={(assistantId) => void retryAssistant(assistantId)}
-                onRegenerate={(assistantId, newIntent) => {
-                  if (!newIntent) return;
-                  return regenerateAssistant(assistantId, newIntent);
-                }}
-              />
-            )}
-          </AnimatePresence>
-        </div>
+      <div className="flex min-h-0 flex-1">
+        <DesktopSidebarDock
+          expanded={sidebarOpen}
+          onToggle={toggleSidebar}
+          onCreate={() => !createMut.isPending && createMut.mutate({})}
+          creating={createMut.isPending}
+          view={studioView}
+          onViewChange={setStudioView}
+        />
 
-        {!isEmpty && <div className="lumen-bottom-fade" aria-hidden />}
-      </main>
+        <section className="flex min-w-0 flex-1 flex-col">
+          <StudioContextBar
+            title={currentTitle}
+            view={studioView}
+            onViewChange={setStudioView}
+            fast={fast}
+            onFastChange={setFast}
+            contextStats={contextStats}
+          />
 
-      <DesktopComposerPill onSubmit={() => sendMessage()} />
+          <main
+            ref={scrollRef}
+            className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
+          >
+            <div
+              className="mx-auto w-full max-w-[var(--content-workbench)] px-3 py-3 xl:px-5"
+              style={{
+                paddingBottom:
+                  "calc(96px + env(safe-area-inset-bottom, 0px))",
+              }}
+            >
+              <AnimatePresence mode="sync" initial={false}>
+                {studioView === "images" ? (
+                  <motion.div
+                    key="conversation-images"
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: DURATION.page, ease: EASE.develop }}
+                  >
+                    <ConversationImageGallery
+                      messages={messages}
+                      generations={generations}
+                    />
+                  </motion.div>
+                ) : isEmpty ? (
+                  <motion.div
+                    key="onboarding"
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: DURATION.page, ease: EASE.develop }}
+                  >
+                    <Onboarding
+                      onPick={(text, m) => {
+                        setText(text);
+                        setMode(m);
+                      }}
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="conversation"
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: DURATION.page, ease: EASE.develop }}
+                  >
+                    <DesktopConversationCanvas
+                      messages={messages}
+                      generations={generations}
+                      scrollRef={scrollRef}
+                      onEditImage={promoteImageToReference}
+                      onRetryGen={handleRetryGen}
+                      onRetryText={(assistantId) => void retryAssistant(assistantId)}
+                      onRegenerate={(assistantId, newIntent) => {
+                        if (!newIntent) return;
+                        return regenerateAssistant(assistantId, newIntent);
+                      }}
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {!isEmpty && <div className="lumen-bottom-fade" aria-hidden />}
+          </main>
+        </section>
+      </div>
 
       <DesktopSidebarDrawer
-        open={sidebarOpen}
+        open={sidebarOpen && isWideSidebar === false}
         onClose={() => setSidebarOpen(false)}
       >
-        <Sidebar />
+        <Sidebar embedded showBrand />
       </DesktopSidebarDrawer>
+
+      <DesktopComposerPill onSubmit={() => sendMessage()} />
     </div>
   );
 }
@@ -395,7 +333,7 @@ function DesktopSidebarDrawer({
         <>
           <motion.div
             key="drawer-backdrop"
-            className="fixed inset-0 z-[calc(var(--z-dialog)-1)] bg-black/50"
+            className="fixed inset-0 z-[calc(var(--z-dialog)-1)] bg-black/50 min-[1440px]:hidden"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -405,7 +343,7 @@ function DesktopSidebarDrawer({
           />
           <motion.aside
             key="drawer-panel"
-            className="fixed left-0 top-0 bottom-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]"
+            className="fixed bottom-0 left-0 top-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] min-[1440px]:hidden"
             initial={{ x: -288 }}
             animate={{ x: 0 }}
             exit={{ x: -288 }}
@@ -414,6 +352,15 @@ function DesktopSidebarDrawer({
             aria-modal="true"
             aria-label="会话侧栏"
           >
+            <IconButton
+              size="sm"
+              variant="ghost"
+              onClick={onClose}
+              aria-label="关闭会话侧栏"
+              className="absolute right-3 top-3 z-10 rounded-[var(--radius-control)]"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </IconButton>
             {children}
           </motion.aside>
         </>
@@ -422,48 +369,80 @@ function DesktopSidebarDrawer({
   );
 }
 
-function FastLamp({ on }: { on: boolean }) {
+function DesktopSidebarDock({
+  expanded,
+  onToggle,
+  onCreate,
+  creating,
+  view,
+  onViewChange,
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+  onCreate: () => void;
+  creating: boolean;
+  view: "chat" | "images";
+  onViewChange: (view: "chat" | "images") => void;
+}) {
   return (
-    <span
-      className={[
-        "inline-flex items-center justify-center",
-        on ? "text-[var(--amber-400)]" : "text-[var(--fg-3)]",
-      ].join(" ")}
-      style={
-        on ? { filter: "drop-shadow(0 0 6px var(--amber-glow-strong))" } : undefined
-      }
+    <aside
+      aria-label="会话导航"
+      className={cn(
+        "hidden min-[1120px]:flex shrink-0 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
+        "transition-[width] duration-[var(--dur-panel)]",
+        expanded ? "w-16 min-[1440px]:w-[264px]" : "w-16",
+      )}
     >
-      <Zap className="w-4 h-4" fill={on ? "currentColor" : "none"} strokeWidth={1.8} />
-    </span>
-  );
-}
-
-function GenerationRing({ pct, total }: { pct: number; total: number }) {
-  const R = 10;
-  const C = 2 * Math.PI * R;
-  const off = C * (1 - Math.max(0, Math.min(pct, 100)) / 100);
-  return (
-    <span
-      className="inline-flex relative w-6 h-6 items-center justify-center text-[9px] font-mono text-[var(--amber-300)]"
-      aria-label={`生成中 ${total} 张`}
-    >
-      <svg width={24} height={24} viewBox="0 0 24 24" className="absolute inset-0">
-        <circle cx={12} cy={12} r={R} stroke="var(--border-subtle)" strokeWidth={2} fill="none" />
-        <circle
-          cx={12}
-          cy={12}
-          r={R}
-          stroke="var(--amber-400)"
-          strokeWidth={2}
-          fill="none"
-          strokeLinecap="round"
-          strokeDasharray={C}
-          strokeDashoffset={off}
-          transform="rotate(-90 12 12)"
-          style={{ transition: "stroke-dashoffset 300ms ease" }}
-        />
-      </svg>
-      <span className="relative">{total}</span>
-    </span>
+      {expanded ? (
+        <div className="hidden h-full min-w-0 flex-1 min-[1440px]:flex">
+          <Sidebar embedded />
+        </div>
+      ) : null}
+      <div
+        className={cn(
+          "flex h-full w-16 shrink-0 flex-col items-center gap-2 px-2 py-3",
+          expanded && "min-[1440px]:hidden",
+        )}
+      >
+        <IconButton
+          size="md"
+          variant="ghost"
+          onClick={onToggle}
+          aria-label="展开会话侧栏"
+          tooltip="展开会话侧栏"
+        >
+          <PanelLeftOpen className="h-[18px] w-[18px]" aria-hidden />
+        </IconButton>
+        <IconButton
+          size="md"
+          variant="primary"
+          onClick={onCreate}
+          disabled={creating}
+          aria-label="新建对话"
+          tooltip="新建对话"
+        >
+          <Plus className="h-4 w-4" aria-hidden />
+        </IconButton>
+        <span className="my-1 h-px w-8 bg-[var(--border-subtle)]" aria-hidden />
+        <IconButton
+          size="md"
+          variant={view === "chat" ? "secondary" : "ghost"}
+          onClick={() => onViewChange("chat")}
+          aria-label="对话视图"
+          tooltip="对话视图"
+        >
+          <MessageSquareText className="h-4 w-4" aria-hidden />
+        </IconButton>
+        <IconButton
+          size="md"
+          variant={view === "images" ? "secondary" : "ghost"}
+          onClick={() => onViewChange("images")}
+          aria-label="图片视图"
+          tooltip="图片视图"
+        >
+          <Images className="h-4 w-4" aria-hidden />
+        </IconButton>
+      </div>
+    </aside>
   );
 }

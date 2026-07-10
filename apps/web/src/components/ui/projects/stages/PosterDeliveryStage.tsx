@@ -69,10 +69,10 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     onSuccess: (data) => {
       queryClient.setQueryData(qk.workflow(workflow.id), data);
       queryClient.invalidateQueries({ queryKey: ["workflows"] });
-      toast.success("海报成品已加入项目资产");
+      toast.success("海报成品已加入项目素材");
     },
     onError: (error) => {
-      toast.error("加入项目资产失败", {
+      toast.error("加入项目素材失败", {
         description: error.message || "请稍后重试",
       });
     },
@@ -120,7 +120,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     <StageFrame
       eyebrow="N°07 — 交付"
       title="交付"
-      subtitle="批量下载所有尺寸，把成品加入项目资产，后续可从项目中心继续查找。"
+      subtitle="批量下载所有尺寸，把成品加入项目素材，后续可从项目中心继续查找。"
       actions={
         <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:flex-wrap">
           <Button
@@ -142,7 +142,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
             loading={saveAssets.isPending}
             className="w-full sm:w-auto"
           >
-            {allSaved ? "已加入项目资产" : "加入项目资产"}
+            {allSaved ? "已加入项目素材" : "加入项目素材"}
           </Button>
           <Button
             variant="outline"
@@ -185,8 +185,8 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
         </p>
         <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
           {allSaved
-            ? "这些成品已保存为项目资产，可从项目中心继续追踪与复用。"
-            : "下载前建议先加入项目资产，便于后续查找、复用和交付复盘。"}
+            ? "这些成品已保存为项目素材，可从项目中心继续追踪与复用。"
+            : "下载前建议先加入项目素材，便于后续查找、复用和交付复盘。"}
         </p>
       </div>
 

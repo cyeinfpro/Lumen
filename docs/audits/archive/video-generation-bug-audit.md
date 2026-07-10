@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@f91098ed2dc4c08a52184aa9996d86c41bbaa4ab"
+status: resolved
+resolved_by: "f91098ed2dc4c08a52184aa9996d86c41bbaa4ab"
+superseded_by: null
+---
+
+> **归档状态**：已修复历史记录，不代表当前缺陷。
+>
+> **审计基线**：2026-06-04 未提交视频功能工作树。
+>
+> **记录提交**：`f91098ed2dc4c08a52184aa9996d86c41bbaa4ab`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # 视频生成功能 Bug 审查与修复记录
 
 - **审查范围**: 本次未提交的视频生成功能改动(API / worker / core / web)

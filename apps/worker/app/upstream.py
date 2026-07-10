@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
-import email.utils
 import hashlib
 import inspect
 import io
@@ -40,7 +39,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import shutil
 import signal
@@ -49,10 +47,9 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -72,8 +69,12 @@ from lumen_core.providers import (
     provider_supports_route,
     resolve_provider_proxy_url,
 )
-from lumen_core.url_security import pinned_async_http_transport, resolve_public_http_target
+from lumen_core.url_security import (
+    pinned_async_http_transport,
+    resolve_public_http_target,
+)
 
+from . import http_retry
 from .config import settings
 from .runtime_settings import resolve, resolve_db
 from .validation import (
@@ -81,6 +82,11 @@ from .validation import (
     validate_provider_base_url,
 )
 from . import provider_pool
+
+_RETRY_HTTPX_EXC = http_retry.RETRY_HTTPX_EXC
+_RETRY_STATUS = http_retry.RETRY_STATUS
+_parse_retry_after_seconds = http_retry.parse_retry_after_seconds
+_post_with_retry = http_retry.post_with_retry
 
 # Prometheus 埋点：metrics_upstream 在共享 packages/core 下；worker 与 api 都通过
 # lumen_core import 同一份实现，避免按 cwd 注入 sys.path 的脆弱依赖。极端情况下
@@ -143,6 +149,29 @@ _image_trace_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar
 )
 
 
+@dataclass
+class _ImageQuotaScope:
+    task_id: str
+    attempt_epoch: int
+    logical_call_index: int = 0
+
+
+@dataclass
+class _ImageQuotaReservation:
+    provider_name: str
+    member: str
+    reserved_at: float
+    state: str = "reserved"
+
+
+_image_quota_scope_ctx: contextvars.ContextVar[_ImageQuotaScope | None] = (
+    contextvars.ContextVar("lumen_image_quota_scope", default=None)
+)
+_image_quota_reservation_ctx: contextvars.ContextVar[_ImageQuotaReservation | None] = (
+    contextvars.ContextVar("lumen_image_quota_reservation", default=None)
+)
+
+
 def push_image_trace_id(trace_id: str | None) -> contextvars.Token[str | None] | None:
     """Bind a generation-level trace id to downstream image HTTP calls."""
     if not isinstance(trace_id, str) or not trace_id:
@@ -154,6 +183,36 @@ def pop_image_trace_id(token: contextvars.Token[str | None] | None) -> None:
     if token is None:
         return
     _image_trace_id_ctx.reset(token)
+
+
+def push_image_quota_context(
+    task_id: str,
+    attempt_epoch: int,
+) -> contextvars.Token[_ImageQuotaScope | None]:
+    return _image_quota_scope_ctx.set(
+        _ImageQuotaScope(
+            task_id=str(task_id),
+            attempt_epoch=max(1, int(attempt_epoch or 1)),
+        )
+    )
+
+
+def pop_image_quota_context(
+    token: contextvars.Token[_ImageQuotaScope | None],
+) -> None:
+    _image_quota_scope_ctx.reset(token)
+
+
+def _next_image_quota_member(provider_name: str, route: str) -> str:
+    scope = _image_quota_scope_ctx.get()
+    if scope is None:
+        trace_id = _image_trace_id_ctx.get() or uuid.uuid4().hex
+        return f"{trace_id}:1:{provider_name}:{route}"
+    scope.logical_call_index += 1
+    return (
+        f"{scope.task_id}:{scope.attempt_epoch}:{scope.logical_call_index}:"
+        f"{provider_name}:{route}"
+    )
 
 
 def _generate_trace_id() -> str:
@@ -1088,40 +1147,6 @@ def _attach_image_idempotency_key(
     )
 
 
-def _parse_retry_after_seconds(value: str | None) -> float | None:
-    if not value:
-        return None
-    stripped = value.strip()
-    try:
-        seconds = float(stripped)
-    except (TypeError, ValueError):
-        try:
-            retry_at = email.utils.parsedate_to_datetime(stripped)
-        except (TypeError, ValueError, IndexError, OverflowError):
-            return None
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
-        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
-    if not math.isfinite(seconds) or seconds < 0:
-        return None
-    return min(seconds, 15.0)
-
-
-def _transient_retry_sleep_seconds(
-    *,
-    attempt: int,
-    backoff_base_s: float,
-    response: httpx.Response | None = None,
-) -> float:
-    retry_after = _parse_retry_after_seconds(
-        response.headers.get("retry-after") if response is not None else None
-    )
-    if retry_after is not None:
-        return retry_after
-    base = min(8.0, backoff_base_s * (2 ** max(0, attempt - 1)))
-    return max(0.05, base * random.uniform(0.6, 1.4))
-
-
 def _extract_response_meta_headers(
     response_headers: Any,
 ) -> dict[str, Any]:
@@ -1624,99 +1649,6 @@ async def _resolve_image_job_base_url() -> str:
     return _validate_image_job_base_url(raw or _DEFAULT_IMAGE_JOB_BASE_URL)
 
 
-# 主链路临时性错误重试策略。
-# 上游网关对 4K 图生图偶发返回 502 "Upstream request failed"（后端 backend 抖动），
-# 直接真测 curl 同样请求 93s 能成功——所以策略：先在主链路重试，耗尽才降级到备用。
-# 否则"一抖就跑去备用"，而备用走 chat+image_tool 反而更脆弱。
-_RETRY_STATUS = {502, 503, 504}
-# httpx.TimeoutException 是 ConnectTimeout/ReadTimeout/WriteTimeout/PoolTimeout
-# 的共同基类（已 verify），单写基类即可全覆盖；ConnectError 不继承 TimeoutException
-# 必须单列。
-_RETRY_HTTPX_EXC: tuple[type[BaseException], ...] = (
-    httpx.TimeoutException,
-    httpx.ConnectError,
-    httpx.RemoteProtocolError,
-)
-
-
-async def _post_with_retry(
-    *,
-    client: httpx.AsyncClient,
-    url: str,
-    headers: dict[str, str],
-    json_body: dict[str, Any] | None = None,
-    data: dict[str, str] | None = None,
-    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
-    timeout: httpx.Timeout | None = None,
-    retry_httpx_exceptions: bool = True,
-    max_attempts: int = 2,  # 和 curl 版对齐；上游网关失败每次 ~80s
-    backoff_base_s: float = 1.0,
-) -> httpx.Response:
-    """对主链路 POST 做有界重试。
-
-    - httpx ConnectError/ReadTimeout/WriteTimeout/PoolTimeout/RemoteProtocolError → 重试
-    - HTTP 502/503/504 → 重试
-    - 其他情况（非 retriable httpx / 其他 status）→ 直接返回/抛出，交给调用方处理
-
-    backoff: 1s, 2s（指数退避）。attempts 耗尽仍失败时，如有 last_resp 则返回（让
-    调用方用 _parse_error 转 UpstreamError → 走 fallback），否则重抛 last_exc。
-    """
-    last_exc: BaseException | None = None
-    last_resp: httpx.Response | None = None
-    for attempt in range(max_attempts):
-        if attempt > 0:
-            await asyncio.sleep(
-                _transient_retry_sleep_seconds(
-                    attempt=attempt,
-                    backoff_base_s=backoff_base_s,
-                    response=last_resp,
-                )
-            )
-        try:
-            if json_body is not None:
-                resp = await client.post(
-                    url,
-                    json=json_body,
-                    headers=headers,
-                    **({"timeout": timeout} if timeout is not None else {}),
-                )
-            else:
-                resp = await client.post(
-                    url,
-                    data=data,
-                    files=files,
-                    headers=headers,
-                    **({"timeout": timeout} if timeout is not None else {}),
-                )
-        except _RETRY_HTTPX_EXC as exc:
-            if not retry_httpx_exceptions:
-                raise
-            last_exc = exc
-            logger.warning(
-                "upstream transient httpx error attempt=%d/%d url=%s err=%r",
-                attempt + 1,
-                max_attempts,
-                url,
-                exc,
-            )
-            continue
-        if resp.status_code in _RETRY_STATUS:
-            last_resp = resp
-            logger.warning(
-                "upstream transient status attempt=%d/%d url=%s status=%d",
-                attempt + 1,
-                max_attempts,
-                url,
-                resp.status_code,
-            )
-            continue
-        return resp
-    if last_resp is not None:
-        return last_resp
-    assert last_exc is not None
-    raise last_exc
-
-
 def _minimum_image_read_timeout(size: str) -> float:
     pixels = _parse_size_pixels(size)
     if pixels is not None and pixels > _IMAGE_4K_PIXELS:
@@ -1779,6 +1711,7 @@ async def _direct_generate_image_once(
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
     proxy_url = await resolve_provider_proxy_url(proxy_override)
@@ -1828,6 +1761,7 @@ async def _direct_generate_image_once(
             json_body=body,
             timeout=request_timeout,
             retry_httpx_exceptions=False,
+            before_attempt=before_attempt,
         )
     except httpx.TimeoutException as exc:
         duration_ms = (time.monotonic() - started) * 1000.0
@@ -2359,6 +2293,7 @@ async def _submit_and_wait_image_job(
     api_key: str,
     proxy: ProviderProxyDefinition | None,
     progress_callback: ImageProgressCallback | None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     proxy_url = await resolve_provider_proxy_url(proxy)
     client = await (
@@ -2386,6 +2321,7 @@ async def _submit_and_wait_image_job(
             headers=headers,
             json_body=payload,
             max_attempts=3,
+            before_attempt=before_attempt,
         )
     except _RETRY_HTTPX_EXC as exc:
         duration_ms = (time.monotonic() - started) * 1000.0
@@ -2574,6 +2510,7 @@ async def _image_job_generate_once(
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     progress_callback: ImageProgressCallback | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     body = _image_job_body_base(
         prompt=prompt,
@@ -2595,6 +2532,7 @@ async def _image_job_generate_once(
         api_key=api_key_override,
         proxy=proxy_override,
         progress_callback=progress_callback,
+        before_attempt=before_attempt,
     )
 
 
@@ -2632,6 +2570,7 @@ async def _image_job_edit_once(
     image_edit_input_transport: str = "url",
     progress_callback: ImageProgressCallback | None = None,
     user_id: str | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     sidecar_base_url: str | None = base_url_override
     if sidecar_base_url is None:
@@ -2674,6 +2613,7 @@ async def _image_job_edit_once(
         api_key=api_key_override,
         proxy=proxy_override,
         progress_callback=progress_callback,
+        before_attempt=before_attempt,
     )
 
 
@@ -2695,6 +2635,7 @@ async def _image_job_responses_once(
     proxy_override: ProviderProxyDefinition | None = None,
     progress_callback: ImageProgressCallback | None = None,
     user_id: str | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """Submit an image job that points the sidecar at ``/v1/responses``.
 
@@ -2735,6 +2676,7 @@ async def _image_job_responses_once(
         api_key=api_key_override,
         proxy=proxy_override,
         progress_callback=progress_callback,
+        before_attempt=before_attempt,
     )
 
 
@@ -4728,6 +4670,7 @@ async def _responses_image_stream_with_retry(
     api_key_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     user_id: str | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """GEN-P1-9: 重试预算按上游错误码动态调整。
 
@@ -4757,6 +4700,8 @@ async def _responses_image_stream_with_retry(
         effective_attempt = outer_attempt + attempt
         cv_token = _image_retry_attempt_ctx.set(effective_attempt)
         try:
+            if before_attempt is not None:
+                await before_attempt(attempt + 1)
             kwargs: dict[str, Any] = {
                 "prompt": prompt,
                 "size": size,
@@ -4967,12 +4912,169 @@ def _is_quota_accounting_unavailable(exc: BaseException) -> bool:
     )
 
 
+def _provider_has_image_quota(provider: Any) -> bool:
+    rate_limit = getattr(provider, "image_rate_limit", None)
+    daily_quota = getattr(provider, "image_daily_quota", None)
+    return bool(rate_limit) or (
+        isinstance(daily_quota, int)
+        and not isinstance(daily_quota, bool)
+        and daily_quota > 0
+    )
+
+
+async def _reserve_admin_image_call(
+    pool: Any,
+    provider: Any,
+    *,
+    route: str,
+) -> _ImageQuotaReservation | None:
+    if _is_byok_provider(provider) or not _provider_has_image_quota(provider):
+        return None
+    from . import account_limiter
+
+    provider_name = str(getattr(provider, "name", "unknown"))
+    reservation_member = _next_image_quota_member(provider_name, route)
+    reserved_at = time.time()
+    redis = _provider_pool_redis(pool)
+    if redis is None:
+        raise UpstreamError(
+            "quota reservation unavailable",
+            status_code=503,
+            error_code=EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+            payload={
+                "provider": provider_name,
+                "reservation_member": reservation_member,
+                "retry_after": account_limiter.REDIS_ERROR_RETRY_AFTER_S,
+            },
+        )
+    try:
+        allowed, retry_after, member = await account_limiter.reserve_quota(
+            redis,
+            provider_name,
+            getattr(provider, "image_rate_limit", None),
+            getattr(provider, "image_daily_quota", None),
+            task_id=reservation_member,
+            now=reserved_at,
+        )
+    except account_limiter.AccountLimiterUnavailable as exc:
+        raise UpstreamError(
+            "quota reservation unavailable",
+            status_code=503,
+            error_code=EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+            payload={
+                "provider": provider_name,
+                "reservation_member": reservation_member,
+                "retry_after": account_limiter.REDIS_ERROR_RETRY_AFTER_S,
+            },
+        ) from exc
+    if not allowed:
+        raise UpstreamError(
+            "image account quota exhausted",
+            status_code=429,
+            error_code=EC.RATE_LIMIT_ERROR.value,
+            payload={
+                "provider": provider_name,
+                "reservation_member": member or reservation_member,
+                "retry_after": retry_after,
+            },
+        )
+    return _ImageQuotaReservation(
+        provider_name=provider_name,
+        member=member or reservation_member,
+        reserved_at=reserved_at,
+    )
+
+
+def _image_request_attempt_claim(
+    pool: Any,
+    provider: Any,
+    *,
+    route: str,
+) -> Callable[[int], Awaitable[None]]:
+    async def claim(attempt: int) -> None:
+        reservation = await _reserve_admin_image_call(
+            pool,
+            provider,
+            route=f"{route}:attempt-{attempt}",
+        )
+        if reservation is not None:
+            reservation.state = "started"
+
+    return claim
+
+
+async def _release_unused_image_reservation(
+    pool: Any,
+    reservation: _ImageQuotaReservation | None,
+) -> None:
+    if reservation is None or reservation.state != "reserved":
+        return
+    from . import account_limiter
+
+    try:
+        released = await account_limiter.release_quota(
+            _provider_pool_redis(pool),
+            reservation.provider_name,
+            reservation.member,
+            reserved_at=reservation.reserved_at,
+        )
+    except account_limiter.AccountLimiterUnavailable:
+        logger.exception(
+            "unused image quota reservation release failed provider=%s member=%s",
+            reservation.provider_name,
+            reservation.member,
+        )
+        return
+    if released:
+        reservation.state = "released"
+
+
+@asynccontextmanager
+async def _image_quota_claim(
+    pool: Any | None,
+    provider: Any,
+    *,
+    route: str,
+) -> AsyncIterator[_ImageQuotaReservation | None]:
+    quota_pool = pool
+    reservation: _ImageQuotaReservation | None = None
+    token: contextvars.Token[_ImageQuotaReservation | None] | None = None
+    if not _is_byok_provider(provider) and _provider_has_image_quota(provider):
+        if quota_pool is None:
+            quota_pool = await provider_pool.get_pool()
+        reservation = await _reserve_admin_image_call(
+            quota_pool,
+            provider,
+            route=route,
+        )
+        if reservation is not None:
+            token = _image_quota_reservation_ctx.set(reservation)
+    try:
+        yield reservation
+    finally:
+        if token is not None:
+            _image_quota_reservation_ctx.reset(token)
+        if quota_pool is not None:
+            await _release_unused_image_reservation(quota_pool, reservation)
+
+
 async def _record_admin_image_call_or_raise(
     pool: Any,
-    provider_name: str,
+    provider: Any,
     *,
     task_id: str = "",
-) -> None:
+) -> bool:
+    provider_name = str(getattr(provider, "name", provider))
+    reservation = _image_quota_reservation_ctx.get()
+    if (
+        reservation is not None
+        and reservation.provider_name == provider_name
+        and reservation.state in {"started", "confirmed"}
+    ):
+        reservation.state = "confirmed"
+        return True
+    if not _provider_has_image_quota(provider):
+        return True
     from . import account_limiter
 
     try:
@@ -4983,24 +5085,18 @@ async def _record_admin_image_call_or_raise(
                 task_id=task_id,
             )
         )
+        return True
     except account_limiter.AccountLimiterUnavailable as exc:
         retry_after = account_limiter.REDIS_ERROR_RETRY_AFTER_S
-        logger.warning(
-            "quota accounting unavailable provider=%s task=%s retry_after=%.1fs",
+        logger.error(
+            "quota accounting deferred after upstream success provider=%s "
+            "task=%s retry_after=%.1fs err=%s",
             provider_name,
             task_id,
             retry_after,
+            exc,
         )
-        raise UpstreamError(
-            "quota accounting unavailable",
-            status_code=503,
-            error_code=EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
-            payload={
-                "provider": provider_name,
-                "task_id": task_id,
-                "retry_after": retry_after,
-            },
-        ) from exc
+        return False
 
 
 async def _direct_generate_image_with_failover(
@@ -5063,15 +5159,19 @@ async def _direct_generate_image_with_failover(
                 proxy = _provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
+                kwargs["before_attempt"] = _image_request_attempt_claim(
+                    pool,
+                    provider,
+                    route="image2:generations",
+                )
                 result = await _direct_generate_image_once(**kwargs)
-                # BYOK provider 的成功 / 失败统计走 byok_runtime + UserApiCredential
-                # 字段；admin pool 的 image health / quota / inflight 维度不应被
-                # 用户 runtime 污染（review #2 强约束）。
+                # BYOK provider 的成功 / 失败统计走 byok_runtime +
+                # UserApiCredential；admin pool 的 image health / quota /
+                # inflight 维度不应被用户 runtime 污染。
                 if not _is_byok_provider(provider):
                     _pool_report_image_success(
                         pool, provider.name, endpoint_kind="generations"
                     )
-                    await _record_admin_image_call_or_raise(pool, provider.name)
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -5243,6 +5343,7 @@ async def _image_job_run_once(
     progress_callback: ImageProgressCallback | None,
     image_edit_input_transport: str = "url",
     user_id: str | None = None,
+    before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """Single image-job submit dispatched by (action, endpoint).
 
@@ -5267,6 +5368,7 @@ async def _image_job_run_once(
         "api_key_override": api_key,
         "base_url_override": base_url or None,
         "progress_callback": progress_callback,
+        "before_attempt": before_attempt,
     }
     if proxy is not None:
         common["proxy_override"] = proxy
@@ -5475,9 +5577,16 @@ async def _image_job_with_failover(
                         api_key=provider.api_key,
                         base_url=provider_base_url,
                         proxy=_provider_proxy(provider),
-                        image_edit_input_transport=provider.image_edit_input_transport,
+                        image_edit_input_transport=(
+                            provider.image_edit_input_transport
+                        ),
                         progress_callback=progress_callback,
                         user_id=user_id,
+                        before_attempt=_image_request_attempt_claim(
+                            pool,
+                            provider,
+                            route=f"image_jobs:{endpoint}",
+                        ),
                     )
                 except (asyncio.CancelledError, UpstreamCancelled):
                     raise
@@ -5548,7 +5657,6 @@ async def _image_job_with_failover(
                             endpoint_kind=inflight_ek,
                             record_endpoint=False,
                         )
-                        await _record_admin_image_call_or_raise(pool, provider.name)
                     await _emit_image_progress(
                         progress_callback,
                         "provider_used",
@@ -5713,14 +5821,21 @@ async def _direct_edit_image_with_failover(
                 proxy = _provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
-                result = await _direct_edit_image_once(**kwargs)
-                # BYOK runtime 不进 admin pool；与 _direct_generate_image_with_failover
-                # 同样的隔离原则。
-                if not _is_byok_provider(provider):
-                    _pool_report_image_success(
-                        pool, provider.name, endpoint_kind="generations"
-                    )
-                    await _record_admin_image_call_or_raise(pool, provider.name)
+                async with _image_quota_claim(
+                    pool,
+                    provider,
+                    route="image2:edits",
+                ) as quota_reservation:
+                    if quota_reservation is not None:
+                        quota_reservation.state = "started"
+                    result = await _direct_edit_image_once(**kwargs)
+                    # BYOK runtime 不进 admin pool；与
+                    # _direct_generate_image_with_failover 同样的隔离原则。
+                    if not _is_byok_provider(provider):
+                        _pool_report_image_success(
+                            pool, provider.name, endpoint_kind="generations"
+                        )
+                        await _record_admin_image_call_or_raise(pool, provider)
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -5892,18 +6007,17 @@ async def _responses_image_stream_with_failover(
                     kwargs["proxy_override"] = proxy
                 if user_id is not None:
                     kwargs["user_id"] = user_id
+                kwargs["before_attempt"] = _image_request_attempt_claim(
+                    pool,
+                    provider,
+                    route="responses:image_generation",
+                )
                 result = await _responses_image_stream_with_retry(**kwargs)
                 # BYOK runtime 不进 admin pool；用户 credential 健康度由
                 # byok_runtime.record_user_credential_runtime_error 单独维护。
                 if not _is_byok_provider(provider):
                     _pool_report_image_success(
                         pool, provider.name, endpoint_kind="responses"
-                    )
-                    # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
-                    await _record_admin_image_call_or_raise(
-                        pool,
-                        provider.name,
-                        task_id=task_id,
                     )
                 await _emit_image_progress(
                     progress_callback,
@@ -7216,7 +7330,7 @@ async def _dispatch_image(
         try:
             any_yielded = False
             try:
-                async for item in _run_image_once_for_provider(
+                image_iter = _run_image_once_for_provider(
                     action=action,
                     provider=provider,
                     channel=channel,
@@ -7234,7 +7348,8 @@ async def _dispatch_image(
                     model=model,
                     progress_callback=progress_callback,
                     user_id=user_id,
-                ):
+                )
+                async for item in image_iter:
                     any_yielded = True
                     yield item
                 return

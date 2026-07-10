@@ -28,7 +28,6 @@ from lumen_core.constants import (
     EV_VIDEO_SUCCEEDED,
     VideoGenerationStage,
     VideoGenerationStatus,
-    task_channel,
 )
 from lumen_core.models import Image, Video, VideoGeneration, new_uuid7
 from lumen_core.video_providers import (
@@ -36,11 +35,23 @@ from lumen_core.video_providers import (
     select_video_provider,
 )
 
-from .. import runtime_settings
+from .. import runtime_settings, video_submit_cache
 from ..db import SessionLocal
 from ..storage import StorageDiskFullError, storage
-from ..sse_publish import publish_event
 from ..video_billing import resolve_video_billing
+from ..video_events import (
+    publish_video_event as _publish,
+    publish_video_event_after_commit as _publish_after_commit,
+    queue_video_event as _queue_video_event,
+)
+from ..video_submit_cache import (
+    CachedSubmitResult as _CachedSubmitResult,
+    cached_submit_provider_kind as _cached_submit_provider_kind,
+    cached_submit_provider_name as _cached_submit_provider_name,
+    cached_submit_result as _cached_submit_result,
+    load_submit_result as _load_submit_result,
+    store_submit_result as _store_submit_result,
+)
 from ..video_upstream import (
     PollResult,
     SubmitResult,
@@ -53,7 +64,10 @@ from ..video_upstream import (
 
 logger = logging.getLogger(__name__)
 
+_SUBMIT_RESULT_CACHE_TTL_S = video_submit_cache.SUBMIT_RESULT_CACHE_TTL_S
 _LEASE_TTL_S = 120
+_LEASE_RENEW_S = 30
+_LEASE_RENEW_MAX_TRANSIENT_FAILURES = 3
 _POLL_INTERVAL_S = 8
 _MAX_POLL_DURATION_S = 30 * 60
 _MAX_POLL_COUNT = max(1, _MAX_POLL_DURATION_S // _POLL_INTERVAL_S)
@@ -63,9 +77,9 @@ _MAX_SUBMIT_ATTEMPTS = 4
 _SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
 _RECON_STALE_AFTER_S = 30
+_SUBMIT_UNKNOWN_AFTER_S = max(_LEASE_TTL_S * 2, 5 * 60)
+_SUBMIT_UNKNOWN_FINALIZE_AFTER_S = 60 * 60
 _RECON_LIMIT = 100
-_SUBMIT_RESULT_CACHE_TTL_S = 7 * 24 * 60 * 60
-_SUBMIT_RESULT_CACHE_PREFIX = "video:submit_result:"
 _VIDEO_PROVIDER_SLOT_STALE_AFTER_S = _MAX_PROVIDER_POLL_DURATION_S + 5 * 60
 _VIDEO_PROVIDER_SLOT_TTL_S = _VIDEO_PROVIDER_SLOT_STALE_AFTER_S + 60 * 60
 _VIDEO_PROVIDER_SLOT_PREFIX = "video:provider_slot:"
@@ -75,6 +89,10 @@ _TERMINAL_STATUSES = {
     VideoGenerationStatus.FAILED.value,
     VideoGenerationStatus.CANCELED.value,
     VideoGenerationStatus.EXPIRED.value,
+}
+_NON_RESUBMIT_STATUSES = {
+    *_TERMINAL_STATUSES,
+    VideoGenerationStatus.SUBMIT_UNKNOWN.value,
 }
 _RETRYABLE_VIDEO_ERROR_CODES = {
     "capacity",
@@ -93,11 +111,8 @@ class _StoredVideo:
     diagnostics: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class _CachedSubmitResult:
-    result: SubmitResult
-    provider_name: str | None = None
-    provider_kind: str | None = None
+class _VideoLeaseLost(RuntimeError):
+    pass
 
 
 def _now() -> datetime:
@@ -164,6 +179,20 @@ def _is_retryable_video_exception(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+def _submit_outcome_unknown(exc: Exception) -> bool:
+    if isinstance(
+        exc, (httpx.TimeoutException, asyncio.TimeoutError, httpx.TransportError)
+    ):
+        return True
+    if not isinstance(exc, VideoUpstreamError):
+        return False
+    if exc.status_code in {408, 409}:
+        return True
+    if exc.status_code is not None and exc.status_code >= 500:
+        return True
+    return exc.error_code in {"bad_response", "upstream_unknown"}
+
+
 def _submit_retry_delay_s(attempt: int) -> int:
     index = max(0, min(attempt - 1, len(_SUBMIT_RETRY_DELAYS_S) - 1))
     return _SUBMIT_RETRY_DELAYS_S[index]
@@ -208,6 +237,72 @@ async def _acquire_lease(redis: Any, task_id: str, token: str) -> bool:
     )
 
 
+async def _renew_lease(redis: Any, task_id: str, token: str) -> bool | None:
+    lua = """
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('EXPIRE', KEYS[1], ARGV[2])
+    end
+    return 0
+    """
+    try:
+        renewed = await redis.eval(
+            lua,
+            1,
+            f"video:{task_id}:lease",
+            token,
+            str(_LEASE_TTL_S),
+        )
+        return int(renewed or 0) == 1
+    except Exception:
+        logger.warning("video lease renew failed task=%s", task_id, exc_info=True)
+        return None
+
+
+async def _lease_renewer(
+    redis: Any,
+    task_id: str,
+    token: str,
+    *,
+    stop: asyncio.Event,
+    lost: asyncio.Event,
+) -> None:
+    transient_failures = 0
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_LEASE_RENEW_S)
+            return
+        except TimeoutError:
+            pass
+        renewed = await _renew_lease(redis, task_id, token)
+        if renewed is True:
+            transient_failures = 0
+            continue
+        if renewed is False:
+            lost.set()
+            return
+        transient_failures += 1
+        if transient_failures >= _LEASE_RENEW_MAX_TRANSIENT_FAILURES:
+            lost.set()
+            return
+
+
+async def _lease_active(redis: Any, task_id: str) -> bool:
+    try:
+        return await redis.get(f"video:{task_id}:lease") is not None
+    except Exception:
+        logger.warning(
+            "video lease status unavailable task=%s; keeping task fenced",
+            task_id,
+            exc_info=True,
+        )
+        return True
+
+
+def _raise_if_video_lease_lost(lease_lost: asyncio.Event, message: str) -> None:
+    if lease_lost.is_set():
+        raise _VideoLeaseLost(message)
+
+
 async def _release_lease(redis: Any, task_id: str, token: str) -> None:
     lua = """
     if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -219,86 +314,6 @@ async def _release_lease(redis: Any, task_id: str, token: str) -> None:
         await redis.eval(lua, 1, f"video:{task_id}:lease", token)
     except Exception:
         logger.debug("video lease release failed task=%s", task_id, exc_info=True)
-
-
-def _submit_result_cache_key(task_id: str) -> str:
-    return f"{_SUBMIT_RESULT_CACHE_PREFIX}{task_id}"
-
-
-async def _store_submit_result(
-    redis: Any,
-    task_id: str,
-    result: SubmitResult,
-    *,
-    provider_name: str | None = None,
-    provider_kind: str | None = None,
-) -> None:
-    payload: dict[str, Any] = {
-        "provider_task_id": result.provider_task_id,
-        "raw": result.raw,
-    }
-    if provider_name:
-        payload["provider_name"] = provider_name
-    if provider_kind:
-        payload["provider_kind"] = provider_kind
-    await redis.set(
-        _submit_result_cache_key(task_id),
-        json.dumps(payload, separators=(",", ":")),
-        ex=_SUBMIT_RESULT_CACHE_TTL_S,
-    )
-
-
-async def _load_submit_result(redis: Any, task_id: str) -> _CachedSubmitResult | None:
-    raw = await redis.get(_submit_result_cache_key(task_id))
-    if raw is None:
-        return None
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    if not isinstance(raw, str):
-        return None
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.debug("video submit cache decode failed task=%s", task_id, exc_info=True)
-        return None
-    if not isinstance(payload, dict):
-        return None
-    provider_task_id = payload.get("provider_task_id")
-    raw_result = payload.get("raw")
-    provider_name = payload.get("provider_name")
-    provider_kind = payload.get("provider_kind")
-    if not isinstance(provider_task_id, str) or not provider_task_id:
-        return None
-    if not isinstance(raw_result, dict):
-        return None
-    return _CachedSubmitResult(
-        result=SubmitResult(provider_task_id=provider_task_id, raw=raw_result),
-        provider_name=provider_name
-        if isinstance(provider_name, str) and provider_name
-        else None,
-        provider_kind=provider_kind
-        if isinstance(provider_kind, str) and provider_kind
-        else None,
-    )
-
-
-def _cached_submit_result(cached: Any) -> SubmitResult:
-    if isinstance(cached, _CachedSubmitResult):
-        return cached.result
-    return SubmitResult(
-        provider_task_id=str(getattr(cached, "provider_task_id")),
-        raw=dict(getattr(cached, "raw")),
-    )
-
-
-def _cached_submit_provider_name(cached: Any) -> str | None:
-    value = getattr(cached, "provider_name", None)
-    return value if isinstance(value, str) and value else None
-
-
-def _cached_submit_provider_kind(cached: Any) -> str | None:
-    value = getattr(cached, "provider_kind", None)
-    return value if isinstance(value, str) and value else None
 
 
 def _enqueue_job_id(kind: str, task_id: str, defer_s: int) -> str:
@@ -329,6 +344,35 @@ async def _enqueue_submit(
         _defer_by=defer_s,
         _job_id=_enqueue_job_id("video_generation", task_id, defer_s),
     )
+
+
+async def _enqueue_cached_submit_recovery(
+    redis: Any,
+    task_id: str,
+    *,
+    defer_s: int,
+) -> bool:
+    try:
+        cached_submit = await _load_submit_result(redis, task_id)
+    except Exception:
+        logger.warning(
+            "video cached submit lookup failed task=%s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+    if cached_submit is None:
+        return False
+    try:
+        await _enqueue_submit(redis, task_id, defer_s=defer_s)
+    except Exception:
+        logger.warning(
+            "video cached submit recovery enqueue failed task=%s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 async def _provider_config():
@@ -408,29 +452,6 @@ async def _release_provider_slot(redis: Any, provider_name: str, task_id: str) -
             task_id,
             exc_info=True,
         )
-
-
-async def _publish(
-    redis: Any, generation: VideoGeneration, event_name: str, **extra: Any
-) -> None:
-    data = {
-        "video_generation_id": generation.id,
-        "kind": "video_generation",
-        "status": generation.status,
-        "stage": generation.progress_stage,
-        "progress_pct": generation.progress_pct,
-        "video_id": extra.pop("video_id", None),
-        "error_code": generation.error_code,
-        "error_message": generation.error_message,
-        **extra,
-    }
-    await publish_event(
-        redis,
-        generation.user_id,
-        task_channel(generation.id),
-        event_name,
-        data,
-    )
 
 
 async def _input_image_bytes(
@@ -559,9 +580,235 @@ async def _reference_media_bytes(
 async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
     redis = ctx["redis"]
     token = f"video-submit:{new_uuid7()}"
-    slot_provider_name: str | None = None
     if not await _acquire_lease(redis, task_id, token):
         return
+    stop_renewer = asyncio.Event()
+    lease_lost = asyncio.Event()
+    renewer = asyncio.create_task(
+        _lease_renewer(
+            redis,
+            task_id,
+            token,
+            stop=stop_renewer,
+            lost=lease_lost,
+        )
+    )
+    try:
+        await _run_video_generation_with_lease(
+            ctx,
+            task_id,
+            token=token,
+            lease_lost=lease_lost,
+        )
+    finally:
+        stop_renewer.set()
+        renewer.cancel()
+        await asyncio.gather(renewer, return_exceptions=True)
+        await _release_lease(redis, task_id, token)
+
+
+async def _handle_existing_pre_submit_state(
+    session: Any,
+    redis: Any,
+    generation: VideoGeneration,
+    *,
+    cached_submit: _CachedSubmitResult | None,
+    task_id: str,
+    token: str,
+) -> bool:
+    if cached_submit is not None:
+        return False
+    if generation.status == VideoGenerationStatus.SUBMITTING.value:
+        now = _now()
+        submit_started_at = getattr(
+            generation,
+            "submit_started_at",
+            None,
+        ) or getattr(generation, "updated_at", None)
+        if submit_started_at is not None and submit_started_at > now - timedelta(
+            seconds=_SUBMIT_UNKNOWN_AFTER_S
+        ):
+            generation.next_poll_at = submit_started_at + timedelta(
+                seconds=_SUBMIT_UNKNOWN_AFTER_S
+            )
+        else:
+            _transition_submit_unknown(
+                session,
+                generation,
+                now=now,
+                reason="duplicate_worker_observed_stale_submitting",
+            )
+        await session.commit()
+        await _release_lease(redis, task_id, token)
+        return True
+    if generation.deadline_at <= _now():
+        await _mark_pre_submit_expired(
+            session,
+            generation,
+            reason="deadline_expired_before_submit",
+        )
+        await session.commit()
+        await worker_flush_balance_cache(session)
+        await _release_lease(redis, task_id, token)
+        return True
+    if (
+        generation.cancel_requested_at is not None
+        and generation.status == VideoGenerationStatus.QUEUED.value
+        and not generation.provider_task_id
+    ):
+        await _mark_pre_submit_canceled(session, generation)
+        await session.commit()
+        await worker_flush_balance_cache(session)
+        await _release_lease(redis, task_id, token)
+        return True
+    return False
+
+
+async def _resume_existing_provider_task(
+    redis: Any,
+    generation: VideoGeneration,
+    *,
+    task_id: str,
+    token: str,
+) -> bool:
+    if not generation.provider_task_id:
+        return False
+    try:
+        await _enqueue_poll(redis, generation.id, defer_s=0)
+    except Exception:
+        logger.warning(
+            "video poll enqueue failed task=%s",
+            generation.id,
+            exc_info=True,
+        )
+    await _release_lease(redis, task_id, token)
+    return True
+
+
+def _restore_cached_provider_identity(
+    generation: VideoGeneration,
+    cached_submit: _CachedSubmitResult,
+) -> SubmitResult:
+    cached_provider_name = _cached_submit_provider_name(cached_submit)
+    cached_provider_kind = _cached_submit_provider_kind(cached_submit)
+    if cached_provider_name and not generation.provider_name:
+        generation.provider_name = cached_provider_name
+    if cached_provider_kind and not generation.provider_kind:
+        generation.provider_kind = cached_provider_kind
+    return _cached_submit_result(cached_submit)
+
+
+async def _reserve_video_submit_slot(
+    redis: Any,
+    generation: VideoGeneration,
+    provider: Any,
+    *,
+    task_id: str,
+    token: str,
+    cached: bool,
+) -> bool:
+    acquired = await _acquire_provider_slot(
+        redis,
+        provider.name,
+        provider.concurrency,
+        generation.id,
+    )
+    if acquired:
+        return True
+    try:
+        await _enqueue_submit(
+            redis,
+            generation.id,
+            defer_s=_POLL_INTERVAL_S,
+        )
+    except Exception:
+        label = "cached submit" if cached else "submit"
+        logger.warning(
+            "video %s re-enqueue failed task=%s",
+            label,
+            generation.id,
+            exc_info=True,
+        )
+    await _release_lease(redis, task_id, token)
+    return False
+
+
+async def _restore_pre_submit_after_lease_loss(
+    redis: Any,
+    task_id: str,
+    *,
+    provider_name: str | None,
+    submission_epoch: int | None,
+) -> None:
+    should_requeue = False
+    try:
+        async with SessionLocal() as session:
+            filters = [VideoGeneration.id == task_id]
+            if submission_epoch is not None:
+                filters.append(VideoGeneration.submission_epoch == submission_epoch)
+            generation = (
+                await session.execute(
+                    select(VideoGeneration).where(*filters).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if (
+                generation is not None
+                and not generation.provider_task_id
+                and generation.status
+                in {
+                    VideoGenerationStatus.QUEUED.value,
+                    VideoGenerationStatus.SUBMITTING.value,
+                }
+            ):
+                generation.status = VideoGenerationStatus.QUEUED.value
+                generation.progress_stage = VideoGenerationStage.QUEUED.value
+                generation.next_poll_at = _now()
+                generation.submit_started_at = None
+                diagnostics = _generation_diagnostics(generation)
+                _append_bounded_history(
+                    diagnostics,
+                    "submit_recovery_history",
+                    {
+                        "at": _now().isoformat(),
+                        "reason": "lease_lost_before_upstream",
+                        "submission_epoch": submission_epoch,
+                    },
+                )
+                generation.diagnostics = diagnostics
+                should_requeue = True
+            await session.commit()
+    except Exception:
+        logger.error(
+            "video pre-submit lease recovery failed task=%s epoch=%s",
+            task_id,
+            submission_epoch,
+            exc_info=True,
+        )
+    if provider_name:
+        await _release_provider_slot(redis, provider_name, task_id)
+    if should_requeue:
+        try:
+            await _enqueue_submit(redis, task_id, defer_s=0)
+        except Exception:
+            logger.warning(
+                "video pre-submit lease recovery enqueue failed task=%s",
+                task_id,
+                exc_info=True,
+            )
+
+
+async def _run_video_generation_with_lease(
+    ctx: dict[str, Any],
+    task_id: str,
+    *,
+    token: str,
+    lease_lost: asyncio.Event,
+) -> None:
+    redis = ctx["redis"]
+    slot_provider_name: str | None = None
+    submission_epoch: int | None = None
+    upstream_invoked = False
+    provider_supports_idempotency = False
     try:
         async with SessionLocal() as session:
             generation = (
@@ -571,118 +818,87 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                     .with_for_update(skip_locked=True)
                 )
             ).scalar_one_or_none()
-            if generation is None or generation.status in _TERMINAL_STATUSES:
+            if generation is None or generation.status in _NON_RESUBMIT_STATUSES:
                 await _release_lease(redis, task_id, token)
                 return
-            if generation.provider_task_id:
-                try:
-                    await _enqueue_poll(redis, generation.id, defer_s=0)
-                except Exception:
-                    logger.warning(
-                        "video poll enqueue failed task=%s",
-                        generation.id,
-                        exc_info=True,
-                    )
-                await _release_lease(redis, task_id, token)
+            if await _resume_existing_provider_task(
+                redis,
+                generation,
+                task_id=task_id,
+                token=token,
+            ):
                 return
             cached_submit = await _load_submit_result(redis, generation.id)
-            if cached_submit is None and generation.deadline_at <= _now():
-                await _mark_pre_submit_expired(
-                    session,
-                    redis,
-                    generation,
-                    reason="deadline_expired_before_submit",
-                )
-                await session.commit()
-                await worker_flush_balance_cache(session)
-                await _release_lease(redis, task_id, token)
-                return
-            if (
-                cached_submit is None
-                and generation.cancel_requested_at is not None
-                and generation.status == VideoGenerationStatus.QUEUED.value
-                and not generation.provider_task_id
+            if await _handle_existing_pre_submit_state(
+                session,
+                redis,
+                generation,
+                cached_submit=cached_submit,
+                task_id=task_id,
+                token=token,
             ):
-                await _mark_pre_submit_canceled(session, redis, generation)
-                await session.commit()
-                await worker_flush_balance_cache(session)
-                await _release_lease(redis, task_id, token)
                 return
             if cached_submit is not None:
-                result = _cached_submit_result(cached_submit)
-                cached_provider_name = _cached_submit_provider_name(cached_submit)
-                cached_provider_kind = _cached_submit_provider_kind(cached_submit)
-                if cached_provider_name and not generation.provider_name:
-                    generation.provider_name = cached_provider_name
-                if cached_provider_kind and not generation.provider_kind:
-                    generation.provider_kind = cached_provider_kind
-                provider = await _provider_for_generation(generation)
-                slot_acquired = await _acquire_provider_slot(
-                    redis,
-                    provider.name,
-                    provider.concurrency,
-                    generation.id,
+                submission_epoch = int(getattr(generation, "submission_epoch", 0) or 0)
+                result = _restore_cached_provider_identity(
+                    generation,
+                    cached_submit,
                 )
-                if not slot_acquired:
-                    try:
-                        await _enqueue_submit(
-                            redis,
-                            generation.id,
-                            defer_s=_POLL_INTERVAL_S,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "video cached submit re-enqueue failed task=%s",
-                            generation.id,
-                            exc_info=True,
-                        )
-                    await _release_lease(redis, task_id, token)
-                    return
-                slot_provider_name = provider.name
-                generation.provider_name = provider.name
-                generation.provider_kind = provider.kind
+                await session.commit()
             else:
                 provider = await _provider_for_generation(generation)
-                slot_acquired = await _acquire_provider_slot(
+                if not await _reserve_video_submit_slot(
                     redis,
-                    provider.name,
-                    provider.concurrency,
-                    generation.id,
-                )
-                if not slot_acquired:
-                    try:
-                        await _enqueue_submit(
-                            redis,
-                            generation.id,
-                            defer_s=_POLL_INTERVAL_S,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "video submit re-enqueue failed task=%s",
-                            generation.id,
-                            exc_info=True,
-                        )
-                    await _release_lease(redis, task_id, token)
+                    generation,
+                    provider,
+                    task_id=task_id,
+                    token=token,
+                    cached=False,
+                ):
                     return
                 slot_provider_name = provider.name
-                input_bytes, input_mime = await _input_image_bytes(session, generation)
-                reference_media = await _reference_media_bytes(generation)
+                provider_supports_idempotency = bool(
+                    getattr(provider, "supports_idempotency", False)
+                )
                 generation.provider_name = provider.name
                 generation.provider_kind = provider.kind
+                _raise_if_video_lease_lost(
+                    lease_lost,
+                    "video submit lease lost before state transition",
+                )
+                input_bytes, input_mime = await _input_image_bytes(session, generation)
+                reference_media = await _reference_media_bytes(generation)
                 generation.status = VideoGenerationStatus.SUBMITTING.value
                 generation.progress_stage = VideoGenerationStage.SUBMITTING.value
                 generation.progress_pct = max(generation.progress_pct, 5)
-                generation.started_at = generation.started_at or _now()
+                submit_started_at = _now()
+                generation.started_at = generation.started_at or submit_started_at
                 generation.attempt += 1
+                generation.submission_epoch = (
+                    int(getattr(generation, "submission_epoch", 0) or 0) + 1
+                )
+                submission_epoch = generation.submission_epoch
+                generation.submit_started_at = submit_started_at
+                generation.provider_idempotency_key = (
+                    getattr(generation, "provider_idempotency_key", None)
+                    or f"video:{generation.id}"
+                )
+                generation.next_poll_at = submit_started_at + timedelta(
+                    seconds=_SUBMIT_UNKNOWN_AFTER_S
+                )
                 await session.commit()
 
-            if cached_submit is None:
+                _raise_if_video_lease_lost(
+                    lease_lost,
+                    "video submit lease lost before upstream call",
+                )
                 upstream_model = provider.upstream_model_for(
                     generation.model, generation.action
                 )
                 if not upstream_model:
                     raise RuntimeError("provider model mapping missing")
                 adapter = adapter_for_provider(provider)
+                upstream_invoked = True
                 result = await adapter.submit(
                     VideoSubmitRequest(
                         task_id=generation.id,
@@ -701,6 +917,10 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                         input_image_bytes=input_bytes,
                         input_image_mime=input_mime,
                         reference_media=reference_media,
+                        idempotency_key=(
+                            getattr(generation, "provider_idempotency_key", None)
+                            or f"video:{generation.id}"
+                        ),
                     )
                 )
                 try:
@@ -717,42 +937,35 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                         task_id,
                         exc_info=True,
                     )
+                _raise_if_video_lease_lost(
+                    lease_lost,
+                    "video submit lease lost after upstream call",
+                )
     except Exception as exc:  # noqa: BLE001
-        try:
-            await _fail_before_submit(
-                redis,
-                task_id,
-                exc,
-                provider_name=slot_provider_name,
-            )
-        finally:
-            await _release_lease(redis, task_id, token)
+        await _handle_video_submit_exception(
+            redis,
+            task_id,
+            exc,
+            provider_name=slot_provider_name,
+            submission_epoch=submission_epoch,
+            upstream_invoked=upstream_invoked,
+            provider_supports_idempotency=provider_supports_idempotency,
+        )
         return
 
-    try:
-        async with SessionLocal() as session:
-            generation = (
-                await session.execute(
-                    select(VideoGeneration)
-                    .where(VideoGeneration.id == task_id)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if generation is None or generation.status in _TERMINAL_STATUSES:
-                await _release_lease(redis, task_id, token)
-                return
-            generation.provider_task_id = result.provider_task_id
-            generation.upstream_response = result.raw
-            generation.status = VideoGenerationStatus.SUBMITTED.value
-            generation.progress_stage = VideoGenerationStage.RENDERING.value
-            generation.progress_pct = max(generation.progress_pct, 10)
-            generation.submitted_at = _now()
-            generation.next_poll_at = _now() + timedelta(seconds=_POLL_INTERVAL_S)
-            await session.commit()
-            await _publish(redis, generation, EV_VIDEO_SUBMITTED)
-    except Exception:
-        logger.warning("video submit persist failed task=%s", task_id, exc_info=True)
-        await _release_lease(redis, task_id, token)
+    persisted = await _persist_video_submit_receipt(
+        redis,
+        task_id,
+        result,
+        submission_epoch=submission_epoch,
+        lease_lost=lease_lost,
+    )
+    if not persisted:
+        await _enqueue_cached_submit_recovery(
+            redis,
+            task_id,
+            defer_s=_POLL_INTERVAL_S,
+        )
         return
 
     try:
@@ -763,9 +976,123 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
         await _release_lease(redis, task_id, token)
 
 
-async def _mark_pre_submit_canceled(
-    session, redis: Any, generation: VideoGeneration
+async def _handle_video_submit_exception(
+    redis: Any,
+    task_id: str,
+    exc: Exception,
+    *,
+    provider_name: str | None,
+    submission_epoch: int | None,
+    upstream_invoked: bool,
+    provider_supports_idempotency: bool,
 ) -> None:
+    if isinstance(exc, _VideoLeaseLost):
+        logger.warning(
+            "video submit lease lost; stale worker will not mutate task=%s epoch=%s",
+            task_id,
+            submission_epoch,
+        )
+        if not upstream_invoked:
+            await _restore_pre_submit_after_lease_loss(
+                redis,
+                task_id,
+                provider_name=provider_name,
+                submission_epoch=submission_epoch,
+            )
+        return
+    if (
+        upstream_invoked
+        and not provider_supports_idempotency
+        and _submit_outcome_unknown(exc)
+    ):
+        try:
+            await _mark_submit_unknown(
+                task_id,
+                exc,
+                provider_name=provider_name,
+                submission_epoch=submission_epoch,
+            )
+        except Exception:
+            logger.error(
+                "video submit outcome unknown persistence failed task=%s epoch=%s",
+                task_id,
+                submission_epoch,
+                exc_info=True,
+            )
+        return
+    await _fail_before_submit(
+        redis,
+        task_id,
+        exc,
+        provider_name=provider_name,
+        submission_epoch=submission_epoch,
+    )
+
+
+async def _persist_video_submit_receipt(
+    redis: Any,
+    task_id: str,
+    result: SubmitResult,
+    *,
+    submission_epoch: int | None,
+    lease_lost: asyncio.Event,
+) -> bool:
+    try:
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video submit lease lost before receipt persistence",
+        )
+        async with SessionLocal() as session:
+            filters = [VideoGeneration.id == task_id]
+            if submission_epoch is not None:
+                filters.append(VideoGeneration.submission_epoch == submission_epoch)
+            generation = (
+                await session.execute(
+                    select(VideoGeneration).where(*filters).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                logger.warning(
+                    "video submit receipt fenced out task=%s epoch=%s",
+                    task_id,
+                    submission_epoch,
+                )
+                return False
+            if generation.status in _TERMINAL_STATUSES:
+                return False
+            generation.provider_task_id = result.provider_task_id
+            generation.upstream_response = result.raw
+            generation.status = VideoGenerationStatus.SUBMITTED.value
+            generation.progress_stage = VideoGenerationStage.RENDERING.value
+            generation.progress_pct = max(generation.progress_pct, 10)
+            generation.submitted_at = _now()
+            generation.next_poll_at = _now() + timedelta(seconds=_POLL_INTERVAL_S)
+            diagnostics = _generation_diagnostics(generation)
+            diagnostics["submit_receipt"] = {
+                "submission_epoch": submission_epoch,
+                "provider_task_id": result.provider_task_id,
+                "provider_idempotency_key": getattr(
+                    generation, "provider_idempotency_key", None
+                ),
+                "persisted_at": _now().isoformat(),
+            }
+            generation.diagnostics = diagnostics
+            await session.commit()
+            await _publish_after_commit(redis, generation, EV_VIDEO_SUBMITTED)
+            return True
+    except _VideoLeaseLost:
+        logger.warning(
+            "video submit receipt skipped after lease loss task=%s epoch=%s",
+            task_id,
+            submission_epoch,
+        )
+        return False
+    except Exception:
+        logger.warning("video submit persist failed task=%s", task_id, exc_info=True)
+        return False
+
+
+async def _mark_pre_submit_canceled(session, generation: VideoGeneration) -> None:
     generation.status = VideoGenerationStatus.CANCELED.value
     generation.progress_stage = VideoGenerationStage.FINISHED.value
     generation.progress_pct = 100
@@ -782,11 +1109,11 @@ async def _mark_pre_submit_canceled(
         ),
         reason="pre_submit_cancel",
     )
-    await _publish(redis, generation, EV_VIDEO_CANCELED)
+    _queue_video_event(session, generation, EV_VIDEO_CANCELED)
 
 
 async def _mark_pre_submit_expired(
-    session, redis: Any, generation: VideoGeneration, *, reason: str
+    session, generation: VideoGeneration, *, reason: str
 ) -> None:
     diagnostics = _generation_diagnostics(generation)
     diagnostics["pre_submit_expired_at"] = _now().isoformat()
@@ -808,7 +1135,85 @@ async def _mark_pre_submit_expired(
         ),
         reason=reason,
     )
-    await _publish(redis, generation, EV_VIDEO_FAILED)
+    _queue_video_event(session, generation, EV_VIDEO_FAILED)
+
+
+def _transition_submit_unknown(
+    session: Any,
+    generation: VideoGeneration,
+    *,
+    now: datetime,
+    reason: str,
+    last_error: dict[str, Any] | None = None,
+) -> None:
+    diagnostics = _generation_diagnostics(generation)
+    diagnostics["submit_unknown_at"] = now.isoformat()
+    diagnostics["submit_unknown_reason"] = reason
+    diagnostics["submission_epoch"] = int(
+        getattr(generation, "submission_epoch", 0) or 0
+    )
+    diagnostics["provider_idempotency_key"] = getattr(
+        generation,
+        "provider_idempotency_key",
+        None,
+    )
+    if last_error is not None:
+        diagnostics["last_submit_error"] = last_error
+    generation.status = VideoGenerationStatus.SUBMIT_UNKNOWN.value
+    generation.progress_stage = VideoGenerationStage.SUBMITTING.value
+    generation.progress_pct = max(generation.progress_pct, 5)
+    generation.error_code = "submit_unknown"
+    generation.error_message = (
+        "video submission outcome is unknown; automatic reconciliation pending"
+    )
+    generation.next_poll_at = now + timedelta(seconds=_SUBMIT_UNKNOWN_FINALIZE_AFTER_S)
+    generation.diagnostics = diagnostics
+    _queue_video_event(
+        session,
+        generation,
+        EV_VIDEO_PROGRESS,
+        submission_unknown=True,
+    )
+
+
+async def _mark_submit_unknown(
+    task_id: str,
+    exc: Exception,
+    *,
+    provider_name: str | None,
+    submission_epoch: int | None,
+) -> bool:
+    async with SessionLocal() as session:
+        filters = [VideoGeneration.id == task_id]
+        if submission_epoch is not None:
+            filters.append(VideoGeneration.submission_epoch == submission_epoch)
+        generation = (
+            await session.execute(
+                select(VideoGeneration).where(*filters).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if generation is None or generation.status in _TERMINAL_STATUSES:
+            return False
+        now = _now()
+        error_code = _video_exception_code(exc, default="upstream_unknown")
+        error_message = _video_exception_message(exc, phase="submit")
+        generation.provider_name = generation.provider_name or provider_name
+        _transition_submit_unknown(
+            session,
+            generation,
+            now=now,
+            reason="ambiguous_non_idempotent_submit_error",
+            last_error={
+                "at": now.isoformat(),
+                "attempt": _generation_attempt(generation),
+                "error_code": error_code,
+                "message": error_message[:500],
+                "retryable": False,
+                "outcome_unknown": True,
+            },
+        )
+        await session.commit()
+        return True
 
 
 async def _fail_before_submit(
@@ -817,19 +1222,23 @@ async def _fail_before_submit(
     exc: Exception,
     *,
     provider_name: str | None = None,
+    submission_epoch: int | None = None,
 ) -> None:
     release_provider_name = provider_name
+    release_provider_slot = False
     try:
         async with SessionLocal() as session:
+            filters = [VideoGeneration.id == task_id]
+            if submission_epoch is not None:
+                filters.append(VideoGeneration.submission_epoch == submission_epoch)
             generation = (
                 await session.execute(
-                    select(VideoGeneration)
-                    .where(VideoGeneration.id == task_id)
-                    .with_for_update()
+                    select(VideoGeneration).where(*filters).with_for_update()
                 )
             ).scalar_one_or_none()
-            if generation is None or generation.status in _TERMINAL_STATUSES:
+            if generation is None or generation.status in _NON_RESUBMIT_STATUSES:
                 return
+            release_provider_slot = True
             release_provider_name = release_provider_name or generation.provider_name
             if await _schedule_submit_retry(session, redis, generation, exc):
                 return
@@ -877,11 +1286,11 @@ async def _fail_before_submit(
                 if billable_hint is None
                 else "submit_failed_before_upstream_cost",
             )
+            _queue_video_event(session, generation, EV_VIDEO_FAILED)
             await session.commit()
             await worker_flush_balance_cache(session)
-            await _publish(redis, generation, EV_VIDEO_FAILED)
     finally:
-        if release_provider_name:
+        if release_provider_slot and release_provider_name:
             await _release_provider_slot(redis, release_provider_name, task_id)
 
 
@@ -914,13 +1323,22 @@ async def _schedule_submit_retry(
     _append_bounded_history(diagnostics, "submit_retry_history", retry_item)
     diagnostics["last_submit_error"] = {**retry_item, "retryable": True}
     diagnostics["submit_retry_count"] = len(diagnostics["submit_retry_history"])
-    generation.status = VideoGenerationStatus.SUBMITTING.value
-    generation.progress_stage = VideoGenerationStage.SUBMITTING.value
+    generation.status = VideoGenerationStatus.QUEUED.value
+    generation.progress_stage = VideoGenerationStage.QUEUED.value
     generation.progress_pct = max(generation.progress_pct, 5)
     generation.next_poll_at = now + timedelta(seconds=delay_s)
     generation.error_code = None
     generation.error_message = None
     generation.diagnostics = diagnostics
+    _queue_video_event(
+        session,
+        generation,
+        EV_VIDEO_PROGRESS,
+        retry_transition=True,
+        retry_after_s=delay_s,
+        retry_attempt=attempt,
+        retry_error_code=error_code,
+    )
     await session.commit()
     logger.info(
         "video submit retry scheduled task=%s attempt=%s delay_s=%s code=%s error=%s",
@@ -930,21 +1348,6 @@ async def _schedule_submit_retry(
         error_code,
         error_message,
     )
-    try:
-        await _publish(
-            redis,
-            generation,
-            EV_VIDEO_PROGRESS,
-            retry_after_s=delay_s,
-            retry_attempt=attempt,
-            retry_error_code=error_code,
-        )
-    except Exception:
-        logger.warning(
-            "video submit retry publish failed task=%s",
-            generation.id,
-            exc_info=True,
-        )
     try:
         await _enqueue_submit(redis, generation.id, defer_s=delay_s)
     except Exception:
@@ -1355,9 +1758,14 @@ async def _finish_success(
         generation.billed_tokens = resolution.actual_tokens
         generation.billed_cost_micro = resolution.actual_micro
         generation.finished_at = _now()
+        _queue_video_event(
+            session,
+            generation,
+            EV_VIDEO_SUCCEEDED,
+            video_id=video.id,
+        )
         await session.commit()
         await worker_flush_balance_cache(session)
-        await _publish(redis, generation, EV_VIDEO_SUCCEEDED, video_id=video.id)
     finally:
         if release_provider_name:
             await _release_provider_slot(redis, release_provider_name, generation.id)
@@ -1405,15 +1813,15 @@ async def _finish_terminal_failure(
             "billing_decision": resolution.decision,
         }
         generation.finished_at = _now()
-        await session.commit()
-        await worker_flush_balance_cache(session)
-        await _publish(
-            redis,
+        _queue_video_event(
+            session,
             generation,
             EV_VIDEO_CANCELED
             if internal_status == VideoGenerationStatus.CANCELED.value
             else EV_VIDEO_FAILED,
         )
+        await session.commit()
+        await worker_flush_balance_cache(session)
     finally:
         if release_provider_name:
             await _release_provider_slot(redis, release_provider_name, generation.id)
@@ -1658,10 +2066,81 @@ def _looks_faststart(data: bytes) -> bool:
     )
 
 
+async def _finalize_submit_unknown(
+    session: Any,
+    generation: VideoGeneration,
+    *,
+    now: datetime,
+) -> None:
+    diagnostics = _generation_diagnostics(generation)
+    diagnostics["submit_unknown_finalized_at"] = now.isoformat()
+    resolution = await resolve_video_billing(
+        session,
+        generation,
+        poll_result=PollResult(
+            status="expired",
+            failure_class="submit_unknown",
+            upstream_billable=None,
+            raw={
+                "reason": "submit_unknown_timeout",
+                "upstream_cost_ambiguous": True,
+            },
+        ),
+        reason="submit_unknown_timeout",
+    )
+    diagnostics["billing_decision"] = resolution.decision
+    generation.status = VideoGenerationStatus.EXPIRED.value
+    generation.progress_stage = VideoGenerationStage.FINISHED.value
+    generation.progress_pct = 100
+    generation.error_code = "submit_unknown"
+    generation.error_message = (
+        "video submission outcome could not be reconciled before timeout"
+    )
+    generation.billed_tokens = resolution.actual_tokens
+    generation.billed_cost_micro = resolution.actual_micro
+    generation.finished_at = now
+    generation.next_poll_at = None
+    generation.diagnostics = diagnostics
+    _queue_video_event(session, generation, EV_VIDEO_FAILED)
+
+
+async def _reconcile_submit_unknown(
+    session: Any,
+    redis: Any,
+    generation: VideoGeneration,
+    *,
+    now: datetime,
+) -> tuple[bool, bool, str | None]:
+    try:
+        cached_submit = await _load_submit_result(redis, generation.id)
+    except Exception:
+        logger.warning(
+            "video submit-unknown cache lookup failed task=%s",
+            generation.id,
+            exc_info=True,
+        )
+        cached_submit = None
+    if cached_submit is not None:
+        generation.status = VideoGenerationStatus.SUBMITTING.value
+        generation.error_code = None
+        generation.error_message = None
+        generation.next_poll_at = now
+        return True, True, None
+    if generation.next_poll_at is not None and generation.next_poll_at > now:
+        return False, False, None
+    provider_name = generation.provider_name
+    await _finalize_submit_unknown(session, generation, now=now)
+    return True, False, provider_name
+
+
 async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
     redis = ctx["redis"]
-    cutoff = _now() - timedelta(seconds=_RECON_STALE_AFTER_S)
+    now = _now()
+    cutoff = now - timedelta(seconds=_RECON_STALE_AFTER_S)
+    submit_unknown_cutoff = now - timedelta(seconds=_SUBMIT_UNKNOWN_AFTER_S)
     touched = 0
+    release_slots: list[tuple[str, str]] = []
+    cached_recoveries: list[str] = []
     async with SessionLocal() as session:
         rows = (
             (
@@ -1672,6 +2151,7 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
                             [
                                 VideoGenerationStatus.QUEUED.value,
                                 VideoGenerationStatus.SUBMITTING.value,
+                                VideoGenerationStatus.SUBMIT_UNKNOWN.value,
                                 VideoGenerationStatus.SUBMITTED.value,
                                 VideoGenerationStatus.RUNNING.value,
                             ]
@@ -1684,18 +2164,60 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
                     )
                     .order_by(VideoGeneration.created_at)
                     .limit(_RECON_LIMIT)
+                    .with_for_update(skip_locked=True)
                 )
             )
             .scalars()
             .all()
         )
         for row in rows:
-            if row.provider_task_id:
-                await _enqueue_poll(redis, row.id, defer_s=0)
-            elif row.deadline_at <= _now():
-                await _mark_pre_submit_expired(
+            if row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value:
+                (
+                    changed,
+                    recover_cached,
+                    release_provider,
+                ) = await _reconcile_submit_unknown(
                     session,
                     redis,
+                    row,
+                    now=now,
+                )
+                if recover_cached:
+                    cached_recoveries.append(row.id)
+                if release_provider:
+                    release_slots.append((release_provider, row.id))
+                touched += int(changed)
+                continue
+            elif row.provider_task_id:
+                await _enqueue_poll(redis, row.id, defer_s=0)
+            elif row.status == VideoGenerationStatus.SUBMITTING.value:
+                if await _lease_active(redis, row.id):
+                    continue
+                if await _enqueue_cached_submit_recovery(
+                    redis,
+                    row.id,
+                    defer_s=0,
+                ):
+                    row.next_poll_at = now + timedelta(seconds=_POLL_INTERVAL_S)
+                    touched += 1
+                    continue
+                submit_started_at = getattr(row, "submit_started_at", None) or getattr(
+                    row, "updated_at", None
+                )
+                if (
+                    submit_started_at is not None
+                    and submit_started_at > submit_unknown_cutoff
+                ):
+                    continue
+                _transition_submit_unknown(
+                    session,
+                    row,
+                    now=now,
+                    reason="stale_submitting_without_lease_or_receipt",
+                )
+            elif row.deadline_at <= now:
+                await _mark_pre_submit_expired(
+                    session,
                     row,
                     reason="reconcile_deadline_expired_before_submit",
                 )
@@ -1705,6 +2227,18 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
                 await _enqueue_submit(redis, row.id, defer_s=_POLL_INTERVAL_S)
             touched += 1
         await session.commit()
+        await worker_flush_balance_cache(session)
+    for task_id in cached_recoveries:
+        try:
+            await _enqueue_submit(redis, task_id, defer_s=0)
+        except Exception:
+            logger.warning(
+                "video cached submit recovery enqueue failed task=%s",
+                task_id,
+                exc_info=True,
+            )
+    for provider_name, task_id in release_slots:
+        await _release_provider_slot(redis, provider_name, task_id)
     return touched
 
 

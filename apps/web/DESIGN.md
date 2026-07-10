@@ -198,7 +198,51 @@
 
 ---
 
-## 8. ESLint 防回归
+## 8. Luminous Darkroom 2.0 布局规则
+
+### 8.1 视觉权重
+
+固定顺序：**内容 > 当前任务状态 > 导航 > 设置**。
+
+- 全局 App Bar 只承载品牌、顶层导航、命令面板、任务入口和账户菜单。
+- 会话级 Fast、上下文、记忆、系统提示词放在 Studio Context Bar。
+- 新建会话属于侧栏主动作，不与账户和任务状态并列。
+- 琥珀色只用于当前动作、当前焦点和当前运行状态；普通边框、普通 Hover、普通图标保持中性。
+
+### 8.2 内容宽度
+
+`globals.css` 提供四个稳定宽度：
+
+| token | 用途 |
+|---|---|
+| `--content-text` | 对话、Markdown、代码正文，800px |
+| `--content-composer` | Desktop Composer，880px |
+| `--content-media` | 图片结果、对比和会话媒体，1160px |
+| `--content-workbench` | 项目、视频和多栏工作台，1440px |
+
+不要让文字正文直接继承工作台宽度。媒体可以突破文字列，但不能反向把正文拉宽。
+
+### 8.3 Composer 分层
+
+Composer 必须按三层渐进披露：
+
+1. 核心层：附件、模式、输入、发送/停止。
+2. 摘要层：当前执行参数与成本摘要。
+3. 设置层：Desktop Popover / Mobile Bottom Sheet 中的模型、比例、数量、质量、推理与工具。
+
+高级参数不得长期占据主输入工具栏，也不得因打开设置而改变输入框主几何。
+
+### 8.4 Shell 与移动触控
+
+- Desktop App Bar 高度 56px。
+- Desktop Sidebar：宽屏固定、桌面中宽 64px 窄栏、窄屏抽屉。
+- Mobile Top Bar 第一行只处理位置、切换与新建；会话参数放第二行。
+- Mobile Tab Bar 高度 56px，标签不小于 11px。
+- 视觉按钮可以小于 44px，但移动端实际命中区必须至少 44×44px。
+
+---
+
+## 9. ESLint 防回归
 
 `apps/web/eslint.config.mjs` 配置以下规则（陆续上线）：
 
@@ -211,6 +255,7 @@
 
 ---
 
-## 9. 变更记录
+## 10. 变更记录
 
+- **2026-07-10 Luminous Darkroom 2.0**：收拢 App Bar 与 Studio Context Bar 层级，建立四档内容宽度、三层 Composer、三态侧栏、统一任务入口和克制的强调色规则。
 - **2026-05-09 V1 设计语言统一**：建立 5 语义槽 utility（`@theme` 注册 15 个 `--color-*` 字面量），新增 4 个 `*-fg` 变量做亮色补偿，补 `.type-display / .type-display-lg / .type-overline` 三档。

@@ -29,7 +29,9 @@ _db_url = make_url(settings.database_url)
 if _db_url.drivername in {"postgresql+asyncpg", "postgresql"}:
     _db_url = _db_url.set(drivername="postgresql+psycopg2")
 sync_url = _db_url.render_as_string(hide_password=False)
-config.set_main_option("sqlalchemy.url", sync_url)
+# Alembic stores options in ConfigParser, where percent-encoded socket paths
+# such as host=%2Ftmp must escape "%" to survive interpolation.
+config.set_main_option("sqlalchemy.url", sync_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

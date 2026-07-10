@@ -123,8 +123,10 @@ from ..upstream import (
     _resolve_image_primary_route,
     edit_image,
     generate_image,
+    pop_image_quota_context,
     pop_image_trace_id,
     pop_image_retry_attempt,
+    push_image_quota_context,
     push_image_trace_id,
     push_image_retry_attempt,
 )
@@ -5421,6 +5423,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     # reasoning.effort，绕开 ChatGPT codex 端的"故障 cache"和 sub2api sticky session。
                     retry_attempt_token = push_image_retry_attempt(attempt)
                     trace_token = push_image_trace_id(trace_id)
+                    quota_token = push_image_quota_context(task_id, attempt)
                     upstream_started = time.monotonic()
                     try:
                         if action == GenerationAction.EDIT:
@@ -5482,6 +5485,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             task_id=task_id,
                         )
                     finally:
+                        pop_image_quota_context(quota_token)
                         pop_image_trace_id(trace_token)
                         pop_image_retry_attempt(retry_attempt_token)
                     if first_pair is None:

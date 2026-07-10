@@ -190,6 +190,8 @@ class ResolvedProvider:
     image_jobs_base_url: str = ""
     image_edit_input_transport: str = "url"
     image_concurrency: int = 1
+    image_rate_limit: str | None = None
+    image_daily_quota: int | None = None
     purposes: tuple[str, ...] = DEFAULT_PROVIDER_PURPOSES
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
@@ -895,6 +897,8 @@ class ProviderPool:
                 image_jobs_base_url=p.image_jobs_base_url,
                 image_edit_input_transport=p.image_edit_input_transport,
                 image_concurrency=p.image_concurrency,
+                image_rate_limit=p.image_rate_limit,
+                image_daily_quota=p.image_daily_quota,
                 responses_supported=p.responses_supported,
                 purposes=p.purposes,
                 image_generations_supported=p.image_generations_supported,

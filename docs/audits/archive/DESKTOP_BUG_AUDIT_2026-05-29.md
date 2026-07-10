@@ -1,3 +1,18 @@
+---
+baseline_commit: "b6e4004"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：`v1.1.71` / `b6e4004`。
+>
+> **记录提交**：`e5776aa53109cf73124ea509383ee54c995bd64a`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # Lumen 桌面端（macOS / Windows）深度 Bug 审计
 
 - 审计日期：2026-05-29

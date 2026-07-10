@@ -259,13 +259,13 @@ const SETTING_META: Record<string, SettingMeta> = {
   },
   [UI_NAV_ASSETS_VISIBLE_KEY]: {
     group: "ui",
-    title: "显示资产入口",
-    summary: "控制主导航里的「资产」是否向用户显示。",
-    detail: "关闭后资产流、图库和素材库入口会从用户导航中隐藏。",
+    title: "显示素材入口",
+    summary: "控制主导航里的「素材」是否向用户显示。",
+    detail: "关闭后活动、图库和素材库入口会从用户导航中隐藏。",
     kind: "toggle",
     icon: SlidersHorizontal,
     defaultValue: "1",
-    recommended: "不希望用户浏览历史资产时可以关闭。",
+    recommended: "不希望用户浏览历史素材时可以关闭。",
     keywords: ["ui", "nav", "assets", "stream", "library", "资产", "图库", "入口"],
   },
   "image.engine": {
@@ -668,7 +668,7 @@ const GROUPS: {
   {
     id: "ui",
     label: "界面入口",
-    description: "创作、视频、项目和资产显示",
+    description: "创作、视频、项目和素材显示",
     icon: SlidersHorizontal,
   },
   {

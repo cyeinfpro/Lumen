@@ -734,6 +734,7 @@ async def _generation_out(
         status=row.status,
         progress_stage=row.progress_stage,
         progress_pct=row.progress_pct,
+        submission_epoch=int(getattr(row, "submission_epoch", 0) or 0),
         provider_name=row.provider_name,
         provider_kind=row.provider_kind,
         est_token_upper=row.est_token_upper,
@@ -751,6 +752,7 @@ async def _generation_out(
         created_at=row.created_at,
         updated_at=row.updated_at,
         started_at=row.started_at,
+        submit_started_at=getattr(row, "submit_started_at", None),
         submitted_at=row.submitted_at,
         finished_at=row.finished_at,
     )
@@ -2276,6 +2278,7 @@ async def _publish_video_queued(payload: dict[str, Any]) -> None:
                 "status": VideoGenerationStatus.QUEUED.value,
                 "stage": VideoGenerationStage.QUEUED.value,
                 "progress_pct": 0,
+                "submission_epoch": 0,
                 "video_id": None,
                 "error_code": None,
             },
@@ -2438,6 +2441,7 @@ async def cancel_video_generation(
         raise _http("not_found", "video generation not found", 404)
     now = datetime.now(timezone.utc)
     balance_changed = False
+    terminal_event_queued = False
     if row.status not in _VIDEO_TERMINAL_STATUSES:
         row.cancel_requested_at = row.cancel_requested_at or now
         if (
@@ -2471,28 +2475,57 @@ async def cancel_video_generation(
                     409,
                 )
             balance_changed = True
+            db.add(
+                OutboxEvent(
+                    kind="sse",
+                    payload={
+                        "user_id": user.id,
+                        "channel": task_channel(row.id),
+                        "event_name": EV_VIDEO_CANCELED,
+                        "data": {
+                            "video_generation_id": row.id,
+                            "kind": "video_generation",
+                            "status": row.status,
+                            "stage": row.progress_stage,
+                            "progress_pct": row.progress_pct,
+                            "submission_epoch": int(
+                                getattr(row, "submission_epoch", 0) or 0
+                            ),
+                            "video_id": None,
+                            "error_code": row.error_code,
+                            "error_message": row.error_message,
+                        },
+                    },
+                    published_at=None,
+                )
+            )
+            terminal_event_queued = True
     await db.commit()
     await db.refresh(row)
     if balance_changed:
         await invalidate_balance_cache(user.id)
-    try:
-        await publish_sse_event(
-            get_redis(),
-            user_id=user.id,
-            channel=task_channel(row.id),
-            event_name=EV_VIDEO_CANCELED,
-            data={
-                "video_generation_id": row.id,
-                "kind": "video_generation",
-                "status": row.status,
-                "stage": row.progress_stage,
-                "progress_pct": row.progress_pct,
-                "video_id": None,
-                "error_code": row.error_code,
-            },
-        )
-    except Exception:
-        logger.warning("video cancel SSE publish failed id=%s", row.id, exc_info=True)
+    if not terminal_event_queued:
+        try:
+            await publish_sse_event(
+                get_redis(),
+                user_id=user.id,
+                channel=task_channel(row.id),
+                event_name=EV_VIDEO_CANCELED,
+                data={
+                    "video_generation_id": row.id,
+                    "kind": "video_generation",
+                    "status": row.status,
+                    "stage": row.progress_stage,
+                    "progress_pct": row.progress_pct,
+                    "submission_epoch": int(
+                        getattr(row, "submission_epoch", 0) or 0
+                    ),
+                    "video_id": None,
+                    "error_code": row.error_code,
+                },
+            )
+        except Exception:
+            logger.warning("video cancel SSE publish failed id=%s", row.id, exc_info=True)
     return await _generation_out(db, row)
 
 

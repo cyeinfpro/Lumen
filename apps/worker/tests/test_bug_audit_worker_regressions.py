@@ -262,6 +262,59 @@ async def test_completion_tool_image_budget_counts_reserved_images(
     assert wallet_locks == [True]
 
 
+@pytest.mark.asyncio
+async def test_completion_tool_image_budget_skips_wallet_for_zero_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return type(
+                "CompletionRow",
+                (),
+                {
+                    "id": "comp-free",
+                    "upstream_request": {
+                        "billing_rate_multiplier_x10000": 0,
+                    },
+                },
+            )()
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    async def resolve_int(*_args: Any) -> int:
+        return 100
+
+    async def wallet_billing_applies(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def fail_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("zero-rate tool output must not require wallet balance")
+
+    monkeypatch.setattr(completion.runtime_settings, "resolve_int", resolve_int)
+    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "_wallet_billing_applies",
+        wallet_billing_applies,
+    )
+    monkeypatch.setattr(completion.worker_billing, "billing_enabled", billing_enabled)
+    monkeypatch.setattr(completion.billing_core, "get_wallet", fail_wallet)
+
+    reserved = await completion._ensure_completion_tool_image_wallet_budget(  # noqa: SLF001
+        user_id="user-1",
+        task_id="comp-free",
+    )
+
+    assert reserved == 0
+
+
 def test_completion_tool_image_budget_converts_to_image_tokens() -> None:
     assert (
         completion._image_output_tokens_for_budget(  # noqa: SLF001
@@ -295,11 +348,17 @@ def test_completion_tool_image_budget_converts_to_image_tokens() -> None:
     )
 
 
-def test_completion_completed_response_marks_billable_partial_before_local_work() -> None:
+def test_completion_completed_response_marks_billable_partial_before_local_work() -> (
+    None
+):
     source = inspect.getsource(completion.run_completion)
     first_completed = source.index('elif ev_type == "response.completed":')
-    first_block = source[first_completed : source.index("elif ev_type in {", first_completed)]
-    second_completed = source.index('elif ev_type == "response.completed":', first_completed + 1)
+    first_block = source[
+        first_completed : source.index("elif ev_type in {", first_completed)
+    ]
+    second_completed = source.index(
+        'elif ev_type == "response.completed":', first_completed + 1
+    )
     second_block = source[
         second_completed : source.index("elif ev_type in {", second_completed)
     ]
@@ -402,7 +461,9 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
     submit_failure_source = inspect.getsource(  # noqa: SLF001
         video_generation._fail_before_submit
     )
-    run_source = inspect.getsource(video_generation.run_video_generation)
+    run_source = inspect.getsource(
+        video_generation._run_video_generation_with_lease  # noqa: SLF001
+    )
 
     release_snippet = (
         "_release_provider_slot(redis, release_provider_name, generation.id)"
@@ -438,7 +499,9 @@ def test_storyboard_concat_cleans_tempdir_when_ffmpeg_times_out(
     tmp_path,
 ) -> None:
     monkeypatch.setattr(storyboard_assembly.tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(storyboard_assembly.shutil, "which", lambda _name: "/bin/ffmpeg")
+    monkeypatch.setattr(
+        storyboard_assembly.shutil, "which", lambda _name: "/bin/ffmpeg"
+    )
 
     def timeout_run(*args: Any, **kwargs: Any):
         raise subprocess.TimeoutExpired(
@@ -523,9 +586,13 @@ async def test_video_generation_fail_before_submit_releases_acquired_slot(
         def __init__(self, row: Any) -> None:
             self.row = row
             self.commits = 0
+            self.added: list[Any] = []
 
         async def execute(self, _statement: Any) -> Result:
             return Result(self.row)
+
+        def add(self, value: Any) -> None:
+            self.added.append(value)
 
         async def commit(self) -> None:
             self.commits += 1
@@ -559,9 +626,7 @@ async def test_video_generation_fail_before_submit_releases_acquired_slot(
     async def fake_publish(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def fake_release(
-        _redis: Any, provider_name: str, task_id: str
-    ) -> None:
+    async def fake_release(_redis: Any, provider_name: str, task_id: str) -> None:
         released.append((provider_name, task_id))
 
     monkeypatch.setattr(video_generation, "SessionLocal", lambda: SessionCtx(row))
@@ -579,6 +644,47 @@ async def test_video_generation_fail_before_submit_releases_acquired_slot(
 
 
 @pytest.mark.asyncio
+async def test_video_generation_stale_epoch_does_not_release_current_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def scalar_one_or_none(self) -> None:
+            return None
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    released: list[tuple[str, str]] = []
+
+    async def fake_release(
+        _redis: Any,
+        provider_name: str,
+        task_id: str,
+    ) -> None:
+        released.append((provider_name, task_id))
+
+    monkeypatch.setattr(video_generation, "SessionLocal", Session)
+    monkeypatch.setattr(video_generation, "_release_provider_slot", fake_release)
+
+    await video_generation._fail_before_submit(  # noqa: SLF001
+        object(),
+        "video-1",
+        RuntimeError("stale worker"),
+        provider_name="volcano-main",
+        submission_epoch=1,
+    )
+
+    assert released == []
+
+
+@pytest.mark.asyncio
 async def test_video_provider_slot_reacquire_refreshes_same_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -592,7 +698,9 @@ async def test_video_provider_slot_reacquire_refreshes_same_task(
         async def set(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
 
-        async def zremrangebyscore(self, key: str, _start: float, cutoff: float) -> None:
+        async def zremrangebyscore(
+            self, key: str, _start: float, cutoff: float
+        ) -> None:
             self.zsets[key] = {
                 member: score
                 for member, score in self.zsets.get(key, {}).items()
@@ -662,9 +770,12 @@ async def test_video_submit_cache_preserves_provider_metadata() -> None:
 
     assert redis.ttl == video_generation._SUBMIT_RESULT_CACHE_TTL_S  # noqa: SLF001
     assert cached is not None
-    assert video_generation._cached_submit_result(  # noqa: SLF001
-        cached
-    ).provider_task_id == "upstream-1"
+    assert (
+        video_generation._cached_submit_result(  # noqa: SLF001
+            cached
+        ).provider_task_id
+        == "upstream-1"
+    )
     assert cached.provider_name == "volcano-main"
     assert cached.provider_kind == "volcano"
 
@@ -697,9 +808,7 @@ async def test_run_video_generation_releases_lease_on_terminal_return(
     async def fake_acquire(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
-    async def fake_release(
-        _redis: Any, task_id: str, token: str
-    ) -> None:
+    async def fake_release(_redis: Any, task_id: str, token: str) -> None:
         released.append((task_id, token))
 
     monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
@@ -746,9 +855,7 @@ async def test_run_video_poll_releases_lease_when_submit_is_requeued(
     async def fake_enqueue(_redis: Any, task_id: str, **kwargs: Any) -> None:
         enqueued.append((task_id, kwargs))
 
-    async def fake_release(
-        _redis: Any, task_id: str, token: str
-    ) -> None:
+    async def fake_release(_redis: Any, task_id: str, token: str) -> None:
         released.append((task_id, token))
 
     monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
@@ -799,8 +906,7 @@ async def test_video_poll_window_exhaustion_continues_running_provider_task(
         progress_stage="rendering",
         progress_pct=20,
         poll_count=video_generation._MAX_POLL_COUNT,  # noqa: SLF001
-        submitted_at=now
-        - timedelta(seconds=video_generation._MAX_POLL_DURATION_S + 5),  # noqa: SLF001
+        submitted_at=now - timedelta(seconds=video_generation._MAX_POLL_DURATION_S + 5),  # noqa: SLF001
         upstream_response={},
         next_poll_at=None,
         error_code="poll_timeout",
@@ -989,9 +1095,7 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
     async def fake_acquire(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
-    async def fake_release(
-        _redis: Any, task_id: str, token: str
-    ) -> None:
+    async def fake_release(_redis: Any, task_id: str, token: str) -> None:
         released.append((task_id, token))
 
     async def fake_load_submit_result(_redis: Any, task_id: str) -> Any:
@@ -1003,9 +1107,6 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
 
     async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("unexpected upstream submit path")
-
-    async def fake_provider_for_generation(_generation: Any) -> Any:
-        return SimpleNamespace(name="volcano-main", kind="volcano", concurrency=1)
 
     async def fake_acquire_provider_slot(
         _redis: Any,
@@ -1024,10 +1125,10 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
 
     monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
     monkeypatch.setattr(video_generation, "_release_lease", fake_release)
-    monkeypatch.setattr(video_generation, "_load_submit_result", fake_load_submit_result)
     monkeypatch.setattr(
-        video_generation, "_provider_for_generation", fake_provider_for_generation
+        video_generation, "_load_submit_result", fake_load_submit_result
     )
+    monkeypatch.setattr(video_generation, "_provider_for_generation", fail_if_called)
     monkeypatch.setattr(
         video_generation, "_acquire_provider_slot", fake_acquire_provider_slot
     )
@@ -1041,7 +1142,7 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
 
     assert row.provider_task_id == "upstream-1"
     assert row.status == "submitted"
-    assert acquired_slots == [("volcano-main", 1, "video-1")]
+    assert acquired_slots == []
     assert enqueued == ["video-1"]
     assert released and released[0][0] == "video-1"
 
@@ -1296,7 +1397,9 @@ def test_generation_attempt_update_can_guard_current_status() -> None:
 def test_generation_success_write_requires_running_status() -> None:
     source = inspect.getsource(generation.run_generation)
     marker = "parent_upstream_request_for_bonus = dict(upstream_req)"
-    start = source.index("status=GenerationStatus.SUCCEEDED.value", source.index(marker))
+    start = source.index(
+        "status=GenerationStatus.SUCCEEDED.value", source.index(marker)
+    )
     update_start = source.rindex("_generation_attempt_update(", 0, start)
     update_end = source.index(").values(", update_start)
     success_update = source[update_start:update_end]
@@ -1340,7 +1443,9 @@ def test_generation_prequeue_terminal_writes_guard_queued_status() -> None:
 
 def test_completion_max_attempts_failure_releases_hold() -> None:
     source = inspect.getsource(completion.run_completion)
-    start = source.index('err_code = "max_attempts_exceeded"')
+    helper = inspect.getsource(completion._completion_preflight_failure)
+    assert '"max_attempts_exceeded"' in helper
+    start = source.index("if preflight_failure is not None:")
     end = source.index("return", start)
     branch = source[start:end]
 
@@ -1375,9 +1480,9 @@ def test_completion_cancel_branch_checks_rowcount_before_message_update() -> Non
         "msg_c = await session.get(Message, message_id)"
     )
     assert "except _CompletionEpochSuperseded as stale_exc:" in branch
-    assert branch.index("except _CompletionEpochSuperseded as stale_exc:") < branch.index(
-        "except Exception as db_exc:"
-    )
+    assert branch.index(
+        "except _CompletionEpochSuperseded as stale_exc:"
+    ) < branch.index("except Exception as db_exc:")
 
 
 def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:
@@ -1442,7 +1547,9 @@ async def test_memory_llm_extract_logs_usage(
     async def fake_get_pool() -> Pool:
         return Pool()
 
-    async def fake_responses_call(body: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    async def fake_responses_call(
+        body: dict[str, Any], **kwargs: Any
+    ) -> dict[str, Any]:
         assert kwargs["endpoint_label"] == "responses_memory_extract"
         assert body["store"] is False
         return {

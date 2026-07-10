@@ -53,6 +53,7 @@ type Draft = {
   priority: number;
   weight: number;
   concurrency: number;
+  supports_idempotency: boolean;
   proxy: string;
   models: ModelDraft[];
 };
@@ -315,6 +316,7 @@ function toDraft(item: VideoProviderItemOut): Draft {
     priority: item.priority,
     weight: item.weight,
     concurrency: item.concurrency,
+    supports_idempotency: item.supports_idempotency,
     proxy: item.proxy ?? "",
     models: modelsToRows(item.models),
   };
@@ -331,6 +333,7 @@ function emptyVolcanoDraft(): Draft {
     priority: 100,
     weight: 1,
     concurrency: 10,
+    supports_idempotency: false,
     proxy: "",
     models: volcanoModelDrafts(),
   };
@@ -347,6 +350,7 @@ function emptyVolcanoThirdPartyDraft(): Draft {
     priority: 100,
     weight: 1,
     concurrency: 10,
+    supports_idempotency: false,
     proxy: "",
     models: volcanoModelDrafts(),
   };
@@ -363,6 +367,7 @@ function emptyVolcanoNewApiDraft(): Draft {
     priority: 100,
     weight: 1,
     concurrency: 10,
+    supports_idempotency: false,
     proxy: "",
     models: volcanoNewApiModelDrafts(),
   };
@@ -379,6 +384,7 @@ function emptyDashScopeDraft(): Draft {
     priority: 100,
     weight: 1,
     concurrency: 2,
+    supports_idempotency: false,
     proxy: "",
     models: happyHorseModelDrafts(),
   };
@@ -395,6 +401,7 @@ function emptyVeoDraft(): Draft {
     priority: 80,
     weight: 1,
     concurrency: 2,
+    supports_idempotency: false,
     proxy: "",
     models: veoModelDrafts(),
   };
@@ -411,6 +418,7 @@ function emptyOmniFlashDraft(): Draft {
     priority: 90,
     weight: 1,
     concurrency: 2,
+    supports_idempotency: false,
     proxy: "",
     models: omniFlashModelDrafts(),
   };
@@ -427,6 +435,7 @@ function emptyFakeDraft(): Draft {
     priority: 10,
     weight: 1,
     concurrency: 1,
+    supports_idempotency: true,
     proxy: "",
     models: fakeModelDrafts(),
   };
@@ -862,6 +871,7 @@ export function VideoProvidersPanel() {
         priority: Number(draft.priority) || 0,
         weight: Math.max(1, Number(draft.weight) || 1),
         concurrency: Math.max(1, Math.min(32, Number(draft.concurrency) || 1)),
+        supports_idempotency: draft.supports_idempotency,
         proxy: draft.proxy.trim() || null,
         models,
       });
@@ -1326,6 +1336,10 @@ function ProviderCard({
         <ProviderMetaItem label="权重" value={String(item.weight)} mono />
         <MetaSep />
         <ProviderMetaItem label="并发" value={String(item.concurrency)} mono />
+        <ProviderMetaItem
+          label="幂等提交"
+          value={item.supports_idempotency ? "已确认" : "未确认"}
+        />
         <MetaSep />
         <ProviderMetaItem label="代理" value={item.proxy || "直连"} mono />
       </div>
@@ -1700,6 +1714,16 @@ function ProviderEditor({
               type="checkbox"
               checked={draft.enabled}
               onChange={(event) => onPatch({ enabled: event.target.checked })}
+            />
+          </label>
+          <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
+            <span>确认支持幂等提交</span>
+            <input
+              type="checkbox"
+              checked={draft.supports_idempotency}
+              onChange={(event) =>
+                onPatch({ supports_idempotency: event.target.checked })
+              }
             />
           </label>
           <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">

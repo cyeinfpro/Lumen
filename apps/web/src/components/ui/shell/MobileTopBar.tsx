@@ -11,6 +11,8 @@ import { isDesktopRuntime } from "@/lib/desktop/runtime";
 export interface MobileTopBarProps {
   left?: ReactNode;
   right?: ReactNode;
+  below?: ReactNode;
+  showWallet?: boolean;
   /** 当页面滚动超过 10px 时才玻璃化。需要挂 sentinel：<div data-topbar-sentinel /> */
   glassOnScroll?: boolean;
   className?: string;
@@ -19,6 +21,8 @@ export interface MobileTopBarProps {
 export function MobileTopBar({
   left,
   right,
+  below,
+  showWallet = true,
   glassOnScroll = true,
   className = "",
 }: MobileTopBarProps) {
@@ -52,7 +56,7 @@ export function MobileTopBar({
       ref={ref}
       className={[
         "sticky top-0 left-0 right-0 safe-x",
-        "transition-[background-color,backdrop-filter,border-color] duration-200",
+        "transition-[background-color,backdrop-filter,border-color] duration-[var(--dur-normal)]",
         glass
           ? "bg-[var(--bg-0)]/72 backdrop-blur-xl mobile-perf-surface border-b border-[var(--border-subtle)]"
           : "bg-transparent border-b border-transparent",
@@ -63,15 +67,18 @@ export function MobileTopBar({
         paddingTop: "calc(env(safe-area-inset-top, 0px) + var(--system-banner-height, 0px))",
       }}
     >
-      <div className="relative flex min-h-11 items-center max-w-[640px] mx-auto px-3 gap-2 [@media(max-width:390px)]:gap-1.5">
+      <div className="relative flex min-h-12 items-center max-w-[640px] mx-auto px-3 gap-2 [@media(max-width:390px)]:gap-1.5">
         <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
           {left}
         </div>
         <div className="flex min-w-0 shrink-0 items-center justify-end gap-1 [@media(max-width:390px)]:gap-0.5">
-          <MobileWalletPill />
+          {showWallet ? <MobileWalletPill /> : null}
           {right}
         </div>
       </div>
+      {below ? (
+        <div className="mx-auto max-w-[640px] px-3 pb-2">{below}</div>
+      ) : null}
     </header>
   );
 }

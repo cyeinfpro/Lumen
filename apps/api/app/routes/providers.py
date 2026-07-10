@@ -522,6 +522,7 @@ def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
         priority=provider.priority,
         weight=provider.weight,
         concurrency=provider.concurrency,
+        supports_idempotency=provider.supports_idempotency,
         proxy=provider.proxy_name,
         models=dict(provider.models or {}),
     )
@@ -662,6 +663,7 @@ async def update_video_providers(
             "priority": item.priority,
             "weight": max(1, item.weight),
             "concurrency": max(1, min(32, int(item.concurrency or 1))),
+            "supports_idempotency": item.supports_idempotency,
             "models": models,
         }
         if proxy_name:

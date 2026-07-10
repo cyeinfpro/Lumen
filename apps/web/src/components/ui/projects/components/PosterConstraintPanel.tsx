@@ -57,7 +57,7 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
       <InfoPanel title="文案切分">
         <p className="whitespace-pre-wrap break-words">{jsonValue(copyAnalysis)}</p>
       </InfoPanel>
-      <InfoPanel title="品牌资产">
+      <InfoPanel title="品牌素材">
         <p className="whitespace-pre-wrap break-words">{jsonValue(brandAssets)}</p>
       </InfoPanel>
       <InfoPanel title="选定母版">

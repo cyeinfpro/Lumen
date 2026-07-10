@@ -693,6 +693,7 @@ class VideoGenerationOut(BaseOut):
     status: str
     progress_stage: str
     progress_pct: int
+    submission_epoch: int = 0
     provider_name: str | None = None
     provider_kind: str | None = None
     est_token_upper: int
@@ -708,6 +709,7 @@ class VideoGenerationOut(BaseOut):
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
+    submit_started_at: datetime | None = None
     submitted_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -1363,6 +1365,7 @@ class AdminPricingBulkIn(BaseModel):
     model: str = Field(min_length=1, max_length=64)
     channel: str | None = Field(default=None, max_length=32)
     rates: AdminPricingBulkRatesIn
+    priority: int = Field(default=0, ge=-100_000, le=100_000)
     enabled: bool = True
     note: str | None = Field(default=None, max_length=500)
 
@@ -1394,6 +1397,7 @@ class PricingRuleOut(BaseOut):
     variant: str = "default"
     unit: PricingUnit
     price: MoneyOut
+    priority: int = 0
     enabled: bool
     note: str | None = None
     created_at: datetime
@@ -1413,6 +1417,7 @@ class PricingRuleUpsertIn(BaseModel):
     variant: str = Field(default="default", min_length=1, max_length=32)
     unit: PricingUnit
     price_rmb: str = Field(min_length=1, max_length=32)
+    priority: int = Field(default=0, ge=-100_000, le=100_000)
     enabled: bool = True
     note: str | None = Field(default=None, max_length=500)
 
@@ -1914,6 +1919,7 @@ class VideoProviderItemOut(BaseModel):
     priority: int = 0
     weight: int = 1
     concurrency: int = 1
+    supports_idempotency: bool = False
     proxy: str | None = None
     models: dict[str, str] = Field(default_factory=dict)
 
@@ -1934,6 +1940,7 @@ class VideoProviderItemIn(BaseModel):
     priority: int = 0
     weight: int = 1
     concurrency: int = 1
+    supports_idempotency: bool = False
     proxy: str | None = None
     models: dict[str, str] = Field(default_factory=dict)
 

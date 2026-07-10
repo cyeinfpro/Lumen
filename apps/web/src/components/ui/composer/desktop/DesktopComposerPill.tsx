@@ -1,10 +1,6 @@
 "use client";
 
-// Darkroom 桌面端 Composer Pill（≥768px）：
-// - fixed bottom-6 中间居中，max-w 920，折叠 60 / 展开 ≤320
-// - 宽高比 & 推理强度用 Popover（不是 BottomSheet）
-// - 键盘快捷键：⌘↵ 发送、/ 展开
-// - 蓝本：../mobile/MobileComposerPill.tsx
+// 桌面 Composer：56px 核心输入层 + 执行摘要 + Popover 高级设置。
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -33,12 +29,11 @@ import {
   Zap,
 } from "lucide-react";
 import {
-  Chip,
   SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
 import { useChatStore, type ReasoningEffort } from "@/store/useChatStore";
-import type { Quality, RenderQualityChoice } from "@/lib/types";
+import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
 import { enhancePrompt } from "@/lib/apiClient";
@@ -52,7 +47,6 @@ import { useHaptic } from "@/hooks/useHaptic";
 import { DURATION, EASE, SPRING } from "@/lib/motion";
 import {
   DesktopPopover,
-  PopoverList,
 } from "./DesktopPopover";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
@@ -149,8 +143,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [aspectPopoverOpen, setAspectPopoverOpen] = useState(false);
-  const [reasoningPopoverOpen, setReasoningPopoverOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [shutterBurst, setShutterBurst] = useState(false);
   const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
     null,
@@ -162,8 +155,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const aspectTriggerRef = useRef<HTMLDivElement | null>(null);
-  const reasoningTriggerRef = useRef<HTMLDivElement | null>(null);
+  const advancedTriggerRef = useRef<HTMLDivElement | null>(null);
   const isComposingRef = useRef(false);
   const submittingRef = useRef(false);
   const didMountRef = useRef(false);
@@ -233,8 +225,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       }
 
       setExpanded(false);
-      setAspectPopoverOpen(false);
-      setReasoningPopoverOpen(false);
+      setAdvancedOpen(false);
       textareaRef.current?.blur();
     };
 
@@ -529,31 +520,32 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       onDragLeave={handleDragLeave}
       onDrop={(e) => void handleDrop(e)}
       initial={false}
-      animate={{ height: expanded ? "auto" : 48 }}
+      animate={{ height: expanded ? "auto" : 56 }}
       transition={SPRING.sheet}
       className={cn(
-        "fixed bottom-4 left-1/2 -translate-x-1/2",
-        "w-[calc(100%-40px)] max-w-[860px]",
+        "fixed bottom-5 -translate-x-1/2",
+        "max-w-[var(--content-composer)]",
         "overflow-visible",
-        "rounded-[var(--radius-panel)] backdrop-blur-xl",
-        "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
-        "border transition-[border-color,box-shadow] duration-200",
+        "rounded-[var(--radius-sheet)]",
+        "bg-[var(--bg-1)]/96",
+        "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
         isDragActive
-          ? "border-[var(--amber-400)] shadow-[var(--shadow-amber)]"
-          : isImageMode
-          ? "border-[var(--border-amber)]"
-          : "border-[var(--border-subtle)]",
+          ? "border-[var(--accent)]"
+          : "border-[var(--border)] focus-within:border-[var(--accent-border)]",
         "shadow-[var(--shadow-2)]",
       )}
       style={{
+        left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
+        width:
+          "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))",
         zIndex: expanded
           ? ("var(--z-composer-expanded, 45)" as unknown as number)
           : ("var(--z-composer, 40)" as unknown as number),
       }}
     >
-      {/* 折叠态：单行 60px */}
+      {/* 折叠态：核心操作保持在一行 */}
       {!expanded && (
-        <div className="flex items-center h-[48px] px-3 gap-2">
+        <div className="flex h-14 items-center gap-2 px-2.5">
           <IconBtn
             label="添加参考图"
             onClick={openFilePicker}
@@ -579,13 +571,15 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             )}
           </IconBtn>
 
+          <ModeSegment value={mode} onChange={(value) => setMode(value)} />
+
           <button
             type="button"
             onClick={expandAndFocus}
             aria-label="展开输入框"
             aria-expanded={false}
             className={cn(
-              "flex-1 min-w-0 h-8 px-3 text-left rounded-[var(--radius-card)] cursor-text",
+              "flex-1 min-w-0 h-10 px-3 text-left rounded-[var(--radius-control)] cursor-text",
               "bg-transparent transition-colors",
               "hover:bg-[var(--bg-2)]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
@@ -597,7 +591,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                 text ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
               )}
             >
-              {text || "给 Lumen 一句话… (按 / 展开)"}
+              {text || "描述你想创作的内容…"}
             </span>
           </button>
 
@@ -842,7 +836,12 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             />
           </div>
 
-          <ExecutionSummaryBar summary={executionSummary} />
+          <div ref={advancedTriggerRef}>
+            <ExecutionSummaryBar
+              summary={executionSummary}
+              onAdjust={() => setAdvancedOpen((value) => !value)}
+            />
+          </div>
 
           {/* 工具条 */}
           <div
@@ -879,219 +878,6 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
 
             <ModeSegment value={mode} onChange={(v) => setMode(v)} />
 
-            {/* 尺寸下拉（image mode） */}
-            {isImageMode && (
-              <div className="relative shrink-0">
-                <select
-                  aria-label="尺寸选择"
-                  value={quality}
-                  onChange={(event) => setQuality(event.target.value as Quality)}
-                  className={cn(
-                    "h-8 min-w-[68px] appearance-none rounded-full pl-3 pr-7",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    "text-[11px] text-[var(--fg-1)] tabular-nums",
-                    "hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)]",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {QUALITY_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                  aria-hidden
-                />
-              </div>
-            )}
-
-            {/* 渲染质量下拉（image mode） */}
-            {isImageMode && (
-              <div className="relative shrink-0">
-                <select
-                  aria-label="渲染质量"
-                  value={renderQuality}
-                  onChange={(event) =>
-                    setRenderQuality(event.target.value as RenderQualityChoice)
-                  }
-                  className={cn(
-                    "h-8 min-w-[66px] appearance-none rounded-full pl-3 pr-7",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    "text-[11px] text-[var(--fg-1)]",
-                    "hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)]",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                >
-                  {RENDER_QUALITY_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                  aria-hidden
-                />
-              </div>
-            )}
-
-            {/* 宽高比 Popover trigger（image mode） */}
-            {isImageMode && (
-              <div ref={aspectTriggerRef} className="relative shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setAspectPopoverOpen((v) => !v)}
-                  aria-haspopup="dialog"
-                  aria-expanded={aspectPopoverOpen}
-                  aria-label={`宽高比 ${aspect}`}
-                  className={cn(
-                    "inline-flex items-center gap-1 h-8 px-2.5 rounded-full",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    "text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)]",
-                    "whitespace-nowrap transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {aspect}
-                  <ChevronDown className="w-3 h-3" aria-hidden />
-                </button>
-                <DesktopPopover
-                  open={aspectPopoverOpen}
-                  onClose={() => setAspectPopoverOpen(false)}
-                  anchorRef={aspectTriggerRef}
-                  ariaLabel="选择宽高比"
-                  align="left"
-                  className="max-h-[430px]"
-                >
-                  <AspectRatioPicker
-                    value={aspect}
-                    onChange={setAspectRatio}
-                    onClose={() => setAspectPopoverOpen(false)}
-                  />
-                </DesktopPopover>
-              </div>
-            )}
-
-            {/* 图像数量下拉（image mode） */}
-            {isImageMode && (
-              <div className="relative shrink-0">
-                <select
-                  aria-label="图像数量"
-                  value={count}
-                  onChange={(event) => setImageCount(Number(event.target.value))}
-                  className={cn(
-                    "h-8 min-w-[62px] appearance-none rounded-full pl-3 pr-7",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    "text-[11px] text-[var(--fg-1)] tabular-nums",
-                    "hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)]",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {COUNT_OPTIONS.map((n) => (
-                    <option key={n} value={n}>
-                      x{n}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-                  aria-hidden
-                />
-              </div>
-            )}
-
-            {/* 推理强度 Popover trigger（chat mode） */}
-            {!isImageMode && (
-              <div ref={reasoningTriggerRef} className="relative shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setReasoningPopoverOpen((v) => !v)}
-                  aria-haspopup="dialog"
-                  aria-expanded={reasoningPopoverOpen}
-                  aria-label="推理强度"
-                  className={cn(
-                    "inline-flex items-center gap-1 h-8 px-2.5 rounded-full",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    "text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)]",
-                    "whitespace-nowrap transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                >
-                  {REASONING_OPTIONS.find((r) => r.value === reasoningEffort)?.label ??
-                    "默认"}
-                  <ChevronDown className="w-3 h-3" aria-hidden />
-                </button>
-                <DesktopPopover
-                  open={reasoningPopoverOpen}
-                  onClose={() => setReasoningPopoverOpen(false)}
-                  anchorRef={reasoningTriggerRef}
-                  ariaLabel="选择推理强度"
-                  align="left"
-                >
-                  <PopoverList
-                    title="推理强度"
-                    items={REASONING_OPTIONS.map((o) => ({
-                      key: o.value,
-                      label: o.label,
-                      hint: o.hint,
-                      selected: o.value === reasoningEffort,
-                      onSelect: () => {
-                        setReasoningEffort(o.value);
-                        setReasoningPopoverOpen(false);
-                      },
-                    }))}
-                  />
-                </DesktopPopover>
-              </div>
-            )}
-
-            {!isImageMode && (
-              <>
-                <Chip
-                  active={webSearch}
-                  onClick={() => setWebSearch(!webSearch)}
-                  icon={<Globe2 className="w-3.5 h-3.5" aria-hidden />}
-                >
-                  搜索
-                </Chip>
-                <Chip
-                  active={fileSearch}
-                  onClick={() => setFileSearch(!fileSearch)}
-                  icon={<FileSearch className="w-3.5 h-3.5" aria-hidden />}
-                  title="需要配置 vector store"
-                >
-                  文件
-                </Chip>
-                <Chip
-                  active={codeInterpreter}
-                  onClick={() => setCodeInterpreter(!codeInterpreter)}
-                  icon={<Code2 className="w-3.5 h-3.5" aria-hidden />}
-                >
-                  代码
-                </Chip>
-                <Chip
-                  active={imageGeneration}
-                  onClick={() => setImageGeneration(!imageGeneration)}
-                  icon={<ImagePlus className="w-3.5 h-3.5" aria-hidden />}
-                >
-                  生图
-                </Chip>
-              </>
-            )}
-
-            <Chip
-              active={fast}
-              onClick={() => setFast(!fast)}
-              icon={<Zap className="w-3.5 h-3.5" aria-hidden />}
-            >
-              Fast
-            </Chip>
-
             {shouldShowCount && (
               <span
                 data-inline
@@ -1117,6 +903,40 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               size="lg"
             />
           </div>
+
+          <DesktopPopover
+            open={advancedOpen}
+            onClose={() => setAdvancedOpen(false)}
+            anchorRef={advancedTriggerRef}
+            ariaLabel="高级执行设置"
+            align="right"
+            className="w-[min(720px,calc(100vw-32px))] max-h-[min(72vh,620px)] p-0"
+          >
+            <AdvancedComposerSettings
+              mode={mode}
+              quality={quality}
+              onQualityChange={setQuality}
+              renderQuality={renderQuality}
+              onRenderQualityChange={setRenderQuality}
+              aspect={aspect}
+              onAspectChange={setAspectRatio}
+              count={count}
+              onCountChange={setImageCount}
+              reasoningEffort={reasoningEffort ?? "medium"}
+              onReasoningEffortChange={setReasoningEffort}
+              webSearch={webSearch}
+              onWebSearchChange={setWebSearch}
+              fileSearch={fileSearch}
+              onFileSearchChange={setFileSearch}
+              codeInterpreter={codeInterpreter}
+              onCodeInterpreterChange={setCodeInterpreter}
+              imageGeneration={imageGeneration}
+              onImageGenerationChange={setImageGeneration}
+              fast={fast}
+              onFastChange={setFast}
+              onClose={() => setAdvancedOpen(false)}
+            />
+          </DesktopPopover>
         </div>
       )}
 
@@ -1169,10 +989,10 @@ function IconBtn({
       aria-label={label}
       title={label}
       className={cn(
-        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-full",
+        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-[var(--radius-control)]",
         "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-        "active:scale-[0.94] transition-all duration-150",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
+        "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         "disabled:opacity-40 disabled:cursor-not-allowed",
       )}
     >
@@ -1214,7 +1034,7 @@ function SendButton({
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
                 ? "shadow-[var(--shadow-amber)]"
-                : "shadow-[var(--shadow-shutter)]",
+                : "shadow-[var(--shadow-1)]",
             ].join(" ")
           : "bg-[var(--bg-3)] text-[var(--fg-3)] cursor-not-allowed",
       )}
@@ -1263,5 +1083,309 @@ function ModeSegment({
         ]}
       />
     </div>
+  );
+}
+
+function AdvancedComposerSettings({
+  mode,
+  quality,
+  onQualityChange,
+  renderQuality,
+  onRenderQualityChange,
+  aspect,
+  onAspectChange,
+  count,
+  onCountChange,
+  reasoningEffort,
+  onReasoningEffortChange,
+  webSearch,
+  onWebSearchChange,
+  fileSearch,
+  onFileSearchChange,
+  codeInterpreter,
+  onCodeInterpreterChange,
+  imageGeneration,
+  onImageGenerationChange,
+  fast,
+  onFastChange,
+  onClose,
+}: {
+  mode: ComposerMode;
+  quality: Quality;
+  onQualityChange: (value: Quality) => void;
+  renderQuality: RenderQualityChoice;
+  onRenderQualityChange: (value: RenderQualityChoice) => void;
+  aspect: AspectRatio;
+  onAspectChange: (value: AspectRatio) => void;
+  count: number;
+  onCountChange: (value: number) => void;
+  reasoningEffort: ReasoningEffort;
+  onReasoningEffortChange: (value: ReasoningEffort) => void;
+  webSearch: boolean;
+  onWebSearchChange: (value: boolean) => void;
+  fileSearch: boolean;
+  onFileSearchChange: (value: boolean) => void;
+  codeInterpreter: boolean;
+  onCodeInterpreterChange: (value: boolean) => void;
+  imageGeneration: boolean;
+  onImageGenerationChange: (value: boolean) => void;
+  fast: boolean;
+  onFastChange: (value: boolean) => void;
+  onClose: () => void;
+}) {
+  const imageMode = mode === "image";
+
+  return (
+    <div className="flex min-h-0 flex-col">
+      <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
+        <div>
+          <p className="text-[13px] font-semibold text-[var(--fg-0)]">
+            执行设置
+          </p>
+          <p className="mt-0.5 text-[11px] text-[var(--fg-2)]">
+            仅在需要时调整，当前选择会同步到执行摘要。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="关闭执行设置"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          <X className="h-4 w-4" aria-hidden />
+        </button>
+      </div>
+
+      <div className="min-h-0 overflow-y-auto p-4">
+        {imageMode ? (
+          <div className="grid gap-5 lg:grid-cols-[minmax(220px,0.72fr)_minmax(360px,1.28fr)]">
+            <div className="grid content-start gap-4">
+              <section className="grid gap-2" aria-labelledby="image-output-settings">
+                <h3
+                  id="image-output-settings"
+                  className="text-[11px] font-medium text-[var(--fg-2)]"
+                >
+                  输出
+                </h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <SettingSelect
+                    label="尺寸"
+                    value={quality}
+                    onChange={(value) => onQualityChange(value as Quality)}
+                    options={QUALITY_OPTIONS}
+                  />
+                  <SettingSelect
+                    label="质量"
+                    value={renderQuality}
+                    onChange={(value) =>
+                      onRenderQualityChange(value as RenderQualityChoice)
+                    }
+                    options={RENDER_QUALITY_OPTIONS}
+                  />
+                  <SettingSelect
+                    label="数量"
+                    value={String(count)}
+                    onChange={(value) => onCountChange(Number(value))}
+                    options={COUNT_OPTIONS.map((value) => ({
+                      value: String(value),
+                      label: `${value} 张`,
+                    }))}
+                  />
+                </div>
+              </section>
+
+              <section className="grid gap-2" aria-labelledby="image-speed-settings">
+                <h3
+                  id="image-speed-settings"
+                  className="text-[11px] font-medium text-[var(--fg-2)]"
+                >
+                  执行
+                </h3>
+                <ToggleRow
+                  active={fast}
+                  onClick={() => onFastChange(!fast)}
+                  icon={<Zap className="h-4 w-4" aria-hidden />}
+                  label="Fast"
+                  detail="优先更快完成"
+                />
+              </section>
+            </div>
+
+            <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56">
+              <AspectRatioPicker
+                value={aspect}
+                onChange={onAspectChange}
+                className="w-full max-w-none"
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-5">
+            <section className="grid gap-2" aria-labelledby="reasoning-settings">
+              <h3
+                id="reasoning-settings"
+                className="text-[11px] font-medium text-[var(--fg-2)]"
+              >
+                推理强度
+              </h3>
+              <div className="grid gap-2 sm:grid-cols-5">
+                {REASONING_OPTIONS.map((option) => {
+                  const active = option.value === reasoningEffort;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => onReasoningEffortChange(option.value)}
+                      aria-pressed={active}
+                      className={cn(
+                        "min-h-14 rounded-[var(--radius-card)] border px-3 py-2 text-left",
+                        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+                        active
+                          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
+                          : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
+                      )}
+                    >
+                      <span className="block text-[12px] font-medium">
+                        {option.label}
+                      </span>
+                      <span className="mt-0.5 block text-[10px] text-[var(--fg-2)]">
+                        {option.hint}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="grid gap-2" aria-labelledby="tool-settings">
+              <h3
+                id="tool-settings"
+                className="text-[11px] font-medium text-[var(--fg-2)]"
+              >
+                工具
+              </h3>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <ToggleRow
+                  active={webSearch}
+                  onClick={() => onWebSearchChange(!webSearch)}
+                  icon={<Globe2 className="h-4 w-4" aria-hidden />}
+                  label="联网搜索"
+                  detail="获取最新网页信息"
+                />
+                <ToggleRow
+                  active={fileSearch}
+                  onClick={() => onFileSearchChange(!fileSearch)}
+                  icon={<FileSearch className="h-4 w-4" aria-hidden />}
+                  label="文件检索"
+                  detail="搜索已配置资料"
+                />
+                <ToggleRow
+                  active={codeInterpreter}
+                  onClick={() => onCodeInterpreterChange(!codeInterpreter)}
+                  icon={<Code2 className="h-4 w-4" aria-hidden />}
+                  label="代码工具"
+                  detail="运行分析与计算"
+                />
+                <ToggleRow
+                  active={imageGeneration}
+                  onClick={() => onImageGenerationChange(!imageGeneration)}
+                  icon={<ImagePlus className="h-4 w-4" aria-hidden />}
+                  label="对话生图"
+                  detail="允许回答中生成图片"
+                />
+                <ToggleRow
+                  active={fast}
+                  onClick={() => onFastChange(!fast)}
+                  icon={<Zap className="h-4 w-4" aria-hidden />}
+                  label="Fast"
+                  detail="优先更快完成"
+                />
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: ReadonlyArray<{ value: string; label: string }>;
+}) {
+  return (
+    <label className="grid gap-1.5">
+      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
+      <span className="relative">
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-10 w-full appearance-none rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 pr-8 text-[12px] text-[var(--fg-0)] outline-none transition-colors hover:bg-[var(--bg-2)] focus-visible:shadow-[var(--ring)]"
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <ChevronDown
+          className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]"
+          aria-hidden
+        />
+      </span>
+    </label>
+  );
+}
+
+function ToggleRow({
+  active,
+  onClick,
+  icon,
+  label,
+  detail,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  detail: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "flex min-h-14 items-center gap-3 rounded-[var(--radius-card)] border px-3 text-left",
+        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+        active
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
+      )}
+    >
+      <span
+        className={cn(
+          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)]",
+          active
+            ? "bg-[var(--accent)] text-[var(--accent-on)]"
+            : "bg-[var(--bg-2)] text-[var(--fg-2)]",
+        )}
+      >
+        {icon}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[12px] font-medium">{label}</span>
+        <span className="mt-0.5 block truncate text-[10px] text-[var(--fg-2)]">
+          {detail}
+        </span>
+      </span>
+    </button>
   );
 }

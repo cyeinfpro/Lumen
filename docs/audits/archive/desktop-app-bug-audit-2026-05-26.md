@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@8a0a835cca4dc890032e90bba5ff00d466070ae7"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：桌面端 `v1.1.64` 工作树。
+>
+> **记录提交**：`8a0a835cca4dc890032e90bba5ff00d466070ae7`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # Lumen 桌面端（Mac / Windows）Bug 与稳健性审计报告
 
 - **审计范围**：本次审计聚焦最近一轮桌面端改动（基于工作树未提交内容 + 最近的 `desktop-release` / `desktop-app-design` 提交序列）

@@ -132,6 +132,36 @@ async def test_post_with_retry_honors_retry_after_header(
 
 
 @pytest.mark.asyncio
+async def test_post_with_retry_claims_quota_for_every_physical_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            return httpx.Response(503 if self.calls == 1 else 200)
+
+    async def before_attempt(attempt: int) -> None:
+        attempts.append(attempt)
+
+    monkeypatch.setattr(upstream.asyncio, "sleep", lambda _delay: _done())
+
+    response = await upstream._post_with_retry(
+        client=_Client(),  # type: ignore[arg-type]
+        url="https://example.invalid/v1/images/generations",
+        headers={},
+        json_body={"prompt": "test"},
+        before_attempt=before_attempt,
+    )
+
+    assert response.status_code == 200
+    assert attempts == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_reference_url_live_resolves_public_target_before_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -515,6 +545,45 @@ async def test_responses_image_retry_honors_429_budget(
 
     assert calls == 5
     assert sleeps == [10.0, 10.0, 10.0, 10.0]
+
+
+@pytest.mark.asyncio
+async def test_responses_image_retry_claims_each_physical_stream_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims: list[int] = []
+    calls = 0
+
+    async def fake_stream(**_kwargs: Any) -> tuple[str, str | None]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise upstream.UpstreamError(
+                "temporary failure",
+                status_code=503,
+                error_code="server_error",
+            )
+        return "ZmFrZS1wbmc=", None
+
+    async def before_attempt(attempt: int) -> None:
+        claims.append(attempt)
+
+    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(upstream.asyncio, "sleep", lambda _delay: _done())
+
+    result = await upstream._responses_image_stream_with_retry(
+        prompt="test",
+        size="1024x1024",
+        action="generate",
+        images=None,
+        quality="high",
+        progress_callback=None,
+        use_httpx=False,
+        before_attempt=before_attempt,
+    )
+
+    assert result == ("ZmFrZS1wbmc=", None)
+    assert claims == [1, 2]
 
 
 async def _done() -> None:

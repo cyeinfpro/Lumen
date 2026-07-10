@@ -144,13 +144,13 @@ export function AspectRatioPicker({
                       "transition-[background-color,border-color,color,box-shadow] duration-200",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                       selected
-                        ? "border-[var(--border-amber)] bg-[linear-gradient(135deg,rgba(242,169,58,0.18),rgba(242,169,58,0.07)_48%,rgba(242,169,58,0.03))] text-[var(--amber-300)] shadow-[var(--shadow-amber)]"
-                        : "border-[var(--border-subtle)] bg-[var(--bg-2)]/80 text-[var(--fg-0)] hover:border-[var(--border-amber)] hover:bg-[var(--bg-3)]",
+                        ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                        : "border-[var(--border-subtle)] bg-[var(--bg-2)]/80 text-[var(--fg-0)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)]",
                     )}
                   >
                     {selected ? (
                       <span
-                        className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
+                        className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
                         aria-hidden
                       />
                     ) : null}

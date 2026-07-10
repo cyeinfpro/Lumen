@@ -1,3 +1,18 @@
+---
+baseline_commit: "working-tree@c163dfcc967145fd6a3ed16f7935c6c8dc2d94eb"
+status: archived
+resolved_by: null
+superseded_by: null
+---
+
+> **归档状态**：历史报告，不代表当前代码。
+>
+> **审计基线**：2026-06-29 未提交工作树快照。
+>
+> **记录提交**：`c163dfcc967145fd6a3ed16f7935c6c8dc2d94eb`。
+>
+> **索引**：[`docs/audits/README.md`](../README.md)。
+
 # 未提交改动审查报告
 
 审查范围：当前工作区全部未提交修改与新增文件。

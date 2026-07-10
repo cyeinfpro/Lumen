@@ -83,9 +83,9 @@ export function StreamErrorState({
     <StreamStatePanel
       icon={<AlertTriangle className="h-5 w-5" />}
       tone="warning"
-      eyebrow="资产库暂不可用"
+      eyebrow="素材库暂不可用"
       title="图库没有成功载入"
-      description="当前资产列表请求失败。筛选、搜索和已加载内容不会被清空，可以先重试，也可以回到创作页继续生成。"
+      description="当前素材列表请求失败。筛选、搜索和已加载内容不会被清空，可以先重试，也可以回到创作页继续生成。"
       primaryAction={
         <button
           type="button"
@@ -136,7 +136,7 @@ export function StreamNoResultsState({
       tone="neutral"
       eyebrow="没有匹配结果"
       title={label}
-      description="当前搜索或筛选条件太窄。清除条件后会回到完整资产流，也可以换一个提示词关键词继续搜索。"
+      description="当前搜索或筛选条件太窄。清除条件后会回到完整素材流，也可以换一个提示词关键词继续搜索。"
       primaryAction={
         <button
           type="button"
@@ -163,8 +163,8 @@ export function StreamNeverState() {
     <StreamStatePanel
       icon={<Images className="h-5 w-5" />}
       tone="accent"
-      eyebrow="资产流为空"
-      title="还没有作品进入资产库"
+      eyebrow="素材流为空"
+      title="还没有作品进入素材库"
       description="生成完成后的图片会自动沉淀到这里。之后可以按比例、参考图、Fast 模式筛选，也可以批量选择并创建分享链接。"
       primaryAction={
         <button
@@ -188,7 +188,7 @@ export function StreamNeverState() {
     >
       <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
         <StateFact label="生成" value="创作页出图" />
-        <StateFact label="管理" value="资产页筛选" />
+        <StateFact label="管理" value="素材页筛选" />
         <StateFact label="复用" value="批量分享与定位" />
       </div>
     </StreamStatePanel>

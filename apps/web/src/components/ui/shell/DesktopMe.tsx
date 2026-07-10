@@ -94,7 +94,7 @@ export function DesktopMe() {
                     "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
                     "flex items-center justify-center",
                     "type-card-title text-[var(--bg-0)]",
-                    "shadow-[var(--shadow-amber)]",
+                    "shadow-[var(--shadow-1)]",
                   )}
                   style={{ fontSize: "24px" }}
                 >

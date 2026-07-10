@@ -1167,6 +1167,7 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     from types import SimpleNamespace
 
     from app.routes import prompts
+    from lumen_core.pricing import CostBreakdown
 
     calls: dict[str, Any] = {}
 
@@ -1182,9 +1183,29 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     async def false_setting(_db: Any) -> bool:
         return False
 
-    async def estimate(*_args: Any, **kwargs: Any) -> int:
-        calls["estimate"] = kwargs
-        return 123
+    async def snapshot(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.setdefault("snapshots", []).append(kwargs)
+        return {"model": kwargs["model"]}
+
+    def breakdown(
+        _snapshot: dict[str, Any],
+        **kwargs: Any,
+    ) -> CostBreakdown:
+        calls.setdefault("breakdowns", []).append(kwargs)
+        return CostBreakdown(
+            input_cost_micro=100,
+            output_cost_micro=23,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=kwargs["rate_multiplier_x10000"],
+            total_cost_micro=123,
+            actual_cost_micro=123,
+            pricing_source="snapshot",
+        )
 
     async def hold(*_args: Any, **kwargs: Any) -> SimpleNamespace:
         calls["hold"] = kwargs
@@ -1196,7 +1217,12 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     monkeypatch.setattr(prompts, "_billing_enabled", true_setting)
     monkeypatch.setattr(prompts, "_billing_cache_aware", true_setting)
     monkeypatch.setattr(prompts, "_billing_allow_negative", false_setting)
-    monkeypatch.setattr(prompts.billing_core, "estimate_completion_cost", estimate)
+    monkeypatch.setattr(prompts.billing_core, "completion_pricing_snapshot", snapshot)
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "completion_breakdown_from_snapshot",
+        breakdown,
+    )
     monkeypatch.setattr(prompts.billing_core, "hold", hold)
     monkeypatch.setattr(prompts, "invalidate_balance_cache", invalidate)
 
@@ -1214,11 +1240,91 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     assert out is not None
     assert db.committed is True
     assert out.hold_amount_micro == 10_000
-    assert calls["estimate"]["rate_multiplier_x10000"] == 10_000
+    assert {item["model"] for item in calls["snapshots"]} == {"gpt-5.4", "gpt-5.5"}
+    assert all(
+        item["rate_multiplier_x10000"] == 10_000
+        for item in calls["breakdowns"]
+    )
     assert calls["hold"]["ref_type"] == "prompt_enhance"
     assert calls["hold"]["ref_id"] == out.request_id
     assert calls["hold"]["idempotency_key"] == f"prompt_enhance:hold:{out.request_id}"
+    assert len(calls["hold"]["meta"]["pricing_snapshots"]) == 3
     assert calls["invalidated"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_zero_rate_skips_preauthorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+    from lumen_core.pricing import CostBreakdown
+
+    calls: dict[str, Any] = {}
+
+    class Db:
+        committed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def true_setting(_db: Any) -> bool:
+        return True
+
+    async def false_setting(_db: Any) -> bool:
+        return False
+
+    async def snapshot(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"model": kwargs["model"]}
+
+    def breakdown(_snapshot: dict[str, Any], **kwargs: Any) -> CostBreakdown:
+        return CostBreakdown(
+            input_cost_micro=1,
+            output_cost_micro=1,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=kwargs["rate_multiplier_x10000"],
+            total_cost_micro=2,
+            actual_cost_micro=0,
+            pricing_source="snapshot",
+        )
+
+    async def fail_hold(*_args: Any, **_kwargs: Any) -> None:
+        calls["hold"] = True
+        raise AssertionError("zero-rate enhance must not reserve wallet balance")
+
+    monkeypatch.setattr(prompts, "_billing_enabled", true_setting)
+    monkeypatch.setattr(prompts, "_billing_cache_aware", true_setting)
+    monkeypatch.setattr(prompts, "_billing_allow_negative", false_setting)
+    monkeypatch.setattr(prompts.billing_core, "completion_pricing_snapshot", snapshot)
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "completion_breakdown_from_snapshot",
+        breakdown,
+    )
+    monkeypatch.setattr(prompts.billing_core, "hold", fail_hold)
+
+    db = Db()
+    out = await prompts._prepare_prompt_enhance_billing(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        SimpleNamespace(
+            id="user-1",
+            email="u@example.com",
+            account_mode="wallet",
+            billing_rate_multiplier=0,
+        ),
+    )
+
+    assert out is not None
+    assert out.rate_multiplier_x10000 == 0
+    assert out.hold_amount_micro == 0
+    assert db.committed is False
+    assert "hold" not in calls
 
 
 @pytest.mark.asyncio

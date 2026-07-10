@@ -106,7 +106,7 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
             { autoAlpha: 0.985 },
             {
               autoAlpha: 1,
-              duration: 0.18,
+              duration: 0.16,
               clearProps: "opacity,visibility",
             },
           );
@@ -114,12 +114,12 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
           if (pageItems.length > 0) {
             tl.fromTo(
               pageItems,
-              { autoAlpha: 0, y: 8 },
+              { autoAlpha: 0, y: 6 },
               {
                 autoAlpha: 1,
                 y: 0,
-                duration: 0.28,
-                stagger: { each: 0.02, from: "start" },
+                duration: 0.18,
+                stagger: { each: 0.01, from: "start" },
                 clearProps: "transform,opacity,visibility",
               },
               "<0.03",

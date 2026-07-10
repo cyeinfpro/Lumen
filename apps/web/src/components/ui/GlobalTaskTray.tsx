@@ -24,6 +24,7 @@ import { TaskCenter } from "./tray/TaskCenter";
 
 export function GlobalTaskTray() {
   const taskTrayMinimized = useUiStore((s) => s.taskTray.minimized);
+  const taskIslandMounted = useUiStore((s) => s.taskIslandMounted);
   const setTaskTrayMinimized = useUiStore((s) => s.setTaskTrayMinimized);
   const generations = useChatStore((s) => s.generations);
   const retryGeneration = useChatStore((s) => s.retryGeneration);
@@ -159,7 +160,7 @@ export function GlobalTaskTray() {
               />
             </motion.div>
           )}
-          {taskTrayMinimized && (
+          {taskTrayMinimized && !taskIslandMounted && (
             <motion.button
               key="tray-button"
               type="button"

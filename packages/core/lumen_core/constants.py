@@ -81,6 +81,7 @@ class GenerationStage(StrEnum):
 class VideoGenerationStatus(StrEnum):
     QUEUED = "queued"
     SUBMITTING = "submitting"
+    SUBMIT_UNKNOWN = "submit_unknown"
     SUBMITTED = "submitted"
     RUNNING = "running"
     SUCCEEDED = "succeeded"

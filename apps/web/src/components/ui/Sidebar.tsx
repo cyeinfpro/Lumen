@@ -17,9 +17,9 @@ import {
   MoreHorizontal,
   PanelLeftClose,
   Plus,
-  Sparkles,
 } from "lucide-react";
 
+import { LumenMark } from "@/components/ui/brand/LumenMark";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import { acquireBodyScrollLock } from "@/hooks/useBodyScrollLock";
@@ -76,9 +76,27 @@ function dayKeyOf(iso: string): Bucket {
   return "older";
 }
 
+function closeSidebarBelowWide(
+  setSidebarOpen: (open: boolean) => void,
+): void {
+  if (typeof window !== "undefined" && window.innerWidth < 1440) {
+    setSidebarOpen(false);
+  }
+}
+
+function sidebarPrimaryActionClass(showBrand: boolean): string {
+  return cn("px-4 pb-3", showBrand ? "" : "pt-3");
+}
+
 type TabKind = "active" | "archived";
 
-export function Sidebar() {
+export function Sidebar({
+  embedded = false,
+  showBrand = !embedded,
+}: {
+  embedded?: boolean;
+  showBrand?: boolean;
+} = {}) {
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
   const studioView = useUiStore((s) => s.studioView);
   const setStudioView = useUiStore((s) => s.setStudioView);
@@ -91,14 +109,6 @@ export function Sidebar() {
   const listRef = useRef<HTMLDivElement | null>(null);
   const archiveMenuRef = useRef<HTMLDivElement | null>(null);
   const [archiveMenuOpen, setArchiveMenuOpen] = useState(false);
-
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 768px)");
-    const syncSidebarWithViewport = () => setSidebarOpen(query.matches);
-    syncSidebarWithViewport();
-    query.addEventListener("change", syncSidebarWithViewport);
-    return () => query.removeEventListener("change", syncSidebarWithViewport);
-  }, [setSidebarOpen]);
 
   // 移动端抽屉打开时锁定 body 滚动；viewport / open 变化时自动 rerun
   useEffect(() => {
@@ -258,7 +268,7 @@ export function Sidebar() {
         // 加载成功后再关移动端抽屉，失败不关避免用户失去上下文
         if (
           typeof window !== "undefined" &&
-          window.innerWidth < 768 &&
+          window.innerWidth < 1440 &&
           sidebarOpen
         ) {
           toggleSidebar();
@@ -342,44 +352,20 @@ export function Sidebar() {
   const innerChrome = (
     <div className="flex-1 flex flex-col w-full min-h-0">
         {/* ——— 品牌栏 ——— */}
-        <div className="px-4 pt-4 pb-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {/* Lumen 品牌徽标渐变：琥珀→orange，非状态色，token 化无意义 */}
-            {/* eslint-disable-next-line no-restricted-syntax */}
-            <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--accent)] to-orange-300 flex items-center justify-center shadow-[var(--shadow-amber)]">
-              <Sparkles className="w-3 h-3 text-black/70" strokeWidth={2.5} />
-            </span>
-            <span className="font-medium tracking-tight text-[var(--fg-0)]">
-              Lumen
-            </span>
-          </div>
-          <IconButton
-            variant="ghost"
-            size="sm"
-            onClick={toggleSidebar}
-            aria-label="收起侧栏"
-            tooltip="收起侧栏"
-            className="md:hidden"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </IconButton>
-        </div>
+        <SidebarBrand visible={showBrand} onClose={toggleSidebar} />
 
         {/* ——— 主 CTA：新建会话 ——— */}
-        <div className="px-4 pb-3">
+        <div className={sidebarPrimaryActionClass(showBrand)}>
           <motion.button
             type="button"
             onClick={handleNewCanvas}
             disabled={createMut.isPending}
-            whileHover={createMut.isPending ? undefined : { scale: 1.02 }}
-            whileTap={createMut.isPending ? undefined : { scale: 0.96 }}
-            transition={{ type: "spring", stiffness: 400, damping: 25 }}
             className={cn(
-              "group w-full flex items-center gap-2 h-10 px-3 rounded-[var(--radius-panel)]",
-              "bg-gradient-to-br from-[var(--accent)] to-[#D68A1E] text-black font-medium",
-              "shadow-[var(--shadow-amber)]",
-              "hover:shadow-[var(--shadow-amber)] hover:brightness-[1.04]",
-              "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-1)]",
+              "group w-full flex items-center gap-2 h-10 px-3 rounded-[var(--radius-control)]",
+              "bg-[var(--accent)] text-[var(--accent-on)] font-medium",
+              "shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-quick)]",
+              "hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)]",
+              "outline-none focus-visible:shadow-[var(--ring)]",
               "disabled:opacity-60 disabled:cursor-wait",
             )}
           >
@@ -426,7 +412,7 @@ export function Sidebar() {
               onClick={() => {
                 setStudioView("images");
                 setArchiveMenuOpen(false);
-                setSidebarOpen(false);
+                closeSidebarBelowWide(setSidebarOpen);
               }}
               label="图片"
               controls="conversation-image-gallery"
@@ -625,6 +611,10 @@ export function Sidebar() {
 
   const ariaCommon = { "aria-label": "会话侧栏" } as const;
 
+  if (embedded) {
+    return innerChrome;
+  }
+
   return (
     <>
       {/* 移动端：AnimatePresence 管理 overlay + 抽屉；桌面端另起一条路径 */}
@@ -677,6 +667,37 @@ export function Sidebar() {
         {innerChrome}
       </aside>
     </>
+  );
+}
+
+function SidebarBrand({
+  visible,
+  onClose,
+}: {
+  visible: boolean;
+  onClose: () => void;
+}) {
+  if (!visible) return null;
+
+  return (
+    <div className="flex items-center justify-between px-4 pb-3 pt-4">
+      <div className="flex items-center gap-2">
+        <LumenMark className="h-6 w-6 text-[var(--accent)]" />
+        <span className="font-medium tracking-tight text-[var(--fg-0)]">
+          Lumen
+        </span>
+      </div>
+      <IconButton
+        variant="ghost"
+        size="sm"
+        onClick={onClose}
+        aria-label="收起侧栏"
+        tooltip="收起侧栏"
+        className="md:hidden"
+      >
+        <PanelLeftClose className="h-4 w-4" />
+      </IconButton>
+    </div>
   );
 }
 

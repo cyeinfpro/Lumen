@@ -40,10 +40,10 @@ const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
   },
   {
     key: "assets",
-    label: "资产",
+    label: "素材",
     route: "/assets",
     detail: "生成图、上传图、模型库、风格库和分享记录",
-    keywords: ["assets", "stream", "library", "feed", "资产", "图库", "图片", "模型库", "风格库"],
+    keywords: ["assets", "stream", "library", "feed", "素材", "资产", "图库", "图片", "模型库", "风格库"],
     matchPrefixes: ["/assets", "/stream", "/library"],
   },
   {
@@ -75,10 +75,10 @@ const DESKTOP_NAV_ITEMS: readonly AppNavItem[] = [
   },
   {
     key: "assets",
-    label: "资产",
+    label: "素材",
     route: "/assets",
     detail: "本机生成图、上传图和会话素材",
-    keywords: ["assets", "stream", "feed", "资产", "图库", "图片"],
+    keywords: ["assets", "stream", "feed", "素材", "资产", "图库", "图片"],
     matchPrefixes: ["/assets", "/stream"],
   },
   {
