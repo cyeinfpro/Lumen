@@ -76,14 +76,6 @@ function dayKeyOf(iso: string): Bucket {
   return "older";
 }
 
-function closeSidebarBelowWide(
-  setSidebarOpen: (open: boolean) => void,
-): void {
-  if (typeof window !== "undefined" && window.innerWidth < 1440) {
-    setSidebarOpen(false);
-  }
-}
-
 function sidebarPrimaryActionClass(showBrand: boolean): string {
   return cn("px-4 pb-3", showBrand ? "" : "pt-3");
 }
@@ -98,8 +90,6 @@ export function Sidebar({
   showBrand?: boolean;
 } = {}) {
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
-  const studioView = useUiStore((s) => s.studioView);
-  const setStudioView = useUiStore((s) => s.setStudioView);
   const currentConvId = useChatStore((s) => s.currentConvId);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
   const loadHistoricalMessages = useChatStore((s) => s.loadHistoricalMessages);
@@ -362,9 +352,9 @@ export function Sidebar({
             disabled={createMut.isPending}
             className={cn(
               "group w-full flex items-center gap-2 h-10 px-3 rounded-[var(--radius-control)]",
-              "bg-[var(--accent)] text-[var(--accent-on)] font-medium",
-              "shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-quick)]",
-              "hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)]",
+              "border border-[var(--fg-0)] bg-[var(--fg-0)] text-[var(--bg-0)] font-medium",
+              "transition-opacity duration-[var(--dur-quick)]",
+              "hover:opacity-90 active:opacity-[var(--op-press)]",
               "outline-none focus-visible:shadow-[var(--ring)]",
               "disabled:opacity-60 disabled:cursor-wait",
             )}
@@ -372,12 +362,15 @@ export function Sidebar({
             {createMut.isPending ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
-              <Plus className="w-4 h-4" strokeWidth={2.5} />
+              <Plus
+                className="w-4 h-4 text-[var(--accent)]"
+                strokeWidth={2.5}
+              />
             )}
             <span className="text-sm flex-1 text-left">新建会话</span>
             <kbd
               aria-hidden
-              className="hidden sm:inline-flex px-1.5 py-0.5 rounded bg-black/15 text-[10px] font-mono tracking-wide"
+              className="hidden text-[10px] font-mono tracking-wide opacity-55 sm:inline-flex"
             >
               ⌘N
             </kbd>
@@ -394,71 +387,47 @@ export function Sidebar({
           <SearchBox value={query} onChange={setQuery} />
         </div>
 
-        {/* ——— 高频入口：对话 / 图片；归档收进更多菜单 ——— */}
-        <div className="px-4 pb-2" role="tablist" aria-label="会话类型">
-          <div className="flex gap-1 p-0.5 rounded-[var(--radius-card)] bg-white/[0.03] border border-[var(--border-subtle)]">
-            <TabButton
-              active={studioView === "chat" && tab === "active"}
-              onClick={() => {
-                setStudioView("chat");
-                setTab("active");
-              }}
-              label="对话"
-              controls="sidebar-tabpanel-active"
-              id="sidebar-tab-active"
-            />
-            <TabButton
-              active={studioView === "images"}
-              onClick={() => {
-                setStudioView("images");
-                setArchiveMenuOpen(false);
-                closeSidebarBelowWide(setSidebarOpen);
-              }}
-              label="图片"
-              controls="conversation-image-gallery"
-              id="sidebar-tab-images"
-            />
+        {/* ——— 会话列表标题；图片视图只在工作区切换，避免重复入口 ——— */}
+        <div className="px-4 pb-2">
+          <div className="flex h-8 items-center justify-between border-b border-[var(--border-subtle)]">
+            <span className="text-[11px] font-medium text-[var(--fg-2)]">
+              {tab === "active" ? "会话" : "已归档"}
+            </span>
             <div ref={archiveMenuRef} className="relative">
               <IconButton
                 variant="ghost"
                 size="sm"
-                aria-label="更多会话入口"
+                aria-label="会话列表选项"
                 aria-haspopup="menu"
                 aria-expanded={archiveMenuOpen}
                 onClick={() => setArchiveMenuOpen((open) => !open)}
-                className={cn(
-                  "relative h-8 w-9 rounded-[var(--radius-control)]",
-                  studioView === "chat" && tab === "archived"
-                    ? "bg-white/10 text-[var(--fg-0)]"
-                    : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-                )}
+                className="relative h-7 w-7 rounded-[var(--radius-control)] text-[var(--fg-2)] hover:text-[var(--fg-0)]"
               >
                 <MoreHorizontal className="h-4 w-4" aria-hidden />
-                {archivedTotal > 0 && (
-                  <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                {archivedTotal > 0 && tab === "active" && (
+                  <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
                 )}
               </IconButton>
               <AnimatePresence>
                 {archiveMenuOpen && (
                   <motion.div
                     role="menu"
-                    aria-label="更多会话入口"
+                    aria-label="会话列表选项"
                     initial={{ opacity: 0, y: -4, scale: 0.98 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -4, scale: 0.98 }}
                     transition={{ duration: 0.14 }}
                     className={cn(
-                      "absolute right-0 top-10 z-20 min-w-40 overflow-hidden rounded-[var(--radius-card)]",
+                      "absolute right-0 top-9 z-20 min-w-40 overflow-hidden rounded-[var(--radius-card)]",
                       "border border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]",
                     )}
                   >
                     {/* @list-item-ok: menu item, 行内 a11y role + 横向布局 */}
-<button
+                    <button
                       type="button"
                       role="menuitem"
                       onClick={() => {
-                        setStudioView("chat");
-                        setTab("archived");
+                        setTab(tab === "active" ? "archived" : "active");
                         setArchiveMenuOpen(false);
                       }}
                       className={cn(
@@ -467,9 +436,15 @@ export function Sidebar({
                         "focus-visible:outline-none focus-visible:bg-[var(--bg-2)]",
                       )}
                     >
-                      <Archive className="h-3.5 w-3.5 text-[var(--fg-2)]" />
-                      <span className="flex-1">查看归档</span>
-                      {archivedTotal > 0 && (
+                      {tab === "active" ? (
+                        <Archive className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+                      ) : (
+                        <Inbox className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+                      )}
+                      <span className="flex-1">
+                        {tab === "active" ? "查看归档" : "返回会话"}
+                      </span>
+                      {tab === "active" && archivedTotal > 0 && (
                         <span className="font-mono text-[10px] text-[var(--fg-3)]">
                           {archivedTotal}
                         </span>
@@ -486,9 +461,8 @@ export function Sidebar({
         <div
           ref={listRef}
           onKeyDown={handleListKey}
-          role="tabpanel"
-          id={tab === "active" ? "sidebar-tabpanel-active" : "sidebar-tabpanel-archived"}
-          aria-labelledby={tab === "active" ? "sidebar-tab-active" : undefined}
+          role="region"
+          aria-label={tab === "active" ? "会话列表" : "归档会话列表"}
           className="flex-1 overflow-y-auto px-2 pb-2 space-y-5 scrollbar-thin"
         >
           {isInitialLoading && <ListSkeleton />}
@@ -815,56 +789,6 @@ function ArchivedList({
         );
       })}
     </div>
-  );
-}
-
-// ——— 子组件：tab 按钮 ———
-function TabButton({
-  active,
-  onClick,
-  label,
-  badge,
-  controls,
-  id,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  badge?: number;
-  controls?: string;
-  id?: string;
-}) {
-  return (
-    /* @list-item-ok: tab 按钮，role="tab" + 等宽 flex-1 + 内嵌 badge，不适合 Button primitive */
-<button
-      type="button"
-      role="tab"
-      id={id}
-      aria-selected={active}
-      aria-controls={controls}
-      onClick={onClick}
-      className={cn(
-        "flex-1 h-8 inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-control)] type-caption transition-all",
-        "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
-        active
-          ? "bg-white/10 text-[var(--fg-0)]"
-          : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-      )}
-    >
-      {label}
-      {typeof badge === "number" && (
-        <span
-          className={cn(
-            "inline-flex items-center justify-center h-4 min-w-[18px] px-1 rounded-full text-[10px] font-mono",
-            active
-              ? "bg-[var(--accent)]/20 text-[var(--accent)]"
-              : "bg-white/5 text-[var(--fg-2)]",
-          )}
-        >
-          {badge}
-        </span>
-      )}
-    </button>
   );
 }
 

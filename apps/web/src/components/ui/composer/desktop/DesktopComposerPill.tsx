@@ -48,11 +48,16 @@ import { DURATION, EASE, SPRING } from "@/lib/motion";
 import {
   DesktopPopover,
 } from "./DesktopPopover";
+import {
+  ComposerExecutionControls,
+  COUNT_OPTIONS,
+  QUALITY_OPTIONS,
+  RENDER_QUALITY_OPTIONS,
+} from "./DesktopComposerExecutionControls";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
 import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
-import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
@@ -73,20 +78,6 @@ const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }
   { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
 ];
 
-const COUNT_OPTIONS = [1, 2, 4, 8, 10] as const;
-
-const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
-  { value: "1k", label: "1K" },
-  { value: "2k", label: "2K" },
-  { value: "4k", label: "4K" },
-];
-
-const RENDER_QUALITY_OPTIONS: { value: RenderQualityChoice; label: string }[] = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
-
 // 斜杠命令：/ask → chat；/image → image
 function parseSlash(text: string): {
   stripped: string;
@@ -99,6 +90,27 @@ function parseSlash(text: string): {
     stripped: text.slice(m[0].length).trim(),
     force: cmd === "ask" ? "chat" : "image",
   };
+}
+
+function composerFrameClass(expanded: boolean, isDragActive: boolean): string {
+  return cn(
+    "fixed bottom-4 -translate-x-1/2",
+    "max-w-[880px]",
+    "overflow-visible",
+    "rounded-[var(--radius-panel)]",
+    "bg-[var(--bg-1)]/97",
+    "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
+    isDragActive
+      ? "border-[var(--accent)]"
+      : "border-[var(--border-subtle)] focus-within:border-[var(--accent-border)]",
+    expanded ? "shadow-[var(--shadow-2)]" : "shadow-[var(--shadow-1)]",
+  );
+}
+
+function composerFrameWidth(expanded: boolean): string {
+  return expanded
+    ? "min(880px, calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))"
+    : "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))";
 }
 
 export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
@@ -509,6 +521,14 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
+  const handleModeChange = useCallback(
+    (nextMode: ComposerMode) => {
+      setAdvancedOpen(false);
+      setMode(nextMode);
+    },
+    [setMode],
+  );
+
   const isImageMode = mode === "image";
 
   return (
@@ -522,22 +542,10 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       initial={false}
       animate={{ height: expanded ? "auto" : 56 }}
       transition={SPRING.sheet}
-      className={cn(
-        "fixed bottom-5 -translate-x-1/2",
-        "max-w-[var(--content-composer)]",
-        "overflow-visible",
-        "rounded-[var(--radius-sheet)]",
-        "bg-[var(--bg-1)]/96",
-        "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
-        isDragActive
-          ? "border-[var(--accent)]"
-          : "border-[var(--border)] focus-within:border-[var(--accent-border)]",
-        "shadow-[var(--shadow-2)]",
-      )}
+      className={composerFrameClass(expanded, isDragActive)}
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
-        width:
-          "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))",
+        width: composerFrameWidth(expanded),
         zIndex: expanded
           ? ("var(--z-composer-expanded, 45)" as unknown as number)
           : ("var(--z-composer, 40)" as unknown as number),
@@ -571,7 +579,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             )}
           </IconBtn>
 
-          <ModeSegment value={mode} onChange={(value) => setMode(value)} />
+          <ModeSegment value={mode} onChange={handleModeChange} />
 
           <button
             type="button"
@@ -837,8 +845,22 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
           </div>
 
           <div ref={advancedTriggerRef}>
-            <ExecutionSummaryBar
+            <ComposerExecutionControls
+              mode={mode}
               summary={executionSummary}
+              count={count}
+              onCountChange={setImageCount}
+              aspect={aspect}
+              onAspectChange={setAspectRatio}
+              quality={quality}
+              onQualityChange={setQuality}
+              renderQuality={renderQuality}
+              onRenderQualityChange={setRenderQuality}
+              fast={fast}
+              onFastChange={setFast}
+              attachmentCount={attachments.length}
+              costLabel={costEstimate.label}
+              costWarning={costEstimate.warning}
               onAdjust={() => setAdvancedOpen((value) => !value)}
             />
           </div>
@@ -876,7 +898,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
 
             <span className="w-px h-5 bg-[var(--border-subtle)] mx-0.5 shrink-0" aria-hidden />
 
-            <ModeSegment value={mode} onChange={(v) => setMode(v)} />
+            <ModeSegment value={mode} onChange={handleModeChange} />
 
             {shouldShowCount && (
               <span
@@ -1138,14 +1160,9 @@ function AdvancedComposerSettings({
   return (
     <div className="flex min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-        <div>
-          <p className="text-[13px] font-semibold text-[var(--fg-0)]">
-            执行设置
-          </p>
-          <p className="mt-0.5 text-[11px] text-[var(--fg-2)]">
-            仅在需要时调整，当前选择会同步到执行摘要。
-          </p>
-        </div>
+        <p className="text-[13px] font-semibold text-[var(--fg-0)]">
+          执行设置
+        </p>
         <button
           type="button"
           onClick={onClose}

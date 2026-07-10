@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Images, MessageSquareText, PanelLeftOpen, Plus, X } from "lucide-react";
+import { PanelLeftOpen, Plus, X } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell/DesktopTopNav";
 import { Sidebar } from "@/components/ui/Sidebar";
@@ -205,8 +205,6 @@ export function DesktopStudio() {
           onToggle={toggleSidebar}
           onCreate={() => !createMut.isPending && createMut.mutate({})}
           creating={createMut.isPending}
-          view={studioView}
-          onViewChange={setStudioView}
         />
 
         <section className="flex min-w-0 flex-1 flex-col">
@@ -224,10 +222,10 @@ export function DesktopStudio() {
             className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
           >
             <div
-              className="mx-auto w-full max-w-[var(--content-workbench)] px-3 py-3 xl:px-5"
+              className="mx-auto w-full max-w-[var(--content-workbench)] px-3 py-2 xl:px-5"
               style={{
                 paddingBottom:
-                  "calc(96px + env(safe-area-inset-bottom, 0px))",
+                  "calc(120px + env(safe-area-inset-bottom, 0px))",
               }}
             >
               <AnimatePresence mode="sync" initial={false}>
@@ -374,15 +372,11 @@ function DesktopSidebarDock({
   onToggle,
   onCreate,
   creating,
-  view,
-  onViewChange,
 }: {
   expanded: boolean;
   onToggle: () => void;
   onCreate: () => void;
   creating: boolean;
-  view: "chat" | "images";
-  onViewChange: (view: "chat" | "images") => void;
 }) {
   return (
     <aside
@@ -390,7 +384,7 @@ function DesktopSidebarDock({
       className={cn(
         "hidden min-[1120px]:flex shrink-0 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
         "transition-[width] duration-[var(--dur-panel)]",
-        expanded ? "w-16 min-[1440px]:w-[264px]" : "w-16",
+        expanded ? "w-16 min-[1440px]:w-[248px]" : "w-16",
       )}
     >
       {expanded ? (
@@ -422,25 +416,6 @@ function DesktopSidebarDock({
           tooltip="新建对话"
         >
           <Plus className="h-4 w-4" aria-hidden />
-        </IconButton>
-        <span className="my-1 h-px w-8 bg-[var(--border-subtle)]" aria-hidden />
-        <IconButton
-          size="md"
-          variant={view === "chat" ? "secondary" : "ghost"}
-          onClick={() => onViewChange("chat")}
-          aria-label="对话视图"
-          tooltip="对话视图"
-        >
-          <MessageSquareText className="h-4 w-4" aria-hidden />
-        </IconButton>
-        <IconButton
-          size="md"
-          variant={view === "images" ? "secondary" : "ghost"}
-          onClick={() => onViewChange("images")}
-          aria-label="图片视图"
-          tooltip="图片视图"
-        >
-          <Images className="h-4 w-4" aria-hidden />
         </IconButton>
       </div>
     </aside>

@@ -129,9 +129,9 @@
 
     /* Stable content geometry */
     --content-text: 800px;
-    --content-composer: 880px;
-    --content-media: 1160px;
-    --content-workbench: 1440px;
+    --content-composer: 760px;
+    --content-media: 1040px;
+    --content-workbench: 1240px;
 
     /* 字体家族（spec §4.2）
        --font-body / --font-mono / --font-serif 由 next/font 在 body class
@@ -795,7 +795,7 @@
   }
   @media (min-width: 1440px) {
     .studio-shell[data-sidebar-open="true"] {
-      --studio-sidebar-offset: 264px;
+      --studio-sidebar-offset: 248px;
     }
   }
 

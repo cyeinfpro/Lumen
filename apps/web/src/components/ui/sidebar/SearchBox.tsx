@@ -41,7 +41,8 @@ export function SearchBox({
   return (
     <div
       className={cn(
-        "relative flex items-center h-10 md:h-9 rounded-[var(--radius-card)] bg-white/[0.04] border border-[var(--border)] focus-within:border-[var(--accent)]/60 focus-within:bg-white/[0.06] transition-colors",
+        "relative flex h-10 items-center rounded-[var(--radius-control)] border border-transparent bg-[var(--bg-0)]/68 transition-colors md:h-9",
+        "focus-within:border-[var(--border)] focus-within:bg-[var(--bg-0)]",
         className,
       )}
     >
