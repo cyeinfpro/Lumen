@@ -22,19 +22,6 @@ type ImageResultLightboxOptions = {
   createdAt?: number | string | null;
 };
 
-type Versionish = Pick<
-  LightboxItem,
-  | "source"
-  | "source_type"
-  | "parent_image_id"
-  | "parent_generation_id"
-  | "from_generation_id"
-  | "generation_id"
-  | "action_source"
-  | "generation_action"
-  | "metadata"
->;
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -174,6 +161,25 @@ function sourceFor(
   return { source, sourceType, sourceId };
 }
 
+function mediaUrls(
+  image: GeneratedImage,
+  options: ImageResultLightboxOptions,
+): Pick<LightboxItem, "url" | "previewUrl" | "thumbUrl"> {
+  return {
+    url: options.url ?? imageBinaryUrl(image.id),
+    previewUrl:
+      options.previewUrl ??
+      image.display_url ??
+      image.preview_url ??
+      imageVariantUrl(image.id, "display2048"),
+    thumbUrl:
+      options.thumbUrl ??
+      image.thumb_url ??
+      image.preview_url ??
+      imageVariantUrl(image.id, "thumb256"),
+  };
+}
+
 export function imageResultToLightboxItem(
   gen: Generation,
   image: GeneratedImage,
@@ -181,6 +187,7 @@ export function imageResultToLightboxItem(
 ): LightboxItem {
   const metadata = explainabilityMetadata(gen, image);
   const { source, sourceType, sourceId } = sourceFor(metadata, options);
+  const media = mediaUrls(image, options);
   const diagnostics: LightboxParamBag | null =
     asRecord(gen.diagnostics) ??
     asRecord(image.diagnostics) ??
@@ -212,17 +219,7 @@ export function imageResultToLightboxItem(
 
   return {
     id: image.id,
-    url: options.url ?? imageBinaryUrl(image.id),
-    previewUrl:
-      options.previewUrl ??
-      image.display_url ??
-      image.preview_url ??
-      imageVariantUrl(image.id, "display2048"),
-    thumbUrl:
-      options.thumbUrl ??
-      image.thumb_url ??
-      image.preview_url ??
-      imageVariantUrl(image.id, "thumb256"),
+    ...media,
     prompt: options.prompt ?? gen.prompt,
     width: image.width,
     height: image.height,
@@ -258,39 +255,4 @@ export function imageResultToLightboxItem(
     generation_action: gen.action,
     metadata,
   };
-}
-
-function shortId(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return value.length > 10 ? `${value.slice(0, 8)}...` : value;
-}
-
-function labelForAction(value: string | null | undefined): string {
-  const normalized = value?.toLowerCase();
-  if (normalized === "inpaint") return "局部修图";
-  if (normalized === "upscale") return "放大";
-  if (normalized === "variation") return "变体";
-  if (normalized === "reroll" || normalized === "retry") return "重生成";
-  if (normalized === "edit" || normalized === "revise") return "编辑";
-  return "生成";
-}
-
-export function imageVersionLabel(item: Versionish): string | null {
-  const metadata = item.metadata ?? {};
-  const parentImage =
-    item.parent_image_id ?? recordText(metadata, ["parent_image_id", "source_image_id"]);
-  const parentGeneration =
-    item.parent_generation_id ??
-    recordText(metadata, ["parent_generation_id", "parent_task_id"]);
-  const action =
-    item.action_source ??
-    item.generation_action ??
-    recordText(metadata, ["action_source", "generation_action", "action"]);
-  if (parentImage) return `${labelForAction(action)}自 ${shortId(parentImage)}`;
-  if (parentGeneration) return `任务分支 ${shortId(parentGeneration)}`;
-  const source = item.source_type ?? item.source ?? recordText(metadata, ["source"]);
-  if (source === "project") return "项目产出";
-  if (source === "upload") return "用户上传";
-  if (source === "telegram") return "Telegram";
-  return null;
 }

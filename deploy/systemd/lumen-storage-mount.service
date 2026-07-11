@@ -8,6 +8,7 @@ Before=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=LUMEN_STORAGE_TARGET=/opt/lumendata
 ExecStart=/usr/local/sbin/lumen-storage-mount up
 ExecStop=/usr/local/sbin/lumen-storage-mount down
 # CIFS 抖动场景下，up 子命令可能因网络/远端不可达返回 1/2；如果让 unit 直接

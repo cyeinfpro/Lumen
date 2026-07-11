@@ -64,17 +64,6 @@ bug_review_report.md
 docs/audits/local/*
 !docs/audits/local/README.md
 
-# Desktop build artifacts
-apps/desktop/target/
-apps/desktop/dist/
-apps/desktop/src-tauri/target/
-apps/desktop/binaries/
-apps/desktop/resources/
-apps/desktop/gen/
-*.dmg
-*.exe.unsigned
-*.nsis.zip
-
 # 一次性整理 checklist
 RELEASE-CHECKLIST.md
 

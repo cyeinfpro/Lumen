@@ -5,12 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/var/lib/lumen-storage/apply.env
+Environment=LUMEN_STORAGE_TARGET=/opt/lumendata
 ExecStart=/usr/local/sbin/lumen-storage-mount apply
 # 1) Clean up the trigger so the next click re-fires PathChanged.
-# 2) Restart watchers whose inotify watches were attached to /opt/lumendata
-#    paths (lumen-update.path watches /opt/lumendata/backup/.update.trigger).
-#    A mount swap invalidates those inode handles silently, so we re-attach
-#    here. systemctl is async; log errors but keep cleanup successful.
-ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/apply.trigger /var/lib/lumen-storage/apply.env; if ! systemctl try-restart lumen-update.path; then echo 'lumen-storage-apply: failed to restart lumen-update.path' >&2; fi"
+# 2) Restart every watcher whose inotify handle points inside the swapped
+#    backup mount. A mount replacement can leave path units active but attached
+#    to the old inode, so update/warm/backup/restore must all be re-armed.
+ExecStopPost=/bin/sh -c 'rm -f /var/lib/lumen-storage/apply.trigger; for unit in lumen-update.path lumen-update-warm.path lumen-backup.path lumen-restore.path; do if ! systemctl try-restart "$$unit"; then echo "lumen-storage-apply: failed to restart $$unit" >&2; fi; done; exit 0'
 TimeoutStartSec=600

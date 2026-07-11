@@ -1,0 +1,1 @@
+"""Generation task implementation parts."""

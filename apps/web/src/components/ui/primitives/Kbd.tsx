@@ -29,5 +29,3 @@ export function Kbd({
     </kbd>
   );
 }
-
-export default Kbd;

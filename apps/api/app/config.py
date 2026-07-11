@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ipaddress
 import os
-import secrets
 import tomllib
 from pathlib import Path
 from urllib.parse import unquote
@@ -13,16 +12,6 @@ from urllib.parse import urlsplit
 from pydantic import Field
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from lumen_core.desktop_runtime import (
-    DESKTOP_PROVIDER_FILE_ENV,
-    DATA_ROOT_ENV,
-    desktop_backup_root,
-    desktop_sqlite_url,
-    desktop_storage_root,
-    is_desktop_runtime,
-)
-
 
 _LOCAL_HOST = "localhost"
 _DEFAULT_API_PORT = 8000
@@ -106,13 +95,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str = _DEFAULT_DATABASE_URL
-    lumen_runtime: str = "docker"
-    lumen_data_root: str = Field(default="", alias=DATA_ROOT_ENV)
-    lumen_local_token: str = ""
-    lumen_desktop_provider_file: str = Field(
-        default="",
-        alias=DESKTOP_PROVIDER_FILE_ENV,
-    )
     db_pool_size: int = Field(default=5, ge=1)
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout: float = Field(default=30.0, gt=0)
@@ -231,18 +213,6 @@ class Settings(BaseSettings):
             raise ValueError("SMTP_FROM_EMAIL must be a valid email address")
         if smtp_password and not smtp_username:
             raise ValueError("SMTP_USERNAME must be set when SMTP_PASSWORD is set")
-        if is_desktop_runtime(self.lumen_runtime):
-            if self.database_url == _DEFAULT_DATABASE_URL:
-                self.database_url = desktop_sqlite_url(self.lumen_data_root)
-            if self.storage_root == "/opt/lumendata/storage":
-                self.storage_root = desktop_storage_root(self.lumen_data_root)
-            if self.backup_root == "/opt/lumendata/backup":
-                self.backup_root = desktop_backup_root(self.lumen_data_root)
-            if not self.session_secret.strip():
-                self.session_secret = secrets.token_urlsafe(48)
-            if len(self.byok_api_key_master_secret.strip()) < 16:
-                self.byok_api_key_master_secret = BYOK_DEV_MASTER_SECRET
-            return self
         allow_public_dev = (
             os.environ.get("LUMEN_ALLOW_PUBLIC_DEV", "").strip().lower()
             in _TRUE_ENV_VALUES

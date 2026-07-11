@@ -20,7 +20,6 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         "apps/worker",
         "apps/tgbot",
         "apps/web",
-        "apps/desktop",
         "packages/core/lumen_core",
     ):
         (root / path).mkdir(parents=True, exist_ok=True)
@@ -49,18 +48,6 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
     (root / "apps/web/package-lock.json").write_text(
         json.dumps({"version": version, "packages": {"": {"version": version}}})
         + "\n",
-        encoding="utf-8",
-    )
-    (root / "apps/desktop/Cargo.toml").write_text(
-        f'[package]\nname = "lumen-desktop"\nversion = "{version}"\n',
-        encoding="utf-8",
-    )
-    (root / "apps/desktop/Cargo.lock").write_text(
-        f'[[package]]\nname = "lumen-desktop"\nversion = "{version}"\n',
-        encoding="utf-8",
-    )
-    (root / "apps/desktop/tauri.conf.json").write_text(
-        json.dumps({"version": version}, indent=2) + "\n",
         encoding="utf-8",
     )
     return root

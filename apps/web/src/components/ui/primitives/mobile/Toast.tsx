@@ -3,11 +3,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   type ReactNode,
-  createContext,
   useCallback,
-  useContext,
   useEffect,
-  useMemo,
   useState,
 } from "react";
 import { DURATION, EASE } from "@/lib/motion";
@@ -23,12 +20,6 @@ interface ToastItem {
   count: number;
   expireAt: number;
 }
-
-interface MobileToastCtx {
-  push: (message: ReactNode, kind?: MobileToastKind) => void;
-}
-
-const Ctx = createContext<MobileToastCtx | null>(null);
 
 const DEFAULT_DURATION = 1800;
 const MAX_TOASTS = 2;
@@ -90,57 +81,53 @@ export function MobileToastViewport() {
     return () => window.clearInterval(t);
   }, [items.length]);
 
-  const ctx = useMemo(() => ({ push }), [push]);
-
   return (
-    <Ctx.Provider value={ctx}>
-      <div
-        aria-live="polite"
-        aria-atomic="true"
-        className="pointer-events-none fixed inset-x-0 flex flex-col items-center gap-2 px-4"
-        style={{
-          // 56px = 底部导航栏高度；56px = 迷你播放器高度（MiniPlayer）；16px = 间距
-          bottom: "calc(56px + 56px + 16px + env(safe-area-inset-bottom, 0px))",
-          zIndex: "var(--z-toast, 100)" as unknown as number,
-        }}
-      >
-        <AnimatePresence initial={false}>
-          {items.map((t) => (
-            <motion.div
-              key={t.id}
-              initial={{ opacity: 0, y: 16, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.98 }}
-              transition={{ duration: DURATION.normal, ease: EASE.develop }}
-              className={[
-                "pointer-events-auto flex items-start gap-2",
-                "w-full max-w-[min(28rem,calc(100vw-2rem))] px-3.5 py-2.5 rounded-[var(--radius-card)]",
-                "text-[13px] font-medium",
-                "backdrop-blur-xl border shadow-[var(--shadow-2)]",
-                kindClass(t.kind),
-              ].join(" ")}
-              role={t.kind === "danger" || t.kind === "warning" ? "alert" : "status"}
-            >
-              <span className="min-w-0 flex-1 break-words leading-snug [overflow-wrap:anywhere]">
-                {t.message}
+    <div
+      aria-live="polite"
+      aria-atomic="true"
+      className="pointer-events-none fixed inset-x-0 flex flex-col items-center gap-2 px-4"
+      style={{
+        // 56px = 底部导航栏高度；56px = 迷你播放器高度（MiniPlayer）；16px = 间距
+        bottom: "calc(56px + 56px + 16px + env(safe-area-inset-bottom, 0px))",
+        zIndex: "var(--z-toast, 100)" as unknown as number,
+      }}
+    >
+      <AnimatePresence initial={false}>
+        {items.map((t) => (
+          <motion.div
+            key={t.id}
+            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.98 }}
+            transition={{ duration: DURATION.normal, ease: EASE.develop }}
+            className={[
+              "pointer-events-auto flex items-start gap-2",
+              "w-full max-w-[min(28rem,calc(100vw-2rem))] px-3.5 py-2.5 rounded-[var(--radius-card)]",
+              "text-[13px] font-medium",
+              "backdrop-blur-xl border shadow-[var(--shadow-2)]",
+              kindClass(t.kind),
+            ].join(" ")}
+            role={t.kind === "danger" || t.kind === "warning" ? "alert" : "status"}
+          >
+            <span className="min-w-0 flex-1 break-words leading-snug [overflow-wrap:anywhere]">
+              {t.message}
+            </span>
+            {t.count > 1 && (
+              <span className="mt-0.5 shrink-0 text-[10px] tracking-wider text-[var(--fg-2)]">
+                ×{t.count}
               </span>
-              {t.count > 1 && (
-                <span className="mt-0.5 shrink-0 text-[10px] tracking-wider text-[var(--fg-2)]">
-                  ×{t.count}
-                </span>
-              )}
-              <MobileIconButton
-                icon={<X className="w-4 h-4" />}
-                label="关闭通知"
-                minHit={false}
-                onPress={() => setItems((list) => list.filter((x) => x.id !== t.id))}
-                className="-mr-1 -mt-1 w-8 h-8 shrink-0 opacity-60 hover:opacity-100"
-              />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
-    </Ctx.Provider>
+            )}
+            <MobileIconButton
+              icon={<X className="w-4 h-4" />}
+              label="关闭通知"
+              minHit={false}
+              onPress={() => setItems((list) => list.filter((x) => x.id !== t.id))}
+              className="-mr-1 -mt-1 w-8 h-8 shrink-0 opacity-60 hover:opacity-100"
+            />
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -155,14 +142,4 @@ function kindClass(k: MobileToastKind) {
     default:
       return "bg-[var(--bg-1)]/90 text-[var(--fg-0)] border-[var(--border-subtle)]";
   }
-}
-
-export function useMobileToast() {
-  const ctx = useContext(Ctx);
-  return {
-    push: (m: ReactNode, k?: MobileToastKind) => {
-      if (ctx) ctx.push(m, k);
-      else pushMobileToast(m, k);
-    },
-  };
 }

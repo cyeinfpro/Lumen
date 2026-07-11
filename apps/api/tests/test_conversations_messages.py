@@ -10,6 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.routes import conversations
 from lumen_core.constants import CompletionStatus, GenerationStatus
+from lumen_core.schemas import ConversationPatchIn
 
 
 class _Result:
@@ -88,6 +89,59 @@ class _ActiveTaskDb:
 
 
 @pytest.mark.asyncio
+async def test_patch_conversation_can_clear_nullable_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conv = SimpleNamespace(
+        id="conv-1",
+        title="Conversation",
+        pinned=False,
+        archived=False,
+        memory_disabled=False,
+        active_scope_id=None,
+        last_activity_at=now,
+        default_params={},
+        default_system="old system",
+        default_system_prompt_id="prompt-1",
+        created_at=now,
+    )
+
+    async def fake_owned_conv(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return conv
+
+    class Db:
+        executed = False
+
+        async def execute(self, _statement: Any) -> _Result:
+            self.executed = True
+            return _Result([])
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, _row: Any) -> None:
+            return None
+
+    db = Db()
+    monkeypatch.setattr(conversations, "_get_owned_visible_conv", fake_owned_conv)
+
+    out = await conversations.patch_conversation(
+        "conv-1",
+        ConversationPatchIn(
+            default_system=None,
+            default_system_prompt_id=None,
+        ),
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.default_system is None
+    assert out.default_system_prompt_id is None
+    assert db.executed is False
+
+
+@pytest.mark.asyncio
 async def test_list_conversations_filters_workflow_backing_conversations() -> None:
     db = _Db([])
 
@@ -143,27 +197,46 @@ async def test_delete_conversation_soft_deletes_generated_images() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_conversation_active_tasks_releases_generation_and_completion_holds(
+async def test_cancel_conversation_active_tasks_releases_only_queued_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gen = SimpleNamespace(
-        id="gen-1",
+    gen_queued = SimpleNamespace(
+        id="gen-queued",
+        status=GenerationStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+        billing_retry_count=1,
+    )
+    gen_running = SimpleNamespace(
+        id="gen-running",
         status=GenerationStatus.RUNNING.value,
         progress_stage="rendering",
         finished_at=None,
         error_code=None,
         error_message=None,
     )
-    comp = SimpleNamespace(
-        id="comp-1",
-        status=CompletionStatus.STREAMING.value,
-        progress_stage="streaming",
+    comp_queued = SimpleNamespace(
+        id="comp-queued",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage="queued",
         finished_at=None,
         error_code=None,
         error_message=None,
         upstream_request={"billing_retry_count": 1},
     )
-    db = _ActiveTaskDb([[gen], [comp]])
+    comp_streaming = SimpleNamespace(
+        id="comp-streaming",
+        status=CompletionStatus.STREAMING.value,
+        progress_stage="streaming",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    db = _ActiveTaskDb(
+        [[gen_queued, gen_running], [comp_queued, comp_streaming]]
+    )
     released: list[dict[str, Any]] = []
 
     async def release_conversation_task_hold(
@@ -204,19 +277,24 @@ async def test_cancel_conversation_active_tasks_releases_generation_and_completi
     )
 
     assert cleanup == {
-        "generations_canceled": 1,
-        "completions_canceled": 1,
+        "generations_canceled": 2,
+        "completions_canceled": 2,
         "holds_released": 2,
-        "active_generation_ids": ["gen-1"],
-        "active_completion_ids": ["comp-1"],
-        "queued_generation_ids": [],
-        "running_generation_ids": ["gen-1"],
-        "streaming_completion_ids": ["comp-1"],
+        "active_generation_ids": ["gen-queued", "gen-running"],
+        "active_completion_ids": ["comp-queued", "comp-streaming"],
+        "queued_generation_ids": ["gen-queued"],
+        "running_generation_ids": ["gen-running"],
+        "streaming_completion_ids": ["comp-streaming"],
     }
-    assert gen.status == GenerationStatus.CANCELED.value
-    assert comp.status == CompletionStatus.CANCELED.value
-    assert [call["ref_id"] for call in released] == ["gen-1", "comp-1:retry:1"]
+    assert [call["ref_id"] for call in released] == [
+        "gen-queued:retry:1",
+        "comp-queued:retry:1",
+    ]
     assert all(call["committed"] is False for call in released)
+    assert gen_queued.status == GenerationStatus.CANCELED.value
+    assert gen_running.status == GenerationStatus.RUNNING.value
+    assert comp_queued.status == CompletionStatus.CANCELED.value
+    assert comp_streaming.status == CompletionStatus.STREAMING.value
 
 
 @pytest.mark.asyncio
@@ -248,8 +326,8 @@ async def test_cancel_conversation_active_tasks_skips_holds_for_byok(
 
     assert cleanup["holds_released"] == 0
     assert released == []
-    assert gen.status == GenerationStatus.CANCELED.value
-    assert comp.status == CompletionStatus.CANCELED.value
+    assert gen.status == GenerationStatus.RUNNING.value
+    assert comp.status == CompletionStatus.STREAMING.value
 
 
 @pytest.mark.asyncio
@@ -541,6 +619,44 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
     assert out.manual_compact_available is False
     assert out.manual_compact_min_input_tokens == 4000
     assert out.manual_compact_unavailable_reason == "below_min_tokens"
+
+
+@pytest.mark.asyncio
+async def test_context_window_estimate_uses_message_id_at_equal_summary_timestamp() -> None:
+    boundary_at = datetime.now(timezone.utc)
+    messages = [
+        _message("msg-c", boundary_at),
+        _message("msg-b", boundary_at),
+        _message("msg-a", boundary_at),
+    ]
+    original = _message("msg-0", boundary_at - timedelta(seconds=1))
+    by_id = {msg.id: msg for msg in [original, *messages]}
+    conv = SimpleNamespace(
+        id="conv-1",
+        default_system=None,
+        default_system_prompt_id=None,
+        summary_jsonb={
+            "version": 2,
+            "kind": "rolling_conversation_summary",
+            "up_to_message_id": "msg-b",
+            "up_to_created_at": boundary_at.isoformat(),
+            "first_user_message_id": original.id,
+            "text": "Earlier summary",
+            "tokens": 12,
+        },
+    )
+
+    out = await conversations._estimate_context_window(
+        _ContextDb(messages, by_id=by_id),  # type: ignore[arg-type]
+        conv=conv,  # type: ignore[arg-type]
+        user_id="user-1",
+        user_default_prompt_id=None,
+    )
+
+    # The original task remains sticky and msg-c is the only message after the
+    # msg-b boundary. msg-a/msg-b share its timestamp but are not counted.
+    assert out.included_messages_count == 2
+    assert out.summary_up_to_message_id == "msg-b"
 
 
 @pytest.mark.asyncio

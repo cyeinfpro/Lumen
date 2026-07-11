@@ -1099,9 +1099,9 @@ def validate_providers(raw: str) -> str:
             raise ValueError(f"providers[{i}].base_url must include a hostname")
         if parts.username or parts.password:
             raise ValueError(f"providers[{i}].base_url must not include credentials")
-        proxy_name = item.get("proxy", item.get("proxy_name"))
-        if isinstance(proxy_name, str) and proxy_name.strip():
-            name_clean = proxy_name.strip()
+        raw_proxy_name = item.get("proxy", item.get("proxy_name"))
+        if isinstance(raw_proxy_name, str) and raw_proxy_name.strip():
+            name_clean = raw_proxy_name.strip()
             if name_clean not in proxy_enabled_by_name and enabled:
                 raise ValueError(
                     f"providers[{i}].proxy references unknown proxy: {name_clean}"

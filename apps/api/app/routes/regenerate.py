@@ -25,7 +25,6 @@ from lumen_core.constants import (
     MessageStatus,
     Role,
 )
-from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -43,7 +42,6 @@ from lumen_core.providers import parse_provider_bool
 from lumen_core.runtime_settings import get_spec
 
 from ..billing_cache_state import invalidate_balance_cache
-from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..ratelimit import MESSAGES_LIMITER
@@ -95,8 +93,6 @@ async def _release_regenerate_cancel_hold(
 
 
 async def _regenerate_wallet_exists(db: AsyncSession, user_id: str) -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 
@@ -168,46 +164,59 @@ async def _cancel_regenerate_target_active_tasks(
     running_generation_ids: list[str] = []
     streaming_completion_ids: list[str] = []
     holds_released = 0
+    should_release_queued_holds = account_mode == "wallet"
+    if not should_release_queued_holds and (
+        any(
+            generation.status == GenerationStatus.QUEUED.value
+            for generation in generations
+        )
+        or any(
+            completion.status == CompletionStatus.QUEUED.value
+            for completion in completions
+        )
+    ):
+        should_release_queued_holds = await _regenerate_wallet_exists(db, user_id)
 
+    # Active predecessors stay active until their worker observes the cancel
+    # signal, so their wallet hold cannot be released ahead of upstream work.
     for generation in generations:
         if generation.status == GenerationStatus.QUEUED.value:
             queued_generation_ids.append(generation.id)
+            generation.status = GenerationStatus.CANCELED.value
+            generation.progress_stage = "finalizing"
+            generation.finished_at = canceled_at
+            generation.error_code = "cancelled"
+            generation.error_message = "regenerate cancelled old assistant"
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_regenerate_cancel_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="generation",
+                        ref_id=billing_core.generation_billing_ref_id(generation),
+                    )
+                )
         elif generation.status == GenerationStatus.RUNNING.value:
             running_generation_ids.append(generation.id)
-        generation.status = GenerationStatus.CANCELED.value
-        generation.progress_stage = "finalizing"
-        generation.finished_at = canceled_at
-        generation.error_code = "cancelled"
-        generation.error_message = "regenerate cancelled old assistant"
-        if account_mode == "wallet" or await _regenerate_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_regenerate_cancel_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="generation",
-                    ref_id=billing_core.retry_billing_ref_id(
-                        generation.id, getattr(generation, "retry_count", 0)
-                    ),
-                )
-            )
 
     for completion in completions:
-        if completion.status == CompletionStatus.STREAMING.value:
-            streaming_completion_ids.append(completion.id)
-        completion.status = CompletionStatus.CANCELED.value
-        completion.progress_stage = "finalizing"
-        completion.finished_at = canceled_at
-        completion.error_code = "cancelled"
-        completion.error_message = "regenerate cancelled old assistant"
-        if account_mode == "wallet" or await _regenerate_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_regenerate_cancel_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="completion",
-                    ref_id=billing_core.completion_billing_ref_id(completion),
+        if completion.status == CompletionStatus.QUEUED.value:
+            completion.status = CompletionStatus.CANCELED.value
+            completion.progress_stage = "finalizing"
+            completion.finished_at = canceled_at
+            completion.error_code = "cancelled"
+            completion.error_message = "regenerate cancelled old assistant"
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_regenerate_cancel_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="completion",
+                        ref_id=billing_core.completion_billing_ref_id(completion),
+                    )
                 )
-            )
+        elif completion.status == CompletionStatus.STREAMING.value:
+            streaming_completion_ids.append(completion.id)
 
     return {
         "generations_canceled": len(generations),
@@ -315,21 +324,28 @@ async def _lookup_idempotent_regenerate(
             )
         )
     ).scalar_one_or_none()
-    if not comp_hit and not gen_anchor:
+    if comp_hit is not None:
+        anchor_msg_id = comp_hit.message_id
+    elif gen_anchor is not None:
+        anchor_msg_id = gen_anchor.message_id
+    else:
         return None
-    anchor_msg_id = comp_hit.message_id if comp_hit else gen_anchor.message_id
     gen_hits: list[Generation] = []
     if gen_anchor is not None:
-        gen_hits = (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == user_id,
-                    Generation.message_id == anchor_msg_id,
+        gen_hits = list(
+            (
+                await db.execute(
+                    select(Generation)
+                    .where(
+                        Generation.user_id == user_id,
+                        Generation.message_id == anchor_msg_id,
+                    )
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
                 )
-                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return RegenerateOut(
         assistant_message_id=anchor_msg_id,
         completion_id=comp_hit.id if comp_hit else None,
@@ -391,19 +407,23 @@ async def _ordered_target_generations(
     ``_mask_image_id_from_target`` (mask pairing) MUST use this same ordering
     so size + mask come from the same row. See review note REGEN-01.
     """
-    return (
-        await db.execute(
-            select(Generation)
-            .join(Message, Message.id == Generation.message_id)
-            .where(
-                Generation.user_id == user_id,
-                Generation.message_id == target_msg_id,
-                Message.conversation_id == conv_id,
-                *_message_alive_filters(),
+    return list(
+        (
+            await db.execute(
+                select(Generation)
+                .join(Message, Message.id == Generation.message_id)
+                .where(
+                    Generation.user_id == user_id,
+                    Generation.message_id == target_msg_id,
+                    Message.conversation_id == conv_id,
+                    *_message_alive_filters(),
+                )
+                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-            .order_by(Generation.created_at.asc(), Generation.id.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
 
 async def _image_params_from_target(
@@ -420,7 +440,9 @@ async def _image_params_from_target(
         return ImageParamsIn()
     first = gens[0]
     fixed_size = first.size_requested if "x" in (first.size_requested or "") else None
-    upstream_request = first.upstream_request if isinstance(first.upstream_request, dict) else {}
+    upstream_request = (
+        first.upstream_request if isinstance(first.upstream_request, dict) else {}
+    )
     output_format = None
     output_compression = None
     output_format_source = upstream_request.get("output_format_source")
@@ -437,34 +459,36 @@ async def _image_params_from_target(
             upstream_request.get("output_compression")
         )
     try:
-        return ImageParamsIn(
-            aspect_ratio=first.aspect_ratio,
-            size_mode="fixed" if fixed_size else "auto",
-            fixed_size=fixed_size,
-            count=max(1, min(16, len(gens))),
-            quality=_str_option(
-                upstream_request.get("billing_tier"),
-                {"1k", "2k", "4k"},
-                None,
-            ),
-            fast=_bool_option(upstream_request.get("fast"), False),
-            render_quality=_str_option(
-                upstream_request.get("render_quality"),
-                _IMAGE_RENDER_QUALITY_VALUES,
-                "auto",
-            ),
-            output_format=output_format,
-            output_compression=output_compression,
-            background=_str_option(
-                upstream_request.get("background"),
-                _IMAGE_BACKGROUND_VALUES,
-                "auto",
-            ),
-            moderation=_str_option(
-                upstream_request.get("moderation"),
-                _IMAGE_MODERATION_VALUES,
-                "low",
-            ),
+        return ImageParamsIn.model_validate(
+            {
+                "aspect_ratio": first.aspect_ratio,
+                "size_mode": "fixed" if fixed_size else "auto",
+                "fixed_size": fixed_size,
+                "count": max(1, min(16, len(gens))),
+                "quality": _str_option(
+                    upstream_request.get("billing_tier"),
+                    {"1k", "2k", "4k"},
+                    None,
+                ),
+                "fast": _bool_option(upstream_request.get("fast"), False),
+                "render_quality": _str_option(
+                    upstream_request.get("render_quality"),
+                    _IMAGE_RENDER_QUALITY_VALUES,
+                    "auto",
+                ),
+                "output_format": output_format,
+                "output_compression": output_compression,
+                "background": _str_option(
+                    upstream_request.get("background"),
+                    _IMAGE_BACKGROUND_VALUES,
+                    "auto",
+                ),
+                "moderation": _str_option(
+                    upstream_request.get("moderation"),
+                    _IMAGE_MODERATION_VALUES,
+                    "low",
+                ),
+            }
         )
     except (TypeError, ValueError) as exc:
         logger.warning(

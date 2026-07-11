@@ -1,5 +1,6 @@
 import pytest
 
+import lumen_core.sizing as sizing
 from lumen_core.sizing import (
     _fallback_by_budget,
     resolve_size,
@@ -103,3 +104,17 @@ def test_fallback_by_budget_keeps_ratio_close_after_alignment():
 def test_fallback_by_budget_rejects_budget_below_minimum_aligned_pixel_count():
     with pytest.raises(ValueError, match="budget too small"):
         _fallback_by_budget("1:1", 255)
+
+
+def test_fallback_by_budget_rejects_invalid_selected_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sizing,
+        "min",
+        lambda *_args, **_kwargs: (0, 0),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="invalid fallback candidate"):
+        _fallback_by_budget("1:1", 256)

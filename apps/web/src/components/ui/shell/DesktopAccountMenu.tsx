@@ -7,7 +7,6 @@ import {
   CircleUserRound,
   CreditCard,
   FileText,
-  Settings,
   Shield,
 } from "lucide-react";
 import Link from "next/link";
@@ -21,14 +20,13 @@ import {
   getPricing,
   type AuthUser,
 } from "@/lib/apiClient";
-import { isDesktopRuntime } from "@/lib/desktop/runtime";
 import { formatRmb } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
 type MenuUser = AuthUser & { role?: "admin" | "member" };
 
-function walletIsEnabled(desktop: boolean, user: MenuUser | undefined): boolean {
-  return !desktop && user?.account_mode === "wallet";
+function walletIsEnabled(user: MenuUser | undefined): boolean {
+  return user?.account_mode === "wallet";
 }
 
 function walletIsVisible({
@@ -57,19 +55,17 @@ function formatWalletText(
 }
 
 function accountMenuItems({
-  desktop,
   showWallet,
   isAdmin,
 }: {
-  desktop: boolean;
   showWallet: boolean;
   isAdmin: boolean;
 }) {
   const items = [
     {
       href: "/me",
-      label: desktop ? "设置" : "账户",
-      icon: desktop ? Settings : CircleUserRound,
+      label: "账户",
+      icon: CircleUserRound,
     },
     { href: "/settings/memory", label: "记忆", icon: Brain },
     { href: "/settings/prompts", label: "系统提示词", icon: FileText },
@@ -81,7 +77,7 @@ function accountMenuItems({
       icon: CreditCard,
     });
   }
-  if (isAdmin && !desktop) {
+  if (isAdmin) {
     items.push({ href: "/admin", label: "管理后台", icon: Shield });
   }
   return items;
@@ -91,14 +87,13 @@ export function DesktopAccountMenu() {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const pathname = usePathname();
-  const desktop = isDesktopRuntime();
   const meQuery = useQuery<MenuUser>({
     queryKey: ["me"],
     queryFn: () => getMe() as Promise<MenuUser>,
     retry: false,
     staleTime: 60_000,
   });
-  const walletEnabled = walletIsEnabled(desktop, meQuery.data);
+  const walletEnabled = walletIsEnabled(meQuery.data);
   const walletQuery = useQuery({
     queryKey: ["me", "wallet"],
     queryFn: getMyWallet,
@@ -128,11 +123,10 @@ export function DesktopAccountMenu() {
   const items = useMemo(
     () =>
       accountMenuItems({
-        desktop,
         showWallet,
         isAdmin: meQuery.data?.role === "admin",
       }),
-    [desktop, meQuery.data?.role, showWallet],
+    [meQuery.data?.role, showWallet],
   );
 
   return (
@@ -169,7 +163,7 @@ export function DesktopAccountMenu() {
           </p>
           <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-[var(--fg-2)]">
             <span className="truncate">
-              {meQuery.data?.email || (desktop ? "本机模式" : "Lumen 账户")}
+              {meQuery.data?.email || "Lumen 账户"}
             </span>
             {walletText ? (
               <span className="shrink-0 font-mono text-[var(--fg-1)]">

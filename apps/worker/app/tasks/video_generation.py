@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
-import json
 import logging
-import shutil
-import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,6 +34,13 @@ from lumen_core.video_providers import (
 from .. import runtime_settings, video_submit_cache
 from ..db import SessionLocal
 from ..storage import StorageDiskFullError, storage
+from ..video_artifacts import (
+    DownloadedVideo,
+    ProcessedVideoFile as _ProcessedVideoFile,
+    copy_video_file_exclusive_result,
+    postprocess_video_bytes as _postprocess_video_bytes,
+    postprocess_video_file as _postprocess_video_file,
+)
 from ..video_billing import resolve_video_billing
 from ..video_events import (
     publish_video_event as _publish,
@@ -56,6 +59,7 @@ from ..video_upstream import (
     PollResult,
     SubmitResult,
     VideoReferenceMedia,
+    VideoProviderAdapter,
     VideoSubmitRequest,
     VideoUpstreamError,
     adapter_for_provider,
@@ -76,6 +80,7 @@ _MAX_PROVIDER_POLL_DURATION_S = 48 * 60 * 60
 _MAX_SUBMIT_ATTEMPTS = 4
 _SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
+_MAX_UNEXPECTED_POLL_ATTEMPTS = 4
 _RECON_STALE_AFTER_S = 30
 _SUBMIT_UNKNOWN_AFTER_S = max(_LEASE_TTL_S * 2, 5 * 60)
 _SUBMIT_UNKNOWN_FINALIZE_AFTER_S = 60 * 60
@@ -109,6 +114,7 @@ _RETRYABLE_VIDEO_ERROR_CODES = {
 class _StoredVideo:
     video: Video
     diagnostics: dict[str, Any]
+    created_storage_keys: tuple[str, ...] = ()
 
 
 class _VideoLeaseLost(RuntimeError):
@@ -148,6 +154,9 @@ def _video_exception_code(exc: Exception, *, default: str) -> str:
     if isinstance(exc, VideoUpstreamError):
         value = (exc.error_code or "").strip()
         return value or default
+    raw_code = getattr(exc, "error_code", None)
+    if isinstance(raw_code, str) and raw_code.strip():
+        return raw_code.strip()[:64]
     if isinstance(exc, httpx.TimeoutException) or isinstance(exc, asyncio.TimeoutError):
         return "upstream_timeout"
     if isinstance(exc, httpx.TransportError):
@@ -298,8 +307,11 @@ async def _lease_active(redis: Any, task_id: str) -> bool:
         return True
 
 
-def _raise_if_video_lease_lost(lease_lost: asyncio.Event, message: str) -> None:
-    if lease_lost.is_set():
+def _raise_if_video_lease_lost(
+    lease_lost: asyncio.Event | None,
+    message: str,
+) -> None:
+    if lease_lost is not None and lease_lost.is_set():
         raise _VideoLeaseLost(message)
 
 
@@ -387,12 +399,150 @@ async def _provider_config():
     return providers
 
 
+def _provider_binding_error(
+    generation: VideoGeneration,
+    message: str,
+    *,
+    current_provider_name: str | None = None,
+) -> VideoUpstreamError:
+    return VideoUpstreamError(
+        message,
+        error_code="provider_snapshot_unavailable",
+        status_code=422,
+        raw={
+            "provider_name": generation.provider_name,
+            "provider_kind": generation.provider_kind,
+            "provider_task_id": generation.provider_task_id,
+            "current_provider_name": current_provider_name,
+        },
+    )
+
+
+def _provider_snapshot(generation: VideoGeneration) -> dict[str, Any]:
+    raw_request = getattr(generation, "upstream_request", None)
+    request = raw_request if isinstance(raw_request, dict) else {}
+    raw_snapshot = request.get("provider_snapshot")
+    snapshot = dict(raw_snapshot) if isinstance(raw_snapshot, dict) else {}
+    for key in ("provider_name", "provider_kind", "upstream_model"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value.strip():
+            snapshot[key] = value.strip()
+            continue
+        fallback = request.get(key)
+        if isinstance(fallback, str) and fallback.strip():
+            snapshot[key] = fallback.strip()
+        else:
+            snapshot.pop(key, None)
+    base_url = snapshot.get("base_url")
+    if isinstance(base_url, str) and base_url.strip():
+        snapshot["base_url"] = base_url.strip().rstrip("/")
+    else:
+        snapshot.pop("base_url", None)
+    return snapshot
+
+
+def _provider_binding_fingerprint(provider: Any) -> str:
+    parts = (
+        str(provider.kind),
+        str(provider.base_url).rstrip("/"),
+        str(provider.api_key),
+        str(provider.proxy_name or ""),
+    )
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+def _persist_provider_snapshot(
+    generation: VideoGeneration,
+    provider: Any,
+    *,
+    upstream_model: str,
+) -> None:
+    raw_request = getattr(generation, "upstream_request", None)
+    request = dict(raw_request) if isinstance(raw_request, dict) else {}
+    request["provider_name"] = provider.name
+    request["provider_kind"] = provider.kind
+    request["upstream_model"] = upstream_model
+    request["provider_snapshot"] = {
+        "provider_name": provider.name,
+        "provider_kind": provider.kind,
+        "base_url": provider.base_url.rstrip("/"),
+        "proxy_name": provider.proxy_name,
+        "upstream_model": upstream_model,
+        "binding_fingerprint": _provider_binding_fingerprint(provider),
+        "captured_at": _now().isoformat(),
+    }
+    generation.upstream_request = request
+
+
 async def _provider_for_generation(generation: VideoGeneration):
     providers = await _provider_config()
-    if generation.provider_name:
+    provider_name = (generation.provider_name or "").strip()
+    if generation.provider_task_id and not provider_name:
+        raise _provider_binding_error(
+            generation,
+            "submitted video task has no persisted provider identity",
+        )
+    if provider_name:
         for provider in providers:
-            if provider.name == generation.provider_name:
-                return provider
+            if provider.name != provider_name:
+                continue
+            if generation.provider_kind and provider.kind != generation.provider_kind:
+                raise _provider_binding_error(
+                    generation,
+                    "persisted video provider kind no longer matches configuration",
+                    current_provider_name=provider.name,
+                )
+            snapshot = _provider_snapshot(generation)
+            snapshot_name = snapshot.get("provider_name")
+            snapshot_kind = snapshot.get("provider_kind")
+            snapshot_base_url = snapshot.get("base_url")
+            snapshot_binding = snapshot.get("binding_fingerprint")
+            if snapshot_name and snapshot_name != provider.name:
+                raise _provider_binding_error(
+                    generation,
+                    "video provider snapshot name does not match persisted provider",
+                    current_provider_name=provider.name,
+                )
+            if snapshot_kind and snapshot_kind != provider.kind:
+                raise _provider_binding_error(
+                    generation,
+                    "video provider snapshot kind no longer matches configuration",
+                    current_provider_name=provider.name,
+                )
+            if (
+                generation.provider_task_id
+                and isinstance(snapshot_base_url, str)
+                and snapshot_base_url.rstrip("/") != provider.base_url.rstrip("/")
+            ):
+                raise _provider_binding_error(
+                    generation,
+                    "video provider endpoint changed after task submission",
+                    current_provider_name=provider.name,
+                )
+            if (
+                generation.provider_task_id
+                and isinstance(snapshot_binding, str)
+                and snapshot_binding != _provider_binding_fingerprint(provider)
+            ):
+                raise _provider_binding_error(
+                    generation,
+                    "video provider credentials or route changed after task submission",
+                    current_provider_name=provider.name,
+                )
+            if not generation.provider_task_id and not provider.supports(
+                generation.model,
+                generation.action,
+            ):
+                raise _provider_binding_error(
+                    generation,
+                    "persisted video provider is no longer enabled for this request",
+                    current_provider_name=provider.name,
+                )
+            return provider
+        raise _provider_binding_error(
+            generation,
+            "persisted video provider is no longer configured; refusing provider switch",
+        )
     provider = select_video_provider(
         providers,
         model=generation.model,
@@ -691,10 +841,58 @@ def _restore_cached_provider_identity(
 ) -> SubmitResult:
     cached_provider_name = _cached_submit_provider_name(cached_submit)
     cached_provider_kind = _cached_submit_provider_kind(cached_submit)
-    if cached_provider_name and not generation.provider_name:
-        generation.provider_name = cached_provider_name
-    if cached_provider_kind and not generation.provider_kind:
-        generation.provider_kind = cached_provider_kind
+    snapshot = _provider_snapshot(generation)
+    snapshot_name = snapshot.get("provider_name")
+    snapshot_kind = snapshot.get("provider_kind")
+    if (
+        generation.provider_name
+        and snapshot_name
+        and generation.provider_name != snapshot_name
+    ):
+        raise _provider_binding_error(
+            generation,
+            "video provider snapshot conflicts with persisted provider identity",
+            current_provider_name=cached_provider_name,
+        )
+    if (
+        generation.provider_kind
+        and snapshot_kind
+        and generation.provider_kind != snapshot_kind
+    ):
+        raise _provider_binding_error(
+            generation,
+            "video provider snapshot conflicts with persisted provider kind",
+            current_provider_name=cached_provider_name,
+        )
+    expected_name = generation.provider_name or snapshot_name
+    expected_kind = generation.provider_kind or snapshot_kind
+    if cached_provider_name and expected_name and cached_provider_name != expected_name:
+        raise _provider_binding_error(
+            generation,
+            "cached video submit receipt belongs to a different provider",
+            current_provider_name=cached_provider_name,
+        )
+    if cached_provider_kind and expected_kind and cached_provider_kind != expected_kind:
+        raise _provider_binding_error(
+            generation,
+            "cached video submit receipt has a different provider kind",
+            current_provider_name=cached_provider_name,
+        )
+    resolved_name = expected_name or cached_provider_name
+    resolved_kind = expected_kind or cached_provider_kind
+    if not isinstance(resolved_name, str) or not resolved_name.strip():
+        raise _provider_binding_error(
+            generation,
+            "cached video submit receipt has no provider identity",
+        )
+    if not isinstance(resolved_kind, str) or not resolved_kind.strip():
+        raise _provider_binding_error(
+            generation,
+            "cached video submit receipt has no provider kind",
+            current_provider_name=resolved_name,
+        )
+    generation.provider_name = resolved_name.strip()
+    generation.provider_kind = resolved_kind.strip()
     return _cached_submit_result(cached_submit)
 
 
@@ -862,12 +1060,27 @@ async def _run_video_generation_with_lease(
                 )
                 generation.provider_name = provider.name
                 generation.provider_kind = provider.kind
+                upstream_model = provider.upstream_model_for(
+                    generation.model,
+                    generation.action,
+                )
+                if not upstream_model:
+                    raise RuntimeError("provider model mapping missing")
                 _raise_if_video_lease_lost(
                     lease_lost,
                     "video submit lease lost before state transition",
                 )
                 input_bytes, input_mime = await _input_image_bytes(session, generation)
                 reference_media = await _reference_media_bytes(generation)
+                _raise_if_video_lease_lost(
+                    lease_lost,
+                    "video submit lease lost while loading request media",
+                )
+                _persist_provider_snapshot(
+                    generation,
+                    provider,
+                    upstream_model=upstream_model,
+                )
                 generation.status = VideoGenerationStatus.SUBMITTING.value
                 generation.progress_stage = VideoGenerationStage.SUBMITTING.value
                 generation.progress_pct = max(generation.progress_pct, 5)
@@ -892,11 +1105,6 @@ async def _run_video_generation_with_lease(
                     lease_lost,
                     "video submit lease lost before upstream call",
                 )
-                upstream_model = provider.upstream_model_for(
-                    generation.model, generation.action
-                )
-                if not upstream_model:
-                    raise RuntimeError("provider model mapping missing")
                 adapter = adapter_for_provider(provider)
                 upstream_invoked = True
                 result = await adapter.submit(
@@ -1357,11 +1565,73 @@ async def _schedule_submit_retry(
     return True
 
 
+async def _handle_video_upstream_poll_error(
+    redis: Any,
+    task_id: str,
+    exc: VideoUpstreamError,
+    *,
+    lease_lost: asyncio.Event,
+) -> None:
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before upstream error handling",
+    )
+    if await _finish_cancelled_after_provider_poll_error(
+        redis,
+        task_id,
+        lease_lost=lease_lost,
+        exc=exc,
+    ):
+        return
+    if await _schedule_poll_retry(
+        redis,
+        task_id,
+        exc,
+        lease_lost=lease_lost,
+    ):
+        return
+    retryable_poll_error = _is_retryable_video_exception(exc)
+    await _apply_poll_result(
+        redis,
+        task_id,
+        PollResult(
+            status="expired" if retryable_poll_error else "failed",
+            failure_class=exc.error_code,
+            upstream_billable=None,
+            raw=exc.raw
+            or {
+                "error": _video_exception_message(exc, phase="poll"),
+                "error_code": _video_exception_code(
+                    exc,
+                    default="upstream_unknown",
+                ),
+            },
+        ),
+        fallback_error_message=_video_exception_message(
+            exc,
+            phase="poll",
+        ),
+        lease_lost=lease_lost,
+    )
+
+
 async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
     redis = ctx["redis"]
     token = f"video-poll:{new_uuid7()}"
     if not await _acquire_lease(redis, task_id, token):
         return
+    stop_renewer = asyncio.Event()
+    lease_lost = asyncio.Event()
+    renewer = asyncio.create_task(
+        _lease_renewer(
+            redis,
+            task_id,
+            token,
+            stop=stop_renewer,
+            lost=lease_lost,
+        )
+    )
+    adapter: VideoProviderAdapter | None = None
     try:
         async with SessionLocal() as session:
             generation = (
@@ -1372,18 +1642,25 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
                 )
             ).scalar_one_or_none()
             if generation is None or generation.status in _TERMINAL_STATUSES:
-                await _release_lease(redis, task_id, token)
                 return
             if not generation.provider_task_id:
                 await _enqueue_submit(redis, task_id, defer_s=_POLL_INTERVAL_S)
-                await _release_lease(redis, task_id, token)
                 return
+            _raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost before provider resolution",
+            )
             provider = await _provider_for_generation(generation)
             adapter = adapter_for_provider(provider)
+            provider_task_id = generation.provider_task_id
             deadline_expired = generation.deadline_at <= _now()
             should_commit_poll_state = False
             if generation.cancel_requested_at is not None:
-                await _try_provider_cancel(adapter, generation)
+                await _try_provider_cancel(
+                    adapter,
+                    generation,
+                    lease_lost=lease_lost,
+                )
                 should_commit_poll_state = True
             if deadline_expired:
                 diagnostics = _generation_diagnostics(generation)
@@ -1392,50 +1669,99 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
                 generation.diagnostics = diagnostics
                 should_commit_poll_state = True
             if should_commit_poll_state:
+                _raise_if_video_lease_lost(
+                    lease_lost,
+                    "video poll lease lost before state commit",
+                )
                 await session.commit()
 
-        poll = await adapter.poll(generation.provider_task_id)
-        await _apply_poll_result(redis, task_id, poll)
+        poll = await adapter.poll(provider_task_id)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost during provider poll",
+        )
+        await _apply_poll_result(
+            redis,
+            task_id,
+            poll,
+            adapter=adapter,
+            lease_lost=lease_lost,
+        )
+    except _VideoLeaseLost as exc:
+        logger.warning("video poll lease lost task=%s err=%s", task_id, exc)
+        return
     except VideoUpstreamError as exc:
-        if await _finish_cancelled_after_provider_poll_error(redis, task_id, exc):
-            return
-        if not await _schedule_poll_retry(redis, task_id, exc):
-            retryable_poll_error = _is_retryable_video_exception(exc)
-            await _apply_poll_result(
+        try:
+            await _handle_video_upstream_poll_error(
                 redis,
                 task_id,
-                PollResult(
-                    status="expired" if retryable_poll_error else "failed",
-                    failure_class=exc.error_code,
-                    upstream_billable=None,
-                    raw=exc.raw
-                    or {
-                        "error": _video_exception_message(exc, phase="poll"),
-                        "error_code": _video_exception_code(
-                            exc, default="upstream_unknown"
-                        ),
-                    },
-                ),
-                fallback_error_message=_video_exception_message(exc, phase="poll"),
+                lease_lost=lease_lost,
+                exc=exc,
             )
+        except _VideoLeaseLost as lease_exc:
+            logger.warning(
+                "video poll lease lost during upstream error handling task=%s err=%s",
+                task_id,
+                lease_exc,
+            )
+            return
     except Exception as exc:  # noqa: BLE001
         logger.warning("video poll failed task=%s err=%s", task_id, exc, exc_info=True)
-        async with SessionLocal() as session:
-            generation = (
-                await session.execute(
-                    select(VideoGeneration)
-                    .where(VideoGeneration.id == task_id)
-                    .with_for_update()
+        try:
+            _raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost before unexpected error handling",
+            )
+            if _is_retryable_video_exception(exc):
+                if await _schedule_poll_retry(
+                    redis,
+                    task_id,
+                    exc,
+                    lease_lost=lease_lost,
+                ):
+                    return
+                await _apply_poll_result(
+                    redis,
+                    task_id,
+                    PollResult(
+                        status="expired",
+                        failure_class=_video_exception_code(
+                            exc,
+                            default="upstream_unknown",
+                        ),
+                        upstream_billable=None,
+                        raw={
+                            "error": _video_exception_message(exc, phase="poll"),
+                            "error_code": _video_exception_code(
+                                exc,
+                                default="upstream_unknown",
+                            ),
+                        },
+                    ),
+                    fallback_error_message=_video_exception_message(
+                        exc,
+                        phase="poll",
+                    ),
+                    lease_lost=lease_lost,
                 )
-            ).scalar_one_or_none()
-            if generation is None or generation.status in _TERMINAL_STATUSES:
-                await _release_lease(redis, task_id, token)
                 return
-            generation.poll_count += 1
-            generation.next_poll_at = _now() + timedelta(seconds=_POLL_INTERVAL_S)
-            await session.commit()
-        await _enqueue_poll(redis, task_id)
+            await _handle_unexpected_poll_exception(
+                redis,
+                task_id,
+                exc,
+                lease_lost=lease_lost,
+            )
+        except _VideoLeaseLost as lease_exc:
+            logger.warning(
+                "video poll lease lost during unexpected error handling task=%s err=%s",
+                task_id,
+                lease_exc,
+            )
+            return
     finally:
+        stop_renewer.set()
+        renewer.cancel()
+        await asyncio.gather(renewer, return_exceptions=True)
         await _release_lease(redis, task_id, token)
 
 
@@ -1443,9 +1769,15 @@ async def _schedule_poll_retry(
     redis: Any,
     task_id: str,
     exc: Exception,
+    *,
+    lease_lost: asyncio.Event | None = None,
 ) -> bool:
     if not _is_retryable_video_exception(exc):
         return False
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before retry scheduling",
+    )
     async with SessionLocal() as session:
         generation = (
             await session.execute(
@@ -1456,6 +1788,10 @@ async def _schedule_poll_retry(
         ).scalar_one_or_none()
         if generation is None or generation.status in _TERMINAL_STATUSES:
             return True
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before retry mutation",
+        )
         now = _now()
         error_code = _video_exception_code(exc, default="upstream_unknown")
         if _provider_tracking_window_exhausted(generation, now):
@@ -1472,6 +1808,8 @@ async def _schedule_poll_retry(
             )
         error_message = _video_exception_message(exc, phase="poll")
         diagnostics = dict(generation.diagnostics or {})
+        diagnostics.pop("unexpected_poll_attempts", None)
+        diagnostics.pop("unexpected_poll_fingerprint", None)
         if generation.deadline_at <= now:
             diagnostics.setdefault("deadline_expired_at", now.isoformat())
             diagnostics["deadline_expired_poll_retry_continues"] = True
@@ -1507,6 +1845,10 @@ async def _schedule_poll_retry(
         generation.error_code = None
         generation.error_message = None
         generation.diagnostics = diagnostics
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before retry commit",
+        )
         await session.commit()
         logger.info(
             "video poll retry scheduled task=%s poll_count=%s delay_s=%s code=%s "
@@ -1518,6 +1860,10 @@ async def _schedule_poll_retry(
             error_message,
         )
         try:
+            _raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost before retry event",
+            )
             await _publish(
                 redis,
                 generation,
@@ -1525,6 +1871,8 @@ async def _schedule_poll_retry(
                 retry_after_s=delay_s,
                 retry_error_code=error_code,
             )
+        except _VideoLeaseLost:
+            raise
         except Exception:
             logger.warning(
                 "video poll retry publish failed task=%s",
@@ -1532,7 +1880,13 @@ async def _schedule_poll_retry(
                 exc_info=True,
             )
         try:
+            _raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost before retry enqueue",
+            )
             await _enqueue_poll(redis, generation.id, defer_s=delay_s)
+        except _VideoLeaseLost:
+            raise
         except Exception:
             logger.warning(
                 "video poll retry enqueue failed task=%s", generation.id, exc_info=True
@@ -1540,13 +1894,142 @@ async def _schedule_poll_retry(
         return True
 
 
+async def _handle_unexpected_poll_exception(
+    redis: Any,
+    task_id: str,
+    exc: Exception,
+    *,
+    lease_lost: asyncio.Event | None = None,
+) -> None:
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before unexpected error persistence",
+    )
+    async with SessionLocal() as session:
+        generation = (
+            await session.execute(
+                select(VideoGeneration)
+                .where(VideoGeneration.id == task_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if generation is None or generation.status in _TERMINAL_STATUSES:
+            return
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before unexpected error mutation",
+        )
+        now = _now()
+        diagnostics = _generation_diagnostics(generation)
+        try:
+            previous_attempts = int(diagnostics.get("unexpected_poll_attempts") or 0)
+        except (TypeError, ValueError):
+            previous_attempts = 0
+        error_code = _video_exception_code(exc, default="poll_internal_error")
+        error_message = _video_exception_message(exc, phase="poll")
+        fingerprint = f"{type(exc).__module__}.{type(exc).__qualname__}:{error_code}"
+        if diagnostics.get("unexpected_poll_fingerprint") != fingerprint:
+            previous_attempts = 0
+        tracking_exhausted = _provider_tracking_window_exhausted(generation, now)
+        attempt = previous_attempts + 1
+        terminal = tracking_exhausted or attempt >= _MAX_UNEXPECTED_POLL_ATTEMPTS
+        item = {
+            "at": now.isoformat(),
+            "attempt": attempt,
+            "error_code": error_code,
+            "message": error_message[:500],
+            "terminal": terminal,
+        }
+        _append_bounded_history(
+            diagnostics,
+            "unexpected_poll_history",
+            item,
+        )
+        diagnostics["unexpected_poll_attempts"] = attempt
+        diagnostics["unexpected_poll_fingerprint"] = fingerprint
+        diagnostics["last_poll_error"] = {
+            **item,
+            "retryable": not terminal,
+        }
+        diagnostics["max_unexpected_poll_attempts"] = _MAX_UNEXPECTED_POLL_ATTEMPTS
+        generation.diagnostics = diagnostics
+        if terminal:
+            await _finish_terminal_failure(
+                session,
+                redis,
+                generation,
+                PollResult(
+                    status="expired" if tracking_exhausted else "failed",
+                    failure_class=error_code,
+                    upstream_billable=None,
+                    raw={
+                        "phase": "poll",
+                        "error": error_message,
+                        "error_code": error_code,
+                        "unexpected_poll_attempts": attempt,
+                        "max_unexpected_poll_attempts": (_MAX_UNEXPECTED_POLL_ATTEMPTS),
+                        "provider_tracking_window_exhausted": tracking_exhausted,
+                        "upstream_cost_ambiguous": True,
+                    },
+                ),
+                fallback_error_message=error_message,
+                lease_lost=lease_lost,
+            )
+            return
+
+        delay_s = (
+            _EXTENDED_POLL_INTERVAL_S
+            if _poll_window_exhausted(generation, now)
+            else _POLL_RETRY_DELAY_S
+        )
+        generation.status = VideoGenerationStatus.RUNNING.value
+        if generation.progress_stage not in {
+            VideoGenerationStage.RENDERING.value,
+            VideoGenerationStage.FETCHING.value,
+        }:
+            generation.progress_stage = VideoGenerationStage.RENDERING.value
+        generation.progress_pct = max(generation.progress_pct, 20)
+        generation.poll_count += 1
+        generation.next_poll_at = now + timedelta(seconds=delay_s)
+        generation.error_code = None
+        generation.error_message = None
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before unexpected error retry commit",
+        )
+        await session.commit()
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before unexpected error retry event",
+        )
+        await _publish(
+            redis,
+            generation,
+            EV_VIDEO_PROGRESS,
+            retry_after_s=delay_s,
+            retry_error_code=error_code,
+            unexpected_retry_attempt=attempt,
+        )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before unexpected error retry enqueue",
+        )
+        await _enqueue_poll(redis, generation.id, defer_s=delay_s)
+
+
 async def _finish_cancelled_after_provider_poll_error(
     redis: Any,
     task_id: str,
     exc: VideoUpstreamError,
+    *,
+    lease_lost: asyncio.Event | None = None,
 ) -> bool:
     if _video_exception_code(exc, default="upstream_unknown") != "upstream_not_ready":
         return False
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before cancel reconciliation",
+    )
     async with SessionLocal() as session:
         generation = (
             await session.execute(
@@ -1557,6 +2040,10 @@ async def _finish_cancelled_after_provider_poll_error(
         ).scalar_one_or_none()
         if generation is None or generation.status in _TERMINAL_STATUSES:
             return True
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before cancel terminal mutation",
+        )
         diagnostics = _generation_diagnostics(generation)
         if generation.cancel_requested_at is None or not diagnostics.get(
             "cancel_sent_at"
@@ -1578,22 +2065,45 @@ async def _finish_cancelled_after_provider_poll_error(
                 "upstream_cost_ambiguous": True,
             },
         )
-        await _finish_terminal_failure(
-            session,
-            redis,
-            generation,
-            poll,
-            fallback_error_message="video task cancelled by user",
-        )
+        if lease_lost is None:
+            await _finish_terminal_failure(
+                session,
+                redis,
+                generation,
+                poll,
+                fallback_error_message="video task cancelled by user",
+            )
+        else:
+            await _finish_terminal_failure(
+                session,
+                redis,
+                generation,
+                poll,
+                fallback_error_message="video task cancelled by user",
+                lease_lost=lease_lost,
+            )
         return True
 
 
-async def _try_provider_cancel(adapter: Any, generation: VideoGeneration) -> None:
+async def _try_provider_cancel(
+    adapter: Any,
+    generation: VideoGeneration,
+    *,
+    lease_lost: asyncio.Event | None = None,
+) -> None:
     diagnostics = _generation_diagnostics(generation)
     if diagnostics.get("cancel_sent_at") or diagnostics.get("cancel_unsupported_at"):
         return
     try:
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before provider cancel",
+        )
         result = await adapter.cancel(generation.provider_task_id)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost during provider cancel",
+        )
         attempted_at = _now().isoformat()
         diagnostics["cancel_attempted_at"] = attempted_at
         diagnostics["cancel_result"] = result.raw if result else None
@@ -1603,6 +2113,8 @@ async def _try_provider_cancel(adapter: Any, generation: VideoGeneration) -> Non
             diagnostics["cancel_sent_at"] = attempted_at
         else:
             diagnostics["cancel_rejected_at"] = attempted_at
+    except _VideoLeaseLost:
+        raise
     except Exception as exc:  # noqa: BLE001
         diagnostics["cancel_error_at"] = _now().isoformat()
         diagnostics["cancel_error"] = str(exc)[:500]
@@ -1615,7 +2127,13 @@ async def _apply_poll_result(
     poll: PollResult,
     *,
     fallback_error_message: str | None = None,
+    adapter: VideoProviderAdapter | None = None,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before result persistence",
+    )
     async with SessionLocal() as session:
         generation = (
             await session.execute(
@@ -1626,11 +2144,22 @@ async def _apply_poll_result(
         ).scalar_one_or_none()
         if generation is None or generation.status in _TERMINAL_STATUSES:
             return
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before result mutation",
+        )
 
         if poll.status in {"queued", "running"}:
             now = _now()
             if not _provider_tracking_window_exhausted(generation, now):
-                await _continue_running_poll(session, redis, generation, poll, now=now)
+                await _continue_running_poll(
+                    session,
+                    redis,
+                    generation,
+                    poll,
+                    now=now,
+                    lease_lost=lease_lost,
+                )
                 return
             poll = PollResult(
                 status="expired",
@@ -1658,7 +2187,14 @@ async def _apply_poll_result(
                     raw={**(poll.raw or {}), "error": "missing video_url"},
                 )
             else:
-                await _finish_success(session, redis, generation, poll)
+                await _finish_success(
+                    session,
+                    redis,
+                    generation,
+                    poll,
+                    adapter=adapter,
+                    lease_lost=lease_lost,
+                )
                 return
 
         await _finish_terminal_failure(
@@ -1667,6 +2203,7 @@ async def _apply_poll_result(
             generation,
             poll,
             fallback_error_message=fallback_error_message,
+            lease_lost=lease_lost,
         )
 
 
@@ -1677,10 +2214,13 @@ async def _continue_running_poll(
     poll: PollResult,
     *,
     now: datetime,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
     local_window_exhausted = _poll_window_exhausted(generation, now)
     delay_s = _EXTENDED_POLL_INTERVAL_S if local_window_exhausted else _POLL_INTERVAL_S
     diagnostics = _generation_diagnostics(generation)
+    diagnostics.pop("unexpected_poll_attempts", None)
+    diagnostics.pop("unexpected_poll_fingerprint", None)
     if local_window_exhausted:
         diagnostics.setdefault("poll_window_exhausted_at", now.isoformat())
         diagnostics["extended_polling_continues"] = True
@@ -1704,7 +2244,15 @@ async def _continue_running_poll(
     generation.error_code = None
     generation.error_message = None
     generation.diagnostics = diagnostics
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before running-state commit",
+    )
     await session.commit()
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before progress event",
+    )
     await _publish(
         redis,
         generation,
@@ -1712,7 +2260,28 @@ async def _continue_running_poll(
         extended_polling=local_window_exhausted,
         retry_after_s=delay_s,
     )
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost before next poll enqueue",
+    )
     await _enqueue_poll(redis, generation.id, defer_s=delay_s)
+
+
+def _cancelled_poll_during_finalization(poll: PollResult) -> PollResult:
+    raw = {
+        **(poll.raw or {}),
+        "reason": "cancel_requested_during_finalization",
+        "provider_status": poll.status,
+    }
+    if poll.usage_total_tokens is None and poll.upstream_billable is None:
+        raw["upstream_cost_ambiguous"] = True
+    return PollResult(
+        status="cancelled",
+        failure_class="canceled",
+        usage_total_tokens=poll.usage_total_tokens,
+        upstream_billable=poll.upstream_billable,
+        raw=raw,
+    )
 
 
 async def _finish_success(
@@ -1720,34 +2289,106 @@ async def _finish_success(
     redis: Any,
     generation: VideoGeneration,
     poll: PollResult,
+    *,
+    adapter: VideoProviderAdapter | None = None,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
     release_provider_name = generation.provider_name
+    release_provider_slot = False
+    terminal_committed = False
+    stored: _StoredVideo | None = None
+    artifacts_adopted = False
     try:
-        provider = await _provider_for_generation(generation)
-        release_provider_name = release_provider_name or provider.name
-        adapter = adapter_for_provider(provider)
+        if generation.cancel_requested_at is not None:
+            await _finish_terminal_failure(
+                session,
+                redis,
+                generation,
+                _cancelled_poll_during_finalization(poll),
+                fallback_error_message="video task cancelled by user",
+                lease_lost=lease_lost,
+            )
+            return
+        active_adapter = adapter
+        if active_adapter is None:
+            provider = await _provider_for_generation(generation)
+            release_provider_name = release_provider_name or provider.name
+            active_adapter = adapter_for_provider(provider)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before fetching-state commit",
+        )
+        release_provider_slot = True
         generation.status = VideoGenerationStatus.RUNNING.value
         generation.progress_stage = VideoGenerationStage.FETCHING.value
         generation.progress_pct = max(generation.progress_pct, 96)
         generation.upstream_response = poll.raw
         await session.commit()
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before fetching event",
+        )
         await _publish(redis, generation, EV_VIDEO_FETCHING)
 
-        video_bytes = await adapter.fetch_result(poll.video_url or "")
-        stored = await _store_video_asset(generation, video_bytes)
+        def ensure_active() -> None:
+            _raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost during result download",
+            )
+
+        downloaded = await active_adapter.download_result(
+            poll.video_url or "",
+            ensure_active=ensure_active,
+        )
+        artifact_attempt_id = new_uuid7()
+        stored = await _store_video_asset(
+            generation,
+            downloaded,
+            lease_lost=lease_lost,
+            artifact_attempt_id=artifact_attempt_id,
+        )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before success row lock",
+        )
+        await session.refresh(generation, with_for_update=True)
+        if generation.status in _TERMINAL_STATUSES:
+            release_provider_slot = False
+            return
+        if generation.cancel_requested_at is not None:
+            release_provider_slot = False
+            await _finish_terminal_failure(
+                session,
+                redis,
+                generation,
+                _cancelled_poll_during_finalization(poll),
+                fallback_error_message="video task cancelled by user",
+                lease_lost=lease_lost,
+            )
+            return
         existing = await _video_for_generation(session, generation.id)
         if existing is None:
             session.add(stored.video)
             await session.flush()
             video = stored.video
+            adopt_stored_artifacts = True
         else:
             video = existing
+            adopt_stored_artifacts = False
         diagnostics = {**(generation.diagnostics or {}), **stored.diagnostics}
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before billing settlement",
+        )
         resolution = await resolve_video_billing(
             session,
             generation,
             poll_result=poll,
             reason="succeeded",
+        )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before success mutation",
         )
         diagnostics["billing_decision"] = resolution.decision
         generation.status = VideoGenerationStatus.SUCCEEDED.value
@@ -1764,10 +2405,23 @@ async def _finish_success(
             EV_VIDEO_SUCCEEDED,
             video_id=video.id,
         )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before success commit",
+        )
         await session.commit()
+        terminal_committed = True
+        artifacts_adopted = adopt_stored_artifacts
         await worker_flush_balance_cache(session)
     finally:
-        if release_provider_name:
+        if stored is not None and not artifacts_adopted:
+            await _delete_video_storage_keys(stored.created_storage_keys)
+        lease_still_owned = lease_lost is None or not lease_lost.is_set()
+        if (
+            release_provider_slot
+            and release_provider_name
+            and (terminal_committed or lease_still_owned)
+        ):
             await _release_provider_slot(redis, release_provider_name, generation.id)
 
 
@@ -1784,14 +2438,28 @@ async def _finish_terminal_failure(
     poll: PollResult,
     *,
     fallback_error_message: str | None,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
     release_provider_name = generation.provider_name
+    release_provider_slot = False
+    terminal_committed = False
     try:
+        if generation.status in _TERMINAL_STATUSES:
+            return
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before terminal billing",
+        )
+        release_provider_slot = True
         resolution = await resolve_video_billing(
             session,
             generation,
             poll_result=poll,
             reason=poll.status,
+        )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before terminal mutation",
         )
         internal_status = (
             VideoGenerationStatus.CANCELED.value
@@ -1820,10 +2488,20 @@ async def _finish_terminal_failure(
             if internal_status == VideoGenerationStatus.CANCELED.value
             else EV_VIDEO_FAILED,
         )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before terminal commit",
+        )
         await session.commit()
+        terminal_committed = True
         await worker_flush_balance_cache(session)
     finally:
-        if release_provider_name:
+        lease_still_owned = lease_lost is None or not lease_lost.is_set()
+        if (
+            release_provider_slot
+            and release_provider_name
+            and (terminal_committed or lease_still_owned)
+        ):
             await _release_provider_slot(redis, release_provider_name, generation.id)
 
 
@@ -1853,217 +2531,239 @@ async def _video_for_generation(session, generation_id: str) -> Video | None:
     ).scalar_one_or_none()
 
 
-async def _store_video_asset(generation: VideoGeneration, data: bytes) -> _StoredVideo:
-    processed, diagnostics = await asyncio.to_thread(_postprocess_video_bytes, data)
-    video_key = f"u/{generation.user_id}/v/{generation.id}/output.mp4"
-    poster_key = f"u/{generation.user_id}/v/{generation.id}/poster.jpg"
-    await storage.aput_bytes(video_key, processed["video_bytes"])
-    poster_storage_key = None
-    if processed.get("poster_bytes"):
-        try:
-            await storage.aput_bytes(poster_key, processed["poster_bytes"])
-            poster_storage_key = poster_key
-        except StorageDiskFullError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            diagnostics["poster_store_error"] = str(exc)[:500]
-    sha = hashlib.sha256(processed["video_bytes"]).hexdigest()
-    video = Video(
-        id=new_uuid7(),
-        user_id=generation.user_id,
-        owner_generation_id=generation.id,
-        storage_key=video_key,
-        poster_storage_key=poster_storage_key,
-        mime="video/mp4",
-        width=int(processed.get("width") or 0),
-        height=int(processed.get("height") or 0),
-        duration_ms=int(processed.get("duration_ms") or 0),
-        fps=processed.get("fps"),
-        size_bytes=len(processed["video_bytes"]),
-        sha256=sha,
-        etag=sha,
-        has_audio=bool(processed.get("has_audio")),
-        faststart=bool(processed.get("faststart")),
-        visibility="private",
-        metadata_jsonb=diagnostics,
+def _video_artifact_keys(
+    generation: VideoGeneration,
+    extension: str,
+    *,
+    artifact_attempt_id: str | None,
+) -> tuple[str, str]:
+    base = f"u/{generation.user_id}/v/{generation.id}"
+    if artifact_attempt_id is not None:
+        attempt_id = artifact_attempt_id.strip()
+        if not attempt_id or "/" in attempt_id or "\x00" in attempt_id:
+            raise ValueError("invalid video artifact attempt id")
+        base = f"{base}/final/{attempt_id}"
+    return f"{base}/output{extension}", f"{base}/poster.jpg"
+
+
+async def _delete_video_storage_keys(keys: tuple[str, ...] | list[str]) -> None:
+    unique_keys = list(dict.fromkeys(keys))
+    if not unique_keys:
+        return
+    results = await asyncio.gather(
+        *(asyncio.to_thread(storage.delete, key) for key in unique_keys),
+        return_exceptions=True,
     )
-    return _StoredVideo(video=video, diagnostics=diagnostics)
-
-
-def _postprocess_video_bytes(data: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
-    diagnostics: dict[str, Any] = {}
-    video_bytes = data
-    faststart = _looks_faststart(data)
-    diagnostics["faststart_input"] = faststart
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
-    poster_bytes = None
-    metadata: dict[str, Any] = {}
-    if ffmpeg and ffprobe:
-        with tempfile.TemporaryDirectory(prefix="lumen-video-") as tmp:
-            src = Path(tmp) / "input.mp4"
-            dst = Path(tmp) / "faststart.mp4"
-            poster = Path(tmp) / "poster.jpg"
-            src.write_bytes(data)
-            if not faststart:
-                proc = subprocess.run(
-                    [
-                        ffmpeg,
-                        "-y",
-                        "-i",
-                        str(src),
-                        "-c",
-                        "copy",
-                        "-movflags",
-                        "+faststart",
-                        str(dst),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120,
-                    check=False,
-                )
-                if proc.returncode == 0 and dst.is_file():
-                    video_bytes = dst.read_bytes()
-                    faststart = True
-                else:
-                    diagnostics["faststart_error"] = proc.stderr.decode(
-                        "utf-8", "replace"
-                    )[-1000:]
-            probe_src = dst if dst.is_file() else src
-            metadata = _probe_video(ffprobe, probe_src)
-            poster_proc = subprocess.run(
-                [
-                    ffmpeg,
-                    "-y",
-                    "-ss",
-                    "0",
-                    "-i",
-                    str(probe_src),
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "2",
-                    str(poster),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-                check=False,
+    for key, result in zip(unique_keys, results, strict=False):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "video artifact cleanup failed key=%s err=%s",
+                key,
+                result,
             )
-            if poster_proc.returncode == 0 and poster.is_file():
-                poster_bytes = poster.read_bytes()
-            else:
-                diagnostics["poster_error"] = poster_proc.stderr.decode(
-                    "utf-8", "replace"
-                )[-1000:]
-    else:
-        diagnostics["ffmpeg_missing"] = True
-    diagnostics["faststart"] = faststart
-    diagnostics.update(metadata)
-    return {
-        "video_bytes": video_bytes,
-        "poster_bytes": poster_bytes,
-        "faststart": faststart,
-        **metadata,
-    }, diagnostics
 
 
-def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-show_format",
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
+async def _put_video_storage_bytes(
+    key: str,
+    data: bytes,
+    *,
+    track_created: bool,
+) -> bool:
+    if not track_created:
+        await storage.aput_bytes(key, data)
+        return False
+    result = await asyncio.to_thread(storage.put_bytes_result, key, data)
+    return bool(result.created)
+
+
+async def _store_video_asset(
+    generation: VideoGeneration,
+    data: bytes | DownloadedVideo,
+    *,
+    lease_lost: asyncio.Event | None = None,
+    artifact_attempt_id: str | None = None,
+) -> _StoredVideo:
+    if isinstance(data, DownloadedVideo):
+        return await _store_downloaded_video_asset(
+            generation,
+            data,
+            lease_lost=lease_lost,
+            artifact_attempt_id=artifact_attempt_id,
+        )
+    processed, diagnostics = await asyncio.to_thread(_postprocess_video_bytes, data)
+    _raise_if_video_lease_lost(
+        lease_lost,
+        "video poll lease lost after byte video postprocess",
     )
-    if proc.returncode != 0:
-        return {"probe_error": proc.stderr.decode("utf-8", "replace")[-1000:]}
+    mime = str(processed.get("mime") or "video/mp4")
+    extension = str(processed.get("extension") or ".mp4")
+    video_key, poster_key = _video_artifact_keys(
+        generation,
+        extension,
+        artifact_attempt_id=artifact_attempt_id,
+    )
+    video_bytes = processed["video_bytes"]
+    track_created = artifact_attempt_id is not None
+    created_keys: list[str] = []
     try:
-        raw = json.loads(proc.stdout.decode("utf-8"))
-    except json.JSONDecodeError:
-        return {"probe_error": "invalid ffprobe json"}
-    streams = raw.get("streams") if isinstance(raw, dict) else []
-    video_stream = next(
-        (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"),
-        {},
-    )
-    audio_stream = next(
-        (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "audio"),
-        None,
-    )
-    duration = _float_or_none(video_stream.get("duration")) or _float_or_none(
-        (raw.get("format") or {}).get("duration")
-    )
-    fps = _fps(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"))
-    return {
-        "width": int(video_stream.get("width") or 0),
-        "height": int(video_stream.get("height") or 0),
-        "duration_ms": int(duration * 1000) if duration is not None else 0,
-        "fps": fps,
-        "has_audio": audio_stream is not None,
-        "probe": raw,
-    }
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before byte artifact storage",
+        )
+        if await _put_video_storage_bytes(
+            video_key,
+            video_bytes,
+            track_created=track_created,
+        ):
+            created_keys.append(video_key)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost after byte artifact storage",
+        )
+        poster_storage_key = None
+        if processed.get("poster_bytes"):
+            try:
+                if await _put_video_storage_bytes(
+                    poster_key,
+                    processed["poster_bytes"],
+                    track_created=track_created,
+                ):
+                    created_keys.append(poster_key)
+                poster_storage_key = poster_key
+            except StorageDiskFullError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["poster_store_error"] = str(exc)[:500]
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost after byte poster storage",
+        )
+        if artifact_attempt_id is not None:
+            diagnostics["artifact_attempt_id"] = artifact_attempt_id
+        sha = hashlib.sha256(video_bytes).hexdigest()
+        video = Video(
+            id=new_uuid7(),
+            user_id=generation.user_id,
+            owner_generation_id=generation.id,
+            storage_key=video_key,
+            poster_storage_key=poster_storage_key,
+            mime=mime,
+            width=int(processed.get("width") or 0),
+            height=int(processed.get("height") or 0),
+            duration_ms=int(processed.get("duration_ms") or 0),
+            fps=processed.get("fps"),
+            size_bytes=len(video_bytes),
+            sha256=sha,
+            etag=sha,
+            has_audio=bool(processed.get("has_audio")),
+            faststart=bool(processed.get("faststart")),
+            visibility="private",
+            metadata_jsonb=diagnostics,
+        )
+        return _StoredVideo(
+            video=video,
+            diagnostics=diagnostics,
+            created_storage_keys=tuple(created_keys),
+        )
+    except BaseException:
+        await _delete_video_storage_keys(created_keys)
+        raise
 
 
-def _float_or_none(value: Any) -> float | None:
+async def _store_downloaded_video_asset(
+    generation: VideoGeneration,
+    downloaded: DownloadedVideo,
+    *,
+    lease_lost: asyncio.Event | None,
+    artifact_attempt_id: str | None,
+) -> _StoredVideo:
+    processed: _ProcessedVideoFile | None = None
+    created_keys: list[str] = []
     try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _fps(value: Any) -> float | None:
-    if not isinstance(value, str) or "/" not in value:
-        return _float_or_none(value)
-    left, right = value.split("/", 1)
-    try:
-        denom = float(right)
-        if denom == 0:
-            return None
-        return float(left) / denom
-    except (TypeError, ValueError):
-        return None
-
-
-def _looks_faststart(data: bytes) -> bool:
-    offset = 0
-    moov_offset: int | None = None
-    mdat_offset: int | None = None
-    data_len = len(data)
-    while offset + 8 <= data_len:
-        size = int.from_bytes(data[offset : offset + 4], "big")
-        box_type = data[offset + 4 : offset + 8]
-        header_size = 8
-        if size == 1:
-            if offset + 16 > data_len:
-                break
-            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
-            header_size = 16
-        elif size == 0:
-            size = data_len - offset
-        if size < header_size:
-            break
-        if box_type == b"moov" and moov_offset is None:
-            moov_offset = offset
-        elif box_type == b"mdat" and mdat_offset is None:
-            mdat_offset = offset
-        if moov_offset is not None and mdat_offset is not None:
-            break
-        offset += size
-    return moov_offset is not None and (
-        mdat_offset is None or moov_offset < mdat_offset
-    )
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before video postprocess",
+        )
+        processed = await asyncio.to_thread(_postprocess_video_file, downloaded)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost after video postprocess",
+        )
+        video_key, poster_key = _video_artifact_keys(
+            generation,
+            processed.extension,
+            artifact_attempt_id=artifact_attempt_id,
+        )
+        try:
+            write_result = await asyncio.to_thread(
+                copy_video_file_exclusive_result,
+                processed.path,
+                storage.path_for(video_key),
+                expected_sha256=processed.sha256,
+                expected_size=processed.size_bytes,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise StorageDiskFullError(video_key) from exc
+            raise
+        if write_result.created:
+            created_keys.append(video_key)
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost after video artifact storage",
+        )
+        diagnostics = dict(processed.metadata)
+        poster_storage_key = None
+        if processed.poster_bytes:
+            try:
+                if await _put_video_storage_bytes(
+                    poster_key,
+                    processed.poster_bytes,
+                    track_created=True,
+                ):
+                    created_keys.append(poster_key)
+                poster_storage_key = poster_key
+            except StorageDiskFullError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["poster_store_error"] = str(exc)[:500]
+        _raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost after video poster storage",
+        )
+        if artifact_attempt_id is not None:
+            diagnostics["artifact_attempt_id"] = artifact_attempt_id
+        video = Video(
+            id=new_uuid7(),
+            user_id=generation.user_id,
+            owner_generation_id=generation.id,
+            storage_key=video_key,
+            poster_storage_key=poster_storage_key,
+            mime=processed.mime,
+            width=int(processed.metadata.get("width") or 0),
+            height=int(processed.metadata.get("height") or 0),
+            duration_ms=int(processed.metadata.get("duration_ms") or 0),
+            fps=processed.metadata.get("fps"),
+            size_bytes=processed.size_bytes,
+            sha256=processed.sha256,
+            etag=processed.sha256,
+            has_audio=bool(processed.metadata.get("has_audio")),
+            faststart=processed.faststart,
+            visibility="private",
+            metadata_jsonb=diagnostics,
+        )
+        return _StoredVideo(
+            video=video,
+            diagnostics=diagnostics,
+            created_storage_keys=tuple(created_keys),
+        )
+    except BaseException:
+        await _delete_video_storage_keys(created_keys)
+        raise
+    finally:
+        if processed is not None:
+            processed.cleanup()
+        downloaded.cleanup()
 
 
 async def _finalize_submit_unknown(

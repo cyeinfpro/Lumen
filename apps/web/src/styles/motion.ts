@@ -20,7 +20,7 @@ export function usePrefersReducedMotion(): boolean {
   return Boolean(useReducedMotion());
 }
 
-export function motionDuration(ms: number, reduced: boolean): number {
+function motionDuration(ms: number, reduced: boolean): number {
   return reduced ? 0 : ms / 1000;
 }
 

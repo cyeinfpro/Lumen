@@ -16,24 +16,6 @@ const NAV_ROUTE_PREFIXES: readonly {
   { key: "assets", route: "/assets", prefixes: ["/assets", "/stream", "/library"] },
 ];
 
-const DESKTOP_UNSUPPORTED_PREFIXES = [
-  "/admin",
-  "/api/admin",
-  "/api/billing",
-  "/invite",
-  "/library",
-  "/login",
-  "/me/wallet",
-  "/poster-styles",
-  "/projects",
-  "/reset-password",
-  "/settings/api-key",
-  "/settings/privacy",
-  "/settings/telegram",
-  "/settings/usage",
-  "/signup",
-] as const;
-
 function normalizeBackendUrl(): string {
   const raw = process.env.LUMEN_BACKEND_URL?.trim() || "http://127.0.0.1:8000";
   const url = new URL(raw);
@@ -98,17 +80,6 @@ function redirectForHiddenNavPath(
 export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-lumen-pathname", request.nextUrl.pathname);
-  if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
-    if (
-      DESKTOP_UNSUPPORTED_PREFIXES.some((prefix) =>
-        matchesPrefix(request.nextUrl.pathname, prefix),
-      )
-    ) {
-      return NextResponse.redirect(new URL("/", request.url));
-    }
-    const token = process.env.LUMEN_LOCAL_TOKEN?.trim();
-    if (token) requestHeaders.set("x-lumen-local-token", token);
-  }
   const targetPath = backendPath(request.nextUrl.pathname);
   if (!targetPath) {
     const redirectTo = redirectForHiddenNavPath(

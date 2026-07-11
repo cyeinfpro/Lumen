@@ -106,8 +106,17 @@ NEW_ID=""
 NEW_RELEASE=""
 PREVIOUS_TAG=""
 TARGET_TAG=""
-SWITCHED=0
 ROLLBACK_DONE=0
+UPDATE_STATE_COMMITTED=0
+UPDATE_STATE_SNAPSHOT_READY=0
+UPDATE_RELEASE_SWITCHED=0
+UPDATE_OLD_SERVICES_STOPPED=0
+UPDATE_ENV_SNAPSHOT=""
+UPDATE_ORIGINAL_CURRENT_PRESENT=0
+UPDATE_ORIGINAL_CURRENT_TARGET=""
+UPDATE_ORIGINAL_PREVIOUS_PRESENT=0
+UPDATE_ORIGINAL_PREVIOUS_TARGET=""
+UPDATE_HOST_ARTIFACT_SNAPSHOT=""
 LUMEN_UPDATE_MODE="$(printf '%s' "${LUMEN_UPDATE_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
 case "${LUMEN_UPDATE_MODE}" in
     fast)
@@ -121,9 +130,16 @@ case "${LUMEN_UPDATE_MODE}" in
         ;;
 esac
 if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ -z "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS+x}" ]; then
-    # Fast 是默认交互更新路径：不在每次点击时额外拉 raw.githubusercontent
-    # 上的脚本。需要全量自更新/强校验时用 LUMEN_UPDATE_MODE=standard。
-    LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0
+    # stable 首跳必须先补齐 release manifest guard 与 host runners，否则旧
+    # release 会用旧 helper 校验新发布物。rolling main 才默认跳过额外 raw 拉取。
+    case "${LUMEN_UPDATE_CHANNEL:-stable}" in
+        stable|latest|minor|major|v[0-9]*)
+            LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=1
+            ;;
+        *)
+            LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0
+            ;;
+    esac
 fi
 export LUMEN_UPDATE_MODE
 
@@ -315,7 +331,7 @@ render_update_runner_unit() {
 }
 
 refresh_update_runner_units() {
-    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+    if ! lumen_systemd_runtime_available; then
         log_info "[refresh_update_runner] 未检测到 Linux systemd，跳过。"
         emit_info refresh_update_runner status "skipped_no_systemd"
         return 0
@@ -332,6 +348,9 @@ refresh_update_runner_units() {
     local src_backup_service="${src_dir}/lumen-backup.service"
     local src_backup_timer="${src_dir}/lumen-backup.timer"
     local src_backup_path="${src_dir}/lumen-backup.path"
+    local src_restore_service="${src_dir}/lumen-restore-runner.service"
+    local src_restore_path="${src_dir}/lumen-restore.path"
+    local src_storage_script="${src_dir%/systemd}/scripts/lumen_storage_mount.sh"
     if [ ! -f "${src_path}" ] || [ ! -f "${src_runner}" ]; then
         log_warn "[refresh_update_runner] 找不到 update runner unit 模板（${src_dir}），跳过。"
         emit_warn refresh_update_runner "unit_templates_missing"
@@ -360,29 +379,57 @@ refresh_update_runner_units() {
     if [ -f "${src_backup_path}" ]; then
         render_update_runner_unit "${src_backup_path}" "${tmp_dir}/lumen-backup.path" "${data_root}" "${backup_root}" "${deploy_root}"
     fi
+    if [ -f "${src_restore_service}" ]; then
+        render_update_runner_unit "${src_restore_service}" "${tmp_dir}/lumen-restore-runner.service" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
+    if [ -f "${src_restore_path}" ]; then
+        render_update_runner_unit "${src_restore_path}" "${tmp_dir}/lumen-restore.path" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
+    local storage_unit
+    for storage_unit in lumen-storage-mount.service \
+        lumen-storage-apply.service lumen-storage-apply.path \
+        lumen-storage-test.service lumen-storage-test.path; do
+        if [ -f "${src_dir}/${storage_unit}" ]; then
+            render_update_runner_unit "${src_dir}/${storage_unit}" "${tmp_dir}/${storage_unit}" "${data_root}" "${backup_root}" "${deploy_root}"
+        fi
+    done
 
     lumen_ensure_backup_service_user "${backup_root}"
 
-    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update.path"; then
         log_warn "[refresh_update_runner] 安装 lumen-update.path 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
         return 0
     fi
-    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" /etc/systemd/system/lumen-update-runner.service; then
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-runner.service"; then
         log_warn "[refresh_update_runner] 安装 lumen-update-runner.service 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
         return 0
     fi
     if [ -f "${tmp_dir}/lumen-update-warm.path" ] && [ -f "${tmp_dir}/lumen-update-warm.service" ]; then
-        if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" /etc/systemd/system/lumen-update-warm.path; then
+        if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-warm.path"; then
             log_warn "[refresh_update_runner] 安装 lumen-update-warm.path 失败，镜像预热将不可用。"
-        elif ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" /etc/systemd/system/lumen-update-warm.service; then
+        elif ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-warm.service"; then
             log_warn "[refresh_update_runner] 安装 lumen-update-warm.service 失败，镜像预热将不可用。"
         fi
     fi
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.service "[refresh_update_runner] 安装 lumen-backup.service 失败，自动/手动触发备份将不可用。"
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "[refresh_update_runner] 安装 lumen-backup.timer 失败，自动备份将不可用。"
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.path "[refresh_update_runner] 安装 lumen-backup.path 失败，管理后台立即备份将不可用。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-restore-runner.service "[refresh_update_runner] 安装 lumen-restore-runner.service 失败，管理后台恢复将不可用。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-restore.path "[refresh_update_runner] 安装 lumen-restore.path 失败，管理后台恢复将不可用。"
+    for storage_unit in lumen-storage-mount.service \
+        lumen-storage-apply.service lumen-storage-apply.path \
+        lumen-storage-test.service lumen-storage-test.path; do
+        lumen_install_optional_systemd_unit "${tmp_dir}" "${storage_unit}" "[refresh_update_runner] 安装 ${storage_unit} 失败，管理后台存储切换可能不可用。"
+    done
+    if [ -f "${src_storage_script}" ]; then
+        lumen_run_as_root install -m 0755 "${src_storage_script}" "${LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount" \
+            || log_warn "[refresh_update_runner] 安装 lumen-storage-mount 失败，管理后台存储切换不可用。"
+    fi
+    local storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
+    lumen_run_as_root install -d -m 0770 -o root -g "${storage_gid}" /var/lib/lumen-storage \
+        || log_warn "[refresh_update_runner] 创建 /var/lib/lumen-storage 失败，API 可能无法写入触发文件。"
     if ! lumen_run_as_root systemctl daemon-reload; then
         log_warn "[refresh_update_runner] systemctl daemon-reload 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
@@ -400,12 +447,22 @@ refresh_update_runner_units() {
     fi
     lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "[refresh_update_runner] 启用 lumen-backup.timer 失败，自动备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.timer。"
     lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.path "[refresh_update_runner] 启用 lumen-backup.path 失败，管理后台立即备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.path。"
+    lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-restore.path "[refresh_update_runner] 启用 lumen-restore.path 失败，管理后台恢复将不可用；可稍后手动执行 systemctl enable --now lumen-restore.path。"
+    if [ -f "${tmp_dir}/lumen-storage-apply.path" ] && [ -f "${tmp_dir}/lumen-storage-test.path" ]; then
+        lumen_run_as_root systemctl enable --now lumen-storage-apply.path lumen-storage-test.path \
+            || log_warn "[refresh_update_runner] 启用 storage path watchers 失败，管理后台存储切换不可用。"
+    fi
+    if [ -f "${tmp_dir}/lumen-storage-mount.service" ]; then
+        lumen_run_as_root systemctl enable lumen-storage-mount.service \
+            || log_warn "[refresh_update_runner] 启用 lumen-storage-mount.service 失败，重启后需手工恢复挂载。"
+    fi
     rm -rf "${tmp_dir}"
 
     log_info "一键更新 runner 已刷新：监听 ${backup_root}/.update.trigger"
     emit_info refresh_update_runner update_trigger "${backup_root}/.update.trigger"
     emit_info refresh_update_runner warm_trigger "${backup_root}/.warm.trigger"
     emit_info refresh_update_runner backup_trigger "${backup_root}/.backup.trigger"
+    emit_info refresh_update_runner restore_trigger "${backup_root}/.restore.trigger"
     return 0
 }
 
@@ -510,11 +567,6 @@ rsync_repo_to_release() {
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
         --exclude='/apps/worker/var/' \
-        --exclude='/apps/desktop/target/' \
-        --exclude='/apps/desktop/dist/' \
-        --exclude='/apps/desktop/binaries/' \
-        --exclude='/apps/desktop/resources/' \
-        --exclude='/apps/desktop/gen/' \
         --exclude='/var/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
@@ -538,16 +590,26 @@ rsync_repo_to_release() {
 sync_repo_to_release() {
     local src="$1"
     local dst="$2"
+    local source_ref="${3:-}"
+    local archive_ref="${source_ref:-HEAD}"
     local err_file rc
     if [ -d "${src}/.git" ] && command -v git >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
         err_file="$(mktemp "${UPDATE_LOG_DIR:-/tmp}/lumen-git-archive.XXXXXX.err" 2>/dev/null || mktemp)"
-        log_info "[fetch_release] git archive ${src} -> ${dst}"
+        log_info "[fetch_release] git archive ${archive_ref} from ${src} -> ${dst}"
         rc=0
-        ( cd "${src}" && git archive --format=tar HEAD ) 2>"${err_file}" \
+        ( cd "${src}" && git archive --format=tar "${archive_ref}" ) 2>"${err_file}" \
             | tar -xf - -C "${dst}" 2>>"${err_file}" || rc=$?
         if [ "${rc}" -eq 0 ]; then
             rm -f "${err_file}"
             return 0
+        fi
+        if [ -n "${source_ref}" ]; then
+            log_error "[fetch_release] git archive ${source_ref} 失败（rc=${rc}），拒绝回退到工作树 HEAD。"
+            sed -n '1,20p' "${err_file}" 2>/dev/null | while IFS= read -r line; do
+                [ -n "${line}" ] && log_error "git archive stderr: ${line}"
+            done
+            rm -f "${err_file}"
+            return "${rc}"
         fi
         log_warn "[fetch_release] git archive 失败（rc=${rc}），回退 rsync。"
         sed -n '1,20p' "${err_file}" 2>/dev/null | while IFS= read -r line; do
@@ -694,7 +756,134 @@ run_update_cleanup() {
     emit_done cleanup 0
 }
 
-# Trap：任何未结束 phase 收口为 fail，并尝试切回旧 release。
+# Trap：任何未结束 phase 收口为 fail，并恢复尚未提交的 release/env 状态。
+snapshot_update_state() {
+    if [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ]; then
+        return 0
+    fi
+    if [ ! -f "${SHARED_ENV}" ]; then
+        log_error "无法快照不存在的 shared env：${SHARED_ENV}"
+        return 1
+    fi
+    UPDATE_ENV_SNAPSHOT="$(mktemp "${SHARED_DIR}/.env.update.XXXXXX")" \
+        || return 1
+    if ! cp -p "${SHARED_ENV}" "${UPDATE_ENV_SNAPSHOT}"; then
+        rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+        UPDATE_ENV_SNAPSHOT=""
+        return 1
+    fi
+    if [ -L "${ROOT}/current" ]; then
+        UPDATE_ORIGINAL_CURRENT_PRESENT=1
+        UPDATE_ORIGINAL_CURRENT_TARGET="$(readlink "${ROOT}/current")"
+    fi
+    if [ -L "${ROOT}/previous" ]; then
+        UPDATE_ORIGINAL_PREVIOUS_PRESENT=1
+        UPDATE_ORIGINAL_PREVIOUS_TARGET="$(readlink "${ROOT}/previous")"
+    fi
+    if lumen_systemd_runtime_available; then
+        if ! UPDATE_HOST_ARTIFACT_SNAPSHOT="$(mktemp -d "${SHARED_DIR}/.host.update.XXXXXX")"; then
+            rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+            UPDATE_ENV_SNAPSHOT=""
+            return 1
+        fi
+        if ! lumen_snapshot_operations_host_artifacts \
+                "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"; then
+            lumen_discard_host_artifact_snapshot "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"
+            UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+            rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+            UPDATE_ENV_SNAPSHOT=""
+            return 1
+        fi
+    fi
+    UPDATE_STATE_SNAPSHOT_READY=1
+    return 0
+}
+
+restore_update_env_snapshot() {
+    [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ] || return 0
+    [ -f "${UPDATE_ENV_SNAPSHOT}" ] || return 1
+    local restore_tmp="${SHARED_DIR}/.env.restore.$$"
+    rm -f "${restore_tmp}" 2>/dev/null || true
+    if ! cp -p "${UPDATE_ENV_SNAPSHOT}" "${restore_tmp}" \
+            || ! mv -f "${restore_tmp}" "${SHARED_ENV}"; then
+        rm -f "${restore_tmp}" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+restore_update_symlink_snapshot() {
+    local rc=0
+    if [ "${UPDATE_ORIGINAL_CURRENT_PRESENT}" -eq 1 ]; then
+        lumen_atomic_replace_symlink \
+            "${UPDATE_ORIGINAL_CURRENT_TARGET}" "${ROOT}/current" || rc=1
+    elif [ -L "${ROOT}/current" ]; then
+        rm -f "${ROOT}/current" || rc=1
+    fi
+    if [ "${UPDATE_ORIGINAL_PREVIOUS_PRESENT}" -eq 1 ]; then
+        lumen_atomic_replace_symlink \
+            "${UPDATE_ORIGINAL_PREVIOUS_TARGET}" "${ROOT}/previous" || rc=1
+    elif [ -L "${ROOT}/previous" ]; then
+        rm -f "${ROOT}/previous" || rc=1
+    fi
+    return "${rc}"
+}
+
+discard_update_state_snapshot() {
+    if [ -n "${UPDATE_ENV_SNAPSHOT}" ]; then
+        rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+    fi
+    UPDATE_ENV_SNAPSHOT=""
+    lumen_discard_host_artifact_snapshot "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"
+    UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+    UPDATE_STATE_SNAPSHOT_READY=0
+}
+
+restore_uncommitted_update_state() {
+    local rc=0
+    if ! restore_update_symlink_snapshot; then
+        log_error "rollback：current/previous symlink 未能完整恢复。"
+        rc=1
+    fi
+    if ! restore_update_env_snapshot; then
+        log_error "rollback：shared/.env 原字节恢复失败；快照保留在 ${UPDATE_ENV_SNAPSHOT:-<missing>}。"
+        rc=1
+    else
+        log_warn "rollback：shared/.env 已按更新前快照原字节恢复。"
+    fi
+    if [ -n "${UPDATE_HOST_ARTIFACT_SNAPSHOT}" ]; then
+        if ! lumen_restore_operations_host_artifacts \
+                "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"; then
+            log_error "rollback：systemd units 或 host 脚本未能完整恢复。"
+            rc=1
+        else
+            log_warn "rollback：systemd units 与 host 脚本已恢复到更新前快照。"
+        fi
+    fi
+    if [ "${UPDATE_RELEASE_SWITCHED}" -eq 1 ] \
+            || [ "${UPDATE_OLD_SERVICES_STOPPED}" -eq 1 ]; then
+        log_warn "rollback：重新拉起更新前 release 的 worker/web/api。"
+        if ! lumen_compose_in "${ROOT}/current" \
+                up --pull missing -d worker web api; then
+            log_error "rollback：更新前 release 核心服务恢复失败。"
+            rc=1
+        else
+            UPDATE_RELEASE_SWITCHED=0
+            UPDATE_OLD_SERVICES_STOPPED=0
+        fi
+    fi
+    if [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
+        if ! lumen_release_remove_unused "${ROOT}" "${NEW_ID}"; then
+            log_warn "rollback：未能删除未启用 release ${NEW_ID}。"
+            rc=1
+        fi
+    fi
+    if [ "${rc}" -eq 0 ]; then
+        discard_update_state_snapshot
+    fi
+    return "${rc}"
+}
+
 UPDATE_ERROR_HANDLED=0
 on_err() {
     local rc="${1:-1}"
@@ -707,23 +896,11 @@ on_err() {
     log_error "更新失败：返回码 ${rc}"
     if [ "${ROLLBACK_DONE}" -eq 0 ]; then
         ROLLBACK_DONE=1
-        if [ "${SWITCHED}" -eq 1 ] && [ -n "${CURRENT_ID:-}" ]; then
-            # 切回前先验证 previous release 还在；不在的话拒绝盲切（手动恢复）
-            if [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
-                log_error "rollback：previous release ${CURRENT_ID} 目录不存在，拒绝盲切。请手动恢复："
-                log_error "  ls ${ROOT}/releases/  # 找到合法 release id"
-                log_error "  ln -sfn releases/<id> ${ROOT}/current"
-            elif lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}"; then
-                log_warn "rollback：current 已切回 ${CURRENT_ID}（业务容器仍是新版本，建议人工 docker compose up -d）"
-            else
-                log_error "rollback：current 切回 ${CURRENT_ID} 失败，请手动："
-                log_error "  ln -sfn releases/${CURRENT_ID} ${ROOT}/current"
-            fi
-        elif [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
-            log_warn "rollback：删除未启用的 release ${NEW_ID}"
-            if ! lumen_release_remove_unused "${ROOT}" "${NEW_ID}"; then
-                log_warn "  release 删除失败，请手动 sudo rm -rf '${NEW_RELEASE}'"
-            fi
+        if [ "${UPDATE_STATE_COMMITTED}" -eq 0 ] \
+                && [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ]; then
+            restore_uncommitted_update_state || true
+        else
+            discard_update_state_snapshot
         fi
     fi
     return 0
@@ -766,14 +943,11 @@ fi
 # 实现委托给 lib.sh 的 lumen_self_update_scripts（lumenctl 入口处也用同一个函数）。
 # update 阶段用短 TTL（60s）：lumenctl 入口刚拉过会命中 marker 跳过，避免一次 update 调用
 # 拉两次 GitHub；冷启动（admin systemd-run 直接跑 update.sh）会突破 TTL 拉一次。
-# 只取 lib.sh / backup.sh / restore.sh / update.sh 四个（lumenctl.sh 已在 lumenctl 入口处更新过）。
+# shell facade、release guard 与 root runners 必须作为一个版本单元同步。
 # ---------------------------------------------------------------------------
 emit_start self_update_scripts
 
-if [ "${LUMEN_UPDATE_SELF_UPDATED:-0}" = "1" ]; then
-    log_info "[self_update_scripts] 已通过 self-update re-exec 重入，跳过自身。"
-    emit_done self_update_scripts 0
-elif [ "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS:-1}" = "0" ]; then
+if [ "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS:-1}" = "0" ]; then
     log_info "[self_update_scripts] 关闭（LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0）。"
     emit_done self_update_scripts 0
 elif [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}/scripts" ]; then
@@ -784,7 +958,9 @@ else
         "${CURRENT_RELEASE}/scripts" \
         "${LUMEN_UPDATE_SCRIPTS_BRANCH:-main}" \
         60 \
-        lib.sh backup.sh restore.sh update.sh
+        lib.sh \
+        release_manifest_guard.py update_runner.py restore_runner.py \
+        backup.sh restore.sh update.sh
     case "${LUMEN_SELF_UPDATE_RESULT:-}" in
         ok)
             if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
@@ -794,11 +970,19 @@ else
                 # update.sh 自己变化 → re-exec 新版
                 case " ${LUMEN_SELF_UPDATE_CHANGED} " in
                     *" update.sh "*)
-                        log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
-                        emit_done self_update_scripts 0
-                        export LUMEN_UPDATE_SELF_UPDATED=1
-                        export OPERATION_ID
-                        exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
+                        local self_update_hops="${LUMEN_UPDATE_SELF_UPDATED:-0}"
+                        case "${self_update_hops}" in
+                            ''|*[!0-9]*) self_update_hops=0 ;;
+                        esac
+                        if [ "${self_update_hops}" -ge 2 ]; then
+                            log_warn "[self_update_scripts] update.sh 连续变化超过两跳，拒绝继续 re-exec。"
+                        else
+                            log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
+                            emit_done self_update_scripts 0
+                            export LUMEN_UPDATE_SELF_UPDATED=$((self_update_hops + 1))
+                            export OPERATION_ID
+                            exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
+                        fi
                         ;;
                 esac
             fi
@@ -832,6 +1016,17 @@ if ! lumen_release_ensure_shared_env "${ROOT}"; then
     else
         log_error "[check] 如果还没完整安装，请先执行安装；已安装实例请从部署目录的 current/scripts/lumenctl.sh 执行更新。"
     fi
+    emit_fail check 1
+    exit 1
+fi
+
+if ! lumen_require_python_min_version python3 3 8; then
+    emit_info check reason "python3_too_old_or_missing"
+    emit_fail check 1
+    exit 1
+fi
+if ! snapshot_update_state; then
+    log_error "[check] 无法创建 shared/.env 事务快照，拒绝继续。"
     emit_fail check 1
     exit 1
 fi
@@ -899,6 +1094,21 @@ if [ -z "${TARGET_TAG}" ]; then
     exit 1
 fi
 export LUMEN_IMAGE_TAG="${TARGET_TAG}"
+TARGET_RELEASE_TAG=""
+UPDATE_IMAGE_REGISTRY="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${SHARED_ENV}" 2>/dev/null || true)"
+[ -n "${UPDATE_IMAGE_REGISTRY}" ] || UPDATE_IMAGE_REGISTRY="ghcr.io/cyeinfpro"
+if lumen_release_manifest_required "${TARGET_TAG}"; then
+    TARGET_RELEASE_TAG="${TARGET_TAG}"
+elif lumen_release_alias_tag "${TARGET_TAG}" \
+        && [ "${UPDATE_IMAGE_REGISTRY%/}" = "ghcr.io/cyeinfpro" ]; then
+    TARGET_RELEASE_TAG="$(lumen_resolve_release_alias "${TARGET_TAG}" 2>/dev/null || true)"
+    if ! lumen_release_manifest_required "${TARGET_RELEASE_TAG}"; then
+        log_error "[check] 无法把 ${TARGET_TAG} 解析为同系列具体 GitHub Release。"
+        emit_fail check 1
+        exit 1
+    fi
+    emit_info check release_alias "${TARGET_TAG}->${TARGET_RELEASE_TAG}"
+fi
 if TARGET_VERSION_FROM_TAG="$(semver_from_image_tag "${TARGET_TAG}" 2>/dev/null || true)" \
         && [ -n "${TARGET_VERSION_FROM_TAG}" ]; then
     export LUMEN_VERSION="${TARGET_VERSION_FROM_TAG}"
@@ -1171,6 +1381,55 @@ try_image_extract_release() {
     return 0
 }
 
+sync_main_fallback_release() {
+    local source_dir="" source_ref="" extracted_dir=""
+    local staged_release="${NEW_RELEASE}.main.$$"
+    extracted_dir="${ROOT}/.update-main-source.$$"
+    rm -rf "${staged_release}" "${extracted_dir}" 2>/dev/null || true
+
+    if try_image_extract_release main "${extracted_dir}"; then
+        source_dir="${extracted_dir}"
+        RELEASE_SOURCE_IMAGE_EXTRACT=1
+        emit_info fetch_release fallback_source "image_extract_main"
+    elif [ -d "${REPO_DIR}/.git" ]; then
+        if ! (cd "${REPO_DIR}" && git fetch --quiet origin main); then
+            log_error "[fetch_release] fallback main 源码 fetch 失败。"
+            rm -rf "${extracted_dir}" 2>/dev/null || true
+            return 1
+        fi
+        source_dir="${REPO_DIR}"
+        source_ref="refs/remotes/origin/main"
+        RELEASE_SOURCE_IMAGE_EXTRACT=0
+        emit_info fetch_release fallback_source "git_origin_main"
+    else
+        log_error "[fetch_release] 镜像已回退 main，但无法取得匹配的 main 源码。"
+        rm -rf "${extracted_dir}" 2>/dev/null || true
+        return 1
+    fi
+
+    mkdir -p "${staged_release}"
+    if ! sync_repo_to_release \
+            "${source_dir}" "${staged_release}" "${source_ref}"; then
+        rm -rf "${staged_release}" "${extracted_dir}" 2>/dev/null || true
+        return 1
+    fi
+    ln -sfn "${SHARED_ENV}" "${staged_release}/.env"
+    if ! lumen_safe_rm_rf "${NEW_RELEASE}" \
+            || ! mv "${staged_release}" "${NEW_RELEASE}"; then
+        log_error "[fetch_release] 用 main 源码替换待发布 release 失败。"
+        rm -rf "${staged_release}" "${extracted_dir}" 2>/dev/null || true
+        return 1
+    fi
+
+    RELEASE_SOURCE_REF="${source_ref}"
+    TARGET_RELEASE_TAG=""
+    RELEASE_MANIFEST_FILE=""
+    RELEASE_MANIFEST_TAG=""
+    rm -rf "${extracted_dir}" 2>/dev/null || true
+    log_info "[fetch_release] 待发布源码已同步到 main，与 fallback 镜像一致。"
+    return 0
+}
+
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if ! command -v git >/dev/null 2>&1; then
         log_error "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但缺少 git。"
@@ -1192,22 +1451,22 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
             log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
         fi
     else
-        GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
+        GIT_REF="${LUMEN_UPDATE_GIT_REF:-${TARGET_RELEASE_TAG}}"
         log_info "[fetch_release] git fetch in ${REPO_DIR}"
-        if ! ( cd "${REPO_DIR}" && git fetch --quiet --all --prune ); then
+        if ! ( cd "${REPO_DIR}" && git fetch --quiet --all --prune --tags ); then
             log_error "[fetch_release] git fetch 失败。"
             emit_fail fetch_release 1
             exit 1
         fi
         if [ -n "${GIT_REF}" ]; then
-            if ! ( cd "${REPO_DIR}" && git checkout --quiet "${GIT_REF}" ); then
-                log_error "[fetch_release] git checkout ${GIT_REF} 失败。"
+            if ! ( cd "${REPO_DIR}" && git rev-parse --verify --quiet "${GIT_REF}^{commit}" >/dev/null ); then
+                log_error "[fetch_release] git ref ${GIT_REF} 不存在。"
                 emit_fail fetch_release 1
                 exit 1
             fi
         else
             # 默认 fast-forward 当前分支
-            local local_branch
+            local_branch=""
             local_branch="$(cd "${REPO_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
             if [ -n "${local_branch}" ] && [ "${local_branch}" != "HEAD" ]; then
                 ( cd "${REPO_DIR}" && git pull --ff-only --quiet ) || \
@@ -1216,6 +1475,7 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
         fi
     fi
 fi
+RELEASE_SOURCE_REF="${LUMEN_UPDATE_GIT_REF:-${TARGET_RELEASE_TAG}}"
 
 # 新 release id + 目录
 NEW_ID="releases-$(date -u +%Y%m%d-%H%M%S)"
@@ -1231,7 +1491,7 @@ emit_info fetch_release release_id   "${NEW_ID}"
 emit_info fetch_release release_path "${NEW_RELEASE}"
 
 log_info "[fetch_release] 同步发布物 ${REPO_DIR} -> ${NEW_RELEASE}"
-if ! sync_repo_to_release "${REPO_DIR}" "${NEW_RELEASE}"; then
+if ! sync_repo_to_release "${REPO_DIR}" "${NEW_RELEASE}" "${RELEASE_SOURCE_REF}"; then
     log_error "[fetch_release] 同步仓库到 release 失败。"
     emit_fail fetch_release 1
     exit 1
@@ -1264,6 +1524,10 @@ elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
         log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在，自动回退到 main。"
         emit_info fetch_release target_tag_fallback "main"
         TARGET_TAG="main"
+        if ! sync_main_fallback_release; then
+            emit_fail fetch_release 1
+            exit 1
+        fi
         if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
             enable_local_build_fallback
         fi
@@ -1319,6 +1583,57 @@ fi
 # 把 target tag 落到 release 目录的 .image-tag（回滚定位）
 printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null || true
 
+RELEASE_MANIFEST_FILE=""
+RELEASE_MANIFEST_TAG="${TARGET_RELEASE_TAG}"
+if lumen_release_manifest_required "${TARGET_TAG}" \
+        || lumen_release_alias_tag "${TARGET_TAG}"; then
+    if [ "${LUMEN_IMAGE_REGISTRY%/}" != "ghcr.io/cyeinfpro" ]; then
+        if ! lumen_env_truthy "${LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY:-0}"; then
+            log_error "[set_image_tag] 正式 release tag 使用自定义 registry 时无法核对官方 digest。"
+            log_error "  如确认镜像镜像源可信，请显式设置 LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY=1。"
+            emit_fail set_image_tag 1
+            exit 1
+        fi
+        log_warn "[set_image_tag] 已显式允许未核验的自定义 registry。"
+    else
+        if [ -z "${RELEASE_MANIFEST_TAG}" ] \
+                && lumen_release_alias_tag "${TARGET_TAG}"; then
+            RELEASE_MANIFEST_TAG="$(lumen_resolve_release_alias "${TARGET_TAG}" 2>/dev/null || true)"
+            if ! lumen_release_manifest_required "${RELEASE_MANIFEST_TAG}"; then
+                log_error "[set_image_tag] 无法把 ${TARGET_TAG} 解析为同系列的具体 GitHub Release。"
+                emit_fail set_image_tag 1
+                exit 1
+            fi
+            emit_info set_image_tag release_alias "${TARGET_TAG}->${RELEASE_MANIFEST_TAG}"
+        fi
+        RELEASE_MANIFEST_FILE="${NEW_RELEASE}/release-manifest.json"
+        if ! lumen_fetch_release_manifest "${RELEASE_MANIFEST_TAG}" "${RELEASE_MANIFEST_FILE}"; then
+            log_error "[set_image_tag] 无法获取或校验 ${RELEASE_MANIFEST_TAG} 的 release-manifest.json。"
+            emit_fail set_image_tag 1
+            exit 1
+        fi
+        emit_info set_image_tag release_manifest "verified"
+    fi
+fi
+if [ -n "${RELEASE_MANIFEST_TAG}" ] \
+        && TARGET_VERSION_FROM_MANIFEST="$(semver_from_image_tag "${RELEASE_MANIFEST_TAG}" 2>/dev/null || true)" \
+        && [ -n "${TARGET_VERSION_FROM_MANIFEST}" ] \
+        && [ "${TARGET_VERSION_FROM_MANIFEST}" != "${TARGET_VERSION:-}" ]; then
+    if ! printf '%s\n' "${TARGET_VERSION_FROM_MANIFEST}" > "${NEW_RELEASE}/VERSION"; then
+        log_error "[set_image_tag] 写入 manifest 版本 ${TARGET_VERSION_FROM_MANIFEST} 失败。"
+        emit_fail set_image_tag 1
+        exit 1
+    fi
+    if ! lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION_FROM_MANIFEST}"; then
+        log_error "[set_image_tag] 写入 LUMEN_VERSION=${TARGET_VERSION_FROM_MANIFEST} 失败。"
+        emit_fail set_image_tag 1
+        exit 1
+    fi
+    TARGET_VERSION="${TARGET_VERSION_FROM_MANIFEST}"
+    export LUMEN_VERSION="${TARGET_VERSION_FROM_MANIFEST}"
+    emit_info set_image_tag version "${TARGET_VERSION_FROM_MANIFEST}"
+fi
+
 emit_info set_image_tag tag "${TARGET_TAG}"
 emit_done set_image_tag 0
 
@@ -1336,9 +1651,13 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
         exit 1
     fi
     # tgbot 可选
+    TGBOT_IMAGE_READY=0
     if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
-        lumen_compose_in "${NEW_RELEASE}" build tgbot 2>/dev/null || \
+        if lumen_compose_in "${NEW_RELEASE}" build tgbot 2>/dev/null; then
+            TGBOT_IMAGE_READY=1
+        else
             log_warn "[build_images] tgbot build 失败，已忽略。"
+        fi
     fi
     emit_done pull_images 0
 fi
@@ -1346,6 +1665,7 @@ fi
 if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ] \
         && [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
         && ! lumen_image_tag_is_rolling "${TARGET_TAG}" \
+        && [ -z "${RELEASE_MANIFEST_FILE}" ] \
         && [ "${LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0}" != "1" ]; then
     # Fast 模式不做单独的 compose pull 阻塞阶段。restart_services 用
     # `up --pull missing` 按服务拉缺失镜像：已有镜像直接复用，缺哪个才拉哪个。
@@ -1359,6 +1679,7 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # Phase: pull_images
     # -----------------------------------------------------------------------
     emit_start pull_images
+    TGBOT_IMAGE_READY=0
 
     if [ -n "${LUMEN_PROXY_URL}" ]; then
         emit_info pull_images proxy "configured"
@@ -1366,21 +1687,41 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
 
     # 网络抖动是 pull 失败最常见原因，先重试 3 次（指数退避 5/10/20s），仍失败再走 fallback。
     if ! lumen_retry 3 5 "docker compose pull tag=${TARGET_TAG}" \
-            lumen_compose_in "${NEW_RELEASE}" pull; then
+            lumen_compose_pull_per_image "${NEW_RELEASE}"; then
         if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-0}" = "1" ]; then
             log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
             emit_info pull_images target_tag_fallback "main"
             TARGET_TAG="main"
             export LUMEN_IMAGE_TAG="${TARGET_TAG}"
+            RELEASE_MANIFEST_FILE=""
+            RELEASE_MANIFEST_TAG=""
+            if ! sync_main_fallback_release; then
+                log_error "[pull_images] 无法把待发布源码同步到 main，拒绝混用 release 源码与 main 镜像。"
+                emit_fail pull_images 1
+                exit 1
+            fi
             if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
                 log_error "[pull_images] 回退 main 时写入 shared/.env 失败。"
                 emit_fail pull_images 1
                 exit 1
             fi
+            TARGET_VERSION="$(release_version_for_target \
+                "${NEW_RELEASE}" "${TARGET_TAG}" 2>/dev/null || true)"
+            if [ -z "${TARGET_VERSION}" ] \
+                    || ! printf '%s\n' "${TARGET_VERSION}" \
+                        > "${NEW_RELEASE}/VERSION" \
+                    || ! lumen_set_env_value_in_file \
+                        "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"; then
+                log_error "[pull_images] fallback main 的 VERSION/LUMEN_VERSION 同步失败。"
+                emit_fail pull_images 1
+                exit 1
+            fi
+            export LUMEN_VERSION="${TARGET_VERSION}"
+            emit_info pull_images version "${TARGET_VERSION}"
             printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null \
                 || log_warn "[pull_images] .image-tag 写入失败（已忽略，仅影响事后定位）"
             if ! lumen_retry 2 5 "docker compose pull (main fallback)" \
-                    lumen_compose_in "${NEW_RELEASE}" pull; then
+                    lumen_compose_pull_per_image "${NEW_RELEASE}"; then
                 log_error "[pull_images] fallback main 后 docker compose pull 仍失败。"
                 log_error "  请检查 GHCR 可达性或代理配置。"
                 log_error "  当前服务保持不变。"
@@ -1417,8 +1758,27 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
             fi
             log_warn "[pull_images] tgbot pull 失败，跳过 tgbot 更新（不影响 api/worker/web）。"
         else
+            TGBOT_IMAGE_READY=1
             emit_info pull_images tgbot_pull "ok"
         fi
+    fi
+    if [ -n "${RELEASE_MANIFEST_FILE}" ]; then
+        manifest_args=(
+            --service api
+            --service worker
+            --service web
+        )
+        if [ "${TGBOT_IMAGE_READY}" -eq 1 ]; then
+            manifest_args+=(--service tgbot)
+        fi
+        if ! lumen_verify_release_manifest_images \
+                "${RELEASE_MANIFEST_FILE}" "${RELEASE_MANIFEST_TAG}" "${TARGET_TAG}" \
+                "${manifest_args[@]}"; then
+            log_error "[pull_images] 本地镜像 digest 未通过 release manifest 校验。"
+            emit_fail pull_images 1
+            exit 1
+        fi
+        emit_info pull_images digest_manifest "verified"
     fi
     emit_info pull_images tag "${TARGET_TAG}"
     emit_done pull_images 0
@@ -1554,6 +1914,7 @@ else
     # stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
     lumen_compose_in "${NEW_RELEASE}" stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot >/dev/null 2>&1 || true
     _stopped_old_services=1
+    UPDATE_OLD_SERVICES_STOPPED=1
 fi
 
 _migrate_run_failed=0
@@ -1596,6 +1957,7 @@ if [ "${MIGRATE_NEEDED}" = "1" ] && { [ "${_migrate_run_failed}" = "1" ] \
         fi
         if lumen_compose_in "${ROOT}/releases/${CURRENT_ID}" up --pull missing -d worker api 2>/dev/null; then
             log_info "[migrate_db] 旧服务 (${CURRENT_ID}) 已重启，业务可用旧 schema 继续。"
+            UPDATE_OLD_SERVICES_STOPPED=0
         else
             log_error "[migrate_db] 旧服务重启失败！业务此时停摆，请人工处理："
             log_error "    cd ${ROOT}/releases/${CURRENT_ID}"
@@ -1628,7 +1990,7 @@ fi
 if [ -f "${ROOT}/current/VERSION" ]; then
     ln -sfn current/VERSION "${ROOT}/VERSION" 2>/dev/null || cp "${ROOT}/current/VERSION" "${ROOT}/VERSION"
 fi
-SWITCHED=1
+UPDATE_RELEASE_SWITCHED=1
 emit_info switch from "${CURRENT_ID:-<none>}"
 emit_info switch to   "${NEW_ID}"
 emit_done switch 0
@@ -1759,18 +2121,28 @@ else
     # 前者抗"update 中途用户手动改过 SHARED_ENV"的边界情况，避免回滚拉到错误
     # 镜像导致 release 代码与镜像版本不匹配。
     ROLLBACK_TAG="${PREVIOUS_TAG}"
+    ROLLBACK_VERSION=""
     if [ -n "${CURRENT_ID:-}" ] && [ -f "${ROOT}/releases/${CURRENT_ID}/.image-tag" ]; then
         _anchored="$(head -n1 "${ROOT}/releases/${CURRENT_ID}/.image-tag" 2>/dev/null | tr -d '[:space:]')"
         if [ -n "${_anchored}" ]; then
             ROLLBACK_TAG="${_anchored}"
         fi
     fi
+    if [ -n "${CURRENT_ID:-}" ] \
+            && [ -f "${ROOT}/releases/${CURRENT_ID}/VERSION" ]; then
+        ROLLBACK_VERSION="$(head -n1 \
+            "${ROOT}/releases/${CURRENT_ID}/VERSION" 2>/dev/null \
+            | tr -d '[:space:]')"
+    fi
     if [ -n "${ROLLBACK_TAG}" ] && [ "${ROLLBACK_TAG}" != "${TARGET_TAG}" ]; then
         # 还要验证 PREVIOUS release 目录还在；缺失时回滚没意义，直接走手动恢复路径
         if [ -z "${CURRENT_ID:-}" ] || [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
             log_error "[restart_services] previous release 目录不存在（${ROOT}/releases/${CURRENT_ID:-<none>}），跳过自动回滚。"
         else
-            if lumen_set_image_tag_in_env "${SHARED_ENV}" "${ROLLBACK_TAG}"; then
+            if lumen_set_image_tag_in_env "${SHARED_ENV}" "${ROLLBACK_TAG}" \
+                    && { [ -z "${ROLLBACK_VERSION}" ] \
+                        || lumen_set_env_value_in_file \
+                            "${SHARED_ENV}" LUMEN_VERSION "${ROLLBACK_VERSION}"; }; then
                 _rollback_started=1
                 if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
@@ -1785,7 +2157,8 @@ else
                     _rollback_started=0
                 fi
                 if [ "${_rollback_started}" = "1" ]; then
-                    SWITCHED=0  # current 已切回旧 release，on_err 不再重复切
+                    UPDATE_RELEASE_SWITCHED=0
+                    UPDATE_OLD_SERVICES_STOPPED=0
                     log_warn "[restart_services] 已用 ${ROLLBACK_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
                     emit_info restart_services rolled_back_to "${ROLLBACK_TAG}"
                     emit_info restart_services rolled_back_release "${CURRENT_ID}"
@@ -1813,6 +2186,10 @@ else
     emit_fail restart_services 1
     exit 1
 fi
+
+# 核心服务已按目标 release + image tag 成功重建；后续健康检查失败时保留这组
+# 一致状态供诊断，不再把已应用 migration 的实例盲目切回旧代码。
+UPDATE_STATE_COMMITTED=1
 
 # tgbot：如果 .env 有 TELEGRAM_BOT_TOKEN 非空才起
 if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
@@ -1887,8 +2264,12 @@ return 0
 #   - 全局更新锁（${LUMEN_BACKUP_ROOT}/.lumen-update.lock）：与并发 update 互斥
 # ---------------------------------------------------------------------------
 lumen_acquire_lock "${ROOT}" "update.sh"
+# lumen_acquire_lock 会安装自己的 EXIT trap；重新挂回复合 trap，确保显式
+# `exit 1` 也执行事务恢复，而不只是释放维护锁。
+trap 'rc=$?; [ "$rc" -ne 0 ] && on_err "$rc" || true; lumen_release_lock' EXIT
 
 if lumen_with_lock "update" 1830 do_update; then
+    discard_update_state_snapshot
     # 解 trap，让 EXIT 只做 lock 释放
     trap - ERR
     trap 'lumen_release_lock' EXIT

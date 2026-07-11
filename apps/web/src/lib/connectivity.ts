@@ -12,7 +12,6 @@ type Listener = () => void;
 
 interface ConnectivityState {
   onlineRestoreListeners: Set<Listener>;
-  offlineListeners: Set<Listener>;
   initialized: boolean;
   startRefs: number;
   lastOnline: boolean;
@@ -32,7 +31,6 @@ const state =
   globalConnectivity[STATE_KEY] ??
   (globalConnectivity[STATE_KEY] = {
     onlineRestoreListeners: new Set<Listener>(),
-    offlineListeners: new Set<Listener>(),
     initialized: false,
     startRefs: 0,
     lastOnline: true,
@@ -75,13 +73,6 @@ function ensureInitialized(): void {
   };
   state.offlineHandler = () => {
     state.lastOnline = false;
-    for (const l of state.offlineListeners) {
-      try {
-        l();
-      } catch {
-        /* swallow */
-      }
-    }
   };
   window.addEventListener("online", state.onlineHandler);
   window.addEventListener("offline", state.offlineHandler);
@@ -116,18 +107,4 @@ export function onOnlineRestore(listener: Listener): () => void {
   return () => {
     state.onlineRestoreListeners.delete(listener);
   };
-}
-
-/** 订阅"开始离线"事件。 */
-export function onOffline(listener: Listener): () => void {
-  state.offlineListeners.add(listener);
-  return () => {
-    state.offlineListeners.delete(listener);
-  };
-}
-
-/** 当前是否在线（SSR 默认 true）。 */
-export function isOnline(): boolean {
-  if (typeof navigator === "undefined") return true;
-  return navigator.onLine;
 }

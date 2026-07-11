@@ -13,13 +13,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import fcntl
 import json
 import logging
 import os
 import re
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Iterator
 
 from lumen_core.constants import (
     POSTER_STYLE_CATEGORIES,
@@ -63,6 +65,23 @@ POSTER_STYLE_SYNC_PROXY_NAME_KEY = "poster_style.sync_proxy_name"
 POSTER_STYLE_SYNC_MODE_KEY = "poster_style.sync_mode"
 # 当 system_setting 缺省时的默认（与模特库默认一致：仅管理员能触发同步）
 _DEFAULT_SYNC_MODE = "admin_only"
+
+# 跨进程同步用可续租 lease；文件锁只覆盖短状态临界区。
+POSTER_STYLE_SYNC_LEASE_SECONDS = 5 * 60
+POSTER_STYLE_SYNC_LEASE_RENEW_SECONDS = 60
+
+# GitHub Contents 遍历、响应体与整次同步预算。与 model library 同档，
+# 足够覆盖风格库扩容，同时阻断异常目录树和超大响应。
+POSTER_STYLE_MAX_GITHUB_DEPTH = 8
+POSTER_STYLE_MAX_GITHUB_DIRECTORIES = 128
+POSTER_STYLE_MAX_GITHUB_FILES = 4096
+POSTER_STYLE_MAX_GITHUB_RESPONSE_BYTES = 4 * 1024 * 1024
+POSTER_STYLE_MAX_GITHUB_METADATA_BYTES = 32 * 1024 * 1024
+POSTER_STYLE_MAX_META_BYTES = 256 * 1024
+POSTER_STYLE_MAX_SYNC_DOWNLOAD_BYTES = 512 * 1024 * 1024
+POSTER_STYLE_MAX_INDEX_BYTES = 32 * 1024 * 1024
+POSTER_STYLE_MAX_PRESET_ITEMS = 4096
+POSTER_STYLE_MAX_REDIRECTS = 3
 
 # 与 meta.json category 字段对齐的文件夹名映射。
 # 与 README.md 的目录约定一致：00_user_favorites 留给用户收藏 placeholder。
@@ -140,9 +159,23 @@ _CATEGORY_ALIASES: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 
-# 同进程串行 GitHub sync，配合 last_attempt_at/last_success_at 防 TOCTOU。
-# 与 apparel _SYNC_LOCK 用同样的 asyncio.Lock 语义，但风格库独立锁，避免互相阻塞。
+# 只保护同一进程内的短状态临界区；跨进程互斥由 flock + lease 完成。
+# 任何网络请求或大文件 I/O 都不得放在这个锁内。
 _SYNC_LOCK = asyncio.Lock()
+
+
+@contextmanager
+def _poster_style_sync_file_lock(path: Path) -> Iterator[None]:
+    """Serialize short sync-state mutations across API worker processes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # --- 元数据解析 helper -------------------------------------------------------
@@ -243,13 +276,21 @@ def _load_preset_meta(directory: Path) -> dict[str, Any] | None:
     if not meta_path.is_file():
         return None
     try:
-        raw = meta_path.read_text(encoding="utf-8")
+        with meta_path.open("rb") as handle:
+            raw = handle.read(POSTER_STYLE_MAX_META_BYTES + 1)
     except OSError as exc:
         logger.info("poster style meta.json read failed dir=%s err=%s", directory, exc)
         return None
+    if len(raw) > POSTER_STYLE_MAX_META_BYTES:
+        logger.info(
+            "poster style meta.json exceeds byte limit dir=%s limit=%d",
+            directory,
+            POSTER_STYLE_MAX_META_BYTES,
+        )
+        return None
     try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         logger.info("poster style meta.json parse failed dir=%s err=%s", directory, exc)
         return None
     if not isinstance(data, dict):
@@ -433,13 +474,25 @@ __all__ = [
     "POSTER_STYLE_IMAGE_SUFFIXES",
     "POSTER_STYLE_LIBRARY_FOLDER",
     "POSTER_STYLE_MAX_BINARY_BYTES",
+    "POSTER_STYLE_MAX_GITHUB_DEPTH",
+    "POSTER_STYLE_MAX_GITHUB_DIRECTORIES",
+    "POSTER_STYLE_MAX_GITHUB_FILES",
+    "POSTER_STYLE_MAX_GITHUB_METADATA_BYTES",
+    "POSTER_STYLE_MAX_GITHUB_RESPONSE_BYTES",
+    "POSTER_STYLE_MAX_INDEX_BYTES",
+    "POSTER_STYLE_MAX_META_BYTES",
+    "POSTER_STYLE_MAX_PRESET_ITEMS",
+    "POSTER_STYLE_MAX_REDIRECTS",
     "POSTER_STYLE_MAX_SAMPLES",
+    "POSTER_STYLE_MAX_SYNC_DOWNLOAD_BYTES",
     "POSTER_STYLE_PRESET_ROOT",
     "POSTER_STYLE_ROOT_KEY",
     "POSTER_STYLE_SCHEMA_VERSION",
     "POSTER_STYLE_SOURCES",
     "POSTER_STYLE_SYNC_COOLDOWN_S",
     "POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S",
+    "POSTER_STYLE_SYNC_LEASE_RENEW_SECONDS",
+    "POSTER_STYLE_SYNC_LEASE_SECONDS",
     "POSTER_STYLE_SYNC_MODES",
     "POSTER_STYLE_SYNC_MODE_KEY",
     "POSTER_STYLE_SYNC_PROXY_NAME_KEY",
@@ -461,6 +514,7 @@ __all__ = [
     "_normalize_recommended_aspects",
     "_normalize_style_tags",
     "_poster_style_folder_for_category",
+    "_poster_style_sync_file_lock",
     "_preset_id_from_meta",
     "_preset_item_id",
     "_preset_storage_key",

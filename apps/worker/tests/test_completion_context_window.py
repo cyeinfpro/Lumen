@@ -348,6 +348,66 @@ async def test_compression_calls_summary_service_when_missing(
 
 
 @pytest.mark.asyncio
+async def test_summary_service_keeps_commit_ownership_after_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _message(1, "original task")
+    boundary_message = _message(2, "old context")
+    conversation = _conversation(None)
+    boundary = completion._SummaryBoundary(
+        conversation_id=conversation.id,
+        up_to_message_id=boundary_message.id,
+        up_to_created_at=boundary_message.created_at,
+        first_user_message_id=first.id,
+        recent_message_ids=[],
+        summary_message_ids=[boundary_message.id],
+        source_message_count=1,
+        source_token_estimate=10,
+    )
+    events: list[str] = []
+
+    class Session:
+        async def refresh(self, row: Conversation) -> None:
+            events.append("refresh")
+            assert row is conversation
+
+        async def commit(self) -> None:
+            raise AssertionError("completion context loader must not own summary commit")
+
+    class SummaryService:
+        @staticmethod
+        async def ensure_context_summary(
+            _session: Any,
+            conv: Conversation,
+            _boundary: Any,
+            _settings: dict[str, Any],
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            events.append("service")
+            conv.summary_jsonb = _summary(
+                up_to=boundary_message,
+                first_user=first,
+                text="service-owned summary",
+            )
+            return {"summary_created": True}
+
+    monkeypatch.setattr(completion, "context_summary", SummaryService)
+
+    summary = await completion._ensure_context_summary(
+        Session(),
+        conversation,
+        boundary,
+        target_tokens=100,
+        model="summary-model",
+        redis=None,
+    )
+
+    assert summary is conversation.summary_jsonb
+    assert summary["text"] == "service-owned summary"
+    assert events == ["service", "refresh"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enable_compression")
 async def test_compression_failure_fallback_still_keeps_current_user_message(
     monkeypatch: pytest.MonkeyPatch,

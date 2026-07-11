@@ -14,10 +14,6 @@ import time
 
 from sqlalchemy import select
 
-from lumen_core.desktop_runtime import (
-    is_desktop_runtime,
-    read_desktop_provider_runtime_json,
-)
 from lumen_core.models import SystemSetting
 from lumen_core.runtime_settings import SettingSpec, get_spec
 
@@ -63,10 +59,6 @@ async def resolve(spec_key: str) -> str | None:
     spec = get_spec(spec_key)
     if spec is None:
         return None
-    if spec_key == "providers" and is_desktop_runtime(_config_settings.lumen_runtime):
-        raw = read_desktop_provider_runtime_json()
-        if raw:
-            return raw
 
     now = time.monotonic()
     cached = _CACHE.get(spec_key)

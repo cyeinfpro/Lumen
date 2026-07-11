@@ -87,20 +87,35 @@ async def post_with_retry(
             await before_attempt(attempt + 1)
         try:
             if json_body is not None:
-                response = await client.post(
-                    url,
-                    json=json_body,
-                    headers=headers,
-                    **({"timeout": timeout} if timeout is not None else {}),
-                )
+                if timeout is None:
+                    response = await client.post(
+                        url,
+                        json=json_body,
+                        headers=headers,
+                    )
+                else:
+                    response = await client.post(
+                        url,
+                        json=json_body,
+                        headers=headers,
+                        timeout=timeout,
+                    )
             else:
-                response = await client.post(
-                    url,
-                    data=data,
-                    files=files,
-                    headers=headers,
-                    **({"timeout": timeout} if timeout is not None else {}),
-                )
+                if timeout is None:
+                    response = await client.post(
+                        url,
+                        data=data,
+                        files=files,
+                        headers=headers,
+                    )
+                else:
+                    response = await client.post(
+                        url,
+                        data=data,
+                        files=files,
+                        headers=headers,
+                        timeout=timeout,
+                    )
         except RETRY_HTTPX_EXC as exc:
             if not retry_httpx_exceptions:
                 raise

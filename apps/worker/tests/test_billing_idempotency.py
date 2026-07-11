@@ -364,7 +364,7 @@ async def test_settle_generation_uses_retry_billing_ref(
         id="gen-1",
         user_id="user-1",
         model="gpt-image-2",
-        retry_count=1,
+        billing_retry_count=1,
         upstream_request={"billing_tier": "2k"},
     )
     calls: dict[str, Any] = {}

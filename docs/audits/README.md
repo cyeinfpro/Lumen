@@ -21,9 +21,6 @@
 | `local/ISSUES.md` | `v1.0.43` / `aef4b05` | 本机归档，未纳入版本控制 |
 | [BUG_REVIEW](archive/BUG_REVIEW.md) | 2026-05-16 未提交工作树 | 历史，需重新验证 |
 | [DEEP_BUG_AUDIT](archive/DEEP_BUG_AUDIT.md) | 2026-05-25 工作树 | 历史，需重新验证 |
-| [Desktop app audit](archive/desktop-app-bug-audit-2026-05-26.md) | `v1.1.64` 工作树 | 历史，需重新验证 |
-| [DESKTOP_BUG_AUDIT](archive/DESKTOP_BUG_AUDIT.md) | 2026-05-28 工作树 | 已被后续桌面审计取代 |
-| [Desktop audit 2026-05-29](archive/DESKTOP_BUG_AUDIT_2026-05-29.md) | `v1.1.71` / `b6e4004` | 历史，需重新验证 |
 | [Server audit 2026-05-29](archive/SERVER_BUG_AUDIT_2026-05-29.md) | `v1.1.71` / `b6e4004` | 历史，需重新验证 |
 | [Code review 2026-05-30](archive/CODE_REVIEW_2026-05-30.md) | `b6e4004` 后续工作树 | 历史，需重新验证 |
 | [Video generation review](archive/video-generation-bug-audit.md) | 2026-06-04 未提交工作树 | 已修复记录 |

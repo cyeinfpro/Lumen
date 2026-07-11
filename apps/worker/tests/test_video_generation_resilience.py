@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from app import video_artifacts
 from app.tasks.video_generation import (
     _MAX_POLL_COUNT,
     _MAX_POLL_DURATION_S,
@@ -20,7 +23,35 @@ from app.tasks.video_generation import (
     _video_exception_message,
 )
 from app.tasks import video_generation
-from app.video_upstream import VideoSubmitRequest, VideoUpstreamError, _submit_headers
+from app.video_upstream import (
+    PollResult,
+    VideoSubmitRequest,
+    VideoUpstreamError,
+    _submit_headers,
+)
+
+
+@pytest.mark.parametrize("streams", [None, {}, "invalid"])
+def test_probe_video_tolerates_malformed_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    streams: object,
+) -> None:
+    monkeypatch.setattr(
+        video_artifacts.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": streams, "format": None}).encode(),
+            stderr=b"",
+        ),
+    )
+
+    result = video_artifacts.probe_video("ffprobe", Path("ignored.mp4"))
+
+    assert result["width"] == 0
+    assert result["height"] == 0
+    assert result["duration_ms"] == 0
+    assert result["has_audio"] is False
 
 
 def test_blank_submit_timeout_gets_actionable_error_message() -> None:
@@ -184,6 +215,119 @@ def test_video_submit_uses_persisted_provider_idempotency_key() -> None:
     assert headers["X-Lumen-Task-ID"] == "video-1"
 
 
+def test_cached_submit_receipt_rejects_provider_identity_mismatch() -> None:
+    generation = SimpleNamespace(
+        provider_name="provider-a",
+        provider_kind="volcano",
+        provider_task_id=None,
+        upstream_request={
+            "provider_snapshot": {
+                "provider_name": "provider-a",
+                "provider_kind": "volcano",
+                "base_url": "https://provider-a.example",
+            }
+        },
+    )
+    cached = SimpleNamespace(
+        provider_name="provider-b",
+        provider_kind="volcano",
+        provider_task_id="upstream-1",
+        raw={"id": "upstream-1"},
+    )
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        video_generation._restore_cached_provider_identity(  # noqa: SLF001
+            generation,
+            cached,
+        )
+
+    assert excinfo.value.error_code == "provider_snapshot_unavailable"
+    assert generation.provider_name == "provider-a"
+
+
+@pytest.mark.asyncio
+async def test_submitted_task_rejects_provider_endpoint_snapshot_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SimpleNamespace(
+        name="provider-a",
+        kind="volcano",
+        base_url="https://replacement.example",
+    )
+    generation = SimpleNamespace(
+        provider_name="provider-a",
+        provider_kind="volcano",
+        provider_task_id="upstream-1",
+        upstream_request={
+            "provider_snapshot": {
+                "provider_name": "provider-a",
+                "provider_kind": "volcano",
+                "base_url": "https://original.example",
+            }
+        },
+        model="seedance",
+        action="t2v",
+    )
+
+    async def provider_config() -> list[SimpleNamespace]:
+        return [provider]
+
+    monkeypatch.setattr(video_generation, "_provider_config", provider_config)
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await video_generation._provider_for_generation(generation)  # noqa: SLF001
+
+    assert excinfo.value.error_code == "provider_snapshot_unavailable"
+    assert "endpoint changed" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_submitted_task_rejects_provider_credential_snapshot_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_provider = SimpleNamespace(
+        name="provider-a",
+        kind="volcano",
+        base_url="https://provider.example",
+        api_key="account-a-key",
+        proxy_name=None,
+    )
+    replacement_provider = SimpleNamespace(
+        name="provider-a",
+        kind="volcano",
+        base_url="https://provider.example",
+        api_key="account-b-key",
+        proxy_name=None,
+    )
+    generation = SimpleNamespace(
+        provider_name="provider-a",
+        provider_kind="volcano",
+        provider_task_id="upstream-1",
+        upstream_request={},
+        model="seedance",
+        action="t2v",
+    )
+    video_generation._persist_provider_snapshot(  # noqa: SLF001
+        generation,
+        original_provider,
+        upstream_model="seedance-upstream",
+    )
+
+    async def provider_config() -> list[SimpleNamespace]:
+        return [replacement_provider]
+
+    monkeypatch.setattr(video_generation, "_provider_config", provider_config)
+
+    with pytest.raises(VideoUpstreamError) as excinfo:
+        await video_generation._provider_for_generation(generation)  # noqa: SLF001
+
+    snapshot = generation.upstream_request["provider_snapshot"]
+    assert "api_key" not in snapshot
+    assert snapshot["binding_fingerprint"]
+    assert excinfo.value.error_code == "provider_snapshot_unavailable"
+    assert "credentials or route changed" in str(excinfo.value)
+
+
 def test_video_submit_caches_receipt_before_post_submit_lease_check() -> None:
     source = inspect.getsource(video_generation._run_video_generation_with_lease)
 
@@ -220,6 +364,17 @@ def test_video_poll_deadline_continues_polling_submitted_tasks() -> None:
     assert "if deadline_expired:" in source
 
 
+def test_video_poll_renews_lease_and_threads_loss_fence() -> None:
+    source = inspect.getsource(video_generation.run_video_poll)
+
+    assert "_lease_renewer(" in source
+    assert "lease_lost = asyncio.Event()" in source
+    assert "adapter.poll(provider_task_id)" in source
+    assert '"video poll lease lost during provider poll"' in source
+    assert "lease_lost=lease_lost" in source
+    assert "renewer.cancel()" in source
+
+
 def test_video_poll_retry_is_bounded_by_poll_window_not_local_deadline() -> None:
     source = inspect.getsource(video_generation._schedule_poll_retry)
     window_source = inspect.getsource(video_generation._poll_window_exhausted)
@@ -242,7 +397,8 @@ def test_video_poll_extends_running_provider_tasks_after_local_window() -> None:
 
     assert "_poll_window_exhausted(generation, now)" in helper
     assert "_provider_tracking_window_exhausted(generation, now)" in source
-    assert "_continue_running_poll(session, redis, generation, poll, now=now)" in source
+    assert "await _continue_running_poll(" in source
+    assert "lease_lost=lease_lost" in source
     assert "extended_polling_continues" in helper
     assert "extended_poll_delay_s" in helper
     assert "_EXTENDED_POLL_INTERVAL_S" in helper
@@ -252,6 +408,154 @@ def test_video_poll_extends_running_provider_tasks_after_local_window() -> None:
     assert "_MAX_PROVIDER_POLL_DURATION_S" in source
     assert _MAX_PROVIDER_POLL_DURATION_S > _MAX_POLL_DURATION_S
     assert "poll_elapsed_s" in source
+
+
+@pytest.mark.asyncio
+async def test_poll_result_fences_db_mutation_after_lease_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lost = asyncio.Event()
+    lost.set()
+    monkeypatch.setattr(
+        video_generation,
+        "SessionLocal",
+        lambda: pytest.fail("database should not be opened after lease loss"),
+    )
+
+    with pytest.raises(video_generation._VideoLeaseLost):  # noqa: SLF001
+        await video_generation._apply_poll_result(  # noqa: SLF001
+            object(),
+            "video-1",
+            PollResult(status="running"),
+            lease_lost=lost,
+        )
+
+
+@pytest.mark.asyncio
+async def test_repeated_deterministic_poll_exception_terminates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    generation = SimpleNamespace(
+        id="video-1",
+        status="running",
+        diagnostics={},
+        submitted_at=now,
+        deadline_at=now + timedelta(minutes=10),
+        progress_stage="rendering",
+        progress_pct=20,
+        poll_count=0,
+        next_poll_at=None,
+        error_code=None,
+        error_message=None,
+        provider_name="provider-a",
+    )
+    terminal_polls: list[PollResult] = []
+    enqueued: list[tuple[str, int]] = []
+
+    class Result:
+        def scalar_one_or_none(self) -> SimpleNamespace:
+            return generation
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> Result:
+            return Result()
+
+        async def commit(self) -> None:
+            return None
+
+    async def publish(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def enqueue(_redis: object, task_id: str, *, defer_s: int = 0) -> None:
+        enqueued.append((task_id, defer_s))
+
+    async def finish_terminal(
+        _session: object,
+        _redis: object,
+        _generation: object,
+        poll: PollResult,
+        *,
+        fallback_error_message: str | None,
+        lease_lost: asyncio.Event | None = None,
+    ) -> None:
+        del fallback_error_message, lease_lost
+        terminal_polls.append(poll)
+
+    monkeypatch.setattr(video_generation, "SessionLocal", Session)
+    monkeypatch.setattr(video_generation, "_publish", publish)
+    monkeypatch.setattr(video_generation, "_enqueue_poll", enqueue)
+    monkeypatch.setattr(
+        video_generation,
+        "_finish_terminal_failure",
+        finish_terminal,
+    )
+
+    for _attempt in range(video_generation._MAX_UNEXPECTED_POLL_ATTEMPTS):  # noqa: SLF001
+        await video_generation._handle_unexpected_poll_exception(  # noqa: SLF001
+            object(),
+            generation.id,
+            ValueError("invalid deterministic payload"),
+        )
+
+    assert len(enqueued) == video_generation._MAX_UNEXPECTED_POLL_ATTEMPTS - 1  # noqa: SLF001
+    assert len(terminal_polls) == 1
+    assert terminal_polls[0].status == "failed"
+    assert terminal_polls[0].failure_class == "poll_internal_error"
+    assert terminal_polls[0].upstream_billable is None
+    assert terminal_polls[0].raw["upstream_cost_ambiguous"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_does_not_rebill_terminal_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    billing_calls = 0
+    generation = SimpleNamespace(
+        id="video-1",
+        status="failed",
+        provider_name="provider-a",
+    )
+
+    async def resolve_billing(*_args: object, **_kwargs: object) -> None:
+        nonlocal billing_calls
+        billing_calls += 1
+
+    monkeypatch.setattr(
+        video_generation,
+        "resolve_video_billing",
+        resolve_billing,
+    )
+
+    await video_generation._finish_terminal_failure(  # noqa: SLF001
+        object(),
+        object(),
+        generation,
+        PollResult(status="failed"),
+        fallback_error_message="ignored",
+    )
+
+    assert generation.status == "failed"
+    assert billing_calls == 0
+
+
+def test_terminal_video_events_are_queued_before_commit() -> None:
+    for helper, event_name in (
+        (video_generation._finish_success, "EV_VIDEO_SUCCEEDED"),  # noqa: SLF001
+        (video_generation._finish_terminal_failure, "EV_VIDEO_FAILED"),  # noqa: SLF001
+    ):
+        source = inspect.getsource(helper)
+        event_idx = source.index(event_name)
+        queue_idx = source.rfind("_queue_video_event(", 0, event_idx)
+        commit_idx = source.index("await session.commit()", event_idx)
+
+        assert queue_idx < event_idx < commit_idx
 
 
 def test_video_provider_slot_ttl_covers_tracking_window() -> None:
@@ -301,7 +605,7 @@ def test_video_pre_submit_terminal_paths_flush_balance_cache() -> None:
 
 
 def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
-    source = inspect.getsource(video_generation.run_video_poll)
+    source = inspect.getsource(video_generation._handle_video_upstream_poll_error)
     helper = inspect.getsource(
         video_generation._finish_cancelled_after_provider_poll_error
     )
@@ -318,7 +622,7 @@ def test_video_cancel_ack_not_found_finishes_as_canceled() -> None:
 
 
 def test_retryable_poll_error_exhaustion_expires_without_billable_signal() -> None:
-    source = inspect.getsource(video_generation.run_video_poll)
+    source = inspect.getsource(video_generation._handle_video_upstream_poll_error)
 
     assert "retryable_poll_error = _is_retryable_video_exception(exc)" in source
     assert 'status="expired" if retryable_poll_error else "failed"' in source
@@ -463,3 +767,355 @@ async def test_post_commit_publish_failure_does_not_change_terminal_state(
     )
 
     assert generation.status == "canceled"
+
+
+def _finalization_generation() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        provider_name="provider-1",
+        status="running",
+        cancel_requested_at=None,
+        progress_stage="rendering",
+        progress_pct=90,
+        upstream_response=None,
+        diagnostics={},
+        billed_tokens=None,
+        billed_cost_micro=None,
+        finished_at=None,
+    )
+
+
+class _FinalizationSession:
+    def __init__(
+        self,
+        *,
+        on_refresh: object | None = None,
+        fail_final_commit: bool = False,
+    ) -> None:
+        self.on_refresh = on_refresh
+        self.fail_final_commit = fail_final_commit
+        self.commits = 0
+        self.added: list[object] = []
+        self.flushes = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self.fail_final_commit and self.commits == 2:
+            raise RuntimeError("final commit failed")
+
+    async def refresh(self, generation: object, *, with_for_update: bool) -> None:
+        assert with_for_update is True
+        if callable(self.on_refresh):
+            self.on_refresh(generation)
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+
+async def _noop_async(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_phase", ["download", "storage"])
+async def test_finalization_cancel_during_download_or_storage_never_settles_success(
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_phase: str,
+) -> None:
+    generation = _finalization_generation()
+    cancel_requested_at: datetime | None = None
+    deleted_keys: list[str] = []
+    billing_calls: list[tuple[str, PollResult]] = []
+    events: list[str] = []
+
+    def request_cancel() -> None:
+        nonlocal cancel_requested_at
+        cancel_requested_at = datetime.now(timezone.utc)
+
+    def refresh(row: object) -> None:
+        row.cancel_requested_at = cancel_requested_at
+
+    class Adapter:
+        async def download_result(
+            self,
+            _url: str,
+            *,
+            ensure_active: object,
+        ) -> bytes:
+            ensure_active()
+            if cancel_phase == "download":
+                request_cancel()
+            ensure_active()
+            return b"downloaded"
+
+    async def store(
+        _generation: object,
+        _downloaded: object,
+        *,
+        lease_lost: asyncio.Event | None,
+        artifact_attempt_id: str,
+    ) -> object:
+        assert lease_lost is not None
+        if cancel_phase == "storage":
+            request_cancel()
+        key = f"u/user-1/v/video-1/final/{artifact_attempt_id}/output.mp4"
+        return video_generation._StoredVideo(  # noqa: SLF001
+            video=SimpleNamespace(id="stored-video"),
+            diagnostics={"output_mime": "video/mp4"},
+            created_storage_keys=(key,),
+        )
+
+    async def billing(
+        _session: object,
+        _generation: object,
+        *,
+        poll_result: PollResult,
+        reason: str,
+    ) -> SimpleNamespace:
+        billing_calls.append((reason, poll_result))
+        return SimpleNamespace(
+            decision="failure_usage_settle",
+            actual_tokens=poll_result.usage_total_tokens,
+            actual_micro=321,
+        )
+
+    async def delete(keys: tuple[str, ...] | list[str]) -> None:
+        deleted_keys.extend(keys)
+
+    monkeypatch.setattr(video_generation, "new_uuid7", lambda: "attempt-current")
+    monkeypatch.setattr(video_generation, "_store_video_asset", store)
+    monkeypatch.setattr(video_generation, "resolve_video_billing", billing)
+    monkeypatch.setattr(video_generation, "_delete_video_storage_keys", delete)
+    monkeypatch.setattr(video_generation, "_publish", _noop_async)
+    monkeypatch.setattr(video_generation, "_release_provider_slot", _noop_async)
+    monkeypatch.setattr(video_generation, "worker_flush_balance_cache", _noop_async)
+    monkeypatch.setattr(
+        video_generation,
+        "_queue_video_event",
+        lambda _session, _generation, event, **_kwargs: events.append(event),
+    )
+
+    session = _FinalizationSession(on_refresh=refresh)
+    poll = PollResult(
+        status="succeeded",
+        video_url="https://cdn.example/output.mp4",
+        usage_total_tokens=42,
+        upstream_billable=True,
+        raw={"provider_state": "succeeded"},
+    )
+
+    await video_generation._finish_success(  # noqa: SLF001
+        session,
+        object(),
+        generation,
+        poll,
+        adapter=Adapter(),
+        lease_lost=asyncio.Event(),
+    )
+
+    assert generation.status == "canceled"
+    assert session.added == []
+    assert len(billing_calls) == 1
+    reason, billing_poll = billing_calls[0]
+    assert reason == "cancelled"
+    assert billing_poll.status == "cancelled"
+    assert billing_poll.usage_total_tokens == 42
+    assert billing_poll.upstream_billable is True
+    assert billing_poll.raw["reason"] == "cancel_requested_during_finalization"
+    assert deleted_keys == ["u/user-1/v/video-1/final/attempt-current/output.mp4"]
+    assert events == ["video.canceled"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created", "expected_deleted"),
+    [
+        (True, ["u/user-1/v/video-1/final/attempt-current/output.mp4"]),
+        (False, []),
+    ],
+)
+async def test_video_store_lease_loss_deletes_only_new_attempt_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    created: bool,
+    expected_deleted: list[str],
+) -> None:
+    lease_lost = asyncio.Event()
+    deleted_keys: list[str] = []
+
+    def postprocess(_data: bytes) -> tuple[dict[str, object], dict[str, object]]:
+        return (
+            {
+                "video_bytes": b"video",
+                "poster_bytes": None,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "faststart": True,
+            },
+            {"output_mime": "video/mp4"},
+        )
+
+    async def put(
+        _key: str,
+        _data: bytes,
+        *,
+        track_created: bool,
+    ) -> bool:
+        assert track_created is True
+        lease_lost.set()
+        return created
+
+    def delete(key: str) -> bool:
+        deleted_keys.append(key)
+        return True
+
+    monkeypatch.setattr(video_generation, "_postprocess_video_bytes", postprocess)
+    monkeypatch.setattr(video_generation, "_put_video_storage_bytes", put)
+    monkeypatch.setattr(video_generation.storage, "delete", delete)
+
+    with pytest.raises(video_generation._VideoLeaseLost):  # noqa: SLF001
+        await video_generation._store_video_asset(  # noqa: SLF001
+            _finalization_generation(),
+            b"upstream-video",
+            lease_lost=lease_lost,
+            artifact_attempt_id="attempt-current",
+        )
+
+    assert deleted_keys == expected_deleted
+
+
+@pytest.mark.asyncio
+async def test_finalization_terminal_race_rolls_back_only_current_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = _finalization_generation()
+    deleted_keys: list[str] = []
+    current_key = "u/user-1/v/video-1/final/attempt-current/output.mp4"
+    other_attempt_key = "u/user-1/v/video-1/final/attempt-other/output.mp4"
+
+    class Adapter:
+        async def download_result(
+            self,
+            _url: str,
+            *,
+            ensure_active: object,
+        ) -> bytes:
+            ensure_active()
+            return b"downloaded"
+
+    async def store(*_args: object, **_kwargs: object) -> object:
+        return video_generation._StoredVideo(  # noqa: SLF001
+            video=SimpleNamespace(id="stored-video"),
+            diagnostics={},
+            created_storage_keys=(current_key,),
+        )
+
+    async def delete(keys: tuple[str, ...] | list[str]) -> None:
+        deleted_keys.extend(keys)
+
+    def win_terminal_race(row: object) -> None:
+        row.status = "failed"
+
+    async def unexpected_billing(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("terminal loser must not bill")
+
+    monkeypatch.setattr(video_generation, "new_uuid7", lambda: "attempt-current")
+    monkeypatch.setattr(video_generation, "_store_video_asset", store)
+    monkeypatch.setattr(video_generation, "_delete_video_storage_keys", delete)
+    monkeypatch.setattr(video_generation, "resolve_video_billing", unexpected_billing)
+    monkeypatch.setattr(video_generation, "_publish", _noop_async)
+
+    session = _FinalizationSession(on_refresh=win_terminal_race)
+    await video_generation._finish_success(  # noqa: SLF001
+        session,
+        object(),
+        generation,
+        PollResult(
+            status="succeeded",
+            video_url="https://cdn.example/output.mp4",
+        ),
+        adapter=Adapter(),
+        lease_lost=asyncio.Event(),
+    )
+
+    assert generation.status == "failed"
+    assert session.commits == 1
+    assert deleted_keys == [current_key]
+    assert other_attempt_key not in deleted_keys
+
+
+@pytest.mark.asyncio
+async def test_finalization_commit_failure_rolls_back_created_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = _finalization_generation()
+    deleted_keys: list[str] = []
+    billing_reasons: list[str] = []
+    current_key = "u/user-1/v/video-1/final/attempt-current/output.mp4"
+
+    class Adapter:
+        async def download_result(
+            self,
+            _url: str,
+            *,
+            ensure_active: object,
+        ) -> bytes:
+            ensure_active()
+            return b"downloaded"
+
+    async def store(*_args: object, **_kwargs: object) -> object:
+        return video_generation._StoredVideo(  # noqa: SLF001
+            video=SimpleNamespace(id="stored-video"),
+            diagnostics={"output_mime": "video/mp4"},
+            created_storage_keys=(current_key,),
+        )
+
+    async def no_existing_video(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def billing(
+        *_args: object,
+        reason: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        billing_reasons.append(reason)
+        return SimpleNamespace(
+            decision="actual_usage_settle",
+            actual_tokens=42,
+            actual_micro=321,
+        )
+
+    async def delete(keys: tuple[str, ...] | list[str]) -> None:
+        deleted_keys.extend(keys)
+
+    monkeypatch.setattr(video_generation, "new_uuid7", lambda: "attempt-current")
+    monkeypatch.setattr(video_generation, "_store_video_asset", store)
+    monkeypatch.setattr(video_generation, "_video_for_generation", no_existing_video)
+    monkeypatch.setattr(video_generation, "resolve_video_billing", billing)
+    monkeypatch.setattr(video_generation, "_delete_video_storage_keys", delete)
+    monkeypatch.setattr(video_generation, "_publish", _noop_async)
+    monkeypatch.setattr(video_generation, "_release_provider_slot", _noop_async)
+    monkeypatch.setattr(video_generation, "_queue_video_event", lambda *_a, **_k: None)
+
+    session = _FinalizationSession(fail_final_commit=True)
+    with pytest.raises(RuntimeError, match="final commit failed"):
+        await video_generation._finish_success(  # noqa: SLF001
+            session,
+            object(),
+            generation,
+            PollResult(
+                status="succeeded",
+                video_url="https://cdn.example/output.mp4",
+                usage_total_tokens=42,
+            ),
+            adapter=Adapter(),
+            lease_lost=asyncio.Event(),
+        )
+
+    assert session.added
+    assert session.flushes == 1
+    assert billing_reasons == ["succeeded"]
+    assert deleted_keys == [current_key]

@@ -1,2 +1,2 @@
 "use client";
-export { Lightbox } from "@/components/ui/lightbox/index";
+export { Lightbox } from "@/components/ui/lightbox/Lightbox";

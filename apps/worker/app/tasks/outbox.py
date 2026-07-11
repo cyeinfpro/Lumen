@@ -13,13 +13,16 @@ publisher 只是"补漏"。对每条按 kind 调 `arq_redis.enqueue_job` 送进 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 from arq.cron import cron
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
@@ -38,6 +41,7 @@ from lumen_core.models import (
     Message,
     OutboxDeadLetter,
     OutboxEvent,
+    new_uuid7,
 )
 
 from .. import billing as worker_billing
@@ -52,8 +56,8 @@ _OUTBOX_LOCK_TTL_S = 10
 _OUTBOX_BATCH = 100
 _OUTBOX_DLQ_KEY = "outbox:dead-letter"
 _OUTBOX_DLQ_MAXLEN = 1000
-# GEN-P0-5: enqueue 连续失败超过此阈值 → DLQ 化并标记 published_at 终止循环。
-# 5 次配合 publisher 2s 扫一次 ≈ 至少 10s 的 Redis 抖动容忍。
+# enqueue 连续失败达到此阈值时写一条持久化 DLQ 记录用于告警，但事件仍保持
+# unpublished。publisher 本身就是 redrive，Redis 恢复后会继续投递并自动 resolve DLQ。
 _OUTBOX_MAX_FAIL_COUNT = 5
 # 单次 publisher 调用里，同一事件失败计数的 Redis HASH 键（不持久化到 PG，避免 migration）。
 _OUTBOX_FAIL_COUNT_HASH = "outbox:fail_count"
@@ -82,6 +86,113 @@ class _OutboxPayloadError(ValueError):
     pass
 
 
+_RELEASE_OWNED_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_OWNED_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+
+
+async def _renew_owned_lock(
+    redis: Any,
+    *,
+    key: str,
+    token: str,
+    ttl_s: int,
+) -> bool | None:
+    try:
+        renewed = await redis.eval(
+            _RENEW_OWNED_LOCK_LUA,
+            1,
+            key,
+            token,
+            str(ttl_s),
+        )
+        return int(renewed or 0) == 1
+    except Exception:  # noqa: BLE001
+        logger.warning("redis lock renew failed key=%s", key, exc_info=True)
+        return None
+
+
+async def _renew_owned_lock_loop(
+    redis: Any,
+    *,
+    key: str,
+    token: str,
+    ttl_s: int,
+    stop: asyncio.Event,
+) -> None:
+    interval_s = max(0.1, ttl_s / 3)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+            return
+        except TimeoutError:
+            pass
+        renewed = await _renew_owned_lock(
+            redis,
+            key=key,
+            token=token,
+            ttl_s=ttl_s,
+        )
+        if renewed is False:
+            logger.warning("redis lock ownership lost key=%s", key)
+            return
+
+
+async def _release_owned_lock(redis: Any, *, key: str, token: str) -> None:
+    try:
+        await redis.eval(_RELEASE_OWNED_LOCK_LUA, 1, key, token)
+    except Exception:  # noqa: BLE001
+        logger.warning("redis lock release failed key=%s", key, exc_info=True)
+
+
+@asynccontextmanager
+async def _owned_redis_lock(
+    redis: Any,
+    *,
+    key: str,
+    ttl_s: int,
+) -> AsyncIterator[bool]:
+    token = uuid.uuid4().hex
+    acquired = await redis.set(key, token, ex=ttl_s, nx=True)
+    if not acquired:
+        yield False
+        return
+
+    stop = asyncio.Event()
+    renewer = asyncio.create_task(
+        _renew_owned_lock_loop(
+            redis,
+            key=key,
+            token=token,
+            ttl_s=ttl_s,
+            stop=stop,
+        )
+    )
+    try:
+        yield True
+    finally:
+        stop.set()
+        renewer.cancel()
+        try:
+            await renewer
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            logger.warning("redis lock renewer failed key=%s", key, exc_info=True)
+        finally:
+            await _release_owned_lock(redis, key=key, token=token)
+
+
 # ---------------------------------------------------------------------------
 # publish_outbox
 # ---------------------------------------------------------------------------
@@ -90,28 +201,22 @@ class _OutboxPayloadError(ValueError):
 async def publish_outbox(ctx: dict[str, Any]) -> int:
     """扫未发布的 outbox_events 并 enqueue。返回处理条数。
 
-    GEN-P0-5: 每个事件用 `SELECT ... FOR UPDATE SKIP LOCKED` 独立短事务：
+    每批事件用 `SELECT ... FOR UPDATE SKIP LOCKED`：
     (1) 行级锁读候选 → (2) enqueue → (3) UPDATE published_at 同事务 commit。
-    enqueue 失败 rollback（published_at 保持 NULL），同时在 Redis HASH 累加失败计数；
-    超过 _OUTBOX_MAX_FAIL_COUNT 次 → 写 DLQ 并标 published_at 让这条事件出循环。
+    enqueue 失败时 published_at 保持 NULL；达到告警阈值会写 DLQ，但 publisher
+    继续 redrive，不能把可恢复的 Redis 故障误标成已发布。
     """
     redis = ctx["redis"]
 
-    # SETNX 锁：同一秒只允许一个 worker 扫（批粒度锁，和行锁是两层）
-    got = await redis.set(_OUTBOX_LOCK_KEY, "1", ex=_OUTBOX_LOCK_TTL_S, nx=True)
-    if not got:
-        return 0
-
-    processed = 0
-    try:
+    async with _owned_redis_lock(
+        redis,
+        key=_OUTBOX_LOCK_KEY,
+        ttl_s=_OUTBOX_LOCK_TTL_S,
+    ) as acquired:
+        if not acquired:
+            return 0
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=2)
-
         processed = await _process_outbox_batch(redis, cutoff, _OUTBOX_BATCH)
-    finally:
-        try:
-            await redis.delete(_OUTBOX_LOCK_KEY)
-        except Exception:  # noqa: BLE001
-            pass
 
     if processed:
         logger.info("outbox: published %d events", processed)
@@ -154,6 +259,7 @@ async def _deliver_outbox_event(
             raise _OutboxPayloadError("invalid SSE payload")
         event_data = dict(data)
         event_data.setdefault("outbox_id", event_id)
+        event_data.setdefault("event_id", event_id)
         await publish_event(
             redis,
             user_id,
@@ -181,17 +287,21 @@ async def _deliver_outbox_event(
 
 
 async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int:
-    """GEN-P0-5: 批事务内 "claim → enqueue → commit published_at"。
+    """批事务内 "claim → enqueue → commit published_at"。
 
     P2-16: Redis 去重 key 只在 PG 事务成功提交后写入。事务内只读取已有
     去重记录；如果本轮 enqueue 成功但 PG rollback，后续重试仍由稳定 arq
     job_id / task 幂等吸收，而不会把一个短 TTL 占位误当成已发布事实。
+
+    可恢复的 enqueue 异常永远不写 published_at。达到失败阈值只持久化一条
+    unresolved DLQ 告警；后续成功投递会在同一事务中 resolve 它。
     """
     processed = 0
     # 收集本批内 enqueue 成功的事件，commit 完成后统一写入去重 key。
     dedupe_keys_to_set: list[tuple[str, str]] = []
     dlq_records_to_mirror: list[dict[str, Any]] = []
-    fail_counts_to_clear: list[str] = []
+    fail_counts_to_clear: set[str] = set()
+    delivered_event_ids: list[str] = []
     async with SessionLocal() as session:
         try:
             async with session.begin():
@@ -235,6 +345,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                             )
                         )
                         row.published_at = datetime.now(timezone.utc)
+                        fail_counts_to_clear.add(str(ev_id))
                         continue
 
                     payload = dict(raw_payload)
@@ -267,6 +378,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                             )
                         )
                         row.published_at = datetime.now(timezone.utc)
+                        fail_counts_to_clear.add(str(ev_id))
                         continue
                     except Exception as exc:
                         fail_count = await _increment_outbox_fail_count(redis, ev_id)
@@ -280,25 +392,27 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                             exc,
                         )
                         if fail_count >= _OUTBOX_MAX_FAIL_COUNT:
-                            dlq_records_to_mirror.append(
-                                _persist_outbox_dlq(
-                                    session,
-                                    event_id=ev_id,
-                                    kind=ev_kind,
-                                    payload=payload,
-                                    reason="max_fail_count",
-                                    fail_count=fail_count,
-                                )
+                            record = await _persist_outbox_dlq_once(
+                                session,
+                                event_id=ev_id,
+                                kind=ev_kind,
+                                payload=payload,
+                                reason="max_fail_count",
+                                fail_count=fail_count,
                             )
-                            row.published_at = datetime.now(timezone.utc)
-                            fail_counts_to_clear.append(ev_id)
+                            if record is not None:
+                                dlq_records_to_mirror.append(record)
                         continue
 
                     if should_set_dedupe:
                         dedupe_keys_to_set.append((dedupe_key, marker))
                     # enqueue 成功或已被 dedupe key 证明之前成功 → 标 published_at；commit 由 context manager
                     row.published_at = datetime.now(timezone.utc)
+                    delivered_event_ids.append(str(ev_id))
+                    fail_counts_to_clear.add(str(ev_id))
                     processed += 1
+
+                await _resolve_outbox_dlq_rows(session, delivered_event_ids)
         except Exception:  # noqa: BLE001
             # 非毒化的 transient 错误：rollback 已发生，published_at 仍是 NULL，
             # 下轮会再被候选选中；这里只记日志。
@@ -362,6 +476,37 @@ async def _increment_outbox_fail_count(redis: Any, event_id: str) -> int:
         return 0
 
 
+async def _persist_outbox_dlq_once(
+    session: Any,
+    *,
+    event_id: str,
+    kind: str,
+    payload: dict[str, Any],
+    reason: str,
+    fail_count: int,
+) -> dict[str, Any] | None:
+    existing_id = (
+        await session.execute(
+            select(OutboxDeadLetter.id)
+            .where(
+                OutboxDeadLetter.outbox_id == event_id,
+                OutboxDeadLetter.resolved_at.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing_id is not None:
+        return None
+    return _persist_outbox_dlq(
+        session,
+        event_id=event_id,
+        kind=kind,
+        payload=payload,
+        reason=reason,
+        fail_count=fail_count,
+    )
+
+
 def _persist_outbox_dlq(
     session: Any,
     *,
@@ -398,6 +543,22 @@ def _persist_outbox_dlq(
     return record
 
 
+async def _resolve_outbox_dlq_rows(
+    session: Any,
+    event_ids: list[str],
+) -> None:
+    if not event_ids:
+        return
+    await session.execute(
+        update(OutboxDeadLetter)
+        .where(
+            OutboxDeadLetter.outbox_id.in_(event_ids),
+            OutboxDeadLetter.resolved_at.is_(None),
+        )
+        .values(resolved_at=datetime.now(timezone.utc))
+    )
+
+
 async def _mirror_outbox_dlq(redis: Any, record: dict[str, Any]) -> None:
     """Best-effort Redis mirror after the PostgreSQL transaction commits."""
     try:
@@ -416,6 +577,106 @@ async def _mirror_outbox_dlq(redis: Any, record: dict[str, Any]) -> None:
             record.get("event_id"),
             exc,
         )
+
+
+_PendingOutboxDelivery = tuple[str, str, dict[str, Any]]
+
+
+def _stage_outbox_event(
+    session: Any,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+) -> _PendingOutboxDelivery:
+    event_id = new_uuid7()
+    durable_payload = {**payload, "outbox_id": event_id}
+    session.add(
+        OutboxEvent(
+            id=event_id,
+            kind=kind,
+            payload=durable_payload,
+            published_at=None,
+        )
+    )
+    return event_id, kind, durable_payload
+
+
+async def _mark_staged_outbox_published(event_id: str) -> bool:
+    async with SessionLocal() as session:
+        row = await session.get(OutboxEvent, event_id)
+        if row is None:
+            logger.error(
+                "post-commit outbox delivery lost persistence event=%s",
+                event_id,
+            )
+            return False
+        if row.published_at is None:
+            row.published_at = datetime.now(timezone.utc)
+        await _resolve_outbox_dlq_rows(session, [event_id])
+        await session.commit()
+    return True
+
+
+async def _deliver_staged_outbox_events(
+    redis: Any,
+    deliveries: list[_PendingOutboxDelivery],
+) -> None:
+    """Best-effort fast path for already committed outbox rows.
+
+    Any enqueue/publish/finalize failure leaves the row unpublished, so the
+    periodic publisher remains the source of recovery.
+    """
+    for event_id, kind, payload in deliveries:
+        try:
+            dedupe_key, marker, should_set_dedupe = await _deliver_outbox_event(
+                redis,
+                event_id=event_id,
+                kind=kind,
+                payload=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "post-commit outbox delivery failed event=%s kind=%s err=%s",
+                event_id,
+                kind,
+                exc,
+            )
+            continue
+
+        try:
+            committed = await _mark_staged_outbox_published(event_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "post-commit outbox finalize failed event=%s kind=%s err=%s",
+                event_id,
+                kind,
+                exc,
+            )
+            continue
+        if not committed:
+            continue
+
+        if should_set_dedupe:
+            try:
+                await redis.set(
+                    dedupe_key,
+                    marker,
+                    ex=_OUTBOX_ENQUEUE_DEDUPE_TTL_S,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "post-commit outbox dedupe write failed key=%s err=%s",
+                    dedupe_key,
+                    exc,
+                )
+        try:
+            await redis.hdel(_OUTBOX_FAIL_COUNT_HASH, event_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "post-commit outbox fail-count cleanup failed event=%s err=%s",
+                event_id,
+                exc,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -499,23 +760,26 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
     且 lease 已过期 → 未达到各任务 retry 上限则重入队；否则标 timeout。"""
     redis = ctx["redis"]
 
-    got = await redis.set(_RECON_LOCK_KEY, "1", ex=_RECON_LOCK_TTL_S, nx=True)
-    if not got:
-        return 0
+    async with _owned_redis_lock(
+        redis,
+        key=_RECON_LOCK_KEY,
+        ttl_s=_RECON_LOCK_TTL_S,
+    ) as acquired:
+        if not acquired:
+            return 0
 
-    # Cancel API 把 generation status 置为 canceled，但不会主动清 image_queue 的
-    # active sentinel / lease / task_provider key——worker 协程可能卡在 long-running
-    # httpx 上无法响应 cancel 标志，lease_renewer 还在每 30s 续 active sentinel score。
-    # 结果：DB terminal 但 sentinel 永久占着 capacity slot → 新 task 全部 reserve 失败。
-    # 这里在每次 reconcile 时主动扫 active set，对应 DB terminal 状态的 sentinel 强清。
-    try:
-        await _cleanup_terminal_sentinels(redis)
-    except Exception:  # noqa: BLE001
-        logger.warning("cleanup_terminal_sentinels failed", exc_info=True)
+        # Cancel API 把 generation status 置为 canceled，但不会主动清 image_queue 的
+        # active sentinel / lease / task_provider key——worker 协程可能卡在 long-running
+        # httpx 上无法响应 cancel 标志，lease_renewer 还在每 30s 续 active sentinel score。
+        # 结果：DB terminal 但 sentinel 永久占着 capacity slot → 新 task 全部 reserve 失败。
+        # 这里在每次 reconcile 时主动扫 active set，对应 DB terminal 状态的 sentinel 强清。
+        try:
+            await _cleanup_terminal_sentinels(redis)
+        except Exception:  # noqa: BLE001
+            logger.warning("cleanup_terminal_sentinels failed", exc_info=True)
 
-    touched = 0
-    pending_sse: list[tuple[str, str, str, dict[str, Any]]] = []
-    try:
+        touched = 0
+        pending_outbox: list[_PendingOutboxDelivery] = []
         cutoff = datetime.now(timezone.utc) - _RECON_STUCK_AFTER
 
         async with SessionLocal() as session:
@@ -536,27 +800,38 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
             for g in gen_rows:
                 if not await _lease_expired(redis, g.id):
                     continue
+                reconciled_at = datetime.now(timezone.utc)
                 if (g.attempt or 0) < _RECON_GENERATION_MAX_ATTEMPTS:
-                    try:
-                        await redis.enqueue_job("run_generation", g.id)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error(
-                            "reconcile re-enqueue gen=%s failed err=%s", g.id, exc
-                        )
-                        continue
                     g.status = GenerationStatus.QUEUED.value
                     g.progress_stage = GenerationStage.QUEUED.value
-                    pending_sse.append(
-                        (
-                            g.user_id,
-                            user_channel(g.user_id),
-                            _EV_GEN_REQUEUED,
-                            {
-                                "generation_id": g.id,
-                                "message_id": g.message_id,
-                                "attempt": g.attempt or 0,
-                                "max_attempts": _RECON_GENERATION_MAX_ATTEMPTS,
+                    g.updated_at = reconciled_at
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="generation",
+                            payload={
+                                "task_id": g.id,
+                                "user_id": g.user_id,
                                 "kind": "generation",
+                                "source": "stuck_task_reconciler",
+                            },
+                        )
+                    )
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="sse",
+                            payload={
+                                "user_id": g.user_id,
+                                "channel": user_channel(g.user_id),
+                                "event_name": _EV_GEN_REQUEUED,
+                                "data": {
+                                    "generation_id": g.id,
+                                    "message_id": g.message_id,
+                                    "attempt": g.attempt or 0,
+                                    "max_attempts": _RECON_GENERATION_MAX_ATTEMPTS,
+                                    "kind": "generation",
+                                },
                             },
                         )
                     )
@@ -565,7 +840,8 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                     g.progress_stage = GenerationStage.FINALIZING.value
                     g.error_code = _RECON_TIMEOUT_CODE
                     g.error_message = _RECON_TIMEOUT_MESSAGE
-                    g.finished_at = datetime.now(timezone.utc)
+                    g.finished_at = reconciled_at
+                    g.updated_at = reconciled_at
                     msg = await session.get(Message, g.message_id)
                     if msg is not None:
                         msg.status = MessageStatus.FAILED.value
@@ -583,17 +859,21 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                             "reconcile release_generation failed gen=%s",
                             g.id,
                         )
-                    pending_sse.append(
-                        (
-                            g.user_id,
-                            user_channel(g.user_id),
-                            EV_GEN_FAILED,
-                            {
-                                "generation_id": g.id,
-                                "message_id": g.message_id,
-                                "code": _RECON_TIMEOUT_CODE,
-                                "message": _RECON_TIMEOUT_MESSAGE,
-                                "retriable": False,
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="sse",
+                            payload={
+                                "user_id": g.user_id,
+                                "channel": user_channel(g.user_id),
+                                "event_name": EV_GEN_FAILED,
+                                "data": {
+                                    "generation_id": g.id,
+                                    "message_id": g.message_id,
+                                    "code": _RECON_TIMEOUT_CODE,
+                                    "message": _RECON_TIMEOUT_MESSAGE,
+                                    "retriable": False,
+                                },
                             },
                         )
                     )
@@ -616,28 +896,39 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
             for c in comp_rows:
                 if not await _lease_expired(redis, c.id):
                     continue
+                reconciled_at = datetime.now(timezone.utc)
                 if (c.attempt or 0) < _RECON_COMPLETION_MAX_ATTEMPTS:
-                    try:
-                        await redis.enqueue_job("run_completion", c.id)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error(
-                            "reconcile re-enqueue comp=%s failed err=%s", c.id, exc
-                        )
-                        continue
                     c.status = CompletionStatus.QUEUED.value
                     c.progress_stage = CompletionStage.QUEUED.value
-                    pending_sse.append(
-                        (
-                            c.user_id,
-                            user_channel(c.user_id),
-                            _EV_COMP_REQUEUED,
-                            {
-                                "completion_id": c.id,
-                                "message_id": c.message_id,
-                                "attempt": c.attempt or 0,
-                                "attempt_epoch": c.attempt or 0,
-                                "max_attempts": _RECON_COMPLETION_MAX_ATTEMPTS,
+                    c.updated_at = reconciled_at
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="completion",
+                            payload={
+                                "task_id": c.id,
+                                "user_id": c.user_id,
                                 "kind": "completion",
+                                "source": "stuck_task_reconciler",
+                            },
+                        )
+                    )
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="sse",
+                            payload={
+                                "user_id": c.user_id,
+                                "channel": user_channel(c.user_id),
+                                "event_name": _EV_COMP_REQUEUED,
+                                "data": {
+                                    "completion_id": c.id,
+                                    "message_id": c.message_id,
+                                    "attempt": c.attempt or 0,
+                                    "attempt_epoch": c.attempt or 0,
+                                    "max_attempts": _RECON_COMPLETION_MAX_ATTEMPTS,
+                                    "kind": "completion",
+                                },
                             },
                         )
                     )
@@ -646,7 +937,8 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                     c.progress_stage = CompletionStage.FINALIZING.value
                     c.error_code = _RECON_TIMEOUT_CODE
                     c.error_message = _RECON_TIMEOUT_MESSAGE
-                    c.finished_at = datetime.now(timezone.utc)
+                    c.finished_at = reconciled_at
+                    c.updated_at = reconciled_at
                     msg = await session.get(Message, c.message_id)
                     if msg is not None:
                         msg.status = MessageStatus.FAILED.value
@@ -662,19 +954,23 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                             "reconcile release_completion failed comp=%s",
                             c.id,
                         )
-                    pending_sse.append(
-                        (
-                            c.user_id,
-                            user_channel(c.user_id),
-                            EV_COMP_FAILED,
-                            {
-                                "completion_id": c.id,
-                                "message_id": c.message_id,
-                                "attempt": c.attempt or 0,
-                                "attempt_epoch": c.attempt or 0,
-                                "code": _RECON_TIMEOUT_CODE,
-                                "message": _RECON_TIMEOUT_MESSAGE,
-                                "retriable": False,
+                    pending_outbox.append(
+                        _stage_outbox_event(
+                            session,
+                            kind="sse",
+                            payload={
+                                "user_id": c.user_id,
+                                "channel": user_channel(c.user_id),
+                                "event_name": EV_COMP_FAILED,
+                                "data": {
+                                    "completion_id": c.id,
+                                    "message_id": c.message_id,
+                                    "attempt": c.attempt or 0,
+                                    "attempt_epoch": c.attempt or 0,
+                                    "code": _RECON_TIMEOUT_CODE,
+                                    "message": _RECON_TIMEOUT_MESSAGE,
+                                    "retriable": False,
+                                },
                             },
                         )
                     )
@@ -683,13 +979,9 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
             await session.commit()
             await worker_billing.flush_balance_cache_refreshes(session)
 
-        for user_id, channel, event_name, data in pending_sse:
-            await publish_event(redis, user_id, channel, event_name, data)
-    finally:
-        try:
-            await redis.delete(_RECON_LOCK_KEY)
-        except Exception:  # noqa: BLE001
-            pass
+        # Fast path only after the task-row transaction commits. If Redis or
+        # finalization fails, the unpublished rows above remain recoverable.
+        await _deliver_staged_outbox_events(redis, pending_outbox)
 
     if touched:
         logger.info("reconcile: touched %d rows", touched)

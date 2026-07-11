@@ -15,10 +15,18 @@ import logging
 import os
 import threading
 import time
-from dataclasses import InitVar, dataclass, field
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from lumen_core.byok import (
+    build_provider_probe_request,
+    extract_response_output_text,
+    extract_sse_output_text,
+)
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
@@ -70,7 +78,6 @@ _IMAGE_ROUTING_CONSECUTIVE_FAILURE_PENALTY_MS = 1000.0
 # 通过 runtime_settings: providers.auto_image_probe_interval 调整（admin API 写 DB
 # → 5s TTL 自动生效；或 env PROVIDERS_AUTO_IMAGE_PROBE_INTERVAL fallback）。
 _DEFAULT_IMAGE_PROBE_INTERVAL_S = 0
-_PROBE_INSTRUCTIONS = "You are a precise calculator. Return only the final integer."
 _IMAGE_PROBE_PROMPT = "a small red apple on a white background"
 _IMAGE_PROBE_SIZE = "1024x1024"
 _IMAGE_PROBE_QUALITY = "low"
@@ -85,7 +92,7 @@ _IMAGE_PROBE_MIN_B64_LEN = 1000
 class ProviderConfig:
     name: str
     base_url: str
-    api_key: InitVar[str]
+    api_key: str = field(repr=False, compare=False)
     priority: int = 0
     weight: int = 1
     enabled: bool = True
@@ -110,14 +117,6 @@ class ProviderConfig:
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
-    _api_key: str = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self, api_key: str) -> None:
-        object.__setattr__(self, "_api_key", api_key)
-
-    @property
-    def api_key(self) -> str:
-        return self._api_key
 
 
 @dataclass
@@ -152,6 +151,8 @@ class ProviderHealth:
     last_success_at: float | None = None
     last_probe_at: float | None = None
     cooldown_until: float | None = None
+    half_open_probe_inflight: bool = False
+    half_open_probe_token: str | None = None
     # 真实请求统计（内存计数，定期刷入 Redis）
     total_requests: int = 0
     successful_requests: int = 0
@@ -180,7 +181,7 @@ class ProviderHealth:
 class ResolvedProvider:
     name: str
     base_url: str
-    api_key: InitVar[str]
+    api_key: str = field(repr=False, compare=False)
     proxy: ProviderProxyDefinition | None = field(
         default=None, repr=False, compare=False
     )
@@ -196,14 +197,97 @@ class ResolvedProvider:
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
-    _api_key: str = field(init=False, repr=False, compare=False)
+    text_circuit_state: str = field(default="closed", repr=False, compare=False)
+    half_open_probe_token: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
-    def __post_init__(self, api_key: str) -> None:
-        object.__setattr__(self, "_api_key", api_key)
 
-    @property
-    def api_key(self) -> str:
-        return self._api_key
+@dataclass
+class TextProviderAttempt:
+    _pool: ProviderPool = field(repr=False)
+    provider: ResolvedProvider
+    _reported: bool = field(default=False, init=False, repr=False)
+
+    def report_success(self) -> None:
+        if self._reported:
+            return
+        self._pool.report_success(self.provider.name)
+        self._reported = True
+
+    def report_failure(self) -> None:
+        if self._reported:
+            return
+        self._pool.report_failure(
+            self.provider.name,
+            selected_circuit_state=self.provider.text_circuit_state,
+            half_open_probe_token=self.provider.half_open_probe_token,
+        )
+        self._reported = True
+
+    def report_exception(self, exc: BaseException) -> bool:
+        if not _is_text_provider_failure(exc):
+            return False
+        self.report_failure()
+        return True
+
+    def release(self) -> None:
+        if self._reported:
+            return
+        self._pool.release_text_attempt(self.provider)
+        self._reported = True
+
+
+class _UntrackedTextProviderAttempt:
+    """Compatibility attempt for lightweight pools used by late-bound tests."""
+
+    def report_success(self) -> None:
+        return None
+
+    def report_failure(self) -> None:
+        return None
+
+    def report_exception(self, exc: BaseException) -> bool:
+        return _is_text_provider_failure(exc)
+
+    def release(self) -> None:
+        return None
+
+
+def _is_text_provider_failure(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPError):
+        return True
+    if getattr(exc, "status_code", None) is not None:
+        return True
+    error_code = getattr(exc, "error_code", None)
+    if isinstance(error_code, str) and error_code.strip():
+        return True
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+        return (
+            message.startswith("ssh proxy ") or "unsupported proxy protocol" in message
+        )
+    return False
+
+
+@contextmanager
+def text_provider_attempt(
+    pool: Any,
+    provider: Any,
+) -> Iterator[TextProviderAttempt | _UntrackedTextProviderAttempt]:
+    """Track a real ProviderPool attempt while preserving simple test doubles."""
+    attempt_factory = getattr(pool, "text_attempt", None)
+    if not callable(attempt_factory):
+        attempt = _UntrackedTextProviderAttempt()
+        try:
+            yield attempt
+        finally:
+            attempt.release()
+        return
+    with attempt_factory(provider) as attempt:
+        yield attempt
 
 
 # ---------------------------------------------------------------------------
@@ -378,12 +462,39 @@ class ProviderPool:
 
     # ---- 选择算法 --------------------------------------------------------
 
+    @staticmethod
+    def _eligible_providers_by_priority(
+        providers: list[ProviderConfig],
+        *,
+        endpoint_kind: str | None,
+        route: str,
+        purpose: str,
+    ) -> dict[int, list[ProviderConfig]]:
+        by_priority: dict[int, list[ProviderConfig]] = {}
+        for provider in providers:
+            if purpose not in provider.purposes:
+                continue
+            if not endpoint_kind_allowed(provider, endpoint_kind):
+                continue
+            # capability=False explicitly excludes a provider; None preserves
+            # health-based failover learning for previously unknown routes.
+            if not provider_supports_route(
+                provider,
+                route=route,
+                endpoint_kind=endpoint_kind,
+            ):
+                continue
+            by_priority.setdefault(provider.priority, []).append(provider)
+        return by_priority
+
     def _select_ordered(
         self,
         *,
         endpoint_kind: str | None = None,
         route: str = "text",
         purpose: str | None = None,
+        claim_half_open: bool = True,
+        advance_round_robin: bool = True,
     ) -> list[ResolvedProvider]:
         from .upstream import UpstreamError
 
@@ -395,18 +506,13 @@ class ProviderPool:
                 status_code=503,
             )
 
-        by_priority: dict[int, list[ProviderConfig]] = {}
         effective_purpose = purpose or route_to_purpose(route)
-        for p in enabled:
-            if effective_purpose not in p.purposes:
-                continue
-            if not endpoint_kind_allowed(p, endpoint_kind):
-                continue
-            # capability gate（image-stability-hardening §P2）：capability=False 显式排除；
-            # capability=None 保留现有行为（按健康度 / failover 学习）。
-            if not provider_supports_route(p, route=route, endpoint_kind=endpoint_kind):
-                continue
-            by_priority.setdefault(p.priority, []).append(p)
+        by_priority = self._eligible_providers_by_priority(
+            enabled,
+            endpoint_kind=endpoint_kind,
+            route=route,
+            purpose=effective_purpose,
+        )
         if not by_priority:
             raise UpstreamError(
                 f"no upstream providers available for endpoint kind={endpoint_kind}",
@@ -420,22 +526,29 @@ class ProviderPool:
 
         for prio in priority_levels:
             group = by_priority[prio]
-            ordered = self._weighted_round_robin(group)
+            ordered = self._weighted_round_robin(
+                group,
+                advance=advance_round_robin,
+            )
 
             healthy: list[ProviderConfig] = []
-            half_open: list[ProviderConfig] = []
+            half_open_candidates: list[ProviderConfig] = []
             circuit_open: list[ProviderConfig] = []
 
             for p in ordered:
                 h = self._health.get(p.name)
                 with self._stats_lock:
-                    is_open = False if h is None else self._is_open(h, now)
-                    cooldown_until = None if h is None else h.cooldown_until
-                if h is None or not is_open:
+                    circuit_state = (
+                        "closed" if h is None else self._circuit_state(h, now)
+                    )
+                    half_open_busy = bool(h is not None and h.half_open_probe_inflight)
+                if circuit_state == "closed":
                     healthy.append(p)
-                elif cooldown_until is not None and now >= cooldown_until:
-                    half_open.append(p)
-                else:
+                elif circuit_state == "half_open" and (
+                    not claim_half_open or not half_open_busy
+                ):
+                    half_open_candidates.append(p)
+                elif circuit_state == "open":
                     circuit_open.append(p)
 
             # 按冷却开始时间排 circuit_open（最早的最可能已恢复）
@@ -443,7 +556,38 @@ class ProviderPool:
                 key=lambda p: self._health[p.name].cooldown_until or float("inf")
             )
 
-            for p in healthy + half_open + circuit_open:
+            half_open_probe: list[tuple[ProviderConfig, str]] = []
+            # A half-open candidate must be the first provider this selection
+            # will actually attempt. Reserving later fallback candidates would
+            # strand their probe slots whenever an earlier healthy provider
+            # succeeds. At most one selector owns the probe for a provider.
+            if claim_half_open and not result:
+                for candidate in half_open_candidates:
+                    h = self._health.get(candidate.name)
+                    if h is None:
+                        continue
+                    with self._stats_lock:
+                        if (
+                            self._circuit_state(h, now) == "half_open"
+                            and not h.half_open_probe_inflight
+                        ):
+                            token = uuid.uuid4().hex
+                            h.half_open_probe_inflight = True
+                            h.half_open_probe_token = token
+                            half_open_probe.append((candidate, token))
+                            break
+
+            candidates = (
+                [(p, "half_open", token) for p, token in half_open_probe]
+                + (
+                    []
+                    if claim_half_open
+                    else [(p, "half_open", None) for p in half_open_candidates]
+                )
+                + [(p, "closed", None) for p in healthy]
+                + [(p, "open", None) for p in circuit_open]
+            )
+            for p, circuit_state, half_open_token in candidates:
                 result.append(
                     ResolvedProvider(
                         name=p.name,
@@ -459,6 +603,8 @@ class ProviderPool:
                         responses_supported=p.responses_supported,
                         image_generations_supported=p.image_generations_supported,
                         image_responses_supported=p.image_responses_supported,
+                        text_circuit_state=circuit_state,
+                        half_open_probe_token=half_open_token,
                     )
                 )
 
@@ -471,12 +617,19 @@ class ProviderPool:
         return result
 
     def _weighted_round_robin(
-        self, group: list[ProviderConfig]
+        self,
+        group: list[ProviderConfig],
+        *,
+        advance: bool = True,
     ) -> list[ProviderConfig]:
         if len(group) <= 1:
             return list(group)
         prio = group[0].priority
-        state = self._rr_state.setdefault(prio, {})
+        state = (
+            self._rr_state.setdefault(prio, {})
+            if advance
+            else dict(self._rr_state.get(prio, {}))
+        )
         for p in group:
             state.setdefault(p.name, 0)
 
@@ -517,15 +670,21 @@ class ProviderPool:
         return ordered
 
     @staticmethod
-    def _is_open(h: ProviderHealth, now: float) -> bool:
+    def _circuit_state(h: ProviderHealth, now: float) -> str:
         if h.consecutive_failures < _CB_FAILURE_THRESHOLD:
-            return False
+            return "closed"
         # P2-7: failures 已达阈值但 cooldown_until 还未赋值——这是 report_failure
         # 中"先 incr 后赋值"的窗口期；并发请求若此时进入会绕过断路器。视为 open
         # 拒绝请求，等同时刻的 report_failure 完成赋值后转入正常 cooldown。
         if h.cooldown_until is None:
-            return True
-        return now < h.cooldown_until
+            return "open"
+        if now < h.cooldown_until:
+            return "open"
+        return "half_open"
+
+    @staticmethod
+    def _is_open(h: ProviderHealth, now: float) -> bool:
+        return ProviderPool._circuit_state(h, now) == "open"
 
     # ---- 公开 API --------------------------------------------------------
 
@@ -618,6 +777,59 @@ class ProviderPool:
     ) -> ResolvedProvider:
         providers = await self.select(route=route, purpose=purpose)
         return providers[0]
+
+    async def peek(
+        self,
+        *,
+        route: str = "text",
+        purpose: str | None = None,
+        endpoint_kind: str | None = None,
+    ) -> list[ResolvedProvider]:
+        """Inspect text-capable providers without claiming half-open or RR state."""
+        await self._maybe_reload()
+        effective_purpose = purpose or route_to_purpose(route)
+        if route == "text" or effective_purpose == "embedding":
+            endpoint_kind = endpoint_kind or "responses"
+        return self._select_ordered(
+            endpoint_kind=endpoint_kind,
+            route=route,
+            purpose=effective_purpose,
+            claim_half_open=False,
+            advance_round_robin=False,
+        )
+
+    async def peek_one(
+        self,
+        *,
+        route: str = "text",
+        purpose: str | None = None,
+    ) -> ResolvedProvider:
+        providers = await self.peek(route=route, purpose=purpose)
+        return providers[0]
+
+    @contextmanager
+    def text_attempt(
+        self,
+        provider: ResolvedProvider,
+    ) -> Iterator[TextProviderAttempt]:
+        """Own a selected text attempt and release an unresolved half-open slot."""
+        attempt = TextProviderAttempt(self, provider)
+        try:
+            yield attempt
+        finally:
+            attempt.release()
+
+    def release_text_attempt(self, provider: ResolvedProvider) -> None:
+        """Release only the half-open slot owned by this selected provider."""
+        token = provider.half_open_probe_token
+        if token is None:
+            return
+        with self._stats_lock:
+            h = self._health.get(provider.name)
+            if h is None or h.half_open_probe_token != token:
+                return
+            h.half_open_probe_inflight = False
+            h.half_open_probe_token = None
 
     def _record_request_stats(
         self,
@@ -1038,13 +1250,22 @@ class ProviderPool:
             h.consecutive_failures = 0
             h.last_success_at = time.monotonic()
             h.cooldown_until = None
+            h.half_open_probe_inflight = False
+            h.half_open_probe_token = None
             if not is_probe:
                 h.total_requests += 1
                 h.successful_requests += 1
         if was_open:
             logger.info("circuit_closed: provider=%s recovered", provider_name)
 
-    def report_failure(self, provider_name: str, *, is_probe: bool = False) -> None:
+    def report_failure(
+        self,
+        provider_name: str,
+        *,
+        is_probe: bool = False,
+        selected_circuit_state: str | None = None,
+        half_open_probe_token: str | None = None,
+    ) -> None:
         h = self._health.get(provider_name)
         if h is None:
             return
@@ -1059,17 +1280,43 @@ class ProviderPool:
                 h.failed_requests += 1
             return
         with self._stats_lock:
-            h.consecutive_failures += 1
             h.last_failure_at = now
             h.total_requests += 1
             h.failed_requests += 1
-            failures = h.consecutive_failures
+            if selected_circuit_state is None:
+                was_half_open_probe = h.half_open_probe_inflight
+                was_open_fallback = (
+                    h.consecutive_failures >= _CB_FAILURE_THRESHOLD
+                    and not was_half_open_probe
+                )
+                h.half_open_probe_inflight = False
+                h.half_open_probe_token = None
+            else:
+                owns_half_open_probe = (
+                    half_open_probe_token is not None
+                    and h.half_open_probe_token == half_open_probe_token
+                )
+                was_half_open_probe = (
+                    selected_circuit_state == "half_open" and owns_half_open_probe
+                )
+                was_open_fallback = (
+                    selected_circuit_state == "open"
+                    and h.consecutive_failures >= _CB_FAILURE_THRESHOLD
+                )
+                if owns_half_open_probe:
+                    h.half_open_probe_inflight = False
+                    h.half_open_probe_token = None
             duration = 0.0
-            if failures >= _CB_FAILURE_THRESHOLD:
+            if was_open_fallback:
+                failures = h.consecutive_failures
+            else:
+                h.consecutive_failures += 1
+                failures = h.consecutive_failures
+            if not was_open_fallback and failures >= _CB_FAILURE_THRESHOLD:
                 multiplier = min(failures - _CB_FAILURE_THRESHOLD + 1, 10)
                 duration = min(_CB_COOLDOWN_BASE_S * multiplier, _CB_COOLDOWN_MAX_S)
                 h.cooldown_until = now + duration
-        if failures >= _CB_FAILURE_THRESHOLD:
+        if not was_open_fallback and failures >= _CB_FAILURE_THRESHOLD:
             logger.warning(
                 "circuit_open: provider=%s failures=%d cooldown=%.0fs",
                 provider_name,
@@ -1349,88 +1596,11 @@ class ProviderPool:
 
     @staticmethod
     def _extract_response_output_text(payload: Any) -> str:
-        """从 /v1/responses 非流式响应里抽取模型输出文本。
-
-        兼容三种形态：
-        1) `payload["output_text"]`（OpenAI Responses API 顶层简化字段）
-        2) `payload["output"][*]["content"][*]["text"]`（标准结构）
-        3) 兜底：把 payload 整个 json.dumps 后返回，用关键词搜兜底验证
-
-        返回拼接后的字符串（可能为空）。
-        """
-        if not isinstance(payload, dict):
-            return ""
-        # 1) 顶层 output_text
-        ot = payload.get("output_text")
-        if isinstance(ot, str) and ot:
-            return ot
-        # 2) 遍历 output[].content[].text
-        chunks: list[str] = []
-        out = payload.get("output")
-        if isinstance(out, list):
-            for item in out:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if not isinstance(content, list):
-                    continue
-                for c in content:
-                    if not isinstance(c, dict):
-                        continue
-                    t = c.get("text") or c.get("output_text")
-                    if isinstance(t, str) and t:
-                        chunks.append(t)
-        if chunks:
-            return "".join(chunks)
-        # 3) 兜底：用整个 payload 字符串（让后面的 "9801" 匹配能 work）
-        try:
-            import json
-
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:  # noqa: BLE001
-            return ""
+        return extract_response_output_text(payload)
 
     @staticmethod
     def _extract_sse_output_text(raw: str) -> str:
-        chunks: list[str] = []
-        buffer = raw.replace("\r\n", "\n")
-        for raw_event in buffer.split("\n\n"):
-            data_lines: list[str] = []
-            for line in raw_event.splitlines():
-                line = line.strip()
-                if line.startswith("data:"):
-                    data_lines.append(line[len("data:") :].strip())
-            if not data_lines:
-                continue
-            data = "\n".join(data_lines)
-            if data == "[DONE]":
-                continue
-            try:
-                import json
-
-                obj = json.loads(data)
-            except Exception:  # noqa: BLE001
-                continue
-            if not isinstance(obj, dict):
-                continue
-
-            delta = obj.get("delta")
-            if isinstance(delta, str) and delta:
-                chunks.append(delta)
-                continue
-
-            text = obj.get("text") or obj.get("output_text")
-            if isinstance(text, str) and text:
-                chunks.append(text)
-                continue
-
-            for key in ("response", "item", "part"):
-                nested_text = ProviderPool._extract_response_output_text(obj.get(key))
-                if nested_text:
-                    chunks.append(nested_text)
-                    break
-
-        return "".join(chunks)
+        return extract_sse_output_text(raw)
 
     async def _probe_one(self, provider: ProviderConfig) -> bool:
         """文本算术探活：让 gpt-5.4-mini 算 99*99，必须答出 9801 才算真活。
@@ -1455,27 +1625,7 @@ class ProviderPool:
             "authorization": f"Bearer {provider.api_key}",
             "content-type": "application/json",
         }
-        body = {
-            "model": "gpt-5.4-mini",
-            "instructions": _PROBE_INSTRUCTIONS,
-            # 严格指令：模型必须只返回整数；任何额外文字都不影响 .find("9801") 命中
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "What is 99 times 99? Reply with only the integer "
-                                "result, no words, no explanation."
-                            ),
-                        }
-                    ],
-                }
-            ],
-            "stream": False,
-            "store": False,
-        }
+        body = build_provider_probe_request()
         try:
             proxy_url = await resolve_provider_proxy_url(provider.proxy)
             async with httpx.AsyncClient(
@@ -1724,7 +1874,6 @@ class ProviderPool:
         except Exception:  # noqa: BLE001
             return
 
-        now = time.monotonic()
         wall_now = time.time()
         redis = self.get_redis()
         statuses = self.get_status()
@@ -1779,9 +1928,6 @@ class ProviderPool:
                 )
             except Exception:  # noqa: BLE001
                 pass
-
-        # 防止 unused 警告
-        _ = now
 
     async def flush_stats_to_redis(self, redis: Any) -> None:
         """将内存中的请求计数刷入 Redis Hash，供 API 进程读取。"""
@@ -1989,6 +2135,8 @@ __all__ = [
     "ProviderHealth",
     "ProviderPool",
     "ResolvedProvider",
+    "TextProviderAttempt",
     "get_pool",
     "probe_providers",
+    "text_provider_attempt",
 ]

@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
 from .config import settings
+
+if TYPE_CHECKING:
+    from sentry_sdk.types import Event
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +154,7 @@ def _scrub_request(request: Any) -> Any:
     return cleaned
 
 
-def _sentry_before_send(event: dict, _hint: dict) -> dict:
+def _sentry_before_send(event: Event, _hint: dict[str, Any]) -> Event:
     # Why: emails / cookies / auth headers must never reach Sentry.
     if not isinstance(event, dict):
         return event

@@ -9,11 +9,13 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import stat
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Iterable, Iterator
+from typing import Annotated, Any, BinaryIO, Iterable, Iterator, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import (
@@ -40,11 +42,19 @@ from lumen_core.constants import (
     VideoGenerationStatus,
     task_channel,
 )
-from lumen_core.models import Image, OutboxEvent, PricingRule, Video, VideoGeneration
+from lumen_core.models import (
+    Image,
+    OutboxEvent,
+    PricingRule,
+    User,
+    Video,
+    VideoGeneration,
+)
 from lumen_core.models import new_uuid7
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     MoneyOut,
+    VideoAction,
     VideoCreateIn,
     VideoGenerationOut,
     VideoGenerationsOut,
@@ -52,8 +62,10 @@ from lumen_core.schemas import (
     VideoOptionsOut,
     VideoOut,
     VideoPriceOptionOut,
+    VideoPricingVariant,
     VideoReferenceMediaIn,
     VideoReferenceMediaOut,
+    VideoResolution,
     VideoTemporaryDownloadOut,
     normalize_asset_reference_url,
 )
@@ -120,6 +132,7 @@ _OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
 _OMNI_FLASH_DURATIONS = tuple(range(6, 11))
 _HAPPYHORSE_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 _OMNI_FLASH_ASPECT_RATIOS = ("adaptive", "16:9", "9:16", "1:1")
+_VIDEO_ACTION_VALUES = cast(tuple[VideoAction, ...], VIDEO_ACTIONS)
 _HAPPYHORSE_MODEL_PREFIX = "happyhorse-1.0"
 _OMNI_FLASH_MODEL_PREFIXES = ("omni-flash", "gemini_omni_flash")
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
@@ -370,6 +383,30 @@ def _looks_like_reference_video(data: bytes) -> bool:
     return len(data) >= 12 and data[4:8] == b"ftyp"
 
 
+async def _inspect_reference_video_upload(file: UploadFile) -> tuple[int, str, bytes]:
+    size = 0
+    digest = hashlib.sha256()
+    header = bytearray()
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > _VIDEO_REFERENCE_UPLOAD_MAX_BYTES:
+            raise _http(
+                "too_large",
+                f"file exceeds {_VIDEO_REFERENCE_UPLOAD_MAX_BYTES // (1024 * 1024)}MB",
+                413,
+            )
+        digest.update(chunk)
+        if len(header) < 12:
+            header.extend(chunk[: 12 - len(header)])
+    if size == 0:
+        raise _http("empty_file", "empty file", 400)
+    await file.seek(0)
+    return size, digest.hexdigest(), bytes(header)
+
+
 def _reference_video_upload_key(user_id: str, video_id: str, ext: str) -> str:
     return f"u/{user_id}/vref/{video_id}/original.{ext}"
 
@@ -546,13 +583,14 @@ def _provider_prefers_public_media_url(provider: Any) -> bool:
     ) in {"volcano_third_party", "volcano_newapi", "omni_flash"}
 
 
-def _write_new_file_atomic(path: Path, data: bytes) -> None:
+def _write_new_file_atomic(path: Path, source: BinaryIO) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(data)
+            source.seek(0)
+            shutil.copyfileobj(source, f, length=1024 * 1024)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -823,28 +861,18 @@ async def upload_reference_video(
     file: UploadFile = File(...),
 ) -> VideoOut:
     mime, ext = _reference_upload_ext(file)
-    buf = bytearray()
-    while True:
-        chunk = await file.read(64 * 1024)
-        if not chunk:
-            break
-        buf.extend(chunk)
-        if len(buf) > _VIDEO_REFERENCE_UPLOAD_MAX_BYTES:
-            raise _http(
-                "too_large",
-                f"file exceeds {_VIDEO_REFERENCE_UPLOAD_MAX_BYTES // (1024 * 1024)}MB",
-                413,
-            )
-    if not buf:
-        raise _http("empty_file", "empty file", 400)
-    data = bytes(buf)
-    if not _looks_like_reference_video(data):
+    size, sha, header = await _inspect_reference_video_upload(file)
+    if not _looks_like_reference_video(header):
         raise _http(
             "invalid_video_file",
             "reference video must be a valid mp4 or mov file",
             415,
         )
-    sha = hashlib.sha256(data).hexdigest()
+
+    # Serialize dedupe/quota accounting for each user. The file body has
+    # already been validated and rewound, so this lock covers only DB checks
+    # plus the final atomic filesystem copy.
+    await db.execute(select(User.id).where(User.id == user.id).with_for_update())
     existing = (
         await db.execute(
             select(Video).where(
@@ -857,6 +885,33 @@ async def upload_reference_video(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        existing_path = _fs_path(existing.storage_key)
+        if not existing_path.is_file():
+            repaired_key = _reference_video_upload_key(user.id, existing.id, ext)
+            repaired_path = _fs_path(repaired_key)
+            try:
+                await asyncio.to_thread(
+                    _write_new_file_atomic,
+                    repaired_path,
+                    file.file,
+                )
+                existing.storage_key = repaired_key
+                existing.mime = mime
+                existing.size_bytes = size
+                existing.sha256 = sha
+                existing.etag = sha
+                metadata = dict(existing.metadata_jsonb or {})
+                metadata["filename"] = file.filename or ""
+                metadata["source"] = "uploaded_reference"
+                existing.metadata_jsonb = metadata
+                _ensure_reference_video_access_token(existing)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                await asyncio.to_thread(_unlink_file_if_exists, repaired_path)
+                raise
+            await db.refresh(existing)
+            return _video_out(existing)
         _ensure_reference_video_access_token(existing)
         await db.commit()
         await db.refresh(existing)
@@ -880,7 +935,7 @@ async def upload_reference_video(
             f"reference video limit is {_VIDEO_REFERENCE_UPLOAD_MAX_COUNT} files",
             429,
         )
-    if int(total_bytes or 0) + len(data) > _VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES:
+    if int(total_bytes or 0) + size > _VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES:
         raise _http(
             "reference_video_quota_exceeded",
             "reference video storage quota exceeded",
@@ -896,7 +951,7 @@ async def upload_reference_video(
         height=0,
         duration_ms=0,
         fps=None,
-        size_bytes=len(data),
+        size_bytes=size,
         sha256=sha,
         etag=sha,
         has_audio=False,
@@ -915,7 +970,7 @@ async def upload_reference_video(
     video.storage_key = key
     path = _fs_path(key)
     try:
-        await asyncio.to_thread(_write_new_file_atomic, path, data)
+        await asyncio.to_thread(_write_new_file_atomic, path, file.file)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -1012,7 +1067,16 @@ def _estimate_duration_options_for_model_action(
     return sorted(durations)
 
 
-def _video_price_action_for_provider(provider_kind: str, action: str) -> str:
+def _parse_video_action(value: str) -> VideoAction | None:
+    if value not in _VIDEO_ACTION_VALUES:
+        return None
+    return cast(VideoAction, value)
+
+
+def _video_price_action_for_provider(
+    provider_kind: str,
+    action: VideoAction,
+) -> VideoPricingVariant:
     if (
         provider_kind in {"dashscope", "omni_flash"}
         and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
@@ -1027,7 +1091,7 @@ def _duration_options_for_provider_action(
     model: str,
     upstream_model: str | None,
     provider_kind: str,
-    action: str,
+    action: VideoAction,
     resolutions: Iterable[str],
     fallback_durations: Iterable[int],
     allow_action_fallback: bool = True,
@@ -1291,14 +1355,15 @@ async def _video_price_options(db: AsyncSession) -> list[VideoPriceOptionOut]:
     )
     out: list[VideoPriceOptionOut] = []
     for row in rows:
-        action, resolution = split_video_resolution_pricing_variant(row.variant)
-        if action not in VIDEO_PRICING_VARIANTS:
+        raw_action, resolution = split_video_resolution_pricing_variant(row.variant)
+        if raw_action not in VIDEO_PRICING_VARIANTS:
             continue
+        action = cast(VideoPricingVariant, raw_action)
         out.append(
             VideoPriceOptionOut(
                 model=row.key,
-                action=action,  # type: ignore[arg-type]
-                resolution=resolution,  # type: ignore[arg-type]
+                action=action,
+                resolution=resolution,
                 variant=row.variant,
                 price=_money(row.price_micro),
                 enabled=row.enabled,
@@ -1309,20 +1374,20 @@ async def _video_price_options(db: AsyncSession) -> list[VideoPriceOptionOut]:
 
 
 def _has_video_price(
-    price_pairs: set[tuple[str, str, str | None]],
+    price_pairs: Collection[tuple[str, VideoPricingVariant, str | None]],
     *,
     model: str,
-    action: str,
+    action: VideoPricingVariant,
     resolutions: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
-    def has(action_name: str, resolution: str | None) -> bool:
+    def has(action_name: VideoPricingVariant, resolution: str | None) -> bool:
         return (model, action_name, resolution) in price_pairs or (
             model,
             action_name,
             None,
         ) in price_pairs
 
-    resolution_options = list(resolutions or [None])
+    resolution_options: Iterable[str | None] = resolutions if resolutions else (None,)
     if action != VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
         return any(has(action, resolution) for resolution in resolution_options)
     for resolution in resolution_options:
@@ -1376,21 +1441,25 @@ async def video_options(
     if provider_errors:
         unavailable_reason = "video_provider_config_invalid"
     prices = await _video_price_options(db)
-    price_pairs = {(item.model, item.action, item.resolution) for item in prices}
+    price_pairs: set[tuple[str, VideoPricingVariant, str | None]] = {
+        (item.model, item.action, item.resolution) for item in prices
+    }
     durations, resolutions = _estimate_pairs(estimates)
     global_durations = _duration_options(estimates)
 
-    model_actions: dict[str, set[str]] = {}
+    model_actions: dict[str, set[VideoAction]] = {}
     model_durations: dict[str, set[int]] = {}
-    model_action_durations: dict[str, dict[str, set[int]]] = {}
-    model_action_resolution_durations: dict[str, dict[str, dict[str, set[int]]]] = {}
+    model_action_durations: dict[str, dict[VideoAction, set[int]]] = {}
+    model_action_resolution_durations: dict[
+        str, dict[VideoAction, dict[str, set[int]]]
+    ] = {}
     model_resolutions: dict[str, set[str]] = {}
     model_billing_models: dict[str, dict[str, str]] = {}
     for provider in providers:
         mapping = provider.models or {}
         for key in mapping:
             if ":" not in key:
-                for action in VIDEO_ACTIONS:
+                for action in _VIDEO_ACTION_VALUES:
                     if not provider.supports(key, action):
                         continue
                     upstream_model = provider.upstream_model_for(key, action)
@@ -1464,10 +1533,11 @@ async def video_options(
                         )
                         model_billing_models.setdefault(key, {})[action] = billing_model
                 continue
-            model, action = key.rsplit(":", 1)
-            if action not in VIDEO_ACTIONS or not provider.supports(model, action):
+            model, raw_action = key.rsplit(":", 1)
+            parsed_action = _parse_video_action(raw_action)
+            if parsed_action is None or not provider.supports(model, parsed_action):
                 continue
-            upstream_model = provider.upstream_model_for(model, action)
+            upstream_model = provider.upstream_model_for(model, parsed_action)
             billing_model = video_billing_model(model, upstream_model)
             allowed_resolutions = _video_resolution_options_for_provider(
                 provider.kind,
@@ -1475,7 +1545,9 @@ async def video_options(
                 upstream_model=upstream_model,
                 available_resolutions=resolutions,
             )
-            price_action = _video_price_action_for_provider(provider.kind, action)
+            price_action = _video_price_action_for_provider(
+                provider.kind, parsed_action
+            )
             action_resolutions = [
                 resolution
                 for resolution in allowed_resolutions
@@ -1497,19 +1569,19 @@ async def video_options(
                 model=model,
                 upstream_model=upstream_model,
                 provider_kind=provider.kind,
-                action=action,
+                action=parsed_action,
                 resolutions=action_resolutions,
                 fallback_durations=durations or global_durations,
             )
             if action_resolutions:
-                model_actions.setdefault(model, set()).add(action)
+                model_actions.setdefault(model, set()).add(parsed_action)
                 model_durations.setdefault(model, set()).update(action_durations)
                 model_action_durations.setdefault(model, {}).setdefault(
-                    action, set()
+                    parsed_action, set()
                 ).update(action_durations)
                 action_resolution_durations = (
                     model_action_resolution_durations.setdefault(model, {}).setdefault(
-                        action, {}
+                        parsed_action, {}
                     )
                 )
                 for resolution in action_resolutions:
@@ -1518,7 +1590,7 @@ async def video_options(
                         model=model,
                         upstream_model=upstream_model,
                         provider_kind=provider.kind,
-                        action=action,
+                        action=parsed_action,
                         resolutions=[resolution],
                         fallback_durations=estimate_durations
                         or durations
@@ -1530,13 +1602,15 @@ async def video_options(
                         resolution_durations
                     )
                 model_resolutions.setdefault(model, set()).update(action_resolutions)
-                model_billing_models.setdefault(model, {})[action] = billing_model
+                model_billing_models.setdefault(model, {})[parsed_action] = (
+                    billing_model
+                )
     if enabled and not model_actions and unavailable_reason is None:
         unavailable_reason = "video_provider_or_pricing_missing"
     model_options: list[VideoModelOptionOut] = []
     for model, actions in sorted(model_actions.items()):
         sorted_actions = sorted(actions)
-        billing_models = {
+        billing_models: dict[str, str] = {
             action: model_billing_models.get(model, {}).get(action, model)
             for action in sorted_actions
         }
@@ -1550,7 +1624,7 @@ async def video_options(
                     else None
                 ),
                 billing_models=billing_models,
-                actions=sorted_actions,  # type: ignore[arg-type]
+                actions=sorted_actions,
                 durations_s=sorted(model_durations.get(model, set())),
                 durations_by_action={
                     action: sorted(durations)
@@ -1567,9 +1641,10 @@ async def video_options(
                         model, {}
                     ).items()
                 },
-                resolutions=_ordered_video_resolutions(
-                    model_resolutions.get(model, set())
-                ),  # type: ignore[arg-type]
+                resolutions=cast(
+                    list[VideoResolution],
+                    _ordered_video_resolutions(model_resolutions.get(model, set())),
+                ),
             )
         )
     public_hold_estimates = _public_video_hold_estimates(
@@ -1741,11 +1816,11 @@ async def _reference_media_snapshots(
     required_public_media: bool = False,
 ) -> list[dict[str, Any]]:
     if fallback_snapshots is not None:
-        snapshots = [dict(item) for item in fallback_snapshots]
+        resolved_snapshots = [dict(item) for item in fallback_snapshots]
         image_index = 0
         video_index = 0
         audio_index = 0
-        for snapshot in snapshots:
+        for snapshot in resolved_snapshots:
             if snapshot.get("kind") == "image":
                 image_index += 1
                 snapshot["ref_id"] = _reference_snapshot_ref_id(
@@ -1777,7 +1852,7 @@ async def _reference_media_snapshots(
                 ):
                     snapshot["label"] = f"Audio {audio_index}"
         if reference_public_base_url is not None:
-            for snapshot in snapshots:
+            for snapshot in resolved_snapshots:
                 if snapshot.get("kind") == "image" and isinstance(
                     snapshot.get("image_id"), str
                 ):
@@ -1819,7 +1894,7 @@ async def _reference_media_snapshots(
                         )
                         snapshot["url"] = url
                         snapshot.update(meta)
-        return snapshots
+        return resolved_snapshots
     snapshots: list[dict[str, Any]] = []
     image_index = 0
     video_index = 0
@@ -2225,7 +2300,9 @@ async def _create_video_generation_record(
             "user_id": user.id,
             "kind": "video_generation",
         }
-        outbox = OutboxEvent(kind="video_generation", payload=payload, published_at=None)
+        outbox = OutboxEvent(
+            kind="video_generation", payload=payload, published_at=None
+        )
         db.add(outbox)
         await db.flush()
         payload["outbox_id"] = str(outbox.id)
@@ -2389,7 +2466,11 @@ async def list_video_generations(
             .scalars()
             .all()
         )
-        videos_by_generation_id = {video.owner_generation_id: video for video in videos}
+        videos_by_generation_id = {
+            video.owner_generation_id: video
+            for video in videos
+            if video.owner_generation_id is not None
+        }
     return VideoGenerationsOut(
         items=[
             await _generation_out(db, row, videos_by_generation_id.get(row.id))
@@ -2441,7 +2522,6 @@ async def cancel_video_generation(
         raise _http("not_found", "video generation not found", 404)
     now = datetime.now(timezone.utc)
     balance_changed = False
-    terminal_event_queued = False
     if row.status not in _VIDEO_TERMINAL_STATUSES:
         row.cancel_requested_at = row.cancel_requested_at or now
         if (
@@ -2499,33 +2579,10 @@ async def cancel_video_generation(
                     published_at=None,
                 )
             )
-            terminal_event_queued = True
     await db.commit()
     await db.refresh(row)
     if balance_changed:
         await invalidate_balance_cache(user.id)
-    if not terminal_event_queued:
-        try:
-            await publish_sse_event(
-                get_redis(),
-                user_id=user.id,
-                channel=task_channel(row.id),
-                event_name=EV_VIDEO_CANCELED,
-                data={
-                    "video_generation_id": row.id,
-                    "kind": "video_generation",
-                    "status": row.status,
-                    "stage": row.progress_stage,
-                    "progress_pct": row.progress_pct,
-                    "submission_epoch": int(
-                        getattr(row, "submission_epoch", 0) or 0
-                    ),
-                    "video_id": None,
-                    "error_code": row.error_code,
-                },
-            )
-        except Exception:
-            logger.warning("video cancel SSE publish failed id=%s", row.id, exc_info=True)
     return await _generation_out(db, row)
 
 
@@ -2546,7 +2603,8 @@ async def retry_video_generation(
         )
     row = (
         await db.execute(
-            select(VideoGeneration).where(
+            select(VideoGeneration)
+            .where(
                 VideoGeneration.id == generation_id,
                 VideoGeneration.user_id == user.id,
             )
@@ -2575,11 +2633,13 @@ async def retry_video_generation(
     reference_inputs: list[VideoReferenceMediaIn] = []
     valid_reference_snapshots: list[dict[str, Any]] = []
     for item in reference_snapshots:
-        if item.get("kind") not in {"image", "video", "audio"}:
+        raw_kind = item.get("kind")
+        if raw_kind not in {"image", "video", "audio"}:
             continue
+        kind = cast(Literal["image", "video", "audio"], raw_kind)
         try:
             reference_input = VideoReferenceMediaIn(
-                kind=str(item.get("kind")),
+                kind=kind,
                 image_id=item.get("image_id")
                 if isinstance(item.get("image_id"), str)
                 else None,
@@ -2607,19 +2667,21 @@ async def retry_video_generation(
             409,
         )
     try:
-        body = VideoCreateIn(
-            action=row.action,  # type: ignore[arg-type]
-            model=row.model,
-            prompt=row.prompt,
-            input_image_id=row.input_image_id,
-            reference_media=reference_inputs,
-            duration_s=row.duration_s,
-            resolution=row.resolution,  # type: ignore[arg-type]
-            aspect_ratio=row.aspect_ratio,
-            generate_audio=row.generate_audio,
-            seed=row.seed,
-            watermark=row.watermark,
-            idempotency_key=f"retry:{row.id}:{row.updated_at.isoformat()}",
+        body = VideoCreateIn.model_validate(
+            {
+                "action": row.action,
+                "model": row.model,
+                "prompt": row.prompt,
+                "input_image_id": row.input_image_id,
+                "reference_media": reference_inputs,
+                "duration_s": row.duration_s,
+                "resolution": row.resolution,
+                "aspect_ratio": row.aspect_ratio,
+                "generate_audio": row.generate_audio,
+                "seed": row.seed,
+                "watermark": row.watermark,
+                "idempotency_key": f"retry:{row.id}:{row.updated_at.isoformat()}",
+            }
         )
     except ValueError as exc:
         raise _http(

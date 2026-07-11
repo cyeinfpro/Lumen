@@ -110,5 +110,3 @@ export function Tooltip({
     </span>
   );
 }
-
-export default Tooltip;

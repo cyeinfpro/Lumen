@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV !== "production";
-const isDesktopRuntime = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
 
 // Lumen 反代约定：
 //   - 外层 nginx 只需要把 https://domain/* → web:3000/*（一条 location 就够）
@@ -87,9 +86,6 @@ const hsts = unique([
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  images: {
-    unoptimized: isDesktopRuntime,
-  },
   devIndicators: false,
   // Next.js v16 experimental.proxyClientMaxBodySize：
   // proxy 读 body 时默认只 buffer 10MB；图片上传最大约 50MB，

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, UploadFile
 from PIL import Image as PILImage
 from lumen_core.schemas import VideoCreateIn, VideoPriceOptionOut, VideoReferenceMediaIn
 from lumen_core.video_providers import VideoProviderDefinition
@@ -43,6 +44,114 @@ async def _body(response) -> bytes:
     async for chunk in response.body_iterator:
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+@pytest.mark.asyncio
+async def test_reference_video_upload_inspection_hashes_stream_and_rewinds() -> None:
+    payload = b"\x00\x00\x00\x18ftypisom" + (b"x" * 1024)
+    upload = UploadFile(file=io.BytesIO(payload), filename="reference.mp4")
+
+    size, sha, header = await videos._inspect_reference_video_upload(upload)
+
+    assert size == len(payload)
+    assert sha == hashlib.sha256(payload).hexdigest()
+    assert header == payload[:12]
+    assert upload.file.tell() == 0
+
+
+@pytest.mark.asyncio
+async def test_reference_video_upload_inspection_stops_at_hard_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(videos, "_VIDEO_REFERENCE_UPLOAD_MAX_BYTES", 10)
+    upload = UploadFile(file=io.BytesIO(b"01234567890"), filename="large.mp4")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await videos._inspect_reference_video_upload(upload)
+
+    assert exc_info.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_reference_video_dedupe_repairs_missing_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"\x00\x00\x00\x18ftypisom" + (b"x" * 256)
+    upload = UploadFile(
+        file=io.BytesIO(payload),
+        filename="reference.mp4",
+        headers={"content-type": "video/mp4"},
+    )
+    existing = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        owner_generation_id=None,
+        storage_key="u/user-1/vref/video-1/original.mp4",
+        poster_storage_key=None,
+        mime="video/mp4",
+        width=0,
+        height=0,
+        duration_ms=0,
+        fps=None,
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        etag=hashlib.sha256(payload).hexdigest(),
+        has_audio=False,
+        faststart=False,
+        visibility="private",
+        metadata_jsonb={"source": "uploaded_reference"},
+        created_at=datetime.now(timezone.utc),
+    )
+
+    class Result:
+        def __init__(self, value: Any = None) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [Result(), Result(existing)]
+            self.committed = False
+            self.rolled_back = False
+
+        async def execute(self, _statement: Any) -> Result:
+            return self.results.pop(0)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+        async def refresh(self, _value: Any) -> None:
+            return None
+
+    monkeypatch.setattr(videos.settings, "storage_root", str(tmp_path))
+    db = Db()
+
+    out = await videos.upload_reference_video(
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+        upload,
+    )
+
+    repaired = tmp_path / existing.storage_key
+    assert out.id == existing.id
+    assert repaired.read_bytes() == payload
+    assert db.committed is True
+    assert db.rolled_back is False
+
+
+def test_reference_video_atomic_writer_streams_from_file_object(tmp_path: Path) -> None:
+    path = tmp_path / "video.mp4"
+    source = io.BytesIO(b"streamed-video")
+
+    videos._write_new_file_atomic(path, source)
+
+    assert path.read_bytes() == b"streamed-video"
 
 
 @pytest.mark.asyncio
@@ -358,6 +467,16 @@ def test_video_duration_options_include_smart_duration() -> None:
 def test_reference_action_accepts_any_reference_pricing_path() -> None:
     model = "seedance-2.0"
 
+    assert videos._has_video_price(  # noqa: SLF001
+        {(model, "t2v", None)},
+        model=model,
+        action="t2v",
+    )
+    assert not videos._has_video_price(  # noqa: SLF001
+        {(model, "t2v", "720p")},
+        model=model,
+        action="t2v",
+    )
     assert videos._has_video_price(  # noqa: SLF001
         {(model, "reference_image", "720p")},
         model=model,
@@ -1986,6 +2105,7 @@ def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
     assert "if tx is None:" in source
     assert "await db.rollback()" in source
     assert "if balance_changed:" in source
+    assert "publish_sse_event" not in source
 
 
 @pytest.mark.asyncio

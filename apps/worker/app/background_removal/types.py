@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from PIL import Image as PILImage
+
+
+class IntPixelAccess(Protocol):
+    def __getitem__(self, xy: tuple[int, int], /) -> int: ...
+
+
+class RgbPixelAccess(Protocol):
+    def __getitem__(self, xy: tuple[int, int], /) -> tuple[int, int, int]: ...
+
+
+def int_pixel_access(image: PILImage.Image) -> IntPixelAccess:
+    return cast(IntPixelAccess, image.load())
+
+
+def rgb_pixel_access(image: PILImage.Image) -> RgbPixelAccess:
+    return cast(RgbPixelAccess, image.load())
 
 
 @dataclass

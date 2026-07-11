@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import os
 import sys
 import tempfile
+import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,8 +29,9 @@ from lumen_core.constants import (
 from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
-from app.storage import StorageDiskFullError, StoragePutResult
+from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
 from app.tasks import generation
+from app.tasks.generation_parts import lifecycle, workflow_hooks
 
 
 class FakeStorage:
@@ -235,6 +239,64 @@ async def test_await_with_lease_guard_cancels_work_when_cancel_flag_appears() ->
         )
 
     assert cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_upstream_result_aborts_before_local_finalize() -> None:
+    redis = FakeRedis()
+    await redis.set("task:gen-after-upstream:cancel", "1")
+
+    with pytest.raises(
+        generation._TaskCancelled,
+        match="cancelled after upstream result",
+    ):
+        await generation._raise_if_generation_interrupted(
+            redis,
+            "gen-after-upstream",
+            asyncio.Event(),
+            "cancelled after upstream result",
+        )
+
+
+def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None:
+    source = inspect.getsource(generation.run_generation)
+    upstream_result = source.index('"cancelled after upstream result"')
+    postprocess = source.index("_postprocess_raw_generated_image(", upstream_result)
+    storage_guard = source.index('"cancelled before storage write"', postprocess)
+    storage_write = source.index("_write_generation_files(", storage_guard)
+    persistence_guard = source.index(
+        '"cancelled before generation persistence"',
+        storage_write,
+    )
+    attempt_fence = source.index(
+        "await _ensure_generation_attempt_current(",
+        persistence_guard,
+    )
+    billing_guard = source.index(
+        '"cancelled before billing settlement"',
+        attempt_fence,
+    )
+    settle = source.index("await worker_billing.settle_generation(", billing_guard)
+    commit_guard = source.index('"cancelled before success commit"', settle)
+    commit = source.index("await session.commit()", commit_guard)
+
+    assert upstream_result < postprocess < storage_guard < storage_write
+    assert storage_write < persistence_guard < attempt_fence < billing_guard
+    assert billing_guard < settle < commit_guard < commit
+    assert "_await_with_lease_guard(" in source[
+        source.rindex("created_storage_keys =", 0, storage_write) : persistence_guard
+    ]
+
+
+def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
+    source = inspect.getsource(lifecycle.settle_existing_generated_image)
+
+    cancel_check = source.index("if await _g._is_cancelled(redis, task_id):")
+    release = source.index("await _g.worker_billing.release_generation(")
+    success_update = source.index("status=_g.GenerationStatus.SUCCEEDED.value")
+    settle = source.index("await _g.worker_billing.settle_generation(")
+
+    assert cancel_check < release < success_update < settle
 
 
 def test_classify_disk_full_as_retriable() -> None:
@@ -972,10 +1034,20 @@ async def test_image_queue_capacity_uses_runtime_setting(
 
 
 @pytest.mark.asyncio
-async def test_mark_generation_attempt_failed_publishes_failed_event(
+@pytest.mark.parametrize(
+    ("initial_message_status", "expected_message_status"),
+    [
+        (None, MessageStatus.FAILED),
+        (MessageStatus.CANCELED, MessageStatus.CANCELED),
+    ],
+)
+async def test_mark_generation_attempt_failed_preserves_canceled_message(
     monkeypatch: pytest.MonkeyPatch,
+    initial_message_status: MessageStatus | None,
+    expected_message_status: MessageStatus,
 ) -> None:
     message = FakeMessage()
+    message.status = initial_message_status
     published: list[dict] = []
 
     class _Session:
@@ -1030,7 +1102,7 @@ async def test_mark_generation_attempt_failed_publishes_failed_event(
 
     assert ok is True
     assert session.committed is True
-    assert message.status == MessageStatus.FAILED
+    assert message.status == expected_message_status
     assert published[0]["event_name"] == EV_GEN_FAILED
     assert published[0]["data"]["code"] == "retry_enqueue_failed"
 
@@ -1076,6 +1148,83 @@ async def test_cleanup_storage_on_error_deletes_created_keys(
             raise RuntimeError("commit failed")
 
     assert set(fake_storage.deleted) == {"orig", "display"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("interrupt", "expected_exception"),
+    [
+        ("lease", generation._LeaseLost),
+        ("cancel", generation._TaskCancelled),
+    ],
+)
+async def test_generation_write_interrupt_cleans_real_storage_and_allows_retry(
+    interrupt: str,
+    expected_exception: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_storage = LocalStorage(tmp_path)
+    write_started = threading.Event()
+    allow_write = threading.Event()
+    original_put = local_storage.put_bytes_result
+
+    def blocking_put(key: str, data: bytes):
+        write_started.set()
+        if not allow_write.wait(timeout=5):
+            raise TimeoutError("test storage write was not released")
+        return original_put(key, data)
+
+    monkeypatch.setattr(local_storage, "put_bytes_result", blocking_put)
+    monkeypatch.setattr(generation, "storage", local_storage)
+
+    redis = FakeRedis()
+    lease_lost = asyncio.Event()
+    key = "u/user-1/g/gen-write-race/orig.png"
+    guarded_write = asyncio.create_task(
+        generation._await_with_lease_guard(
+            generation._write_generation_files([(key, b"first-attempt")]),
+            lease_lost,
+            redis=redis,
+            task_id="gen-write-race",
+            cancel_poll_interval_s=0.01,
+        )
+    )
+
+    assert await asyncio.to_thread(write_started.wait, 2)
+    if interrupt == "lease":
+        lease_lost.set()
+    else:
+        await redis.set("task:gen-write-race:cancel", "1")
+    await asyncio.sleep(0.05)
+    allow_write.set()
+
+    with pytest.raises(expected_exception):
+        await guarded_write
+
+    assert not local_storage.path_for(key).exists()
+
+    retry_storage = LocalStorage(tmp_path)
+    monkeypatch.setattr(generation, "storage", retry_storage)
+    assert await generation._write_generation_files([(key, b"retry")]) == [key]
+    assert retry_storage.get_bytes(key) == b"retry"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_storage_on_custom_base_exception_waits_for_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_storage = LocalStorage(tmp_path)
+    key = "u/user-1/g/gen-base-exception/orig.png"
+    local_storage.put_bytes(key, b"image")
+    monkeypatch.setattr(generation, "storage", local_storage)
+
+    with pytest.raises(generation._TaskCancelled):
+        async with generation._cleanup_storage_on_error([key]):
+            raise generation._TaskCancelled("cancelled during persistence")
+
+    assert not local_storage.path_for(key).exists()
 
 
 class _ScalarResult:
@@ -1169,6 +1318,75 @@ async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
     assert step.status == "succeeded"
     assert run.status == "completed"
     assert run.current_step == "model_library_generate"
+
+
+def test_workflow_hook_facade_keeps_requested_count_alias() -> None:
+    assert (
+        generation._model_library_requested_count_from_step
+        is workflow_hooks.model_library_requested_count_from_step
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_library_hook_injects_current_requested_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=[],
+        input_json={"count": 99, "auto_tag": False},
+        output_json={},
+        task_ids=[],
+        status="running",
+    )
+    session = _ModelLibraryHookSession(run, step)
+    monkeypatch.setattr(
+        generation,
+        "_model_library_requested_count_from_step",
+        lambda _step: 1,
+    )
+
+    await generation._maybe_record_model_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_model_library_generation(),
+        image_id="img-1",
+    )
+
+    assert step.status == "succeeded"
+    assert run.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_model_library_hook_propagates_tagger_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=[],
+        input_json={"count": 1, "auto_tag": True},
+        output_json={},
+        task_ids=["task-1"],
+        status="running",
+    )
+    session = _ModelLibraryHookSession(run, step)
+
+    async def cancel_tagger(*_args: Any, **_kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        generation,
+        "_load_model_library_tagger",
+        lambda: cancel_tagger,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await generation._maybe_record_model_library_generate_image(
+            session=session,
+            user_id="user-1",
+            generation=_model_library_generation(),
+            image_id="img-1",
+        )
 
 
 @pytest.mark.asyncio
@@ -1278,6 +1496,7 @@ async def test_poster_style_library_hook_inserts_item_and_keeps_step_running() -
     assert inserted.user_id == "user-1"
     assert inserted.id.startswith("user:")
     assert inserted.metadata_jsonb["workflow_run_id"] == "run-1"
+    assert session.flush_calls == 1
     rendered = str(session.statements[1].compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in rendered
 
@@ -1389,6 +1608,97 @@ async def test_poster_style_library_hook_skips_duplicate_cover_image() -> None:
     # existing 已存在则不应新插入；image_ids 也不重复
     assert step.image_ids == ["img-1"]
     assert session.added == []
+    assert session.flush_calls == 0
+
+
+class _PosterWorkflowHookSession:
+    def __init__(self, *, run: Any, row: Any) -> None:
+        self.run = run
+        self.row = row
+        self.get_calls: list[tuple[Any, str]] = []
+
+    async def execute(self, _statement: Any) -> _ScalarResult:
+        return _ScalarResult(self.run)
+
+    async def get(self, model: Any, key: str) -> Any:
+        self.get_calls.append((model, key))
+        return self.row
+
+
+@pytest.mark.asyncio
+async def test_poster_workflow_hook_preserves_master_image_and_marks_ready() -> None:
+    run = SimpleNamespace(id="run-1")
+    master = SimpleNamespace(
+        workflow_run_id="run-1",
+        image_id="existing-image",
+        status="generating",
+    )
+    session = _PosterWorkflowHookSession(run=run, row=master)
+    generation_row = SimpleNamespace(
+        upstream_request={
+            "workflow_type": "poster_design",
+            "workflow_action": "poster_master",
+            "workflow_run_id": "run-1",
+            "workflow_master_id": "master-1",
+        }
+    )
+
+    await generation._maybe_record_poster_workflow_image(
+        session=session,
+        user_id="user-1",
+        generation=generation_row,
+        image_id="new-image",
+    )
+
+    assert master.image_id == "existing-image"
+    assert master.status == "ready"
+    assert session.get_calls == [(generation.PosterMaster, "master-1")]
+
+
+@pytest.mark.asyncio
+async def test_poster_workflow_hook_replaces_render_image_and_marks_ready() -> None:
+    run = SimpleNamespace(id="run-1")
+    render = SimpleNamespace(
+        workflow_run_id="run-1",
+        image_id="old-image",
+        status="revising",
+    )
+    session = _PosterWorkflowHookSession(run=run, row=render)
+    generation_row = SimpleNamespace(
+        upstream_request={
+            "workflow_type": "poster_design",
+            "workflow_action": "poster_inpaint",
+            "workflow_run_id": "run-1",
+            "workflow_render_id": "render-1",
+        }
+    )
+
+    await generation._maybe_record_poster_workflow_image(
+        session=session,
+        user_id="user-1",
+        generation=generation_row,
+        image_id="new-image",
+    )
+
+    assert render.image_id == "new-image"
+    assert render.status == "ready"
+    assert session.get_calls == [(generation.PosterRender, "render-1")]
+
+
+def test_run_generation_records_workflows_before_billing_and_commit() -> None:
+    source = inspect.getsource(generation.run_generation)
+    model_hook = source.index(
+        "await _maybe_record_model_library_generate_image("
+    )
+    poster_hook = source.index("await _maybe_record_poster_workflow_image(", model_hook)
+    style_hook = source.index(
+        "await _maybe_record_poster_style_library_generate_image(",
+        poster_hook,
+    )
+    settle = source.index("await worker_billing.settle_generation(", style_hook)
+    commit = source.index("await session.commit()", settle)
+
+    assert model_hook < poster_hook < style_hook < settle < commit
 
 
 @pytest.mark.asyncio

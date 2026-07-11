@@ -18,6 +18,7 @@ PUT /admin/storage          — 应用配置（写 conf + 触发 host 上的 lum
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -25,8 +26,9 @@ import re
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,14 +61,32 @@ STATE_DIR = Path(os.environ.get("LUMEN_STORAGE_STATE_DIR", "/var/lib/lumen-stora
 STORAGE_CONF = STATE_DIR / "storage.conf"
 STATUS_FILE = STATE_DIR / "status.json"
 APPLY_TRIGGER = STATE_DIR / "apply.trigger"
-APPLY_ENV = STATE_DIR / "apply.env"
 LAST_APPLY_FILE = STATE_DIR / "last-apply.json"
 TEST_TRIGGER = STATE_DIR / "test.trigger"
-TEST_ENV = STATE_DIR / "test.env"
 TEST_CONF = STATE_DIR / "test.conf"
 LAST_TEST_FILE = STATE_DIR / "last-test.json"
 
 DEFAULT_LOCAL_ROOT = "/var/lib/lumen-data"
+_DEFAULT_ALLOWED_LOCAL_ROOTS = (
+    "/var/lib/lumen-data",
+    "/srv/lumen-data",
+    "/mnt",
+    "/media",
+)
+_FORBIDDEN_LOCAL_ROOTS = {
+    "/",
+    "/etc",
+    "/usr",
+    "/var",
+    "/var/lib",
+    "/srv",
+    "/mnt",
+    "/media",
+    "/opt",
+    "/opt/lumen",
+    "/opt/lumendata",
+    "/var/lib/lumen-storage",
+}
 
 # Apply 流程会 docker stop lumen-api 自身，不能等太久；UI 走 polling 模式补全。
 _APPLY_INLINE_WAIT_SEC = 5.0
@@ -130,13 +150,42 @@ def _normalize_local_root(raw: str) -> str:
             "local.root 必须是绝对路径（以 / 开头）",
             422,
         )
-    # collapse //
-    while "//" in value:
-        value = value.replace("//", "/")
-    # 不允许末尾 /，除非根
-    if len(value) > 1 and value.endswith("/"):
-        value = value.rstrip("/")
-    return value
+    lexical = os.path.normpath(value)
+    normalized = str(Path(lexical).resolve(strict=False))
+    if lexical in _FORBIDDEN_LOCAL_ROOTS or normalized in _FORBIDDEN_LOCAL_ROOTS:
+        raise _http(
+            "unsafe_local_root",
+            f"local.root 不能使用系统目录：{normalized}",
+            422,
+        )
+    allowed_roots = _allowed_local_roots()
+    candidate = Path(normalized)
+    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+        allowed = ", ".join(str(item) for item in allowed_roots)
+        raise _http(
+            "local_root_not_allowed",
+            f"local.root 必须位于允许目录下：{allowed}",
+            422,
+        )
+    return normalized
+
+
+def _allowed_local_roots() -> tuple[Path, ...]:
+    raw = os.environ.get("LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS", "")
+    values = [item.strip() for item in raw.split(":") if item.strip()]
+    if not values:
+        values = list(_DEFAULT_ALLOWED_LOCAL_ROOTS)
+    roots: list[Path] = []
+    for value in values:
+        if not value.startswith("/"):
+            continue
+        root = Path(value).resolve(strict=False)
+        if str(root) == "/":
+            continue
+        roots.append(root)
+    if not roots:
+        roots.append(Path(DEFAULT_LOCAL_ROOT))
+    return tuple(dict.fromkeys(roots))
 
 
 def _validate_smb_inputs(host: str, share: str) -> None:
@@ -271,6 +320,41 @@ def _ensure_state_dir() -> None:
         )
 
 
+@contextmanager
+def _stage_lock(name: str) -> Iterator[None]:
+    lock_path = STATE_DIR / f".{name}.stage.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _clear_stale_trigger(path: Path, *, stale_after: float) -> None:
+    try:
+        age = time.time() - path.stat().st_mtime
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise _http(
+            "storage_state_unavailable",
+            f"cannot inspect pending trigger {path}",
+            500,
+        )
+    if age <= stale_after:
+        raise _http(
+            "storage_operation_pending",
+            "another storage operation is still pending",
+            409,
+        )
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _build_storage_conf(cfg: StorageConfigOut, smb_password: str) -> str:
     return _format_kv_file(
         {
@@ -343,9 +427,10 @@ async def test_storage_endpoint(
         "SMB_USERNAME": body.username.strip(),
         "SMB_PASSWORD": password,
     }
-    _write_atomic(TEST_CONF, _format_kv_file(fields), mode=0o600)
-    _write_atomic(TEST_ENV, f"LUMEN_STORAGE_TEST_CALL_ID={call_id}\n", mode=0o600)
-    _write_atomic(TEST_TRIGGER, f"{call_id}\n", mode=0o600)
+    with _stage_lock("test"):
+        _clear_stale_trigger(TEST_TRIGGER, stale_after=_TEST_TIMEOUT_SEC + 30)
+        _write_atomic(TEST_CONF, _format_kv_file(fields), mode=0o600)
+        _write_atomic(TEST_TRIGGER, f"{call_id}\n", mode=0o600)
 
     result = await _wait_for_call(LAST_TEST_FILE, call_id, _TEST_TIMEOUT_SEC)
 
@@ -476,11 +561,15 @@ async def put_storage_endpoint(
     cfg = await _load_config(db)
     smb_password = await get_setting(db, _spec("storage.smb.password")) or ""
     conf_text = _build_storage_conf(cfg, smb_password)
-    _write_atomic(STORAGE_CONF, conf_text, mode=0o660)
-
     call_id = uuid.uuid4().hex
-    _write_atomic(APPLY_ENV, f"LUMEN_STORAGE_APPLY_CALL_ID={call_id}\n", mode=0o600)
-    _write_atomic(APPLY_TRIGGER, f"{call_id}\n", mode=0o600)
+    try:
+        with _stage_lock("apply"):
+            _clear_stale_trigger(APPLY_TRIGGER, stale_after=15 * 60)
+            _write_atomic(STORAGE_CONF, conf_text, mode=0o660)
+            _write_atomic(APPLY_TRIGGER, f"{call_id}\n", mode=0o600)
+    except HTTPException:
+        await db.rollback()
+        raise
 
     await write_audit(
         db,

@@ -7,13 +7,13 @@ state is still stored in WorkflowRun/WorkflowStep so no new table is required.
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Iterable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -70,6 +70,8 @@ STORYBOARD_DEFAULT_RESOLUTION = "720p"
 STORYBOARD_DEFAULT_ASPECT_RATIO = "16:9"
 STORYBOARD_DEFAULT_DURATION_S = 5
 STORYBOARD_KEYFRAME_PARALLELISM = 4
+STORYBOARD_ASSEMBLY_WAITING_LEASE_S = 5 * 60
+STORYBOARD_ASSEMBLY_WORKER_LEASE_S = 2 * 60
 
 _SHOT_STATUS_RANK = {
     "draft": 0,
@@ -108,7 +110,11 @@ def _clean_text(value: str | None, *, max_len: int, default: str = "") -> str:
     return text[:max_len]
 
 
-def _clean_string_list(values: Iterable[str] | None, *, max_len: int = 36) -> list[str]:
+def _clean_string_list(
+    values: Iterable[object] | None,
+    *,
+    max_len: int = 36,
+) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for value in values or []:
@@ -546,15 +552,19 @@ async def _get_step(
     return step
 
 
-async def _assembly_step(db: AsyncSession, run: WorkflowRun) -> WorkflowStep:
-    step = (
-        await db.execute(
-            select(WorkflowStep).where(
-                WorkflowStep.workflow_run_id == run.id,
-                WorkflowStep.step_key == "assembly",
-            )
-        )
-    ).scalar_one_or_none()
+async def _assembly_step(
+    db: AsyncSession,
+    run: WorkflowRun,
+    *,
+    lock: bool = False,
+) -> WorkflowStep:
+    stmt = select(WorkflowStep).where(
+        WorkflowStep.workflow_run_id == run.id,
+        WorkflowStep.step_key == "assembly",
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    step = (await db.execute(stmt)).scalar_one_or_none()
     if step is None:
         step = WorkflowStep(
             workflow_run_id=run.id,
@@ -566,14 +576,6 @@ async def _assembly_step(db: AsyncSession, run: WorkflowRun) -> WorkflowStep:
         db.add(step)
         await db.flush()
     return step
-
-
-def _asset_id(step: WorkflowStep) -> str:
-    return step.step_key.removeprefix("asset:")
-
-
-def _shot_id(step: WorkflowStep) -> str:
-    return step.step_key.removeprefix("shot:")
 
 
 def _asset_out(step: WorkflowStep) -> StoryboardAssetOut:
@@ -635,7 +637,12 @@ def _shot_source_hash(shot: WorkflowStep, assets_by_id: dict[str, WorkflowStep])
     ]
     payload = {
         "title": inp.get("title"),
+        "purpose": inp.get("purpose"),
+        "narration": inp.get("narration"),
         "visual": inp.get("visual"),
+        "shot_type": inp.get("shot_type"),
+        "camera_move": inp.get("camera_move"),
+        "transition": inp.get("transition"),
         "reference_notes": inp.get("reference_notes"),
         "keyframe_prompt": inp.get("keyframe_prompt"),
         "asset_refs": asset_refs,
@@ -690,11 +697,8 @@ def _resolve_storyboard_video_idempotency_key(
     if requested_key:
         return requested_key[:96], submission_fingerprint
     out = dict(step.output_json or {})
-    submission = (
-        out.get("video_submission")
-        if isinstance(out.get("video_submission"), dict)
-        else {}
-    )
+    raw_submission = out.get("video_submission")
+    submission = raw_submission if isinstance(raw_submission, dict) else {}
     existing_key = submission.get("idempotency_key")
     if (
         submission.get("fingerprint") == submission_fingerprint
@@ -710,6 +714,100 @@ def _resolve_storyboard_video_idempotency_key(
         ),
         submission_fingerprint,
     )
+
+
+def _storyboard_assembly_fingerprint(segment_ids: Iterable[str]) -> str:
+    return _short_hash({"segment_ids": list(segment_ids)})
+
+
+def _storyboard_assembly_idempotency_key(
+    *,
+    run_id: str,
+    fingerprint: str,
+) -> str:
+    return f"sb:{run_id}:assembly:{fingerprint}"[:96]
+
+
+def _parse_assembly_datetime(raw: object) -> datetime | None:
+    if isinstance(raw, datetime):
+        value = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _assembly_lease_expiry(
+    assembly: WorkflowStep,
+    output: dict[str, Any],
+) -> datetime | None:
+    explicit_expiry = _parse_assembly_datetime(output.get("assembly_lease_expires_at"))
+    if explicit_expiry is not None:
+        return explicit_expiry
+
+    claimed_at = _parse_assembly_datetime(output.get("assembly_claimed_at"))
+    if assembly.status == "compositing" and claimed_at is not None:
+        heartbeat_at = _parse_assembly_datetime(output.get("assembly_heartbeat_at"))
+        base = heartbeat_at or claimed_at
+        return base + timedelta(seconds=STORYBOARD_ASSEMBLY_WORKER_LEASE_S)
+
+    enqueued_at = _parse_assembly_datetime(output.get("assembly_enqueued_at"))
+    updated_at = _parse_assembly_datetime(getattr(assembly, "updated_at", None))
+    waiting_base = enqueued_at or updated_at
+    if waiting_base is None:
+        return None
+    return waiting_base + timedelta(seconds=STORYBOARD_ASSEMBLY_WAITING_LEASE_S)
+
+
+def _assembly_attempt_is_stale(
+    assembly: WorkflowStep,
+    output: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if assembly.status not in {"waiting", "compositing"}:
+        return False
+    expires_at = _assembly_lease_expiry(assembly, output)
+    if expires_at is None:
+        return False
+    current = _parse_assembly_datetime(now) or _now()
+    return expires_at <= current
+
+
+def _assembly_request_is_replay(
+    assembly: WorkflowStep,
+    output: dict[str, Any],
+    fingerprint: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if output.get("assembly_fingerprint") != fingerprint:
+        return False
+    if assembly.status == "done":
+        return True
+    if assembly.status not in {"waiting", "compositing"}:
+        return False
+    return not _assembly_attempt_is_stale(assembly, output, now=now)
+
+
+def _assembly_status_for_response(
+    assembly: WorkflowStep,
+    output: dict[str, Any],
+) -> str:
+    attempt_token = output.get("assembly_attempt_token")
+    if (
+        assembly.status == "waiting"
+        and isinstance(attempt_token, str)
+        and attempt_token
+    ):
+        return "compositing"
+    return assembly.status
 
 
 def _shot_out(
@@ -843,7 +941,7 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
             changed = True
     generations: dict[str, Generation] = {}
     if generation_ids:
-        rows = (
+        generation_rows = (
             await db.execute(
                 select(Generation).where(
                     Generation.id.in_(generation_ids),
@@ -851,10 +949,10 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                 )
             )
         ).scalars()
-        generations = {row.id: row for row in rows.all()}
+        generations = {row.id: row for row in generation_rows.all()}
     images_by_generation: dict[str, Image] = {}
     if generation_ids:
-        rows = (
+        image_rows = (
             await db.execute(
                 select(Image).where(
                     Image.owner_generation_id.in_(generation_ids),
@@ -863,7 +961,7 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                 )
             )
         ).scalars()
-        for image in rows.all():
+        for image in image_rows.all():
             if (
                 image.owner_generation_id
                 and image.owner_generation_id not in images_by_generation
@@ -872,7 +970,7 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
 
     video_generations: dict[str, VideoGeneration] = {}
     if video_generation_ids:
-        rows = (
+        video_generation_rows = (
             await db.execute(
                 select(VideoGeneration).where(
                     VideoGeneration.id.in_(video_generation_ids),
@@ -880,10 +978,10 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                 )
             )
         ).scalars()
-        video_generations = {row.id: row for row in rows.all()}
+        video_generations = {row.id: row for row in video_generation_rows.all()}
     videos_by_generation: dict[str, Video] = {}
     if video_generation_ids:
-        rows = (
+        video_rows = (
             await db.execute(
                 select(Video).where(
                     Video.owner_generation_id.in_(video_generation_ids),
@@ -893,7 +991,7 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
         ).scalars()
         videos_by_generation = {
             row.owner_generation_id: row
-            for row in rows.all()
+            for row in video_rows.all()
             if row.owner_generation_id is not None
         }
 
@@ -909,18 +1007,21 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
             )
             if gen is None:
                 continue
-            image = images_by_generation.get(gen.id)
-            if gen.status == GenerationStatus.SUCCEEDED.value and image is not None:
-                if out.get("image_id") != image.id or step.status == "generating":
+            asset_image = images_by_generation.get(gen.id)
+            if (
+                gen.status == GenerationStatus.SUCCEEDED.value
+                and asset_image is not None
+            ):
+                if out.get("image_id") != asset_image.id or step.status == "generating":
                     out.update(
                         {
-                            "image_id": image.id,
+                            "image_id": asset_image.id,
                             "error_code": None,
                             "error_message": None,
                         }
                     )
                     step.output_json = out
-                    step.image_ids = [image.id]
+                    step.image_ids = [asset_image.id]
                     if step.status == "generating":
                         step.status = "ready"
                     changed = True
@@ -947,18 +1048,21 @@ async def _sync_storyboard_outputs(db: AsyncSession, run: WorkflowRun) -> None:
                 else None
             )
             if gen is not None:
-                image = images_by_generation.get(gen.id)
-                if gen.status == GenerationStatus.SUCCEEDED.value and image is not None:
-                    if out.get("keyframe_image_id") != image.id:
+                keyframe_image = images_by_generation.get(gen.id)
+                if (
+                    gen.status == GenerationStatus.SUCCEEDED.value
+                    and keyframe_image is not None
+                ):
+                    if out.get("keyframe_image_id") != keyframe_image.id:
                         out.update(
                             {
-                                "keyframe_image_id": image.id,
+                                "keyframe_image_id": keyframe_image.id,
                                 "error_code": None,
                                 "error_message": None,
                             }
                         )
                         step.output_json = out
-                        step.image_ids = [image.id]
+                        step.image_ids = [keyframe_image.id]
                         if step.status == "keyframe_generating":
                             step.status = "keyframe_ready"
                         changed = True
@@ -1090,7 +1194,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
     ]
     video_generations: dict[str, VideoGeneration] = {}
     if video_generation_ids:
-        rows = (
+        video_generation_rows = (
             await db.execute(
                 select(VideoGeneration).where(
                     VideoGeneration.id.in_(video_generation_ids),
@@ -1098,10 +1202,10 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
                 )
             )
         ).scalars()
-        video_generations = {row.id: row for row in rows.all()}
+        video_generations = {row.id: row for row in video_generation_rows.all()}
     videos_by_generation: dict[str, Video] = {}
     if video_generation_ids:
-        rows = (
+        video_rows = (
             await db.execute(
                 select(Video).where(
                     Video.owner_generation_id.in_(video_generation_ids),
@@ -1111,7 +1215,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
         ).scalars()
         videos_by_generation = {
             row.owner_generation_id: row
-            for row in rows.all()
+            for row in video_rows.all()
             if row.owner_generation_id is not None
         }
 
@@ -1153,7 +1257,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
             item for item in (out.get("segment_ids") or []) if isinstance(item, str)
         ]
         assembly_out = StoryboardAssemblyOut(
-            status=assembly.status,
+            status=_assembly_status_for_response(assembly, out),
             video_id=video_id,
             video_url=_video_url(video_id),
             poster_url=_video_poster_url(
@@ -1354,11 +1458,15 @@ async def _create_storyboard_image_task(
         user_msg=user_msg,
         intent=Intent.IMAGE_TO_IMAGE if attachment_ids else Intent.TEXT_TO_IMAGE,
         idempotency_key=f"storyboard:{run.id}:{step.id}:{purpose}:{new_uuid7()}",
-        image_params=ImageParamsIn(
-            aspect_ratio=str(md.get("aspect_ratio") or STORYBOARD_DEFAULT_ASPECT_RATIO),
-            count=1,
-            quality="2k",
-            render_quality="medium",
+        image_params=ImageParamsIn.model_validate(
+            {
+                "aspect_ratio": str(
+                    md.get("aspect_ratio") or STORYBOARD_DEFAULT_ASPECT_RATIO
+                ),
+                "count": 1,
+                "quality": "2k",
+                "render_quality": "medium",
+            }
         ),
         chat_params=ChatParamsIn(),
         system_prompt=None,
@@ -1690,7 +1798,7 @@ async def list_storyboards(
     )
     page = rows[:limit]
     items = [await _list_item_out(db, row) for row in page]
-    next_cursor = _encode_cursor(rows[limit]) if len(rows) > limit else None
+    next_cursor = _encode_cursor(page[-1]) if len(rows) > limit and page else None
     await db.commit()
     return StoryboardRunListOut(items=items, next_cursor=next_cursor)
 
@@ -2129,12 +2237,13 @@ async def generate_shot_keyframe(
     )
     assets = [s for s in await _load_steps(db, run.id) if _step_kind(s) == "asset"]
     assets_by_id = {asset.id: asset for asset in assets}
-    attachment_ids = [
-        dict(assets_by_id[asset_id].output_json or {}).get("image_id")
-        for asset_id in asset_ids
-        if asset_id in assets_by_id
-    ]
-    attachment_ids = [item for item in attachment_ids if isinstance(item, str) and item]
+    attachment_ids = _clean_string_list(
+        [
+            dict(assets_by_id[asset_id].output_json or {}).get("image_id")
+            for asset_id in asset_ids
+            if asset_id in assets_by_id
+        ]
+    )
     source_hash = _shot_source_hash(step, assets_by_id)
     prompt = _shot_keyframe_prompt(run, step, assets_by_id, body.prompt)
     task = await _create_storyboard_image_task(
@@ -2218,14 +2327,13 @@ async def generate_all_keyframes(
             (shot.input_json or {}).get("asset_ids") or [],
             require_approved=True,
         )
-        attachment_ids = [
-            dict(assets_by_id[asset_id].output_json or {}).get("image_id")
-            for asset_id in asset_ids
-            if asset_id in assets_by_id
-        ]
-        attachment_ids = [
-            item for item in attachment_ids if isinstance(item, str) and item
-        ]
+        attachment_ids = _clean_string_list(
+            [
+                dict(assets_by_id[asset_id].output_json or {}).get("image_id")
+                for asset_id in asset_ids
+                if asset_id in assets_by_id
+            ]
+        )
         source_hash = _shot_source_hash(shot, assets_by_id)
         prompt = _shot_keyframe_prompt(run, shot, assets_by_id, None)
         planned.append((shot, attachment_ids, source_hash, prompt))
@@ -2367,19 +2475,23 @@ async def submit_shot(
     step.status = "generating"
     run.current_step = "videos"
     await db.flush()
-    video_body = VideoCreateIn(
-        action="i2v",
-        model=str(md.get("model") or STORYBOARD_DEFAULT_MODEL),
-        prompt=str(prompt)[:MAX_PROMPT_CHARS],
-        input_image_id=str(keyframe_id),
-        duration_s=body.duration_s
-        or int(inp.get("duration_s") or STORYBOARD_DEFAULT_DURATION_S),
-        resolution=str(md.get("resolution") or STORYBOARD_DEFAULT_RESOLUTION),
-        aspect_ratio=str(md.get("aspect_ratio") or STORYBOARD_DEFAULT_ASPECT_RATIO),
-        generate_audio=bool(md.get("generate_audio", True)),
-        seed=md.get("seed") if isinstance(md.get("seed"), int) else None,
-        watermark=False,
-        idempotency_key=idempotency_key,
+    video_body = VideoCreateIn.model_validate(
+        {
+            "action": "i2v",
+            "model": str(md.get("model") or STORYBOARD_DEFAULT_MODEL),
+            "prompt": str(prompt)[:MAX_PROMPT_CHARS],
+            "input_image_id": str(keyframe_id),
+            "duration_s": body.duration_s
+            or int(inp.get("duration_s") or STORYBOARD_DEFAULT_DURATION_S),
+            "resolution": str(md.get("resolution") or STORYBOARD_DEFAULT_RESOLUTION),
+            "aspect_ratio": str(
+                md.get("aspect_ratio") or STORYBOARD_DEFAULT_ASPECT_RATIO
+            ),
+            "generate_audio": bool(md.get("generate_audio", True)),
+            "seed": md.get("seed") if isinstance(md.get("seed"), int) else None,
+            "watermark": False,
+            "idempotency_key": idempotency_key,
+        }
     )
     video_out = await _create_video_generation_record(
         db,
@@ -2459,7 +2571,7 @@ async def assemble_storyboard(
 ) -> StoryboardRunOut:
     run = await _get_run(db, user_id=user.id, run_id=run_id, lock=True)
     await _sync_storyboard_outputs(db, run)
-    steps = await _load_steps(db, run.id)
+    steps = await _load_steps(db, run.id, lock=True)
     shots = [step for step in steps if _step_kind(step) == "shot"]
     _normalize_shot_indexes(shots)
     if not shots:
@@ -2482,25 +2594,85 @@ async def assemble_storyboard(
         raise _http(
             "segment_missing", "one or more shots are missing generated video ids", 422
         )
-    assembly = await _assembly_step(db, run)
-    assembly.status = "compositing"
+    assembly = await _assembly_step(db, run, lock=True)
+    assembly_fingerprint = _storyboard_assembly_fingerprint(segment_ids)
+    assembly_idempotency_key = _storyboard_assembly_idempotency_key(
+        run_id=run.id,
+        fingerprint=assembly_fingerprint,
+    )
+    current_output = dict(assembly.output_json or {})
+    attempt_now = _now()
+    if _assembly_request_is_replay(
+        assembly,
+        current_output,
+        assembly_fingerprint,
+        now=attempt_now,
+    ):
+        out = await _build_run_out(db, run)
+        await db.commit()
+        return out
+
+    stale_recovery = current_output.get(
+        "assembly_fingerprint"
+    ) == assembly_fingerprint and _assembly_attempt_is_stale(
+        assembly,
+        current_output,
+        now=attempt_now,
+    )
+    previous_attempt_token = current_output.get("assembly_attempt_token")
+    if not isinstance(previous_attempt_token, str) or not previous_attempt_token:
+        previous_attempt_token = None
+    raw_recovery_count = current_output.get("assembly_recovery_count")
+    recovery_count = (
+        raw_recovery_count
+        if isinstance(raw_recovery_count, int) and raw_recovery_count >= 0
+        else 0
+    )
+    if stale_recovery:
+        recovery_count += 1
+
+    attempt_token = new_uuid7()
+    if assembly.status != "compositing":
+        assembly.status = "waiting"
+    lease_expires_at = attempt_now + timedelta(
+        seconds=STORYBOARD_ASSEMBLY_WAITING_LEASE_S
+    )
     assembly.output_json = {
-        **(assembly.output_json or {}),
+        **current_output,
         "segment_ids": segment_ids,
+        "assembly_fingerprint": assembly_fingerprint,
+        "assembly_idempotency_key": assembly_idempotency_key,
+        "assembly_attempt_token": attempt_token,
+        "assembly_enqueued_at": attempt_now.isoformat(),
+        "assembly_claimed_at": None,
+        "assembly_heartbeat_at": None,
+        "assembly_lease_expires_at": lease_expires_at.isoformat(),
+        "assembly_completed_at": None,
+        "assembly_recovery_count": recovery_count,
+        "assembly_recovery_reason": "lease_expired" if stale_recovery else None,
+        "assembly_superseded_attempt_token": (
+            previous_attempt_token if stale_recovery else None
+        ),
         "video_id": None,
         "error_code": None,
         "error_message": None,
     }
-    payload = {
+    payload: dict[str, Any] = {
         "task_id": run.id,
         "run_id": run.id,
         "user_id": user.id,
         "kind": "storyboard_assembly",
+        "assembly_fingerprint": assembly_fingerprint,
+        "assembly_idempotency_key": assembly_idempotency_key,
+        "assembly_attempt_token": attempt_token,
+        "assembly_lease_expires_at": lease_expires_at.isoformat(),
+        "assembly_recovered": stale_recovery,
     }
     outbox = OutboxEvent(kind="storyboard_assembly", payload=payload, published_at=None)
     db.add(outbox)
     await db.flush()
-    payload["outbox_id"] = str(outbox.id)
+    outbox_id = str(outbox.id)
+    payload["outbox_id"] = outbox_id
     outbox.payload = dict(payload)
     assembly.task_ids = [outbox.id]
     run.current_step = "assembly"
@@ -2511,7 +2683,8 @@ async def assemble_storyboard(
         await pool.enqueue_job(
             "run_storyboard_assembly",
             run.id,
-            _job_id=arq_job_id("storyboard_assembly", run.id, payload.get("outbox_id")),
+            attempt_token,
+            _job_id=arq_job_id("storyboard_assembly", run.id, outbox_id),
         )
     except Exception:
         logger.warning(
@@ -2521,7 +2694,12 @@ async def assemble_storyboard(
         user.id,
         run.id,
         "storyboard.assembling",
-        {"segment_ids": segment_ids},
+        {
+            "segment_ids": segment_ids,
+            "assembly_fingerprint": assembly_fingerprint,
+            "assembly_attempt_token": attempt_token,
+            "recovered": stale_recovery,
+        },
     )
     return out
 

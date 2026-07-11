@@ -1,4 +1,53 @@
+import pytest
+
 from app.tasks import generation
+from app.tasks.generation_parts import diagnostics
+
+
+def test_diagnostics_facade_keeps_pure_helper_aliases() -> None:
+    assert generation._compact_diag_value is diagnostics.compact_diag_value
+    assert (
+        generation._build_generation_diagnostics
+        is diagnostics.build_generation_diagnostics
+    )
+
+
+def test_stage_timer_facade_uses_current_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generation.time, "monotonic", lambda: 10.75)
+
+    timer = generation._StageTimer()
+    timer.add_elapsed("upstream", 10.0)
+    timer.set_ms("queue", -5)
+
+    assert timer.snapshot() == {"upstream": 750, "queue": 0}
+
+
+def test_diagnostics_facade_injects_current_redis_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def fake_redis_text(value: object) -> str | None:
+        seen.append(value)
+        return f"decoded:{value!r}" if value is not None else None
+
+    monkeypatch.setattr(generation, "_redis_text", fake_redis_text)
+
+    attempt = generation._provider_attempt_from_progress(
+        {"provider": b"provider", "reason": b"retry"},
+        status="failover",
+        attempt_epoch=3,
+    )
+    selected = generation._request_event_provider_from_attempts(
+        [{"actual_provider": b"winner", "status": "used"}]
+    )
+
+    assert attempt["provider"] == "decoded:b'provider'"
+    assert attempt["reason"] == "decoded:b'retry'"
+    assert selected == "decoded:b'winner'"
+    assert seen == [b"provider", b"retry", b"winner"]
 
 
 def test_safe_generation_error_summary_compacts_message() -> None:

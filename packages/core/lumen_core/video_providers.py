@@ -227,17 +227,17 @@ def parse_video_provider_config_json(
             errors.append(f"video.providers.proxies[{i}] must be an object")
             continue
         try:
-            proxy = parse_proxy_item(item, index=i)
+            parsed_proxy = parse_proxy_item(item, index=i)
         except (ValueError, TypeError, KeyError) as exc:
             errors.append(f"video.providers.proxies[{i}] invalid: {exc}")
             continue
-        if proxy.name in seen_proxy_names:
+        if parsed_proxy.name in seen_proxy_names:
             errors.append(
-                f"video.providers.proxies[{i}].name is duplicated: {proxy.name}"
+                f"video.providers.proxies[{i}].name is duplicated: {parsed_proxy.name}"
             )
             continue
-        seen_proxy_names.add(proxy.name)
-        proxies.append(proxy)
+        seen_proxy_names.add(parsed_proxy.name)
+        proxies.append(parsed_proxy)
 
     providers: list[VideoProviderDefinition] = []
     provider_names: set[str] = set()
@@ -259,20 +259,24 @@ def parse_video_provider_config_json(
     proxy_by_name = {p.name: p for p in proxies}
     attached: list[VideoProviderDefinition] = []
     for provider in providers:
-        proxy = None
+        attached_proxy: ProviderProxyDefinition | None = None
         if provider.proxy_name:
-            proxy = proxy_by_name.get(provider.proxy_name)
-            if proxy is None and provider.enabled and not allow_missing_proxy:
+            attached_proxy = proxy_by_name.get(provider.proxy_name)
+            if (
+                attached_proxy is None
+                and provider.enabled
+                and not allow_missing_proxy
+            ):
                 errors.append(
                     f"provider {provider.name}: proxy {provider.proxy_name} not found"
                 )
-            elif proxy is not None and not proxy.enabled:
+            elif attached_proxy is not None and not attached_proxy.enabled:
                 if provider.enabled:
                     errors.append(
                         f"provider {provider.name}: proxy {provider.proxy_name} is disabled"
                     )
-                proxy = None
-        attached.append(replace(provider, proxy=proxy))
+                attached_proxy = None
+        attached.append(replace(provider, proxy=attached_proxy))
     return attached, proxies, errors
 
 
@@ -297,7 +301,7 @@ def validate_video_providers(
 def ordered_video_providers(
     providers: list[VideoProviderDefinition],
 ) -> list[VideoProviderDefinition]:
-    return weighted_priority_order(providers)  # type: ignore[arg-type]
+    return weighted_priority_order(providers)
 
 
 def select_video_provider(

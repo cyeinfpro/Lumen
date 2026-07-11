@@ -75,16 +75,6 @@ def _admin_request() -> Request:
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_desktop_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # These route tests call provider persistence helpers directly. Keep a
-    # developer shell with LUMEN_RUNTIME=desktop from writing into the real
-    # desktop app data directory.
-    monkeypatch.delenv("LUMEN_RUNTIME", raising=False)
-    monkeypatch.delenv("LUMEN_DATA_ROOT", raising=False)
-    monkeypatch.delenv("LUMEN_DESKTOP_PROVIDER_FILE", raising=False)
-
-
 def test_provider_probe_normalizes_responses_url() -> None:
     from app.routes import providers
 
@@ -141,50 +131,6 @@ def test_provider_admin_output_does_not_mask_missing_key() -> None:
     )
 
     assert item.api_key_hint == ""
-
-
-def test_write_desktop_provider_config_strips_metadata_secrets(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.routes import providers
-
-    metadata_path = tmp_path / "providers.json"
-    runtime_path = tmp_path / "providers.runtime.json"
-    monkeypatch.setattr(
-        providers, "desktop_provider_metadata_path", lambda: metadata_path
-    )
-    monkeypatch.setattr(
-        providers, "desktop_provider_runtime_file", lambda: runtime_path
-    )
-
-    providers._write_desktop_provider_config(
-        [
-            {
-                "name": "primary",
-                "base_url": "https://upstream.example",
-                "api_key": "sk-secret",
-                "enabled": True,
-            }
-        ],
-        [
-            {
-                "name": "egress",
-                "type": "socks5",
-                "host": "127.0.0.1",
-                "port": 1080,
-                "password": "proxy-secret",
-                "enabled": True,
-            }
-        ],
-    )
-
-    metadata = json.loads(metadata_path.read_text())
-    runtime = json.loads(runtime_path.read_text())
-    assert "api_key" not in metadata["providers"][0]
-    assert "password" not in metadata["proxies"][0]
-    assert runtime["providers"][0]["api_key"] == "sk-secret"
-    assert runtime["proxies"][0]["password"] == "proxy-secret"
 
 
 @pytest.mark.asyncio

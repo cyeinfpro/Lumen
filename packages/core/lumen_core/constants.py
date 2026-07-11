@@ -269,6 +269,9 @@ QUEUE_COMPLETIONS = "queue:completions"
 # SSE 回放 stream（每用户）：events:user:{uid}，MAXLEN≈24h
 EVENTS_STREAM_PREFIX = "events:user:"
 EVENTS_STREAM_MAXLEN = 86_400
+# MAXLEN bounds entries per active stream; TTL also removes streams belonging
+# to users who stop receiving events so Redis key count cannot grow forever.
+EVENTS_STREAM_TTL_SECONDS = 48 * 60 * 60
 EVENTS_REPLAY_MAX_SCAN = 5_000
 
 

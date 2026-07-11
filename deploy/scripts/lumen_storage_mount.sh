@@ -16,9 +16,12 @@ STATUS_FILE="${STATE_DIR}/status.json"
 APPLY_RESULT_FILE="${STATE_DIR}/last-apply.json"
 TEST_RESULT_FILE="${STATE_DIR}/last-test.json"
 TEST_CONF_FILE="${STATE_DIR}/test.conf"
+APPLY_TRIGGER_FILE="${STATE_DIR}/apply.trigger"
+TEST_TRIGGER_FILE="${STATE_DIR}/test.trigger"
 TARGET="${LUMEN_STORAGE_TARGET:-/opt/lumendata}"
 TEST_TARGET="${LUMEN_STORAGE_TEST_TARGET:-${STATE_DIR}/scratch}"
 DEFAULT_LOCAL_ROOT="${LUMEN_STORAGE_DEFAULT_LOCAL_ROOT:-/var/lib/lumen-data}"
+DEFAULT_ALLOWED_LOCAL_ROOTS="/var/lib/lumen-data:/srv/lumen-data:/mnt:/media"
 
 # CIFS options tuned for Lumen workload (4K large files, forceuid model, EPERM-tolerant).
 # vers=3.0 — SMB3 baseline; broadly compatible.
@@ -91,6 +94,94 @@ deploy_env_value() {
 
 LUMEN_UID="${LUMEN_APP_UID:-$(deploy_env_value LUMEN_APP_UID 2>/dev/null || printf '10001')}"
 LUMEN_GID="${LUMEN_APP_GID:-$(deploy_env_value LUMEN_APP_GID 2>/dev/null || printf '10001')}"
+LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS="${LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS:-$(deploy_env_value LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS 2>/dev/null || printf '%s' "$DEFAULT_ALLOWED_LOCAL_ROOTS")}:${DEFAULT_LOCAL_ROOT}"
+LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-$(deploy_env_value LUMEN_DB_ROOT 2>/dev/null || deploy_env_value LUMEN_DATA_ROOT 2>/dev/null || printf '%s' "$TARGET")}"
+
+trigger_call_id() {
+  local path="$1" value=""
+  [[ -f "$path" ]] || return 1
+  IFS= read -r value < "$path" || true
+  if [[ ! "$value" =~ ^[0-9a-f]{32}$ ]]; then
+    return 2
+  fi
+  printf '%s\n' "$value"
+}
+
+normalized_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+path_is_within() {
+  local candidate="$1" root="$2" candidate_resolved root_resolved
+  candidate_resolved="$(normalized_path "$candidate")" || return 1
+  root_resolved="$(normalized_path "$root")" || return 1
+  case "$candidate_resolved" in
+    "$root_resolved"|"$root_resolved"/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+local_root_allowed() {
+  local candidate="$1" resolved prefix prefix_resolved
+  [[ "$candidate" = /* ]] || return 1
+  resolved="$(normalized_path "$candidate")" || return 1
+  case "$resolved" in
+    /|/etc|/usr|/var|/var/lib|/srv|/mnt|/media|/opt|/opt/lumen|/opt/lumendata|"$STATE_DIR"|"$TARGET")
+      return 1
+      ;;
+  esac
+  IFS=':' read -r -a allowed_roots <<< "$LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS"
+  for prefix in "${allowed_roots[@]}"; do
+    [[ "$prefix" = /* ]] || continue
+    prefix_resolved="$(normalized_path "$prefix")" || continue
+    case "$resolved" in
+      "$prefix_resolved"|"$prefix_resolved"/*)
+        LOCAL_ROOT="$resolved"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+compose_available() {
+  [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] \
+    && command -v docker >/dev/null 2>&1 \
+    && command -v timeout >/dev/null 2>&1
+}
+
+validate_compose_services() {
+  local service
+  for service in "$@"; do
+    if [[ ! "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+      log "invalid docker compose service name: $service"
+      return 1
+    fi
+  done
+}
+
+compose_with_timeout() {
+  local timeout_sec="$1"
+  shift
+  (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "$timeout_sec" docker compose "$@")
+}
+
+database_services_stopped() {
+  local probe_timeout="${LUMEN_STORAGE_DOCKER_PROBE_TIMEOUT:-15}"
+  local running=""
+  if ! running="$(compose_with_timeout "$probe_timeout" \
+      ps --status running --quiet postgres redis 2>/dev/null)"; then
+    return 1
+  fi
+  [[ -z "$running" ]]
+}
 
 json_str() {
   # Robust JSON string escaping. Prefer jq if available; fall back to python.
@@ -213,6 +304,10 @@ EOF
 }
 
 mount_local() {
+  if ! local_root_allowed "$LOCAL_ROOT"; then
+    log "refusing unsafe local root: $LOCAL_ROOT"
+    return 2
+  fi
   mkdir -p "$LOCAL_ROOT"
   chown "$LUMEN_UID:$LUMEN_GID" "$LOCAL_ROOT" 2>/dev/null || true
   chmod 0775 "$LOCAL_ROOT" 2>/dev/null || true
@@ -294,9 +389,14 @@ cmd_down() {
 
 # Full reload cycle: stop dependent docker services, swap mount, start them.
 cmd_apply() {
-  local call_id="${LUMEN_STORAGE_APPLY_CALL_ID:-}"
+  local call_id=""
   local started_at
   started_at=$(date -u +%s)
+  if ! call_id="$(trigger_call_id "$APPLY_TRIGGER_FILE")"; then
+    log "invalid or missing apply trigger"
+    write_apply_result "" "fail" "invalid or missing apply trigger" "$started_at"
+    return 2
+  fi
 
   exec 9>"${STATE_DIR}/apply.lock"
   if ! flock -n 9; then
@@ -313,33 +413,87 @@ cmd_apply() {
   # start 90s 给容器拉起 + healthcheck 余地。
   local stop_timeout="${LUMEN_STORAGE_DOCKER_STOP_TIMEOUT:-60}"
   local start_timeout="${LUMEN_STORAGE_DOCKER_START_TIMEOUT:-90}"
+  local db_moves_with_target=0
+  local app_services=()
+  local stop_services=()
+  local service
+  read -r -a app_services <<< "$LUMEN_DOCKER_SERVICES"
+  if ! validate_compose_services "${app_services[@]}"; then
+    write_apply_result "$call_id" "fail" "invalid docker compose service list" "$started_at"
+    return 2
+  fi
+  stop_services=("${app_services[@]}")
+  if path_is_within "$LUMEN_DB_ROOT" "$TARGET"; then
+    db_moves_with_target=1
+    stop_services+=("postgres" "redis")
+    log "database root $LUMEN_DB_ROOT moves with $TARGET; postgres/redis require a clean stop"
+  fi
 
-  if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
-    log "docker compose stop $LUMEN_DOCKER_SERVICES (timeout ${stop_timeout}s)"
-    # shellcheck disable=SC2086
-    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${stop_timeout}" docker compose stop -t 30 $LUMEN_DOCKER_SERVICES) \
-      || log "docker compose stop returned non-zero or timed out (continuing)"
+  if [[ "$db_moves_with_target" -eq 1 ]] && ! compose_available; then
+    log "refusing remount: database root moves with target but docker compose is unavailable"
+    write_apply_result "$call_id" "fail" \
+      "refused remount: cannot safely stop postgres/redis under $LUMEN_DB_ROOT" \
+      "$started_at"
+    return 1
+  fi
+
+  if compose_available; then
+    log "docker compose stop ${stop_services[*]} (timeout ${stop_timeout}s)"
+    if ! compose_with_timeout "$stop_timeout" \
+        stop -t 30 "${stop_services[@]}"; then
+      log "refusing remount: docker compose stop failed or timed out"
+      compose_with_timeout "$start_timeout" start "${stop_services[@]}" >/dev/null 2>&1 || true
+      write_apply_result "$call_id" "fail" \
+        "refused remount: dependent services did not stop cleanly" "$started_at"
+      return 1
+    fi
+    if [[ "$db_moves_with_target" -eq 1 ]] && ! database_services_stopped; then
+      log "refusing remount: postgres/redis still running after stop"
+      compose_with_timeout "$start_timeout" start "${stop_services[@]}" >/dev/null 2>&1 || true
+      write_apply_result "$call_id" "fail" \
+        "refused remount: postgres/redis still running" "$started_at"
+      return 1
+    fi
   fi
 
   umount_target_force
 
   if ! cmd_up; then
+    if [[ "$db_moves_with_target" -eq 1 ]]; then
+      log "mount failed; keeping postgres/redis stopped to avoid opening a different data root"
+      write_status
+      write_apply_result "$call_id" "fail" \
+        "mount failed; database services remain stopped to avoid data split" \
+        "$started_at"
+      return 1
+    fi
     log "mount failed, falling back to local default to keep service usable"
     MODE=local LOCAL_ROOT="$DEFAULT_LOCAL_ROOT" mount_local || true
     write_status
-    if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
-      # shellcheck disable=SC2086
-      (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${start_timeout}" docker compose start $LUMEN_DOCKER_SERVICES) || true
+    if compose_available; then
+      compose_with_timeout "$start_timeout" start "${app_services[@]}" >/dev/null 2>&1 || true
     fi
     write_apply_result "$call_id" "fail" "mount failed; fell back to local default $DEFAULT_LOCAL_ROOT" "$started_at"
     return 1
   fi
 
-  if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
-    log "docker compose start $LUMEN_DOCKER_SERVICES (timeout ${start_timeout}s)"
-    # shellcheck disable=SC2086
-    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${start_timeout}" docker compose start $LUMEN_DOCKER_SERVICES) \
-      || log "docker compose start failed or timed out (services may still recover via restart policy)"
+  if compose_available; then
+    if [[ "$db_moves_with_target" -eq 1 ]]; then
+      log "docker compose start postgres redis (timeout ${start_timeout}s)"
+      if ! compose_with_timeout "$start_timeout" start postgres redis; then
+        log "postgres/redis restart failed; application services remain stopped"
+        write_apply_result "$call_id" "fail" \
+          "mount applied but postgres/redis restart failed" "$started_at"
+        return 1
+      fi
+    fi
+    log "docker compose start ${app_services[*]} (timeout ${start_timeout}s)"
+    if ! compose_with_timeout "$start_timeout" start "${app_services[@]}"; then
+      log "application service restart failed or timed out"
+      write_apply_result "$call_id" "fail" \
+        "mount applied but application service restart failed" "$started_at"
+      return 1
+    fi
   fi
 
   log "apply done"
@@ -348,7 +502,12 @@ cmd_apply() {
 
 # SMB connectivity test against $TEST_CONF_FILE; mounts to $TEST_TARGET, write-probes, unmounts.
 cmd_test() {
-  local call_id="${LUMEN_STORAGE_TEST_CALL_ID:-}"
+  local call_id=""
+  if ! call_id="$(trigger_call_id "$TEST_TRIGGER_FILE")"; then
+    log "invalid or missing test trigger"
+    write_test_result "" "fail" "invalid or missing test trigger"
+    return 2
+  fi
   if [[ ! -f "$TEST_CONF_FILE" ]]; then
     write_test_result "$call_id" "fail" "test conf not found at $TEST_CONF_FILE"
     return 1

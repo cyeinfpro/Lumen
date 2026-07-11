@@ -14,11 +14,13 @@ XADD 到这里给 web 断线续传用）。每个 user 一个 worker coroutine�
 并发模型
 --------
 - 一个 user 一个 coroutine，串行消费 stream。这样保证 cursor advance 永远
-  在 _on_succeeded 完成之后；终态推送会在不可逆的 Telegram 发送前先写
-  notified reservation，捕获到发送失败时再清掉 reservation 让 stream replay 重试。
+  在 _on_succeeded 完成之后；终态推送由短 delivery lock 串行，Telegram
+  确认成功后才写 notified。崩溃最多造成可识别的重复，不会永久漏发。
 - 跨 user 仍受 _DISPATCH_SEM=8 限流，防多 user 同时大批量打 TG 429。
-- discovery 每 _DISCOVERY_INTERVAL_SEC 一次 SCAN events:user:*，新出现的
-  stream 起 worker。新绑定 user 首次生成后最长 ~10s 内被接管。
+- tracker 注册任务时把 Lumen user id 写入一个带过期时间的 active-user zset；
+  discovery 每 _DISCOVERY_INTERVAL_SEC 只为这些用户启动 stream worker。
+  一个集群级限速 fallback 会分批检查 `events:user:*`，只把确实命中 TgBot
+  tracker 的旧用户回填到 zset。历史 Web 用户不会占用 Bot 的阻塞连接。
 """
 
 from __future__ import annotations
@@ -42,7 +44,13 @@ from .api_client import ApiError, LumenApi
 from .config import settings
 from .handlers._helpers import mime_extension, truncate_text
 from .keyboards import post_success_keyboard, retry_keyboard
-from .tracker import TaskTrack, tracker
+from .tracker import (
+    ACTIVE_USER_STREAMS_KEY,
+    ACTIVE_USER_STREAM_TTL_SECONDS,
+    TRACK_KEY_PREFIX,
+    TaskTrack,
+    tracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,15 +92,30 @@ _BONUS_PRECHECK_RETRIES: tuple[float, ...] = (0.5, 1.0, 2.0)
 _STREAM_PREFIX = "events:user:"
 _CURSOR_PREFIX = "tg:bot:cursor:"
 
-# 新 user stream 被发现的最大延迟。SCAN 频率，越小越实时越多 redis 往返。
+# 新 Bot user stream 被发现的最大延迟。
 _DISCOVERY_INTERVAL_SEC = 10.0
 # XREAD block 超时（ms）；越大越省 redis 往返
 _XREAD_BLOCK_MS = 5000
 _XREAD_COUNT = 50
 
-# 首次接管一个 stream（无 cursor）时回看窗口。覆盖 bot crash 后短时间事件，
-# 又不至于回放整个 24h MAXLEN 历史。1h 比单 task 上限（25min @ 4K）宽 2 倍。
-_INITIAL_LOOKBACK_MS = 60 * 60 * 1000
+# 首次接管一个 stream（无 cursor）时覆盖完整事件/tracker 保留窗，长停机恢复
+# 不再只看最近 1h。
+_INITIAL_LOOKBACK_MS = ACTIVE_USER_STREAM_TTL_SECONDS * 1000
+_CURSOR_TTL_SECONDS = ACTIVE_USER_STREAM_TTL_SECONDS + 3600
+
+# 升级兼容 fallback：集群内最多一个实例每分钟推进一次 SCAN 游标。正常路径仍
+# 只读 active zset；fallback 每批最多检查少量 stream 的最近事件，并且只有事件
+# generation_id 对应 TgBot tracker 时才回填，避免把全部 Web 用户订阅进来。
+_FALLBACK_SCAN_LEASE_KEY = f"{ACTIVE_USER_STREAMS_KEY}:fallback-scan-lease"
+_FALLBACK_SCAN_CURSOR_KEY = f"{ACTIVE_USER_STREAMS_KEY}:fallback-scan-cursor"
+_FALLBACK_STREAM_CURSOR_PREFIX = (
+    f"{ACTIVE_USER_STREAMS_KEY}:fallback-stream-cursor:"
+)
+_FALLBACK_SCAN_LEASE_SECONDS = 60
+_FALLBACK_SCAN_COUNT = 16
+_FALLBACK_EMPTY_SCAN_BATCHES = 4
+_FALLBACK_ACTIVE_SCAN_BATCHES = 1
+_FALLBACK_EVENTS_PER_STREAM = 32
 
 
 def _stream_key(user_id: str) -> str:
@@ -101,6 +124,10 @@ def _stream_key(user_id: str) -> str:
 
 def _cursor_key(user_id: str) -> str:
     return f"{_CURSOR_PREFIX}{user_id}"
+
+
+def _fallback_stream_cursor_key(user_id: str) -> str:
+    return f"{_FALLBACK_STREAM_CURSOR_PREFIX}{user_id}"
 
 
 def _initial_cursor() -> str:
@@ -202,20 +229,158 @@ async def _send_document_with_backoff(
     raise RuntimeError(f"send_document exhausted retry-after attempts chat={chat_id}")
 
 
-async def _scan_user_streams(redis: aioredis.Redis) -> set[str]:
-    user_ids: set[str] = set()
-    cursor: Any = 0
-    while True:
-        cursor, keys = await redis.scan(
-            cursor=cursor, match=f"{_STREAM_PREFIX}*", count=200
+async def _load_active_user_ids(redis: aioredis.Redis) -> set[str]:
+    """Return active users and incrementally rebuild missing upgrade-era entries."""
+
+    now = int(time.time())
+    pipe = redis.pipeline(transaction=False)
+    pipe.zremrangebyscore(ACTIVE_USER_STREAMS_KEY, "-inf", now)
+    pipe.zrangebyscore(ACTIVE_USER_STREAMS_KEY, now, "+inf")
+    _removed, rows = await pipe.execute()
+    active_user_ids = {
+        user_id for row in rows or [] if (user_id := _decode(row).strip())
+    }
+    active_user_ids.update(
+        await _recover_active_user_ids(
+            redis,
+            max_scan_batches=(
+                _FALLBACK_ACTIVE_SCAN_BATCHES
+                if active_user_ids
+                else _FALLBACK_EMPTY_SCAN_BATCHES
+            ),
         )
-        for k in keys:
-            sk = _decode(k)
-            user_ids.add(sk[len(_STREAM_PREFIX):])
-        # redis-py 异步：cursor 0 / b"0" / "0" 都代表迭代结束
+    )
+    return active_user_ids
+
+
+def _stream_generation_ids(entries: Any) -> list[str]:
+    generation_ids: list[str] = []
+    seen: set[str] = set()
+    for row in entries or []:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            continue
+        fields_raw = row[1]
+        if not isinstance(fields_raw, dict):
+            continue
+        fields = {_decode(key): _decode(value) for key, value in fields_raw.items()}
+        try:
+            envelope = json.loads(fields.get("data") or "{}")
+        except (TypeError, ValueError):
+            continue
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(data, dict):
+            continue
+        for field in ("generation_id", "parent_generation_id"):
+            gen_id = str(data.get(field) or "").strip()
+            if gen_id and gen_id not in seen:
+                seen.add(gen_id)
+                generation_ids.append(gen_id)
+    return generation_ids
+
+
+async def _recover_active_user_ids(
+    redis: aioredis.Redis,
+    *,
+    max_scan_batches: int,
+) -> set[str]:
+    """Run one cluster-throttled, bounded migration scan over replay streams."""
+
+    acquired = await redis.set(
+        _FALLBACK_SCAN_LEASE_KEY,
+        b"1",
+        nx=True,
+        ex=_FALLBACK_SCAN_LEASE_SECONDS,
+    )
+    if not acquired:
+        return set()
+
+    raw_cursor = await redis.get(_FALLBACK_SCAN_CURSOR_KEY)
+    try:
+        cursor: Any = int(_decode(raw_cursor)) if raw_cursor is not None else 0
+    except ValueError:
+        cursor = 0
+
+    candidates: list[tuple[str, str]] = []
+    seen_candidates: set[tuple[str, str]] = set()
+    for _ in range(max(1, max_scan_batches)):
+        cursor, keys = await redis.scan(
+            cursor=cursor,
+            match=f"{_STREAM_PREFIX}*",
+            count=_FALLBACK_SCAN_COUNT,
+        )
+        for raw_key in keys or []:
+            stream_key = _decode(raw_key)
+            if not stream_key.startswith(_STREAM_PREFIX) or stream_key.endswith(":dlq"):
+                continue
+            user_id = stream_key[len(_STREAM_PREFIX) :].strip()
+            if not user_id:
+                continue
+            event_cursor_key = _fallback_stream_cursor_key(user_id)
+            raw_event_cursor = await redis.get(event_cursor_key)
+            event_cursor = _decode(raw_event_cursor).strip() if raw_event_cursor else "+"
+            if event_cursor != "+":
+                parts = event_cursor.split("-", 1)
+                if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                    event_cursor = "+"
+            entries = await redis.xrevrange(
+                stream_key,
+                max="+" if event_cursor == "+" else f"({event_cursor}",
+                min=_initial_cursor(),
+                count=_FALLBACK_EVENTS_PER_STREAM,
+            )
+            next_event_cursor = "+"
+            if entries:
+                oldest_row = entries[-1]
+                if isinstance(oldest_row, (list, tuple)) and oldest_row:
+                    oldest_id = _decode(oldest_row[0]).strip()
+                    if len(entries) >= _FALLBACK_EVENTS_PER_STREAM and oldest_id:
+                        next_event_cursor = oldest_id
+            await redis.set(
+                event_cursor_key,
+                next_event_cursor,
+                ex=_CURSOR_TTL_SECONDS,
+            )
+            for gen_id in _stream_generation_ids(entries):
+                candidate = (user_id, gen_id)
+                if candidate not in seen_candidates:
+                    seen_candidates.add(candidate)
+                    candidates.append(candidate)
         if cursor in (0, b"0", "0"):
             break
-    return user_ids
+
+    await redis.set(
+        _FALLBACK_SCAN_CURSOR_KEY,
+        _decode(cursor),
+        ex=_CURSOR_TTL_SECONDS,
+    )
+    if not candidates:
+        return set()
+
+    exists_pipe = redis.pipeline(transaction=False)
+    for _user_id, gen_id in candidates:
+        exists_pipe.exists(f"{TRACK_KEY_PREFIX}{gen_id}")
+    existing = await exists_pipe.execute()
+
+    recovered: set[str] = set()
+    for (user_id, gen_id), exists in zip(candidates, existing, strict=False):
+        if not exists or user_id in recovered:
+            continue
+        try:
+            if await tracker.refresh(gen_id, user_id):
+                recovered.add(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "listener: fallback tracker refresh failed uid=%s gen=%s err=%r",
+                user_id,
+                gen_id,
+                exc,
+            )
+    if recovered:
+        logger.info(
+            "listener: fallback rebuilt active users count=%d",
+            len(recovered),
+        )
+    return recovered
 
 
 async def _load_cursor(redis: aioredis.Redis, user_id: str) -> str:
@@ -226,7 +391,11 @@ async def _load_cursor(redis: aioredis.Redis, user_id: str) -> str:
 
 
 async def _save_cursor(redis: aioredis.Redis, user_id: str, sse_id: str) -> None:
-    await redis.set(_cursor_key(user_id), sse_id)
+    await redis.set(
+        _cursor_key(user_id),
+        sse_id,
+        ex=_CURSOR_TTL_SECONDS,
+    )
 
 
 _RECONNECT_BACKOFF_MAX_SEC = 60.0
@@ -268,12 +437,10 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
                     redis = aioredis.from_url(
                         settings.redis_url, decode_responses=False
                     )
-                    logger.info(
-                        "listener: connected to %s (stream mode)", settings.redis_url
-                    )
+                    logger.info("listener: connected to Redis (stream mode)")
                     backoff = 1.0
                     consecutive_failures = 0
-                user_ids = await _scan_user_streams(redis)
+                user_ids = await _load_active_user_ids(redis)
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
                 level = (
@@ -298,17 +465,27 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
                 backoff = min(backoff * 2, _RECONNECT_BACKOFF_MAX_SEC)
                 continue
 
-            # 起新 user worker；清理已 done 的
+            # 起新 user worker；取消已不活跃的订阅，避免连接池随历史用户增长。
+            stale_tasks = [
+                workers.pop(uid)
+                for uid in list(workers)
+                if uid not in user_ids
+            ]
+            for task in stale_tasks:
+                task.cancel()
+            if stale_tasks:
+                await asyncio.gather(*stale_tasks, return_exceptions=True)
+
             for uid in user_ids:
-                task = workers.get(uid)
-                if task is None or task.done():
-                    if task is not None and not task.cancelled():
-                        exc = task.exception()
-                        if exc is not None:
+                worker_task = workers.get(uid)
+                if worker_task is None or worker_task.done():
+                    if worker_task is not None and not worker_task.cancelled():
+                        worker_error = worker_task.exception()
+                        if worker_error is not None:
                             logger.warning(
                                 "listener: worker uid=%s died: %r; restarting",
                                 uid,
-                                exc,
+                                worker_error,
                             )
                     workers[uid] = asyncio.create_task(
                         _user_worker(bot, api, redis, uid, stop_event),
@@ -344,8 +521,8 @@ async def _user_worker(
     """单 user stream 消费者。串行处理 + cursor 推进。
 
     cursor 在 _dispatch await 完成 *之后* 才落，保证「dispatch 失败 / 进程
-    崩溃」可以靠 replay 找回；终态发送前先写 notified reservation，避免
-    发送成功后、标记完成前 crash 造成重复推送。
+    崩溃」可以靠 replay 找回；Telegram 确认发送后才写 notified，因此进程
+    在两者之间崩溃时可能重复，但不会把未发送事件永久吞掉。
     """
     stream_key = _stream_key(user_id)
     cursor = await _load_cursor(redis, user_id)
@@ -386,7 +563,12 @@ async def _user_worker(
                     continue
                 try:
                     async with _DISPATCH_SEM:
-                        await _dispatch(bot, api, envelope)
+                        await _dispatch(
+                            bot,
+                            api,
+                            envelope,
+                            stream_user_id=user_id,
+                        )
                 except asyncio.CancelledError:
                     raise
                 except _TerminalDeliveryBusy as exc:
@@ -464,7 +646,13 @@ async def _user_worker(
                 await _save_cursor(redis, user_id, entry_id)
 
 
-async def _dispatch(bot: Bot, api: LumenApi, envelope: dict[str, Any]) -> None:
+async def _dispatch(
+    bot: Bot,
+    api: LumenApi,
+    envelope: dict[str, Any],
+    *,
+    stream_user_id: str = "",
+) -> None:
     """单事件处理。
 
     stream 已经按 user 分流，但同一 user 的事件可能不属于 bot tracker（比如
@@ -496,6 +684,17 @@ async def _dispatch(bot: Bot, api: LumenApi, envelope: dict[str, Any]) -> None:
                 found = True
                 break
         if not found:
+            return
+
+    if stream_user_id and event in {
+        "generation.queued",
+        "generation.started",
+        "generation.progress",
+        "generation.retrying",
+        "generation.partial_image",
+        "generation.attached",
+    }:
+        if not await tracker.refresh(precheck_id, stream_user_id):
             return
 
     if event == "generation.attached":
@@ -562,6 +761,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
                 prompt=parent.prompt,
                 params=parent.params,
                 is_bonus=True,
+                user_id=parent.user_id,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -603,8 +803,9 @@ async def _finish_succeeded_cleanup(bot: Bot, gen_id: str, track) -> None:
 
 async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]) -> None:
     if not await tracker.begin_delivery(gen_id):
-        # Already notified is an idempotent replay. If the sender still holds
-        # the delivery lock, keep the cursor here and retry after lock expiry.
+        # Already notified means Telegram confirmed the terminal delivery.
+        # If the sender still holds the delivery lock, keep the cursor here
+        # until its cleanup completes.
         if await tracker.is_notified(gen_id):
             if await tracker.is_delivery_active(gen_id):
                 raise _TerminalDeliveryBusy(
@@ -614,7 +815,6 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
             return
         raise _TerminalDeliveryBusy(f"succeeded delivery lock held gen={gen_id}")
     delivered = False
-    notification_started = False
     downloads: list[tuple[Path, str, int, str]] = []  # (path, mime, size, filename)
     heartbeat = asyncio.create_task(
         _chat_action_heartbeat(bot, track.chat_id, ChatAction.UPLOAD_DOCUMENT),
@@ -639,8 +839,6 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
             ]
 
         if not image_ids:
-            await tracker.mark_notified(gen_id, release_lock=False)
-            notification_started = True
             await _replace_status(
                 bot,
                 track,
@@ -682,8 +880,6 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                 downloads.append((path, mime, size, filename))
 
             if not downloads:
-                await tracker.mark_notified(gen_id, release_lock=False)
-                notification_started = True
                 await _replace_status(
                     bot,
                     track,
@@ -703,8 +899,6 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                     )
                 )
                 sent_count = 0
-                await tracker.mark_notified(gen_id, release_lock=False)
-                notification_started = True
                 for idx, (path, _mime, _size, filename) in enumerate(downloads):
                     kb = actions_kb if idx == 0 else None
                     cap = caption if idx == 0 else None
@@ -734,11 +928,11 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                 logger.warning("tmp cleanup failed path=%s err=%s", path, exc)
 
     if not delivered:
-        if notification_started:
-            await tracker.clear_terminal_delivery(gen_id)
-        else:
-            await tracker.clear_delivery(gen_id)
+        await tracker.clear_delivery(gen_id)
         raise RuntimeError(f"terminal delivery failed gen={gen_id}")
+    if not await tracker.mark_notified(gen_id, release_lock=False):
+        await tracker.clear_delivery(gen_id)
+        raise RuntimeError(f"terminal delivery marker failed gen={gen_id}")
     await tracker.clear_delivery(gen_id)
     await _finish_succeeded_cleanup(bot, gen_id, track)
 
@@ -760,11 +954,7 @@ async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None
         f"❌ 生成失败 #{gen_id[:8]}\n\n📝 {_truncate(track.prompt, 200)}\n\n"
         f"原因：{code}\n{msg}"
     )
-    delivered = False
-    notification_started = False
     try:
-        await tracker.mark_notified(gen_id, release_lock=False)
-        notification_started = True
         if track.batch_id:
             # batch 模式 placeholder 不动，失败单独发一条
             await bot.send_message(
@@ -782,14 +972,10 @@ async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None
                 await bot.send_message(
                     chat_id=track.chat_id, text=text, reply_markup=retry_keyboard(gen_id)
                 )
-        delivered = True
+        if not await tracker.mark_notified(gen_id, release_lock=False):
+            raise RuntimeError(f"terminal delivery marker failed gen={gen_id}")
     finally:
-        if delivered:
-            await tracker.clear_delivery(gen_id)
-        elif notification_started:
-            await tracker.clear_terminal_delivery(gen_id)
-        else:
-            await tracker.clear_delivery(gen_id)
+        await tracker.clear_delivery(gen_id)
     await _maybe_finalize_batch(bot, track, gen_id)
     # 失败保留 tracker 一会儿，让重试能拿到原 prompt（5 分钟后过期清理）
     asyncio.create_task(_expire_tracker(gen_id, 300))

@@ -4,9 +4,13 @@ import test from "node:test";
 import type { VideoGenerationOut } from "./types";
 
 const {
+  activeVideoTemporaryDownload,
+  isVideoRequestFenceCurrent,
   isTerminalVideoEvent,
   mergeVideoGenerationEvent,
+  mergeVideoGenerationLists,
   mergeVideoGenerationSnapshot,
+  nextVideoRequestFence,
 } = await import(new URL("./videoEventSnapshot.ts", import.meta.url).href);
 
 function generation(
@@ -125,4 +129,111 @@ test("stale HTTP snapshots cannot overwrite newer terminal state", () => {
   });
 
   assert.equal(mergeVideoGenerationSnapshot(current, stale), current);
+});
+
+test("older same-epoch snapshots cannot replace newer task metadata", () => {
+  const current = generation({
+    updated_at: "2026-07-10T00:00:10Z",
+    temporary_download: {
+      source: "volcano",
+      url: "https://example.test/new",
+      expires_at: "2026-07-10T00:20:00Z",
+      expires_in_s: 1200,
+    },
+  });
+  const stale = generation({
+    updated_at: "2026-07-10T00:00:05Z",
+    temporary_download: {
+      source: "volcano",
+      url: "https://example.test/old",
+      expires_at: "2026-07-10T00:10:00Z",
+      expires_in_s: 600,
+    },
+  });
+
+  assert.equal(mergeVideoGenerationSnapshot(current, stale), current);
+});
+
+test("older timestamps still allow a real lifecycle advance", () => {
+  const current = generation({
+    status: "submitted",
+    progress_stage: "rendering",
+    progress_pct: 20,
+    updated_at: "2026-07-10T00:00:10Z",
+  });
+  const progressed = generation({
+    status: "running",
+    progress_stage: "fetching",
+    progress_pct: 95,
+    updated_at: "2026-07-10T00:00:05Z",
+  });
+
+  const merged = mergeVideoGenerationSnapshot(current, progressed);
+  assert.equal(merged.status, "running");
+  assert.equal(merged.progress_stage, "fetching");
+  assert.equal(merged.progress_pct, 95);
+});
+
+test("request fences require both the current task and epoch", () => {
+  const initial = { taskId: "draft:new", epoch: 0 };
+  const taskA = nextVideoRequestFence(initial, "task-a");
+  const taskB = nextVideoRequestFence(taskA, "task-b");
+
+  assert.equal(isVideoRequestFenceCurrent(taskA, taskA), true);
+  assert.equal(isVideoRequestFenceCurrent(taskB, taskA), false);
+  assert.equal(
+    isVideoRequestFenceCurrent(taskB, { ...taskB, taskId: "task-a" }),
+    false,
+  );
+});
+
+test("a retry response with a new generation id is merged beside the original", () => {
+  const original = generation({
+    id: "video-original",
+    status: "failed",
+    progress_stage: "finished",
+    progress_pct: 100,
+    submission_epoch: 2,
+    created_at: "2026-07-10T00:00:00Z",
+  });
+  const retried = generation({
+    id: "video-retry",
+    status: "queued",
+    progress_stage: "queued",
+    progress_pct: 0,
+    submission_epoch: 0,
+    created_at: "2026-07-10T00:01:00Z",
+  });
+
+  const merged = mergeVideoGenerationLists([original], [retried]);
+
+  assert.deepEqual(
+    merged.map((item: VideoGenerationOut) => item.id),
+    ["video-retry", "video-original"],
+  );
+  assert.equal(merged[0], retried);
+  assert.equal(merged[1], original);
+});
+
+test("temporary downloads expire by absolute time, not stale server TTL", () => {
+  const item = generation({
+    temporary_download: {
+      source: "volcano",
+      url: " https://example.test/video ",
+      expires_at: "2026-07-10T00:10:00Z",
+      expires_in_s: 600,
+    },
+  });
+  const active = activeVideoTemporaryDownload(
+    item,
+    Date.parse("2026-07-10T00:01:00Z"),
+  );
+  const expired = activeVideoTemporaryDownload(
+    item,
+    Date.parse("2026-07-10T00:09:40Z"),
+  );
+
+  assert.equal(active?.url, "https://example.test/video");
+  assert.equal(active?.expires_in_s, 540);
+  assert.equal(expired, null);
 });

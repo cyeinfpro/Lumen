@@ -17,8 +17,8 @@ const { calculateDesktopPopoverPosition } = await import(
   ).href
 );
 
-test("desktop account menu does not expose Docker-only admin routes", () => {
-  match(source, /if \(isAdmin && !desktop\) \{/);
+test("desktop account menu exposes admin routes to administrators", () => {
+  match(source, /if \(isAdmin\) \{/);
 });
 
 test("desktop account popover stays within the viewport", () => {

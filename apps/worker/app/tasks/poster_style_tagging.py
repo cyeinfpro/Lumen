@@ -88,7 +88,7 @@ async def _call_upstream(
     *,
     model: str,
 ) -> str | None:
-    from ..provider_pool import get_pool
+    from ..provider_pool import get_pool, text_provider_attempt
     from ..retry import is_retriable as classify_retriable
 
     pool = await get_pool()
@@ -109,7 +109,21 @@ async def _call_upstream(
                 proxy = getattr(provider, "proxy", None)
                 if proxy is not None:
                     kwargs["proxy"] = proxy
-                return await _call_upstream_one(image_record, image_url, **kwargs)
+                with text_provider_attempt(pool, provider) as provider_attempt:
+                    try:
+                        result = await _call_upstream_one(
+                            image_record,
+                            image_url,
+                            **kwargs,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        provider_attempt.report_exception(exc)
+                        raise
+                    else:
+                        provider_attempt.report_success()
+                return result
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 decision = classify_retriable(

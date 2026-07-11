@@ -61,5 +61,3 @@ export function ImagePreviewModal({
 
   return null;
 }
-
-export default ImagePreviewModal;

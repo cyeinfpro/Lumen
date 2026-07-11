@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-10T12:11:46.163Z",
+  "generatedAt": "2026-07-11T16:47:29.844Z",
   "note": "Known frontend UI-governance debt. The checker fails only when current count exceeds a baseline count for the same fingerprint.",
   "findings": [
     {
@@ -28,27 +28,11 @@
       "count": 1
     },
     {
-      "key": "aria-live-error|src/app/admin/_panels/StoragePanel.tsx|74dac1ca3d4eeb53",
-      "rule": "aria-live-error",
-      "path": "src/app/admin/_panels/StoragePanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{formError ? (",
-      "count": 1
-    },
-    {
       "key": "aria-live-error|src/components/ui/inpaint/MaskBoard.tsx|70f33294372e286a",
       "rule": "aria-live-error",
       "path": "src/components/ui/inpaint/MaskBoard.tsx",
       "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
       "snippet": "{imgError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/lightbox/DesktopLightbox.tsx|56e81e52dbdd9296",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{activeLoadError ? (",
       "count": 1
     },
     {
@@ -156,14 +140,6 @@
       "count": 1
     },
     {
-      "key": "aria-live-error|src/components/ui/tray/TaskItem.tsx|9cc8776aab262882",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/tray/TaskItem.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "failed ? \"text-danger\" : \"text-[var(--fg-2)]\",",
-      "count": 1
-    },
-    {
       "key": "hardcoded-dark|src/app/settings/memory/page.tsx|98375540cf208b87",
       "rule": "hardcoded-dark",
       "path": "src/app/settings/memory/page.tsx",
@@ -225,14 +201,6 @@
       "path": "src/components/ui/projects/ProjectsIndex.tsx",
       "message": "Hard-coded dark utility \"text-white/90\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
       "snippet": "className=\"absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-",
-      "count": 1
-    },
-    {
-      "key": "mobile-dialog-shell|src/components/ui/CommandPalette.tsx|cd43326484a401b5",
-      "rule": "mobile-dialog-shell",
-      "path": "src/components/ui/CommandPalette.tsx",
-      "message": "Fixed modal wrapper must use mobile-dialog-shell or be an allowlisted media/lightbox surface.",
-      "snippet": "<div className=\"fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]\">",
       "count": 1
     },
     {

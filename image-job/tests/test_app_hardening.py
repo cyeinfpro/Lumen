@@ -17,8 +17,11 @@ import asyncio
 import base64
 import hashlib
 import importlib.util
+import json
+import stat
 import sqlite3
 import sys
+from collections.abc import AsyncIterator
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,11 +34,11 @@ from PIL import Image
 
 
 def load_app_module():
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    asyncio.set_event_loop(asyncio.new_event_loop())
     path = Path(__file__).resolve().parents[1] / "app.py"
+    module_dir = str(path.parent)
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
     spec = importlib.util.spec_from_file_location("image_job_app_under_test", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -55,6 +58,69 @@ def _png_bytes(size: tuple[int, int] = (2, 2)) -> bytes:
     buf = BytesIO()
     Image.new("RGB", size, color=(128, 128, 128)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+class _ChunkedRequest:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        content_length: str | None = None,
+    ) -> None:
+        self.headers = (
+            {"content-length": content_length} if content_length is not None else {}
+        )
+        self._chunks = chunks
+        self.stream_started = False
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        self.stream_started = True
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _JsonRequest:
+    def __init__(
+        self,
+        payload: dict[str, object],
+        *,
+        headers: dict[str, str],
+    ) -> None:
+        self.payload = payload
+        self.headers = headers
+
+    async def json(self) -> dict[str, object]:
+        return self.payload
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        yield json.dumps(self.payload).encode("utf-8")
+
+
+def test_reference_request_body_rejects_declared_and_streamed_overflow() -> None:
+    app = load_app_module()
+    declared = _ChunkedRequest([b"not-read"], content_length="11")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(app._read_request_body_bounded(declared, max_bytes=10))
+
+    assert exc.value.status_code == 413
+    assert declared.stream_started is False
+
+    chunked = _ChunkedRequest([b"12345", b"67890", b"x"])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(app._read_request_body_bounded(chunked, max_bytes=10))
+
+    assert exc.value.status_code == 413
+
+
+def test_reference_request_body_accepts_exact_limit() -> None:
+    app = load_app_module()
+    request = _ChunkedRequest([b"12345", b"67890"])
+
+    assert (
+        asyncio.run(app._read_request_body_bounded(request, max_bytes=10))
+        == b"1234567890"
+    )
 
 
 def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
@@ -110,6 +176,147 @@ def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
     assert "idempotency_key" in cols
     assert "request_hash" in cols
     assert "jobs_auth_idempotency_idx" in indexes
+    assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_refs_migration_rolls_back_and_retries_after_interruption(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = load_app_module()
+    persistence = app._job_persistence_module
+    db_path = tmp_path / "refs.sqlite3"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE refs (
+            sha256 TEXT PRIMARY KEY,
+            token TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO refs VALUES (
+            'legacy-sha', 'legacy-token', 'png', 10,
+            '2026-07-01T00:00:00+00:00'
+        );
+        """
+    )
+
+    original_copy = persistence._copy_refs_rows
+
+    def interrupted_copy(*args: Any, **kwargs: Any) -> None:
+        original_copy(*args, **kwargs)
+        raise RuntimeError("simulated migration interruption")
+
+    monkeypatch.setattr(persistence, "_copy_refs_rows", interrupted_copy)
+    with pytest.raises(RuntimeError):
+        persistence._ensure_refs_auth_schema(conn)
+
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(refs)")}
+    assert "refs" in tables
+    assert "refs_auth_migration_new" not in tables
+    assert "auth_hash" not in columns
+
+    monkeypatch.setattr(persistence, "_copy_refs_rows", original_copy)
+    persistence._ensure_refs_auth_schema(conn)
+
+    migrated = conn.execute("SELECT auth_hash, sha256, token FROM refs").fetchall()
+    conn.close()
+    assert [tuple(row) for row in migrated] == [
+        ("legacy:legacy-sha", "legacy-sha", "legacy-token")
+    ]
+
+
+def test_refs_migration_rejects_invalid_sqlite_identifiers() -> None:
+    app = load_app_module()
+    persistence = app._job_persistence_module
+
+    assert persistence._sqlite_identifier("refs_auth_migration_new") == (
+        '"refs_auth_migration_new"'
+    )
+    with pytest.raises(ValueError, match="invalid SQLite identifier"):
+        persistence._sqlite_identifier('refs"; DROP TABLE jobs; --')
+
+
+def test_refs_migration_recovers_old_partial_state_without_data_loss(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = load_app_module()
+    db_path = tmp_path / "image_jobs.sqlite3"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE refs (
+            auth_hash TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            token TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(auth_hash, sha256)
+        );
+        INSERT INTO refs VALUES (
+            'auth-current', 'current-sha', 'current-token', 'png', 10,
+            '2026-07-02T00:00:00+00:00'
+        );
+        CREATE TABLE refs_legacy_auth_migration (
+            sha256 TEXT PRIMARY KEY,
+            token TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO refs_legacy_auth_migration VALUES (
+            'legacy-sha', 'legacy-token', 'jpg', 20,
+            '2026-07-01T00:00:00+00:00'
+        );
+        CREATE TABLE refs_auth_migration_new (
+            auth_hash TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            token TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(auth_hash, sha256)
+        );
+        INSERT INTO refs_auth_migration_new VALUES (
+            'auth-staged', 'staged-sha', 'staged-token', 'webp', 30,
+            '2026-07-03T00:00:00+00:00'
+        );
+        """
+    )
+    conn.close()
+
+    app.init_storage_sync()
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT auth_hash, sha256, token FROM refs ORDER BY sha256"
+    ).fetchall()
+    legacy_table = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'refs_legacy_auth_migration'"
+    ).fetchone()
+    conn.close()
+
+    assert rows == [
+        ("auth-current", "current-sha", "current-token"),
+        ("legacy:legacy-sha", "legacy-sha", "legacy-token"),
+        ("auth-staged", "staged-sha", "staged-token"),
+    ]
+    assert legacy_table is None
 
 
 # --- 1) terminal helpers ----------------------------------------------------
@@ -154,9 +361,7 @@ def test_first_stream_error_picks_up_response_incomplete() -> None:
 
 def test_first_stream_error_falls_back_when_incomplete_has_no_details() -> None:
     app = load_app_module()
-    detail = app._first_stream_error(
-        [{"type": "response.incomplete", "response": {}}]
-    )
+    detail = app._first_stream_error([{"type": "response.incomplete", "response": {}}])
     assert isinstance(detail, dict)
     assert detail["code"] == "response_incomplete"
 
@@ -181,7 +386,9 @@ class _ScriptedSseResponse:
             yield line
 
 
-def test_responses_stream_response_failed_raises_validation_for_moderation(monkeypatch) -> None:
+def test_responses_stream_response_failed_raises_validation_for_moderation(
+    monkeypatch,
+) -> None:
     app = load_app_module()
 
     async def fake_touch(_job_id: str) -> None:
@@ -205,7 +412,9 @@ def test_responses_stream_response_failed_raises_validation_for_moderation(monke
             )
         )
     assert exc.value.error_class == app.ERROR_CLASS_VALIDATION
-    assert "moderation_blocked" in exc.value.error.lower() or "safety" in exc.value.error
+    assert (
+        "moderation_blocked" in exc.value.error.lower() or "safety" in exc.value.error
+    )
 
 
 def test_responses_stream_response_incomplete_does_not_become_network_retry(
@@ -284,17 +493,24 @@ class _StreamGetResponse:
         self.headers = headers
         self._chunks = chunks
         self.is_success = 200 <= status_code < 400
+        self.yielded = 0
+        self.closed = False
 
     async def __aenter__(self) -> "_StreamGetResponse":
         return self
 
     async def __aexit__(self, *_args: object) -> None:
-        return None
+        self.closed = True
 
-    async def aiter_bytes(self):
+    async def aiter_raw(self):
         for c in self._chunks:
+            self.yielded += 1
             await asyncio.sleep(0)
             yield c
+
+    async def aiter_bytes(self):
+        async for chunk in self.aiter_raw():
+            yield chunk
 
     async def aread(self) -> bytes:
         return b"".join(self._chunks)
@@ -304,6 +520,12 @@ class _FakeStreamClient:
     def __init__(self, response: _StreamGetResponse) -> None:
         self._response = response
         self.calls: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> "_FakeStreamClient":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
 
     def stream(self, method: str, url: str, **kwargs: Any) -> _StreamGetResponse:
         self.calls.append({"method": method, "url": url, **kwargs})
@@ -315,9 +537,27 @@ class _SequenceStreamClient:
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
+    async def __aenter__(self) -> "_SequenceStreamClient":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
     def stream(self, method: str, url: str, **kwargs: Any) -> _StreamGetResponse:
         self.calls.append({"method": method, "url": url, **kwargs})
         return self._responses.pop(0)
+
+
+def _patch_pinned_client(
+    app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    client: Any,
+) -> None:
+    monkeypatch.setattr(
+        app,
+        "_new_pinned_image_download_client",
+        lambda _target: client,
+    )
 
 
 def test_download_image_url_rejects_via_content_length(monkeypatch) -> None:
@@ -330,6 +570,7 @@ def test_download_image_url_rejects_via_content_length(monkeypatch) -> None:
         chunks=[b""],
     )
     client = _FakeStreamClient(resp)
+    _patch_pinned_client(app, monkeypatch, client)
 
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
@@ -354,6 +595,7 @@ def test_download_image_url_aborts_when_streaming_exceeds_limit(monkeypatch) -> 
         chunks=[b"A" * 8, b"B" * 8, b"C" * 8],  # 累计 24 > 16
     )
     client = _FakeStreamClient(resp)
+    _patch_pinned_client(app, monkeypatch, client)
 
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
@@ -377,6 +619,7 @@ def test_download_image_url_succeeds_under_limit(monkeypatch) -> None:
         chunks=[payload[:32], payload[32:]],
     )
     client = _FakeStreamClient(resp)
+    _patch_pinned_client(app, monkeypatch, client)
 
     candidate = asyncio.run(
         app.download_image_url(
@@ -413,7 +656,7 @@ def test_download_image_url_rejects_private_network_target() -> None:
     assert not client.calls
 
 
-def test_download_image_url_rejects_redirect_to_private_network() -> None:
+def test_download_image_url_rejects_redirect_to_private_network(monkeypatch) -> None:
     app = load_app_module()
     client = _SequenceStreamClient(
         [
@@ -429,6 +672,7 @@ def test_download_image_url_rejects_redirect_to_private_network() -> None:
             ),
         ]
     )
+    _patch_pinned_client(app, monkeypatch, client)
 
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
@@ -447,19 +691,239 @@ def test_download_image_url_retries_on_http_error(monkeypatch) -> None:
     app = load_app_module()
 
     class _RaisingStreamClient:
+        async def __aenter__(self) -> "_RaisingStreamClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
         def stream(self, *_args: Any, **_kw: Any) -> Any:
             raise httpx.ConnectError("boom")
+
+    client = _RaisingStreamClient()
+    _patch_pinned_client(app, monkeypatch, client)
 
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
             app.download_image_url(
-                _RaisingStreamClient(),  # type: ignore[arg-type]
+                client,  # type: ignore[arg-type]
                 "https://93.184.216.34/err.png",
                 cache={},
             )
         )
     assert exc.value.retryable is True
     assert exc.value.error_class == app.ERROR_CLASS_NETWORK
+    assert exc.value.outcome_uncertain is True
+
+
+def test_download_image_url_before_post_is_not_outcome_uncertain(
+    monkeypatch,
+) -> None:
+    app = load_app_module()
+
+    class _RaisingStreamClient:
+        async def __aenter__(self) -> "_RaisingStreamClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def stream(self, *_args: Any, **_kw: Any) -> Any:
+            raise httpx.ConnectError("boom")
+
+    client = _RaisingStreamClient()
+    _patch_pinned_client(app, monkeypatch, client)
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.download_image_url(
+                client,  # type: ignore[arg-type]
+                "https://93.184.216.34/err.png",
+                cache={},
+                retry_requires_idempotency=False,
+            )
+        )
+
+    assert exc.value.retryable is True
+    assert exc.value.outcome_uncertain is False
+
+
+def test_download_image_url_dns_failure_is_uncertain_after_post(
+    monkeypatch,
+) -> None:
+    app = load_app_module()
+
+    async def failed_resolution(_url: str) -> None:
+        raise app.ImageDownloadResolutionError("image URL host cannot be resolved")
+
+    monkeypatch.setattr(
+        app,
+        "resolve_public_image_download_target",
+        failed_resolution,
+    )
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.download_image_url(
+                SimpleNamespace(),
+                "https://cdn.example/result.png",
+                cache={},
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_NETWORK
+    assert exc.value.retryable is True
+    assert exc.value.outcome_uncertain is True
+
+
+def test_download_image_url_caps_error_body(monkeypatch) -> None:
+    app = load_app_module()
+    response = _StreamGetResponse(
+        status_code=502,
+        headers={"content-type": "text/plain"},
+        chunks=[
+            b"A" * (32 * 1024),
+            b"B" * (32 * 1024),
+            b"C",
+            b"D" * (32 * 1024),
+        ],
+    )
+    client = _FakeStreamClient(response)
+    _patch_pinned_client(app, monkeypatch, client)
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.download_image_url(
+                client,  # type: ignore[arg-type]
+                "https://93.184.216.34/error.png",
+                cache={},
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_UPSTREAM_5XX
+    assert exc.value.upstream_body["truncated"] is True
+    assert exc.value.outcome_uncertain is True
+    assert response.yielded == 3
+    assert response.closed is True
+
+
+def test_download_image_url_pins_first_validated_resolution(monkeypatch) -> None:
+    app = load_app_module()
+    resolution_calls = 0
+    captured_targets: list[Any] = []
+
+    def fake_getaddrinfo(
+        _host: str,
+        port: int,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        nonlocal resolution_calls
+        resolution_calls += 1
+        ip = "93.184.216.34" if resolution_calls == 1 else "127.0.0.1"
+        return [(app.socket.AF_INET, app.socket.SOCK_STREAM, 6, "", (ip, port))]
+
+    response = _StreamGetResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},
+        chunks=[_png_bytes()],
+    )
+    client = _FakeStreamClient(response)
+
+    def fake_client_factory(target: Any) -> _FakeStreamClient:
+        captured_targets.append(target)
+        return client
+
+    monkeypatch.setattr(app.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(app, "_new_pinned_image_download_client", fake_client_factory)
+
+    candidate = asyncio.run(
+        app.download_image_url(
+            client,  # type: ignore[arg-type]
+            "https://rebind.example/image.png",
+            cache={},
+        )
+    )
+
+    assert candidate is not None
+    assert resolution_calls == 1
+    assert captured_targets[0].resolved_ips == ("93.184.216.34",)
+
+
+def test_pinned_image_transport_preserves_host_sni_and_validated_ip() -> None:
+    app = load_app_module()
+    target = app.PublicImageDownloadTarget(
+        "https://cdn.example/image.png",
+        ("93.184.216.34",),
+    )
+    response_bytes = (
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+    )
+
+    class ScriptedStream:
+        def __init__(self) -> None:
+            self.reads = 0
+            self.writes: list[bytes] = []
+            self.sni_hosts: list[str] = []
+
+        async def read(self, _max_bytes: int, timeout: float | None = None) -> bytes:
+            _ = timeout
+            self.reads += 1
+            return response_bytes if self.reads == 1 else b""
+
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            _ = timeout
+            self.writes.append(buffer)
+
+        async def aclose(self) -> None:
+            return None
+
+        async def start_tls(
+            self,
+            ssl_context: Any,
+            server_hostname: str | None = None,
+            timeout: float | None = None,
+        ) -> "ScriptedStream":
+            _ = ssl_context, timeout
+            self.sni_hosts.append(server_hostname or "")
+            return self
+
+        def get_extra_info(self, _info: str) -> Any:
+            return None
+
+    stream = ScriptedStream()
+
+    class ScriptedBackend:
+        def __init__(self) -> None:
+            self.connected_hosts: list[str] = []
+
+        async def connect_tcp(self, host: str, *_args: Any, **_kwargs: Any) -> Any:
+            self.connected_hosts.append(host)
+            return stream
+
+        async def connect_unix_socket(
+            self, *_args: Any, **_kwargs: Any
+        ) -> Any:  # pragma: no cover - defensive interface parity
+            raise AssertionError("unexpected unix socket")
+
+        async def sleep(self, _seconds: float) -> None:
+            return None
+
+    transport = app.pinned_async_http_transport(target)
+    network_backend = transport._pool._network_backend  # noqa: SLF001
+    scripted_backend = ScriptedBackend()
+    network_backend._backend = scripted_backend  # noqa: SLF001
+
+    async def run_request() -> httpx.Response:
+        async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
+            return await client.get(target.url)
+
+    response = asyncio.run(run_request())
+
+    assert response.content == b"OK"
+    assert scripted_backend.connected_hosts == ["93.184.216.34"]
+    assert stream.sni_hosts == ["cdn.example"]
+    assert b"host: cdn.example\r\n" in b"".join(stream.writes).lower()
 
 
 # --- 4) restart recovery ----------------------------------------------------
@@ -469,6 +933,7 @@ def test_fail_interrupted_running_jobs_requeues_when_auth_present(
     monkeypatch, tmp_path
 ) -> None:
     app = load_app_module()
+    monkeypatch.setattr(app, "UPSTREAM_IDEMPOTENCY_GUARANTEED", True)
 
     db_path = tmp_path / "image_jobs.sqlite3"
     monkeypatch.setattr(app, "DB_PATH", db_path)
@@ -556,21 +1021,21 @@ def test_image_job_create_is_idempotent_per_auth_and_key(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
 
-    class Req:
-        headers = {
-            "authorization": "Bearer sk-test",
-            "Idempotency-Key": "stable-job",
-        }
-
-        async def json(self) -> dict[str, object]:
-            return {
+    def request(authorization: str) -> _JsonRequest:
+        return _JsonRequest(
+            {
                 "endpoint": "/v1/images/generations",
                 "body": {"prompt": "cat"},
-            }
+            },
+            headers={
+                "authorization": authorization,
+                "Idempotency-Key": "stable-job",
+            },
+        )
 
     async def _run() -> tuple[dict[str, object], dict[str, object], int]:
-        first = await app.create_image_job(Req())
-        second = await app.create_image_job(Req())
+        first = await app.create_image_job(request("Bearer sk-test"))
+        second = await app.create_image_job(request("bEaReR   sk-test"))
         rows = await app.db_all("SELECT * FROM jobs", ())
         return first, second, len(rows)
 
@@ -597,19 +1062,19 @@ def test_image_job_payload_idempotency_key_is_persisted_and_deduped(
 
     monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
 
-    class Req:
-        headers = {"authorization": "Bearer sk-test"}
-
-        async def json(self) -> dict[str, object]:
-            return {
+    def request() -> _JsonRequest:
+        return _JsonRequest(
+            {
                 "endpoint": "/v1/images/generations",
                 "idempotency_key": "payload-stable-job",
                 "body": {"prompt": "cat"},
-            }
+            },
+            headers={"authorization": "Bearer sk-test"},
+        )
 
     async def _run() -> tuple[dict[str, object], dict[str, object], int, str | None]:
-        first = await app.create_image_job(Req())
-        second = await app.create_image_job(Req())
+        first = await app.create_image_job(request())
+        second = await app.create_image_job(request())
         rows = await app.db_all("SELECT * FROM jobs", ())
         return first, second, len(rows), rows[0]["idempotency_key"]
 
@@ -632,20 +1097,20 @@ def test_idempotent_duplicate_reschedules_existing_queued_job(
     monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
     app.init_storage_sync()
 
-    class Req:
-        headers = {
-            "authorization": "Bearer sk-test",
-            "Idempotency-Key": "stable-job",
-        }
-
-        async def json(self) -> dict[str, object]:
-            return {
+    def request() -> _JsonRequest:
+        return _JsonRequest(
+            {
                 "endpoint": "/v1/images/generations",
                 "body": {"prompt": "cat"},
-            }
+            },
+            headers={
+                "authorization": "Bearer sk-test",
+                "Idempotency-Key": "stable-job",
+            },
+        )
 
     async def _run() -> tuple[dict[str, object], int, bool]:
-        raw_payload = await Req().json()
+        raw_payload = await request().json()
         payload = app.validate_payload(raw_payload)
         await app.insert_job(
             "job-existing",
@@ -655,7 +1120,7 @@ def test_idempotent_duplicate_reschedules_existing_queued_job(
             payload_hash=app.request_hash(payload),
         )
 
-        response = await app.create_image_job(Req())
+        response = await app.create_image_job(request())
         rows = await app.db_all("SELECT * FROM jobs", ())
         return response, len(rows), "job-existing" in app._queued_ids
 
@@ -683,24 +1148,21 @@ def test_image_job_idempotency_key_conflict_rejects_different_payload(
 
     monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
 
-    class Req:
-        headers = {
-            "authorization": "Bearer sk-test",
-            "Idempotency-Key": "stable-job",
-        }
-
-        def __init__(self, prompt: str) -> None:
-            self.prompt = prompt
-
-        async def json(self) -> dict[str, object]:
-            return {
+    def request(prompt: str) -> _JsonRequest:
+        return _JsonRequest(
+            {
                 "endpoint": "/v1/images/generations",
-                "body": {"prompt": self.prompt},
-            }
+                "body": {"prompt": prompt},
+            },
+            headers={
+                "authorization": "Bearer sk-test",
+                "Idempotency-Key": "stable-job",
+            },
+        )
 
     async def _run() -> None:
-        await app.create_image_job(Req("cat"))
-        await app.create_image_job(Req("dog"))
+        await app.create_image_job(request("cat"))
+        await app.create_image_job(request("dog"))
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(_run())
@@ -737,6 +1199,29 @@ def test_image_metadata_rejects_images_above_pixel_limit(monkeypatch) -> None:
         app.image_metadata(_png_bytes((2, 2)), "image/png")
 
     assert exc.value.error_class == app.ERROR_CLASS_IMAGE_SAVE
+
+
+def test_save_images_rejects_signature_only_fake_before_writing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"not-a-real-png"
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.save_images(
+                "job-fake-image",
+                "2026-07-11T00:00:00+00:00",
+                1,
+                [app.ImageCandidate(fake_png, "image/png")],
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_IMAGE_SAVE
+    assert "Pillow" in exc.value.error
+    assert not (tmp_path / "data" / "images").exists()
 
 
 def test_pillow_decompression_limit_tracks_config(monkeypatch) -> None:

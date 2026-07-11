@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import inspect
 import ipaddress
-import math
 import logging
-from typing import Literal
+import math
+from typing import Awaitable, Literal, TypeVar
 
 from fastapi import HTTPException, Request, status
 from redis.asyncio import Redis
@@ -22,7 +23,14 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
+_T = TypeVar("_T")
 _DEV_ENVS = {"dev", "development", "local", "test"}
+
+
+async def _resolve_redis_result(value: Awaitable[_T] | _T) -> _T:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _is_dev_env() -> bool:
@@ -153,15 +161,21 @@ class RateLimiter:
 
         now_ms = int(time.time() * 1000)
         try:
-            res = await redis.eval(
-                _LUA,
-                1,
-                key,
-                str(self.capacity),
-                str(self.refill),
-                str(now_ms),
-                str(cost),
-                str(self.initial_tokens if self.initial_tokens is not None else cost),
+            res = await _resolve_redis_result(
+                redis.eval(
+                    _LUA,
+                    1,
+                    key,
+                    str(self.capacity),
+                    str(self.refill),
+                    str(now_ms),
+                    str(cost),
+                    str(
+                        self.initial_tokens
+                        if self.initial_tokens is not None
+                        else cost
+                    ),
+                )
             )
         except Exception as exc:
             # If a non-always-on limiter is disabled in local/dev, we return

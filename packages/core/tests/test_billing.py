@@ -188,6 +188,15 @@ def test_retry_billing_refs_use_retry_suffix_only_after_first_attempt():
     assert billing.retry_billing_ref_id("task-1", 2) == "task-1:retry:2"
 
 
+def test_generation_billing_ref_id_reads_persisted_retry_count():
+    generation = SimpleNamespace(id="gen-1", billing_retry_count="2")
+    invalid = SimpleNamespace(id="gen-2", billing_retry_count="invalid")
+
+    assert billing.generation_billing_retry_count(generation) == 2
+    assert billing.generation_billing_ref_id(generation) == "gen-1:retry:2"
+    assert billing.generation_billing_ref_id(invalid) == "gen-2"
+
+
 def test_completion_billing_ref_id_reads_retry_count_from_upstream_request():
     completion = SimpleNamespace(
         id="comp-1",
@@ -416,6 +425,45 @@ async def test_billing_cache_rate_limits_read_durable_window_ledger(
 
 
 @pytest.mark.asyncio
+async def test_billing_window_ledger_scopes_user_credential_and_ref_type():
+    statements: list[str] = []
+    earliest = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
+
+    class Result:
+        def one(self) -> tuple[int, datetime]:
+            return 75, earliest
+
+    class Db:
+        async def execute(self, stmt: Any) -> Result:
+            statements.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            return Result()
+
+    service = BillingCacheService(redis=None)
+    out = await service.ledger_window_usage(
+        Db(),  # type: ignore[arg-type]
+        "cred-1",
+        "5h",
+        limit_micro=100,
+        now=datetime(2026, 7, 11, 12, tzinfo=timezone.utc),
+        user_id="user-1",
+    )
+
+    assert out.used_micro == 75
+    assert out.limit_micro == 100
+    assert out.resets_at == earliest.replace(hour=15)
+    statement = statements[0]
+    assert "JOIN wallet_transactions" in statement
+    assert "JOIN user_api_credentials" in statement
+    assert "billing_window_usage_events.user_id = 'user-1'" in statement
+    assert "wallet_transactions.ref_type = 'completion'" in statement
+    assert (
+        "wallet_transactions.kind IN ('charge', 'charge_completion', 'settle')"
+        in statement
+    )
+    assert "billing_window_usage_events.created_at <=" in statement
+
+
+@pytest.mark.asyncio
 async def test_billing_cache_window_usage_accepts_bytes_hash_keys():
     started = int(datetime(2026, 5, 15, tzinfo=timezone.utc).timestamp())
 
@@ -526,6 +574,88 @@ async def test_get_wallet_lock_refreshes_existing_identity_map():
 
     assert wallet is not None
     assert session.statements[0].get_execution_options()["populate_existing"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    ["hold", "settle", "release", "charge", "adjust", "topup_redeem"],
+)
+async def test_wallet_mutations_fail_closed_when_wallet_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    async def no_existing_tx(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def missing_wallet(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(billing, "_existing_tx", no_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", missing_wallet)
+
+    with pytest.raises(
+        billing.BillingError,
+        match="wallet could not be initialized",
+    ) as exc:
+        match operation:
+            case "hold":
+                await billing.hold(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    1,
+                    ref_type="generation",
+                    ref_id="gen-1",
+                    idempotency_key="hold:gen-1",
+                )
+            case "settle":
+                await billing.settle(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    ref_type="generation",
+                    ref_id="gen-1",
+                    actual_micro=1,
+                    idempotency_key="settle:gen-1",
+                )
+            case "release":
+                await billing.release(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    ref_type="generation",
+                    ref_id="gen-1",
+                    idempotency_key="release:gen-1",
+                )
+            case "charge":
+                await billing.charge(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    1,
+                    ref_type="generation",
+                    ref_id="gen-1",
+                    idempotency_key="charge:gen-1",
+                )
+            case "adjust":
+                await billing.adjust(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    1,
+                    admin_id="admin-1",
+                    reason="test",
+                    idempotency_key="adjust:user-1",
+                )
+            case "topup_redeem":
+                await billing.topup_redeem(
+                    object(),  # type: ignore[arg-type]
+                    "user-1",
+                    1,
+                    usage_id="usage-1",
+                    code_id="code-1",
+                )
+            case _:  # pragma: no cover - parametrization is exhaustive
+                raise RuntimeError(f"unsupported operation: {operation}")
+
+    assert exc.value.code == "WALLET_UNAVAILABLE"
+    assert exc.value.status_code == 500
 
 
 @pytest.mark.asyncio

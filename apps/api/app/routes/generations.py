@@ -40,7 +40,6 @@ from lumen_core.providers import parse_provider_bool
 
 from ..db import get_db
 from ..deps import CurrentUser
-from ..config import settings
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 
 
@@ -127,7 +126,8 @@ def _feed_filter_signature(
 ) -> str:
     payload = {
         "user_id": user_id,
-        "runtime": settings.lumen_runtime.strip().lower(),
+        # Keep the retired runtime field stable so existing v3 cursors remain valid.
+        "runtime": "docker",
         "ratio": ratio or "",
         "has_ref": bool(has_ref),
         "fast": bool(fast),
@@ -248,36 +248,36 @@ def _apply_filters(
         Conversation.user_id == user_id,
         Conversation.deleted_at.is_(None),
         Conversation.archived.is_(False),
+        select(Image.id)
+        .where(
+            Image.owner_generation_id == Generation.id,
+            Image.user_id == user_id,
+            Image.deleted_at.is_(None),
+        )
+        .exists(),
     )
     if visible_after is not None:
         stmt = stmt.where(Generation.created_at >= visible_after)
-    if settings.lumen_runtime.strip().lower() != "desktop":
-        stmt = stmt.where(
-            Generation.upstream_request["workflow_run_id"].astext.is_(None)
-        )
+    stmt = stmt.where(Generation.upstream_request["workflow_run_id"].astext.is_(None))
 
     if ratio:
         stmt = stmt.where(Generation.aspect_ratio == ratio)
 
     if has_ref:
         # 有参考图：primary_input_image_id 非空 或 input_image_ids 非空数组
-        if settings.lumen_runtime.strip().lower() == "desktop":
-            stmt = stmt.where(Generation.primary_input_image_id.is_not(None))
-        else:
-            stmt = stmt.where(
-                or_(
-                    Generation.primary_input_image_id.is_not(None),
-                    func.cardinality(Generation.input_image_ids) > 0,
-                )
+        stmt = stmt.where(
+            or_(
+                Generation.primary_input_image_id.is_not(None),
+                func.cardinality(Generation.input_image_ids) > 0,
             )
+        )
 
     if fast:
-        if settings.lumen_runtime.strip().lower() != "desktop":
-            stmt = stmt.where(
-                func.lower(Generation.upstream_request["fast"].astext).in_(
-                    ("true", "1")
-                )
+        stmt = stmt.where(
+            func.lower(Generation.upstream_request["fast"].astext).in_(
+                ("true", "1")
             )
+        )
 
     if q:
         # 简易 prompt LIKE 匹配；大小写不敏感。
@@ -459,21 +459,21 @@ async def list_generation_feed(
     # ---- 组装 items ----
     items: list[GenerationFeedItem] = []
     for g in gens:
-        img = image_by_gen.get(g.id)
-        if not img:
+        feed_image = image_by_gen.get(g.id)
+        if feed_image is None:
             # 数据不一致：succeeded 但无 image。跳过，保证前端 item.image 必存在。
             continue
 
-        variant_kinds = kinds_by_image.get(img.id, set())
+        variant_kinds = kinds_by_image.get(feed_image.id, set())
         preview_url = (
-            f"/api/images/{img.id}/variants/preview1024"
+            f"/api/images/{feed_image.id}/variants/preview1024"
             if "preview1024" in variant_kinds
             else None
         )
         if "thumb256" in variant_kinds:
-            thumb_url = f"/api/images/{img.id}/variants/thumb256"
+            thumb_url = f"/api/images/{feed_image.id}/variants/thumb256"
         else:
-            thumb_url = preview_url or f"/api/images/{img.id}/binary"
+            thumb_url = preview_url or f"/api/images/{feed_image.id}/binary"
 
         upstream_request = (
             g.upstream_request if isinstance(g.upstream_request, dict) else {}
@@ -499,16 +499,16 @@ async def list_generation_feed(
                     if isinstance(upstream_request.get("output_format"), str)
                     else None
                 ),
-                size_actual=f"{img.width}x{img.height}",
+                size_actual=f"{feed_image.width}x{feed_image.height}",
                 image=GenerationImageOut(
-                    id=img.id,
-                    url=f"/api/images/{img.id}/binary",
-                    mime=img.mime,
-                    display_url=f"/api/images/{img.id}/variants/display2048",
+                    id=feed_image.id,
+                    url=f"/api/images/{feed_image.id}/binary",
+                    mime=feed_image.mime,
+                    display_url=f"/api/images/{feed_image.id}/variants/display2048",
                     preview_url=preview_url,
                     thumb_url=thumb_url,
-                    width=img.width,
-                    height=img.height,
+                    width=feed_image.width,
+                    height=feed_image.height,
                 ),
                 message_id=g.message_id,
                 conversation_id=conv_by_msg.get(g.message_id, ""),
@@ -516,7 +516,7 @@ async def list_generation_feed(
         )
 
     next_cursor: str | None = None
-    if has_more and items:
+    if has_more:
         last = gens[-1]
         next_cursor = _encode_cursor(
             last.created_at,

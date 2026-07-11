@@ -279,7 +279,7 @@ async def _check_window(
                 raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else None
             )
             used = int(used_raw or 0)
-            if oldest_raw in (None, "", b""):
+            if oldest_raw is None or oldest_raw == "" or oldest_raw == b"":
                 return used, None
             return used, float(oldest_raw)
         except Exception:  # noqa: BLE001

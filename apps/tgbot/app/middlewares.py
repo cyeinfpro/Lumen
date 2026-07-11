@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Awaitable, Callable
@@ -46,7 +47,7 @@ class AccessGate(BaseMiddleware):
     ) -> None:
         self._api = api
         self._refresh_interval_sec = max(1.0, refresh_interval_sec)
-        self._refresh_lock = None
+        self._refresh_lock: asyncio.Lock | None = None
         self._last_refresh = 0.0
         self._bot_enabled = True
         self._allowed_user_ids = _parse_allowed_ids()
@@ -56,8 +57,6 @@ class AccessGate(BaseMiddleware):
             self._allowed_user_ids = _parse_allowed_ids()
             self._last_refresh = time.monotonic()
             return
-
-        import asyncio
 
         if self._refresh_lock is None:
             self._refresh_lock = asyncio.Lock()
@@ -130,10 +129,13 @@ class AccessGate(BaseMiddleware):
         # user_id 白名单
         # 注意：callback_query 必须用 cb.from_user（真正点按钮的人），不要用
         # cb.message.from_user —— 后者是消息发送者，对 bot 自己发的消息来说就是 bot 自己。
-        if cb is not None:
-            from_user = cb.from_user
-        else:
-            from_user = msg.from_user if msg is not None else None
+        from_user = (
+            cb.from_user
+            if cb is not None
+            else msg.from_user
+            if msg is not None
+            else None
+        )
         if from_user is None or chat.id != from_user.id:
             logger.info(
                 "rejecting chat/from_user mismatch: chat_id=%s from_user_id=%s",

@@ -8,9 +8,11 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql import operators, visitors
 
 from app.routes import messages
+from lumen_core.byok_retention import ByokRetentionPolicy
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
@@ -224,6 +226,45 @@ def _message(
     )
 
 
+def _silent_body(**overrides: Any) -> messages.SilentGenerationIn:
+    values: dict[str, Any] = {
+        "idempotency_key": "same-key",
+        "parent_message_id": "parent-1",
+        "intent": "text_to_image",
+        "prompt": "render a clean product image",
+        "attachment_image_ids": [],
+        "image_params": ImageParamsIn(
+            aspect_ratio="16:9",
+            size_mode="fixed",
+            fixed_size="1792x1024",
+            quality="2k",
+            count=1,
+            fast=True,
+            render_quality="high",
+            background="auto",
+            moderation="low",
+        ),
+    }
+    values.update(overrides)
+    return messages.SilentGenerationIn(**values)
+
+
+def _silent_generation_row(
+    generation_id: str,
+    *,
+    message_id: str = "assistant-1",
+    request_hash: str | None = None,
+) -> SimpleNamespace:
+    upstream_request: dict[str, Any] = {}
+    if request_hash is not None:
+        upstream_request["request_hash"] = request_hash
+    return SimpleNamespace(
+        id=generation_id,
+        message_id=message_id,
+        upstream_request=upstream_request,
+    )
+
+
 def _credential() -> SimpleNamespace:
     return SimpleNamespace(id="cred-1", supplier_id="supplier-1")
 
@@ -308,6 +349,30 @@ def test_image_upstream_request_records_billing_tier_from_quality() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("12", 12),
+        ("0", 1),
+        ("100", 64),
+        (object(), 8),
+    ],
+)
+async def test_chat_max_tool_invocations_validates_dynamic_setting(
+    raw: object,
+    expected: int,
+) -> None:
+    db = _Db([_Result(raw)])
+
+    assert (
+        await messages._chat_max_tool_invocations(  # noqa: SLF001
+            db  # type: ignore[arg-type]
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -334,6 +399,33 @@ async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
 
     assert calls["wallet"] == {"user_id": "user-1", "lock": True}
     assert calls["estimate"]["model"] == "gpt-task"
+
+
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_rejects_missing_initialized_wallet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> None:
+        assert lock is True
+        return None
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            user_id="user-1",
+            user_email="u@example.com",
+            account_mode="wallet",
+            model="gpt-task",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 503
+    assert excinfo.value.detail["error"]["code"] == "WALLET_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -729,8 +821,7 @@ async def test_create_assistant_task_splits_image_count_into_wallet_holds(
     assert [call["meta"]["batch_task_index"] for call in hold_calls] == [1, 2, 3]
     assert [gen.upstream_request["n"] for gen in gens] == [1, 1, 1]
     assert all(
-        gen.upstream_request["billing_rate_multiplier_x10000"] == 15_000
-        for gen in gens
+        gen.upstream_request["billing_rate_multiplier_x10000"] == 15_000 for gen in gens
     )
     assert all(
         gen.upstream_request["billing_pricing_snapshot"]["unit_price_micro"] == 7_000
@@ -832,6 +923,70 @@ def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
         )
 
 
+def test_silent_generation_request_hash_is_stable_and_covers_request_fields() -> None:
+    body = _silent_body(
+        attachment_image_ids=["image-a", "image-b"],
+        image_params=ImageParamsIn(
+            aspect_ratio="16:9",
+            size_mode="fixed",
+            fixed_size="1792x1024",
+            quality="2k",
+            count=2,
+            fast=True,
+            render_quality="high",
+            output_format="jpeg",
+            output_compression=90,
+            background="auto",
+            moderation="low",
+        ),
+    )
+    request_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
+
+    assert len(request_hash) == 64
+    assert request_hash == messages._silent_generation_request_hash(  # noqa: SLF001
+        _silent_body(
+            attachment_image_ids=["image-a", "image-b"],
+            image_params=body.image_params.model_dump(mode="json"),
+        )
+    )
+
+    variants = [
+        body.model_copy(update={"parent_message_id": "parent-2"}),
+        body.model_copy(update={"intent": "image_to_image"}),
+        body.model_copy(update={"prompt": "render a different image"}),
+        body.model_copy(update={"attachment_image_ids": ["image-b", "image-a"]}),
+        body.model_copy(
+            update={"image_params": body.image_params.model_copy(update={"count": 3})}
+        ),
+    ]
+    assert all(
+        messages._silent_generation_request_hash(variant)  # noqa: SLF001
+        != request_hash
+        for variant in variants
+    )
+
+
+def test_silent_generation_request_hash_uses_normalized_image_params() -> None:
+    normalized_by_schema = _silent_body(
+        image_params=ImageParamsIn(
+            background="transparent",
+            output_format="jpeg",
+            output_compression=90,
+        )
+    )
+    explicit_normalized = _silent_body(
+        image_params=ImageParamsIn(
+            background="transparent",
+            output_format="png",
+            output_compression=None,
+        )
+    )
+
+    assert messages._silent_generation_request_hash(  # noqa: SLF001
+        normalized_by_schema
+    ) == messages._silent_generation_request_hash(explicit_normalized)  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
     db = _Db([_Result(None), _Result(None)])
@@ -866,6 +1021,435 @@ async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
     )
     assert "messages.deleted_at IS NULL" in str(db.statements[0])
     assert "messages.deleted_at IS NULL" in str(db.statements[1])
+
+
+@pytest.mark.asyncio
+async def test_lookup_idempotent_post_never_substitutes_latest_user_message() -> None:
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="deleted-parent",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    completion = SimpleNamespace(id="completion-1", message_id=assistant.id)
+    db = _Db(
+        [
+            _Result(completion),
+            _Result(None),
+            _Result(assistant),
+            _Result(None),
+        ]
+    )
+
+    prior = await messages._lookup_idempotent_post(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "conv-1",
+        "same-key",
+    )
+
+    assert prior is None
+    assert len(db.statements) == 4
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_lookup_returns_original_task_set() -> None:
+    body = _silent_body()
+    request_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="parent-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    parent = _message(id="parent-1", role=messages.Role.USER.value)
+    generations = [
+        _silent_generation_row("generation-1", request_hash=request_hash),
+        _silent_generation_row("generation-2", request_hash=request_hash),
+    ]
+    db = _Db(
+        [
+            _Result(generations[0]),
+            _Result(assistant),
+            _Result(parent),
+            _Result(all_values=generations),
+        ]
+    )
+
+    prior = await messages._lookup_silent_generation(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user=_wallet_user(),  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        idempotency_key="same-key",
+        parent_message_id=body.parent_message_id,
+        request_hash=request_hash,
+        retention_policy=None,
+    )
+
+    assert prior is not None
+    assert prior.assistant_message.id == assistant.id
+    assert prior.generation_ids == ["generation-1", "generation-2"]
+    assert "generations.created_at ASC" in str(db.statements[3])
+    assert "generations.id ASC" in str(db.statements[3])
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_replay_rejects_request_hash_mismatch() -> None:
+    original = _silent_body()
+    original_hash = messages._silent_generation_request_hash(  # noqa: SLF001
+        original
+    )
+    changed = original.model_copy(update={"prompt": "changed prompt"})
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="parent-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    generation = _silent_generation_row(
+        "generation-1",
+        request_hash=original_hash,
+    )
+    db = _Db(
+        [
+            _Result(generation),
+            _Result(assistant),
+            _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+            _Result(all_values=[generation]),
+        ]
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._lookup_silent_generation(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            user=_wallet_user(),  # type: ignore[arg-type]
+            user_id="user-1",
+            conv_id="conv-1",
+            idempotency_key="same-key",
+            parent_message_id=changed.parent_message_id,
+            request_hash=messages._silent_generation_request_hash(  # noqa: SLF001
+                changed
+            ),
+            retention_policy=None,
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_replay_applies_byok_retention_to_assistant_and_parent() -> (
+    None
+):
+    body = _silent_body()
+    request_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="parent-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    generation = _silent_generation_row(
+        "generation-1",
+        request_hash=request_hash,
+    )
+    db = _Db(
+        [
+            _Result(generation),
+            _Result(assistant),
+            _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+            _Result(all_values=[generation]),
+        ]
+    )
+
+    prior = await messages._lookup_silent_generation(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user=_user(),  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        idempotency_key="same-key",
+        parent_message_id=body.parent_message_id,
+        request_hash=request_hash,
+        retention_policy=ByokRetentionPolicy(hide_enabled=True, hide_days=3),
+    )
+
+    assert prior is not None
+    assert "messages.created_at >=" in str(db.statements[1])
+    assert "messages.created_at >=" in str(db.statements[2])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_message", ["assistant", "parent"])
+async def test_silent_generation_replay_hides_expired_byok_messages(
+    hidden_message: str,
+) -> None:
+    body = _silent_body()
+    request_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="parent-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    generation = _silent_generation_row(
+        "generation-1",
+        request_hash=request_hash,
+    )
+    results = [_Result(generation)]
+    if hidden_message == "assistant":
+        results.append(_Result(None))
+    else:
+        results.extend([_Result(assistant), _Result(None)])
+    db = _Db(results)
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._lookup_silent_generation(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            user=_user(),  # type: ignore[arg-type]
+            user_id="user-1",
+            conv_id="conv-1",
+            idempotency_key="same-key",
+            parent_message_id=body.parent_message_id,
+            request_hash=request_hash,
+            retention_policy=ByokRetentionPolicy(hide_enabled=True, hide_days=3),
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 404
+    assert "messages.created_at >=" in str(db.statements[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_parent", "expected_status"),
+    [("parent-1", None), ("new-parent", 409)],
+)
+async def test_silent_generation_legacy_replay_requires_exact_original_parent(
+    requested_parent: str,
+    expected_status: int | None,
+) -> None:
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="parent-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    generation = _silent_generation_row("generation-1")
+    db = _Db(
+        [
+            _Result(generation),
+            _Result(assistant),
+            _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+            _Result(all_values=[generation]),
+        ]
+    )
+
+    if expected_status is None:
+        prior = await messages._lookup_silent_generation(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            user=_wallet_user(),  # type: ignore[arg-type]
+            user_id="user-1",
+            conv_id="conv-1",
+            idempotency_key="same-key",
+            parent_message_id=requested_parent,
+            request_hash="new-request-hash",
+            retention_policy=None,
+        )
+        assert prior is not None
+    else:
+        with pytest.raises(Exception) as excinfo:
+            await messages._lookup_silent_generation(  # noqa: SLF001
+                db,  # type: ignore[arg-type]
+                user=_wallet_user(),  # type: ignore[arg-type]
+                user_id="user-1",
+                conv_id="conv-1",
+                idempotency_key="same-key",
+                parent_message_id=requested_parent,
+                request_hash="new-request-hash",
+                retention_policy=None,
+            )
+        assert getattr(excinfo.value, "status_code", None) == expected_status
+
+    assert _statement_has_eq_filter(
+        db.statements[2],
+        messages.Message.id,
+        "parent-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_rechecks_after_postgres_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior = messages.SilentGenerationOut(
+        assistant_message=messages.MessageOut.model_validate(
+            _message(
+                id="assistant-1",
+                role=messages.Role.ASSISTANT.value,
+                parent_message_id="parent-1",
+                status=messages.MessageStatus.PENDING.value,
+            )
+        ),
+        generation_ids=["generation-1"],
+    )
+    lookup_results = [None, prior]
+    lookup_calls: list[dict[str, Any]] = []
+
+    async def lookup(*_args: Any, **kwargs: Any) -> Any:
+        lookup_calls.append(kwargs)
+        return lookup_results.pop(0)
+
+    async def lock(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def should_not_create(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("replay must not create a new task")
+
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_lookup_silent_generation", lookup)
+    monkeypatch.setattr(messages, "_lock_idempotency_key", lock)
+    monkeypatch.setattr(messages, "_create_assistant_task", should_not_create)
+    db = _Db([_Result(_conv())])
+
+    out = await messages.create_silent_generation(
+        "conv-1",
+        _silent_body(),
+        _wallet_user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == prior
+    assert len(lookup_calls) == 2
+    assert lookup_calls[0]["request_hash"] == lookup_calls[1]["request_hash"]
+    assert db.added == []
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_unique_conflict_replays_concurrent_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RaceDb(_Db):
+        async def commit(self) -> None:
+            raise IntegrityError("insert generation", {}, Exception("duplicate"))
+
+    prior = messages.SilentGenerationOut(
+        assistant_message=messages.MessageOut.model_validate(
+            _message(
+                id="winner-assistant",
+                role=messages.Role.ASSISTANT.value,
+                parent_message_id="parent-1",
+                status=messages.MessageStatus.PENDING.value,
+            )
+        ),
+        generation_ids=["winner-generation"],
+    )
+    lookup_results = [None, prior]
+    captured_metadata: list[dict[str, Any]] = []
+
+    async def lookup(*_args: Any, **_kwargs: Any) -> Any:
+        return lookup_results.pop(0)
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def create_task(*_args: Any, **kwargs: Any) -> messages.AssistantTaskResult:
+        captured_metadata.append(kwargs["request_metadata"])
+        return messages.AssistantTaskResult(
+            assistant_msg=_message(
+                id="loser-assistant",
+                role=messages.Role.ASSISTANT.value,
+                parent_message_id="parent-1",
+                status=messages.MessageStatus.PENDING.value,
+            ),  # type: ignore[arg-type]
+            completion_id=None,
+            generation_ids=["loser-generation"],
+            outbox_payloads=[],
+            outbox_rows=[],
+        )
+
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_spec", lambda _key: None)
+    monkeypatch.setattr(messages, "_lookup_silent_generation", lookup)
+    monkeypatch.setattr(messages, "_lock_idempotency_key", no_lock)
+    monkeypatch.setattr(messages, "_create_assistant_task", create_task)
+    db = _RaceDb(
+        [
+            _Result(_conv()),
+            _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+        ]
+    )
+    body = _silent_body()
+
+    out = await messages.create_silent_generation(
+        "conv-1",
+        body,
+        _wallet_user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == prior
+    assert db.rolled_back is True
+    assert captured_metadata == [
+        {
+            "request_hash": messages._silent_generation_request_hash(  # noqa: SLF001
+                body
+            )
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_silent_generation_creation_persists_request_hash_on_every_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_lookup(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def billing_disabled(_db: Any) -> bool:
+        return False
+
+    async def no_publish(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_spec", lambda _key: None)
+    monkeypatch.setattr(messages, "_lookup_silent_generation", no_lookup)
+    monkeypatch.setattr(messages, "_lock_idempotency_key", no_lock)
+    monkeypatch.setattr(messages, "_billing_enabled", billing_disabled)
+    monkeypatch.setattr(messages, "_publish_message_appended", no_publish)
+    monkeypatch.setattr(messages, "_publish_assistant_task", no_publish)
+    db = _Db(
+        [
+            _Result(_conv()),
+            _Result(_message(id="parent-1", role=messages.Role.USER.value)),
+        ]
+    )
+    body = _silent_body(
+        image_params=_silent_body().image_params.model_copy(update={"count": 2})
+    )
+
+    out = await messages.create_silent_generation(
+        "conv-1",
+        body,
+        _wallet_user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    expected_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
+    generations = [
+        item for item in db.added if isinstance(item, messages.Generation)
+    ]
+    assert out.generation_ids == [generation.id for generation in generations]
+    assert len(generations) == 2
+    assert all(
+        generation.upstream_request["request_hash"] == expected_hash
+        for generation in generations
+    )
+    assert db.committed is True
 
 
 def test_idempotency_advisory_lock_key_is_conversation_scoped() -> None:
@@ -2540,7 +3124,7 @@ async def test_get_message_query_is_scoped_to_conversation_owner() -> None:
 
 @pytest.mark.asyncio
 async def test_silent_generation_parent_query_filters_deleted_messages() -> None:
-    db = _Db([_Result(_conv()), _Result(None)])
+    db = _Db([_Result(_conv()), _Result(None), _Result(None)])
 
     with pytest.raises(Exception) as excinfo:
         await messages.create_silent_generation(
@@ -2554,7 +3138,7 @@ async def test_silent_generation_parent_query_filters_deleted_messages() -> None
         )
 
     assert getattr(excinfo.value, "status_code", None) == 404
-    rendered = str(db.statements[1])
+    rendered = str(db.statements[2])
     assert "messages.deleted_at IS NULL" in rendered
 
 

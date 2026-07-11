@@ -27,8 +27,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
@@ -322,6 +321,7 @@ class GenerateIn(BaseModel):
 
 
 class GenerateOut(BaseModel):
+    user_id: str
     conversation_id: str
     message_id: str
     generation_ids: list[str]
@@ -787,7 +787,9 @@ async def create_generation(
         render_quality=body.render_quality,
         output_format=body.output_format,
     )
-    intent = "image_to_image" if body.attachment_image_ids else "text_to_image"
+    intent: Literal["image_to_image", "text_to_image"] = (
+        "image_to_image" if body.attachment_image_ids else "text_to_image"
+    )
     msg_in = PostMessageIn(
         idempotency_key=body.idempotency_key or uuid.uuid4().hex,
         text=body.prompt,
@@ -797,6 +799,7 @@ async def create_generation(
     )
     result = await submit_user_message(conv.id, msg_in, user, db)
     return GenerateOut(
+        user_id=user.id,
         conversation_id=conv.id,
         message_id=result.assistant_message.id,
         generation_ids=result.generation_ids,
@@ -941,7 +944,7 @@ async def get_image_binary(
     image_id: str,
     user: BotUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     """Bot 流式取图。复用 images 路由的 storage 工具，但鉴权用 BotUser。"""
     from .images import _fs_path, _storage_streaming_response
 

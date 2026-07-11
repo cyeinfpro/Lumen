@@ -86,7 +86,7 @@ router_public = APIRouter(tags=["system"])
 _UPDATE_LOG_NAME = ".update.log"
 _UPDATE_RUNNING_MARKER = ".update.running"
 _UPDATE_TRIGGER_NAME = ".update.trigger"
-_UPDATE_RUNNER_ENV_NAME = ".update.env"
+_UPDATE_RUNNER_REQUEST_NAME = ".update.request.json"
 _UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
 _PID_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
@@ -130,6 +130,22 @@ class UpdateMarker:
     unit: str | None = None
 
 
+def _ensure_update_not_running(marker: UpdateMarker | None) -> None:
+    if marker is None:
+        return
+    if marker.unit:
+        raise _http(
+            "update_running",
+            f"Lumen update is already running ({marker.unit})",
+            409,
+        )
+    raise _http(
+        "update_running",
+        f"Lumen update is already running (pid {marker.pid})",
+        409,
+    )
+
+
 def _update_script() -> Path:
     return _discover_scripts_dir() / "update.sh"
 
@@ -151,8 +167,8 @@ def _update_trigger_path() -> Path:
     return Path(settings.backup_root).expanduser() / _UPDATE_TRIGGER_NAME
 
 
-def _update_runner_env_path() -> Path:
-    return Path(settings.backup_root).expanduser() / _UPDATE_RUNNER_ENV_NAME
+def _update_runner_request_path() -> Path:
+    return Path(settings.backup_root).expanduser() / _UPDATE_RUNNER_REQUEST_NAME
 
 
 def _lumen_root() -> Path:
@@ -237,45 +253,21 @@ def _runner_unit_available() -> bool:
     return _UPDATE_RUNNER_UNIT in result.stdout
 
 
-def _runner_env_lines(env: dict[str, str]) -> list[str]:
-    """Subset of env vars worth forwarding to the runner via EnvironmentFile."""
-    keys = (
-        "LUMEN_UPDATE_NONINTERACTIVE",
-        "LUMEN_UPDATE_GIT_PULL",
-        "LUMEN_UPDATE_BUILD",
-        "LUMEN_UPDATE_MODE",
-        "LUMEN_UPDATE_SYSTEMD_UNIT",
-        "LUMEN_UPDATE_CHANNEL",
-        "LUMEN_UPDATE_RESOLVED_TAG",
-        "LUMEN_UPDATE_IDEMPOTENCY_KEY",
-        "LUMEN_UPDATE_FORCE_REDEPLOY",
-        "LUMEN_IMAGE_TAG",
-        "LUMEN_UPDATE_PROXY_URL",
-        "LUMEN_UPDATE_ROOT",
-        "LUMEN_REPO_DIR",
-        "LUMEN_SOURCE_ROOT",
-        "LUMEN_HTTP_PROXY",
-        "LUMEN_VERSION",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "NO_PROXY",
-        "no_proxy",
-    )
-    lines: list[str] = []
-    for key in keys:
-        value = env.get(key)
-        if value is None:
-            continue
-        # systemd EnvironmentFile uses simple KEY=VALUE; values must not be
-        # quoted (systemd parses them literally including any quotes).
-        if "\n" in value or "\r" in value:
-            continue
-        lines.append(f"{key}={value}")
-    return lines
+def _runner_request_payload(env: dict[str, str], started_at: datetime) -> dict[str, object]:
+    """Build the narrow request consumed by the privileged host runner.
+
+    The backup directory is writable by lumen-api. It must therefore never be
+    used as a systemd EnvironmentFile or as a source of executable paths.
+    """
+    return {
+        "schema": 1,
+        "target_tag": env["LUMEN_UPDATE_RESOLVED_TAG"],
+        "channel": env["LUMEN_UPDATE_CHANNEL"],
+        "force_redeploy": env.get("LUMEN_UPDATE_FORCE_REDEPLOY") == "1",
+        "idempotency_key": env["LUMEN_UPDATE_IDEMPOTENCY_KEY"],
+        "proxy_url": env.get("LUMEN_UPDATE_PROXY_URL"),
+        "issued_at": started_at.isoformat(),
+    }
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -474,13 +466,6 @@ def _current_service_identity_properties() -> list[str]:
 
 def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
     path = _update_marker_path().with_name(f".update.{unit}.env")
-    prefixes = (
-        "LUMEN_UPDATE_",
-        "LUMEN_API_HEALTH_",
-        "LUMEN_WEB_HEALTH_",
-        "LUMEN_HEALTH_",
-        "LUMEN_ROLLBACK_",
-    )
     keys = {
         "PATH",
         "HOME",
@@ -488,9 +473,24 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
         "LOGNAME",
         "LANG",
         "LC_ALL",
-        "LUMEN_REPO_DIR",
-        "LUMEN_SOURCE_ROOT",
+        "LUMEN_UPDATE_NONINTERACTIVE",
+        "LUMEN_UPDATE_GIT_PULL",
+        "LUMEN_UPDATE_BUILD",
+        "LUMEN_UPDATE_MODE",
+        "LUMEN_UPDATE_SYSTEMD_UNIT",
+        "LUMEN_UPDATE_CHANNEL",
+        "LUMEN_UPDATE_RESOLVED_TAG",
+        "LUMEN_UPDATE_IDEMPOTENCY_KEY",
+        "LUMEN_UPDATE_FORCE_REDEPLOY",
+        "LUMEN_IMAGE_TAG",
+        "LUMEN_VERSION",
         "LUMEN_HTTP_PROXY",
+        "LUMEN_UPDATE_PROXY_URL",
+        "LUMEN_API_HEALTH_URL",
+        "LUMEN_WEB_HEALTH_URL",
+        "LUMEN_HEALTH_COMPOSE_ATTEMPTS",
+        "LUMEN_HEALTH_COMPOSE_INTERVAL",
+        "LUMEN_HEALTH_TIMEOUT_SECONDS",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -498,9 +498,6 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
         "https_proxy",
         "all_proxy",
     }
-    for key in env:
-        if key.startswith(prefixes):
-            keys.add(key)
 
     lines = []
     for key in sorted(keys):
@@ -740,7 +737,7 @@ def _start_update_via_path_unit(
 ) -> tuple[int, str] | None:
     """Trigger lumen-update-runner.service via the path-watched trigger file.
 
-    Writes ``.update.env`` (runner reads via EnvironmentFile) and ``.update.trigger``.
+    Writes a constrained JSON request and ``.update.trigger``.
     PID 1 — not lumen-api — launches the runner, so all of lumen-api's sandbox
     constraints (NoNewPrivileges, ProtectSystem=strict) and the polkit/sudo
     plumbing become irrelevant. Synchronously waits up to ~10s for the runner
@@ -753,20 +750,25 @@ def _start_update_via_path_unit(
         initial_log_size = log_path.stat().st_size
     except OSError:
         initial_log_size = 0
-    env_path = _update_runner_env_path()
+    request_path = _update_runner_request_path()
     trigger_path = _update_trigger_path()
     unit = _UPDATE_RUNNER_UNIT
 
     # 1) Marker first so concurrent triggers see the lock immediately.
     _write_marker(0, started_at.isoformat(), unit=unit)
 
-    # 2) Env file for the runner. Tmp+rename keeps systemd from racing with
-    #    a half-written file when PathChanged fires.
-    env_text = "\n".join(_runner_env_lines(env)) + "\n"
-    env_tmp = env_path.with_suffix(f"{env_path.suffix}.tmp")
-    env_tmp.write_text(env_text, encoding="utf-8")
-    _chmod_tolerate_eperm(env_tmp, 0o600)
-    env_tmp.replace(env_path)
+    # 2) Fixed-schema request for the root-owned runner. The runner rejects
+    # unknown fields and never accepts executable paths from this file.
+    request_text = json.dumps(
+        _runner_request_payload(env, started_at),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    request_tmp = request_path.with_suffix(f"{request_path.suffix}.tmp")
+    request_tmp.write_text(request_text + "\n", encoding="utf-8")
+    _chmod_tolerate_eperm(request_tmp, 0o600)
+    request_tmp.replace(request_path)
 
     # 3) Trigger file. Content is the ISO timestamp; PathChanged on the path
     #    unit fires on close-after-write and starts the runner unit.
@@ -795,7 +797,7 @@ def _start_update_via_path_unit(
             "the same backup directory mounted into lumen-api.\n"
         )
         log_fh.flush()
-        for path in (trigger_path, env_path, _update_marker_path()):
+        for path in (trigger_path, request_path, _update_marker_path()):
             try:
                 path.unlink()
             except OSError:
@@ -813,7 +815,7 @@ def _start_update_via_path_unit(
         f"\n[{unit}] path-unit trigger did not activate within 15s; falling through.\n"
     )
     log_fh.flush()
-    for path in (trigger_path, env_path, _update_marker_path()):
+    for path in (trigger_path, request_path, _update_marker_path()):
         try:
             path.unlink()
         except OSError:
@@ -1651,16 +1653,7 @@ async def trigger_update(
         raise _http("script_missing", f"missing {script}", 500)
     body = body or UpdateTriggerIn()
     marker = await asyncio.to_thread(_read_marker)
-    if marker is not None:
-        if marker.unit:
-            raise _http(
-                "update_running",
-                f"Lumen update is already running ({marker.unit})",
-                409,
-            )
-        raise _http(
-            "update_running", f"Lumen update is already running (pid {marker.pid})", 409
-        )
+    _ensure_update_not_running(marker)
     if await asyncio.to_thread(_maintenance_marker_busy):
         raise _http(
             "maintenance_busy",
@@ -1689,6 +1682,12 @@ async def trigger_update(
             proxy_url=proxy_url,
         )
         target_tag = check_out.resolved_image_tag
+    if target_tag == "latest":
+        raise _http(
+            "invalid_target_tag",
+            "mutable latest is not accepted; use a release channel or concrete tag",
+            422,
+        )
 
     confirmed_target_tag = (body.confirmed_target_tag or "").strip()
     if not body.confirm_update or confirmed_target_tag != target_tag:

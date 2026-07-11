@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -68,7 +69,7 @@ async def _embedding_provider_available(ctx: dict[str, Any] | None) -> bool:
         pool = ctx.get("provider_pool") if isinstance(ctx, dict) else None
         if pool is None:
             pool = await get_pool()
-        providers = await pool.select(purpose="embedding")
+        providers = await pool.peek(purpose="embedding")
         return bool(providers)
     except Exception:
         return False
@@ -238,7 +239,7 @@ def _log_llm_usage(provider_name: str, payload: dict[str, Any]) -> None:
 
 async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[float]:
     try:
-        from ..provider_pool import get_pool
+        from ..provider_pool import get_pool, text_provider_attempt
 
         pool = ctx.get("provider_pool") if isinstance(ctx, dict) else None
         if pool is None:
@@ -256,26 +257,37 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
         provider_name = str(getattr(provider, "name", "<unknown>"))
         provider_names.append(provider_name)
         try:
-            proxy_url = await resolve_provider_proxy_url(
-                getattr(provider, "proxy", None)
-            )
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(
-                    connect=5.0,
-                    read=_EMBEDDING_TIMEOUT_S,
-                    write=_EMBEDDING_TIMEOUT_S,
-                    pool=5.0,
-                ),
-                proxy=proxy_url,
-            ) as client:
-                resp = await client.post(
-                    _append_path(provider.base_url, "/embeddings"),
-                    json={"model": _EMBEDDING_MODEL, "input": content},
-                    headers={
-                        "authorization": f"Bearer {provider.api_key}",
-                        "content-type": "application/json",
-                    },
-                )
+            with text_provider_attempt(pool, provider) as provider_attempt:
+                try:
+                    proxy_url = await resolve_provider_proxy_url(
+                        getattr(provider, "proxy", None)
+                    )
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(
+                            connect=5.0,
+                            read=_EMBEDDING_TIMEOUT_S,
+                            write=_EMBEDDING_TIMEOUT_S,
+                            pool=5.0,
+                        ),
+                        proxy=proxy_url,
+                    ) as client:
+                        resp = await client.post(
+                            _append_path(provider.base_url, "/embeddings"),
+                            json={"model": _EMBEDDING_MODEL, "input": content},
+                            headers={
+                                "authorization": f"Bearer {provider.api_key}",
+                                "content-type": "application/json",
+                            },
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    provider_attempt.report_exception(exc)
+                    raise
+                if resp.status_code >= 400:
+                    provider_attempt.report_failure()
+                else:
+                    provider_attempt.report_success()
             if resp.status_code >= 400:
                 _logger.debug(
                     "memory_extraction.embedding_provider_non_2xx provider=%s status=%s",
@@ -319,7 +331,7 @@ async def _try_llm_extract(
     scope_hint: str | None = None,
 ) -> list[ExtractedMemory]:
     try:
-        from ..provider_pool import get_pool
+        from ..provider_pool import get_pool, text_provider_attempt
         from ..retry import is_retriable as classify_retriable
         from ..upstream import responses_call
 
@@ -363,7 +375,16 @@ async def _try_llm_extract(
             }
             if getattr(provider, "proxy", None) is not None:
                 kwargs["proxy_override"] = provider.proxy
-            payload = await responses_call(body, **kwargs)
+            with text_provider_attempt(pool, provider) as provider_attempt:
+                try:
+                    payload = await responses_call(body, **kwargs)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    provider_attempt.report_exception(exc)
+                    raise
+                else:
+                    provider_attempt.report_success()
             _log_llm_usage(str(getattr(provider, "name", "<unknown>")), payload)
             items = _parse_llm_candidates(_responses_text(payload))
             if explicit_only:
@@ -1069,6 +1090,7 @@ async def memory_reembed(
     if not await _embedding_provider_available(ctx):
         return
     async with SessionLocal() as session:
+        row: UserMemory | UserMemoryStaging | None
         if target == "memory":
             row = await session.get(UserMemory, row_id)
         else:

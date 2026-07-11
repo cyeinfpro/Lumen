@@ -8,7 +8,6 @@ import {
   Check,
   Clapperboard,
   Film,
-  Image as ImageIcon,
   Loader2,
   Play,
   Plus,
@@ -62,6 +61,7 @@ import {
   ProjectTopBar,
 } from "../components/ProjectTopBar";
 import { formatRelativeTime } from "../utils";
+import { StoryboardMediaFrame } from "./StoryboardMediaFrame";
 
 type StoryboardStage =
   | "idea"
@@ -303,19 +303,14 @@ export function StoryboardIndexPage() {
                     </div>
                     <ArrowRight className="h-4 w-4 shrink-0 text-[var(--fg-2)]" />
                   </div>
-                  {item.thumbnail_url ? (
-                    <img
-                      src={item.thumbnail_url}
-                      alt={`${item.title} 缩略图`}
-                      loading="lazy"
-                      decoding="async"
-                      className="h-28 w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
-                    />
-                  ) : (
-                    <div className="grid h-28 place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]">
-                      <Film className="h-7 w-7" />
-                    </div>
-                  )}
+                  <StoryboardMediaFrame
+                    src={item.thumbnail_url}
+                    alt={`${item.title} 缩略图`}
+                    className="h-28 w-full rounded-[var(--radius-card)] border border-[var(--border)]"
+                    emptyClassName="grid h-28 place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
+                    emptyIcon={Film}
+                    emptyIconClassName="h-7 w-7"
+                  />
                   <p className="line-clamp-2 text-sm leading-6 text-[var(--fg-1)]">
                     {item.idea}
                   </p>
@@ -691,19 +686,12 @@ function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset 
         </div>
         <StatusPill status={asset.status} />
       </div>
-      {asset.display_url || asset.image_url ? (
-        <img
-          src={asset.display_url || asset.image_url || ""}
-          alt={`${asset.name} 设定图`}
-          loading="lazy"
-          decoding="async"
-          className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
-        />
-      ) : (
-        <div className="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]">
-          <ImageIcon className="h-6 w-6" />
-        </div>
-      )}
+      <StoryboardMediaFrame
+        src={asset.display_url || asset.image_url}
+        alt={`${asset.name} 设定图`}
+        className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)]"
+        emptyClassName="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
+      />
       <p className="line-clamp-3 min-h-[4.5rem] text-sm leading-6 text-[var(--fg-1)]">
         {asset.description || "暂无描述"}
       </p>
@@ -829,19 +817,12 @@ function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot 
         <h3 className="truncate text-sm font-semibold">{shot.title}</h3>
         <StatusPill status={shot.status} />
       </div>
-      {shot.keyframe_display_url || shot.keyframe_image_url ? (
-        <img
-          src={shot.keyframe_display_url || shot.keyframe_image_url || ""}
-          alt={`${shot.title} 关键帧`}
-          loading="lazy"
-          decoding="async"
-          className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
-        />
-      ) : (
-        <div className="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]">
-          <ImageIcon className="h-6 w-6" />
-        </div>
-      )}
+      <StoryboardMediaFrame
+        src={shot.keyframe_display_url || shot.keyframe_image_url}
+        alt={`${shot.title} 关键帧`}
+        className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)]"
+        emptyClassName="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
+      />
       <InfoLine text="批准后才能提交该段视频生成，修改关键帧会使批准失效。" />
       <div className="grid grid-cols-2 gap-2">
         <IconAction icon={RefreshCw} label={shot.keyframe_stale ? "重新生成" : "生成"} loading={generate.isPending} onClick={() => generate.mutate()} />
@@ -873,19 +854,14 @@ function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot
     !shot.keyframe_stale;
   return (
     <article className="grid gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-3 md:grid-cols-[88px_minmax(0,1fr)_auto] md:items-center">
-      {shot.keyframe_display_url || shot.keyframe_image_url ? (
-        <img
-          src={shot.keyframe_display_url || shot.keyframe_image_url || ""}
-          alt={`${shot.title} 视频参考帧`}
-          loading="lazy"
-          decoding="async"
-          className="aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] object-cover md:w-20"
-        />
-      ) : (
-        <div className="grid aspect-video place-items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] md:w-20">
-          <ImageIcon className="h-5 w-5 text-[var(--fg-2)]" />
-        </div>
-      )}
+      <StoryboardMediaFrame
+        src={shot.keyframe_display_url || shot.keyframe_image_url}
+        alt={`${shot.title} 视频参考帧`}
+        className="aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] md:w-20"
+        emptyClassName="grid aspect-video place-items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] md:w-20"
+        emptyIconClassName="h-5 w-5 text-[var(--fg-2)]"
+        sizes="80px"
+      />
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">

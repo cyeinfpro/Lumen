@@ -41,6 +41,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -148,6 +149,30 @@ function createImageState(key: string): ImageTransientState {
     zoom: 1,
     panOffset: RESET_PAN_OFFSET,
   };
+}
+
+function resolveImagePresentation(
+  imageState: ImageTransientState,
+  imageStateKey: string,
+  imageSrc: string | null | undefined,
+  imagePreviewSrc: string | null | undefined,
+) {
+  const activeImageState =
+    imageState.key === imageStateKey
+      ? imageState
+      : createImageState(imageStateKey);
+  const hasPreview = Boolean(imagePreviewSrc) && imagePreviewSrc !== imageSrc;
+  const displaySrc =
+    activeImageState.displayFailed || activeImageState.viewOriginal
+      ? imageSrc
+      : (imagePreviewSrc ?? imageSrc);
+  const sourceLabel =
+    hasPreview &&
+    !activeImageState.viewOriginal &&
+    !activeImageState.displayFailed
+      ? "预览"
+      : "原图";
+  return { activeImageState, displaySrc, sourceLabel };
 }
 
 function toDesktopGalleryItem(item: LightboxItem): DesktopGalleryItem {
@@ -320,38 +345,39 @@ export function DesktopLightbox() {
     null,
   );
   const [eventItems, setEventItems] = useState<LightboxItem[] | null>(null);
-  const imageStateKey = `${lightbox.imageSrc ?? ""}\n${lightbox.imagePreviewSrc ?? ""}`;
+  const imageStateKey = `${lightbox.imageId ?? ""}\n${lightbox.imageSrc ?? ""}\n${lightbox.imagePreviewSrc ?? ""}`;
+  const activeImageStateKeyRef = useRef(imageStateKey);
+  useLayoutEffect(() => {
+    activeImageStateKeyRef.current = imageStateKey;
+  }, [imageStateKey]);
   const [imageState, setImageState] = useState(() =>
     createImageState(imageStateKey),
   );
-  const activeImageState =
-    imageState.key === imageStateKey
-      ? imageState
-      : createImageState(imageStateKey);
+  const {
+    activeImageState,
+    displaySrc,
+    sourceLabel,
+  } = resolveImagePresentation(
+    imageState,
+    imageStateKey,
+    lightbox.imageSrc,
+    lightbox.imagePreviewSrc,
+  );
   const activeLoadError = activeImageState.loadError;
-  const activeDisplayFailed = activeImageState.displayFailed;
-  const activeViewOriginal = activeImageState.viewOriginal;
   const activeViewMode = activeImageState.viewMode;
   const activeZoom = activeImageState.zoom;
   const activePanOffset = activeImageState.panOffset;
   const updateImageState = useCallback(
     (recipe: (state: ImageTransientState) => ImageTransientState) => {
-      setImageState((prev) =>
-        recipe(prev.key === imageStateKey ? prev : createImageState(imageStateKey)),
-      );
+      setImageState((prev) => {
+        if (activeImageStateKeyRef.current !== imageStateKey) return prev;
+        return recipe(
+          prev.key === imageStateKey ? prev : createImageState(imageStateKey),
+        );
+      });
     },
     [imageStateKey],
   );
-
-  const hasPreview =
-    Boolean(lightbox.imagePreviewSrc) && lightbox.imagePreviewSrc !== lightbox.imageSrc;
-  const displaySrc =
-    activeDisplayFailed || activeViewOriginal
-      ? lightbox.imageSrc
-      : (lightbox.imagePreviewSrc ?? lightbox.imageSrc);
-  const sourceLabel = hasPreview && !activeViewOriginal && !activeDisplayFailed
-    ? "预览"
-    : "原图";
 
   // 边界提示 / 键盘动作反馈
   const [edgeHint, setEdgeHint] = useState<null | "first" | "last">(null);
@@ -365,6 +391,8 @@ export function DesktopLightbox() {
   const isPanning = mousePan !== null;
   const [mainImageLoaded, setMainImageLoaded] = useState(false);
   const switchSeqRef = useRef(0);
+  const downloadSeqRef = useRef(0);
+  const shareSeqRef = useRef(0);
   const preloadAbortRef = useRef<AbortController | null>(null);
 
   // 当前会话所有成功的 generation → image，按 started_at 升序
@@ -425,6 +453,8 @@ export function DesktopLightbox() {
   const handleClose = useCallback(() => {
     hideActiveImageLayer();
     switchSeqRef.current += 1;
+    downloadSeqRef.current += 1;
+    shareSeqRef.current += 1;
     preloadAbortRef.current?.abort();
     preloadAbortRef.current = null;
     imagePointerRef.current = null;
@@ -585,15 +615,22 @@ export function DesktopLightbox() {
     const src = lightbox.imageSrc;
     const id = lightbox.imageId;
     if (!src || downloadStatus === "downloading") return;
+    const operationKey = imageStateKey;
+    const operationSeq = downloadSeqRef.current + 1;
+    downloadSeqRef.current = operationSeq;
+    const operationIsCurrent = () =>
+      activeImageStateKeyRef.current === operationKey &&
+      downloadSeqRef.current === operationSeq;
     setDownloadStatus("downloading");
     void (async () => {
       const a = downloadAnchorRef.current;
       if (!a) {
-        setDownloadStatus("idle");
+        if (operationIsCurrent()) setDownloadStatus("idle");
         return;
       }
       try {
         const blob = await fetchImageBlob(src);
+        if (!operationIsCurrent()) return;
         const objectUrl = URL.createObjectURL(blob);
         a.href = objectUrl;
         a.download = downloadFilename(
@@ -605,14 +642,25 @@ export function DesktopLightbox() {
         a.click();
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         setDownloadStatus("success");
-        window.setTimeout(() => setDownloadStatus("idle"), 1400);
+        window.setTimeout(() => {
+          if (operationIsCurrent()) setDownloadStatus("idle");
+        }, 1400);
       } catch {
+        if (!operationIsCurrent()) return;
         setDownloadStatus("error");
         window.open(src, "_blank", "noopener,noreferrer");
-        window.setTimeout(() => setDownloadStatus("idle"), 1800);
+        window.setTimeout(() => {
+          if (operationIsCurrent()) setDownloadStatus("idle");
+        }, 1800);
       }
     })();
-  }, [currentImageMeta, downloadStatus, lightbox.imageSrc, lightbox.imageId]);
+  }, [
+    currentImageMeta,
+    downloadStatus,
+    imageStateKey,
+    lightbox.imageSrc,
+    lightbox.imageId,
+  ]);
 
   const handleIterate = useCallback(() => {
     const id = lightbox.imageId;
@@ -724,16 +772,30 @@ export function DesktopLightbox() {
     window.open(lightbox.imageSrc, "_blank", "noopener,noreferrer");
   }, [lightbox.imageSrc]);
 
-  const resetShareStatusSoon = useCallback(() => {
-    window.setTimeout(() => setShareStatus("idle"), 1600);
-  }, []);
+  const resetShareStatusSoon = useCallback(
+    (operationKey: string, operationSeq: number) => {
+      window.setTimeout(() => {
+        if (
+          activeImageStateKeyRef.current === operationKey &&
+          shareSeqRef.current === operationSeq
+        ) {
+          setShareStatus("idle");
+        }
+      }, 1600);
+    },
+    [],
+  );
 
   const handleShare = useCallback(() => {
     const imageId = lightbox.imageId;
-    if (!imageId || shareStatus === "creating" || createShareMutation.isPending) {
-      return;
-    }
+    if (!imageId || shareStatus === "creating") return;
 
+    const operationKey = imageStateKey;
+    const operationSeq = shareSeqRef.current + 1;
+    shareSeqRef.current = operationSeq;
+    const operationIsCurrent = () =>
+      activeImageStateKeyRef.current === operationKey &&
+      shareSeqRef.current === operationSeq;
     setShareStatus("creating");
     void (async () => {
       let link: string;
@@ -744,11 +806,13 @@ export function DesktopLightbox() {
         });
         link = share.url;
       } catch {
+        if (!operationIsCurrent()) return;
         setShareStatus("error");
-        resetShareStatusSoon();
+        resetShareStatusSoon(operationKey, operationSeq);
         return;
       }
 
+      if (!operationIsCurrent()) return;
       if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
         try {
           await navigator.share({
@@ -756,10 +820,12 @@ export function DesktopLightbox() {
             text: "Lumen image",
             url: link,
           });
+          if (!operationIsCurrent()) return;
           setShareStatus("success");
-          resetShareStatusSoon();
+          resetShareStatusSoon(operationKey, operationSeq);
           return;
         } catch (error) {
+          if (!operationIsCurrent()) return;
           if (error instanceof DOMException && error.name === "AbortError") {
             setShareStatus("idle");
             return;
@@ -769,15 +835,20 @@ export function DesktopLightbox() {
 
       try {
         await writeClipboardText(link);
+        if (!operationIsCurrent()) return;
         setShareStatus("success");
       } catch {
+        if (!operationIsCurrent()) return;
         setShareStatus("error");
       } finally {
-        resetShareStatusSoon();
+        if (operationIsCurrent()) {
+          resetShareStatusSoon(operationKey, operationSeq);
+        }
       }
     })();
   }, [
     createShareMutation,
+    imageStateKey,
     lightbox.imageId,
     resetShareStatusSoon,
     shareStatus,
@@ -790,6 +861,7 @@ export function DesktopLightbox() {
 
   const switchToGalleryItem = useCallback(
     (target: DesktopGalleryItem, direction: 1 | -1) => {
+      const sourceImageKey = imageStateKey;
       const seq = switchSeqRef.current + 1;
       switchSeqRef.current = seq;
       preloadAbortRef.current?.abort();
@@ -806,6 +878,7 @@ export function DesktopLightbox() {
           );
         } catch {
           if (preloadAbort.signal.aborted) return;
+          if (activeImageStateKeyRef.current !== sourceImageKey) return;
           try {
             await preloadImage(target.image.data_url, preloadAbort.signal);
           } catch {
@@ -814,6 +887,7 @@ export function DesktopLightbox() {
           }
         }
         if (switchSeqRef.current !== seq) return;
+        if (activeImageStateKeyRef.current !== sourceImageKey) return;
         if (preloadAbortRef.current === preloadAbort) {
           preloadAbortRef.current = null;
         }
@@ -834,6 +908,7 @@ export function DesktopLightbox() {
     },
     [
       eventItems,
+      imageStateKey,
       lightbox.action,
       openLightbox,
       openLightboxFromItems,
@@ -1112,12 +1187,18 @@ export function DesktopLightbox() {
   }, [lightbox.open]);
 
   useEffect(() => {
+    switchSeqRef.current += 1;
+    downloadSeqRef.current += 1;
+    shareSeqRef.current += 1;
+    preloadAbortRef.current?.abort();
+    preloadAbortRef.current = null;
     let canceled = false;
     queueMicrotask(() => {
       if (canceled) return;
       setDownloadStatus("idle");
       setShareStatus("idle");
       setPendingImageId(null);
+      setEdgeHint(null);
       setMousePan(null);
       imagePointerRef.current = null;
       setMainImageLoaded(false);
@@ -1561,7 +1642,10 @@ export function DesktopLightbox() {
             )}
           >
             {activeLoadError ? (
-              <div className="pointer-events-auto rounded-[var(--radius-dialog)] border border-white/10 bg-black/50 backdrop-blur px-8 py-10 text-center max-w-md">
+              <div
+                role="alert"
+                className="pointer-events-auto rounded-[var(--radius-dialog)] border border-white/10 bg-black/50 backdrop-blur px-8 py-10 text-center max-w-md"
+              >
                 <p className="text-base text-white/90">图片加载失败</p>
                 <p className="text-xs text-white/50 mt-2">
                   数据可能已过期或网络异常，可关闭后重试。
@@ -1592,6 +1676,7 @@ export function DesktopLightbox() {
                   decoding="async"
                   fetchPriority="high"
                   onLoad={() => {
+                    if (activeImageStateKeyRef.current !== imageStateKey) return;
                     setMainImageLoaded(true);
                     updateImageState((state) => ({
                       ...state,
@@ -1604,6 +1689,7 @@ export function DesktopLightbox() {
                     }));
                   }}
                   onError={() => {
+                    if (activeImageStateKeyRef.current !== imageStateKey) return;
                     if (displaySrc !== lightbox.imageSrc && lightbox.imageSrc) {
                       updateImageState((state) => ({ ...state, displayFailed: true }));
                       return;

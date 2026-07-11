@@ -21,9 +21,6 @@ export function ServiceWorkerRegister() {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
       return;
     }
-    if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
-      return;
-    }
 
     if (process.env.NODE_ENV !== "production") {
       // dev 兜底：清掉曾经注册过的 SW，避免污染 HMR / API 调试。

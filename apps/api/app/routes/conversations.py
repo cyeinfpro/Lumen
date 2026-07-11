@@ -25,7 +25,6 @@ from lumen_core.byok_retention import (
     user_visible_filter as byok_retention_user_visible_filter,
 )
 from lumen_core.constants import CompletionStatus, GenerationStatus
-from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -42,6 +41,7 @@ from lumen_core.context_window import (
     HISTORY_FETCH_BATCH,
     MESSAGE_OVERHEAD_TOKENS,
     compose_summary_guardrail,
+    compare_message_position,
     estimate_message_tokens,
     estimate_summary_tokens,
     estimate_system_prompt_tokens,
@@ -50,8 +50,6 @@ from lumen_core.context_window import (
     is_summary_usable,
     messages_token_count,
     would_exceed_budget,
-    SUMMARY_KIND,
-    SUMMARY_VERSION,
 )
 from lumen_core.runtime_settings import get_spec, parse_value
 from lumen_core.schemas import (
@@ -67,8 +65,7 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
-from ..config import settings
-from ..db import get_db
+from ..db import affected_rows, get_db
 from ..deps import CurrentUser, verify_csrf
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
@@ -139,8 +136,6 @@ def _cursor_field_datetime(cur: dict[str, Any], field: str) -> datetime:
 
 
 def _exclude_workflow_conversations(stmt):
-    if settings.lumen_runtime.strip().lower() == "desktop":
-        return stmt
     return stmt.where(Conversation.default_params["workflow_type"].astext.is_(None))
 
 
@@ -154,13 +149,6 @@ def _not_found() -> HTTPException:
     return HTTPException(
         status_code=404,
         detail={"error": {"code": "not_found", "message": "conversation not found"}},
-    )
-
-
-def _forbidden() -> HTTPException:
-    return HTTPException(
-        status_code=403,
-        detail={"error": {"code": "forbidden", "message": "conversation forbidden"}},
     )
 
 
@@ -281,7 +269,7 @@ async def _soft_delete_conversation_generated_images(
         .values(deleted_at=deleted_at)
         .execution_options(synchronize_session=False)
     )
-    return int(result.rowcount or 0)
+    return affected_rows(result)
 
 
 async def _release_conversation_task_hold(
@@ -307,8 +295,6 @@ async def _release_conversation_task_hold(
 
 
 async def _conversation_wallet_exists(db: AsyncSession, user_id: str) -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 
@@ -365,48 +351,62 @@ async def _cancel_conversation_active_tasks(
     active_completion_ids: list[str] = []
     streaming_completion_ids: list[str] = []
     holds_released = 0
+    should_release_queued_holds = account_mode == "wallet"
+    if not should_release_queued_holds and (
+        any(
+            generation.status == GenerationStatus.QUEUED.value
+            for generation in generations
+        )
+        or any(
+            completion.status == CompletionStatus.QUEUED.value
+            for completion in completions
+        )
+    ):
+        should_release_queued_holds = await _conversation_wallet_exists(db, user_id)
+
+    # Running work keeps its row and wallet hold until the worker confirms that
+    # the upstream awaitable stopped. Post-commit cleanup only requests cancel.
     for generation in generations:
         active_generation_ids.append(generation.id)
         if generation.status == GenerationStatus.QUEUED.value:
             queued_generation_ids.append(generation.id)
+            generation.status = GenerationStatus.CANCELED.value
+            generation.progress_stage = "finalizing"
+            generation.finished_at = canceled_at
+            generation.error_code = "cancelled"
+            generation.error_message = "conversation deleted"
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_conversation_task_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="generation",
+                        ref_id=billing_core.generation_billing_ref_id(generation),
+                        reason="conversation deleted",
+                    )
+                )
         elif generation.status == GenerationStatus.RUNNING.value:
             running_generation_ids.append(generation.id)
-        generation.status = GenerationStatus.CANCELED.value
-        generation.progress_stage = "finalizing"
-        generation.finished_at = canceled_at
-        generation.error_code = "cancelled"
-        generation.error_message = "conversation deleted"
-        if account_mode == "wallet" or await _conversation_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_conversation_task_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="generation",
-                    ref_id=billing_core.retry_billing_ref_id(
-                        generation.id, getattr(generation, "retry_count", 0)
-                    ),
-                    reason="conversation deleted",
-                )
-            )
     for completion in completions:
         active_completion_ids.append(completion.id)
-        if completion.status == CompletionStatus.STREAMING.value:
-            streaming_completion_ids.append(completion.id)
-        completion.status = CompletionStatus.CANCELED.value
-        completion.progress_stage = "finalizing"
-        completion.finished_at = canceled_at
-        completion.error_code = "cancelled"
-        completion.error_message = "conversation deleted"
-        if account_mode == "wallet" or await _conversation_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_conversation_task_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="completion",
-                    ref_id=billing_core.completion_billing_ref_id(completion),
-                    reason="conversation deleted",
+        if completion.status == CompletionStatus.QUEUED.value:
+            completion.status = CompletionStatus.CANCELED.value
+            completion.progress_stage = "finalizing"
+            completion.finished_at = canceled_at
+            completion.error_code = "cancelled"
+            completion.error_message = "conversation deleted"
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_conversation_task_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="completion",
+                        ref_id=billing_core.completion_billing_ref_id(completion),
+                        reason="conversation deleted",
+                    )
                 )
-            )
+        elif completion.status == CompletionStatus.STREAMING.value:
+            streaming_completion_ids.append(completion.id)
     return {
         "generations_canceled": len(generations),
         "completions_canceled": len(completions),
@@ -656,27 +656,28 @@ async def patch_conversation(
         conv.archived = body.archived
     if body.default_params is not None:
         conv.default_params = body.default_params
-    if body.default_system is not None:
+    if "default_system" in body.model_fields_set:
         conv.default_system = body.default_system
-    if body.default_system_prompt_id is not None:
-        prompt_exists = (
-            await db.execute(
-                select(SystemPrompt.id).where(
-                    SystemPrompt.id == body.default_system_prompt_id,
-                    SystemPrompt.user_id == user.id,
+    if "default_system_prompt_id" in body.model_fields_set:
+        if body.default_system_prompt_id is not None:
+            prompt_exists = (
+                await db.execute(
+                    select(SystemPrompt.id).where(
+                        SystemPrompt.id == body.default_system_prompt_id,
+                        SystemPrompt.user_id == user.id,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if prompt_exists is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": {
-                        "code": "system_prompt_not_found",
-                        "message": "system prompt not found",
-                    }
-                },
-            )
+            ).scalar_one_or_none()
+            if prompt_exists is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": {
+                            "code": "system_prompt_not_found",
+                            "message": "system prompt not found",
+                        }
+                    },
+                )
         conv.default_system_prompt_id = body.default_system_prompt_id
     await db.commit()
     await db.refresh(conv)
@@ -846,7 +847,7 @@ async def _setting_str(db: AsyncSession, key: str, default: str) -> str:
 
 
 def _summary_updated_at(summary: dict[str, Any] | None) -> datetime | None:
-    if not is_summary_usable(summary):
+    if not isinstance(summary, dict) or not is_summary_usable(summary):
         return None
     raw = summary.get("compressed_at") or summary.get("updated_at")
     if not isinstance(raw, str) or not raw.strip():
@@ -884,31 +885,10 @@ def _parse_summary_datetime(raw: Any) -> datetime | None:
         return None
 
 
-def _compare_message_position(
-    left_created_at: datetime,
-    left_id: str | None,
-    right_created_at: datetime,
-    right_id: str | None,
-) -> int:
-    left_created_at = _coerce_aware(left_created_at)
-    right_created_at = _coerce_aware(right_created_at)
-    if left_created_at > right_created_at:
-        return 1
-    if left_created_at < right_created_at:
-        return -1
-    if not left_id or not right_id:
-        return 0 if left_id == right_id else -1
-    if left_id > right_id:
-        return 1
-    if left_id < right_id:
-        return -1
-    return 0
-
-
 def _summary_boundary(
     summary: dict[str, Any] | None,
 ) -> tuple[datetime, str | None] | None:
-    if not is_summary_usable(summary):
+    if not isinstance(summary, dict) or not is_summary_usable(summary):
         return None
     created_at = _parse_summary_datetime(summary.get("up_to_created_at"))
     if created_at is None:
@@ -922,7 +902,7 @@ def _message_after_summary(msg: Message, summary: dict[str, Any] | None) -> bool
         return True
     boundary_created_at, boundary_id = boundary
     return (
-        _compare_message_position(
+        compare_message_position(
             msg.created_at,
             msg.id,
             boundary_created_at,
@@ -1120,34 +1100,6 @@ async def _circuit_breaker_retry_after(redis: Any) -> int | None:
     return int(ttl) if isinstance(ttl, int) and ttl > 0 else 60
 
 
-def _extra_instruction_hash(extra_instruction: str | None) -> str | None:
-    if not extra_instruction:
-        return None
-    digest = hashlib.sha1(extra_instruction.encode("utf-8")).hexdigest()
-    return f"sha1:{digest}"
-
-
-def _message_summary_line(msg: Message) -> str:
-    content = msg.content or {}
-    text = content.get("text") if isinstance(content, dict) else None
-    text = text if isinstance(text, str) else ""
-    text = text.strip()
-    if len(text) > 1200:
-        text = f"{text[:700]}\n[... elided ...]\n{text[-300:]}"
-    parts = [f"[{msg.role.upper()} #{msg.id} @ {msg.created_at.isoformat()}]"]
-    if text:
-        parts.append(text)
-    if isinstance(content, dict):
-        attachments = content.get("attachments") or []
-        for att in attachments:
-            if not isinstance(att, dict):
-                continue
-            image_id = att.get("image_id")
-            if image_id:
-                parts.append(f"[user_image image_id={image_id}]")
-    return "\n".join(parts)
-
-
 async def _load_messages_for_compaction(
     db: AsyncSession, conv_id: str
 ) -> list[Message]:
@@ -1200,15 +1152,6 @@ def _estimate_messages_tokens(messages: list[Message]) -> int:
     return sum(estimate_message_tokens(msg.role, msg.content) for msg in messages)
 
 
-def _truncate_to_estimated_tokens(text: str, target_tokens: int) -> str:
-    if estimate_text_tokens(text) <= target_tokens:
-        return text
-    # This mirrors the core estimator's ASCII-heavy behavior closely enough for
-    # the local fallback while avoiding a tokenization dependency in the API app.
-    limit = max(1, target_tokens * 4)
-    return text[:limit].rstrip() + "\n[... summary truncated ...]"
-
-
 def _import_worker_context_summary() -> Any | None:
     """Resolve the worker-side ``ensure_context_summary`` from the api process.
 
@@ -1250,236 +1193,6 @@ def _import_worker_context_summary() -> Any | None:
     except Exception:
         logger.warning("worker context summary import failed", exc_info=True)
         return None
-
-
-async def _local_ensure_context_summary(
-    db: AsyncSession,
-    *,
-    conv: Conversation,
-    force: bool,
-    extra_instruction: str | None,
-    target_tokens: int,
-    dry_run: bool,
-    min_recent_messages: int,
-    model: str,
-) -> dict[str, Any]:
-    messages = await _load_messages_for_compaction(db, conv.id)
-    source_messages, first_user = _compaction_source_messages(
-        messages, min_recent_messages=min_recent_messages
-    )
-    source_token_estimate = _estimate_messages_tokens(source_messages)
-    boundary = source_messages[-1] if source_messages else None
-
-    if dry_run:
-        return {
-            "ok": True,
-            "would_compress": bool(source_messages),
-            "estimated_source_messages": len(source_messages),
-            "estimated_source_tokens": source_token_estimate,
-            "estimated_output_tokens_max": target_tokens,
-        }
-
-    summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else None
-    extra_hash = _extra_instruction_hash(extra_instruction)
-    if (
-        not force
-        and boundary is not None
-        and is_summary_usable(summary)
-        and summary.get("up_to_message_id") == boundary.id
-        and summary.get("extra_instruction_hash") == extra_hash
-    ):
-        return {
-            "ok": True,
-            "summary_tokens": estimate_summary_tokens(summary),
-            "source_message_count": _summary_int(summary, "source_message_count"),
-            "source_token_estimate": _summary_int(summary, "source_token_estimate"),
-            "summary_up_to_message_id": summary.get("up_to_message_id"),
-            "model": summary.get("model") or model,
-            "cached": True,
-            "fallback_reason": None,
-            "image_caption_count": _summary_int(summary, "image_caption_count"),
-        }
-
-    if boundary is None or first_user is None:
-        return {
-            "ok": True,
-            "summary_tokens": 0,
-            "source_message_count": 0,
-            "source_token_estimate": 0,
-            "summary_up_to_message_id": None,
-            "model": model,
-            "cached": False,
-            "fallback_reason": "insufficient_history",
-            "image_caption_count": 0,
-        }
-
-    lines = [
-        "## Earlier Context Summary",
-        "### Source Messages",
-        *(_message_summary_line(msg) for msg in source_messages),
-    ]
-    if extra_instruction:
-        lines.extend(["### Additional Hints From User", extra_instruction.strip()])
-    text = _truncate_to_estimated_tokens("\n\n".join(lines), target_tokens)
-    compressed_at = datetime.now(timezone.utc).isoformat()
-    summary_tokens = estimate_text_tokens(text)
-    previous_runs = _summary_int(summary, "compression_runs")
-    image_caption_count = sum(
-        1
-        for msg in source_messages
-        for att in ((msg.content or {}).get("attachments") or [])
-        if isinstance(att, dict) and att.get("image_id")
-    )
-    conv.summary_jsonb = {
-        "version": SUMMARY_VERSION,
-        "kind": SUMMARY_KIND,
-        "up_to_message_id": boundary.id,
-        "up_to_created_at": boundary.created_at.isoformat(),
-        "first_user_message_id": first_user.id,
-        "text": text,
-        "tokens": summary_tokens,
-        "source_message_count": len(source_messages),
-        "source_token_estimate": source_token_estimate,
-        "model": model,
-        "image_caption_count": image_caption_count,
-        "extra_instruction_hash": extra_hash,
-        "compressed_at": compressed_at,
-        "compression_runs": previous_runs + 1,
-        "last_quality_signal": None,
-    }
-    # Preserve the caller's transaction boundary; this helper only stages work.
-    await db.flush()
-    return {
-        "ok": True,
-        "summary_tokens": summary_tokens,
-        "source_message_count": len(source_messages),
-        "source_token_estimate": source_token_estimate,
-        "summary_up_to_message_id": boundary.id,
-        "model": model,
-        "cached": False,
-        "fallback_reason": None,
-        "image_caption_count": image_caption_count,
-    }
-
-
-async def _ensure_context_summary_compatible(
-    db: AsyncSession,
-    *,
-    conv: Conversation,
-    redis: Any | None,
-    force: bool,
-    extra_instruction: str | None,
-    target_tokens: int,
-    dry_run: bool,
-    min_recent_messages: int,
-    model: str,
-) -> dict[str, Any]:
-    module = _import_worker_context_summary()
-    ensure = getattr(module, "ensure_context_summary", None) if module else None
-    if ensure is None:
-        if not dry_run:
-            messages = await _load_messages_for_compaction(db, conv.id)
-            source_messages, _first_user = _compaction_source_messages(
-                messages, min_recent_messages=min_recent_messages
-            )
-            return {
-                "ok": False,
-                "summary_tokens": 0,
-                "source_message_count": len(source_messages),
-                "source_token_estimate": _estimate_messages_tokens(source_messages),
-                "summary_up_to_message_id": None,
-                "model": model,
-                "cached": False,
-                "fallback_reason": "summary_service_unavailable",
-                "image_caption_count": 0,
-            }
-        return await _local_ensure_context_summary(
-            db,
-            conv=conv,
-            force=force,
-            extra_instruction=extra_instruction,
-            target_tokens=target_tokens,
-            dry_run=dry_run,
-            min_recent_messages=min_recent_messages,
-            model=model,
-        )
-    messages = await _load_messages_for_compaction(db, conv.id)
-    source_messages, _first_user = _compaction_source_messages(
-        messages, min_recent_messages=min_recent_messages
-    )
-    boundary = source_messages[-1] if source_messages else None
-    if boundary is None:
-        return await _local_ensure_context_summary(
-            db,
-            conv=conv,
-            force=force,
-            extra_instruction=extra_instruction,
-            target_tokens=target_tokens,
-            dry_run=dry_run,
-            min_recent_messages=min_recent_messages,
-            model=model,
-        )
-
-    input_budget = await _setting_int(db, "context.summary_input_budget", 80_000)
-    result = await ensure(
-        db,
-        conv,
-        boundary,
-        {
-            "context.summary_target_tokens": target_tokens,
-            "context.summary_input_budget": input_budget,
-            "context.summary_model": model,
-            "redis": redis,
-        },
-        force=force,
-        extra_instruction=extra_instruction,
-        dry_run=dry_run,
-        trigger="manual",
-    )
-    if not isinstance(result, dict):
-        return {
-            "ok": False,
-            "summary_tokens": 0,
-            "source_message_count": len(source_messages),
-            "source_token_estimate": _estimate_messages_tokens(source_messages),
-            "summary_up_to_message_id": None,
-            "model": model,
-            "cached": False,
-            "fallback_reason": "summary_failed",
-            "image_caption_count": 0,
-        }
-
-    if dry_run or result.get("dry_run"):
-        return {
-            "ok": True,
-            "would_compress": bool(
-                result.get("would_compress", result.get("would_call_upstream", False))
-            ),
-            "estimated_source_messages": int(
-                result.get("estimated_source_messages")
-                or result.get("source_message_count")
-                or 0
-            ),
-            "estimated_source_tokens": int(
-                result.get("estimated_source_tokens")
-                or result.get("source_token_estimate")
-                or 0
-            ),
-            "estimated_output_tokens_max": target_tokens,
-        }
-
-    status = str(result.get("status") or "")
-    return {
-        "ok": True,
-        "summary_tokens": int(result.get("summary_tokens") or 0),
-        "source_message_count": int(result.get("source_message_count") or 0),
-        "source_token_estimate": int(result.get("source_token_estimate") or 0),
-        "summary_up_to_message_id": result.get("summary_up_to_message_id"),
-        "model": model,
-        "cached": status.startswith("cached") or status == "cas_reused",
-        "fallback_reason": None,
-        "image_caption_count": int(result.get("image_caption_count") or 0),
-    }
 
 
 async def _load_prompt_content(
@@ -2047,11 +1760,6 @@ async def get_conversation_context(
     )
 
 
-def _manual_compact_idempotency_key(*, user_id: str, conv_id: str, raw_key: str) -> str:
-    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-    return f"context:manual_compact:idemp:{user_id}:{conv_id}:{digest}"
-
-
 def _manual_compact_job_id(
     *,
     user_id: str,
@@ -2165,24 +1873,6 @@ async def _redis_set_nx_json(
     return bool(await setter(key, raw, ex=ttl, nx=True))
 
 
-def _validate_compact_body(body: ConversationCompactIn) -> None:
-    if body.extra_instruction is not None:
-        if len(body.extra_instruction) > MANUAL_COMPACT_EXTRA_INSTRUCTION_MAX_CHARS:
-            raise _bad_request(
-                "invalid_extra_instruction",
-                "extra_instruction exceeds 1000 characters",
-            )
-    if body.target_tokens is not None and not (
-        MANUAL_COMPACT_MIN_TARGET_TOKENS
-        <= body.target_tokens
-        <= MANUAL_COMPACT_MAX_TARGET_TOKENS
-    ):
-        raise _bad_request(
-            "invalid_target_tokens",
-            "target_tokens must be between 300 and 4000",
-        )
-
-
 class ManualCompactIn(BaseModel):
     extra_instruction: str | None = None
     # force=False（默认）会先做 token 预算判断：未超即返回 {"compacted": false}，
@@ -2232,9 +1922,10 @@ def _build_compact_summary_payload(
     )
     summary_tokens = int(result.get("summary_tokens") or 0)
     source_token_estimate = int(result.get("source_token_estimate") or 0)
-    tokens_freed = int(
-        result.get("tokens_freed")
-        if result.get("tokens_freed") is not None
+    raw_tokens_freed = result.get("tokens_freed")
+    tokens_freed = (
+        int(raw_tokens_freed)
+        if raw_tokens_freed is not None
         else max(0, source_token_estimate - summary_tokens)
     )
     return {
@@ -2439,7 +2130,6 @@ async def compact_conversation(
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),
             )
-            .with_for_update()
         )
     ).scalar_one_or_none()
     if conv is None:

@@ -15,8 +15,6 @@ Lumen Web is the Next.js frontend for the Lumen workspace. It renders Studio, vi
 | --- | --- |
 | `LUMEN_BACKEND_URL` | Server-side FastAPI origin used by `src/proxy.ts`. Default local value is `http://127.0.0.1:8000`; Docker compose uses `http://api:8000`. |
 | `NEXT_PUBLIC_API_BASE` | Browser-visible API base. Use `/api` for same-origin deployments. |
-| `NEXT_PUBLIC_LUMEN_RUNTIME` | Set to `desktop` for the Tauri desktop runtime. |
-| `LUMEN_LOCAL_TOKEN` | Desktop-only local bridge token forwarded by the proxy. |
 | `NEXT_PUBLIC_LUMEN_VERSION` | Displayed product version. Accepts `1.2.3` or `v1.2.3`. |
 | `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | Optional Sentry client/server DSN. |
 | `NEXT_PUBLIC_SENTRY_ENV` / `SENTRY_ENV` | Optional Sentry environment. |
@@ -38,7 +36,6 @@ Start the API separately on `127.0.0.1:8000`, or set `LUMEN_BACKEND_URL` to the 
 ```bash
 npm run dev
 npm run build
-npm run build:desktop
 npm run start
 npm test
 npm run lint

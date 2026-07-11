@@ -1,6 +1,16 @@
 from sqlalchemy import CheckConstraint, Float
 
-from lumen_core.models import Generation, Image, SoftDeleteMixin, User, Video, VideoGeneration
+from lumen_core.models import (
+    BillingWindowUsageEvent,
+    Generation,
+    Image,
+    RedemptionBatch,
+    SoftDeleteMixin,
+    User,
+    UserApiCredential,
+    Video,
+    VideoGeneration,
+)
 
 
 def test_image_nsfw_score_uses_explicit_float_column_type():
@@ -34,10 +44,59 @@ def test_user_extraction_threshold_default_matches_latest_migration():
 
 def test_generation_has_user_created_index_for_history_queries():
     index = next(
-        idx for idx in Generation.__table__.indexes if idx.name == "ix_generations_user_created"
+        idx
+        for idx in Generation.__table__.indexes
+        if idx.name == "ix_generations_user_created"
     )
 
     assert [col.name for col in index.columns] == ["user_id", "created_at"]
+
+
+def test_generation_persists_billing_retry_identity():
+    column = Generation.__table__.c.billing_retry_count
+
+    assert column.nullable is False
+    assert column.default is not None
+    assert column.default.arg == 0
+    assert str(column.server_default.arg) == "0"
+
+
+def test_billing_window_usage_enforces_credential_ownership_and_positive_amount():
+    event_constraints = {
+        constraint.name: constraint
+        for constraint in BillingWindowUsageEvent.__table__.constraints
+    }
+    credential_constraints = {
+        constraint.name for constraint in UserApiCredential.__table__.constraints
+    }
+
+    assert "uq_user_api_credentials_id_user" in credential_constraints
+    owner_fk = event_constraints["fk_billing_window_credential_user"]
+    assert [element.parent.name for element in owner_fk.elements] == [
+        "credential_id",
+        "user_id",
+    ]
+    assert [element.target_fullname for element in owner_fk.elements] == [
+        "user_api_credentials.id",
+        "user_api_credentials.user_id",
+    ]
+    assert (
+        str(event_constraints["ck_billing_window_amount_positive"].sqltext)
+        == "amount_micro > 0"
+    )
+
+
+def test_redemption_batch_has_persistent_creator_idempotency_guard():
+    constraint_names = {
+        constraint.name for constraint in RedemptionBatch.__table__.constraints
+    }
+    index_names = {index.name for index in RedemptionBatch.__table__.indexes}
+
+    assert "uq_redemption_batch_creator_idemp" in constraint_names
+    assert "ix_redemption_batches_creator_request_created" in index_names
+    assert RedemptionBatch.__table__.c.idempotency_key.nullable is False
+    assert RedemptionBatch.__table__.c.request_hash.nullable is False
+    assert RedemptionBatch.__table__.c.code_count.nullable is False
 
 
 def test_video_generation_has_idempotency_and_provider_task_guards():

@@ -87,5 +87,3 @@ export function Textarea({
     </div>
   );
 }
-
-export default Textarea;

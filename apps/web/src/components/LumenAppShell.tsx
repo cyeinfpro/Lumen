@@ -43,14 +43,6 @@ const CommandPalette = dynamic(
   { ssr: false, loading: () => null },
 );
 
-const DesktopBootstrapGate = dynamic(
-  () =>
-    import("@/components/desktop/DesktopBootstrapGate").then(
-      (mod) => mod.DesktopBootstrapGate,
-    ),
-  { ssr: false, loading: () => null },
-);
-
 type Props = {
   children: ReactNode;
   initialRuntimeDefaults: RuntimeDefaults;
@@ -64,7 +56,6 @@ export function LumenAppShell({ children, initialRuntimeDefaults }: Props) {
   return (
     <QueryProvider>
       <RuntimeDefaultsBootstrap defaults={initialRuntimeDefaults} />
-      <DesktopBootstrapGate />
       <SSEProvider>
         <ErrorBoundary>
           <PageTransitions>{children}</PageTransitions>

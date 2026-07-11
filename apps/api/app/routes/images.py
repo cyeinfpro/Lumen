@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import inspect
 import io
 import logging
 import os
@@ -18,7 +19,7 @@ import shutil
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, BinaryIO, Iterator
+from typing import Annotated, Any, Awaitable, BinaryIO, Iterator, TypeVar
 
 from fastapi import (
     APIRouter,
@@ -85,6 +86,7 @@ from ..ratelimit import (
     require_client_ip,
 )
 from ..redis_client import get_redis
+from ..services import storage_files
 from ..video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VIDEO_REFERENCE_IMAGE_MIME,
@@ -96,6 +98,7 @@ from ..video_reference_images import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
 _VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 
 _LINK_UNSUPPORTED_ERRNOS = {
@@ -127,6 +130,23 @@ VARIANT_MEDIA_TYPE = {
 }
 VARIANT_LOCK_TTL_SECONDS = 60
 VARIANT_LOCK_WAIT_SECONDS = 5.0
+
+
+async def _resolve_redis_result(value: Awaitable[_T] | _T) -> _T:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _image_mime_type(image: PILImage.Image) -> str:
+    custom_mimetype = getattr(image, "custom_mimetype", None)
+    if isinstance(custom_mimetype, str) and custom_mimetype:
+        return custom_mimetype.lower()
+    image_format = image.format
+    if not isinstance(image_format, str):
+        return ""
+    mime = PILImage.MIME.get(image_format.upper())
+    return mime.lower() if isinstance(mime, str) else ""
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -303,7 +323,7 @@ def _prepare_upload_image(
     _open_image_bytes(data, verify=True)
 
     with _open_image_bytes(data) as im:
-        mime = (im.get_format_mimetype() or "").lower()
+        mime = _image_mime_type(im)
         source_mime = mime
         uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
         if mime in ALLOWED_MIME:
@@ -426,24 +446,11 @@ def _key_for_normalized_ref(user_id: str, image_id: str) -> str:
 
 
 def _fs_path(storage_key: str) -> Path:
-    root = Path(settings.storage_root).resolve()
-    if not storage_key or "\x00" in storage_key:
-        raise _http("invalid_path", "invalid storage path", 400)
-    key_path = PurePosixPath(storage_key)
-    if key_path.is_absolute():
-        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    parts = key_path.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise _http("invalid_path", "storage path escapes root", 400)
-    current = root
-    for part in parts[:-1]:
-        current = current / part
-        try:
-            if current.is_symlink():
-                raise _http("invalid_path", "symlink storage paths are not allowed", 400)
-        except OSError as exc:
-            raise _http("invalid_path", "invalid storage path", 400) from exc
-    return root.joinpath(*parts)
+    return storage_files.resolve_storage_path(
+        settings.storage_root,
+        storage_key,
+        error_factory=_http,
+    )
 
 
 def _storage_usage_path(root: Path) -> Path:
@@ -510,7 +517,14 @@ async def _release_variant_generation_lock(
         "return redis.call('del', KEYS[1]) else return 0 end"
     )
     try:
-        await get_redis().eval(script, 1, _variant_lock_key(image_id, kind), token)
+        await _resolve_redis_result(
+            get_redis().eval(
+                script,
+                1,
+                _variant_lock_key(image_id, kind),
+                token,
+            )
+        )
     except Exception:  # noqa: BLE001
         logger.warning("variant generation lock release failed", exc_info=True)
 
@@ -883,14 +897,7 @@ def _open_regular_file_no_symlink(path: Path) -> tuple[BinaryIO, int]:
 
 
 def _iter_open_file_and_close(f: BinaryIO) -> Iterator[bytes]:
-    try:
-        while True:
-            chunk = f.read(64 * 1024)
-            if not chunk:
-                break
-            yield chunk
-    finally:
-        f.close()
+    yield from storage_files.iter_open_file_and_close(f)
 
 
 _INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"
@@ -1230,7 +1237,7 @@ async def get_image_signed(
     sig: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     """无登录、签名授权的图片端点。
 
     流程：
@@ -1421,7 +1428,7 @@ async def get_image_by_key(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     """Proxy lookup by `storage_key`. Used when Worker writes a `public_url` that
     references our key space. Owner check is enforced."""
     await _check_public_image_lookup_rate_limit(request)

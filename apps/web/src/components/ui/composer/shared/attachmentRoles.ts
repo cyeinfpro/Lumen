@@ -10,13 +10,13 @@ export type ComposerAttachmentRole =
   | "edit_target"
   | "ask_target";
 
-export interface ComposerAttachmentRoleOption {
+interface ComposerAttachmentRoleOption {
   value: ComposerAttachmentRole;
   label: string;
   hint: string;
 }
 
-export const COMPOSER_ATTACHMENT_ROLE_OPTIONS: ComposerAttachmentRoleOption[] = [
+const COMPOSER_ATTACHMENT_ROLE_OPTIONS: ComposerAttachmentRoleOption[] = [
   { value: "reference", label: "参考", hint: "作为整体参考参与生成" },
   { value: "subject", label: "主体", hint: "保持人物、物体或构图主体" },
   { value: "product", label: "产品", hint: "保持商品款式、文字和细节" },

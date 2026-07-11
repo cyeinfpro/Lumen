@@ -17,10 +17,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import SystemSetting
-from lumen_core.desktop_runtime import (
-    is_desktop_runtime,
-    read_desktop_provider_runtime_json,
-)
 from lumen_core.runtime_settings import (
     SUPPORTED_SETTINGS,
     SettingSpec,
@@ -71,10 +67,6 @@ def _expand_legacy_image_route_pairs(
 
 async def get_setting(db: AsyncSession, spec: SettingSpec) -> str | None:
     """DB 优先，env fallback。返回 raw str；调用方自行 parse。"""
-    if spec.key == "providers" and is_desktop_runtime(os.environ.get("LUMEN_RUNTIME")):
-        desktop_raw = read_desktop_provider_runtime_json()
-        if desktop_raw:
-            return desktop_raw
     row = (
         await db.execute(
             select(SystemSetting.value).where(SystemSetting.key == spec.key)
@@ -106,17 +98,10 @@ async def get_settings_view(db: AsyncSession) -> list[SystemSettingItem]:
     for spec in SUPPORTED_SETTINGS:
         db_val = db_map.get(spec.key)
         env_val = os.environ.get(spec.env_fallback)
-        desktop_val = (
-            read_desktop_provider_runtime_json()
-            if spec.key == "providers"
-            and is_desktop_runtime(os.environ.get("LUMEN_RUNTIME"))
-            else None
-        )
         # has_value: DB 非空 OR env 非空
         has_value = (
             bool((db_val is not None and db_val != ""))
             or bool(env_val is not None and env_val != "")
-            or bool(desktop_val)
         )
         # value 显示：DB 优先；敏感字段 mask 为 None
         if spec.sensitive:
@@ -125,7 +110,7 @@ async def get_settings_view(db: AsyncSession) -> list[SystemSettingItem]:
             if db_val is not None and db_val != "":
                 display_val = db_val
             else:
-                display_val = None
+                display_val = env_val if env_val is not None and env_val != "" else None
         items.append(
             SystemSettingItem(
                 key=spec.key,
@@ -274,15 +259,11 @@ async def embedding_provider_available(db: AsyncSession) -> bool:
     every memory write/read path so the feature degrades cleanly instead of
     silently producing useless deterministic vectors.
     """
-    raw = None
-    if is_desktop_runtime(os.environ.get("LUMEN_RUNTIME")):
-        raw = read_desktop_provider_runtime_json()
-    if not raw:
-        raw = (
-            await db.execute(
-                select(SystemSetting.value).where(SystemSetting.key == "providers")
-            )
-        ).scalar_one_or_none()
+    raw = (
+        await db.execute(
+            select(SystemSetting.value).where(SystemSetting.key == "providers")
+        )
+    ).scalar_one_or_none()
     if not raw:
         spec = get_spec("providers")
         if spec:

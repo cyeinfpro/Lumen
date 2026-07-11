@@ -406,7 +406,3 @@ export function useContextCompactionEvents(
 
   return state;
 }
-
-export const contextCompactionEventInternals = {
-  parseCompactionEvent,
-};

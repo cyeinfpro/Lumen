@@ -264,16 +264,16 @@ def expand_video_duration_estimates(
                 parsed = _parse_estimate_key(key, value)
                 if parsed is None:
                     continue
-                resolution, duration_s, estimate = parsed
-                by_resolution.setdefault(resolution, {})[duration_s] = estimate
+                resolution, duration_s, parsed_estimate = parsed
+                by_resolution.setdefault(resolution, {})[duration_s] = parsed_estimate
             expanded_action: dict[str, Any] = {}
             for resolution, duration_map in by_resolution.items():
                 for duration_s in durations_s:
-                    estimate = _duration_estimate(duration_map, duration_s)
-                    if estimate is not None:
+                    duration_estimate = _duration_estimate(duration_map, duration_s)
+                    if duration_estimate is not None:
                         expanded_action[
                             estimate_key(resolution=resolution, duration_s=duration_s)
-                        ] = estimate
+                        ] = duration_estimate
             expanded_model[action] = expanded_action
         expanded[model] = expanded_model
     return expanded

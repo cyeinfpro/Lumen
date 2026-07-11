@@ -52,6 +52,28 @@ lumen_env_truthy() {
     esac
 }
 
+lumen_require_python_min_version() {
+    local python_bin="${1:-python3}"
+    local min_major="${2:-3}"
+    local min_minor="${3:-8}"
+    if ! command -v "${python_bin}" >/dev/null 2>&1; then
+        log_error "未找到 Python：${python_bin}（需要 >= ${min_major}.${min_minor}）。"
+        return 1
+    fi
+    if ! "${python_bin}" - "${min_major}" "${min_minor}" <<'PY' >/dev/null 2>&1
+import sys
+
+major = int(sys.argv[1])
+minor = int(sys.argv[2])
+raise SystemExit(0 if sys.version_info >= (major, minor) else 1)
+PY
+    then
+        log_error "${python_bin} 版本过低：$("${python_bin}" --version 2>&1)，需要 >= ${min_major}.${min_minor}。"
+        return 1
+    fi
+    return 0
+}
+
 # 默认运维路径与 Compose project name（§11.4 死规则：project name 必须固定）。
 # 调用方可通过环境变量覆盖；fallback 全部走 /opt/lumendata 与 /opt/lumen 约定。
 # LUMEN_DB_ROOT 只承载 postgres / redis，便于把数据库放在本机盘，
@@ -490,161 +512,8 @@ lumen_step_finalize_failure() {
 
 LUMEN_DOCKER_USE_SUDO="${LUMEN_DOCKER_USE_SUDO:-0}"
 
-# lumen_acquire_lock <root> <script_name>
-# update / uninstall 共用同一把维护锁，避免同时操作 compose、迁移和依赖目录。
-lumen_release_lock() {
-    case "${LUMEN_LOCK_KIND:-}" in
-        flock)
-            flock -u 9 2>/dev/null || true
-            exec 9>&- 2>/dev/null || true
-            ;;
-        mkdir)
-            if [ -n "${LUMEN_LOCK_PATH:-}" ]; then
-                rm -rf "${LUMEN_LOCK_PATH}" 2>/dev/null || true
-            fi
-            ;;
-    esac
-    LUMEN_LOCK_KIND=""
-}
-
-lumen_lock_dir_stale() {
-    local lock_dir="$1"
-    local owner_file="${lock_dir}/owner"
-    local owner_pid="" owner_script="" owner_cmd=""
-    if [ ! -f "${owner_file}" ]; then
-        return 0
-    fi
-    owner_pid="$(grep -E '^pid=' "${owner_file}" 2>/dev/null \
-        | head -1 | sed 's/^pid=//' | tr -d '[:space:]')"
-    owner_script="$(grep -E '^script=' "${owner_file}" 2>/dev/null \
-        | head -1 | sed 's/^script=//' | tr -d '[:space:]')"
-    case "${owner_pid}" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
-    if ! kill -0 "${owner_pid}" 2>/dev/null; then
-        return 0
-    fi
-    if [ -z "${owner_script}" ]; then
-        return 1
-    fi
-    if ! owner_cmd="$(lumen_pid_cmdline "${owner_pid}" 2>/dev/null)"; then
-        log_warn "锁 owner pid=${owner_pid} 仍存在，但命令行暂不可读；保守保留 lock。"
-        return 1
-    fi
-    case "${owner_cmd}" in
-        *"${owner_script}"*) return 1 ;;
-    esac
-    log_warn "锁 owner pid=${owner_pid} 仍存在，但命令行不匹配 script=${owner_script}：${owner_cmd:-<unavailable>}"
-    return 0
-}
-
-lumen_acquire_lock() {
-    local root="$1"
-    local script_name="${2:-maintenance}"
-    local lock_file="${root}/.lumen-maintenance.lock"
-    local lock_dir="${lock_file}.d"
-
-    if [ -n "${LUMEN_LOCK_KIND:-}" ]; then
-        return 0
-    fi
-
-    if command -v flock >/dev/null 2>&1; then
-        if ! exec 9>"${lock_file}"; then
-            log_error "无法创建锁文件：${lock_file}"
-            exit 1
-        fi
-        if ! flock -n 9; then
-            log_error "已有 Lumen 维护脚本在运行，当前 ${script_name} 退出。"
-            log_error "锁文件：${lock_file}"
-            exit 1
-        fi
-        LUMEN_LOCK_KIND="flock"
-        LUMEN_LOCK_PATH="${lock_file}"
-    else
-        if ! mkdir "${lock_dir}" 2>/dev/null; then
-            # mkdir 锁的 stale-check：进程被 kill -9 / OOM kill 不会跑 EXIT
-            # trap，锁目录残留。读 owner 的 pid + script，并验证 pid 命令行仍是
-            # 同一个维护脚本；仅 pid 存活不够，PID 复用会把 stale 锁误判为活锁。
-            # flock 路径不需此逻辑，kernel 自动释放。
-            local _owner_pid=""
-            if [ -f "${lock_dir}/owner" ]; then
-                _owner_pid="$(grep -E '^pid=' "${lock_dir}/owner" 2>/dev/null \
-                    | head -1 | sed 's/^pid=//' | tr -d '[:space:]')"
-            fi
-            if lumen_lock_dir_stale "${lock_dir}"; then
-                log_warn "检测到 stale 锁（owner pid=${_owner_pid:-未知} 已失效或不匹配），自动清理后重试..."
-                rm -rf "${lock_dir}" 2>/dev/null || true
-                if ! mkdir "${lock_dir}" 2>/dev/null; then
-                    log_error "已有 Lumen 维护脚本在运行（stale 清理后仍冲突），当前 ${script_name} 退出。"
-                    log_error "锁目录：${lock_dir}"
-                    exit 1
-                fi
-            else
-                log_error "已有 Lumen 维护脚本在运行（owner pid=${_owner_pid:-未知}），当前 ${script_name} 退出。"
-                log_error "锁目录：${lock_dir}"
-                log_error "如果确认没有脚本在运行，可手动删除该锁目录后重试。"
-                exit 1
-            fi
-        fi
-        LUMEN_LOCK_KIND="mkdir"
-        LUMEN_LOCK_PATH="${lock_dir}"
-        {
-            printf 'pid=%s\n' "$$"
-            printf 'script=%s\n' "${script_name}"
-            printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
-        } > "${lock_dir}/owner"
-    fi
-
-    trap 'lumen_release_lock' EXIT
-}
-
-# lumen_try_acquire_lock <root> <script_name>
-# 非阻塞版本：占用时返回 1（不 exit）；成功时和 lumen_acquire_lock 一致。
-# 用途：定时 backup 等场景"被占用则跳过本次"。
-lumen_try_acquire_lock() {
-    local root="$1"
-    local script_name="${2:-maintenance}"
-    local lock_file="${root}/.lumen-maintenance.lock"
-    local lock_dir="${lock_file}.d"
-
-    if [ -n "${LUMEN_LOCK_KIND:-}" ]; then
-        return 0
-    fi
-
-    if command -v flock >/dev/null 2>&1; then
-        # 注意：`exec FD>file 2>/dev/null` 会把当前 shell 的 stderr 永久重定向到
-        # /dev/null（exec 无命令时所有 redirect 都作用于当前 shell）。改为不带
-        # 2>/dev/null，让 exec 失败时错误正常显示，且不污染主 shell 的 fd 2。
-        if ! exec 9>"${lock_file}"; then
-            return 1
-        fi
-        if ! flock -n 9 2>/dev/null; then
-            exec 9>&- || true
-            return 1
-        fi
-        LUMEN_LOCK_KIND="flock"
-        LUMEN_LOCK_PATH="${lock_file}"
-    else
-        if ! mkdir "${lock_dir}" 2>/dev/null; then
-            if lumen_lock_dir_stale "${lock_dir}"; then
-                rm -rf "${lock_dir}" 2>/dev/null || true
-                mkdir "${lock_dir}" 2>/dev/null || return 1
-            else
-                return 1
-            fi
-        fi
-        LUMEN_LOCK_KIND="mkdir"
-        LUMEN_LOCK_PATH="${lock_dir}"
-        {
-            printf 'pid=%s\n' "$$"
-            printf 'script=%s\n' "${script_name}"
-            printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
-        } > "${lock_dir}/owner" 2>/dev/null || true
-    fi
-
-    trap 'lumen_release_lock' EXIT
-    return 0
-}
+# Maintenance and operation lock helpers are loaded from lib/locking.sh
+# at the end of this facade.
 
 lumen_handle_signal() {
     local signal="$1"
@@ -1001,7 +870,9 @@ lumen_redis_is_error_reply() {
 # 默认参数：
 #   branch    = ${LUMEN_SELF_UPDATE_BRANCH:-main}
 #   ttl_sec   = ${LUMEN_SELF_UPDATE_TTL:-600}（10 分钟内复调直接 noop；0 / FORCE=1 强拉）
-#   files...  = lib.sh backup.sh restore.sh update.sh lumenctl.sh
+#   files...  = lib.sh lib/runtime.sh lib/locking.sh lib/container_release.sh
+#               release_manifest_guard.py update_runner.py restore_runner.py
+#               backup.sh restore.sh update.sh lumenctl.sh
 #
 # 输出（全局变量；调用方据此决定后续动作）：
 #   LUMEN_SELF_UPDATE_RESULT     ok | skipped | failed | disabled
@@ -1015,6 +886,43 @@ lumen_redis_is_error_reply() {
 #   LUMEN_SELF_UPDATE=0          全局关闭（caller 自己另外暴露开关也可以）
 #
 # 返回值：始终 0（softfail；caller 看 LUMEN_SELF_UPDATE_RESULT 判定）。
+lumen_validate_self_update_file() {
+    local relative="$1"
+    local path="$2"
+    local first_line=""
+    if [ ! -f "${path}" ] || [ -L "${path}" ]; then
+        return 1
+    fi
+    IFS= read -r first_line < "${path}" || true
+    case "${relative}" in
+        *.sh)
+            case "${first_line}" in
+                '#!'*bash*) ;;
+                *) return 1 ;;
+            esac
+            bash -n "${path}" >/dev/null 2>&1
+            ;;
+        *.py)
+            case "${first_line}" in
+                '#!'*python3*) ;;
+                *) return 1 ;;
+            esac
+            command -v python3 >/dev/null 2>&1 || return 1
+            python3 - "${path}" <<'PY' >/dev/null 2>&1
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+compile(source, str(path), "exec")
+PY
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 lumen_self_update_scripts() {
     LUMEN_SELF_UPDATE_RESULT=skipped
     LUMEN_SELF_UPDATE_CHANGED=""
@@ -1030,9 +938,116 @@ lumen_self_update_scripts() {
         shift "$#"
     fi
     local files=("$@")
+    local module_files=(
+        lib/runtime.sh
+        lib/locking.sh
+        lib/container_release.sh
+    )
+    local python_helper_files=(
+        release_manifest_guard.py
+        update_runner.py
+        restore_runner.py
+    )
     if [ "${#files[@]}" -eq 0 ]; then
-        files=(lib.sh backup.sh restore.sh update.sh lumenctl.sh)
+        files=(
+            lib.sh
+            lib/runtime.sh
+            lib/locking.sh
+            lib/container_release.sh
+            release_manifest_guard.py
+            update_runner.py
+            restore_runner.py
+            backup.sh
+            restore.sh
+            update.sh
+            lumenctl.sh
+        )
+    else
+        # lib.sh、lib/*.sh 与 Python runners/guard 是一个版本单元。旧 stable
+        # updater 的显式清单只包含 shell 文件；自动补齐 helper，避免新 update.sh
+        # 在首跳 re-exec 后仍调用旧 release_manifest_guard.py。
+        local requested include_modules=0 include_python_helpers=0 module helper present
+        for requested in "${files[@]}"; do
+            if [ "${requested}" = "lib.sh" ]; then
+                include_modules=1
+            fi
+            case "${requested}" in
+                lib.sh|update.sh|lumenctl.sh)
+                    include_python_helpers=1
+                    ;;
+            esac
+        done
+        if [ "${include_modules}" -eq 1 ]; then
+            for module in "${module_files[@]}"; do
+                present=0
+                for requested in "${files[@]}"; do
+                    if [ "${requested}" = "${module}" ]; then
+                        present=1
+                        break
+                    fi
+                done
+                if [ "${present}" -eq 0 ]; then
+                    files+=("${module}")
+                fi
+            done
+        fi
+        if [ "${include_python_helpers}" -eq 1 ]; then
+            for helper in "${python_helper_files[@]}"; do
+                present=0
+                for requested in "${files[@]}"; do
+                    if [ "${requested}" = "${helper}" ]; then
+                        present=1
+                        break
+                    fi
+                done
+                if [ "${present}" -eq 0 ]; then
+                    files+=("${helper}")
+                fi
+            done
+        fi
     fi
+
+    # Install dependencies before the facade/update entrypoints so an
+    # interrupted replacement cannot leave new shell code pointing at old or
+    # missing modules/helpers.
+    local ordered_files=()
+    for module in "${module_files[@]}"; do
+        for requested in "${files[@]}"; do
+            if [ "${requested}" = "${module}" ]; then
+                ordered_files+=("${requested}")
+                break
+            fi
+        done
+    done
+    for helper in "${python_helper_files[@]}"; do
+        for requested in "${files[@]}"; do
+            if [ "${requested}" = "${helper}" ]; then
+                ordered_files+=("${requested}")
+                break
+            fi
+        done
+    done
+    for requested in "${files[@]}"; do
+        present=0
+        for module in "${module_files[@]}"; do
+            if [ "${requested}" = "${module}" ]; then
+                present=1
+                break
+            fi
+        done
+        if [ "${present}" -eq 0 ]; then
+            for helper in "${python_helper_files[@]}"; do
+                if [ "${requested}" = "${helper}" ]; then
+                    present=1
+                    break
+                fi
+            done
+        fi
+        if [ "${present}" -eq 0 ]; then
+            ordered_files+=("${requested}")
+        fi
+    done
+    files=("${ordered_files[@]}")
 
     if [ "${LUMEN_SELF_UPDATE:-1}" = "0" ]; then
         LUMEN_SELF_UPDATE_RESULT=disabled
@@ -1044,7 +1059,21 @@ lumen_self_update_scripts() {
     fi
 
     local marker="${scripts_dir}/.lumen-self-update.last"
-    if [ "${LUMEN_SELF_UPDATE_FORCE:-0}" != "1" ] && [ -f "${marker}" ]; then
+    local coverage_marker="${scripts_dir}/.lumen-self-update.files"
+    local coverage_complete=1
+    if [ ! -f "${coverage_marker}" ]; then
+        coverage_complete=0
+    else
+        for requested in "${files[@]}"; do
+            if ! grep -Fxq "${requested}" "${coverage_marker}" 2>/dev/null; then
+                coverage_complete=0
+                break
+            fi
+        done
+    fi
+    if [ "${LUMEN_SELF_UPDATE_FORCE:-0}" != "1" ] \
+            && [ "${coverage_complete}" -eq 1 ] \
+            && [ -f "${marker}" ]; then
         local last_ts now_ts age
         last_ts="$(cat "${marker}" 2>/dev/null || echo 0)"
         case "${last_ts}" in
@@ -1074,6 +1103,7 @@ lumen_self_update_scripts() {
         LUMEN_SELF_UPDATE_RESULT=failed
         return 0
     fi
+    # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
     LUMEN_SELF_UPDATE_SOURCE="${raw_base}"
 
     local proxy_url=""
@@ -1087,8 +1117,25 @@ lumen_self_update_scripts() {
     tmp_dir="$(mktemp -d 2>/dev/null)" || { LUMEN_SELF_UPDATE_RESULT=failed; return 0; }
 
     local f
-    local first_two
     for f in "${files[@]}"; do
+        case "${f}" in
+            ''|.|..|/*|../*|*/../*|*/..|*[!A-Za-z0-9_./-]*)
+                if command -v log_warn >/dev/null 2>&1; then
+                    log_warn "[self_update] 非法脚本相对路径：${f:-<empty>}，跳过 self-update。"
+                fi
+                rm -rf "${tmp_dir}" 2>/dev/null || true
+                LUMEN_SELF_UPDATE_RESULT=failed
+                return 0
+                ;;
+        esac
+        if ! mkdir -p "$(dirname "${tmp_dir}/${f}")"; then
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "[self_update] 无法创建临时模块目录：$(dirname "${tmp_dir}/${f}")。"
+            fi
+            rm -rf "${tmp_dir}" 2>/dev/null || true
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
         if ! "${curl_cmd[@]}" "${raw_base}/${f}" -o "${tmp_dir}/${f}" 2>/dev/null; then
             if command -v log_warn >/dev/null 2>&1; then
                 log_warn "[self_update] 下载 ${f} 失败（GitHub 不可达？），跳过 self-update（继续用本地脚本）。"
@@ -1097,20 +1144,19 @@ lumen_self_update_scripts() {
             LUMEN_SELF_UPDATE_RESULT=failed
             return 0
         fi
-        # shebang 校验：拒绝 404 HTML / 限流 JSON / 任何非 shell 内容。
-        # bash -n 对 `{"tags":[...]}` 这种 JSON 也会"通过"（被理解为 brace group + 字符串），所以单靠语法检查不够。
-        first_two="$(head -c 2 "${tmp_dir}/${f}" 2>/dev/null || true)"
-        if [ "${first_two}" != "#!" ]; then
+        if ! lumen_validate_self_update_file "${f}" "${tmp_dir}/${f}"; then
             if command -v log_warn >/dev/null 2>&1; then
-                log_warn "[self_update] ${f} 不以 #! 开头（远端返回非脚本内容；可能 404 HTML / JSON / 限流页），跳过 self-update。"
-            fi
-            rm -rf "${tmp_dir}" 2>/dev/null || true
-            LUMEN_SELF_UPDATE_RESULT=failed
-            return 0
-        fi
-        if ! bash -n "${tmp_dir}/${f}" 2>/dev/null; then
-            if command -v log_warn >/dev/null 2>&1; then
-                log_warn "[self_update] ${f} bash -n 校验不过，跳过 self-update。"
+                case "${f}" in
+                    *.sh)
+                        log_warn "[self_update] ${f} 不是有效 bash 脚本，跳过 self-update。"
+                        ;;
+                    *.py)
+                        log_warn "[self_update] ${f} 不是有效 Python 3 helper，跳过 self-update。"
+                        ;;
+                    *)
+                        log_warn "[self_update] ${f} 文件类型不在 self-update 允许列表，跳过。"
+                        ;;
+                esac
             fi
             rm -rf "${tmp_dir}" 2>/dev/null || true
             LUMEN_SELF_UPDATE_RESULT=failed
@@ -1120,17 +1166,56 @@ lumen_self_update_scripts() {
 
     LUMEN_SELF_UPDATE_BACKUP_TS="$(date -u +%Y%m%d-%H%M%S)"
     local changed=""
+    local library_changed=0
+    local update_requested=0
+    local target target_dir
     for f in "${files[@]}"; do
-        if [ -f "${scripts_dir}/${f}" ] && cmp -s "${tmp_dir}/${f}" "${scripts_dir}/${f}"; then
+        if [ "${f}" = "update.sh" ]; then
+            update_requested=1
+            break
+        fi
+    done
+    for f in "${files[@]}"; do
+        target="${scripts_dir}/${f}"
+        target_dir="$(dirname "${target}")"
+        if ! mkdir -p "${target_dir}"; then
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "[self_update] 无法创建目标模块目录：${target_dir}，跳过 self-update。"
+            fi
+            rm -rf "${tmp_dir}" 2>/dev/null || true
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+        if [ -f "${target}" ] && cmp -s "${tmp_dir}/${f}" "${target}"; then
             continue
         fi
-        if [ -f "${scripts_dir}/${f}" ]; then
-            cp -a "${scripts_dir}/${f}" "${scripts_dir}/${f}.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}" 2>/dev/null || true
+        if [ -f "${target}" ]; then
+            cp -a "${target}" "${target}.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}" 2>/dev/null || true
         fi
-        cp -a "${tmp_dir}/${f}" "${scripts_dir}/${f}.new"
-        mv "${scripts_dir}/${f}.new" "${scripts_dir}/${f}"
+        cp -a "${tmp_dir}/${f}" "${target}.new"
+        mv "${target}.new" "${target}"
         changed="${changed}${f} "
+        case "${f}" in
+            lib.sh|lib/*.sh) library_changed=1 ;;
+        esac
     done
+
+    # Existing callers use changed-file tokens as their re-exec contract:
+    # lumenctl watches lib.sh, while update.sh watches update.sh. A module-only
+    # change still replaces already-sourced function definitions, so emit the
+    # corresponding dependency tokens without requiring caller changes.
+    if [ "${library_changed}" -eq 1 ]; then
+        case " ${changed} " in
+            *" lib.sh "*) ;;
+            *) changed="${changed}lib.sh " ;;
+        esac
+        if [ "${update_requested}" -eq 1 ]; then
+            case " ${changed} " in
+                *" update.sh "*) ;;
+                *) changed="${changed}update.sh " ;;
+            esac
+        fi
+    fi
 
     # 关键脚本执行权限（只对仓库里本来就 +x 的）
     local exec_f
@@ -1146,12 +1231,14 @@ lumen_self_update_scripts() {
     # find 无匹配仍 exit 0（dir 存在），更稳。
     local max_keep="${LUMEN_SELF_UPDATE_BAK_KEEP:-5}"
     if [ "${max_keep}" -gt 0 ] 2>/dev/null; then
-        local prune_f total del_n
+        local prune_f prune_dir prune_name total del_n
         for prune_f in "${files[@]}"; do
-            total="$(find "${scripts_dir}" -maxdepth 1 -name "${prune_f}.bak.*" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
+            prune_dir="${scripts_dir}/$(dirname "${prune_f}")"
+            prune_name="$(basename "${prune_f}")"
+            total="$(find "${prune_dir}" -maxdepth 1 -name "${prune_name}.bak.*" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
             if [ -n "${total}" ] && [ "${total}" -gt "${max_keep}" ] 2>/dev/null; then
                 del_n=$((total - max_keep))
-                find "${scripts_dir}" -maxdepth 1 -name "${prune_f}.bak.*" -type f 2>/dev/null \
+                find "${prune_dir}" -maxdepth 1 -name "${prune_name}.bak.*" -type f 2>/dev/null \
                     | sort \
                     | head -n "${del_n}" \
                     | while IFS= read -r bak_path; do
@@ -1161,10 +1248,18 @@ lumen_self_update_scripts() {
         done
     fi
 
+    local coverage_tmp="${coverage_marker}.tmp.$$"
+    if printf '%s\n' "${files[@]}" | sort -u > "${coverage_tmp}" 2>/dev/null; then
+        mv -f "${coverage_tmp}" "${coverage_marker}" 2>/dev/null || true
+    else
+        rm -f "${coverage_tmp}" 2>/dev/null || true
+    fi
     date -u +%s > "${marker}" 2>/dev/null || true
     rm -rf "${tmp_dir}" 2>/dev/null || true
 
+    # shellcheck disable=SC2034  # Public results consumed by sourcing callers.
     LUMEN_SELF_UPDATE_CHANGED="${changed}"
+    # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
     LUMEN_SELF_UPDATE_RESULT=ok
     if command -v log_info >/dev/null 2>&1; then
         if [ -z "${changed}" ]; then
@@ -1220,694 +1315,8 @@ lumen_configure_proxy_env() {
     printf '%s' "${proxy_url}"
 }
 
-lumen_run_as_root() {
-    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-        "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        lumen_sudo "$@"
-    else
-        return 1
-    fi
-}
-
-lumen_run_as_user() {
-    local user="$1"
-    shift
-    if [ "$(id -un 2>/dev/null || true)" = "${user}" ]; then
-        "$@"
-    elif [ "${EUID:-$(id -u)}" -eq 0 ] && command -v runuser >/dev/null 2>&1; then
-        runuser -u "${user}" -- "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        lumen_sudo -u "${user}" "$@"
-    else
-        return 1
-    fi
-}
-
-lumen_systemd_unit_property() {
-    local unit="$1"
-    local prop="$2"
-    command -v systemctl >/dev/null 2>&1 || return 0
-    systemctl show -p "${prop}" --value "${unit}" 2>/dev/null || true
-}
-
-lumen_runtime_service_user() {
-    local user=""
-    if lumen_systemd_has_unit lumen-api.service; then
-        user="$(lumen_systemd_unit_property lumen-api.service User)"
-    elif lumen_systemd_has_unit lumen-worker.service; then
-        user="$(lumen_systemd_unit_property lumen-worker.service User)"
-    elif lumen_systemd_has_unit lumen-web.service; then
-        user="$(lumen_systemd_unit_property lumen-web.service User)"
-    fi
-    printf '%s' "${user:-$(id -un)}"
-}
-
-lumen_runtime_service_group() {
-    local user="$1"
-    local group=""
-    if lumen_systemd_has_unit lumen-api.service; then
-        group="$(lumen_systemd_unit_property lumen-api.service Group)"
-    elif lumen_systemd_has_unit lumen-worker.service; then
-        group="$(lumen_systemd_unit_property lumen-worker.service Group)"
-    elif lumen_systemd_has_unit lumen-web.service; then
-        group="$(lumen_systemd_unit_property lumen-web.service Group)"
-    fi
-    if [ -z "${group}" ] && id "${user}" >/dev/null 2>&1; then
-        group="$(id -gn "${user}" 2>/dev/null || true)"
-    fi
-    printf '%s' "${group:-${user}}"
-}
-
-lumen_user_can_write_dir() {
-    local user="$1"
-    local dir="$2"
-    lumen_run_as_user "${user}" test -w "${dir}" >/dev/null 2>&1
-}
-
-lumen_ensure_dir_writable() {
-    local dir="$1"
-    local label="${2:-目录}"
-    local owner_user="${3:-}"
-    local owner_group="${4:-}"
-    if [ -z "${dir}" ]; then
-        log_error "${label} 为空。"
-        return 1
-    fi
-    if [ -e "${dir}" ] && [ ! -d "${dir}" ]; then
-        log_error "${label} 已存在但不是目录：${dir}"
-        return 1
-    fi
-    if [ ! -d "${dir}" ]; then
-        mkdir -p "${dir}" 2>/dev/null || lumen_run_as_root mkdir -p "${dir}" || {
-            log_error "无法创建 ${label}：${dir}"
-            return 1
-        }
-    fi
-    if [ -n "${owner_user}" ]; then
-        owner_group="${owner_group:-${owner_user}}"
-        if ! lumen_user_can_write_dir "${owner_user}" "${dir}"; then
-            lumen_run_as_root chown -R "${owner_user}:${owner_group}" "${dir}" 2>/dev/null || true
-        fi
-        if ! lumen_user_can_write_dir "${owner_user}" "${dir}"; then
-            log_error "${label} 对运行用户 ${owner_user} 不可写：${dir}"
-            return 1
-        fi
-        return 0
-    fi
-    if [ ! -w "${dir}" ]; then
-        lumen_run_as_root chown -R "$(id -un):$(id -gn)" "${dir}" 2>/dev/null || true
-    fi
-    if [ ! -w "${dir}" ]; then
-        log_error "${label} 不可写：${dir}"
-        return 1
-    fi
-}
-
-lumen_ensure_runtime_dirs() {
-    local env_file="${1:-.env}"
-    local storage_root backup_root storage_parent owner_user owner_group
-    storage_root="$(lumen_env_value STORAGE_ROOT "${env_file}")"
-    backup_root="$(lumen_env_value BACKUP_ROOT "${env_file}")"
-    storage_root="${storage_root:-/opt/lumendata/storage}"
-    backup_root="${backup_root:-/opt/lumendata/backup}"
-    storage_parent="$(dirname "${storage_root}")"
-    owner_user="$(lumen_runtime_service_user)"
-    owner_group="$(lumen_runtime_service_group "${owner_user}")"
-
-    lumen_ensure_dir_writable "${storage_root}" "STORAGE_ROOT" "${owner_user}" "${owner_group}" || return 1
-    lumen_ensure_dir_writable "${backup_root}/pg" "PostgreSQL 备份目录" "${owner_user}" "${owner_group}" || return 1
-    lumen_ensure_dir_writable "${backup_root}/redis" "Redis 备份目录" "${owner_user}" "${owner_group}" || return 1
-    if [ "${storage_parent}" != "." ]; then
-        log_info "运行时目录就绪：${storage_parent}（运行用户：${owner_user}:${owner_group}）"
-    fi
-}
-
-lumen_systemd_has_unit() {
-    local unit="$1"
-    command -v systemctl >/dev/null 2>&1 || return 1
-    if systemctl list-unit-files "${unit}" --no-legend 2>/dev/null \
-        | awk '{print $1}' \
-        | grep -Fxq "${unit}"; then
-        return 0
-    fi
-    systemctl status "${unit}" >/dev/null 2>&1 && return 0
-    return 1
-}
-
-lumen_systemd_has_any_units() {
-    local unit
-    for unit in "$@"; do
-        if lumen_systemd_has_unit "${unit}"; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-lumen_systemctl() {
-    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-        systemctl "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        lumen_sudo systemctl "$@" || systemctl "$@"
-    else
-        return 1
-    fi
-}
-
-lumen_install_optional_systemd_unit() {
-    local tmp_dir="$1"
-    local unit="$2"
-    local warn_msg="$3"
-    [ -f "${tmp_dir}/${unit}" ] || return 0
-    lumen_run_as_root install -m 0644 "${tmp_dir}/${unit}" "/etc/systemd/system/${unit}" \
-        || log_warn "${warn_msg}"
-}
-
-lumen_ensure_backup_service_user() {
-    local backup_root="${1:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
-    local user="${LUMEN_BACKUP_SERVICE_USER:-lumen-backup}"
-    local group="${LUMEN_BACKUP_SERVICE_GROUP:-lumen-backup}"
-    local shell_path="/usr/sbin/nologin"
-    [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
-    [ -x "${shell_path}" ] || shell_path="/bin/false"
-
-    if command -v getent >/dev/null 2>&1; then
-        if ! getent group "${group}" >/dev/null 2>&1; then
-            lumen_run_as_root groupadd --system "${group}" 2>/dev/null \
-                || log_warn "创建 ${group} 组失败；lumen-backup.service 可能无法启动。"
-        fi
-    fi
-    if ! id "${user}" >/dev/null 2>&1; then
-        lumen_run_as_root useradd --system --home-dir "${backup_root}" \
-            --shell "${shell_path}" --gid "${group}" "${user}" 2>/dev/null \
-            || log_warn "创建 ${user} 用户失败；lumen-backup.service 可能无法启动。"
-    fi
-    if command -v getent >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
-        lumen_run_as_root usermod -aG docker "${user}" 2>/dev/null \
-            || log_warn "把 ${user} 加入 docker 组失败；备份服务可能无法访问 docker socket。"
-    else
-        log_warn "未找到 docker 组；请确保 ${user} 可访问 /var/run/docker.sock。"
-    fi
-    lumen_run_as_root mkdir -p "${backup_root}" 2>/dev/null || true
-    lumen_run_as_root chgrp -R "${group}" "${backup_root}" 2>/dev/null || true
-    lumen_run_as_root chmod -R g+rwX "${backup_root}" 2>/dev/null || true
-}
-
-lumen_enable_optional_systemd_unit() {
-    local tmp_dir="$1"
-    local unit="$2"
-    local warn_msg="$3"
-    [ -f "${tmp_dir}/${unit}" ] || return 0
-    lumen_run_as_root systemctl enable --now "${unit}" || log_warn "${warn_msg}"
-}
-
-lumen_restart_systemd_units() {
-    local units=()
-    local unit
-    for unit in "$@"; do
-        if lumen_systemd_has_unit "${unit}"; then
-            units+=("${unit}")
-        else
-            log_warn "未发现 systemd unit：${unit}，跳过。"
-        fi
-    done
-    if [ "${#units[@]}" -eq 0 ]; then
-        log_error "未发现可重启的 Lumen systemd unit。"
-        return 1
-    fi
-    log_info "重启 systemd 服务：${units[*]}"
-    if ! lumen_systemctl restart "${units[@]}"; then
-        log_error "systemctl restart 失败：${units[*]}"
-        log_error "如果脚本由管理后台触发，请确认运行用户有 sudo systemctl restart lumen-* 权限。"
-        return 1
-    fi
-}
-
-lumen_systemd_unit_active() {
-    local unit="$1"
-    if ! lumen_systemd_has_unit "${unit}"; then
-        log_warn "未发现 ${unit}，跳过 active 检查。"
-        return 0
-    fi
-    if ! lumen_systemctl is-active --quiet "${unit}"; then
-        log_error "${unit} 未处于 active 状态。"
-        if command -v journalctl >/dev/null 2>&1; then
-            log_error "排查命令：journalctl -u ${unit} -n 160 --no-pager"
-        fi
-        return 1
-    fi
-}
-
-lumen_check_runtime_health() {
-    local api_url="${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
-    local web_url="${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}"
-    local api_attempts="${LUMEN_API_HEALTH_ATTEMPTS:-60}"
-    local web_attempts="${LUMEN_WEB_HEALTH_ATTEMPTS:-60}"
-    local check_worker="${LUMEN_CHECK_WORKER:-1}"
-    local failed=0
-
-    log_step "Lumen 运行时健康检查"
-    if lumen_wait_for_http_ok "${api_url}" "${api_attempts}"; then
-        log_info "API 健康检查通过：${api_url}"
-    else
-        log_error "API 健康检查失败：${api_url}"
-        failed=1
-    fi
-
-    if lumen_wait_for_http_ok "${web_url}" "${web_attempts}"; then
-        log_info "Web 健康检查通过：${web_url}"
-    else
-        log_error "Web 健康检查失败：${web_url}"
-        failed=1
-    fi
-
-    if [ "${check_worker}" = "1" ]; then
-        if lumen_systemd_has_unit lumen-worker.service; then
-            lumen_systemd_unit_active lumen-worker.service || failed=1
-        else
-            log_warn "未发现 lumen-worker.service；请确认 Worker 进程已启动：cd apps/worker && uv run python -m arq app.main.WorkerSettings"
-        fi
-    fi
-
-    return "${failed}"
-}
-
-LUMEN_LOCAL_RUNTIME_PIDS=()
-LUMEN_LOCAL_RUNTIME_LOG_DIR=""
-
-# 后台拉起的 API/Worker/Web PID 持久化文件。install.sh 退出后子进程不会主动结束，
-# 写入这里方便 uninstall.sh 准确停掉，避免 8000/3000 端口悬空。
-lumen_runtime_pid_file() {
-    local root="$1"
-    printf '%s/var/run/lumen-runtime.pids' "${root}"
-}
-
-lumen_persist_runtime_pids() {
-    local root="$1"
-    local pid_file
-    pid_file="$(lumen_runtime_pid_file "${root}")"
-    mkdir -p "$(dirname "${pid_file}")" 2>/dev/null || true
-    : > "${pid_file}" 2>/dev/null || return 0
-    local pid
-    for pid in "${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}"; do
-        [ -n "${pid}" ] || continue
-        printf '%s\n' "${pid}" >> "${pid_file}"
-    done
-    chmod 600 "${pid_file}" 2>/dev/null || true
-}
-
-lumen_stop_local_runtime_jobs() {
-    local pid
-    for pid in "${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}"; do
-        if kill -0 "${pid}" 2>/dev/null; then
-            kill "${pid}" 2>/dev/null || true
-        fi
-    done
-    for pid in "${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}"; do
-        wait "${pid}" 2>/dev/null || true
-    done
-    LUMEN_LOCAL_RUNTIME_PIDS=()
-}
-
-# 列出占用某端口的 PID（每行一个）。优先 lsof，其次 ss，最后 netstat。
-lumen_pids_listening_on_port() {
-    local port="$1"
-    local out=""
-    if command -v lsof >/dev/null 2>&1; then
-        out="$(lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u || true)"
-        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            out="$(lumen_run_as_root lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u || true)"
-        fi
-        printf '%s\n' "${out}" | sed '/^$/d'
-        if [ -n "${out}" ]; then
-            return 0
-        fi
-    fi
-    if command -v ss >/dev/null 2>&1; then
-        # ss -ltnpH 输出含 users:(("name",pid=NNN,fd=...)) 的字段
-        out="$(ss -ltnpH 2>/dev/null \
-            | awk -v port="${port}" '$4 ~ ":"port"$" {print $0}' \
-            | grep -oE 'pid=[0-9]+' \
-            | awk -F= '{print $2}' \
-            | sort -u || true)"
-        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            out="$(lumen_run_as_root ss -ltnpH 2>/dev/null \
-                | awk -v port="${port}" '$4 ~ ":"port"$" {print $0}' \
-                | grep -oE 'pid=[0-9]+' \
-                | awk -F= '{print $2}' \
-                | sort -u || true)"
-        fi
-        printf '%s\n' "${out}" | sed '/^$/d'
-        if [ -n "${out}" ]; then
-            return 0
-        fi
-    fi
-    if command -v netstat >/dev/null 2>&1; then
-        out="$(netstat -ltnp 2>/dev/null \
-            | awk -v port="${port}" '$4 ~ ":"port"$" {print $7}' \
-            | awk -F'/' '{print $1}' \
-            | grep -E '^[0-9]+$' \
-            | sort -u || true)"
-        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            out="$(lumen_run_as_root netstat -ltnp 2>/dev/null \
-                | awk -v port="${port}" '$4 ~ ":"port"$" {print $7}' \
-                | awk -F'/' '{print $1}' \
-                | grep -E '^[0-9]+$' \
-                | sort -u || true)"
-        fi
-        printf '%s\n' "${out}" | sed '/^$/d'
-        return 0
-    fi
-    return 0
-}
-
-lumen_kill_pid() {
-    local pid="$1"
-    local signal="${2:-TERM}"
-    [ -n "${pid}" ] || return 1
-    kill "-${signal}" "${pid}" 2>/dev/null && return 0
-    if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-        lumen_run_as_root kill "-${signal}" "${pid}" 2>/dev/null && return 0
-    fi
-    return 1
-}
-
-lumen_pid_exists() {
-    local pid="$1"
-    [ -n "${pid}" ] || return 1
-    kill -0 "${pid}" 2>/dev/null && return 0
-    if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-        lumen_run_as_root kill -0 "${pid}" 2>/dev/null && return 0
-    fi
-    return 1
-}
-
-# 抓 PID 的命令行文本（用于识别是不是 lumen 自己起的进程）。
-lumen_pid_cmdline() {
-    local pid="$1"
-    if [ -r "/proc/${pid}/cmdline" ]; then
-        local proc_out
-        proc_out="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)"
-        if [ -n "${proc_out}" ]; then
-            printf '%s' "${proc_out}"
-            return 0
-        fi
-    fi
-    if command -v ps >/dev/null 2>&1; then
-        # macOS ps 没有 /proc，用 -o command= 拿全命令行
-        local out
-        out="$(ps -o command= -p "${pid}" 2>/dev/null)"
-        if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
-        out="$(ps -o args= -p "${pid}" 2>/dev/null)"
-        if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
-        if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            out="$(lumen_run_as_root ps -o command= -p "${pid}" 2>/dev/null)"
-            if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
-            out="$(lumen_run_as_root ps -o args= -p "${pid}" 2>/dev/null)"
-            if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
-        fi
-    fi
-    return 1
-}
-
-# 抓 PID 的工作目录。next-server 子进程把 process.title 改成 "next-server (v...)"，
-# cmdline 已不含项目路径，必须用 cwd 才能确认是不是 lumen 起的。
-lumen_pid_cwd() {
-    local pid="$1"
-    [ -n "${pid}" ] || return 0
-    if [ -L "/proc/${pid}/cwd" ]; then
-        readlink -f "/proc/${pid}/cwd" 2>/dev/null
-        return 0
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-        # macOS 的 lsof 即便加 -p PID 仍可能输出全表，必须先匹配 p<pid> 再取它后面的 n 行。
-        local out
-        out="$(lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
-            | awk -v pid="${pid}" '
-                /^p/ { current = substr($0, 2); next }
-                /^n/ && current == pid { sub(/^n/, ""); print; exit }
-            ' || true)"
-        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-            out="$(lumen_run_as_root lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
-                | awk -v pid="${pid}" '
-                    /^p/ { current = substr($0, 2); next }
-                    /^n/ && current == pid { sub(/^n/, ""); print; exit }
-                ' || true)"
-        fi
-        printf '%s' "${out}"
-    fi
-}
-
-# 判断给定 PID 是否 lumen 后台运行时（uvicorn app.main:app / arq app.main / next-server / npm run dev|start）。
-# 防止误杀同机其它 nodejs / python 服务。
-lumen_is_lumen_runtime_process() {
-    local pid="$1"
-    [ -n "${pid}" ] || return 1
-    local cmd
-    cmd="$(lumen_pid_cmdline "${pid}")"
-    case "${cmd}" in
-        *"uvicorn app.main:app"*) return 0 ;;
-        *"arq app.main.WorkerSettings"*) return 0 ;;
-        *"app.main.WorkerSettings"*) return 0 ;;
-        # next-server (v...)  —— next 子进程改 process.title 后 cmdline 通常就这么短，
-        # 不含 apps/web。cwd 兜底（见下）会再校验一次是不是真在 lumen 项目内。
-        *"next-server"*) return 0 ;;
-        *"node"*"node_modules/next/dist"*) return 0 ;;
-        *"node"*"node_modules/.bin/next"*) return 0 ;;
-        *"npm run dev"*|*"npm run start"*|*"npm exec next"*) return 0 ;;
-        *"next dev"*|*"next start"*) return 0 ;;
-    esac
-    # cmdline 包含 apps/* 路径的兜底（uvicorn 走 uv run 可能少 uvicorn 字面量）
-    case "${cmd}" in
-        *"apps/api"*"uvicorn"*|*"apps/api"*"app.main"*) return 0 ;;
-        *"apps/worker"*"arq"*|*"apps/worker"*"app.main"*) return 0 ;;
-    esac
-    # 进程 cwd 在 apps/api|worker|web 下：next-server 等改了 process.title 的进程靠这个识别
-    local cwd
-    cwd="$(lumen_pid_cwd "${pid}")"
-    case "${cwd}" in
-        */apps/api|*/apps/api/*) return 0 ;;
-        */apps/worker|*/apps/worker/*) return 0 ;;
-        */apps/web|*/apps/web/*) return 0 ;;
-    esac
-    return 1
-}
-
-# 关掉 PID 文件中记录的 lumen 进程（先 SIGTERM，最多等 wait_seconds 秒，必要时 SIGKILL）。
-# 返回值非零表示有部分进程仍在；调用方按需要再处理。
-lumen_stop_persisted_runtime() {
-    local root="$1"
-    local wait_seconds="${2:-15}"
-    local pid_file
-    pid_file="$(lumen_runtime_pid_file "${root}")"
-    [ -f "${pid_file}" ] || return 0
-    local -a pids=()
-    local line
-    while IFS= read -r line; do
-        line="${line//[[:space:]]/}"
-        [[ "${line}" =~ ^[0-9]+$ ]] || continue
-        pids+=("${line}")
-    done < "${pid_file}"
-    if [ "${#pids[@]}" -eq 0 ]; then
-        rm -f "${pid_file}" 2>/dev/null || true
-        return 0
-    fi
-    local pid sent=0
-    for pid in "${pids[@]}"; do
-        if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
-            lumen_kill_pid "${pid}" TERM || true
-            sent=1
-        fi
-    done
-    if [ "${sent}" -eq 1 ]; then
-        local _i
-        for _i in $(seq 1 "${wait_seconds}"); do
-            local alive=0
-            for pid in "${pids[@]}"; do
-                if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
-                    alive=1
-                    break
-                fi
-            done
-            [ "${alive}" -eq 0 ] && break
-            sleep 1
-        done
-        for pid in "${pids[@]}"; do
-            if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
-                lumen_kill_pid "${pid}" KILL || true
-            fi
-        done
-    fi
-    rm -f "${pid_file}" 2>/dev/null || true
-}
-
-# 扫描端口 → 找 lumen 自己的进程 → kill。返回 0 表示端口已腾出（或本来就空闲）。
-# 输入：端口号 + 用途描述（仅日志）。
-lumen_release_port_if_lumen() {
-    local port="$1"
-    local label="${2:-port ${port}}"
-    if ! lumen_process_listening_on_port "${port}"; then
-        return 0
-    fi
-    local -a pids=()
-    local pid
-    while IFS= read -r pid; do
-        [ -n "${pid}" ] || continue
-        pids+=("${pid}")
-    done < <(lumen_pids_listening_on_port "${port}")
-    if [ "${#pids[@]}" -eq 0 ]; then
-        # 拿不到 PID（无 root / 无 lsof / docker-proxy 占的端口都可能落到这里）。
-        # 让调用方按 docker 或外部进程去处理，这里返回非 0。
-        return 1
-    fi
-    local matched=0
-    for pid in "${pids[@]}"; do
-        if lumen_is_lumen_runtime_process "${pid}"; then
-            log_warn "${label}：发现 Lumen 残留进程 pid=${pid}，发送 SIGTERM。"
-            lumen_kill_pid "${pid}" TERM || true
-            matched=1
-        fi
-    done
-    if [ "${matched}" -eq 0 ]; then
-        log_warn "${label}：被非 Lumen 进程占用，PID=${pids[*]}。"
-        return 1
-    fi
-    local _i
-    for _i in $(seq 1 10); do
-        if ! lumen_process_listening_on_port "${port}"; then
-            return 0
-        fi
-        sleep 1
-    done
-    for pid in "${pids[@]}"; do
-        if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
-            log_warn "${label}：pid=${pid} 未在 SIGTERM 后退出，发送 SIGKILL。"
-            lumen_kill_pid "${pid}" KILL || true
-        fi
-    done
-    sleep 1
-    if lumen_process_listening_on_port "${port}"; then
-        return 1
-    fi
-    return 0
-}
-
-lumen_tail_runtime_log() {
-    local name="$1"
-    local file="$2"
-    if [ -s "${file}" ]; then
-        log_error "${name} 最近日志："
-        tail -n "${LUMEN_RUNTIME_LOG_TAIL_LINES:-80}" "${file}" >&2 || true
-    fi
-}
-
-# 启动新进程前先把端口腾出来：lumen 自己的旧进程主动 kill；外部进程则报错。
-# 返回 0 表示端口现在空闲，可以启动；返回 1 表示外部占用，调用方应放弃启动。
-lumen_prepare_port_for_runtime() {
-    local port="$1"
-    local label="$2"
-    if ! lumen_process_listening_on_port "${port}"; then
-        return 0
-    fi
-    log_info "${label} 启动前发现 ${port} 已被占用，尝试释放（仅限 Lumen 自家进程）。"
-    if lumen_release_port_if_lumen "${port}" "${label}"; then
-        return 0
-    fi
-    log_error "${label}：端口 ${port} 被外部进程占用，无法启动。"
-    log_error "排查命令：lsof -iTCP:${port} -sTCP:LISTEN -nP   或   ss -ltnp \"sport = :${port}\""
-    return 1
-}
-
-lumen_start_local_runtime() {
-    local root="$1"
-    local web_npm_script="${2:-dev}"
-    local api_log worker_log web_log
-    local api_pid="" worker_pid="" web_pid=""
-    local failed=0
-
-    LUMEN_LOCAL_RUNTIME_LOG_DIR="${root}/.install-logs/runtime.$(date '+%Y%m%d%H%M%S')"
-    mkdir -p "${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
-    api_log="${LUMEN_LOCAL_RUNTIME_LOG_DIR}/api.log"
-    worker_log="${LUMEN_LOCAL_RUNTIME_LOG_DIR}/worker.log"
-    web_log="${LUMEN_LOCAL_RUNTIME_LOG_DIR}/web.log"
-
-    log_step "启动 Lumen 运行时进程"
-
-    # 上一次 install/start 写下的 PID 文件是最可靠的清理来源；先按 PID
-    # 停掉，再用端口扫描兜底处理未记录或旧版本残留的进程。
-    lumen_stop_persisted_runtime "${root}" "${LUMEN_RUNTIME_STOP_WAIT_SECONDS:-15}" || true
-
-    # 先把 8000/3000 上的旧 Lumen 进程清掉。否则这次启动的新 API/Web 会因 EADDRINUSE
-    # 立刻退出，而旧进程仍在响应 healthz，健康检查会假阳性通过。
-    if ! lumen_prepare_port_for_runtime 8000 "API"; then
-        failed=1
-    else
-        log_info "启动 API → ${api_log}"
-        (
-            cd "${root}/apps/api" || exit 1
-            exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-        ) >"${api_log}" 2>&1 &
-        api_pid="$!"
-        LUMEN_LOCAL_RUNTIME_PIDS+=("${api_pid}")
-    fi
-
-    log_info "启动 Worker → ${worker_log}"
-    (
-        cd "${root}/apps/worker" || exit 1
-        exec uv run python -m arq app.main.WorkerSettings
-    ) >"${worker_log}" 2>&1 &
-    worker_pid="$!"
-    LUMEN_LOCAL_RUNTIME_PIDS+=("${worker_pid}")
-
-    if ! lumen_prepare_port_for_runtime 3000 "Web"; then
-        failed=1
-    else
-        log_info "启动 Web → ${web_log}"
-        (
-            cd "${root}/apps/web" || exit 1
-            exec npm run "${web_npm_script}"
-        ) >"${web_log}" 2>&1 &
-        web_pid="$!"
-        LUMEN_LOCAL_RUNTIME_PIDS+=("${web_pid}")
-    fi
-
-    sleep "${LUMEN_WORKER_START_GRACE_SECONDS:-3}"
-    # 校验三个 PID 仍然存活：旧进程会让 healthz 假阳性，
-    # 只有「我们刚启动的进程还活着」才算真启动成功。
-    if [ -n "${api_pid}" ] && ! kill -0 "${api_pid}" 2>/dev/null; then
-        log_error "API 启动后立即退出（常见原因：端口 8000 冲突 / DATABASE_URL 错误 / .env 不完整）。"
-        lumen_tail_runtime_log "API" "${api_log}"
-        failed=1
-    fi
-    if [ -n "${worker_pid}" ] && ! kill -0 "${worker_pid}" 2>/dev/null; then
-        log_error "Worker 启动后立即退出。"
-        lumen_tail_runtime_log "Worker" "${worker_log}"
-        failed=1
-    fi
-    if [ -n "${web_pid}" ] && ! kill -0 "${web_pid}" 2>/dev/null; then
-        log_error "Web 启动后立即退出（常见原因：端口 3000 被旧进程占用 / npm build 残缺）。"
-        lumen_tail_runtime_log "Web" "${web_log}"
-        failed=1
-    fi
-
-    if [ "${failed}" -eq 0 ] && ! LUMEN_CHECK_WORKER=0 lumen_check_runtime_health; then
-        failed=1
-    fi
-
-    if [ "${failed}" -ne 0 ]; then
-        lumen_tail_runtime_log "API" "${api_log}"
-        lumen_tail_runtime_log "Web" "${web_log}"
-        log_error "运行时健康检查失败，日志目录：${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
-        lumen_stop_local_runtime_jobs
-        return 1
-    fi
-
-    # 把后台 PID 写到 var/run/lumen-runtime.pids，方便 uninstall.sh 在不同 shell
-    # 进程里也能停掉这些后台运行时；否则 8000/3000 会被悬空进程一直占住。
-    lumen_persist_runtime_pids "${root}"
-    log_info "运行时日志目录：${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
-}
+# Host runtime, systemd, storage ownership, and local process helpers are loaded
+# from lib/runtime.sh at the end of this facade.
 
 # lumen_root —— 解析 BASH_SOURCE[1] 所在目录的上级（项目根目录）
 # 注意：本函数依赖调用者通过 source 引入本文件，从其所在的脚本路径反推。
@@ -2229,428 +1638,8 @@ lumen_release_cleanup_old() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Docker Compose 包装与容器化健康检查
-# 详见 docs/docker-full-stack-cutover-plan.md §11.4 / §13 / §17.5-§17.7。
-# ---------------------------------------------------------------------------
-
-# 返回固定的 Compose project name 常量（§11.4 死规则）。
-lumen_compose_project_name() {
-    printf '%s' "${LUMEN_COMPOSE_PROJECT:-lumen}"
-}
-
-# 包装 docker compose；自动注入 COMPOSE_PROJECT_NAME，并探测 v2 可用性。
-#
-# 显式 -f / --env-file 兜底：
-# 当 caller cwd 不是 release 目录（例如 lumenctl/update.sh 从 /opt/lumen 而非
-# /opt/lumen/current 调起）时，docker compose 默认无法读到 release dir 的 .env，
-# 所有 ${VAR:-default} 走 fallback。曾在 update-lumen 时把 LUMEN_DB_ROOT
-# 从 /var/lib/lumen-data 错回 /opt/lumendata（SMB），触发 pg recreate 后
-# initdb 错乱清空数据目录。这里探测 caller cwd 没有 docker-compose.yml 时，
-# 自动指向 ${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current 的 compose 文件 + .env。
-lumen_compose() {
-    if ! docker compose version >/dev/null 2>&1; then
-        log_error "未检测到 docker compose v2，请安装/升级到 Docker Compose v2 后重试。"
-        return 1
-    fi
-    local explicit=()
-    if [ ! -f "./docker-compose.yml" ]; then
-        local _cur="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
-        if [ -f "${_cur}/docker-compose.yml" ]; then
-            explicit+=("-f" "${_cur}/docker-compose.yml")
-            [ -f "${_cur}/.env" ] && explicit+=("--env-file" "${_cur}/.env")
-        fi
-    fi
-    # ${explicit[@]+"${explicit[@]}"}: 兼容 set -u — 空数组 ${arr[@]} 报
-    # unbound variable，需用 + 形式 "如果定义了就展开"。
-    COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
-        lumen_docker compose --ansi=never ${explicit[@]+"${explicit[@]}"} "$@"
-}
-
-# 在指定目录执行 lumen_compose（release 切换时用）。
-lumen_compose_in() {
-    local dir="$1"
-    shift
-    ( cd "${dir}" && lumen_compose "$@" )
-}
-
-# 按镜像分组拉取 compose 中的所有 image：先 `compose config --images` 枚举，
-# 再逐个 `lumen_docker pull`，每个镜像之前打 `[i/n] image:tag` 头部分隔。
-# docker 自身的 layer 进度（下载条/速度）保留，TTY 下原地刷新；非 TTY 下虽然
-# 会逐行输出但每个镜像之间有清晰边界，不会像 `compose pull` 那样把所有镜像的
-# layer 进度混在一起刷屏。
-# 用法：lumen_compose_pull_per_image <compose_dir>
-# 枚举失败兜底回退 `lumen_compose_in <dir> pull`，保证最差也能 work。
-lumen_verify_image_signature_if_required() {
-    local image="$1"
-    if ! lumen_env_truthy "${LUMEN_VERIFY_IMAGE_SIGNATURES:-0}"; then
-        return 0
-    fi
-    if ! command -v cosign >/dev/null 2>&1; then
-        log_error "LUMEN_VERIFY_IMAGE_SIGNATURES=1 但未找到 cosign，无法校验镜像签名。"
-        return 1
-    fi
-    cosign verify \
-        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        --certificate-identity-regexp "https://github.com/cyeinfpro/Lumen/.github/workflows/docker-release.yml@refs/(tags/v.*|heads/main)" \
-        "${image}" >/dev/null
-}
-
-lumen_record_image_digest() {
-    local image="$1"
-    local digest lock_file
-    digest="$(lumen_docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}" 2>/dev/null | head -n1 || true)"
-    if [ -z "${digest}" ]; then
-        log_warn "未能读取镜像 digest：${image}"
-        return 0
-    fi
-    log_info "镜像 digest：${digest}"
-    lock_file="${LUMEN_IMAGE_DIGEST_LOCK_FILE:-}"
-    if [ -n "${lock_file}" ]; then
-        mkdir -p "$(dirname "${lock_file}")"
-        printf '%s %s\n' "${image}" "${digest}" >> "${lock_file}"
-    fi
-}
-
-lumen_compose_pull_per_image() {
-    local compose_dir="$1"
-    if [ -z "${compose_dir}" ]; then
-        log_error "lumen_compose_pull_per_image: compose_dir 参数缺失"
-        return 1
-    fi
-    local images raw_images
-    if ! raw_images="$(lumen_compose_in "${compose_dir}" config --images 2>/dev/null)"; then
-        if lumen_env_truthy "${LUMEN_VERIFY_IMAGE_SIGNATURES:-0}"; then
-            log_error "LUMEN_VERIFY_IMAGE_SIGNATURES=1 时无法枚举 compose 镜像列表，拒绝执行未校验的 docker compose pull。"
-            return 1
-        fi
-        log_warn "无法枚举 compose 镜像列表（${compose_dir}），回退到默认 docker compose pull。"
-        lumen_compose_in "${compose_dir}" pull
-        return $?
-    fi
-    images="$(printf '%s\n' "${raw_images}" | sort -u)"
-    if [ -z "${images}" ]; then
-        log_warn "compose 镜像列表为空（${compose_dir}），跳过 pull。"
-        return 0
-    fi
-
-    local total idx=0 img rc=0
-    local failed=()
-    total="$(printf '%s\n' "${images}" | sed '/^$/d' | wc -l | tr -d ' ')"
-    log_info "拉取 ${total} 个镜像（按镜像分组，docker 进度保留）"
-    while IFS= read -r img; do
-        [ -z "${img}" ] && continue
-        idx=$((idx + 1))
-        printf '\n  [%d/%d] %s\n' "${idx}" "${total}" "${img}"
-        if ! lumen_docker pull "${img}"; then
-            failed+=("${img}")
-            rc=1
-        elif ! lumen_verify_image_signature_if_required "${img}"; then
-            failed+=("${img}")
-            rc=1
-        else
-            lumen_record_image_digest "${img}"
-        fi
-    done <<< "${images}"
-
-    if [ "${rc}" -ne 0 ]; then
-        log_error "以下镜像拉取失败（${#failed[@]}/${total}）："
-        local f
-        for f in "${failed[@]}"; do
-            log_error "  - ${f}"
-        done
-    fi
-    return "${rc}"
-}
-
-# 把 lumen-* 容器从任意 stale compose project 迁移到 LUMEN_COMPOSE_PROJECT
-# (默认 lumen)。idempotent — 没有 stale 直接返回。
-#
-# Why: 历史上有人在 /opt/lumen/current/ 直接 `cd && docker compose up` 起过容器
-# (project 取 cwd basename = "current"，或随 release dir 变化)。新版 lib.sh 强制
-# COMPOSE_PROJECT_NAME=lumen 后，docker 视角 project=lumen 无该容器要新建，但容器
-# 名 lumen-redis 是全局唯一被 stale project 占用 → "container name in use" 冲突，
-# --force-recreate 跨 project 不生效。
-#
-# 操作：
-#   1. detect 所有 name 形如 lumen-* 的容器，按 project label 分组
-#   2. 找出 project ≠ ${LUMEN_COMPOSE_PROJECT:-lumen} 的，逐个 docker compose -p
-#      <stale> down --remove-orphans (volume 是 bind mount /opt/lumendata/*，不
-#      会被 down 删掉)
-#   3. 让调用方继续正常 up 到目标 project
-lumen_compose_project_unify() {
-    local target="${LUMEN_COMPOSE_PROJECT:-lumen}"
-    if ! command -v docker >/dev/null 2>&1; then
-        return 0
-    fi
-    local stale
-    # docker ps 的 .Labels 是 "k1=v1,k2=v2" 字符串不能 index；用单数
-    # {{.Label "key"}}（docker ps 专用）取单个 label。
-    stale="$(docker ps -a \
-        --filter 'name=^lumen-' \
-        --format '{{.Label "com.docker.compose.project"}}' \
-        2>/dev/null | sort -u | grep -v "^${target}$" | grep -v '^$' || true)"
-    if [ -z "${stale}" ]; then
-        return 0
-    fi
-    log_info "[compose-project] 检测到 lumen-* 容器跑在非 ${target} 的 project："
-    while IFS= read -r p; do
-        [ -z "${p}" ] && continue
-        log_info "  - project=${p}; 即将 docker compose -p '${p}' down --remove-orphans"
-    done <<< "${stale}"
-    log_info "[compose-project] volumes 是 bind mount (/opt/lumendata/*)，不会丢数据。"
-    while IFS= read -r p; do
-        [ -z "${p}" ] && continue
-        if ! docker compose -p "${p}" down --remove-orphans 2>&1 | tail -10; then
-            log_warn "[compose-project] docker compose -p '${p}' down 失败；后续 up 会撞容器名。"
-        fi
-    done <<< "${stale}"
-}
-
-# 轮询 HTTP 健康端点；用法：lumen_health_http <url> <max_seconds> <interval_seconds>。
-lumen_health_http() {
-    local url="$1"
-    local max_seconds="${2:-30}"
-    local interval="${3:-2}"
-    [ "${interval}" -gt 0 ] || interval=1
-    local attempts=$(( max_seconds / interval ))
-    [ "${attempts}" -gt 0 ] || attempts=1
-    local _i
-    for _i in $(seq 1 "${attempts}"); do
-        if curl --noproxy '*' -fsS --max-time 5 -o /dev/null "${url}" 2>/dev/null; then
-            return 0
-        fi
-        sleep "${interval}"
-    done
-    return 1
-}
-
-# 检查 compose 服务是否 running 且（如有 healthcheck）healthy；变长服务名。
-lumen_health_compose() {
-    local attempts="${LUMEN_HEALTH_COMPOSE_ATTEMPTS:-60}"
-    local interval="${LUMEN_HEALTH_COMPOSE_INTERVAL:-2}"
-    local proj="${LUMEN_COMPOSE_PROJECT:-lumen}"
-    local svc cid status _i ok
-    for svc in "$@"; do
-        cid=""
-        ok=0
-        for _i in $(seq 1 "${attempts}"); do
-            cid="$(lumen_compose ps --status running --quiet "${svc}" 2>/dev/null | head -n1)"
-            if [ -z "${cid}" ]; then
-                sleep "${interval}"
-                continue
-            fi
-            status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${proj}-${svc}" 2>/dev/null || true)"
-            if [ -z "${status}" ]; then
-                # 容器可能用其它命名（service-1 等）；按容器 id 再查一次。
-                status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${cid}" 2>/dev/null || true)"
-            fi
-            case "${status}" in
-                ""|healthy)
-                    ok=1
-                    break
-                    ;;
-                unhealthy)
-                    log_error "compose 服务 ${svc} 进入 unhealthy 状态。"
-                    return 1
-                    ;;
-                starting|*)
-                    sleep "${interval}"
-                    continue
-                ;;
-            esac
-        done
-        if [ -z "${cid}" ]; then
-            log_error "compose 服务 ${svc} 未在 ${attempts}×${interval}s 内 running。"
-            return 1
-        fi
-        if [ "${ok}" -ne 1 ]; then
-            log_error "compose 服务 ${svc} 未在 ${attempts}×${interval}s 内 healthy。"
-            return 1
-        fi
-    done
-    return 0
-}
-
-# 根据 LUMEN_UPDATE_CHANNEL 解析目标镜像 tag；输出到 stdout。
-# 注意：stable/latest 解析失败时不能沿用 current_tag，否则 update-lumen 会因为
-# current_tag == target_tag 走 noop，造成"更新成功但仍是旧版本"。也不能静默
-# 回退 main，否则稳定通道会变成 rolling 通道。只有 pinned channel 才允许明确
-# 保持当前 tag。
-# 用法：
-#   lumen_image_tag_resolve [channel] [env_file]
-# 兼容旧调用：如果第一个参数是存在的文件路径，则视为 env_file，channel 从环境读取。
-lumen_image_tag_resolve() {
-    local channel="${1:-${LUMEN_UPDATE_CHANNEL:-stable}}"
-    local env_file="${2:-${LUMEN_DEPLOY_ROOT}/shared/.env}"
-    if [ -n "${1:-}" ] && [ -f "${1}" ] && [ -z "${2:-}" ]; then
-        env_file="$1"
-        channel="${LUMEN_UPDATE_CHANNEL:-stable}"
-    fi
-    local resolved_tag="${LUMEN_UPDATE_RESOLVED_TAG:-}"
-    if [ -n "${resolved_tag}" ]; then
-        if lumen_image_tag_is_valid "${resolved_tag}"; then
-            printf '%s\n' "${resolved_tag}"
-            return 0
-        fi
-        log_warn "LUMEN_UPDATE_RESOLVED_TAG=${resolved_tag} 非法，忽略并继续解析。"
-    fi
-    local current_tag=""
-    if [ -f "${env_file}" ]; then
-        current_tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}")"
-    fi
-    case "${channel}" in
-        main)
-            printf 'main\n'
-            return 0
-            ;;
-        pinned)
-            if [ -n "${current_tag}" ]; then
-                printf '%s\n' "${current_tag}"
-                return 0
-            fi
-            log_warn "channel=pinned 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
-            return 0
-            ;;
-        minor)
-            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/'
-                return 0
-            fi
-            if [ -n "${current_tag}" ]; then
-                log_warn "channel=minor 需要当前 LUMEN_IMAGE_TAG 形如 v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
-                printf '%s\n' "${current_tag}"
-                return 0
-            fi
-            log_warn "channel=minor 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
-            return 0
-            ;;
-        major)
-            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}$'; then
-                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+)(\.[0-9]+){0,2}$/\1/'
-                return 0
-            fi
-            if [ -n "${current_tag}" ]; then
-                log_warn "channel=major 需要当前 LUMEN_IMAGE_TAG 形如 v1、v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
-                printf '%s\n' "${current_tag}"
-                return 0
-            fi
-            log_warn "channel=major 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
-            return 0
-            ;;
-        v[0-9]*)
-            printf '%s\n' "${channel}"
-            return 0
-            ;;
-    esac
-    # stable / latest：查 GitHub Releases API 取 latest tag_name
-    local api_url="https://api.github.com/repos/cyeinfpro/Lumen/releases/latest"
-    local proxy_args=()
-    if [ -n "${LUMEN_UPDATE_PROXY_URL:-}" ]; then
-        proxy_args=(-x "${LUMEN_UPDATE_PROXY_URL}")
-    fi
-    local body=""
-    if command -v curl >/dev/null 2>&1; then
-        body="$(curl -fsSL --max-time 8 "${proxy_args[@]}" \
-            -H 'Accept: application/vnd.github+json' \
-            "${api_url}" 2>/dev/null || true)"
-    fi
-    local tag=""
-    if [ -n "${body}" ]; then
-        tag="$(printf '%s' "${body}" \
-            | grep -m1 '"tag_name"' \
-            | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
-    fi
-    if [ -n "${tag}" ]; then
-        printf '%s\n' "${tag}"
-        return 0
-    fi
-    if [ -n "${current_tag}" ]; then
-        log_warn "GitHub Releases API 不可达，stable/latest 无法解析；当前 LUMEN_IMAGE_TAG=${current_tag}，请稍后重试或显式设置 LUMEN_UPDATE_CHANNEL=main。"
-    else
-        log_warn "GitHub Releases API 不可达且 .env 无 LUMEN_IMAGE_TAG；stable/latest 无法解析，请稍后重试或显式设置 LUMEN_UPDATE_CHANNEL=main。"
-    fi
-    return 1
-}
-
-lumen_image_tag_is_valid() {
-    local tag="${1:-}"
-    case "${tag}" in
-        main|latest)
-            return 0
-            ;;
-    esac
-    printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.-]+)?$'
-}
-
-lumen_image_tag_is_rolling() {
-    local tag="${1:-}"
-    case "${tag}" in
-        main|latest)
-            return 0
-            ;;
-    esac
-    printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+$|^v[0-9]+\.[0-9]+$'
-}
-
-# 把 LUMEN_IMAGE_TAG=<tag> 唯一写入指定 .env，禁止动其他字段（§6.4.1）。
-lumen_set_image_tag_in_env() {
-    local file="$1"
-    local tag="$2"
-    local dir base tmp
-    if [ -z "${file}" ] || [ -z "${tag}" ]; then
-        log_error "lumen_set_image_tag_in_env：参数不完整 (file=${file} tag=${tag})。"
-        return 1
-    fi
-    if [ ! -f "${file}" ]; then
-        log_error "lumen_set_image_tag_in_env：${file} 不存在。"
-        return 1
-    fi
-    dir="$(dirname "${file}")"
-    base="$(basename "${file}")"
-    # 显式 `.tmp` 后缀：dir 可能恰好是 nginx sites-enabled 之类含 `include *` 的
-    # 目录（运维误把 .env 放进去过），mktemp 默认无后缀的临时名 `.foo.image-tag.AbCdEf`
-    # 会被纳入 include。`.tmp` 后缀让所有 conf 风格 include 一致跳过。
-    if ! tmp="$(mktemp "${dir}/.${base}.image-tag.XXXXXX.tmp")"; then
-        log_error "lumen_set_image_tag_in_env：无法创建临时文件。"
-        return 1
-    fi
-    if ! awk -v tag="${tag}" '
-        BEGIN { done = 0 }
-        /^LUMEN_IMAGE_TAG=/ {
-            if (done == 0) {
-                print "LUMEN_IMAGE_TAG=" tag
-                done = 1
-            }
-            next
-        }
-        { print }
-        END {
-            if (done == 0) {
-                print "LUMEN_IMAGE_TAG=" tag
-            }
-        }
-    ' "${file}" > "${tmp}"; then
-        rm -f "${tmp}" 2>/dev/null || true
-        log_error "写入 LUMEN_IMAGE_TAG 临时文件失败：${file}"
-        return 1
-    fi
-    if ! mv "${tmp}" "${file}"; then
-        rm -f "${tmp}" 2>/dev/null || true
-        log_error "替换 LUMEN_IMAGE_TAG 文件失败：${file}"
-        return 1
-    fi
-    local count
-    count="$(grep -cE '^LUMEN_IMAGE_TAG=' "${file}" || true)"
-    if [ "${count}" != "1" ]; then
-        log_error "${file} 中 LUMEN_IMAGE_TAG 出现 ${count} 次，期望唯一存在。"
-        return 1
-    fi
-    return 0
-}
+# Docker Compose, image verification, release manifest, and image tag helpers
+# are loaded from lib/container_release.sh at the end of this facade.
 
 # 输出 ::lumen-step:: 结构化阶段日志；接受 key=val 透传，自动追加 ts。
 # 同时写 stdout + stderr，方便 SSE 与 tee 日志双路捕获。
@@ -2841,49 +1830,73 @@ lumen_retry() {
     done
 }
 
-# 全局更新锁（§12.5）：优先 flock，macOS / 精简环境无 flock 时用 mkdir 目录锁兜底。
-# 用法：lumen_with_lock <operation_id> <ttl_seconds> <cmd...>；占用时输出 system_operation_busy 并退出 75。
-lumen_with_lock() {
-    local op_id="$1"
-    local ttl="$2"
-    shift 2 || true
-    local lock_dir="${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}"
-    local lock_file="${lock_dir}/.lumen-update.lock"
-    local lock_mkdir="${lock_file}.d"
-    local rc=0
-    mkdir -p "${lock_dir}" 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# Structured module facade
+# ---------------------------------------------------------------------------
 
-    if command -v flock >/dev/null 2>&1; then
-        # 历史 bug：`exec 8>file 2>/dev/null` 会把整个 shell 的 stderr 永久指向
-        # /dev/null（exec 无命令时所有 redirect 作用于当前 shell），后续 do_update
-        # 的 log_warn / log_error 全部丢失。已修复为不重定向 fd 2。
-        if ! exec 8>"${lock_file}"; then
-            log_error "无法打开更新锁文件：${lock_file}"
+# Resolve modules from lib.sh itself, never from caller-owned SCRIPT_DIR. This
+# keeps sourcing reliable through release symlinks and paths containing spaces.
+_LUMEN_LIB_SOURCE="${BASH_SOURCE[0]:-}"
+if [ -z "${_LUMEN_LIB_SOURCE}" ]; then
+    log_error "无法解析 scripts/lib.sh 路径，不能加载 shell 模块。"
+    if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+        exit 1
+    fi
+    return 1
+fi
+_LUMEN_LIB_SCRIPTS_DIR="$(cd "$(dirname "${_LUMEN_LIB_SOURCE}")" && pwd -P)"
+_LUMEN_LIB_MODULES=(
+    lib/runtime.sh
+    lib/locking.sh
+    lib/container_release.sh
+)
+_LUMEN_LIB_MISSING=()
+for _LUMEN_LIB_MODULE in "${_LUMEN_LIB_MODULES[@]}"; do
+    if [ ! -f "${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}" ]; then
+        _LUMEN_LIB_MISSING+=("${_LUMEN_LIB_MODULE}")
+    fi
+done
+
+# Transition compatibility: an older self-updater only knew about lib.sh. If it
+# installs this facade first, fetch the missing version-matched modules before
+# sourcing them. Normal checkouts/releases never enter this branch.
+if [ "${#_LUMEN_LIB_MISSING[@]}" -gt 0 ]; then
+    log_warn "lib.sh 缺少模块，尝试从同一脚本分支补齐：${_LUMEN_LIB_MISSING[*]}"
+    _LUMEN_LIB_FORCE_WAS_SET=0
+    _LUMEN_LIB_FORCE_PREVIOUS=""
+    if [ "${LUMEN_SELF_UPDATE_FORCE+x}" = "x" ]; then
+        _LUMEN_LIB_FORCE_WAS_SET=1
+        _LUMEN_LIB_FORCE_PREVIOUS="${LUMEN_SELF_UPDATE_FORCE}"
+    fi
+    LUMEN_SELF_UPDATE_FORCE=1
+    lumen_self_update_scripts \
+        "${_LUMEN_LIB_SCRIPTS_DIR}" \
+        "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
+        0 \
+        ${_LUMEN_LIB_MISSING[@]+"${_LUMEN_LIB_MISSING[@]}"}
+    if [ "${_LUMEN_LIB_FORCE_WAS_SET}" -eq 1 ]; then
+        LUMEN_SELF_UPDATE_FORCE="${_LUMEN_LIB_FORCE_PREVIOUS}"
+    else
+        unset LUMEN_SELF_UPDATE_FORCE
+    fi
+fi
+
+for _LUMEN_LIB_MODULE in "${_LUMEN_LIB_MODULES[@]}"; do
+    if [ ! -f "${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}" ]; then
+        log_error "缺少 shell 模块：${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}"
+        if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
             exit 1
         fi
-        if ! flock -n 8; then
-            printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
-                "${op_id}" "${ttl}"
-            exec 8>&- || true
-            exit 75
-        fi
-        "$@" || rc=$?
-        flock -u 8 2>/dev/null || true
-        exec 8>&- || true
-        return "${rc}"
+        return 1
     fi
+    # shellcheck source=/dev/null
+    . "${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}"
+done
 
-    if ! mkdir "${lock_mkdir}" 2>/dev/null; then
-        printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
-            "${op_id}" "${ttl}"
-        exit 75
-    fi
-    {
-        printf 'pid=%s\n' "$$"
-        printf 'operation_id=%s\n' "${op_id}"
-        printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
-    } > "${lock_mkdir}/owner" 2>/dev/null || true
-    "$@" || rc=$?
-    rm -rf "${lock_mkdir}" 2>/dev/null || true
-    return "${rc}"
-}
+unset _LUMEN_LIB_SOURCE
+unset _LUMEN_LIB_SCRIPTS_DIR
+unset _LUMEN_LIB_MODULES
+unset _LUMEN_LIB_MISSING
+unset _LUMEN_LIB_MODULE
+unset _LUMEN_LIB_FORCE_WAS_SET
+unset _LUMEN_LIB_FORCE_PREVIOUS

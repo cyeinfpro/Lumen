@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import faulthandler
-import hmac
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -19,14 +18,12 @@ from fastapi.responses import JSONResponse
 from lumen_core import __version__ as lumen_core_version
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.constants import MAX_PROMPT_CHARS
-from lumen_core.desktop_runtime import DESKTOP_TOKEN_HEADER, is_desktop_runtime
 from lumen_core.runtime_settings import get_spec
 from sqlalchemy import text
 
 from .arq_pool import close_arq_pool, get_arq_pool
 from .config import settings
 from .db import SessionLocal, engine
-from .desktop_migrations import run_desktop_migrations
 from .observability import (
     http_errors_total,
     init_otel,
@@ -59,9 +56,10 @@ def _install_fault_dump_signal() -> None:
 
 _install_fault_dump_signal()
 
-# Why: hard cap on raw request body. 对齐 routes/images.py 的 MAX_BYTES（50 MiB）
-# 再给 multipart 边界 / 任意 JSON 负载 10 MiB 余量。更大的请求在 handler 分配前就拒。
-_MAX_REQUEST_BYTES = 60 * 1024 * 1024
+# Why: hard cap on raw request body. The largest endpoint accepts a 64 MiB
+# reference video; leave 2 MiB for multipart framing without silently making
+# that documented endpoint limit unreachable.
+_MAX_REQUEST_BYTES = 66 * 1024 * 1024
 
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
@@ -202,60 +200,6 @@ class _BodySizeLimitMiddleware:
         await self.app(scope, limited_receive, send_wrapper)
 
 
-class _DesktopLocalTokenMiddleware:
-    """Reject direct calls to the desktop API port.
-
-    In desktop mode the WebView talks to the local Next sidecar; that sidecar
-    injects the per-launch token before rewrites reach FastAPI.  A random local
-    port alone is not enough because another local process could discover it.
-    """
-
-    _PUBLIC_PATHS = {"/healthz", "/readyz", "/system/desktop-ready"}
-
-    def __init__(self, app):  # type: ignore[no-untyped-def]
-        self.app = app
-
-    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
-        if scope["type"] != "http" or not is_desktop_runtime(settings.lumen_runtime):
-            await self.app(scope, receive, send)
-            return
-        if scope.get("path") in self._PUBLIC_PATHS:
-            await self.app(scope, receive, send)
-            return
-        expected = settings.lumen_local_token.strip()
-        if not expected:
-            response = JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={
-                    "error": {
-                        "code": "desktop_token_misconfigured",
-                        "message": "desktop local token is not configured",
-                    }
-                },
-            )
-            await response(scope, receive, send)
-            return
-        provided = ""
-        header_name = DESKTOP_TOKEN_HEADER.lower().encode("latin-1")
-        for name, value in scope.get("headers", []):
-            if name.lower() == header_name:
-                provided = value.decode("latin-1")
-                break
-        if not provided or not hmac.compare_digest(provided, expected):
-            response = JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={
-                    "error": {
-                        "code": "desktop_token_required",
-                        "message": "desktop local token is required",
-                    }
-                },
-            )
-            await response(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
-
-
 _NAV_FEATURE_API_PREFIXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "studio",
@@ -346,13 +290,10 @@ class _NavFeatureGuardMiddleware:
 
 
 def _is_prod_env() -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     return settings.app_env.strip().lower() not in {
         "dev",
         "development",
         "local",
-        "desktop",
         "test",
     }
 
@@ -363,8 +304,6 @@ async def _check_alembic_head() -> None:
     跳过条件：env LUMEN_SKIP_MIGRATION_CHECK=1，或 alembic 元数据不可用（开发树外的安装路径）。
     复用 db.engine（不开新连接池）。
     """
-    if is_desktop_runtime(settings.lumen_runtime):
-        return
     if os.environ.get("LUMEN_SKIP_MIGRATION_CHECK", "").strip() in {"1", "true", "yes"}:
         return
 
@@ -426,8 +365,6 @@ async def lifespan(app: FastAPI):
         settings.otel_exporter_endpoint,
         app=app,
     )
-    if is_desktop_runtime(settings.lumen_runtime):
-        await run_desktop_migrations()
     # Alembic 启动门禁：prod 必须在 head；非 prod 仅 warn；测试期通过 env 跳过。
     await _check_alembic_head()
     # 限流可观测性：明确记录限流是否启用，避免生产忘开等于无限流。
@@ -444,30 +381,25 @@ async def lifespan(app: FastAPI):
             settings.app_env,
             is_rl_enabled,
         )
-    if not is_desktop_runtime(settings.lumen_runtime):
-        try:
-            async with SessionLocal() as session:
-                changed = await migrate_image_primary_route(session)
-                changed = await migrate_provider_purposes(session) or changed
-                if changed:
-                    await session.commit()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "runtime settings image route migration failed", exc_info=True
-            )
+    try:
+        async with SessionLocal() as session:
+            changed = await migrate_image_primary_route(session)
+            changed = await migrate_provider_purposes(session) or changed
+            if changed:
+                await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("runtime settings image route migration failed", exc_info=True)
     # 提前建立 redis 连接（失败早暴露）
     r = get_redis()
     await r.ping()
-    billing_cache: BillingCacheService | None = None
-    if not is_desktop_runtime(settings.lumen_runtime):
-        billing_cache = BillingCacheService(redis=r)
-        await billing_cache.start_workers()
-        try:
-            from .routes import billing as billing_routes
+    billing_cache = BillingCacheService(redis=r)
+    await billing_cache.start_workers()
+    try:
+        from .routes import billing as billing_routes
 
-            billing_routes.configure_billing_cache(billing_cache)
-        except Exception:  # noqa: BLE001
-            logger.warning("billing cache route wiring failed", exc_info=True)
+        billing_routes.configure_billing_cache(billing_cache)
+    except Exception:  # noqa: BLE001
+        logger.warning("billing cache route wiring failed", exc_info=True)
     # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
     await get_arq_pool()
     # Opportunistic only: if tiktoken's cache is cold and the metadata download is
@@ -477,14 +409,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if billing_cache is not None:
-            await billing_cache.stop_workers()
-            try:
-                from .routes import billing as billing_routes
+        await billing_cache.stop_workers()
+        try:
+            from .routes import billing as billing_routes
 
-                billing_routes.configure_billing_cache(None)
-            except Exception:  # noqa: BLE001
-                pass
+            billing_routes.configure_billing_cache(None)
+        except Exception:  # noqa: BLE001
+            pass
         await close_arq_pool()
         await r.aclose()
 
@@ -524,11 +455,9 @@ def build_app() -> FastAPI:
             "Authorization",
             "Idempotency-Key",
             "Last-Event-ID",
-            DESKTOP_TOKEN_HEADER,
         ],
     )
     app.add_middleware(_BodySizeLimitMiddleware)
-    app.add_middleware(_DesktopLocalTokenMiddleware)
     app.add_middleware(_NavFeatureGuardMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
     return app
@@ -691,18 +620,7 @@ def _include_core_routers(target: FastAPI) -> None:
     target.include_router(prompts_router.router)
 
 
-def _include_desktop_routers(target: FastAPI) -> None:
-    from .routes import desktop as desktop_router  # noqa: E402
-    from .routes import memories as memories_router  # noqa: E402
-    from .routes import storyboards  # noqa: E402
-
-    target.include_router(desktop_router.router)
-    _include_core_routers(target)
-    target.include_router(storyboards.router)
-    target.include_router(memories_router.router)
-
-
-def _include_docker_routers(target: FastAPI) -> None:
+def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin as admin_router  # noqa: E402
     from .routes import admin_backups as admin_backups_router  # noqa: E402
     from .routes import admin_models as admin_models_router  # noqa: E402
@@ -751,11 +669,8 @@ def _include_docker_routers(target: FastAPI) -> None:
     target.include_router(billing_router.router)
 
 
-if is_desktop_runtime(settings.lumen_runtime):
-    _include_desktop_routers(app)
-else:
-    _include_docker_routers(app)
+_include_app_routers(app)
 
 # Prometheus /metrics（路由挂载后）
-if settings.metrics_enabled and not is_desktop_runtime(settings.lumen_runtime):
+if settings.metrics_enabled:
     setup_prometheus(app)

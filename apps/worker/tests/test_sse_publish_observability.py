@@ -27,6 +27,7 @@ class FakeRedis:
         self.dlq: list[tuple[str, str]] = []
         self.dedupe: dict[str, str] = {}
         self.stream_entries: list[tuple[str, dict]] = []
+        self.expirations: list[tuple[str, int]] = []
 
     async def xadd(self, key, fields, **_kwargs):
         self.xadd_calls += 1
@@ -77,6 +78,10 @@ class FakeRedis:
         return 1
 
     async def ltrim(self, *_args):
+        return 1
+
+    async def expire(self, key: str, ttl: int) -> int:
+        self.expirations.append((key, ttl))
         return 1
 
 
@@ -142,6 +147,9 @@ async def test_publish_event_xadd_retries_use_seconds_not_milliseconds(monkeypat
     assert sleeps == [0.5, 2.0]
     assert redis.xadd_calls == 3
     assert redis.dlq == []
+    assert redis.expirations == [
+        ("events:user:user-1", sse_publish.EVENTS_STREAM_TTL_SECONDS)
+    ]
     assert len(redis.published) == 1
 
     channel, payload_json = redis.published[0]
@@ -401,30 +409,6 @@ async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
     assert "sse_id" not in payload
     assert payload["recoverable"] is False
     assert payload["dlq_id"] == dlq_payload["dlq_id"]
-
-
-@pytest.mark.asyncio
-async def test_publish_event_uses_live_only_id_for_desktop_garnet(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LUMEN_RUNTIME", "desktop")
-    redis = GarnetNoStreamRedis()
-
-    await sse_publish.publish_event(
-        redis,
-        "user-1",
-        "user:user-1",
-        "generation.progress",
-        {"generation_id": "gen-1"},
-    )
-
-    dedupe_key = next(iter(redis.kv))
-    payload = json.loads(redis.published[0][1])
-    assert redis.xadd_calls == 2
-    assert redis.deleted == [dedupe_key]
-    assert redis.kv[dedupe_key].startswith("live-")
-    assert payload["sse_id"] == redis.kv[dedupe_key]
-    assert redis.dlq == []
 
 
 @pytest.mark.asyncio

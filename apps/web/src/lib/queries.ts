@@ -31,7 +31,6 @@ import {
   createApparelModelLibraryItem,
   deleteAdminUser,
   deleteConversation,
-  deleteStoryboard,
   deleteStoryboardAsset,
   deleteStoryboardShot,
   deleteApparelModelLibraryItems,
@@ -45,9 +44,7 @@ import {
   generateStoryboardAsset,
   generateStoryboardKeyframe,
   getApparelModelLibraryJobs,
-  getMyUsage,
   getPublicInvite,
-  getPublicShare,
   getWorkflow,
   getStoryboard,
   getSystemSettings,
@@ -60,13 +57,10 @@ import {
   listWorkflows,
   listStoryboards,
   listInviteLinks,
-  listMessages,
   listMySessions,
-  listMyShares,
   listSystemPrompts,
   patchConversation,
   patchStoryboard,
-  patchStoryboardAsset,
   patchStoryboardShot,
   patchSystemPrompt,
   patchWorkflow,
@@ -92,7 +86,6 @@ import {
   removeAllowedEmail,
   revokeInviteLink,
   revokeMySession,
-  revokeShare,
   moveStoryboardShot,
   setAdminUserPassword,
   setDefaultSystemPrompt,
@@ -142,12 +135,9 @@ import {
   type CreateApparelWorkflowOut,
   type CreateShowcaseImagesIn,
   type ListConversationsOpts,
-  type ListMessagesOpts,
-  type MessageListResponse,
   type PatchConversationIn,
   type PatchWorkflowIn,
   type StoryboardAssetCreateIn,
-  type StoryboardAssetPatchIn,
   type StoryboardCreateIn,
   type StoryboardGenerateIn,
   type StoryboardListResponse,
@@ -201,13 +191,11 @@ import type {
   ProvidersProbeOut,
   ProxyListOut,
   ProxyTestOut,
-  PublicShareOut,
   SessionOut,
   ShareOut,
   SystemSettingsOut,
   VideoProvidersOut,
   VideoProvidersUpdateIn,
-  UsageOut,
 } from "./types";
 import {
   getAdminStorage,
@@ -222,10 +210,7 @@ import {
 
 // ——— Query keys ———
 export const qk = {
-  meUsage: () => ["me", "usage"] as const,
   allowedEmails: () => ["admin", "allowed_emails"] as const,
-  adminUsers: (params?: { limit?: number; cursor?: string }) =>
-    ["admin", "users", params ?? {}] as const,
   adminUserHistory: (userId: string) =>
     ["admin", "users", userId, "history"] as const,
   adminRequestEvents: (params?: {
@@ -235,7 +220,6 @@ export const qk = {
     range?: "24h" | "7d" | "30d";
   }) => ["admin", "request_events", params ?? {}] as const,
   myShares: () => ["me", "shares"] as const,
-  publicShare: (token: string) => ["share", token] as const,
   inviteLinks: () => ["admin", "invite_links"] as const,
   publicInvite: (token: string) => ["invite", token] as const,
   systemSettings: () => ["admin", "settings"] as const,
@@ -256,8 +240,6 @@ export const qk = {
     ["conversations", opts ?? {}] as const,
   conversationsInfinite: (params?: { limit?: number; q?: string }) =>
     ["conversations", "infinite", params ?? {}] as const,
-  messages: (convId: string, opts?: ListMessagesOpts) =>
-    ["messages", convId, opts ?? {}] as const,
   conversationContext: (convId: string) =>
     ["conversations", convId, "context"] as const,
   workflows: (params?: { type?: string; limit?: number }) =>
@@ -310,7 +292,7 @@ export function useCreateSystemPromptMutation(
   });
 }
 
-export interface PatchSystemPromptVars extends PatchSystemPromptIn {
+interface PatchSystemPromptVars extends PatchSystemPromptIn {
   id: string;
 }
 
@@ -363,17 +345,6 @@ export function useSetDefaultSystemPromptMutation(
   });
 }
 
-
-export function useMyUsageQuery(
-  options?: Omit<UseQueryOptions<UsageOut>, "queryKey" | "queryFn">,
-) {
-  return useQuery<UsageOut>({
-    queryKey: qk.meUsage(),
-    queryFn: getMyUsage,
-    ...options,
-  });
-}
-
 export function useAllowedEmailsQuery(
   options?: Omit<
     UseQueryOptions<{ items: AllowedEmailOut[] }>,
@@ -383,20 +354,6 @@ export function useAllowedEmailsQuery(
   return useQuery<{ items: AllowedEmailOut[] }>({
     queryKey: qk.allowedEmails(),
     queryFn: listAllowedEmails,
-    ...options,
-  });
-}
-
-export function useAdminUsersQuery(
-  params?: { limit?: number; cursor?: string },
-  options?: Omit<
-    UseQueryOptions<{ items: AdminUserOut[]; next_cursor?: string }>,
-    "queryKey" | "queryFn"
-  >,
-) {
-  return useQuery<{ items: AdminUserOut[]; next_cursor?: string }>({
-    queryKey: qk.adminUsers(params),
-    queryFn: () => listAdminUsers(params),
     ...options,
   });
 }
@@ -482,31 +439,6 @@ export function useAdminRequestEventsQuery(
   });
 }
 
-export function useMySharesQuery(
-  options?: Omit<
-    UseQueryOptions<{ items: ShareOut[] }>,
-    "queryKey" | "queryFn"
-  >,
-) {
-  return useQuery<{ items: ShareOut[] }>({
-    queryKey: qk.myShares(),
-    queryFn: listMyShares,
-    ...options,
-  });
-}
-
-export function usePublicShareQuery(
-  token: string,
-  options?: Omit<UseQueryOptions<PublicShareOut>, "queryKey" | "queryFn">,
-) {
-  return useQuery<PublicShareOut>({
-    queryKey: qk.publicShare(token),
-    queryFn: () => getPublicShare(token),
-    enabled: Boolean(token),
-    ...options,
-  });
-}
-
 // ——— Mutations ———
 
 export function useAddAllowedEmailMutation(
@@ -540,13 +472,13 @@ export function useRemoveAllowedEmailMutation(
   });
 }
 
-export interface CreateShareVars {
+interface CreateShareVars {
   imageId: string;
   show_prompt?: boolean;
   expires_at?: string;
 }
 
-export interface CreateMultiShareVars {
+interface CreateMultiShareVars {
   imageIds: string[];
   show_prompt?: boolean;
   expires_at?: string;
@@ -594,20 +526,6 @@ export function useCreateMultiShareMutation(
   });
 }
 
-export function useRevokeShareMutation(
-  options?: Omit<UseMutationOptions<void, Error, string>, "mutationFn">,
-) {
-  const qc = useQueryClient();
-  return useMutation<void, Error, string>({
-    mutationFn: (shareId: string) => revokeShare(shareId),
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.myShares() });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
-
 // ——————————————————————————————————————————————————————————————
 // Invite Links / 系统设置 / 会话 / 注销
 // ——————————————————————————————————————————————————————————————
@@ -627,7 +545,7 @@ export function useInviteLinksQuery(
   });
 }
 
-export interface CreateInviteLinkVars {
+interface CreateInviteLinkVars {
   email?: string | null;
   expires_in_days?: number;
   role?: "admin" | "member";
@@ -1136,7 +1054,7 @@ export function useCreateConversationMutation(
   });
 }
 
-export interface PatchConversationVars extends PatchConversationIn {
+interface PatchConversationVars extends PatchConversationIn {
   id: string;
 }
 
@@ -1180,20 +1098,6 @@ export function useDeleteConversationMutation(
       qc.invalidateQueries({ queryKey: ["stream", "feed"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
-  });
-}
-
-// ——— 历史消息（翻旧消息/初始装载） ———
-export function useListMessagesQuery(
-  convId: string | null | undefined,
-  opts?: ListMessagesOpts,
-  options?: Omit<UseQueryOptions<MessageListResponse>, "queryKey" | "queryFn">,
-) {
-  return useQuery<MessageListResponse>({
-    queryKey: qk.messages(convId ?? "", opts),
-    queryFn: () => listMessages(convId as string, opts),
-    enabled: typeof convId === "string" && convId.length > 0,
-    ...options,
   });
 }
 
@@ -1271,7 +1175,7 @@ export function useCreateApparelWorkflowMutation(
   });
 }
 
-export interface PatchWorkflowVars extends PatchWorkflowIn {
+interface PatchWorkflowVars extends PatchWorkflowIn {
   id: string;
 }
 
@@ -1384,22 +1288,6 @@ export function useCreateStoryboardMutation(
   });
 }
 
-export function useDeleteStoryboardMutation(
-  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
-) {
-  const qc = useQueryClient();
-  return useMutation<{ ok: boolean }, Error, string>({
-    mutationFn: deleteStoryboard,
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.removeQueries({ queryKey: qk.storyboard(vars) });
-      qc.invalidateQueries({ queryKey: ["storyboards"] });
-      qc.invalidateQueries({ queryKey: ["workflows"] });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
-
 export function usePatchStoryboardMutation(
   storyboardId: string,
   options?: Omit<
@@ -1424,21 +1312,6 @@ export function useCreateStoryboardAssetMutation(
   return useStoryboardRunMutation(
     storyboardId,
     (body) => createStoryboardAsset(storyboardId, body),
-    options,
-  );
-}
-
-export function usePatchStoryboardAssetMutation(
-  storyboardId: string,
-  stepId: string,
-  options?: Omit<
-    UseMutationOptions<StoryboardRun, Error, StoryboardAssetPatchIn>,
-    "mutationFn"
-  >,
-) {
-  return useStoryboardRunMutation(
-    storyboardId,
-    (body) => patchStoryboardAsset(storyboardId, stepId, body),
     options,
   );
 }
@@ -2135,7 +2008,6 @@ export function usePutAdminStorageMutation(
 
 import {
   batchDeletePosterStyles,
-  createPosterStyle,
   deletePosterStyle,
   generatePosterStyle,
   getPosterStyle,
@@ -2147,7 +2019,6 @@ import {
   type PosterStyleAutoTagOut,
   type PosterStyleBatchDeleteOut,
   type PosterStyleCategoryFilter,
-  type PosterStyleCreateIn,
   type PosterStyleGenerateIn,
   type PosterStyleGenerateOut,
   type PosterStyleItem,
@@ -2161,7 +2032,7 @@ import {
 } from "./apiClient";
 
 // Query keys（与 apparelModelLibrary 命名风格对齐）
-export const posterStyleKeys = {
+const posterStyleKeys = {
   all: () => ["poster-styles"] as const,
   list: (params?: PosterStyleListOpts) =>
     ["poster-styles", "list", params ?? {}] as const,
@@ -2224,23 +2095,6 @@ export function usePosterStyleJobsQuery(
     refetchOnWindowFocus: true,
     staleTime: 2_000,
     ...options,
-  });
-}
-
-export function useCreatePosterStyleMutation(
-  options?: Omit<
-    UseMutationOptions<PosterStyleItem, Error, PosterStyleCreateIn>,
-    "mutationFn"
-  >,
-) {
-  const qc = useQueryClient();
-  return useMutation<PosterStyleItem, Error, PosterStyleCreateIn>({
-    mutationFn: createPosterStyle,
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
   });
 }
 

@@ -26,10 +26,6 @@ apps/web/.env.*
 
 build/
 dist/
-apps/desktop/dist/
-apps/desktop/target/
-apps/desktop/gen/
-apps/desktop/binaries/
 scripts/*.bak.*
 
 var/

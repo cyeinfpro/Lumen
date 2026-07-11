@@ -45,7 +45,7 @@ export function imageById(
   );
 }
 
-export function candidateReferenceImageIds(candidate: ModelCandidate): string[] {
+function candidateReferenceImageIds(candidate: ModelCandidate): string[] {
   return dedupeStrings([
     ...stringArray(candidate.model_brief_json.candidate_image_ids),
     candidate.contact_sheet_image_id,

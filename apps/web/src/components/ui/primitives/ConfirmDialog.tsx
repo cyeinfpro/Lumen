@@ -192,5 +192,3 @@ export function ConfirmDialog({
     </AnimatePresence>
   );
 }
-
-export default ConfirmDialog;

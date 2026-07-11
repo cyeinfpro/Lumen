@@ -88,5 +88,3 @@ export function IconButton({
   }
   return btn;
 }
-
-export default IconButton;

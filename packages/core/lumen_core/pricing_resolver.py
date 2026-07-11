@@ -52,7 +52,9 @@ def pricing_from_json(raw: str | bytes | None) -> ModelPricing | None:
         return None
     if not isinstance(data, dict):
         return None
-    fields = {name: data.get(name) for name in ModelPricing.__dataclass_fields__}
+    fields: dict[str, Any] = {
+        name: data.get(name) for name in ModelPricing.__dataclass_fields__
+    }
     try:
         return ModelPricing(**fields).with_defaults()
     except TypeError:

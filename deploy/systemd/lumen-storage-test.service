@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/var/lib/lumen-storage/test.env
+Environment=LUMEN_STORAGE_TARGET=/opt/lumendata
 ExecStart=/usr/local/sbin/lumen-storage-mount test
-ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/test.trigger /var/lib/lumen-storage/test.env"
+ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/test.trigger"
 TimeoutStartSec=120

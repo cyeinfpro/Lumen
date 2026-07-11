@@ -8,22 +8,15 @@ Type=oneshot
 # release 布局：runner 始终从 current 启动 update.sh；update.sh 内部会把 ROOT
 # 解析回 /opt/lumen，并在 ${ROOT}/releases/<new_id>/ 下做新一轮发布。
 WorkingDirectory=/opt/lumen/current
-EnvironmentFile=-/opt/lumendata/backup/.update.env
-Environment=LUMEN_UPDATE_NONINTERACTIVE=1
-Environment=LUMEN_UPDATE_MODE=fast
-Environment=LUMEN_UPDATE_GIT_PULL=1
-# 默认走 docker compose pull 拉预构建镜像；宿主机不再做 npm/uv 构建。
-# 需要本地 build 时由 API 写 .update.env 注入 LUMEN_UPDATE_BUILD=1 兜底。
-Environment=LUMEN_UPDATE_BUILD=0
 StandardOutput=append:/opt/lumendata/backup/.update.log
 StandardError=append:/opt/lumendata/backup/.update.log
 # timeout gives the runner its own wall-clock guard in addition to systemd's
 # TimeoutStartSec, so a wedged child process cannot sit for the full unit cap.
-ExecStart=/usr/bin/env timeout --preserve-status --kill-after=300s 7200s bash /opt/lumen/current/scripts/update.sh
+ExecStart=/usr/bin/env timeout --preserve-status --kill-after=300s 7200s python3 /opt/lumen/current/scripts/update_runner.py
 # update.sh 的非零退出必须保持 failed 状态，便于 systemctl/journal/告警发现。
 SuccessExitStatus=0 SIGTERM SIGINT
 # Clean trigger / marker / env regardless of update result so the next click works.
-ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.update.trigger /opt/lumendata/backup/.update.running /opt/lumendata/backup/.update.env"
+ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.update.trigger /opt/lumendata/backup/.update.running /opt/lumendata/backup/.update.request.json"
 # 7200s 上限：弱网下 docker pull 多 GB 镜像 + 偶发 npm/uv 兜底 build 可能 > 1h；
 # 比 infinity 稳（卡住时仍会被 systemd 终结），又留出充足窗口避免误杀正常更新。
 TimeoutStartSec=7300

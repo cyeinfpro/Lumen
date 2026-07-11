@@ -14,8 +14,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Awaitable, Literal, cast
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +22,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.byok import (
+    build_provider_probe_request,
+    extract_response_output_text as _extract_response_output_text,
+    extract_sse_output_text as _extract_sse_output_text,
+)
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
@@ -37,16 +41,11 @@ from lumen_core.providers import (
     resolve_provider_proxy_url,
 )
 from lumen_core.video_providers import parse_video_provider_config_json
-from lumen_core.desktop_runtime import (
-    desktop_provider_metadata_path,
-    desktop_provider_runtime_file,
-    is_desktop_runtime,
-    read_desktop_provider_runtime_json,
-)
 from lumen_core.models import SystemSetting
 from lumen_core.runtime_settings import get_spec, validate_providers
 from lumen_core.schemas import (
     ProviderItemOut,
+    ProviderPurpose,
     ProviderProbeResult,
     ProviderProxyOut,
     ProviderStatsItem,
@@ -69,11 +68,6 @@ router = APIRouter(prefix="/admin/providers", tags=["admin-providers"])
 _PROBE_TIMEOUT_S = 15.0
 _PROVIDERS_MAX_LEN = 65536
 _VIDEO_PROVIDERS_MAX_LEN = 65536
-_PROBE_MODEL = "gpt-5.4-mini"
-_PROBE_INSTRUCTIONS = "You are a precise calculator. Return only the final integer."
-_PROBE_INPUT = (
-    "What is 99 times 99? Reply with only the integer result, no words, no explanation."
-)
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -120,7 +114,11 @@ def _normalize_proxy_type(value: str, *, fallback: bool = False) -> str:
 
 def _safe_int(value: object, default: int, *, minimum: int | None = None) -> int:
     try:
-        parsed = int(value)  # type: ignore[arg-type]
+        parsed = (
+            int(value)
+            if isinstance(value, (str, bytes, bytearray, int, float))
+            else default
+        )
     except (TypeError, ValueError):
         parsed = default
     if minimum is not None:
@@ -159,80 +157,10 @@ def _legacy_env_providers_raw() -> str | None:
     )
 
 
-def _is_desktop_provider_runtime() -> bool:
-    return is_desktop_runtime(os.environ.get("LUMEN_RUNTIME"))
-
-
-def _safe_read_text(path: Path) -> str | None:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    return raw if raw.strip() else None
-
-
-def _strip_provider_secrets(items: list[dict]) -> list[dict]:
-    stripped: list[dict] = []
-    for item in items:
-        clean = dict(item)
-        clean.pop("api_key", None)
-        stripped.append(clean)
-    return stripped
-
-
-def _strip_proxy_secrets(items: list[dict]) -> list[dict]:
-    stripped: list[dict] = []
-    for item in items:
-        clean = dict(item)
-        clean.pop("password", None)
-        stripped.append(clean)
-    return stripped
-
-
-def _write_json_file(
-    path: Path, payload: dict[str, Any], *, private: bool = False
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    if private:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-
-
-def _write_desktop_provider_config(items: list[dict], proxies: list[dict]) -> None:
-    # Metadata is durable and intentionally keyless. The runtime file is a
-    # per-launch local secret handoff consumed by API/worker sidecars.
-    _write_json_file(
-        desktop_provider_metadata_path(),
-        {
-            "providers": _strip_provider_secrets(items),
-            "proxies": _strip_proxy_secrets(proxies),
-        },
-    )
-    runtime_path = desktop_provider_runtime_file()
-    if runtime_path is not None:
-        _write_json_file(
-            runtime_path,
-            {"providers": items, "proxies": proxies},
-            private=True,
-        )
-
-
 async def _read_providers(
     db: AsyncSession,
 ) -> tuple[str | None, str]:
     """返回 (raw_json, source)。source 为 "db" | "env" | "none"。"""
-    if _is_desktop_provider_runtime():
-        runtime_raw = read_desktop_provider_runtime_json()
-        if runtime_raw:
-            return runtime_raw, "desktop"
-        metadata_raw = _safe_read_text(desktop_provider_metadata_path())
-        if metadata_raw:
-            return metadata_raw, "desktop"
     row = (
         await db.execute(
             select(SystemSetting.value).where(SystemSetting.key == "providers")
@@ -297,8 +225,20 @@ def _normalize_bool(raw: Any, *, default: bool = False) -> bool:
     return default if parsed is None else parsed
 
 
-def _normalize_purposes(raw: Any) -> list[str]:
-    return list(normalize_provider_purposes(raw))
+def _normalize_purposes(raw: Any) -> list[ProviderPurpose]:
+    return [
+        cast(ProviderPurpose, purpose)
+        for purpose in normalize_provider_purposes(raw)
+    ]
+
+
+def _normalize_image_edit_transport(
+    raw: Any,
+) -> Literal["url", "file"]:
+    return cast(
+        Literal["url", "file"],
+        normalize_image_edit_input_transport(raw),
+    )
 
 
 def _to_out(it: dict, idx: int) -> ProviderItemOut:
@@ -323,7 +263,7 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         image_jobs_base_url=_normalize_image_jobs_base_url(
             it.get("image_jobs_base_url")
         ),
-        image_edit_input_transport=normalize_image_edit_input_transport(
+        image_edit_input_transport=_normalize_image_edit_transport(
             it.get("image_edit_input_transport")
         ),
         image_concurrency=_normalize_image_concurrency(it.get("image_concurrency")),
@@ -602,8 +542,8 @@ async def update_video_providers(
         )
 
     seen_names: set[str] = set()
-    for item in body.items:
-        name = item.name.strip()
+    for video_input in body.items:
+        name = video_input.name.strip()
         if not name:
             raise _http("invalid_request", "视频供应商名称不能为空", 422)
         if name in seen_names:
@@ -614,11 +554,15 @@ async def update_video_providers(
     raw_shared, _shared_source = await _read_providers(db)
     old_items, old_video_proxies = _parse_video_raw_config(old_raw)
     old_keys: dict[str, str] = {}
-    for item in old_items:
-        name = item.get("name")
-        api_key = item.get("api_key")
-        if isinstance(name, str) and isinstance(api_key, str) and api_key:
-            old_keys[name.strip()] = api_key
+    for old_item in old_items:
+        old_name = old_item.get("name")
+        old_api_key = old_item.get("api_key")
+        if (
+            isinstance(old_name, str)
+            and isinstance(old_api_key, str)
+            and old_api_key
+        ):
+            old_keys[old_name.strip()] = old_api_key
 
     shared_proxy_names = {
         proxy.get("name")
@@ -633,15 +577,15 @@ async def update_video_providers(
 
     rows: list[dict[str, Any]] = []
     referenced_video_proxies: set[str] = set()
-    for item in body.items:
-        provider_name = item.name.strip()
-        api_key = item.api_key.strip() or old_keys.get(provider_name, "")
+    for video_input in body.items:
+        provider_name = video_input.name.strip()
+        api_key = video_input.api_key.strip() or old_keys.get(provider_name, "")
         models = {
             str(key).strip(): str(value).strip()
-            for key, value in item.models.items()
+            for key, value in video_input.models.items()
             if str(key).strip() and str(value).strip()
         }
-        proxy_name = (item.proxy or "").strip() or None
+        proxy_name = (video_input.proxy or "").strip() or None
         if proxy_name:
             if (
                 proxy_name not in shared_proxy_names
@@ -656,14 +600,14 @@ async def update_video_providers(
                 referenced_video_proxies.add(proxy_name)
         row: dict[str, Any] = {
             "name": provider_name,
-            "kind": item.kind,
-            "base_url": item.base_url.strip(),
+            "kind": video_input.kind,
+            "base_url": video_input.base_url.strip(),
             "api_key": api_key,
-            "enabled": item.enabled,
-            "priority": item.priority,
-            "weight": max(1, item.weight),
-            "concurrency": max(1, min(32, int(item.concurrency or 1))),
-            "supports_idempotency": item.supports_idempotency,
+            "enabled": video_input.enabled,
+            "priority": video_input.priority,
+            "weight": max(1, video_input.weight),
+            "concurrency": max(1, min(32, int(video_input.concurrency or 1))),
+            "supports_idempotency": video_input.supports_idempotency,
             "models": models,
         }
         if proxy_name:
@@ -736,9 +680,6 @@ async def update_providers(
 ) -> ProvidersOut:
     # 清空场景
     if not body.items:
-        if _is_desktop_provider_runtime():
-            _write_desktop_provider_config([], [])
-            return ProvidersOut(items=[], proxies=[], source="desktop")
         existing = (
             await db.execute(
                 select(SystemSetting).where(SystemSetting.key == "providers")
@@ -762,8 +703,8 @@ async def update_providers(
 
     # 名称去重
     seen_names: set[str] = set()
-    for it in body.items:
-        n = it.name.strip()
+    for provider_input in body.items:
+        n = provider_input.name.strip()
         if not n:
             raise _http("invalid_request", "provider 名称不能为空", 422)
         if n in seen_names:
@@ -771,8 +712,8 @@ async def update_providers(
         seen_names.add(n)
 
     seen_proxy_names: set[str] = set()
-    for it in body.proxies:
-        n = it.name.strip()
+    for proxy_input in body.proxies:
+        n = proxy_input.name.strip()
         if not n:
             raise _http("invalid_request", "proxy 名称不能为空", 422)
         if n in seen_proxy_names:
@@ -785,14 +726,14 @@ async def update_providers(
     old_proxy_passwords: dict[str, str] = {}
     if old_raw:
         old_items, old_proxies = _parse_config(old_raw)
-        for it in old_items:
-            name = it.get("name", "")
-            key = it.get("api_key", "")
+        for old_item in old_items:
+            name = old_item.get("name", "")
+            key = old_item.get("api_key", "")
             if isinstance(name, str) and isinstance(key, str) and name.strip() and key:
                 old_keys[name.strip()] = key
-        for it in old_proxies:
-            name = it.get("name", "")
-            password = it.get("password", "")
+        for old_proxy in old_proxies:
+            name = old_proxy.get("name", "")
+            password = old_proxy.get("password", "")
             if (
                 isinstance(name, str)
                 and isinstance(password, str)
@@ -801,67 +742,72 @@ async def update_providers(
             ):
                 old_proxy_passwords[name.strip()] = password
 
-    proxy_arr: list[dict] = []
-    for it in body.proxies:
-        proxy_name = it.name.strip()
-        proxy_type = _normalize_proxy_type(it.type)
-        proxy_password = it.password.strip()
+    proxy_arr: list[dict[str, Any]] = []
+    for proxy_input in body.proxies:
+        proxy_name = proxy_input.name.strip()
+        proxy_type = _normalize_proxy_type(proxy_input.type)
+        proxy_password = proxy_input.password.strip()
         if proxy_password == "" and proxy_name in old_proxy_passwords:
             proxy_password = old_proxy_passwords[proxy_name]
         proxy_arr.append(
             {
                 "name": proxy_name,
                 "type": proxy_type,
-                "host": it.host.strip(),
-                "port": it.port,
-                "username": (it.username or "").strip() or None,
+                "host": proxy_input.host.strip(),
+                "port": proxy_input.port,
+                "username": (proxy_input.username or "").strip() or None,
                 "password": proxy_password,
-                "private_key_path": (it.private_key_path or "").strip() or None,
-                "enabled": it.enabled,
+                "private_key_path": (proxy_input.private_key_path or "").strip()
+                or None,
+                "enabled": proxy_input.enabled,
             }
         )
-    proxy_names = {it["name"] for it in proxy_arr}
+    proxy_names = {proxy_row["name"] for proxy_row in proxy_arr}
 
-    arr: list[dict] = []
-    for it in body.items:
-        provider_name = it.name.strip()
-        api_key = it.api_key.strip()
+    arr: list[dict[str, Any]] = []
+    for provider_input in body.items:
+        provider_name = provider_input.name.strip()
+        api_key = provider_input.api_key.strip()
         if api_key == "" and provider_name in old_keys:
             api_key = old_keys[provider_name]
-        if not api_key and it.enabled:
+        if not api_key and provider_input.enabled:
             raise _http(
                 "invalid_request",
                 f"provider「{provider_name}」缺少 api_key",
                 422,
             )
-        provider_proxy = (it.proxy or "").strip() or None
+        provider_proxy = (provider_input.proxy or "").strip() or None
         if provider_proxy and provider_proxy not in proxy_names:
             raise _http(
                 "invalid_request",
                 f"provider「{provider_name}」引用了不存在的代理：{provider_proxy}",
                 422,
             )
-        endpoint = _normalize_image_jobs_endpoint(it.image_jobs_endpoint)
-        row = {
+        endpoint = _normalize_image_jobs_endpoint(
+            provider_input.image_jobs_endpoint
+        )
+        row: dict[str, Any] = {
             "name": provider_name,
-            "base_url": it.base_url.strip(),
+            "base_url": provider_input.base_url.strip(),
             "api_key": api_key,
-            "priority": it.priority,
-            "weight": max(1, it.weight),
-            "enabled": it.enabled,
-            "purposes": _normalize_purposes(it.purposes),
-            "image_jobs_enabled": it.image_jobs_enabled,
+            "priority": provider_input.priority,
+            "weight": max(1, provider_input.weight),
+            "enabled": provider_input.enabled,
+            "purposes": _normalize_purposes(provider_input.purposes),
+            "image_jobs_enabled": provider_input.image_jobs_enabled,
             "image_jobs_endpoint": endpoint,
             "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
-                it.image_jobs_endpoint_lock, endpoint
+                provider_input.image_jobs_endpoint_lock, endpoint
             ),
             "image_jobs_base_url": _normalize_image_jobs_base_url(
-                it.image_jobs_base_url
+                provider_input.image_jobs_base_url
             ),
-            "image_edit_input_transport": normalize_image_edit_input_transport(
-                it.image_edit_input_transport
+            "image_edit_input_transport": _normalize_image_edit_transport(
+                provider_input.image_edit_input_transport
             ),
-            "image_concurrency": _normalize_image_concurrency(it.image_concurrency),
+            "image_concurrency": _normalize_image_concurrency(
+                provider_input.image_concurrency
+            ),
         }
         # capability 三态：None 时不写入持久化结构，保持配置最小、避免污染老配置。
         for attr_in, key_out in (
@@ -869,7 +815,7 @@ async def update_providers(
             ("image_generations_supported", "image_generations_supported"),
             ("image_responses_supported", "image_responses_supported"),
         ):
-            val = _normalize_capability(getattr(it, attr_in, None))
+            val = _normalize_capability(getattr(provider_input, attr_in, None))
             if val is not None:
                 row[key_out] = val
         if provider_proxy:
@@ -893,12 +839,6 @@ async def update_providers(
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 
-    if _is_desktop_provider_runtime():
-        _write_desktop_provider_config(arr, proxy_arr)
-        out = [_to_out(it, i) for i, it in enumerate(arr)]
-        proxies_out = [_to_proxy_out(it, i) for i, it in enumerate(proxy_arr)]
-        return ProvidersOut(items=out, proxies=proxies_out, source="desktop")
-
     existing = (
         await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
@@ -913,7 +853,10 @@ async def update_providers(
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
-        details={"count": len(arr), "names": [it["name"] for it in arr]},
+        details={
+            "count": len(arr),
+            "names": [provider_row["name"] for provider_row in arr],
+        },
     )
     await db.commit()
     from .admin_models import invalidate_admin_models_cache
@@ -921,47 +864,52 @@ async def update_providers(
     invalidate_admin_models_cache()
 
     out: list[ProviderItemOut] = []
-    for it in arr:
-        endpoint = _normalize_image_jobs_endpoint(it.get("image_jobs_endpoint"))
+    for provider_row in arr:
+        endpoint = _normalize_image_jobs_endpoint(
+            provider_row.get("image_jobs_endpoint")
+        )
         out.append(
             ProviderItemOut(
-                name=it["name"],
-                base_url=it["base_url"],
-                api_key_hint=_mask_key(it["api_key"]),
-                priority=it["priority"],
-                weight=it["weight"],
-                enabled=it["enabled"],
-                purposes=_normalize_purposes(it.get("purposes")),
-                proxy=it.get("proxy"),
+                name=provider_row["name"],
+                base_url=provider_row["base_url"],
+                api_key_hint=_mask_key(provider_row["api_key"]),
+                priority=provider_row["priority"],
+                weight=provider_row["weight"],
+                enabled=provider_row["enabled"],
+                purposes=_normalize_purposes(provider_row.get("purposes")),
+                proxy=provider_row.get("proxy"),
                 image_jobs_enabled=_normalize_bool(
-                    it.get("image_jobs_enabled"),
+                    provider_row.get("image_jobs_enabled"),
                     default=False,
                 ),
                 image_jobs_endpoint=endpoint,
                 image_jobs_endpoint_lock=_normalize_image_jobs_endpoint_lock(
-                    it.get("image_jobs_endpoint_lock"), endpoint
+                    provider_row.get("image_jobs_endpoint_lock"), endpoint
                 ),
                 image_jobs_base_url=_normalize_image_jobs_base_url(
-                    it.get("image_jobs_base_url")
+                    provider_row.get("image_jobs_base_url")
                 ),
-                image_edit_input_transport=normalize_image_edit_input_transport(
-                    it.get("image_edit_input_transport")
+                image_edit_input_transport=_normalize_image_edit_transport(
+                    provider_row.get("image_edit_input_transport")
                 ),
                 image_concurrency=_normalize_image_concurrency(
-                    it.get("image_concurrency")
+                    provider_row.get("image_concurrency")
                 ),
                 responses_supported=_normalize_capability(
-                    it.get("responses_supported")
+                    provider_row.get("responses_supported")
                 ),
                 image_generations_supported=_normalize_capability(
-                    it.get("image_generations_supported")
+                    provider_row.get("image_generations_supported")
                 ),
                 image_responses_supported=_normalize_capability(
-                    it.get("image_responses_supported")
+                    provider_row.get("image_responses_supported")
                 ),
             )
         )
-    proxies_out = [_to_proxy_out(it, i) for i, it in enumerate(proxy_arr)]
+    proxies_out = [
+        _to_proxy_out(proxy_row, index)
+        for index, proxy_row in enumerate(proxy_arr)
+    ]
     return ProvidersOut(items=out, proxies=proxies_out, source="db")
 
 
@@ -1010,10 +958,6 @@ async def patch_provider_enabled(
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 
-    if _is_desktop_provider_runtime():
-        _write_desktop_provider_config(items, proxies)
-        return _to_out(target, target_idx)
-
     existing = (
         await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
@@ -1040,80 +984,6 @@ async def patch_provider_enabled(
 # ---------------------------------------------------------------------------
 # 探活
 # ---------------------------------------------------------------------------
-
-
-def _extract_response_output_text(payload: object) -> str:
-    """Extract text from a non-streaming Responses API payload."""
-    if not isinstance(payload, dict):
-        return ""
-
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text:
-        return output_text
-
-    chunks: list[str] = []
-    output = payload.get("output")
-    if isinstance(output, list):
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                text = part.get("text") or part.get("output_text")
-                if isinstance(text, str) and text:
-                    chunks.append(text)
-    if chunks:
-        return "".join(chunks)
-
-    try:
-        return json.dumps(payload, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def _extract_sse_output_text(raw: str) -> str:
-    chunks: list[str] = []
-    buffer = raw.replace("\r\n", "\n")
-    for raw_event in buffer.split("\n\n"):
-        data_lines: list[str] = []
-        for line in raw_event.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                data_lines.append(line[len("data:") :].strip())
-        if not data_lines:
-            continue
-        data = "\n".join(data_lines)
-        if data == "[DONE]":
-            continue
-        try:
-            obj = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-
-        delta = obj.get("delta")
-        if isinstance(delta, str) and delta:
-            chunks.append(delta)
-            continue
-
-        text = obj.get("text") or obj.get("output_text")
-        if isinstance(text, str) and text:
-            chunks.append(text)
-            continue
-
-        for key in ("response", "item", "part"):
-            nested = obj.get(key)
-            nested_text = _extract_response_output_text(nested)
-            if nested_text:
-                chunks.append(nested_text)
-                break
-
-    return "".join(chunks)
 
 
 @dataclass
@@ -1195,18 +1065,7 @@ async def _probe_one(
         "authorization": f"Bearer {api_key}",
         "content-type": "application/json",
     }
-    body = {
-        "model": _PROBE_MODEL,
-        "instructions": _PROBE_INSTRUCTIONS,
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": _PROBE_INPUT}],
-            }
-        ],
-        "stream": False,
-        "store": False,
-    }
+    body = build_provider_probe_request()
     t0 = time.monotonic()
     try:
         proxy_url = await resolve_provider_proxy_url(proxy)
@@ -1396,7 +1255,10 @@ async def provider_stats(
 
     for name in provider_names:
         key = f"lumen:provider_stats:{name}"
-        vals = await r.hgetall(key)
+        vals = await cast(
+            Awaitable[dict[str, str]],
+            r.hgetall(key),
+        )
         total = int(vals.get("total", 0))
         success = int(vals.get("success", 0))
         fail = int(vals.get("fail", 0))

@@ -95,7 +95,6 @@ type Draft = Omit<ProviderItemIn, "api_key" | "proxy"> & {
   api_key: string;
   proxy: string | null;
 };
-type ProxyDraft = ProviderProxyIn & { _key: number; password: string };
 type FieldErrors = Record<string, string>;
 
 let _draftSeq = 0;
@@ -147,20 +146,6 @@ function emptyDraft(): Draft {
 
 function providerHasStoredKey(provider: ProviderItemOut | null | undefined): boolean {
   return Boolean(provider?.api_key_hint?.trim());
-}
-
-function toProxyDraft(p: ProviderProxyOut): ProxyDraft {
-  return {
-    _key: nextKey(),
-    name: p.name,
-    type: p.type,
-    host: p.host,
-    port: p.port,
-    username: p.username ?? "",
-    password: "",
-    private_key_path: p.private_key_path ?? "",
-    enabled: p.enabled,
-  };
 }
 
 function proxyOutToIn(p: ProviderProxyOut): ProviderProxyIn {
@@ -249,7 +234,6 @@ export function ProvidersPanel() {
   const settingsMut = useUpdateSystemSettingsMutation();
 
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
-  const [proxyDrafts, setProxyDrafts] = useState<ProxyDraft[] | null>(null);
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -337,7 +321,6 @@ export function ProvidersPanel() {
 
   const cancelEdit = useCallback(() => {
     setDrafts(null);
-    setProxyDrafts(null);
     setEditingIdx(null);
     setGlobalError(null);
     setDeleteConfirmIdx(null);
@@ -369,11 +352,10 @@ export function ProvidersPanel() {
 
   const startEdit = useCallback(() => {
     setDrafts(serverItems.map(toDraft));
-    setProxyDrafts(serverProxies.map(toProxyDraft));
     setEditingIdx(null);
     setGlobalError(null);
     setDeleteConfirmIdx(null);
-  }, [serverItems, serverProxies]);
+  }, [serverItems]);
 
   const addProvider = useCallback(() => {
     const d = emptyDraft();
@@ -433,41 +415,10 @@ export function ProvidersPanel() {
   // ---- 保存校验 ----
 
   const validateAndSave = useCallback(() => {
-    if (!drafts || !proxyDrafts) return;
+    if (!drafts) return;
     setGlobalError(null);
 
-    const proxyNames = proxyDrafts.map((d) => d.name.trim()).filter(Boolean);
-    const proxyDupes = proxyNames.filter((n, i) => proxyNames.indexOf(n) !== i);
-    if (proxyDupes.length > 0) {
-      setGlobalError(`代理名称重复：${[...new Set(proxyDupes)].join(", ")}`);
-      return;
-    }
-    for (let i = 0; i < proxyDrafts.length; i++) {
-      const p = proxyDrafts[i];
-      const proxyName = p.name.trim();
-      if (!p.name.trim()) {
-        setGlobalError(`Proxy #${i + 1} 缺少名称`);
-        return;
-      }
-      if (!p.host.trim()) {
-        setGlobalError(`代理「${p.name}」缺少主机地址`);
-        return;
-      }
-      if (!Number.isFinite(p.port) || p.port < 1 || p.port > 65535) {
-        setGlobalError(`代理「${p.name}」端口必须在 1-65535 之间`);
-        return;
-      }
-      const isExistingProxy = serverProxies.some((s) => s.name === proxyName);
-      if (
-        p.type === "ssh" &&
-        !p.password.trim() &&
-        !isExistingProxy &&
-        !(p.private_key_path ?? "").trim()
-      ) {
-        setGlobalError(`SSH 代理「${proxyName}」缺少密码`);
-        return;
-      }
-    }
+    const proxyNames = serverProxies.map((proxy) => proxy.name.trim()).filter(Boolean);
 
     for (let i = 0; i < drafts.length; i++) {
       const d = drafts[i];
@@ -552,16 +503,7 @@ export function ProvidersPanel() {
 
     // Providers 保存时不再编辑 proxies，直接把服务器现有 proxies 透传回去（password 留空让后端保留旧值）。
     // 代理的增删改在「代理池」标签页做，与本面板解耦。
-    const proxyPayload: ProviderProxyIn[] = serverProxies.map((p) => ({
-      name: p.name,
-      type: p.type,
-      host: p.host,
-      port: p.port,
-      username: p.username ?? null,
-      password: "",
-      private_key_path: p.private_key_path ?? null,
-      enabled: p.enabled,
-    }));
+    const proxyPayload = serverProxies.map(proxyOutToIn);
 
     updateMut.mutate({ items: providerPayload, proxies: proxyPayload }, {
       onSuccess: () => {
@@ -576,7 +518,7 @@ export function ProvidersPanel() {
         }
       },
     });
-  }, [drafts, proxyDrafts, serverItems, serverProxies, updateMut, cancelEdit]);
+  }, [drafts, serverItems, serverProxies, updateMut, cancelEdit]);
 
   // ---- 探活 ----
 
@@ -763,17 +705,7 @@ export function ProvidersPanel() {
           {/* 代理增删改已移到「代理池」标签页；编辑 Provider 时通过 dropdown 关联现有代理。 */}
           <DraftList
             drafts={drafts!}
-            proxies={(serverProxies ?? []).map((p, i) => ({
-              _key: i + 1,
-              name: p.name,
-              type: p.type,
-              host: p.host,
-              port: p.port,
-              username: p.username ?? "",
-              password: "",
-              private_key_path: p.private_key_path ?? "",
-              enabled: p.enabled,
-            }))}
+            proxies={serverProxies}
             editingIdx={editingIdx}
             deleteConfirmIdx={deleteConfirmIdx}
             fieldErrors={draftErrors}
@@ -913,9 +845,7 @@ function StatsRow({
       ? "数据库"
       : source === "env"
         ? "环境变量"
-        : source === "desktop"
-          ? "本机"
-          : "未配置";
+        : "未配置";
   const sourceIcon =
     source === "db" ? (
       <Server className="w-3 h-3" />
@@ -1639,7 +1569,7 @@ function DraftList({
   onDeleteConfirm,
 }: {
   drafts: Draft[];
-  proxies: ProxyDraft[];
+  proxies: ProviderProxyOut[];
   editingIdx: number | null;
   deleteConfirmIdx: number | null;
   fieldErrors: Record<number, FieldErrors>;
@@ -1688,11 +1618,28 @@ function DraftList({
 
 import { forwardRef } from "react";
 
+function providerApiKeyHint(
+  isExisting: boolean,
+  hasExistingKey: boolean,
+): string {
+  if (!isExisting) return "新增供应商必须填写";
+  return hasExistingKey
+    ? "留空保持原值不变"
+    : "当前没有保存密钥，启用前必须填写";
+}
+
+function providerApiKeyPlaceholder(
+  isExisting: boolean,
+  hasExistingKey: boolean,
+): string {
+  return isExisting && hasExistingKey ? "（留空保持不变）" : "sk-...";
+}
+
 const DraftCard = forwardRef<
   HTMLDivElement,
   {
     draft: Draft;
-    proxies: ProxyDraft[];
+    proxies: ProviderProxyOut[];
     index: number;
     total: number;
     expanded: boolean;
@@ -1849,22 +1796,17 @@ const DraftCard = forwardRef<
               {/* API 密钥 */}
               <Field
                 label="API 密钥"
-                hint={
-                  isExisting
-                    ? hasExistingKey
-                      ? "留空保持原值不变"
-                      : "当前没有保存密钥，启用前必须填写"
-                    : "新增供应商必须填写"
-                }
+                hint={providerApiKeyHint(isExisting, hasExistingKey)}
                 required={!isExisting || !hasExistingKey}
               >
                 <input
                   type="password"
                   value={draft.api_key}
                   onChange={(e) => onUpdate({ api_key: e.target.value })}
-                  placeholder={
-                    isExisting && hasExistingKey ? "（留空保持不变）" : "sk-..."
-                  }
+                  placeholder={providerApiKeyPlaceholder(
+                    isExisting,
+                    hasExistingKey,
+                  )}
                   autoComplete="new-password"
                   className={fieldCls(false)}
                 />
@@ -1921,7 +1863,7 @@ const DraftCard = forwardRef<
                 >
                   <option value="">不使用代理</option>
                   {proxies.map((p) => (
-                    <option key={p._key} value={p.name.trim()} disabled={!p.name.trim()}>
+                    <option key={p.name} value={p.name.trim()} disabled={!p.name.trim()}>
                       {p.name.trim() || "(未命名代理)"} · {p.type === "ssh" ? "SSH" : "S5"}
                     </option>
                   ))}

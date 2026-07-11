@@ -11,7 +11,14 @@ import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Iterator
+from typing import (
+    Annotated,
+    Any,
+    BinaryIO,
+    Iterator,
+    Protocol,
+    runtime_checkable,
+)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -64,6 +71,17 @@ _EXPORT_CHUNK_SIZE = 64 * 1024
 # full hour. The refill rate (1/hr) still caps sustained use to one export per
 # hour; the extra burst slot is purely for retry-after-failure ergonomics.
 _EXPORT_LIMITER = RateLimiter(capacity=2, refill_per_sec=1 / 3600, always_on=True)
+
+
+@runtime_checkable
+class _RowcountResult(Protocol):
+    rowcount: int | None
+
+
+def _dml_rowcount(result: object) -> int | None:
+    if not isinstance(result, _RowcountResult):
+        raise TypeError("expected a DML result with rowcount")
+    return result.rowcount
 
 
 def _ext_for(mime: str) -> str:
@@ -194,40 +212,54 @@ async def _cancel_account_active_tasks(
     running_generation_ids: list[str] = []
     streaming_completion_ids: list[str] = []
     holds_released = 0
+    should_release_queued_holds = account_mode == "wallet"
+    if not should_release_queued_holds and (
+        any(
+            generation.status == GenerationStatus.QUEUED.value
+            for generation in generations
+        )
+        or any(
+            completion.status == CompletionStatus.QUEUED.value
+            for completion in completions
+        )
+    ):
+        should_release_queued_holds = await _account_wallet_exists(db, user_id)
+
+    # The worker owns upstream cancellation and final billing cleanup for
+    # active rows; this transaction only finalizes work that never started.
     for generation in generations:
         task_ids.append(generation.id)
         if generation.status == GenerationStatus.QUEUED.value:
             queued_generation_ids.append(generation.id)
+            generation.status = GenerationStatus.CANCELED.value
+            generation.finished_at = canceled_at
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_account_delete_task_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="generation",
+                        ref_id=billing_core.generation_billing_ref_id(generation),
+                    )
+                )
         elif generation.status == GenerationStatus.RUNNING.value:
             running_generation_ids.append(generation.id)
-        generation.status = GenerationStatus.CANCELED.value
-        generation.finished_at = canceled_at
-        if account_mode == "wallet" or await _account_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_account_delete_task_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="generation",
-                    ref_id=billing_core.retry_billing_ref_id(
-                        generation.id, getattr(generation, "retry_count", 0)
-                    ),
-                )
-            )
     for completion in completions:
         task_ids.append(completion.id)
-        if completion.status == CompletionStatus.STREAMING.value:
-            streaming_completion_ids.append(completion.id)
-        completion.status = CompletionStatus.CANCELED.value
-        completion.finished_at = canceled_at
-        if account_mode == "wallet" or await _account_wallet_exists(db, user_id):
-            holds_released += int(
-                await _release_account_delete_task_hold(
-                    db,
-                    user_id=user_id,
-                    ref_type="completion",
-                    ref_id=billing_core.completion_billing_ref_id(completion),
+        if completion.status == CompletionStatus.QUEUED.value:
+            completion.status = CompletionStatus.CANCELED.value
+            completion.finished_at = canceled_at
+            if should_release_queued_holds:
+                holds_released += int(
+                    await _release_account_delete_task_hold(
+                        db,
+                        user_id=user_id,
+                        ref_type="completion",
+                        ref_id=billing_core.completion_billing_ref_id(completion),
+                    )
                 )
-            )
+        elif completion.status == CompletionStatus.STREAMING.value:
+            streaming_completion_ids.append(completion.id)
     return {
         "generations_canceled": len(generations),
         "completions_canceled": len(completions),
@@ -248,7 +280,7 @@ async def _release_account_generation_queue_state(redis: Any, task_id: str) -> N
 async def _post_commit_account_task_cleanup(
     *,
     user_id: str,
-    cleanup: dict[str, object],
+    cleanup: dict[str, Any],
 ) -> None:
     queued_generation_ids = [
         task_id
@@ -707,10 +739,10 @@ async def delete_my_account(
         actor_ip_hash=request_ip_hash(request),
         target_user_id=user.id,
         details={
-            "users": user_result.rowcount,
-            "sessions_revoked": sessions_result.rowcount,
-            "conversations_deleted": conversations_result.rowcount,
-            "images_deleted": images_result.rowcount,
+            "users": _dml_rowcount(user_result),
+            "sessions_revoked": _dml_rowcount(sessions_result),
+            "conversations_deleted": _dml_rowcount(conversations_result),
+            "images_deleted": _dml_rowcount(images_result),
             "generations_canceled": task_cleanup["generations_canceled"],
             "completions_canceled": task_cleanup["completions_canceled"],
         },

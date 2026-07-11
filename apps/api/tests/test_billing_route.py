@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,28 @@ def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
     assert billing._openai_price_micro("0.0005", 1.0) == 1  # noqa: SLF001
 
 
+def test_redemption_expiry_boundary_is_consistently_expired() -> None:
+    now = datetime.now(timezone.utc)
+    code = SimpleNamespace(
+        revoked_at=None,
+        expires_at=now,
+        redeemed_count=0,
+        max_redemptions=1,
+    )
+
+    assert billing._redemption_status(code, now=now) == "expired"  # noqa: SLF001
+    overview_source = inspect.getsource(billing.admin_billing_overview)
+    assert "RedemptionCode.expires_at > now" in overview_source
+
+
+def test_admin_wallet_routes_exclude_soft_deleted_users() -> None:
+    list_source = inspect.getsource(billing.admin_list_wallets)
+    mode_source = inspect.getsource(billing.admin_set_account_mode)
+
+    assert "User.deleted_at.is_(None)" in list_source
+    assert "User.deleted_at.is_(None)" in mode_source
+
+
 def test_usage_by_kind_uses_cost_breakdown_and_rate_multiplier() -> None:
     row = SimpleNamespace(
         kind="charge",
@@ -66,33 +89,63 @@ def test_usage_by_kind_uses_cost_breakdown_and_rate_multiplier() -> None:
     assert out.reasoning == 500
 
 
-def test_window_usage_reports_reset_from_oldest_in_window() -> None:
-    now = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
-    old = SimpleNamespace(
-        kind="charge",
-        amount_micro=-10_000,
-        ref_type="completion",
-        created_at=now - timedelta(hours=6),
-        meta={"cost_micro": 10_000},
-    )
-    recent = SimpleNamespace(
-        kind="charge",
-        amount_micro=-20_000,
-        ref_type="completion",
-        created_at=now - timedelta(hours=2),
-        meta={"cost_micro": 20_000},
-    )
+def test_usage_by_kind_classifies_settlements_by_ref_type() -> None:
+    rows = [
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-20_000,
+            ref_type="completion",
+            meta={"actual_micro": 20_000},
+        ),
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-30_000,
+            ref_type="prompt_enhance",
+            meta={"actual_micro": 30_000},
+        ),
+        SimpleNamespace(
+            kind="settle",
+            amount_micro=-40_000,
+            ref_type="generation",
+            meta={"actual_micro": 40_000},
+        ),
+    ]
 
-    out = billing._window_usage(  # noqa: SLF001
-        [old, recent],
+    out = billing._usage_by_kind(rows)  # noqa: SLF001
+
+    assert out.output == 50_000
+    assert out.image == 40_000
+
+
+def test_redemption_batch_legacy_idempotency_is_bounded_to_plaintext_window() -> None:
+    now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+
+    first = billing._redemption_batch_idempotency_key(  # noqa: SLF001
+        None,
+        admin_id="admin-1",
+        request_hash="request-hash",
         now=now,
-        span=timedelta(hours=5),
-        limit_micro=100_000,
+    )
+    retry = billing._redemption_batch_idempotency_key(  # noqa: SLF001
+        None,
+        admin_id="admin-1",
+        request_hash="request-hash",
+        now=now + timedelta(seconds=299),
+    )
+    later = billing._redemption_batch_idempotency_key(  # noqa: SLF001
+        None,
+        admin_id="admin-1",
+        request_hash="request-hash",
+        now=now + timedelta(seconds=300),
     )
 
-    assert out.used_micro == 20_000
-    assert out.limit_micro == 100_000
-    assert out.resets_at == recent.created_at + timedelta(hours=5)
+    assert retry == first
+    assert later != first
+    assert billing._redemption_batch_lock_identity(  # noqa: SLF001
+        first, "request-hash"
+    ) == billing._redemption_batch_lock_identity(  # noqa: SLF001
+        later, "request-hash"
+    )
 
 
 def test_bulk_multiplier_converts_to_x10000() -> None:
@@ -162,11 +215,18 @@ def test_generated_redemption_secret_is_strong_and_random() -> None:
 class _Db:
     def __init__(self) -> None:
         self.added: list[Any] = []
+        self.flush_calls: list[list[Any] | None] = []
         self.committed = False
         self.rolled_back = False
 
     def add(self, value: Any) -> None:
         self.added.append(value)
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        return _ScalarOneOrNoneResult(None)
+
+    async def flush(self, values: list[Any] | None = None) -> None:
+        self.flush_calls.append(values)
 
     async def commit(self) -> None:
         self.committed = True
@@ -263,6 +323,90 @@ class _FirstDb:
 
     async def execute(self, *_args: Any, **_kwargs: Any) -> _FirstResult:
         return _FirstResult(self.value)
+
+
+@pytest.mark.asyncio
+async def test_wallet_audit_uses_database_window_and_limits_mismatch_rows() -> None:
+    statements: list[str] = []
+
+    class StatsResult:
+        def one(self) -> tuple[int, int, int]:
+            return 4, 2, 1
+
+    class MismatchResult:
+        def all(self) -> list[tuple[str, str, str, int, int]]:
+            return [("user-1", "tx-2", "charge", 75, 70)]
+
+    class Db:
+        async def execute(self, stmt: Any) -> Any:
+            statements.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            return StatsResult() if len(statements) == 1 else MismatchResult()
+
+    out = await billing.admin_wallet_audit(
+        SimpleNamespace(id="admin-1"),
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        limit=1,
+    )
+
+    assert out.transactions == 4
+    assert out.users == 2
+    assert out.mismatch_count == 1
+    assert out.mismatches == [
+        "user=user-1 tx=tx-2 kind=charge running=75 balance_after=70"
+    ]
+    assert "OVER (PARTITION BY wallet_transactions.user_id" in statements[0]
+    assert "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" in statements[0]
+    assert "wallet_transactions.user_id = 'user-1'" in statements[0]
+    assert "LIMIT 1" in statements[1]
+
+
+@pytest.mark.asyncio
+async def test_credential_windows_use_persisted_credential_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, int, str]] = []
+    now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+
+    class Service:
+        def __init__(self, redis: Any | None = None) -> None:
+            assert redis is None
+
+        async def ledger_window_usage(
+            self,
+            _db: Any,
+            credential_id: str,
+            window: str,
+            *,
+            limit_micro: int,
+            now: datetime,
+            user_id: str,
+        ) -> Any:
+            calls.append((credential_id, window, limit_micro, user_id))
+            return SimpleNamespace(
+                used_micro={"5h": 5, "1d": 10, "7d": 20}[window],
+                limit_micro=limit_micro,
+                resets_at=now + timedelta(hours=1),
+            )
+
+    monkeypatch.setattr(billing, "BillingCacheService", Service)
+
+    windows = await billing._credential_windows(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        credential_id="cred-1",
+        limits={"5h": 50, "1d": 100, "7d": 200},
+        now=now,
+    )
+
+    assert windows["5h"].used_micro == 5
+    assert windows["1d"].used_micro == 10
+    assert windows["7d"].used_micro == 20
+    assert calls == [
+        ("cred-1", "5h", 50, "user-1"),
+        ("cred-1", "1d", 100, "user-1"),
+        ("cred-1", "7d", 200, "user-1"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -499,8 +643,176 @@ async def test_create_redemption_codes_returns_plaintext_and_no_store(
     assert len(out.plaintext_codes) == 2
     assert all(code.startswith("LMN-") for code in out.plaintext_codes)
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Idempotency-Key"].startswith("derived:")
+    assert isinstance(db.added[0], billing.RedemptionBatch)
+    assert db.flush_calls[0] == [db.added[0]]
+    assert db.flush_calls[-1] is None
     assert any(key.startswith(billing._DOWNLOAD_TOKEN_PREFIX) for key in redis.values)  # noqa: SLF001
     assert any(key.startswith(billing._PLAINTEXT_BATCH_PREFIX) for key in redis.values)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_create_redemption_codes_replays_persisted_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = billing.RedemptionBatch(
+        id="batch-1",
+        created_by="admin-1",
+        idempotency_key="client:create-1",
+        request_hash="persisted-request-hash",
+        amount_micro=10_000_000,
+        code_count=2,
+        max_redemptions=1,
+        expires_at=None,
+    )
+    replayed: list[tuple[str, str]] = []
+    expected = billing.AdminRedemptionCodeCreateOut(
+        batch_id="batch-1",
+        count=2,
+        amount=billing._money(10_000_000),  # noqa: SLF001
+        download_token="tok_replay",
+        plaintext_codes=["LMN-AAAA-BBBB-CCCC-DDDD"],
+    )
+
+    async def fail_new_batch_checks(_db: Any) -> None:
+        raise AssertionError(
+            "persisted replay must not require current billing secrets"
+        )
+
+    async def fake_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def existing(*_args: Any, **_kwargs: Any) -> Any:
+        return batch
+
+    async def replay(
+        persisted: Any,
+        *,
+        request_hash: str,
+        idempotency_key: str,
+        response: Response,
+    ) -> Any:
+        assert persisted is batch
+        assert response is not None
+        replayed.append((request_hash, idempotency_key))
+        return expected
+
+    monkeypatch.setattr(
+        billing,
+        "_require_bootstrap_completed",
+        fail_new_batch_checks,
+    )
+    monkeypatch.setattr(billing, "_redemption_secret", fail_new_batch_checks)
+    monkeypatch.setattr(billing, "_lock_redemption_batch_idempotency_key", fake_lock)
+    monkeypatch.setattr(billing, "_redemption_batch_for_idempotency", existing)
+    monkeypatch.setattr(billing, "_replay_redemption_batch", replay)
+    monkeypatch.setattr(
+        billing,
+        "_redemption_batch_request_hash",
+        lambda *_args, **_kwargs: "persisted-request-hash",
+    )
+    monkeypatch.setattr(
+        billing.billing_core,
+        "generate_redemption_code",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("persisted replay must not generate new codes")
+        ),
+    )
+
+    out = await billing.admin_create_redemption_codes(
+        AdminRedemptionCodeCreateIn(amount_rmb="10", count=2),
+        _request(
+            method="POST",
+            headers=[(b"idempotency-key", b"create-1")],
+        ),
+        Response(),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        _Db(),  # type: ignore[arg-type]
+    )
+
+    assert out is expected
+    assert replayed == [("persisted-request-hash", "client:create-1")]
+
+
+@pytest.mark.asyncio
+async def test_redemption_batch_replay_rejects_changed_request() -> None:
+    batch = billing.RedemptionBatch(
+        id="batch-1",
+        created_by="admin-1",
+        idempotency_key="client:create-1",
+        request_hash="first-request",
+        amount_micro=10_000_000,
+        code_count=1,
+        max_redemptions=1,
+        expires_at=None,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await billing._replay_redemption_batch(  # noqa: SLF001
+            batch,
+            request_hash="second-request",
+            idempotency_key="client:create-1",
+            response=Response(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_redemption_batch_replay_returns_persisted_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expires_at = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    codes = [
+        "LMN-AAAA-BBBB-CCCC-DDDD",
+        "LMN-EEEE-FFFF-GGGG-HHHH",
+    ]
+    batch = billing.RedemptionBatch(
+        id="batch-1",
+        created_by="admin-1",
+        idempotency_key="client:create-1",
+        request_hash="request-hash",
+        amount_micro=10_000_000,
+        code_count=2,
+        max_redemptions=1,
+        expires_at=expires_at,
+    )
+
+    async def load(batch_id: str) -> dict[str, Any]:
+        assert batch_id == "batch-1"
+        return {
+            "batch_id": batch_id,
+            "amount_rmb": "10",
+            "expires_at": expires_at.isoformat(),
+            "codes": codes,
+        }
+
+    async def store(**kwargs: Any) -> str:
+        assert kwargs == {
+            "batch_id": "batch-1",
+            "amount_micro": 10_000_000,
+            "codes": codes,
+            "expires_at": expires_at,
+        }
+        return "tok_replay"
+
+    monkeypatch.setattr(billing, "_load_redemption_plaintext_batch", load)
+    monkeypatch.setattr(billing, "_store_redemption_plaintext_batch", store)
+    response = Response()
+
+    out = await billing._replay_redemption_batch(  # noqa: SLF001
+        batch,
+        request_hash="request-hash",
+        idempotency_key="client:create-1",
+        response=response,
+    )
+
+    assert out.batch_id == "batch-1"
+    assert out.plaintext_codes == codes
+    assert out.download_token == "tok_replay"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Idempotency-Key"] == "client:create-1"
 
 
 @pytest.mark.asyncio

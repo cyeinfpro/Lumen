@@ -86,27 +86,39 @@ def _row(builder: InlineKeyboardBuilder, label: str, options: list[tuple[str, ob
 def main_menu(params: dict[str, object]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     # 比例
-    for text, value in ASPECT_RATIOS:
-        prefix = "✅ " if params["aspect_ratio"] == value else ""
-        b.button(text=f"{prefix}{text}", callback_data=f"cfg:aspect_ratio:{value}")
+    for text, aspect_value in ASPECT_RATIOS:
+        prefix = "✅ " if params["aspect_ratio"] == aspect_value else ""
+        b.button(
+            text=f"{prefix}{text}",
+            callback_data=f"cfg:aspect_ratio:{aspect_value}",
+        )
     b.adjust(3, 3)
 
     b2 = InlineKeyboardBuilder()
-    for text, value in QUALITY_LABELS:
-        prefix = "✅ " if params["render_quality"] == value else ""
-        b2.button(text=f"{prefix}质量·{text}", callback_data=f"cfg:render_quality:{value}")
+    for text, quality_value in QUALITY_LABELS:
+        prefix = "✅ " if params["render_quality"] == quality_value else ""
+        b2.button(
+            text=f"{prefix}质量·{text}",
+            callback_data=f"cfg:render_quality:{quality_value}",
+        )
     b2.adjust(3)
 
     b3 = InlineKeyboardBuilder()
-    for text, value in COUNT_LABELS:
-        prefix = "✅ " if params["count"] == value else ""
-        b3.button(text=f"{prefix}×{text}", callback_data=f"cfg:count:{value}")
+    for text, count_value in COUNT_LABELS:
+        prefix = "✅ " if params["count"] == count_value else ""
+        b3.button(
+            text=f"{prefix}×{text}",
+            callback_data=f"cfg:count:{count_value}",
+        )
     b3.adjust(4)
 
     b4 = InlineKeyboardBuilder()
-    for text, value in RESOLUTION_LABELS:
-        prefix = "✅ " if params["resolution"] == value else ""
-        b4.button(text=f"{prefix}{text}", callback_data=f"cfg:resolution:{value}")
+    for text, resolution_value in RESOLUTION_LABELS:
+        prefix = "✅ " if params["resolution"] == resolution_value else ""
+        b4.button(
+            text=f"{prefix}{text}",
+            callback_data=f"cfg:resolution:{resolution_value}",
+        )
     b4.adjust(3)
 
     b_fmt = InlineKeyboardBuilder()

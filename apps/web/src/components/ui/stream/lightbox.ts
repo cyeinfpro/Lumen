@@ -15,7 +15,7 @@ function mimeFromOutputFormat(format: string | null | undefined): string | undef
   return undefined;
 }
 
-export function generationToLightboxItem(
+function generationToLightboxItem(
   item: GenerationSummary,
   options: LightboxSourceOptions = {},
 ): LightboxItem {

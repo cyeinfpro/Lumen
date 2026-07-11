@@ -215,6 +215,35 @@ def test_normalize_scene_cards_aligns_by_product_visibility_without_fallback_fil
     assert cards[2]["location"] == "街边玻璃门外"
 
 
+def test_normalize_scene_cards_uses_index_for_duplicate_shot_classes() -> None:
+    shot_picks = [
+        ("natural_pose", {"label": "自然动作一"}),
+        ("natural_pose", {"label": "自然动作二"}),
+    ]
+    raw_cards = [
+        _complete_scene_card(
+            id="natural_pose-2",
+            location="第二个场景",
+            micro_event="向右跨一步后停住",
+            pose="身体三分之二正面向右移动",
+            motion="右脚落地时衣摆轻微摆动",
+            shooting_brief="第二个场景中向右跨一步后停住，商品主体清楚。",
+        ),
+        _complete_scene_card(
+            id="natural_pose-1",
+            location="第一个场景",
+            micro_event="向左跨一步后停住",
+            pose="身体三分之二正面向左移动",
+            motion="左脚落地时衣摆轻微摆动",
+            shooting_brief="第一个场景中向左跨一步后停住，商品主体清楚。",
+        ),
+    ]
+
+    cards = scene_planner._normalize_scene_cards(raw_cards, shot_picks)
+
+    assert [card["location"] for card in cards] == ["第一个场景", "第二个场景"]
+
+
 def test_normalize_scene_cards_rejects_incomplete_gpt_card_instead_of_pool_fill() -> (
     None
 ):

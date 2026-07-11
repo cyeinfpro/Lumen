@@ -94,16 +94,28 @@ def test_export_tempfile_iterator_closes_on_early_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_account_active_tasks_releases_generation_and_completion_holds(
+async def test_cancel_account_active_tasks_releases_only_queued_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gen = SimpleNamespace(id="gen-1", status=GenerationStatus.RUNNING.value)
-    comp = SimpleNamespace(
-        id="comp-1",
-        status=CompletionStatus.STREAMING.value,
+    gen_queued = SimpleNamespace(
+        id="gen-queued",
+        status=GenerationStatus.QUEUED.value,
+        billing_retry_count=1,
+    )
+    gen_running = SimpleNamespace(
+        id="gen-running",
+        status=GenerationStatus.RUNNING.value,
+    )
+    comp_queued = SimpleNamespace(
+        id="comp-queued",
+        status=CompletionStatus.QUEUED.value,
         upstream_request={"billing_retry_count": 1},
     )
-    db = _Db([[gen], [comp]])
+    comp_streaming = SimpleNamespace(
+        id="comp-streaming",
+        status=CompletionStatus.STREAMING.value,
+    )
+    db = _Db([[gen_queued, gen_running], [comp_queued, comp_streaming]])
     released: list[dict[str, Any]] = []
 
     async def release_account_delete_task_hold(
@@ -137,18 +149,28 @@ async def test_cancel_account_active_tasks_releases_generation_and_completion_ho
     )
 
     assert cleanup == {
-        "generations_canceled": 1,
-        "completions_canceled": 1,
+        "generations_canceled": 2,
+        "completions_canceled": 2,
         "holds_released": 2,
-        "task_ids": ["gen-1", "comp-1"],
-        "queued_generation_ids": [],
-        "running_generation_ids": ["gen-1"],
-        "streaming_completion_ids": ["comp-1"],
+        "task_ids": [
+            "gen-queued",
+            "gen-running",
+            "comp-queued",
+            "comp-streaming",
+        ],
+        "queued_generation_ids": ["gen-queued"],
+        "running_generation_ids": ["gen-running"],
+        "streaming_completion_ids": ["comp-streaming"],
     }
-    assert gen.status == GenerationStatus.CANCELED.value
-    assert comp.status == CompletionStatus.CANCELED.value
-    assert [call["ref_id"] for call in released] == ["gen-1", "comp-1:retry:1"]
+    assert [call["ref_id"] for call in released] == [
+        "gen-queued:retry:1",
+        "comp-queued:retry:1",
+    ]
     assert all(call["committed"] is False for call in released)
+    assert gen_queued.status == GenerationStatus.CANCELED.value
+    assert gen_running.status == GenerationStatus.RUNNING.value
+    assert comp_queued.status == CompletionStatus.CANCELED.value
+    assert comp_streaming.status == CompletionStatus.STREAMING.value
 
 
 @pytest.mark.asyncio
@@ -183,8 +205,8 @@ async def test_cancel_account_active_tasks_skips_holds_for_byok(
 
     assert cleanup["holds_released"] == 0
     assert released == []
-    assert gen.status == GenerationStatus.CANCELED.value
-    assert comp.status == CompletionStatus.CANCELED.value
+    assert gen.status == GenerationStatus.RUNNING.value
+    assert comp.status == CompletionStatus.STREAMING.value
 
 
 @pytest.mark.asyncio

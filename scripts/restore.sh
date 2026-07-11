@@ -571,7 +571,7 @@ fi
 if [ "$_redis_cp_ok" = "0" ]; then
     log "ERROR redis 数据拷贝失败，回滚到原状态"
     for _f in dump.rdb appendonly.aof appendonlydir; do
-        rm -rf "$REDIS_HOST_DIR/$_f" 2>/dev/null || true
+        rm -rf "${REDIS_HOST_DIR:?}/$_f" 2>/dev/null || true
         if [ -e "$REDIS_BACKUP_DIR/$_f" ]; then
             mv "$REDIS_BACKUP_DIR/$_f" "$REDIS_HOST_DIR/$_f" \
                 || log "WARN 回滚 redis/$_f 失败，请人工检查 $REDIS_BACKUP_DIR"

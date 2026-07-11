@@ -20,8 +20,8 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import MutableMapping
-from dataclasses import InitVar, dataclass, field, replace
-from typing import Any, Callable
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Protocol, TypeVar
 from urllib.parse import quote
 
 
@@ -31,6 +31,23 @@ PROVIDER_PURPOSE_VALUES = ("chat", "image", "embedding")
 DEFAULT_PROVIDER_PURPOSES = ("chat", "image")
 
 
+class _WeightedProvider(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def priority(self) -> int: ...
+
+    @property
+    def weight(self) -> int: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+
+_WeightedProviderT = TypeVar("_WeightedProviderT", bound=_WeightedProvider)
+
+
 @dataclass(frozen=True)
 class ProviderProxyDefinition:
     name: str
@@ -38,17 +55,9 @@ class ProviderProxyDefinition:
     host: str
     port: int
     username: str | None = None
-    password: InitVar[str | None] = None
+    password: str | None = field(default=None, repr=False, compare=False)
     private_key_path: str | None = None
     enabled: bool = True
-    _password: str | None = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self, password: str | None) -> None:
-        object.__setattr__(self, "_password", password)
-
-    @property
-    def password(self) -> str | None:  # noqa: F811 - expose InitVar through a read-only property
-        return self._password
 
 
 @dataclass(frozen=True)
@@ -640,15 +649,15 @@ def advance_round_robin_counter(
 
 
 def _weighted_priority_order(
-    providers: list[ProviderDefinition],
+    providers: list[_WeightedProviderT],
     counter_for_priority: Callable[[int], int] | None,
-) -> list[ProviderDefinition]:
+) -> list[_WeightedProviderT]:
     enabled = [p for p in providers if p.enabled]
-    by_priority: dict[int, list[ProviderDefinition]] = {}
+    by_priority: dict[int, list[_WeightedProviderT]] = {}
     for p in enabled:
         by_priority.setdefault(p.priority, []).append(p)
 
-    result: list[ProviderDefinition] = []
+    result: list[_WeightedProviderT] = []
     for prio in sorted(by_priority.keys(), reverse=True):
         group = by_priority[prio]
         if len(group) <= 1:
@@ -673,9 +682,9 @@ def _weighted_priority_order(
 
 
 def weighted_priority_order_and_advance(
-    providers: list[ProviderDefinition],
+    providers: list[_WeightedProviderT],
     rr_counters: MutableMapping[int, int] | RoundRobinState,
-) -> list[ProviderDefinition]:
+) -> list[_WeightedProviderT]:
     return _weighted_priority_order(
         providers,
         lambda priority: advance_round_robin_counter(rr_counters, priority),
@@ -683,9 +692,9 @@ def weighted_priority_order_and_advance(
 
 
 def weighted_priority_order(
-    providers: list[ProviderDefinition],
+    providers: list[_WeightedProviderT],
     rr_counters: MutableMapping[int, int] | RoundRobinState | None = None,
-) -> list[ProviderDefinition]:
+) -> list[_WeightedProviderT]:
     """Return weighted provider order.
 
     Passing `rr_counters` is kept for compatibility; new code should use

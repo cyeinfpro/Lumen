@@ -22,6 +22,12 @@ class _Result:
     def scalar_one_or_none(self) -> Any:
         return self.value
 
+    def scalars(self) -> _Result:
+        return self
+
+    def all(self) -> Any:
+        return self.value if isinstance(self.value, list) else []
+
 
 class _Db:
     def __init__(self, results: list[_Result]) -> None:
@@ -89,17 +95,34 @@ async def _billing_allow_negative_false(_db: Any) -> bool:
     return False
 
 
-def test_task_item_exposes_queue_observability_metadata() -> None:
+def _task_record(**overrides: Any) -> Any:
     created = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
-    task = SimpleNamespace(
-        id="gen-1",
-        message_id="msg-1",
-        status=GenerationStatus.QUEUED.value,
-        progress_stage=GenerationStage.QUEUED.value,
-        started_at=None,
-        created_at=created,
-        finished_at=None,
+    values: dict[str, Any] = {
+        "id": "gen-1",
+        "message_id": "msg-1",
+        "status": GenerationStatus.QUEUED.value,
+        "progress_stage": GenerationStage.QUEUED.value,
+        "started_at": None,
+        "created_at": created,
+        "finished_at": None,
+        "upstream_request": {},
+        "error_code": None,
+        "error_message": None,
+        "attempt": 0,
+        "prompt": "render an image",
+        "primary_input_image_id": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_build_task_item_exposes_live_route_fields() -> None:
+    created = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    task = _task_record(
         upstream_request={
+            "workflow_run_id": "project-1",
+            "action_source": "composer.reroll",
+            "trace_id": "trace-request-1",
             "queue_metadata": {
                 "queue_lane": "image:workflow:large",
                 "workflow_type": "apparel_model_showcase",
@@ -108,22 +131,280 @@ def test_task_item_exposes_queue_observability_metadata() -> None:
                 "size_bucket": "large",
                 "cost_class": "large",
                 "queue_wait_ms": 3200,
-            }
+            },
         },
-        error_code=None,
-        error_message=None,
+        error_code="provider_exhausted",
+        error_message="all providers are busy",
         attempt=0,
+        prompt="render a wide hero image",
+        primary_input_image_id="source-image-1",
     )
 
-    item = tasks._task_item("generation", task)  # noqa: SLF001
+    item = tasks._build_task_item(  # noqa: SLF001
+        "generation",
+        task,
+        conversation_id="conv-1",
+        conversation_default_params={"telegram": True},
+        thumb_url="/api/images/image-1/variants/thumb256",
+        queue_position=4,
+        sort_at=created,
+    )
 
-    assert item.queue_lane == "image:workflow:large"
-    assert item.workflow_type == "apparel_model_showcase"
-    assert item.workflow_step_key == "showcase_generation"
-    assert item.pixel_count == 8_294_400
-    assert item.size_bucket == "large"
-    assert item.cost_class == "large"
-    assert item.queue_wait_ms == 3200
+    assert (
+        item.kind,
+        item.id,
+        item.message_id,
+        item.status,
+        item.progress_stage,
+        item.stage,
+    ) == (
+        "generation",
+        "gen-1",
+        "msg-1",
+        GenerationStatus.QUEUED.value,
+        GenerationStage.QUEUED.value,
+        GenerationStage.QUEUED.value,
+    )
+    assert (item.started_at, item.finished_at, item.created_at, item.date) == (
+        None,
+        None,
+        created,
+        created,
+    )
+    assert tasks._decode_task_cursor(item.cursor) == (  # noqa: SLF001
+        created,
+        "generation",
+        "gen-1",
+    )
+    assert (
+        item.conversation_id,
+        item.project_id,
+        item.source,
+        item.workflow_type,
+        item.workflow_step_key,
+    ) == (
+        "conv-1",
+        "project-1",
+        "project",
+        "apparel_model_showcase",
+        "showcase_generation",
+    )
+    assert (item.action_source, item.trace_id) == (
+        "composer.reroll",
+        "trace-request-1",
+    )
+    assert (
+        item.queue_lane,
+        item.pixel_count,
+        item.size_bucket,
+        item.cost_class,
+        item.queue_wait_ms,
+        item.queue_position,
+    ) == ("image:workflow:large", 8_294_400, "large", "large", 3200, 4)
+    assert (item.title, item.prompt, item.source_image_id, item.thumb_url) == (
+        "render a wide hero image",
+        "render a wide hero image",
+        "source-image-1",
+        "/api/images/image-1/variants/thumb256",
+    )
+    assert (item.error_code, item.error_message, item.retryable) == (
+        "provider_exhausted",
+        "all providers are busy",
+        False,
+    )
+    assert item.recommended_actions == []
+    assert (item.substage, item.retrying, item.waiting_provider, item.cancelled) == (
+        "waiting_provider",
+        False,
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_substage", "diagnostics_substage", "expected"),
+    [
+        ("request_stage", "diagnostics_stage", "request_stage"),
+        (None, "diagnostics_stage", "diagnostics_stage"),
+        (None, None, "waiting_provider"),
+    ],
+)
+def test_build_task_item_substage_priority(
+    request_substage: str | None,
+    diagnostics_substage: str | None,
+    expected: str,
+) -> None:
+    upstream_request: dict[str, Any] = {}
+    if request_substage is not None:
+        upstream_request["substage"] = request_substage
+    if diagnostics_substage is not None:
+        upstream_request["generation_diagnostics"] = {
+            "substage": diagnostics_substage,
+        }
+    task = _task_record(
+        upstream_request=upstream_request,
+        error_code="provider_exhausted",
+    )
+
+    item = tasks._build_task_item("generation", task)  # noqa: SLF001
+
+    assert item.substage == expected
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_uses_shared_task_item_builder() -> None:
+    created = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    task = _task_record()
+    image = SimpleNamespace(id="image-1", owner_generation_id="gen-1")
+    db = _Db(
+        [
+            _Result([task]),
+            _Result([("msg-1", "conv-1", {})]),
+            _Result([("conv-1", {})]),
+            _Result([image]),
+            _Result([("image-1", "thumb256")]),
+            _Result(["gen-1"]),
+        ]
+    )
+
+    output = await tasks.list_tasks(
+        user=_user(),  # type: ignore[arg-type]
+        db=db,  # type: ignore[arg-type]
+        kind="generation",
+        limit=10,
+    )
+
+    expected = tasks._build_task_item(  # noqa: SLF001
+        "generation",
+        task,
+        conversation_id="conv-1",
+        message_content={},
+        conversation_default_params={},
+        thumb_url="/api/images/image-1/variants/thumb256",
+        queue_position=1,
+        sort_at=created,
+    )
+    assert output.items == [expected]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_preserves_cross_kind_sort_order() -> None:
+    created = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    generation = _task_record(id="gen-1", created_at=created)
+    completion = _task_record(
+        id="comp-1",
+        message_id="msg-2",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage=CompletionStage.QUEUED.value,
+        created_at=created,
+    )
+    db = _Db(
+        [
+            _Result([generation]),
+            _Result([completion]),
+            _Result(
+                [
+                    ("msg-1", "conv-1", {}),
+                    ("msg-2", "conv-1", {}),
+                ]
+            ),
+            _Result([("conv-1", {})]),
+            _Result([]),
+            _Result(["gen-1"]),
+        ]
+    )
+
+    output = await tasks.list_tasks(
+        user=_user(),  # type: ignore[arg-type]
+        db=db,  # type: ignore[arg-type]
+        kind="all",
+        limit=10,
+    )
+
+    assert [(item.kind, item.id) for item in output.items] == [
+        ("generation", "gen-1"),
+        ("completion", "comp-1"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "error_code", "expected"),
+    [
+        (
+            "generation",
+            GenerationStatus.FAILED.value,
+            "upstream_timeout",
+            ("retryable", True, False, ("retry",)),
+        ),
+        (
+            "generation",
+            GenerationStatus.FAILED.value,
+            "INSUFFICIENT_BALANCE",
+            ("terminal", False, False, ("open_wallet", "reduce_cost")),
+        ),
+        (
+            "generation",
+            GenerationStatus.CANCELED.value,
+            "cancelled",
+            ("cancelled", True, True, ("retry",)),
+        ),
+        (
+            "generation",
+            GenerationStatus.SUCCEEDED.value,
+            None,
+            ("display_ready", False, False, ()),
+        ),
+        (
+            "completion",
+            CompletionStatus.SUCCEEDED.value,
+            None,
+            ("completed", False, False, ()),
+        ),
+        (
+            "completion",
+            CompletionStatus.STREAMING.value,
+            None,
+            (CompletionStage.THINKING.value, False, False, ()),
+        ),
+    ],
+)
+def test_build_task_item_preserves_terminal_and_status_semantics(
+    kind: Any,
+    status: str,
+    error_code: str | None,
+    expected: tuple[str, bool, bool, tuple[str, ...]],
+) -> None:
+    progress_stage = (
+        CompletionStage.THINKING.value
+        if status == CompletionStatus.STREAMING.value
+        else GenerationStage.FINALIZING.value
+    )
+    task = _task_record(
+        id=f"{kind}-1",
+        status=status,
+        progress_stage=progress_stage,
+        error_code=error_code,
+        error_message="task failed" if error_code else None,
+        attempt=1,
+        queue_wait_ms=125,
+    )
+
+    item = tasks._build_task_item(kind, task)  # noqa: SLF001
+
+    substage, retryable, cancelled, actions = expected
+    assert (item.status, item.progress_stage, item.stage) == (
+        status,
+        progress_stage,
+        progress_stage,
+    )
+    assert (item.substage, item.retryable, item.cancelled) == (
+        substage,
+        retryable,
+        cancelled,
+    )
+    assert item.retrying is False
+    assert item.waiting_provider is False
+    assert tuple(action.id for action in item.recommended_actions) == actions
 
 
 def test_task_cursor_round_trips_and_rejects_invalid() -> None:
@@ -235,7 +516,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
         error_message="timeout",
         started_at=old_time,
         finished_at=old_time,
-        retry_count=0,
+        billing_retry_count=0,
         prompt="render a wide hero image",
         size_requested="3840x2160",
         aspect_ratio="16:9",
@@ -253,7 +534,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     assert gen.status == GenerationStatus.QUEUED.value
     assert gen.progress_stage == GenerationStage.QUEUED.value
     assert gen.attempt == 0
-    assert gen.retry_count == 1
+    assert gen.billing_retry_count == 1
     assert gen.error_code is None
     assert gen.error_message is None
     assert gen.started_at is None
@@ -329,7 +610,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
         status=GenerationStatus.CANCELED.value,
         progress_stage=GenerationStage.FINALIZING.value,
         attempt=1,
-        retry_count=0,
+        billing_retry_count=0,
         error_code="cancelled",
         error_message="cancelled by user",
         started_at=None,
@@ -346,7 +627,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
     )
 
     assert out == {"status": GenerationStatus.QUEUED.value}
-    assert gen.retry_count == 1
+    assert gen.billing_retry_count == 1
     assert held == [
         {
             "committed": False,

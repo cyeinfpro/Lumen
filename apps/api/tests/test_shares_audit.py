@@ -303,22 +303,7 @@ async def test_create_multi_image_share_preserves_image_order(
 
 
 @pytest.mark.asyncio
-async def test_desktop_loopback_public_share_reads_skip_rate_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fail_check(*_args, **_kwargs) -> None:
-        raise AssertionError("desktop loopback public reads should not be rate limited")
-
-    monkeypatch.setattr(shares.settings, "lumen_runtime", "desktop")
-    monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", fail_check)
-    monkeypatch.setattr(shares.PUBLIC_IMAGE_LIMITER, "check", fail_check)
-
-    await shares._check_share_preview_rate_limit(_request("GET"))
-    await shares._check_share_image_rate_limit(_request("GET"))
-
-
-@pytest.mark.asyncio
-async def test_non_loopback_public_share_reads_keep_rate_limit(
+async def test_loopback_public_share_reads_keep_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[str] = []
@@ -326,15 +311,14 @@ async def test_non_loopback_public_share_reads_keep_rate_limit(
     async def record_check(_redis, key: str, *_args, **_kwargs) -> None:
         seen.append(key)
 
-    monkeypatch.setattr(shares.settings, "lumen_runtime", "desktop")
     monkeypatch.setattr(shares, "get_redis", lambda: object())
     monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", record_check)
     monkeypatch.setattr(shares.PUBLIC_IMAGE_LIMITER, "check", record_check)
 
-    await shares._check_share_preview_rate_limit(_request("GET", "198.51.100.10"))
-    await shares._check_share_image_rate_limit(_request("GET", "198.51.100.10"))
+    await shares._check_share_preview_rate_limit(_request("GET"))
+    await shares._check_share_image_rate_limit(_request("GET"))
 
-    assert seen == ["rl:share_meta:198.51.100.10", "rl:share_image:198.51.100.10"]
+    assert seen == ["rl:share_meta:127.0.0.1", "rl:share_image:127.0.0.1"]
 
 
 @pytest.mark.asyncio

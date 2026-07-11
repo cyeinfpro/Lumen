@@ -43,7 +43,6 @@ import { cn } from "@/lib/utils";
 import { Button, ConfirmDialog, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { UpdateAvailableCard } from "@/components/admin/UpdateAvailableCard";
-import { isDesktopRuntime } from "@/lib/desktop/runtime";
 
 const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
 const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
@@ -120,7 +119,6 @@ const SSE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 15000];
 const SSE_MAX_RETRIES = SSE_RETRY_DELAYS_MS.length;
 
 export function AdminUpdatePanel() {
-  if (isDesktopRuntime()) return null;
   return <AdminUpdatePanelInner />;
 }
 

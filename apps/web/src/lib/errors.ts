@@ -5,7 +5,6 @@
 // 设计：
 // - mapError 对不同输入归一化成 NormalizedError：含 title（标题）、description（说明）、
 //   actionLabel（CTA 文案，如有），以及原始 code/status 留作打点
-// - errorCodeToMessage / errorCodeToAction 仍保留单点查询便利，已被 useChatStore 早期使用
 // - 不依赖 React，server / client 双侧可用
 
 import { ApiError } from "./api/http";
@@ -179,11 +178,6 @@ function statusToCode(status: number): string | null {
   return null;
 }
 
-/** 单点查询：错误码 → 用户友好文案。映射缺失时返回 null。 */
-export function errorCodeToMessage(code: string): string | null {
-  return CODE_TITLE[code] ?? null;
-}
-
 /**
  * 错误码 → 单行可直接展示的完整文案（title + description）。映射缺失时返回 null，
  * 让调用方回退到原始 message。useChatStore.composerError 之类的单行展示场景用它。
@@ -193,12 +187,6 @@ export function errorCodeToFullText(code: string): string | null {
   if (!title) return null;
   const desc = CODE_DESC[code];
   return desc ? `${title}：${desc}` : title;
-}
-
-/** 单点查询：错误码 → 推荐 action 标签。 */
-export function errorCodeToAction(code: string): string | null {
-  const action = CODE_ACTION[code];
-  return action ? ACTION_LABEL[action] : null;
 }
 
 export function recommendedActionsForError(

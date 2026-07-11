@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
     AuditLog,
     BillingWindowUsageEvent,
@@ -25,7 +24,6 @@ from lumen_core.pricing import (
 )
 
 from . import runtime_settings
-from .config import settings
 from .observability import (
     billing_cost_micro_total,
     billing_idempotency_replay_total,
@@ -45,8 +43,6 @@ async def _setting_bool(key: str, default: bool = False) -> bool:
 
 
 async def _billing_enabled() -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     return await _setting_bool("billing.enabled", False)
 
 
@@ -111,10 +107,11 @@ def _apply_rate_multiplier_micro(amount_micro: int, multiplier_x10000: int) -> i
 
 
 def _generation_billing_ref_id(generation: Generation) -> str:
-    return billing_core.retry_billing_ref_id(
-        generation.id,
-        getattr(generation, "retry_count", 0),
-    )
+    return billing_core.generation_billing_ref_id(generation)
+
+
+def _generation_billing_retry_count(generation: Generation) -> int:
+    return billing_core.generation_billing_retry_count(generation)
 
 
 def _completion_billing_ref_id(completion: Completion) -> str:
@@ -153,8 +150,6 @@ async def held_amount_for_ref(
     ref_type: str,
     ref_id: str,
 ) -> int:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return 0
     return await billing_core._held_amount_for_ref(  # noqa: SLF001
         session, user_id, ref_type, ref_id
     )
@@ -179,6 +174,8 @@ def _snapshot_rate_multiplier_x10000(task: Generation | Completion) -> int | Non
     if not isinstance(upstream_request, dict):
         return None
     raw = upstream_request.get("billing_rate_multiplier_x10000")
+    if raw is None:
+        return None
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -249,8 +246,6 @@ async def _wallet_billing_applies(
     ref_type: str,
     ref_id: str,
 ) -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     if await _account_mode(session, user_id) == "wallet":
         return True
     return (
@@ -566,7 +561,7 @@ async def settle_generation(
             "image_count": billable_image_count,
             "tier_source": tier_source,
             "model": generation.model,
-            "retry_count": int(getattr(generation, "retry_count", 0) or 0),
+            "retry_count": _generation_billing_retry_count(generation),
             "rate_multiplier_x10000": rate_multiplier,
         },
     )
@@ -656,7 +651,7 @@ async def release_generation(
         meta={
             "generation_id": generation.id,
             "reason": reason,
-            "retry_count": int(getattr(generation, "retry_count", 0) or 0),
+            "retry_count": _generation_billing_retry_count(generation),
         },
     )
     if tx is not None:

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from lumen_core.context_window import (
     CONTEXT_INPUT_TOKEN_BUDGET,
     FALLBACK_INPUT_TOKEN_BUDGET,
@@ -7,13 +9,14 @@ from lumen_core.context_window import (
     SYSTEM_PROMPT_DUPLICATION_FACTOR,
     SYSTEM_PROMPT_OVERHEAD_TOKENS,
     compose_summary_guardrail,
-    get_input_budget,
+    compare_message_position,
     estimate_message_tokens,
     estimate_summary_tokens,
     estimate_system_prompt_tokens,
     estimate_text_tokens,
     format_sticky_input_text,
     format_summary_input_text,
+    get_input_budget,
     is_summary_usable,
 )
 from lumen_core.constants import DEFAULT_CHAT_INSTRUCTIONS, Role
@@ -138,6 +141,32 @@ def test_estimate_message_tokens_counts_only_list_attachments(monkeypatch):
         Role.USER.value,
         {"attachments": [{"image_id": "img-1"}, {"image_id": ""}, "bad"]},
     ) == MESSAGE_OVERHEAD_TOKENS + IMAGE_INPUT_ESTIMATED_TOKENS
+
+
+def test_compare_message_position_orders_timestamp_then_id():
+    timestamp = datetime(2026, 7, 11, tzinfo=timezone.utc)
+
+    assert (
+        compare_message_position(
+            timestamp + timedelta(seconds=1),
+            "msg-a",
+            timestamp,
+            "msg-z",
+        )
+        == 1
+    )
+    assert compare_message_position(timestamp, "msg-b", timestamp, "msg-a") == 1
+    assert compare_message_position(timestamp, "msg-a", timestamp, "msg-b") == -1
+    assert (
+        compare_message_position(
+            timestamp.replace(tzinfo=None),
+            "msg-a",
+            timestamp,
+            "msg-a",
+        )
+        == 0
+    )
+    assert compare_message_position(timestamp, "msg-a", timestamp, None) == -1
 
 
 def test_get_input_budget_uses_tested_model_budget_and_conservative_fallback():
