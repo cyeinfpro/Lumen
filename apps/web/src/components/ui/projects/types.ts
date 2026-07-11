@@ -272,9 +272,3 @@ export const POSTER_DEFAULT_TARGET_ASPECTS = [
   "16:9",
   "3:4",
 ] as const;
-
-export const POSTER_REVISION_SCOPE_LABEL: Record<string, string> = {
-  background: "背景重生",
-  style: "风格调整",
-  inpaint: "局部修复",
-};

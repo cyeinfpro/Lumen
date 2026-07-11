@@ -213,7 +213,8 @@ def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
         raise VideoReferenceVideoError(
             "invalid_video", "invalid ffprobe output", 400
         ) from exc
-    streams = raw.get("streams") if isinstance(raw, dict) else []
+    raw_streams = raw.get("streams") if isinstance(raw, dict) else None
+    streams = raw_streams if isinstance(raw_streams, list) else []
     video_stream = next(
         (item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"),
         None,

@@ -46,10 +46,8 @@ from ..runtime_settings import get_setting
 from ._admin_common import admin_http as _http, write_admin_audit
 from .admin_models import invalidate_admin_models_cache
 from .providers import (
-    _is_desktop_provider_runtime,
     _parse_config,
     _read_providers,
-    _write_desktop_provider_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,6 +206,16 @@ async def list_proxies(
     items: list[ProxyHealthOut] = []
     for p in parsed:
         h, in_cd = health_by_name.get(p.name, ({}, False))
+        latency_value = h.get("last_latency_ms")
+        last_latency_ms = (
+            float(latency_value)
+            if isinstance(latency_value, (int, float))
+            else None
+        )
+        tested_value = h.get("last_tested_at")
+        last_tested_at = tested_value if isinstance(tested_value, str) else None
+        target_value = h.get("last_target")
+        last_target = target_value if isinstance(target_value, str) else None
         items.append(
             ProxyHealthOut(
                 name=p.name,
@@ -218,9 +226,9 @@ async def list_proxies(
                 private_key_path=pkpath_by_name.get(p.name),
                 has_password=has_password_by_name.get(p.name, False),
                 enabled=p.enabled,
-                last_latency_ms=h.get("last_latency_ms") if isinstance(h.get("last_latency_ms"), (int, float)) else None,
-                last_tested_at=h.get("last_tested_at"),
-                last_target=h.get("last_target"),
+                last_latency_ms=last_latency_ms,
+                last_tested_at=last_tested_at,
+                last_target=last_target,
                 in_cooldown=in_cd,
             )
         )
@@ -288,16 +296,6 @@ async def update_proxies(
         validated = validate_providers(new_raw)
     except ValueError as exc:
         raise _http("invalid_config", str(exc), 422) from exc
-
-    if _is_desktop_provider_runtime():
-        providers = config.get("providers") or []
-        if not isinstance(providers, list):
-            providers = []
-        _write_desktop_provider_config(
-            [it for it in providers if isinstance(it, dict)],
-            new_proxies,
-        )
-        return await list_proxies(_admin=admin, db=db)
 
     existing = (
         await db.execute(

@@ -27,6 +27,7 @@ import { Markdown } from "@/components/ui/Markdown";
 import { ViewportImage } from "@/components/ui/ViewportImage";
 import { cn } from "@/lib/utils";
 import { CompletionStatusLine } from "@/components/ui/chat/CompletionStatusLine";
+import { generationRenderSignature } from "@/components/ui/chat/generationRenderSignature";
 import { useHistoryPaging } from "@/hooks/useHistoryPaging";
 
 import type {
@@ -147,44 +148,6 @@ function openLightbox(
       detail: { items, initialId, fromRect: fromRect ?? undefined },
     }),
   );
-}
-
-function generationRenderSignature(
-  gen: Generation | undefined,
-): string {
-  if (!gen) return "missing";
-  const image = gen.image;
-  return [
-    gen.id,
-    gen.status,
-    gen.stage ?? "",
-    gen.substage ?? "",
-    gen.retrying ? "1" : "0",
-    gen.waiting_provider ? "1" : "0",
-    gen.cancelled ? "1" : "0",
-    gen.retryable ? "1" : "0",
-    gen.attempt ?? "",
-    gen.max_attempts ?? "",
-    gen.retry_eta ?? "",
-    gen.error_code ?? "",
-    gen.error_message ?? "",
-    gen.prompt,
-    gen.aspect_ratio,
-    gen.size_requested,
-    gen.started_at ?? "",
-    gen.finished_at ?? "",
-    gen.failover_count ?? "",
-    gen.billing_free ? "1" : "0",
-    gen.billing_label ?? "",
-    gen.is_dual_race_bonus ? "1" : "0",
-    image?.id ?? "",
-    image?.display_url ?? "",
-    image?.preview_url ?? "",
-    image?.thumb_url ?? "",
-    image?.width ?? "",
-    image?.height ?? "",
-    image?.size_actual ?? "",
-  ].join(":");
 }
 
 function assistantGenerationsRenderSignature(

@@ -779,10 +779,11 @@ async def events(
                     channel = msg.get("channel")
                     if _is_compaction_channel(channel, bridge_channels):
                         data_text = _decode_pubsub_text(data)
-                        conv_id = _compaction_conv_id(channel)
-                        if data_text and conv_id:
+                        compaction_conv_id = _compaction_conv_id(channel)
+                        if data_text and compaction_conv_id:
                             out = _format_compaction_sse(
-                                data_text, expected_conv_id=conv_id
+                                data_text,
+                                expected_conv_id=compaction_conv_id,
                             )
                             if out is not None:
                                 try:
@@ -820,14 +821,17 @@ async def events(
                                             ),
                                         }
                                 if phase == "started":
-                                    pending_compaction_started[conv_id] = (
+                                    pending_compaction_started[compaction_conv_id] = (
                                         time.monotonic()
                                         + _COMPACTION_MERGE_WINDOW_SECONDS,
                                         out,
                                     )
                                 else:
                                     if phase in {"progress", "completed"}:
-                                        pending_compaction_started.pop(conv_id, None)
+                                        pending_compaction_started.pop(
+                                            compaction_conv_id,
+                                            None,
+                                        )
                                     # 任何 upstream 数据都要刷新 idle 计时
                                     last_upstream = time.monotonic()
                                     yield out

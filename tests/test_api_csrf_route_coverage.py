@@ -15,91 +15,33 @@ ROOT = Path(__file__).resolve().parents[1]
 API_ROOT = ROOT / "apps" / "api"
 
 CSRF_EXEMPT_WRITE_ROUTES = {
-    (
-        "docker",
-        "POST",
-        "/auth/signup",
-    ): "auth/bootstrap: creates the first session before a CSRF token exists",
-    (
-        "docker",
-        "POST",
-        "/auth/signup/byok",
-    ): "auth/bootstrap: verifies BYOK signup token before a session exists",
-    (
-        "docker",
-        "POST",
-        "/auth/login",
-    ): "auth/bootstrap: establishes the session and CSRF token",
-    (
-        "docker",
-        "POST",
-        "/auth/password/reset-request",
-    ): "public/auth bootstrap: pre-login reset request with rate limits",
-    (
-        "docker",
-        "POST",
-        "/auth/password/reset-confirm",
-    ): "public/auth bootstrap: token-based reset before login",
-    (
-        "docker",
-        "POST",
-        "/auth/api-key/verify",
-    ): "public/bootstrap: BYOK key verification before signup completion",
-    (
-        "docker",
-        "POST",
-        "/telegram/bind",
-    ): "bot: X-Bot-Token plus one-time link code",
-    (
-        "docker",
-        "POST",
-        "/telegram/unbind",
-    ): "bot: X-Bot-Token plus bound chat identity",
-    (
-        "docker",
-        "POST",
-        "/telegram/proxy/report",
-    ): "bot: X-Bot-Token service-to-service report",
-    (
-        "docker",
-        "POST",
-        "/telegram/prompts/enhance",
-    ): "bot: X-Bot-Token plus bound chat identity",
-    (
-        "docker",
-        "POST",
-        "/telegram/generations",
-    ): "bot: X-Bot-Token plus bound chat identity",
-    (
-        "desktop",
-        "POST",
-        "/auth/logout",
-    ): "desktop: local single-user logout behind desktop local token middleware",
-    (
-        "desktop",
-        "POST",
-        "/settings/bootstrap-complete",
-    ): "desktop/bootstrap: local first-run marker behind desktop local token middleware",
-    (
-        "desktop",
-        "PUT",
-        "/settings/system",
-    ): "desktop: local settings facade behind desktop local token middleware",
-    (
-        "desktop",
-        "PUT",
-        "/settings/providers",
-    ): "desktop: local provider facade behind desktop local token middleware",
-    (
-        "desktop",
-        "PATCH",
-        "/settings/providers/{provider_name}/enabled",
-    ): "desktop: local provider facade behind desktop local token middleware",
-    (
-        "desktop",
-        "POST",
-        "/settings/providers/probe",
-    ): "desktop: local provider probe behind desktop local token middleware",
+    ("POST", "/auth/signup"): (
+        "auth/bootstrap: creates the first session before a CSRF token exists"
+    ),
+    ("POST", "/auth/signup/byok"): (
+        "auth/bootstrap: verifies BYOK signup token before a session exists"
+    ),
+    ("POST", "/auth/login"): "auth/bootstrap: establishes the session and CSRF token",
+    ("POST", "/auth/password/reset-request"): (
+        "public/auth bootstrap: pre-login reset request with rate limits"
+    ),
+    ("POST", "/auth/password/reset-confirm"): (
+        "public/auth bootstrap: token-based reset before login"
+    ),
+    ("POST", "/auth/api-key/verify"): (
+        "public/bootstrap: BYOK key verification before signup completion"
+    ),
+    ("POST", "/telegram/bind"): "bot: X-Bot-Token plus one-time link code",
+    ("POST", "/telegram/unbind"): "bot: X-Bot-Token plus bound chat identity",
+    ("POST", "/telegram/proxy/report"): (
+        "bot: X-Bot-Token service-to-service report"
+    ),
+    ("POST", "/telegram/prompts/enhance"): (
+        "bot: X-Bot-Token plus bound chat identity"
+    ),
+    ("POST", "/telegram/generations"): (
+        "bot: X-Bot-Token plus bound chat identity"
+    ),
 }
 
 _ROUTE_DUMP_SCRIPT = r"""
@@ -157,13 +99,12 @@ print(json.dumps(routes, sort_keys=True))
 """
 
 
-def _route_dump(runtime: str) -> list[dict[str, Any]]:
+def _route_dump() -> list[dict[str, Any]]:
     env = os.environ.copy()
     env.update(
         {
             "APP_ENV": "test",
             "BYOK_API_KEY_MASTER_SECRET": "test-byok-master-secret-0123456789-test",
-            "LUMEN_RUNTIME": runtime,
             "LUMEN_TEST_API_ROOT": str(API_ROOT),
         }
     )
@@ -203,18 +144,17 @@ def test_write_routes_require_csrf_or_exact_exemption() -> None:
     stale_exemptions = set(CSRF_EXEMPT_WRITE_ROUTES)
     unexpected: list[str] = []
 
-    for runtime in ("docker", "desktop"):
-        for route in _route_dump(runtime):
-            key = (runtime, route["method"], route["path"])
-            if route["has_csrf"]:
-                continue
-            if key in CSRF_EXEMPT_WRITE_ROUTES:
-                stale_exemptions.discard(key)
-                continue
-            unexpected.append(
-                f"{runtime} {route['method']} {route['path']} "
-                f"({route['name']}; deps={route['calls']})"
-            )
+    for route in _route_dump():
+        key = (route["method"], route["path"])
+        if route["has_csrf"]:
+            continue
+        if key in CSRF_EXEMPT_WRITE_ROUTES:
+            stale_exemptions.discard(key)
+            continue
+        unexpected.append(
+            f"{route['method']} {route['path']} "
+            f"({route['name']}; deps={route['calls']})"
+        )
 
     assert unexpected == []
     assert stale_exemptions == set()

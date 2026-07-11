@@ -1,0 +1,12 @@
+[Unit]
+Description=Lumen restore trigger watcher
+After=multi-user.target
+
+[Path]
+PathChanged=/opt/lumendata/backup/.restore.trigger
+Unit=lumen-restore-runner.service
+TriggerLimitIntervalSec=60s
+TriggerLimitBurst=2
+
+[Install]
+WantedBy=multi-user.target

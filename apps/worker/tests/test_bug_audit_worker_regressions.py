@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from app import account_limiter, sse_publish, upstream
+from app import account_limiter, sse_publish, upstream, video_artifacts
 from app.provider_pool import ProviderConfig, ProviderPool
 from app.tasks import (
     completion,
@@ -19,6 +19,7 @@ from app.tasks import (
     storyboard_assembly,
     video_generation,
 )
+from app.tasks.generation_parts import lifecycle as generation_lifecycle
 
 
 def test_completion_charge_uses_same_session_before_success_commit() -> None:
@@ -46,6 +47,29 @@ def test_completion_rechecks_cancel_after_billing_charge_before_commit() -> None
     commit_idx = source.index("await session.commit()", charge_idx)
 
     assert charge_idx < cancel_idx < commit_idx
+
+
+def test_completion_flushes_before_each_delta_publish() -> None:
+    source = inspect.getsource(completion.run_completion)
+    marker = 'if ev_type == "response.output_text.delta":'
+    starts: list[int] = []
+    cursor = 0
+    while True:
+        start = source.find(marker, cursor)
+        if start < 0:
+            break
+        starts.append(start)
+        cursor = start + len(marker)
+
+    assert len(starts) == 2
+    for start in starts:
+        end = source.index('elif ev_type == "response.completed":', start)
+        block = source[start:end]
+        flush_idx = block.index("await _flush_completion_text(")
+        publish_idx = block.index("await publish_event(")
+
+        assert "EV_COMP_DELTA" in block
+        assert flush_idx < publish_idx
 
 
 def test_completion_tool_limit_continues_with_tool_choice_none() -> None:
@@ -372,7 +396,7 @@ def test_completion_terminal_failure_preserves_partial_usage_buckets() -> None:
     source = inspect.getsource(completion.run_completion)
     start = source.index("# Why: partial-stream or completed-response failures")
     branch = source[start : source.index("await session.commit()", start)]
-    charge_idx = branch.index("await worker_billing.charge_completion")
+    settle_idx = branch.index("await _settle_failed_completion_billing")
 
     for assignment in (
         "comp_partial.cache_read_tokens = cache_read_tokens",
@@ -383,7 +407,7 @@ def test_completion_terminal_failure_preserves_partial_usage_buckets() -> None:
         "comp_partial.image_output_tokens = image_output_tokens",
     ):
         assert assignment in branch
-        assert branch.index(assignment) < charge_idx
+        assert branch.index(assignment) < settle_idx
     assert "_fallback_completion_tool_image_tokens(" in branch
 
 
@@ -479,13 +503,17 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
 def test_video_postprocess_returns_processed_and_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(video_generation.shutil, "which", lambda _name: None)
+    video_bytes = (
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+        b"\x00\x00\x00\x08mdat"
+    )
+    monkeypatch.setattr(video_artifacts.shutil, "which", lambda _name: None)
 
     processed, diagnostics = video_generation._postprocess_video_bytes(  # noqa: SLF001
-        b"raw-video"
+        video_bytes
     )
 
-    assert processed["video_bytes"] == b"raw-video"
+    assert processed["video_bytes"] == video_bytes
     assert processed["poster_bytes"] is None
     assert processed["faststart"] is False
     assert diagnostics["faststart"] is False
@@ -1359,6 +1387,62 @@ def test_run_generation_uses_unique_lease_token_for_owner_cas() -> None:
     assert "_release_lease(redis, task_id, lease_token)" in source
 
 
+@pytest.mark.asyncio
+async def test_generation_runtime_resource_cleanup_releases_every_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    async def release_slot(
+        _redis: Any,
+        *,
+        task_id: str,
+        provider_name: str | None,
+    ) -> None:
+        calls.append((f"slot:{task_id}", provider_name))
+
+    async def clear_inflight(_redis: Any, task_id: str) -> None:
+        calls.append((f"inflight:{task_id}", None))
+
+    async def clear_avoided(_redis: Any, task_id: str) -> None:
+        calls.append((f"avoided:{task_id}", None))
+
+    async def release_lease(_redis: Any, task_id: str, token: str) -> None:
+        calls.append((f"lease:{task_id}", token))
+
+    monkeypatch.setattr(generation, "_release_image_queue_slot", release_slot)
+    monkeypatch.setattr(generation, "_inflight_clear", clear_inflight)
+    monkeypatch.setattr(generation, "_clear_avoided_providers", clear_avoided)
+    monkeypatch.setattr(generation, "_release_lease", release_lease)
+
+    await generation._release_generation_runtime_resources(  # noqa: SLF001
+        object(),
+        task_id="gen-1",
+        lease_token="worker-1:lease",
+        provider_name="provider-1",
+        clear_avoided_providers=True,
+    )
+
+    assert calls == [
+        ("slot:gen-1", "provider-1"),
+        ("inflight:gen-1", None),
+        ("avoided:gen-1", None),
+        ("lease:gen-1", "worker-1:lease"),
+    ]
+
+
+def test_generation_setup_failure_is_inside_runtime_cleanup_guard() -> None:
+    source = inspect.getsource(generation.run_generation)
+    start = source.index("renewer = asyncio.create_task(")
+    end = source.index("has_partial =", start)
+    setup = source[start:end]
+
+    assert "except BaseException:" in setup
+    assert "_cancel_renewer_task(renewer)" in setup
+    assert "_release_generation_runtime_resources(" in setup
+    assert "await asyncio.shield(cleanup_future)" in setup
+
+
 def test_generation_lease_lost_max_attempts_fails_without_requeue() -> None:
     source = inspect.getsource(generation.run_generation)
     start = source.rindex("except _LeaseLost as exc:")
@@ -1427,16 +1511,22 @@ def test_generation_max_attempts_failure_releases_hold() -> None:
 
 
 def test_generation_prequeue_terminal_writes_guard_queued_status() -> None:
-    source = inspect.getsource(generation.run_generation)
-    markers = [
-        "await _ensure_generation_conversation_alive(",
-        '"primary_input_image_id must be included in input_image_ids"',
-        '"generation already has image task_id=%s image_id=%s',
+    run_source = inspect.getsource(generation.run_generation)
+    lifecycle_source = inspect.getsource(
+        generation_lifecycle.settle_existing_generated_image
+    )
+    source_markers = [
+        (run_source, "await _ensure_generation_conversation_alive("),
+        (run_source, '"primary_input_image_id must be included in input_image_ids"'),
+        (
+            lifecycle_source,
+            '"generation already has image task_id=%s image_id=%s',
+        ),
     ]
-    for marker in markers:
+    for source, marker in source_markers:
         start = source.index(marker)
         end = source.index("return", start)
-        branch = source[start:end]
+        branch = source[start:end].replace("_g.", "")
         assert "_generation_attempt_update(" in branch
         assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
 
@@ -1468,6 +1558,58 @@ def test_completion_retry_enqueue_failure_marks_terminal_failed() -> None:
     assert '"retriable": False' in branch
 
 
+@pytest.mark.asyncio
+async def test_partial_completion_billing_failure_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_charge(_session: Any, _completion: Any) -> None:
+        raise RuntimeError("ledger unavailable")
+
+    release_called = False
+
+    async def release(_session: Any, _completion: Any, *, reason: str) -> None:
+        nonlocal release_called
+        release_called = True
+
+    monkeypatch.setattr(completion.worker_billing, "charge_completion", fail_charge)
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        await completion._settle_failed_completion_billing(  # noqa: SLF001
+            object(),
+            SimpleNamespace(),
+            usage_values=(1, 0, 0),
+            reason="upstream_failed",
+        )
+
+    assert release_called is False
+
+
+@pytest.mark.asyncio
+async def test_zero_usage_failed_completion_releases_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+
+    async def charge(_session: Any, _completion: Any) -> None:
+        raise AssertionError("zero usage must not charge")
+
+    async def release(_session: Any, _completion: Any, *, reason: str) -> None:
+        released.append(reason)
+
+    monkeypatch.setattr(completion.worker_billing, "charge_completion", charge)
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+
+    await completion._settle_failed_completion_billing(  # noqa: SLF001
+        object(),
+        SimpleNamespace(),
+        usage_values=(0, None, 0),
+        reason="upstream_failed",
+    )
+
+    assert released == ["upstream_failed"]
+
+
 def test_completion_cancel_branch_checks_rowcount_before_message_update() -> None:
     source = inspect.getsource(completion.run_completion)
     start = source.index("except _TaskCancelled as exc:")
@@ -1475,8 +1617,8 @@ def test_completion_cancel_branch_checks_rowcount_before_message_update() -> Non
     branch = source[start:end]
 
     assert "res = await session.execute(" in branch
-    assert "if (res.rowcount or 0) == 0:" in branch
-    assert branch.index("if (res.rowcount or 0) == 0:") < branch.index(
+    assert "if affected_rows(res) == 0:" in branch
+    assert branch.index("if affected_rows(res) == 0:") < branch.index(
         "msg_c = await session.get(Message, message_id)"
     )
     assert "except _CompletionEpochSuperseded as stale_exc:" in branch

@@ -5,6 +5,8 @@ from PIL import ImageChops
 from PIL import ImageDraw
 from PIL import ImageFilter
 
+from .types import int_pixel_access
+
 # Speckles smaller than this fraction of the image are removed.
 NOISE_AREA_FRACTION = 0.0005
 HOLE_AREA_FRACTION = 0.0005
@@ -72,13 +74,13 @@ def _fill_small_holes(alpha: PILImage.Image, min_area: int) -> PILImage.Image:
 
     width, height = labeled.size
     boundary_labels: set[int] = set()
-    pixels = labeled.load()
+    pixels = int_pixel_access(labeled)
     for x in range(width):
-        boundary_labels.add(int(pixels[x, 0]))
-        boundary_labels.add(int(pixels[x, height - 1]))
+        boundary_labels.add(pixels[x, 0])
+        boundary_labels.add(pixels[x, height - 1])
     for y in range(height):
-        boundary_labels.add(int(pixels[0, y]))
-        boundary_labels.add(int(pixels[width - 1, y]))
+        boundary_labels.add(pixels[0, y])
+        boundary_labels.add(pixels[width - 1, y])
     boundary_labels.discard(0)
 
     fill_labels = {
@@ -102,7 +104,7 @@ def _label_components(
     binary: PILImage.Image, *, target_value: int
 ) -> tuple[PILImage.Image, dict[int, int]] | None:
     work = binary.copy()
-    pixels = work.load()
+    pixels = int_pixel_access(work)
     width, height = work.size
     label = 1
     for y in range(height):

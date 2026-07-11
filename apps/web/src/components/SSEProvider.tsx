@@ -327,6 +327,8 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const overflowCompletionIdsRef = useRef<string[]>([]);
   const recoveryAbortRef = useRef<AbortController | null>(null);
   const initialSSEOpenRef = useRef(false);
+  const observedUserIdRef = useRef<string | null>(userId);
+  const lastHydratedUserIdRef = useRef<string | null>(null);
   const lastOpenChannelsKeyRef = useRef<string | null>(null);
   const taskInvalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -335,6 +337,12 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     qcRef.current = qc;
   }, [qc]);
+
+  useEffect(() => {
+    if (observedUserIdRef.current === userId) return;
+    observedUserIdRef.current = userId;
+    lastHydratedUserIdRef.current = null;
+  }, [userId]);
 
   const scheduleTaskInvalidation = useCallback(() => {
     if (taskInvalidationTimerRef.current) return;
@@ -670,6 +678,14 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const handleSSEOpen = useCallback(() => {
     const previousChannelsKey = lastOpenChannelsKeyRef.current;
     lastOpenChannelsKeyRef.current = channelsKey;
+    const openedUserId =
+      userId && channels.includes(`user:${userId}`) ? userId : null;
+    const shouldHydrateNewUserChannel =
+      openedUserId !== null &&
+      lastHydratedUserIdRef.current !== openedUserId;
+    if (shouldHydrateNewUserChannel) {
+      lastHydratedUserIdRef.current = openedUserId;
+    }
 
     if (!initialSSEOpenRef.current) {
       initialSSEOpenRef.current = true;
@@ -678,12 +694,17 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (previousChannelsKey !== channelsKey) {
-      runRecovery("channel-open", false, false, "overflow");
+      runRecovery(
+        "channel-open",
+        shouldHydrateNewUserChannel,
+        false,
+        "overflow",
+      );
       return;
     }
 
     runRecovery("reconnect-open", true, true, "limited");
-  }, [channelsKey, runRecovery]);
+  }, [channels, channelsKey, runRecovery, userId]);
 
   useSSE(channels, handlers, { onOpen: handleSSEOpen });
 

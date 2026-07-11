@@ -20,7 +20,6 @@ import {
   ImageIcon,
   Info,
   Loader2,
-  Rocket,
   RotateCcw,
   Save,
   Search,
@@ -50,6 +49,34 @@ import { copy } from "@/lib/copy";
 import { ErrorBlock } from "../page";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
+
+function clearSubmittedOps(
+  currentOps: Record<string, Op>,
+  submittedOps: Record<string, Op>,
+): Record<string, Op> {
+  const next = { ...currentOps };
+  for (const [key, submitted] of Object.entries(submittedOps)) {
+    const current = next[key];
+    if (
+      current?.kind === submitted.kind &&
+      (current.kind === "clear" ||
+        (submitted.kind === "set" && current.value === submitted.value))
+    ) {
+      delete next[key];
+    }
+  }
+  return next;
+}
+
+function clearSubmittedErrors(
+  currentErrors: Record<string, string>,
+  submittedOps: Record<string, Op>,
+): Record<string, string> {
+  const next = { ...currentErrors };
+  for (const key of Object.keys(submittedOps)) delete next[key];
+  return next;
+}
+
 type SettingGroupId =
   | "site"
   | "ui"
@@ -57,7 +84,6 @@ type SettingGroupId =
   | "upstream"
   | "providers"
   | "library"
-  | "update"
   | "context_auto"
   | "context_caption"
   | "context_manual"
@@ -124,8 +150,6 @@ type UpdateProxyOption = {
   last_latency_ms: number | null;
 };
 
-const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
-const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
 const MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY = "model_library.sync_use_proxy_pool";
 const MODEL_LIBRARY_SYNC_PROXY_NAME_KEY = "model_library.sync_proxy_name";
 const GENERATION_FAST_DEFAULT_KEY = "generation.fast_default";
@@ -144,8 +168,8 @@ const HIDDEN_KEYS = new Set<string>([
   "providers",
   "image.primary_route",
   "image.text_to_image_primary_route",
-  UPDATE_USE_PROXY_POOL_KEY,
-  UPDATE_PROXY_NAME_KEY,
+  "update.use_proxy_pool",
+  "update.proxy_name",
 ]);
 
 const IMAGE_ENGINE_OPTIONS: readonly SettingChoice[] = [
@@ -450,27 +474,6 @@ const SETTING_META: Record<string, SettingMeta> = {
     warning: "每次都消耗一次图片配额；生产建议关闭或 ≥ 30 分钟。",
     keywords: ["provider", "image", "probe", "图片探活"],
   },
-  [UPDATE_USE_PROXY_POOL_KEY]: {
-    group: "update",
-    title: "更新时使用代理池",
-    summary: "一键更新 Lumen 时，让 git、uv 和 npm 的出站请求走代理池。",
-    detail: "仅影响一键更新",
-    kind: "toggle",
-    icon: Rocket,
-    defaultValue: "0",
-    recommended: "国内服务器拉取依赖慢或失败时开启。",
-    keywords: ["update", "proxy", "更新", "代理池"],
-  },
-  [UPDATE_PROXY_NAME_KEY]: {
-    group: "update",
-    title: "更新代理",
-    summary: "选择一键更新时使用代理池里的哪一个代理。",
-    detail: "留空走第一个启用代理",
-    kind: "text",
-    icon: Rocket,
-    recommended: "优先选择已测试成功、延迟稳定的代理。",
-    keywords: ["update", "proxy", "name", "更新代理"],
-  },
   [MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY]: {
     group: "library",
     title: "模特库同步使用代理池",
@@ -706,12 +709,6 @@ const GROUPS: {
     label: "模特库",
     description: "预设同步和拉取代理",
     icon: ImageIcon,
-  },
-  {
-    id: "update",
-    label: "Lumen 更新",
-    description: "一键更新和代理选择",
-    icon: Rocket,
   },
   {
     id: "site",
@@ -987,11 +984,14 @@ export function SettingsPanel() {
     }
     if (payload.length === 0) return;
 
+    const submittedOps = ops;
     updateMut.mutate(payload, {
       onSuccess: () => {
         setSavedAt(Date.now());
-        setOps({});
-        setFieldErrors({});
+        setOps((currentOps) => clearSubmittedOps(currentOps, submittedOps));
+        setFieldErrors((currentErrors) =>
+          clearSubmittedErrors(currentErrors, submittedOps),
+        );
       },
       onError: (err) => {
         if (err instanceof ApiError) {
@@ -1733,10 +1733,7 @@ function SettingControl({
     );
   }
 
-  if (
-    item.key === UPDATE_PROXY_NAME_KEY ||
-    item.key === MODEL_LIBRARY_SYNC_PROXY_NAME_KEY
-  ) {
+  if (item.key === MODEL_LIBRARY_SYNC_PROXY_NAME_KEY) {
     return (
       <UpdateProxySelectControl
         item={item}
@@ -2390,7 +2387,6 @@ function countByGroup(items: SystemSettingItem[]): Record<SettingGroupId, number
     upstream: 0,
     providers: 0,
     library: 0,
-    update: 0,
     context_auto: 0,
     context_caption: 0,
     context_manual: 0,
@@ -2432,7 +2428,6 @@ function getSettingMeta(key: string, fallbackDescription?: string): SettingMeta 
   else if (prefix === "upstream") group = "upstream";
   else if (prefix === "providers") group = "providers";
   else if (prefix === "model_library") group = "library";
-  else if (prefix === "update") group = "update";
   else if (prefix === "context") group = "context_auto";
   return {
     group,

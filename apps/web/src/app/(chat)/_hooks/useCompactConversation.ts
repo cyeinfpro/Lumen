@@ -134,6 +134,3 @@ export function useCompactConversation(
     },
   });
 }
-
-// V1 hook 名兼容（部分组件已经引用了 useCompactConversationMutation 风格的导出名）。
-export { useCompactConversation as useCompactConversationMutation };

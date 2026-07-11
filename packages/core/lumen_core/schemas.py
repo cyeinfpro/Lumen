@@ -1171,6 +1171,22 @@ class ModelCandidateSaveToLibraryIn(BaseModel):
     style_tags: list[str] = Field(default_factory=list, max_length=12)
 
 
+ShowcaseShot = Literal[
+    "front_full_body",
+    "natural_pose",
+    "detail_half_body",
+    "side_or_back",
+]
+
+
+def _default_showcase_shot_plan() -> list[ShowcaseShot]:
+    return [
+        "front_full_body",
+        "natural_pose",
+        "detail_half_body",
+    ]
+
+
 class ShowcaseImagesCreateIn(BaseModel):
     template: Literal[
         "white_ecommerce",
@@ -1181,19 +1197,8 @@ class ShowcaseImagesCreateIn(BaseModel):
         "natural_phone_snapshot",
         "social_seed",
     ] = "premium_studio"
-    shot_plan: list[
-        Literal[
-            "front_full_body",
-            "natural_pose",
-            "detail_half_body",
-            "side_or_back",
-        ]
-    ] = Field(
-        default_factory=lambda: [
-            "front_full_body",
-            "natural_pose",
-            "detail_half_body",
-        ],
+    shot_plan: list[ShowcaseShot] = Field(
+        default_factory=_default_showcase_shot_plan,
         min_length=1,
         max_length=4,
     )
@@ -1328,6 +1333,7 @@ class BillingUsageByKindOut(BaseModel):
 class BillingSnapshotOut(BaseModel):
     balance_micro: int
     billing_rate_multiplier: str
+    credential_id: str | None = None
     windows: dict[str, BillingWindowOut]
     by_kind_30d: BillingUsageByKindOut
 
@@ -1336,6 +1342,7 @@ class AdminBillingUsageOut(BaseModel):
     user_id: str
     balance_micro: int
     billing_rate_multiplier: str
+    credential_id: str | None = None
     range_start: datetime
     range_end: datetime
     windows: dict[str, BillingWindowOut]
@@ -1803,6 +1810,13 @@ class StorageApplyResponseOut(BaseModel):
 # ---------- Providers（管理员 Provider Pool CRUD + 探活） ----------
 
 
+ProviderPurpose = Literal["chat", "image", "embedding"]
+
+
+def _default_provider_purposes() -> list[ProviderPurpose]:
+    return ["chat", "image"]
+
+
 class ProviderItemOut(BaseModel):
     name: str
     base_url: str
@@ -1810,9 +1824,7 @@ class ProviderItemOut(BaseModel):
     priority: int
     weight: int
     enabled: bool
-    purposes: list[Literal["chat", "image", "embedding"]] = Field(
-        default_factory=lambda: ["chat", "image"]
-    )
+    purposes: list[ProviderPurpose] = Field(default_factory=_default_provider_purposes)
     proxy: str | None = None
     image_jobs_enabled: bool = False
     image_jobs_endpoint: str = "auto"
@@ -1867,8 +1879,8 @@ class ProviderItemIn(BaseModel):
     priority: int = 0
     weight: int = 1
     enabled: bool = True
-    purposes: list[Literal["chat", "image", "embedding"]] = Field(
-        default_factory=lambda: ["chat", "image"], min_length=1
+    purposes: list[ProviderPurpose] = Field(
+        default_factory=_default_provider_purposes, min_length=1
     )
     proxy: str | None = None
     image_jobs_enabled: bool = False
@@ -2265,6 +2277,10 @@ PosterAspectRatio = Literal["1:1", "9:16", "16:9", "3:4", "4:3", "2:3", "3:2", "
 PosterRevisionScope = Literal["background", "inpaint", "style"]
 
 
+def _default_poster_aspects() -> list[PosterAspectRatio]:
+    return ["1:1", "9:16", "16:9", "3:4"]
+
+
 class PosterBrandAssetsIn(BaseModel):
     """可选品牌资产；前端不传时全部 None，prompt 里跳过该段。"""
 
@@ -2281,7 +2297,7 @@ class PosterDesignWorkflowCreateIn(BaseModel):
     copy_text: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     style_id: str = Field(min_length=1, max_length=128)
     target_aspects: list[PosterAspectRatio] = Field(
-        default_factory=lambda: ["1:1", "9:16", "16:9", "3:4"],
+        default_factory=_default_poster_aspects,
         min_length=1,
         max_length=8,
     )
@@ -2321,7 +2337,7 @@ class PosterRendersCreateIn(BaseModel):
     """生成多尺寸成品入参；每个 aspect 独立 Generation 任务（stagger 入队）。"""
 
     aspects: list[PosterAspectRatio] = Field(
-        default_factory=lambda: ["1:1", "9:16", "16:9", "3:4"],
+        default_factory=_default_poster_aspects,
         min_length=1,
         max_length=8,
     )

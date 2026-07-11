@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import contextlib
+import logging
 
 from aiogram import F, Router
 from aiogram.enums import ChatAction
@@ -35,9 +35,12 @@ _HEARTBEAT_AUTH_LOGGED: set[int] = set()
 
 
 async def _chat_action_heartbeat(message: Message, action: ChatAction) -> None:
+    bot = message.bot
+    if bot is None:
+        return
     while True:
         try:
-            await message.bot.send_chat_action(message.chat.id, action)
+            await bot.send_chat_action(message.chat.id, action)
         except (TelegramUnauthorizedError, TelegramForbiddenError) as exc:
             # 401/403：bot token 失效或被踢出 chat。整个进程内 per-chat 只 warn 一次。
             if message.chat.id not in _HEARTBEAT_AUTH_LOGGED:
@@ -84,8 +87,20 @@ async def _submit_generation(
         return
 
     gen_ids = result.get("generation_ids") or []
+    user_id = str(result.get("user_id") or "").strip()
     if not gen_ids:
         await answer("⚠️ 任务创建成功但没有返回 generation_id，请联系管理员。")
+        return
+    if not user_id:
+        short_ids = " ".join(f"#{str(gen_id)[:8]}" for gen_id in gen_ids)
+        logger.error(
+            "generation response missing user_id; tracker registration skipped ids=%s",
+            gen_ids,
+        )
+        await answer(
+            f"⚠️ 任务已创建 {short_ids}，但服务端未返回 user_id，"
+            "无法启用自动通知；请用 /tasks 查看结果。"
+        )
         return
 
     summary = render_params_summary(params)
@@ -116,6 +131,7 @@ async def _submit_generation(
                     prompt=prompt,
                     params=params,
                     batch_id=batch_id,
+                    user_id=user_id,
                 ),
             )
     except Exception as exc:  # noqa: BLE001

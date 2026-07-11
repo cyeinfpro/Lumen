@@ -60,6 +60,7 @@ import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import { triggerImageDownload } from "@/components/ui/lightbox/utils";
 import { DevelopingCard } from "@/components/ui/chat/mobile";
+import { generationRenderSignature } from "@/components/ui/chat/generationRenderSignature";
 import { DesktopSceneDivider } from "./DesktopSceneDivider";
 
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
@@ -232,44 +233,6 @@ function messageScrollSignature(messages: Message[]): string {
 function latestAssistantIsStreaming(messages: Message[]): boolean {
   const last = messages[messages.length - 1];
   return last?.role === "assistant" && last.status === "streaming";
-}
-
-function generationRenderSignature(
-  gen: Generation | undefined,
-): string {
-  if (!gen) return "missing";
-  const image = gen.image;
-  return [
-    gen.id,
-    gen.status,
-    gen.stage ?? "",
-    gen.substage ?? "",
-    gen.retrying ? "1" : "0",
-    gen.waiting_provider ? "1" : "0",
-    gen.cancelled ? "1" : "0",
-    gen.retryable ? "1" : "0",
-    gen.attempt ?? "",
-    gen.max_attempts ?? "",
-    gen.retry_eta ?? "",
-    gen.error_code ?? "",
-    gen.error_message ?? "",
-    gen.prompt,
-    gen.aspect_ratio,
-    gen.size_requested,
-    gen.started_at ?? "",
-    gen.finished_at ?? "",
-    gen.failover_count ?? "",
-    gen.billing_free ? "1" : "0",
-    gen.billing_label ?? "",
-    gen.is_dual_race_bonus ? "1" : "0",
-    image?.id ?? "",
-    image?.display_url ?? "",
-    image?.preview_url ?? "",
-    image?.thumb_url ?? "",
-    image?.width ?? "",
-    image?.height ?? "",
-    image?.size_actual ?? "",
-  ].join(":");
 }
 
 function assistantGenerationsRenderSignature(

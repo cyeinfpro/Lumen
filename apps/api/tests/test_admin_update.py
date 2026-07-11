@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -99,18 +100,31 @@ def test_update_check_version_falls_back_to_runtime_env(
     assert update_check._build_type(root) == "docker"
 
 
-def test_update_runner_env_forces_target_tag_and_version() -> None:
+def test_update_runner_request_contains_only_constrained_fields() -> None:
     env = {
         "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
-        "LUMEN_IMAGE_TAG": "v1.2.4",
-        "LUMEN_VERSION": "1.2.4",
+        "LUMEN_UPDATE_CHANNEL": "stable",
+        "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-123",
+        "LUMEN_UPDATE_FORCE_REDEPLOY": "1",
+        "LUMEN_UPDATE_PROXY_URL": "http://proxy.example:3128",
+        "LUMEN_UPDATE_ROOT": "/tmp/attacker",
+        "LUMEN_REPO_DIR": "/tmp/attacker-repo",
     }
 
-    lines = admin_update._runner_env_lines(env)
+    payload = admin_update._runner_request_payload(
+        env,
+        datetime(2026, 5, 2, tzinfo=timezone.utc),
+    )
 
-    assert "LUMEN_UPDATE_RESOLVED_TAG=v1.2.4" in lines
-    assert "LUMEN_IMAGE_TAG=v1.2.4" in lines
-    assert "LUMEN_VERSION=1.2.4" in lines
+    assert payload == {
+        "schema": 1,
+        "target_tag": "v1.2.4",
+        "channel": "stable",
+        "force_redeploy": True,
+        "idempotency_key": "idem-123",
+        "proxy_url": "http://proxy.example:3128",
+        "issued_at": "2026-05-02T00:00:00+00:00",
+    }
     assert admin_update._version_from_update_tag("v1.2.4") == "1.2.4"
     assert admin_update._version_from_update_tag("main") is None
 
@@ -125,6 +139,43 @@ def _admin_update_request() -> Request:
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_trigger_update_rejects_mutable_latest_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    (script_dir / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_update.settings, "lumen_scripts_dir", str(script_dir))
+    monkeypatch.setattr(admin_update, "_read_marker", lambda: None)
+    monkeypatch.setattr(admin_update, "_maintenance_marker_busy", lambda: False)
+
+    async def false_value(_db: Any) -> bool:
+        return False
+
+    async def zero_value(_db: Any) -> int:
+        return 0
+
+    async def no_proxy(_db: Any) -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(admin_update, "_update_allow_prerelease", false_value)
+    monkeypatch.setattr(admin_update, "_update_check_ttl", zero_value)
+    monkeypatch.setattr(admin_update, "_resolve_update_proxy", no_proxy)
+
+    with pytest.raises(Exception) as excinfo:
+        await admin_update.trigger_update(
+            _admin_update_request(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            admin_update.UpdateTriggerIn(target_tag="latest", channel="stable"),
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_target_tag"
 
 
 @pytest.mark.asyncio
@@ -333,9 +384,12 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
                 "LUMEN_UPDATE_BUILD": "0",
                 "LUMEN_UPDATE_CHANNEL": "pinned",
                 "LUMEN_UPDATE_FORCE_REDEPLOY": "1",
+                "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.3",
+                "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-123",
                 "LUMEN_REPO_DIR": "/root/Lumen",
                 "LUMEN_IMAGE_TAG": "v1.2.3",
                 "HTTP_PROXY": "http://proxy.example:3128",
+                "LUMEN_UPDATE_PROXY_URL": "http://proxy.example:3128",
                 "PATH": "/should/not/leak",
             },
             log_fh=log_fh,
@@ -347,16 +401,16 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     marker = (backup_root / ".update.running").read_text(encoding="utf-8")
     assert f"unit={admin_update._UPDATE_RUNNER_UNIT}" in marker
 
-    env_text = (backup_root / ".update.env").read_text(encoding="utf-8")
-    assert "LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
-    assert "LUMEN_UPDATE_BUILD=0" in env_text
-    assert "LUMEN_UPDATE_CHANNEL=pinned" in env_text
-    assert "LUMEN_UPDATE_FORCE_REDEPLOY=1" in env_text
-    assert "LUMEN_REPO_DIR=/root/Lumen" in env_text
-    assert "LUMEN_IMAGE_TAG=v1.2.3" in env_text
-    assert "HTTP_PROXY=http://proxy.example:3128" in env_text
-    # Non-allowlisted vars must not leak into the runner env file.
-    assert "PATH=" not in env_text
+    request_payload = json.loads(
+        (backup_root / ".update.request.json").read_text(encoding="utf-8")
+    )
+    assert request_payload["target_tag"] == "v1.2.3"
+    assert request_payload["channel"] == "pinned"
+    assert request_payload["force_redeploy"] is True
+    assert request_payload["idempotency_key"] == "idem-123"
+    assert request_payload["proxy_url"] == "http://proxy.example:3128"
+    assert "LUMEN_REPO_DIR" not in request_payload
+    assert "PATH" not in request_payload
 
     trigger_text = (backup_root / ".update.trigger").read_text(encoding="utf-8")
     assert trigger_text.startswith("2026-05-02T00:00:00")
@@ -466,14 +520,18 @@ def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
     log_path.parent.mkdir(parents=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         outcome = admin_update._start_update_via_path_unit(
-            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            env={
+                "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                "LUMEN_UPDATE_CHANNEL": "stable",
+                "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-124",
+            },
             log_fh=log_fh,
             started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
         )
 
     assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
     assert (backup_root / ".update.running").is_file()
-    assert (backup_root / ".update.env").is_file()
+    assert (backup_root / ".update.request.json").is_file()
     assert (backup_root / ".update.trigger").is_file()
 
 
@@ -528,14 +586,18 @@ def test_start_update_via_path_unit_uses_log_confirmation_in_trigger_only_mode(
     log_path.parent.mkdir(parents=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         outcome = admin_update._start_update_via_path_unit(
-            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            env={
+                "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                "LUMEN_UPDATE_CHANNEL": "stable",
+                "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-125",
+            },
             log_fh=log_fh,
             started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
         )
 
     assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
     assert (backup_root / ".update.trigger").is_file()
-    assert (backup_root / ".update.env").is_file()
+    assert (backup_root / ".update.request.json").is_file()
     assert (backup_root / ".update.running").is_file()
 
 
@@ -562,14 +624,18 @@ def test_start_update_via_path_unit_cleans_up_when_trigger_only_runner_is_missin
     log_path.parent.mkdir(parents=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         outcome = admin_update._start_update_via_path_unit(
-            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            env={
+                "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                "LUMEN_UPDATE_CHANNEL": "stable",
+                "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-126",
+            },
             log_fh=log_fh,
             started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
         )
 
     assert outcome is None
     assert not (backup_root / ".update.trigger").exists()
-    assert not (backup_root / ".update.env").exists()
+    assert not (backup_root / ".update.request.json").exists()
     assert not (backup_root / ".update.running").exists()
     assert "host runner did not append output" in log_path.read_text(encoding="utf-8")
 
@@ -599,7 +665,11 @@ def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(
     log_path.parent.mkdir(parents=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         outcome = admin_update._start_update_via_path_unit(
-            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            env={
+                "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                "LUMEN_UPDATE_CHANNEL": "stable",
+                "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-127",
+            },
             log_fh=log_fh,
             started_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
         )
@@ -608,7 +678,7 @@ def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(
     # Staged files cleaned so the next attempt isn't blocked by stale state.
     assert not (backup_root / ".update.running").exists()
     assert not (backup_root / ".update.trigger").exists()
-    assert not (backup_root / ".update.env").exists()
+    assert not (backup_root / ".update.request.json").exists()
 
 
 @pytest.mark.asyncio

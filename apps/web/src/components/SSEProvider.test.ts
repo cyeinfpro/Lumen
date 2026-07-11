@@ -46,3 +46,30 @@ test("chat store reset clears the local seen event id cache", () => {
   match(source, /seenEventIdsRef\.current\.clear\(\)/);
   match(source, /seenEventIdQueueRef\.current = \[\]/);
 });
+
+test("opening a new authenticated channel rehydrates after an anonymous open", () => {
+  match(
+    source,
+    /const lastHydratedUserIdRef = useRef<string \| null>\(null\)/,
+  );
+  match(
+    source,
+    /const observedUserIdRef = useRef<string \| null>\(userId\)/,
+  );
+  match(
+    source,
+    /userId && channels\.includes\(`user:\$\{userId\}`\) \? userId : null/,
+  );
+  match(
+    source,
+    /lastHydratedUserIdRef\.current !== openedUserId/,
+  );
+  match(
+    source,
+    /runRecovery\(\s*"channel-open",\s*shouldHydrateNewUserChannel,\s*false,\s*"overflow"/,
+  );
+  match(
+    source,
+    /if \(observedUserIdRef\.current === userId\) return;[\s\S]*?observedUserIdRef\.current = userId;[\s\S]*?lastHydratedUserIdRef\.current = null;/,
+  );
+});

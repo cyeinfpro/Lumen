@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
@@ -204,6 +205,25 @@ def test_parse_proxy_item_normalizes_s5_alias_and_hides_password_in_repr():
     assert proxy.username == "user"
     assert proxy.password == "secret"
     assert "secret" not in repr(proxy)
+
+
+def test_provider_proxy_default_password_and_replace_preserve_public_contract():
+    default_proxy = ProviderProxyDefinition(
+        name="default",
+        protocol="socks5",
+        host="127.0.0.1",
+        port=1080,
+    )
+    secret_proxy = ProviderProxyDefinition(
+        name="secret",
+        protocol="socks5",
+        host="127.0.0.1",
+        port=1080,
+        password="keep-me",
+    )
+
+    assert default_proxy.password is None
+    assert replace(secret_proxy, name="copy").password == "keep-me"
 
 
 def test_parse_proxy_item_parses_string_enabled_without_truthy_coercion():

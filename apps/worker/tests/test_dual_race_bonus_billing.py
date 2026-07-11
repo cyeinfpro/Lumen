@@ -87,7 +87,7 @@ async def test_dual_race_bonus_is_billable_and_settled_before_publish(
         session.operations.append("flush")
 
     async def noop_record_candidate_image(**_kwargs: Any) -> None:
-        return None
+        session.operations.append("hook")
 
     async def noop_delete_storage_keys(_keys: list[str]) -> None:
         return None
@@ -145,7 +145,7 @@ async def test_dual_race_bonus_is_billable_and_settled_before_publish(
 
     assert ok is True
     assert session.committed is True
-    assert session.operations == ["settle", "commit", "flush"]
+    assert session.operations == ["hook", "settle", "commit", "flush"]
     bonus_row = next(row for row in session.added if isinstance(row, Generation))
     image_row = next(row for row in session.added if isinstance(row, Image))
     assert settle_calls == [

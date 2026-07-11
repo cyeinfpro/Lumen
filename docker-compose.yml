@@ -146,6 +146,9 @@ services:
       # Manual backup follows the same host-side trigger model: the container
       # writes .backup.trigger, PID 1 runs lumen-backup.service with Docker CLI.
       LUMEN_BACKUP_VIA_TRIGGER: "1"
+      # Restore must also run on the host because the API container has neither
+      # the Docker CLI nor the socket needed by restore.sh.
+      LUMEN_RESTORE_VIA_TRIGGER: "1"
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup
@@ -301,8 +304,6 @@ services:
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       TELEGRAM_PROXY_URL: "${TELEGRAM_PROXY_URL:-}"
       DOWNLOAD_TMP_DIR: "${DOWNLOAD_TMP_DIR:-}"
-      BOT_MODE: "${BOT_MODE:-polling}"
-      WEBHOOK_URL: "${WEBHOOK_URL:-}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
     restart: unless-stopped

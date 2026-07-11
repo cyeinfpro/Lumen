@@ -456,8 +456,12 @@ log "redis pack ok size=$REDIS_SIZE"
 _extract_ts() {
     local dir="$1"
     local suffix="$2"
+    local path
     [ -d "$dir" ] || return 0
-    ls "$dir" 2>/dev/null \
+    for path in "$dir"/*."$suffix"; do
+        [ -f "$path" ] || continue
+        printf '%s\n' "${path##*/}"
+    done \
         | grep -E "^[0-9]{8}-[0-9]{6}\\.${suffix//\./\\.}$" \
         | sed -E "s/\\.${suffix//\./\\.}$//" \
         | sort -u

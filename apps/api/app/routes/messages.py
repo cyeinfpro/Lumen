@@ -90,10 +90,9 @@ from lumen_core.schemas import (
 )
 from lumen_core.sizing import ResolvedSize, resolve_size
 from lumen_core import billing as billing_core
-from lumen_core.desktop_runtime import is_desktop_runtime
 
 from ..arq_pool import get_arq_pool
-from ..audit import hash_email, write_audit
+from ..audit import write_audit
 
 # Why: read_byok_settings is re-exported here so existing tests that
 # monkeypatch `messages.read_byok_settings` keep working. Production code on
@@ -103,7 +102,6 @@ from ..byok_service import (  # noqa: F401
     read_byok_settings_cached,
     retention_policy_from_settings,
 )
-from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..intent import resolve_intent
@@ -190,6 +188,7 @@ _DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
 _IMAGE_MODERATION_VALUES = {"auto", "low"}
+_SILENT_GENERATION_REQUEST_HASH_KEY = "request_hash"
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
 _CONFIRM_REPLY_YES_RE = re.compile(
     r"^\s*(对|是|嗯|可以|继续|好|yes|yep|yeah|ok|okay)\b|按.*来",
@@ -270,23 +269,6 @@ async def _billing_enabled(db: AsyncSession) -> bool:
     )
 
 
-async def _audit_billing_gap(
-    db: AsyncSession,
-    *,
-    event_type: str,
-    user: User,
-    details: dict[str, Any],
-) -> None:
-    await write_audit(
-        db,
-        event_type=event_type,
-        user_id=user.id,
-        actor_email_hash=hash_email(user.email),
-        details=details,
-        autocommit=False,
-    )
-
-
 async def _billing_allow_negative(db: AsyncSession) -> bool:
     return billing_core.parse_bool_setting(
         await _billing_setting_raw(db, "billing.allow_negative_balance"),
@@ -356,10 +338,18 @@ async def _chat_max_tool_invocations(db: AsyncSession) -> int:
         logger.warning("chat max_tool_invocations lookup failed", exc_info=True)
     if raw in (None, ""):
         raw = os.environ.get("CHAT_MAX_TOOL_INVOCATIONS")
-    try:
-        return min(64, max(1, int(raw or _MAX_TOOL_INVOCATIONS_DEFAULT)))
-    except (TypeError, ValueError):
+    if isinstance(raw, bool):
         return _MAX_TOOL_INVOCATIONS_DEFAULT
+    if isinstance(raw, int):
+        parsed = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = int(raw.strip())
+        except ValueError:
+            return _MAX_TOOL_INVOCATIONS_DEFAULT
+    else:
+        return _MAX_TOOL_INVOCATIONS_DEFAULT
+    return min(64, max(1, parsed))
 
 
 async def _estimate_chat_tool_budget_micro(
@@ -397,6 +387,12 @@ async def _ensure_chat_wallet_preflight(
     if account_mode != "wallet" or not await _billing_enabled(db):
         return None
     wallet = await billing_core.get_wallet(db, user_id, lock=True)
+    if wallet is None:
+        raise _http(
+            "WALLET_UNAVAILABLE",
+            "wallet could not be initialized",
+            503,
+        )
     rate_multiplier_x10000 = await _user_rate_multiplier_x10000(db, user_id)
     if rate_multiplier_x10000 > 0 and wallet.balance_micro < 10_000:
         raise _http(
@@ -612,7 +608,7 @@ def _message_attachment_roles(
         if isinstance(item, str):
             roles.append({"image_id": item, "role": default_role})
             continue
-        role = {
+        role: dict[str, Any] = {
             "image_id": item.image_id,
             "role": item.role,
         }
@@ -844,6 +840,23 @@ async def _byok_retention_policy_for_user(db: AsyncSession, user: User):
     if not byok_retention_applies_to_user(user):
         return None
     return retention_policy_from_settings(await read_byok_settings_cached(db))
+
+
+def _message_user_visible_filters(
+    user: User,
+    *,
+    retention_policy: Any | None,
+) -> tuple[Any, ...]:
+    filters = list(_message_alive_filters())
+    if retention_policy is not None:
+        retention_filter = byok_retention_user_visible_filter(
+            user,
+            Message.created_at,
+            policy=retention_policy,
+        )
+        if retention_filter is not None:
+            filters.append(retention_filter)
+    return tuple(filters)
 
 
 async def _ensure_conversation_visible_to_user(
@@ -1259,8 +1272,6 @@ async def _resolve_task_credential_pin(
     required_purpose: str,
     account_mode: str,
 ) -> _TaskCredentialPin | None:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return None
     if account_mode != "byok":
         return None
     byok_settings = await read_byok_settings_cached(db)
@@ -1475,13 +1486,13 @@ async def _create_assistant_task(
                     },
                     autocommit=False,
                 )
-        payload = {
+        completion_payload: dict[str, Any] = {
             "task_id": comp.id,
             "user_id": user_id,
             "kind": "completion",
         }
-        payload.update(_task_payload_context(comp_upstream_request))
-        outbox_payloads.append(payload)
+        completion_payload.update(_task_payload_context(comp_upstream_request))
+        outbox_payloads.append(completion_payload)
     else:
         # text_to_image / image_to_image
         requested_count = max(1, min(10, image_params.count))
@@ -1660,16 +1671,16 @@ async def _create_assistant_task(
                         autocommit=False,
                     )
             generation_ids.append(gen.id)
-            payload = {
+            generation_payload: dict[str, Any] = {
                 "task_id": gen.id,
                 "user_id": user_id,
                 "kind": "generation",
             }
             defer_s = _image_multi_generation_defer_s(image_index)
             if defer_s > 0:
-                payload["defer_s"] = defer_s
-            payload.update(_task_payload_context(gen_upstream_request))
-            outbox_payloads.append(payload)
+                generation_payload["defer_s"] = defer_s
+            generation_payload.update(_task_payload_context(gen_upstream_request))
+            outbox_payloads.append(generation_payload)
 
     # outbox rows (same transaction)
     outbox_rows: list[OutboxEvent] = []
@@ -1913,10 +1924,12 @@ async def _lookup_idempotent_post(
             )
         )
     ).scalar_one_or_none()
-    if not comp_hit and not gen_anchor:
+    if comp_hit is not None:
+        anchor_msg_id = comp_hit.message_id
+    elif gen_anchor is not None:
+        anchor_msg_id = gen_anchor.message_id
+    else:
         return None
-
-    anchor_msg_id = comp_hit.message_id if comp_hit else gen_anchor.message_id
     assistant_msg = (
         await db.execute(
             select(Message).where(
@@ -1930,7 +1943,7 @@ async def _lookup_idempotent_post(
         return None
     gen_hits: list[Generation] = []
     if gen_anchor is not None:
-        gen_hits = (
+        gen_hits = list(
             (
                 await db.execute(
                     select(Generation)
@@ -1953,19 +1966,6 @@ async def _lookup_idempotent_post(
                     Message.conversation_id == conv_id,
                     *alive_filters,
                 )
-            )
-        ).scalar_one_or_none()
-    if user_msg is None:
-        user_msg = (
-            await db.execute(
-                select(Message)
-                .where(
-                    Message.conversation_id == conv_id,
-                    Message.role == Role.USER.value,
-                    *alive_filters,
-                )
-                .order_by(Message.created_at.desc())
-                .limit(1)
             )
         ).scalar_one_or_none()
     if user_msg is None:
@@ -2346,6 +2346,132 @@ class SilentGenerationOut(BaseModel):
     generation_ids: list[str] = PydanticField(default_factory=list)
 
 
+def _silent_generation_request_hash(body: SilentGenerationIn) -> str:
+    payload = {
+        "parent_message_id": body.parent_message_id,
+        "intent": body.intent,
+        "prompt": body.prompt,
+        "attachment_image_ids": list(body.attachment_image_ids),
+        "image_params": body.image_params.model_dump(mode="json"),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stored_silent_generation_request_hash(generation: Generation) -> Any:
+    request = getattr(generation, "upstream_request", None)
+    if not isinstance(request, dict):
+        return None
+    return request.get(_SILENT_GENERATION_REQUEST_HASH_KEY)
+
+
+async def _lookup_silent_generation(
+    db: AsyncSession,
+    *,
+    user: User,
+    user_id: str,
+    conv_id: str,
+    idempotency_key: str,
+    parent_message_id: str,
+    request_hash: str,
+    retention_policy: Any | None,
+) -> SilentGenerationOut | None:
+    lookup_keys = _idempotency_lookup_keys(conv_id, idempotency_key)
+    anchor = (
+        await db.execute(
+            select(Generation)
+            .join(Message, Message.id == Generation.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Generation.user_id == user_id,
+                Generation.idempotency_key.in_(lookup_keys),
+                Message.conversation_id == conv_id,
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+            )
+            .order_by(Generation.created_at.asc(), Generation.id.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if anchor is None:
+        return None
+    assistant_msg = (
+        await db.execute(
+            select(Message).where(
+                Message.id == anchor.message_id,
+                Message.conversation_id == conv_id,
+                Message.role == Role.ASSISTANT.value,
+                *_message_user_visible_filters(
+                    user,
+                    retention_policy=retention_policy,
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if assistant_msg is None:
+        raise _http("not_found", "assistant message not found", 404)
+    stored_parent_message_id = assistant_msg.parent_message_id
+    if not isinstance(stored_parent_message_id, str) or not stored_parent_message_id:
+        raise _http("idempotency_conflict", "idempotency_key conflict", 409)
+    stored_parent = (
+        await db.execute(
+            select(Message).where(
+                Message.id == stored_parent_message_id,
+                Message.conversation_id == conv_id,
+                *_message_user_visible_filters(
+                    user,
+                    retention_policy=retention_policy,
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if stored_parent is None:
+        raise _http("not_found", "parent message not found", 404)
+    generations = list(
+        (
+            await db.execute(
+                select(Generation)
+                .where(
+                    Generation.user_id == user_id,
+                    Generation.message_id == anchor.message_id,
+                )
+                .order_by(Generation.created_at.asc(), Generation.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not generations:
+        generations = [anchor]
+
+    if stored_parent_message_id != parent_message_id:
+        raise _http("idempotency_conflict", "idempotency_key conflict", 409)
+
+    stored_hashes = [
+        _stored_silent_generation_request_hash(generation)
+        for generation in generations
+    ]
+    present_hashes = [value for value in stored_hashes if value is not None]
+    if present_hashes and (
+        len(present_hashes) != len(stored_hashes)
+        or any(
+            not isinstance(value, str) or value != request_hash
+            for value in present_hashes
+        )
+    ):
+        raise _http("idempotency_conflict", "idempotency_key conflict", 409)
+
+    return SilentGenerationOut(
+        assistant_message=MessageOut.model_validate(assistant_msg),
+        generation_ids=[generation.id for generation in generations],
+    )
+
+
 @router.post(
     "/conversations/{conv_id}/generations",
     response_model=SilentGenerationOut,
@@ -2373,26 +2499,42 @@ async def create_silent_generation(
         raise _http("not_found", "conversation not found", 404)
     await _ensure_conversation_visible_to_user(db, conv, user)
 
+    request_hash = _silent_generation_request_hash(body)
     retention_policy = await _byok_retention_policy_for_user(db, user)
-    message_retention_filter = (
-        byok_retention_user_visible_filter(
-            user,
-            Message.created_at,
-            policy=retention_policy,
-        )
-        if retention_policy is not None
-        else None
+    prior = await _lookup_silent_generation(
+        db,
+        user=user,
+        user_id=user.id,
+        conv_id=conv_id,
+        idempotency_key=body.idempotency_key,
+        parent_message_id=body.parent_message_id,
+        request_hash=request_hash,
+        retention_policy=retention_policy,
     )
+    if prior is not None:
+        return prior
+    if await _lock_idempotency_key(db, user.id, conv_id, body.idempotency_key):
+        prior = await _lookup_silent_generation(
+            db,
+            user=user,
+            user_id=user.id,
+            conv_id=conv_id,
+            idempotency_key=body.idempotency_key,
+            parent_message_id=body.parent_message_id,
+            request_hash=request_hash,
+            retention_policy=retention_policy,
+        )
+        if prior is not None:
+            return prior
+
     parent_msg = (
         await db.execute(
             select(Message).where(
                 Message.id == body.parent_message_id,
                 Message.conversation_id == conv_id,
-                *_message_alive_filters(),
-                *(
-                    (message_retention_filter,)
-                    if message_retention_filter is not None
-                    else ()
+                *_message_user_visible_filters(
+                    user,
+                    retention_policy=retention_policy,
                 ),
             )
         )
@@ -2449,6 +2591,9 @@ async def create_silent_generation(
         attachment_ids=attachment_ids,
         text=text,
         default_image_output_format=default_image_output_format,
+        request_metadata={
+            _SILENT_GENERATION_REQUEST_HASH_KEY: request_hash,
+        },
     )
 
     now = datetime.now(timezone.utc)
@@ -2458,6 +2603,18 @@ async def create_silent_generation(
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        prior = await _lookup_silent_generation(
+            db,
+            user=user,
+            user_id=user.id,
+            conv_id=conv_id,
+            idempotency_key=body.idempotency_key,
+            parent_message_id=body.parent_message_id,
+            request_hash=request_hash,
+            retention_policy=retention_policy,
+        )
+        if prior is not None:
+            return prior
         raise _http("idempotency_conflict", "idempotency_key conflict", 409)
 
     await db.refresh(result.assistant_msg)

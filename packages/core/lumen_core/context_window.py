@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, TypeGuard
 
 from .constants import DEFAULT_CHAT_INSTRUCTIONS, Role
 
@@ -129,7 +130,31 @@ def estimate_message_tokens(role: str, content: dict[str, Any] | None) -> int:
     return 0
 
 
-def is_summary_usable(summary_jsonb: dict[str, Any] | None) -> bool:
+def compare_message_position(
+    left_created_at: datetime,
+    left_id: str | None,
+    right_created_at: datetime,
+    right_id: str | None,
+) -> int:
+    """Compare the ``(created_at, id)`` order used by summary boundaries."""
+    if left_created_at.tzinfo is None:
+        left_created_at = left_created_at.replace(tzinfo=timezone.utc)
+    if right_created_at.tzinfo is None:
+        right_created_at = right_created_at.replace(tzinfo=timezone.utc)
+    if left_created_at > right_created_at:
+        return 1
+    if left_created_at < right_created_at:
+        return -1
+    if not left_id or not right_id:
+        return 0 if left_id == right_id else -1
+    if left_id > right_id:
+        return 1
+    if left_id < right_id:
+        return -1
+    return 0
+
+
+def is_summary_usable(summary_jsonb: object) -> TypeGuard[dict[str, Any]]:
     """Return whether a stored conversation summary has the P1 schema."""
     if not isinstance(summary_jsonb, dict):
         return False
@@ -152,6 +177,8 @@ def is_summary_usable(summary_jsonb: dict[str, Any] | None) -> bool:
 
 
 def estimate_summary_tokens(summary_jsonb: dict[str, Any] | None) -> int:
+    if not isinstance(summary_jsonb, dict):
+        return 0
     if not is_summary_usable(summary_jsonb):
         return 0
 
@@ -451,6 +478,7 @@ __all__ = [
     "SYSTEM_PROMPT_OVERHEAD_TOKENS",
     "SUMMARY_KIND",
     "SUMMARY_VERSION",
+    "compare_message_position",
     "compose_summary_guardrail",
     "count_tokens",
     "estimate_message_tokens",

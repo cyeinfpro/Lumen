@@ -383,6 +383,12 @@ def coerce_bool(value: Any) -> bool:
     return False
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 _GENERIC_PRODUCT_KEYWORDS = {
     "unknown",
     "需人工复核",
@@ -623,7 +629,10 @@ def fallback_scene_cards_from_pool(
 def _stable_cycle(options: tuple[str, ...], *, index: int, seed: str) -> str:
     if not options:
         return ""
-    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(
+        seed.encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()
     offset = int(digest[:8], 16) % len(options)
     return options[(offset + index - 1) % len(options)]
 
@@ -906,7 +915,7 @@ def _fallback_scene_card_shooting_brief(
     *,
     shot_class: str,
 ) -> str:
-    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera = _dict_or_empty(card.get("camera"))
     camera_seed = "，".join(
         clean_text(item, max_len=50)
         for item in (
@@ -955,7 +964,7 @@ def _product_visibility_for_shot(shot_class: str) -> str:
 
 
 def scene_fingerprint(card: dict[str, Any]) -> str:
-    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera = _dict_or_empty(card.get("camera"))
     parts = [
         card.get("scene_family"),
         card.get("location"),
@@ -1365,10 +1374,14 @@ def _coerce_selection_scores(value: Any) -> list[dict[str, Any]]:
         for key in numeric_keys:
             if key not in item:
                 continue
+            score = item.get(key)
+            if score is None:
+                row[key] = clean_text(score, max_len=20)
+                continue
             try:
-                row[key] = round(float(item.get(key)), 2)
+                row[key] = round(float(score), 2)
             except (TypeError, ValueError):
-                row[key] = clean_text(item.get(key), max_len=20)
+                row[key] = clean_text(score, max_len=20)
         reason = clean_text(item.get("reason"), max_len=140)
         if reason:
             row["reason"] = reason
@@ -1394,9 +1407,7 @@ async def compose_image_prompt_with_gpt55(
     provider_order: list[ProviderDefinition] | None = None,
     reference_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    camera = (
-        scene_card.get("camera") if isinstance(scene_card.get("camera"), dict) else {}
-    )
+    camera = _dict_or_empty(scene_card.get("camera"))
     product_context = compact_product_context_for_gpt55(product_analysis, garment_lock)
     payload = {
         "product_context": {
@@ -1767,7 +1778,7 @@ def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
         "shooting_brief",
     )
     missing = [key for key in required if not str(card.get(key) or "").strip()]
-    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera = _dict_or_empty(card.get("camera"))
     for key in ("distance", "angle", "lens_feel", "orientation"):
         if not str(camera.get(key) or "").strip():
             missing.append(f"camera.{key}")
@@ -1775,7 +1786,7 @@ def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
 
 
 def _reject_side_back_for_non_side_card(card: dict[str, Any], shot_class: str) -> None:
-    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera = _dict_or_empty(card.get("camera"))
     camera_angle = camera.get("angle")
     if shot_class == "side_or_back":
         if not (
@@ -1836,17 +1847,29 @@ def _normalize_scene_cards(
         raw_id = clean_text(raw.get("id"), max_len=100).lower()
         vis = clean_text(raw.get("product_visibility"), max_len=80)
         matched_index: int | None = None
-        for index, (shot_class, _variant) in enumerate(shot_picks):
-            if not taken[index] and shot_class.lower() in raw_id:
-                matched_index = index
-                break
+        exact_id_matches = [
+            index
+            for index, (shot_class, _variant) in enumerate(shot_picks)
+            if not taken[index] and raw_id == f"{shot_class.lower()}-{index + 1}"
+        ]
+        if len(exact_id_matches) == 1:
+            matched_index = exact_id_matches[0]
+        if matched_index is None:
+            class_matches = [
+                index
+                for index, (shot_class, _variant) in enumerate(shot_picks)
+                if not taken[index] and shot_class.lower() in raw_id
+            ]
+            if len(class_matches) == 1:
+                matched_index = class_matches[0]
         if matched_index is None and vis:
-            for index, (shot_class, _variant) in enumerate(shot_picks):
-                if taken[index]:
-                    continue
-                if vis == _product_visibility_for_shot(shot_class):
-                    matched_index = index
-                    break
+            visibility_matches = [
+                index
+                for index, (shot_class, _variant) in enumerate(shot_picks)
+                if not taken[index] and vis == _product_visibility_for_shot(shot_class)
+            ]
+            if len(visibility_matches) == 1:
+                matched_index = visibility_matches[0]
         if matched_index is None:
             leftover.append(raw)
             continue
@@ -1866,7 +1889,7 @@ def _normalize_scene_cards(
         )
         if not isinstance(raw, dict):
             raise ValueError(f"missing GPT scene_card for shot {index + 1}")
-        camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
+        camera = _dict_or_empty(raw.get("camera"))
         card = {
             "id": clean_text(raw.get("id"), max_len=80) or f"scene-{index + 1:02d}",
             "scene_family": clean_text(raw.get("scene_family"), max_len=60)

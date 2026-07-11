@@ -11,12 +11,6 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.desktop_runtime import (
-    LOCAL_USER_DISPLAY_NAME,
-    LOCAL_USER_EMAIL,
-    LOCAL_USER_ID,
-    is_desktop_runtime,
-)
 from lumen_core.models import AuthSession, TelegramBinding, User
 from lumen_core.utils import ensure_utc
 
@@ -56,40 +50,10 @@ def _csrf_failed() -> HTTPException:
     )
 
 
-async def get_or_create_desktop_user(db: AsyncSession) -> User:
-    user = (
-        await db.execute(select(User).where(User.id == LOCAL_USER_ID))
-    ).scalar_one_or_none()
-    if user is not None:
-        return user
-    user = User(
-        id=LOCAL_USER_ID,
-        email=LOCAL_USER_EMAIL,
-        email_verified=True,
-        password_hash=None,
-        display_name=LOCAL_USER_DISPLAY_NAME,
-        role="admin",
-        account_mode="byok",
-        notification_email=False,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return user
-
-
 async def get_current_user(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    if is_desktop_runtime(settings.lumen_runtime):
-        cached_user = getattr(request.state, "current_user", None)
-        if isinstance(cached_user, User):
-            return cached_user
-        user = await get_or_create_desktop_user(db)
-        request.state.current_user = user
-        return user
-
     raw = request.cookies.get(SESSION_COOKIE)
     sid = parse_session_cookie(raw)
     if not sid:
@@ -170,8 +134,6 @@ async def verify_csrf(
     Safe (GET/HEAD/OPTIONS) requests skip. POST/PATCH/DELETE/PUT require a
     session-bound `X-CSRF-Token` header.
     """
-    if is_desktop_runtime(settings.lumen_runtime):
-        return
     if request.method in SAFE_METHODS:
         return
     sid = parse_session_cookie(request.cookies.get(SESSION_COOKIE))
@@ -189,8 +151,6 @@ async def verify_csrf_session(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """CSRF check for auth-sensitive routes that must reject stale sessions early."""
-    if is_desktop_runtime(settings.lumen_runtime):
-        return
     if request.method in SAFE_METHODS:
         return
     sid = parse_session_cookie(request.cookies.get(SESSION_COOKIE))

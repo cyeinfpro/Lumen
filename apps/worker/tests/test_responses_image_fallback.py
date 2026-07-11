@@ -19,6 +19,7 @@ from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     UPSTREAM_MODEL,
 )
+from lumen_core.url_security import PublicHttpDownload
 
 PNG_B64 = base64.b64encode(b"fake-png-bytes").decode("ascii")
 
@@ -157,12 +158,30 @@ def _patch_provider_pool_to_use_resolved_runtime(
     async def fake_resolve_public_http_target(*_args: Any, **_kwargs: Any) -> None:
         return None
 
+    async def fake_download_public_http_url(
+        url: str,
+        **_kwargs: Any,
+    ) -> PublicHttpDownload:
+        client = await upstream._get_images_client()
+        response = await client.get(url)
+        return PublicHttpDownload(
+            url=url,
+            status_code=response.status_code,
+            headers=dict(getattr(response, "headers", {})),
+            body=getattr(response, "content", b""),
+        )
+
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(upstream, "resolve", fake_resolve)
     monkeypatch.setattr(
         upstream,
         "resolve_public_http_target",
         fake_resolve_public_http_target,
+    )
+    monkeypatch.setattr(
+        upstream,
+        "download_public_http_url",
+        fake_download_public_http_url,
     )
 
 

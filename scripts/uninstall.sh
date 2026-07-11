@@ -95,10 +95,20 @@ LUMEN_LEGACY_SYSTEMD_UNITS=(
 LUMEN_LEGACY_UPDATE_UNITS=(
     lumen-update.path
     lumen-update-runner.service
+    lumen-update-warm.path
+    lumen-update-warm.service
     lumen-health-watchdog.timer
     lumen-health-watchdog.service
     lumen-backup.timer
+    lumen-backup.path
     lumen-backup.service
+    lumen-restore.path
+    lumen-restore-runner.service
+    lumen-storage-mount.service
+    lumen-storage-apply.path
+    lumen-storage-apply.service
+    lumen-storage-test.path
+    lumen-storage-test.service
 )
 
 LUMEN_NGINX_ACTIVE_DIRS=(

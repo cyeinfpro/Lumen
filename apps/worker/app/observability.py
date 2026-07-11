@@ -15,10 +15,13 @@ import re
 import threading
 from errno import EADDRINUSE
 from socketserver import ThreadingMixIn
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram, make_wsgi_app
+
+if TYPE_CHECKING:
+    from sentry_sdk.types import Event
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +104,10 @@ def _scrub_request(request: Any) -> Any:
     return cleaned
 
 
-def _sentry_before_send(event: dict, _hint: dict) -> dict:
+def _sentry_before_send(
+    event: Event,
+    _hint: dict[str, Any],
+) -> Event | None:
     if not isinstance(event, dict):
         return event
     if "request" in event:
@@ -419,12 +425,17 @@ def _start_metrics_wsgi_server(host: str, port: int) -> tuple[Any, threading.Thr
     return httpd, thread
 
 
-def start_metrics_server(port: int, host: str = "0.0.0.0") -> None:
+# Prometheus scrapes this listener over the private container network.
+def start_metrics_server(
+    port: int,
+    host: str = "0.0.0.0",  # nosec B104
+) -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
     global _metrics_httpd, _metrics_server_started, _metrics_thread
     if _metrics_server_started:
         return
-    bind_host = host.strip() or "0.0.0.0"
+    # Empty configuration retains the container-network listener.
+    bind_host = host.strip() or "0.0.0.0"  # nosec B104
     try:
         _metrics_httpd, _metrics_thread = _start_metrics_wsgi_server(bind_host, port)
         _metrics_server_started = True

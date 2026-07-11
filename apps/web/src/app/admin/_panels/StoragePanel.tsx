@@ -458,7 +458,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
 
         {/* —— 操作区 —— */}
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="type-caption text-[var(--fg-2)]">
+          <div aria-live="polite" className="type-caption text-[var(--fg-2)]">
             {formError ? (
               <span className="inline-flex items-center gap-1.5 text-danger">
                 <AlertTriangle className="h-3.5 w-3.5" /> {formError}
@@ -988,5 +988,3 @@ function formatTs(unixSeconds: number | null | undefined): string {
     return "—";
   }
 }
-
-export default StoragePanel;

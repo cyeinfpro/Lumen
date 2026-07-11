@@ -48,7 +48,6 @@ let _redirecting = false;
 // 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → assign("/login") → 重载 → 再 401，会死循环刷新。
 export function handle401() {
   if (typeof window === "undefined") return;
-  if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") return;
   if (_redirecting) return;
   if (isPublicPath(window.location.pathname)) return;
   _redirecting = true;
@@ -60,7 +59,7 @@ export function handle401() {
   }
 }
 
-export function readCookie(name: string): string | null {
+function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
   const cookies = document.cookie ? document.cookie.split("; ") : [];
   for (const raw of cookies) {
@@ -102,6 +101,15 @@ export class ApiError extends Error {
     this.status = opts.status;
     this.payload = opts.payload;
   }
+}
+
+function networkRequestError(err: unknown): Error {
+  if (err instanceof Error && err.name === "AbortError") return err;
+  return new ApiError({
+    code: "network_error",
+    message: err instanceof Error ? err.message : "network error",
+    status: 0,
+  });
 }
 
 // 写操作（POST/PUT/PATCH/DELETE）需要 X-CSRF-Token。GET/HEAD 不附。
@@ -262,11 +270,7 @@ export async function apiFetch<T = unknown>(
   try {
     res = await fetchWithRetryableHttp(url, requestInit, retryable);
   } catch (err) {
-    throw new ApiError({
-      code: "network_error",
-      message: err instanceof Error ? err.message : "network error",
-      status: 0,
-    });
+    throw networkRequestError(err);
   }
 
   if (res.status === 401) {

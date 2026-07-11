@@ -22,10 +22,12 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
-from datetime import datetime, timezone
+import secrets
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Iterable
+from typing import Annotated, Any, Awaitable, Callable, Iterable
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import httpx
 from fastapi import (
@@ -45,7 +47,7 @@ from lumen_core.constants import (
     GenerationStatus,
     Intent,
     POSTER_STYLE_CATEGORIES,
-    POSTER_STYLE_IMAGE_SUFFIXES,
+    POSTER_STYLE_IMAGE_SUFFIXES,  # noqa: F401 - workflow service runtime
     POSTER_STYLE_MAX_BINARY_BYTES,
     POSTER_STYLE_MAX_SAMPLES,
     POSTER_STYLE_SCHEMA_VERSION,
@@ -94,36 +96,63 @@ from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..runtime_settings import get_setting
+from ..services.poster_styles import storage as poster_style_storage
+from ..workflow_services.library_sync_operation import (
+    _do_poster_style_sync,
+)
 from ._poster_library import (
+    POSTER_STYLE_FETCH_TIMEOUT_S,
     POSTER_STYLE_GENERATE_STEP_KEY,
     POSTER_STYLE_GENERATE_WORKER_ACTION,
+    POSTER_STYLE_MAX_GITHUB_DEPTH,
+    POSTER_STYLE_MAX_GITHUB_DIRECTORIES,
+    POSTER_STYLE_MAX_GITHUB_FILES,
+    POSTER_STYLE_MAX_GITHUB_METADATA_BYTES,
+    POSTER_STYLE_MAX_GITHUB_RESPONSE_BYTES,
+    POSTER_STYLE_MAX_INDEX_BYTES,
+    POSTER_STYLE_MAX_META_BYTES,
+    POSTER_STYLE_MAX_PRESET_ITEMS,
+    POSTER_STYLE_MAX_REDIRECTS,
+    POSTER_STYLE_MAX_SYNC_DOWNLOAD_BYTES,
     POSTER_STYLE_ROOT_KEY,
+    POSTER_STYLE_SYNC_LEASE_RENEW_SECONDS,  # noqa: F401 - workflow service runtime
+    POSTER_STYLE_SYNC_LEASE_SECONDS,
     POSTER_STYLE_SYNC_MODE_KEY,
     POSTER_STYLE_SYNC_PROXY_NAME_KEY,
     POSTER_STYLE_SYNC_USE_PROXY_POOL_KEY,
     WORKFLOW_TYPE_POSTER_STYLE_GENERATE,
     _DEFAULT_SYNC_MODE,
     _SYNC_LOCK,
-    _category_from_folder_name,
+    _category_from_folder_name,  # noqa: F401 - workflow service runtime
     _clean_optional_text,
     _github_contents_url,
     _library_item_url,
     _library_sample_url,
-    _metadata_from_meta_json,
+    _metadata_from_meta_json,  # noqa: F401 - workflow service runtime
     _normalize_category,
     _normalize_palette,
     _normalize_recommended_aspects,
     _normalize_style_tags,
     _poster_style_folder_for_category,
+    _poster_style_sync_file_lock,
     _preset_item_id,
-    _preset_storage_key,
-    _preset_thumb_storage_key,
+    _preset_storage_key,  # noqa: F401 - workflow service runtime
+    _preset_thumb_storage_key,  # noqa: F401 - workflow service runtime
     _scan_local_presets,
 )
 
 
 router = APIRouter(prefix="/poster-styles", tags=["poster-styles"])
 logger = logging.getLogger(__name__)
+
+_GITHUB_API_HOST = "api.github.com"
+_GITHUB_RAW_HOSTS = frozenset(
+    {
+        "raw.githubusercontent.com",
+        "media.githubusercontent.com",
+    }
+)
+_HTTP_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 def _poster_style_auto_tag_concurrency() -> int:
@@ -222,98 +251,42 @@ def _clean_string_list(
 
 
 def _storage_root() -> Path:
-    return Path(settings.storage_root).resolve()
+    return poster_style_storage.resolve_storage_root(settings.storage_root)
 
 
 def _storage_path(storage_key: str) -> Path:
-    root = _storage_root()
-    if not storage_key or "\x00" in storage_key:
-        raise _http("invalid_path", "invalid storage path", 400)
-    key_path = Path(storage_key)
-    if key_path.is_absolute():
-        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    path = (root / key_path).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise _http("invalid_path", "storage path escapes root", 400) from exc
-    return path
+    return poster_style_storage.resolve_storage_path(
+        storage_key,
+        root=_storage_root(),
+    )
 
 
 def _fsync_dir(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    poster_style_storage.fsync_dir(path)
 
 
 def _write_bytes_replace(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        _fsync_dir(path.parent)
-    finally:
-        tmp.unlink(missing_ok=True)
+    poster_style_storage.write_bytes_replace(path, data)
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode(
-        "utf-8"
+    poster_style_storage.write_json_atomic(
+        path,
+        data,
+        max_bytes=POSTER_STYLE_MAX_INDEX_BYTES,
     )
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        _fsync_dir(path.parent)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def _read_json_file(path: Path, default: dict[str, Any]) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return dict(default)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise _http(
-            "invalid_index", f"invalid poster style index: {path.name}", 500
-        ) from exc
-    if not isinstance(data, dict):
-        raise _http("invalid_index", f"invalid poster style index: {path.name}", 500)
-    return data
+    return poster_style_storage.read_json_file(
+        path,
+        default,
+        max_bytes=POSTER_STYLE_MAX_INDEX_BYTES,
+    )
 
 
 def _guess_mime(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        return "image/jpeg"
-    if suffix == ".png":
-        return "image/png"
-    if suffix == ".webp":
-        return "image/webp"
-    return "application/octet-stream"
+    return poster_style_storage.guess_mime(path)
 
 
 # ----- 路径 / index helpers ------------------------------------------------
@@ -331,6 +304,10 @@ def _global_preset_index_path() -> Path:
 
 def _library_sync_state_path() -> Path:
     return _preset_storage_root() / "sync-state.json"
+
+
+def _library_sync_lock_path() -> Path:
+    return _preset_storage_root() / ".sync-state.lock"
 
 
 def _local_presets_root() -> Path | None:
@@ -361,14 +338,26 @@ def _default_sync_state() -> dict[str, Any]:
         "last_error": None,
         "last_attempt_at": None,
         "last_result": None,
+        "sync_lease": None,
     }
 
 
 def _load_global_preset_index() -> dict[str, Any]:
-    return _read_json_file(_global_preset_index_path(), _default_global_index())
+    index = _read_json_file(_global_preset_index_path(), _default_global_index())
+    items = index.get("preset_items")
+    if not isinstance(items, list) or len(items) > POSTER_STYLE_MAX_PRESET_ITEMS:
+        raise _http(
+            "invalid_index",
+            f"invalid poster style index: {_global_preset_index_path().name}",
+            500,
+        )
+    return index
 
 
 def _save_global_preset_index(index: dict[str, Any]) -> None:
+    items = index.get("preset_items")
+    if not isinstance(items, list) or len(items) > POSTER_STYLE_MAX_PRESET_ITEMS:
+        raise ValueError("poster style preset item limit exceeded")
     index["schema_version"] = POSTER_STYLE_SCHEMA_VERSION
     index["updated_at"] = _iso_now()
     _write_json_atomic(_global_preset_index_path(), index)
@@ -450,7 +439,8 @@ async def _resolve_sync_proxy(
 
 def _http_client_kwargs(proxy_url: str | None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
-        "timeout": httpx.Timeout(30.0),
+        "timeout": httpx.Timeout(POSTER_STYLE_FETCH_TIMEOUT_S),
+        "follow_redirects": False,
     }
     if proxy_url:
         kwargs["proxy"] = proxy_url
@@ -458,7 +448,11 @@ def _http_client_kwargs(proxy_url: str | None) -> dict[str, Any]:
 
 
 async def _sync_state_out(db: AsyncSession, user: Any) -> PosterStyleSyncStateOut:
-    state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+    state = await asyncio.to_thread(
+        _read_json_file,
+        _library_sync_state_path(),
+        _default_sync_state(),
+    )
     return PosterStyleSyncStateOut(
         last_success_at=_safe_datetime(state.get("last_success_at")),
         last_error=_clean_optional_text(state.get("last_error"), max_len=1000),
@@ -473,9 +467,9 @@ async def _sync_state_out(db: AsyncSession, user: Any) -> PosterStyleSyncStateOu
 def _item_out_from_row(row: PosterStyleItem) -> PosterStyleItemOut:
     """user item 走 image API（cover_image_id + sample_image_ids 都指向真实 Image）。"""
     cover_id = row.cover_image_id
-    sample_ids = list(row.sample_image_ids or [])
-    if cover_id and cover_id not in sample_ids:
-        sample_ids = [cover_id, *sample_ids]
+    sample_ids = _dedupe_nonempty([cover_id or "", *(row.sample_image_ids or [])])[
+        :POSTER_STYLE_MAX_SAMPLES
+    ]
     if cover_id:
         cover_url = f"/api/images/{cover_id}/binary"
         display_url = f"/api/images/{cover_id}/variants/display2048"
@@ -528,6 +522,7 @@ def _item_out_from_preset(raw: dict[str, Any]) -> PosterStyleItemOut:
     samples = raw.get("samples")
     if not isinstance(samples, list):
         samples = []
+    samples = samples[:POSTER_STYLE_MAX_SAMPLES]
     samples_out: list[PosterStyleSampleOut] = []
     for idx, sample in enumerate(samples):
         if not isinstance(sample, dict):
@@ -698,60 +693,363 @@ async def _load_user_items(
 # ----- GitHub sync ----------------------------------------------------------
 
 
+class _PosterStyleSyncLimitExceeded(ValueError):
+    """A configured GitHub traversal or download budget was exceeded."""
+
+
+class _PosterStyleSyncLeaseLost(RuntimeError):
+    """The sync lease expired or was replaced before this worker finished."""
+
+
+def _decoded_url_path_segments(
+    url: str,
+    *,
+    allow_trailing_slash: bool = False,
+) -> list[str] | None:
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    raw_segments = path.split("/")
+    if not raw_segments or raw_segments[0] != "":
+        return None
+    segments: list[str] = []
+    path_segments = raw_segments[1:]
+    for index, raw_segment in enumerate(path_segments):
+        if not raw_segment:
+            if allow_trailing_slash and index == len(path_segments) - 1:
+                continue
+            return None
+        segment = unquote(raw_segment)
+        if (
+            segment in {".", ".."}
+            or "/" in segment
+            or "\\" in segment
+            or "\x00" in segment
+        ):
+            return None
+        segments.append(segment)
+    return segments
+
+
+def _validate_github_contents_url(url: str) -> str:
+    clean = (url or "").strip()
+    try:
+        parts = urlsplit(clean)
+        port = parts.port
+    except ValueError:
+        parts = None
+        port = None
+    if (
+        parts is None
+        or parts.scheme != "https"
+        or (parts.hostname or "").lower() != _GITHUB_API_HOST
+        or port is not None
+        or parts.username is not None
+        or parts.password is not None
+        or bool(parts.fragment)
+    ):
+        raise _http(
+            "invalid_preset_sync_url",
+            "preset sync URL must be a GitHub contents API URL",
+            503,
+        )
+    segments = _decoded_url_path_segments(clean, allow_trailing_slash=True)
+    if (
+        segments is None
+        or len(segments) < 5
+        or segments[0] != "repos"
+        or segments[3] != "contents"
+    ):
+        raise _http(
+            "invalid_preset_sync_url",
+            "preset sync URL must be a GitHub contents API URL",
+            503,
+        )
+    return clean
+
+
+def _validate_github_download_url(url: str) -> str | None:
+    clean = (url or "").strip()
+    try:
+        parts = urlsplit(clean)
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        parts.scheme != "https"
+        or (parts.hostname or "").lower() not in _GITHUB_RAW_HOSTS
+        or port is not None
+        or parts.username is not None
+        or parts.password is not None
+        or bool(parts.fragment)
+    ):
+        return None
+    segments = _decoded_url_path_segments(clean)
+    if segments is None or len(segments) < 4:
+        return None
+    return clean
+
+
+def _require_github_download_url(url: str) -> str:
+    clean = _validate_github_download_url(url)
+    if clean is None:
+        raise ValueError("preset file download URL must be a GitHub raw URL")
+    return clean
+
+
 def _github_api_child_url(base_url: str, child_name: str) -> str:
+    if (
+        not child_name
+        or child_name in {".", ".."}
+        or "/" in child_name
+        or "\\" in child_name
+        or "\x00" in child_name
+    ):
+        raise ValueError("invalid GitHub child path")
     prefix, _, query = base_url.partition("?")
+    safe_child_name = quote(child_name, safe="")
     return (
-        f"{prefix.rstrip('/')}/{child_name}?{query}"
+        f"{prefix.rstrip('/')}/{safe_child_name}?{query}"
         if query
-        else f"{prefix.rstrip('/')}/{child_name}"
+        else f"{prefix.rstrip('/')}/{safe_child_name}"
+    )
+
+
+async def _fetch_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_bytes: int,
+    validate_url: Callable[[str], str],
+    headers: dict[str, str] | None = None,
+    progress: Callable[[], Awaitable[None]] | None = None,
+) -> bytes:
+    if max_bytes <= 0:
+        raise _PosterStyleSyncLimitExceeded("GitHub response byte budget exhausted")
+    current_url = validate_url(url)
+    redirect_count = 0
+    while True:
+        async with client.stream(
+            "GET",
+            current_url,
+            headers=headers,
+            follow_redirects=False,
+        ) as resp:
+            if resp.status_code in _HTTP_REDIRECT_STATUSES:
+                location = resp.headers.get("location")
+                if not location:
+                    raise ValueError("GitHub redirect is missing Location")
+                if redirect_count >= POSTER_STYLE_MAX_REDIRECTS:
+                    raise ValueError("GitHub redirect limit exceeded")
+                if len(location) > 4096:
+                    raise ValueError("GitHub redirect Location is too long")
+                current_url = validate_url(urljoin(current_url, location))
+                redirect_count += 1
+                if progress is not None:
+                    await progress()
+                continue
+
+            resp.raise_for_status()
+            raw_length = resp.headers.get("content-length")
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError("invalid GitHub Content-Length") from exc
+                if content_length < 0:
+                    raise ValueError("invalid GitHub Content-Length")
+                if content_length > max_bytes:
+                    raise _PosterStyleSyncLimitExceeded(
+                        f"GitHub response exceeds {max_bytes} bytes"
+                    )
+            payload = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(payload) + len(chunk) > max_bytes:
+                    raise _PosterStyleSyncLimitExceeded(
+                        f"GitHub response exceeds {max_bytes} bytes"
+                    )
+                payload.extend(chunk)
+                if progress is not None:
+                    await progress()
+            return bytes(payload)
+
+
+async def _fetch_github_contents_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_bytes: int,
+    progress: Callable[[], Awaitable[None]] | None = None,
+) -> bytes:
+    return await _fetch_bytes(
+        client,
+        url,
+        max_bytes=max_bytes,
+        validate_url=_validate_github_contents_url,
+        headers={"Accept": "application/vnd.github+json"},
+        progress=progress,
+    )
+
+
+async def _fetch_github_download_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_bytes: int = POSTER_STYLE_MAX_BINARY_BYTES,
+    progress: Callable[[], Awaitable[None]] | None = None,
+) -> bytes:
+    return await _fetch_bytes(
+        client,
+        url,
+        max_bytes=max_bytes,
+        validate_url=_require_github_download_url,
+        progress=progress,
     )
 
 
 async def _walk_github_contents(
     client: httpx.AsyncClient,
     contents_url: str,
+    *,
+    progress: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
-    resp = await client.get(
-        contents_url,
-        headers={"Accept": "application/vnd.github+json"},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and data.get("type") == "file":
-        return [data]
-    if not isinstance(data, list):
-        raise ValueError("GitHub contents response must be an array")
+    root_url = _validate_github_contents_url(contents_url)
+    pending: list[tuple[str, int]] = [(root_url, 0)]
+    scheduled: set[str] = {root_url}
     files: list[dict[str, Any]] = []
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        entry_type = entry.get("type")
-        name = str(entry.get("name") or "")
-        if entry_type == "dir":
-            child_url = str(entry.get("url") or "") or _github_api_child_url(
-                contents_url, name
-            )
-            files.extend(await _walk_github_contents(client, child_url))
-        elif entry_type == "file":
-            files.append(entry)
+    metadata_bytes = 0
+    cursor = 0
+    while cursor < len(pending):
+        current_url, depth = pending[cursor]
+        cursor += 1
+        remaining_metadata = POSTER_STYLE_MAX_GITHUB_METADATA_BYTES - metadata_bytes
+        raw = await _fetch_github_contents_bytes(
+            client,
+            current_url,
+            max_bytes=min(
+                POSTER_STYLE_MAX_GITHUB_RESPONSE_BYTES,
+                remaining_metadata,
+            ),
+            progress=progress,
+        )
+        metadata_bytes += len(raw)
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("type") == "file":
+            entries: list[Any] = [data]
+        elif isinstance(data, list):
+            entries = data
+        else:
+            raise ValueError("GitHub contents response must be an array")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_type = entry.get("type")
+            name = str(entry.get("name") or "")
+            if entry_type == "dir":
+                if depth >= POSTER_STYLE_MAX_GITHUB_DEPTH:
+                    raise _PosterStyleSyncLimitExceeded(
+                        "GitHub contents depth limit exceeded"
+                    )
+                child_url = _github_api_child_url(current_url, name)
+                if child_url in scheduled:
+                    continue
+                if len(scheduled) >= POSTER_STYLE_MAX_GITHUB_DIRECTORIES:
+                    raise _PosterStyleSyncLimitExceeded(
+                        "GitHub contents directory limit exceeded"
+                    )
+                scheduled.add(child_url)
+                pending.append((child_url, depth + 1))
+            elif entry_type == "file":
+                files.append(entry)
+                if len(files) > POSTER_STYLE_MAX_GITHUB_FILES:
+                    raise _PosterStyleSyncLimitExceeded(
+                        "GitHub contents file limit exceeded"
+                    )
+        if progress is not None:
+            await progress()
     return files
 
 
-async def _fetch_bytes(client: httpx.AsyncClient, url: str) -> bytes:
-    resp = await client.get(url)
-    resp.raise_for_status()
-    return resp.content
+def _github_entry_size(entry: dict[str, Any]) -> int | None:
+    raw = entry.get("size")
+    if raw is None:
+        return None
+    try:
+        size = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid GitHub file size") from exc
+    if size < 0:
+        raise ValueError("invalid GitHub file size")
+    return size
+
+
+def _sync_download_limit(
+    *,
+    downloaded_bytes: int,
+    expected_size: int | None,
+) -> int:
+    remaining = POSTER_STYLE_MAX_SYNC_DOWNLOAD_BYTES - downloaded_bytes
+    if remaining <= 0:
+        raise _PosterStyleSyncLimitExceeded(
+            "poster style sync download budget exceeded"
+        )
+    if expected_size is not None:
+        if expected_size > POSTER_STYLE_MAX_BINARY_BYTES:
+            raise _PosterStyleSyncLimitExceeded(
+                "GitHub poster style binary exceeds the per-file byte limit"
+            )
+        if expected_size > remaining:
+            raise _PosterStyleSyncLimitExceeded(
+                "poster style sync download budget exceeded"
+            )
+    return min(POSTER_STYLE_MAX_BINARY_BYTES, remaining)
+
+
+def _github_entry_path(entry: dict[str, Any]) -> Path | None:
+    raw = str(entry.get("path") or entry.get("name") or "").strip()
+    if not raw or "\x00" in raw or "\\" in raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path
+
+
+def _poster_relative_parts(path: Path) -> list[str]:
+    parts = list(path.parts)
+    for index in range(max(0, len(parts) - 1)):
+        if parts[index : index + 2] == ["assets", "poster-style-presets"]:
+            return parts[index + 2 :]
+    return parts
 
 
 async def _fetch_meta_json(
-    client: httpx.AsyncClient, entry: dict[str, Any]
+    client: httpx.AsyncClient,
+    entry: dict[str, Any],
+    *,
+    progress: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
-    """从 GitHub Contents API 拿到 meta.json 文件实体，下载 raw 并解析为 dict。"""
+    """Download one bounded GitHub meta.json and parse it as an object."""
     download_url = str(entry.get("download_url") or "").strip()
     if not download_url:
         return None
+    expected_size = _github_entry_size(entry)
+    if expected_size is not None and expected_size > POSTER_STYLE_MAX_META_BYTES:
+        raise _PosterStyleSyncLimitExceeded(
+            "GitHub poster style meta.json exceeds the byte limit"
+        )
     try:
-        raw = await _fetch_bytes(client, download_url)
+        raw = await _fetch_github_download_bytes(
+            client,
+            download_url,
+            max_bytes=POSTER_STYLE_MAX_META_BYTES,
+            progress=progress,
+        )
+    except (_PosterStyleSyncLimitExceeded, _PosterStyleSyncLeaseLost):
+        raise
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.info(
             "poster style: meta.json download failed url=%s err=%s", download_url, exc
@@ -763,6 +1061,156 @@ async def _fetch_meta_json(
         logger.info("poster style: meta.json decode failed err=%s", exc)
         return None
     return data if isinstance(data, dict) else None
+
+
+def _sync_lease_owner(state: dict[str, Any]) -> tuple[str, datetime] | None:
+    lease = state.get("sync_lease")
+    if not isinstance(lease, dict):
+        return None
+    token = str(lease.get("token") or "").strip()
+    expires_at = _safe_datetime(lease.get("expires_at"))
+    if not token or expires_at is None:
+        return None
+    return token, expires_at
+
+
+def _claim_library_sync_lease_sync() -> tuple[str | None, dict[str, Any]]:
+    """Atomically claim one cross-process sync lease under a short file lock."""
+
+    with _poster_style_sync_file_lock(_library_sync_lock_path()):
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        now = _now()
+        last_success = _safe_datetime(state.get("last_success_at"))
+        if last_success is not None:
+            success_age = (now - last_success).total_seconds()
+            if success_age < POSTER_STYLE_SYNC_COOLDOWN_S:
+                return None, state
+
+        owner = _sync_lease_owner(state)
+        if owner is not None and owner[1] > now:
+            return None, state
+        if owner is not None:
+            state["sync_lease"] = None
+
+        last_attempt = _safe_datetime(state.get("last_attempt_at"))
+        if last_attempt is not None:
+            attempt_age = (now - last_attempt).total_seconds()
+            if attempt_age < POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S:
+                return None, state
+
+        token = secrets.token_hex(16)
+        now_iso = now.isoformat().replace("+00:00", "Z")
+        state["last_attempt_at"] = now_iso
+        state["sync_lease"] = {
+            "token": token,
+            "started_at": now_iso,
+            "heartbeat_at": now_iso,
+            "expires_at": (now + timedelta(seconds=POSTER_STYLE_SYNC_LEASE_SECONDS))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        _save_sync_state(state)
+        return token, state
+
+
+async def _claim_library_sync_lease() -> tuple[str | None, dict[str, Any]]:
+    async with _SYNC_LOCK:
+        return await asyncio.to_thread(_claim_library_sync_lease_sync)
+
+
+def _renew_library_sync_lease_sync(token: str) -> bool:
+    with _poster_style_sync_file_lock(_library_sync_lock_path()):
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        owner = _sync_lease_owner(state)
+        if owner is None or owner[0] != token:
+            return False
+        now = _now()
+        now_iso = now.isoformat().replace("+00:00", "Z")
+        lease = dict(state["sync_lease"])
+        lease["heartbeat_at"] = now_iso
+        lease["expires_at"] = (
+            (now + timedelta(seconds=POSTER_STYLE_SYNC_LEASE_SECONDS))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        state["sync_lease"] = lease
+        _save_sync_state(state)
+        return True
+
+
+async def _renew_library_sync_lease(token: str) -> bool:
+    async with _SYNC_LOCK:
+        return await asyncio.to_thread(_renew_library_sync_lease_sync, token)
+
+
+def _complete_library_sync_lease_sync(
+    token: str,
+    index: dict[str, Any],
+    result: dict[str, Any],
+    completed_at: datetime,
+) -> None:
+    with _poster_style_sync_file_lock(_library_sync_lock_path()):
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        owner = _sync_lease_owner(state)
+        if owner is None or owner[0] != token:
+            raise _PosterStyleSyncLeaseLost("poster style sync lease was lost")
+        # Publish the index before success state. A crash leaves an expiring
+        # lease instead of advertising success with stale index contents.
+        _save_global_preset_index(index)
+        state["last_success_at"] = completed_at.isoformat().replace("+00:00", "Z")
+        state["last_error"] = None
+        state["last_result"] = result
+        state["sync_lease"] = None
+        _save_sync_state(state)
+
+
+async def _complete_library_sync_lease(
+    token: str,
+    index: dict[str, Any],
+    result: dict[str, Any],
+    completed_at: datetime,
+) -> None:
+    async with _SYNC_LOCK:
+        await asyncio.to_thread(
+            _complete_library_sync_lease_sync,
+            token,
+            index,
+            result,
+            completed_at,
+        )
+
+
+def _fail_library_sync_lease_sync(
+    token: str,
+    *,
+    message: str,
+    result: dict[str, Any],
+) -> bool:
+    with _poster_style_sync_file_lock(_library_sync_lock_path()):
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        owner = _sync_lease_owner(state)
+        if owner is None or owner[0] != token:
+            return False
+        state["last_error"] = message[:1000]
+        state["last_result"] = result
+        state["sync_lease"] = None
+        _save_sync_state(state)
+        return True
+
+
+async def _fail_library_sync_lease(
+    token: str,
+    *,
+    message: str,
+    result: dict[str, Any],
+) -> bool:
+    async with _SYNC_LOCK:
+        return await asyncio.to_thread(
+            _fail_library_sync_lease_sync,
+            token,
+            message=message,
+            result=result,
+        )
 
 
 def _cached_sync_response(state: dict[str, Any]) -> PosterStyleSyncOut:
@@ -786,30 +1234,23 @@ async def _sync_library_presets_from_github_folder(
     *,
     proxy_url: str | None = None,
 ) -> PosterStyleSyncOut:
-    """触发 GitHub 同步。冷却 + 锁与 apparel 同构。
-
-    成功 5min cooldown；失败 30s 短重试 cooldown，避免临时网络故障锁死。
-    单进程内 _SYNC_LOCK 串行执行；多副本部署仍要靠 cooldown 防互打。
-    """
+    """Claim a short cross-process lease, then run GitHub I/O lock-free."""
     if not contents_url:
         raise _http(
             "sync_not_configured",
             "preset GitHub folder url is not configured",
             503,
         )
-    async with _SYNC_LOCK:
-        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
-        last_success = _safe_datetime(state.get("last_success_at"))
-        if last_success is not None:
-            age = (_now() - last_success).total_seconds()
-            if age < POSTER_STYLE_SYNC_COOLDOWN_S:
-                return _cached_sync_response(state)
-        last_attempt = _safe_datetime(state.get("last_attempt_at"))
-        if last_attempt is not None:
-            age = (_now() - last_attempt).total_seconds()
-            if age < POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S:
-                return _cached_sync_response(state)
-        return await _do_sync_library_presets(contents_url, state, proxy_url=proxy_url)
+    contents_url = _validate_github_contents_url(contents_url)
+    lease_token, state = await _claim_library_sync_lease()
+    if lease_token is None:
+        return _cached_sync_response(state)
+    return await _do_sync_library_presets(
+        contents_url,
+        state,
+        proxy_url=proxy_url,
+        lease_token=lease_token,
+    )
 
 
 def _build_preset_entry(
@@ -858,8 +1299,17 @@ def _preset_changed(prev: dict[str, Any], cur: dict[str, Any]) -> bool:
         return True
     for a, b in zip(prev_samples, cur_samples):
         if not isinstance(a, dict) or not isinstance(b, dict):
-            continue
-        if a.get("sha256") != b.get("sha256"):
+            return True
+        if any(
+            a.get(field) != b.get(field)
+            for field in (
+                "name",
+                "sha256",
+                "thumb_sha256",
+                "github_sha",
+                "github_thumb_sha",
+            )
+        ):
             return True
     return False
 
@@ -869,211 +1319,29 @@ async def _do_sync_library_presets(
     state: dict[str, Any],
     *,
     proxy_url: str | None = None,
+    lease_token: str | None = None,
 ) -> PosterStyleSyncOut:
-    now = _now()
-    state["last_attempt_at"] = now.isoformat().replace("+00:00", "Z")
-    _save_sync_state(state)
+    return await _do_poster_style_sync(
+        sys.modules[__name__],
+        contents_url,
+        state,
+        proxy_url=proxy_url,
+        lease_token=lease_token,
+    )
 
-    added = 0
-    updated = 0
-    skipped = 0
-    errors: list[str] = []
-    try:
-        async with httpx.AsyncClient(**_http_client_kwargs(proxy_url)) as client:
-            files = await _walk_github_contents(client, contents_url)
-            # 按目录分组 GitHub 文件实体。dir 信息靠 entry["path"] 的父目录。
-            by_dir: dict[str, dict[str, Any]] = {}
-            for entry in files:
-                path_value = str(entry.get("path") or entry.get("name") or "")
-                if not path_value:
-                    continue
-                path = Path(path_value)
-                parts = [
-                    p for p in path.parts if p not in {"assets", "poster-style-presets"}
-                ]
-                if len(parts) < 2:
-                    continue
-                dir_name = parts[-2]
-                bucket = by_dir.setdefault(
-                    dir_name,
-                    {"meta": None, "samples": [], "thumbs": {}},
-                )
-                file_name = path.name.lower()
-                suffix = path.suffix.lower()
-                if file_name == "meta.json":
-                    bucket["meta"] = entry
-                elif suffix in POSTER_STYLE_IMAGE_SUFFIXES:
-                    stem = path.stem
-                    if stem.endswith(".thumb"):
-                        base = stem[: -len(".thumb")]
-                        bucket["thumbs"][f"{base}{suffix}"] = entry
-                    else:
-                        bucket["samples"].append(entry)
 
-            index = _load_global_preset_index()
-            existing_by_id = {
-                str(item.get("id") or ""): dict(item)
-                for item in index.get("preset_items", [])
-                if isinstance(item, dict)
-            }
-            next_items: dict[str, dict[str, Any]] = dict(existing_by_id)
-            seen_sync_keys: set[tuple[str, int]] = set()
-
-            for dir_name, bucket in by_dir.items():
-                meta_entry = bucket["meta"]
-                if not isinstance(meta_entry, dict):
-                    continue
-                meta = await _fetch_meta_json(client, meta_entry)
-                if meta is None:
-                    skipped += 1
-                    errors.append(f"{dir_name}: meta.json missing or invalid")
-                    continue
-                category_hint = _category_from_folder_name(dir_name)
-                parsed = _metadata_from_meta_json(meta, category_hint=category_hint)
-                if parsed is None:
-                    skipped += 1
-                    errors.append(f"{dir_name}: meta.json has no preset_id")
-                    continue
-                preset_id = parsed["preset_id"]
-                version = int(parsed["version"])
-                sync_key = (preset_id, version)
-                if sync_key in seen_sync_keys:
-                    skipped += 1
-                    errors.append(
-                        f"{dir_name}: duplicate preset_id/version {preset_id}@{version}"
-                    )
-                    continue
-                seen_sync_keys.add(sync_key)
-                item_id = _preset_item_id(preset_id, version)
-                previous = next_items.get(item_id)
-
-                # 下载样图 + thumb，落盘到 storage。
-                sample_entries: list[dict[str, Any]] = sorted(
-                    bucket["samples"],
-                    key=lambda e: str(e.get("name") or ""),
-                )
-                samples_for_storage: list[dict[str, Any]] = []
-                for sample_entry in sample_entries[:POSTER_STYLE_MAX_SAMPLES]:
-                    sample_name = str(sample_entry.get("name") or "")
-                    sample_url = str(sample_entry.get("download_url") or "")
-                    if not sample_url:
-                        continue
-                    try:
-                        data = await _fetch_bytes(client, sample_url)
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(
-                            f"{preset_id}: sample {sample_name} download failed: {exc!r}"
-                        )
-                        continue
-                    sample_sha = hashlib.sha256(data).hexdigest()
-                    image_key = _preset_storage_key(preset_id, version, sample_name)
-                    image_path = _storage_path(image_key)
-                    needs_write = not image_path.is_file()
-                    if previous:
-                        prev_samples = previous.get("samples") or []
-                        prev_match = next(
-                            (
-                                s
-                                for s in prev_samples
-                                if isinstance(s, dict) and s.get("name") == sample_name
-                            ),
-                            None,
-                        )
-                        if prev_match and prev_match.get("sha256") != sample_sha:
-                            needs_write = True
-                    else:
-                        needs_write = True
-                    if needs_write:
-                        _write_bytes_replace(image_path, data)
-
-                    # thumb：与 image key 同目录下 stem.thumb.*
-                    thumb_entry = bucket["thumbs"].get(sample_name)
-                    thumb_key = image_key
-                    thumb_sha = sample_sha
-                    if isinstance(thumb_entry, dict):
-                        thumb_url = str(thumb_entry.get("download_url") or "")
-                        suffix = Path(sample_name).suffix.lower() or ".webp"
-                        base_stem = Path(sample_name).stem
-                        thumb_key_candidate = _preset_thumb_storage_key(
-                            preset_id, version, base_stem, suffix
-                        )
-                        if thumb_url:
-                            try:
-                                thumb_data = await _fetch_bytes(client, thumb_url)
-                                thumb_sha = hashlib.sha256(thumb_data).hexdigest()
-                                thumb_path = _storage_path(thumb_key_candidate)
-                                if not thumb_path.is_file():
-                                    _write_bytes_replace(thumb_path, thumb_data)
-                                thumb_key = thumb_key_candidate
-                            except Exception as exc:  # noqa: BLE001
-                                errors.append(
-                                    f"{preset_id}: thumb fallback to original: {exc!r}"
-                                )
-                    samples_for_storage.append(
-                        {
-                            "name": sample_name,
-                            "image_storage_key": image_key,
-                            "thumb_storage_key": thumb_key,
-                            "sha256": sample_sha,
-                            "thumb_sha256": thumb_sha,
-                        }
-                    )
-
-                item = _build_preset_entry(
-                    parsed_meta=parsed,
-                    samples_for_storage=samples_for_storage,
-                    previous=previous,
-                )
-                if previous is None:
-                    added += 1
-                elif _preset_changed(previous, item):
-                    updated += 1
-                else:
-                    skipped += 1
-                next_items[item_id] = item
-
-            index["preset_items"] = sorted(
-                next_items.values(),
-                key=lambda item: (
-                    _normalize_category(item.get("category")),
-                    str(item.get("preset_id") or ""),
-                    int(item.get("version") or 0),
-                ),
-            )
-            _save_global_preset_index(index)
+def _publish_local_bootstrap_sync(items: list[dict[str, Any]]) -> bool:
+    with _poster_style_sync_file_lock(_library_sync_lock_path()):
         state = _read_json_file(_library_sync_state_path(), _default_sync_state())
-        state["last_success_at"] = now.isoformat().replace("+00:00", "Z")
-        state["last_error"] = None
-        state["last_result"] = {
-            "added": added,
-            "updated": updated,
-            "skipped": skipped,
-            "errors": errors[:20],
-        }
-        _save_sync_state(state)
-        return PosterStyleSyncOut(
-            status="ok",
-            added=added,
-            updated=updated,
-            skipped=skipped,
-            errors=errors[:20],
-            last_success_at=now,
-            last_error=None,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
-        msg = str(exc)
-        state["last_error"] = msg[:1000]
-        state["last_result"] = {
-            "added": added,
-            "updated": updated,
-            "skipped": skipped,
-            "errors": [*errors[:19], msg[:300]],
-        }
-        _save_sync_state(state)
-        raise _http("preset_sync_failed", msg or "preset sync failed", 502) from exc
+        owner = _sync_lease_owner(state)
+        if owner is not None and owner[1] > _now():
+            return False
+        index = _load_global_preset_index()
+        if index.get("preset_items"):
+            return False
+        index["preset_items"] = items
+        _save_global_preset_index(index)
+        return True
 
 
 async def _bootstrap_local_presets_if_empty() -> None:
@@ -1083,13 +1351,13 @@ async def _bootstrap_local_presets_if_empty() -> None:
     GitHub，只是 meta.json 有；先把本地能扫到的 preset 元数据填到 index 里，
     sync 时再下样图覆盖。如果 sample 仓库内已经有，也一并尝试拷到 storage。
     """
-    index = _load_global_preset_index()
+    index = await asyncio.to_thread(_load_global_preset_index)
     if index.get("preset_items"):
         return
     local_root = _local_presets_root()
     if local_root is None:
         return
-    scanned = _scan_local_presets(local_root)
+    scanned = await asyncio.to_thread(_scan_local_presets, local_root)
     if not scanned:
         return
     items: list[dict[str, Any]] = []
@@ -1103,9 +1371,12 @@ async def _bootstrap_local_presets_if_empty() -> None:
                 previous=None,
             )
         )
-    index["preset_items"] = items
-    _save_global_preset_index(index)
-    logger.info("poster style: bootstrapped %d presets from local assets", len(items))
+    async with _SYNC_LOCK:
+        published = await asyncio.to_thread(_publish_local_bootstrap_sync, items)
+    if published:
+        logger.info(
+            "poster style: bootstrapped %d presets from local assets", len(items)
+        )
 
 
 # ----- Item lookup ---------------------------------------------------------
@@ -1135,7 +1406,7 @@ async def _find_preset_item(
     hidden = await _load_user_hidden_preset_ids(db, user_id)
     if item_id in hidden:
         return None
-    index = _load_global_preset_index()
+    index = await asyncio.to_thread(_load_global_preset_index)
     for item in index.get("preset_items") or []:
         if isinstance(item, dict) and str(item.get("id") or "") == item_id:
             return dict(item)
@@ -1153,24 +1424,10 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _open_storage_file(storage_key: str) -> tuple[Path, str, str]:
+def _open_storage_file(storage_key: str) -> tuple[Path, str, int]:
     path = _storage_path(storage_key)
     if not path.is_file():
         raise _http("not_found", "library binary missing", 404)
-    return path, _guess_mime(path), _sha256_file(path)
-
-
-def _stream_file(path: Path) -> Iterable[bytes]:
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(64 * 1024)
-            if not chunk:
-                break
-            yield chunk
-
-
-def _binary_response(storage_key: str, request: Request) -> Response:
-    path, media_type, sha = _open_storage_file(storage_key)
     size = path.stat().st_size
     if size > POSTER_STYLE_MAX_BINARY_BYTES:
         raise _http(
@@ -1178,6 +1435,26 @@ def _binary_response(storage_key: str, request: Request) -> Response:
             f"library binary exceeds {POSTER_STYLE_MAX_BINARY_BYTES} bytes",
             413,
         )
+    return path, _guess_mime(path), size
+
+
+def _stream_file(path: Path, max_bytes: int) -> Iterable[bytes]:
+    remaining = max(0, max_bytes)
+    with path.open("rb") as f:
+        while remaining:
+            chunk = f.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+async def _binary_response(storage_key: str, request: Request) -> Response:
+    path, media_type, size = await asyncio.to_thread(
+        _open_storage_file,
+        storage_key,
+    )
+    sha = await asyncio.to_thread(_sha256_file, path)
     etag = f'"{sha}"'
     if request.headers.get("if-none-match") == etag:
         return Response(
@@ -1185,7 +1462,7 @@ def _binary_response(storage_key: str, request: Request) -> Response:
             headers={"ETag": etag, "Cache-Control": "private, max-age=86400"},
         )
     return StreamingResponse(
-        _stream_file(path),
+        _stream_file(path, size),
         media_type=media_type,
         headers={
             "Cache-Control": "private, max-age=86400",
@@ -1256,7 +1533,7 @@ async def list_poster_styles(
 
     preset_total = 0
     if source in {"all", "preset"}:
-        index = _load_global_preset_index()
+        index = await asyncio.to_thread(_load_global_preset_index)
         hidden = await _load_user_hidden_preset_ids(db, user.id)
         preset_items = [
             item
@@ -1335,7 +1612,7 @@ async def get_poster_style_item_binary(
     storage_key = _preset_cover_storage_key(raw)
     if not storage_key:
         raise _http("no_cover", "preset has no synced sample image yet", 404)
-    return _binary_response(storage_key, request)
+    return await _binary_response(storage_key, request)
 
 
 @router.get("/items/{item_id:path}/thumb")
@@ -1357,7 +1634,7 @@ async def get_poster_style_item_thumb(
     storage_key = _preset_thumb_for_cover(raw) or _preset_cover_storage_key(raw)
     if not storage_key:
         raise _http("no_cover", "preset has no synced sample image yet", 404)
-    return _binary_response(storage_key, request)
+    return await _binary_response(storage_key, request)
 
 
 @router.get("/items/{item_id:path}/samples/{sample_index}")
@@ -1382,6 +1659,7 @@ async def get_poster_style_sample(
     if (
         not isinstance(samples, list)
         or sample_index < 0
+        or sample_index >= POSTER_STYLE_MAX_SAMPLES
         or sample_index >= len(samples)
     ):
         raise _http("invalid_sample", "sample index out of range", 404)
@@ -1391,7 +1669,7 @@ async def get_poster_style_sample(
     storage_key = str(sample.get("image_storage_key") or "")
     if not storage_key:
         raise _http("no_sample", "preset sample has no synced binary yet", 404)
-    return _binary_response(storage_key, request)
+    return await _binary_response(storage_key, request)
 
 
 # ----- 创建 / 编辑 / 删除 -------------------------------------------------

@@ -11,9 +11,7 @@ export interface AppNavItem {
   matchPrefixes: readonly string[];
 }
 
-const IS_DESKTOP_RUNTIME = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
-
-const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
+const APP_NAV_ITEMS: readonly AppNavItem[] = [
   {
     key: "studio",
     label: "创作",
@@ -56,45 +54,6 @@ const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
   },
 ];
 
-const DESKTOP_NAV_ITEMS: readonly AppNavItem[] = [
-  {
-    key: "studio",
-    label: "创作",
-    route: "/",
-    detail: "本机对话、生图、图生图、修图",
-    keywords: ["new", "studio", "home", "创作", "首页", "工作台", "聊天", "生图"],
-    matchPrefixes: ["/"],
-  },
-  {
-    key: "video",
-    label: "视频",
-    route: "/video",
-    detail: "本机视频任务和生成历史",
-    keywords: ["video", "seedance", "视频", "文生视频", "图生视频", "首帧"],
-    matchPrefixes: ["/video"],
-  },
-  {
-    key: "assets",
-    label: "素材",
-    route: "/assets",
-    detail: "本机生成图、上传图和会话素材",
-    keywords: ["assets", "stream", "feed", "素材", "资产", "图库", "图片"],
-    matchPrefixes: ["/assets", "/stream"],
-  },
-  {
-    key: "me",
-    label: "设置",
-    route: "/me",
-    detail: "供应商池、记忆、数据目录、诊断和更新",
-    keywords: ["me", "profile", "account", "settings", "我的", "账号", "设置", "记忆"],
-    matchPrefixes: ["/me", "/settings"],
-  },
-];
-
-export const APP_NAV_ITEMS: readonly AppNavItem[] = IS_DESKTOP_RUNTIME
-  ? DESKTOP_NAV_ITEMS
-  : DOCKER_NAV_ITEMS;
-
 export const DEFAULT_NAV_VISIBILITY: Required<NavVisibility> = {
   studio: true,
   video: true,
@@ -127,7 +86,7 @@ export function getAppNavItems(
   return APP_NAV_ITEMS.filter((item) => isNavItemVisible(item, visibility));
 }
 
-export function matchesPathPrefix(pathname: string, prefix: string): boolean {
+function matchesPathPrefix(pathname: string, prefix: string): boolean {
   if (prefix === "/") return pathname === "/" || pathname === "";
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
@@ -152,7 +111,7 @@ export function getActiveNavKey(
   return getActiveNavKeyFromItems(pathname, getAppNavItems(visibility));
 }
 
-export function getRouteNavKey(pathname: string): AppNavKey | null {
+function getRouteNavKey(pathname: string): AppNavKey | null {
   return getActiveNavKeyFromItems(pathname, APP_NAV_ITEMS);
 }
 

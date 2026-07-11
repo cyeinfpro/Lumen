@@ -30,6 +30,13 @@ BYOK_DEFAULT_VALIDATION_TIMEOUT_MS = 15_000
 BYOK_DEFAULT_PENDING_TOKEN_TTL_SECONDS = 900
 BYOK_ENCRYPTION_VERSION = "v1"
 BYOK_MAX_API_KEY_LEN = 512
+_PROVIDER_PROBE_MODEL = "gpt-5.4-mini"
+_PROVIDER_PROBE_INSTRUCTIONS = (
+    "You are a precise calculator. Return only the final integer."
+)
+_PROVIDER_PROBE_INPUT = (
+    "What is 99 times 99? Reply with only the integer result, no words, no explanation."
+)
 
 # Accept: pure 0, or non-zero-leading 1-3 digits + optional thousands groups
 # (each exactly 3 digits, separated by ',' or ' '), or any plain non-zero
@@ -206,6 +213,27 @@ def build_validation_request(
         "stream": False,
         "store": False,
         "max_output_tokens": 16,
+    }
+
+
+def build_provider_probe_request() -> dict[str, Any]:
+    """Build the fixed Responses payload used for provider health probes."""
+    return {
+        "model": _PROVIDER_PROBE_MODEL,
+        "instructions": _PROVIDER_PROBE_INSTRUCTIONS,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _PROVIDER_PROBE_INPUT,
+                    }
+                ],
+            }
+        ],
+        "stream": False,
+        "store": False,
     }
 
 

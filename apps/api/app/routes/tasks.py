@@ -24,7 +24,6 @@ from lumen_core.constants import (
     GenerationStatus,
     task_channel,
 )
-from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.runtime_settings import get_spec
 from lumen_core.models import Completion, Generation, OutboxEvent, WalletTransaction
 from lumen_core.models import Conversation, Image, ImageVariant, Message
@@ -39,7 +38,6 @@ from lumen_core.schemas import (
 
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
-from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
@@ -120,6 +118,10 @@ def _redis_text(value: object) -> str | None:
 
 def _generation_billing_ref_id(task_id: str, retry_count: int | None) -> str:
     return billing_core.retry_billing_ref_id(task_id, retry_count)
+
+
+def _generation_billing_retry_count(task: Generation) -> int:
+    return billing_core.generation_billing_retry_count(task)
 
 
 def _completion_billing_ref_id(task_id: str, retry_count: int | None) -> str:
@@ -206,7 +208,8 @@ async def _hold_generation_retry_wallet(
     amount = await _generation_retry_hold_micro(db, gen)
     if amount <= 0:
         return False
-    ref_id = _generation_billing_ref_id(gen.id, getattr(gen, "retry_count", 0))
+    retry_count = _generation_billing_retry_count(gen)
+    ref_id = _generation_billing_ref_id(gen.id, retry_count)
     try:
         tx = await billing_core.hold(
             db,
@@ -219,7 +222,7 @@ async def _hold_generation_retry_wallet(
             meta={
                 "generation_id": gen.id,
                 "reason": "generation retry",
-                "retry_count": int(getattr(gen, "retry_count", 0) or 0),
+                "retry_count": retry_count,
             },
         )
     except billing_core.BillingError as exc:
@@ -232,8 +235,6 @@ async def _completion_retry_hold_micro(
     completion: Completion,
     previous_retry_count: int,
 ) -> int:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return 0
     if not await _billing_enabled(db):
         return 0
     prev_ref_id = _completion_billing_ref_id(completion.id, previous_retry_count)
@@ -322,6 +323,8 @@ def _json_dict(value: Any) -> dict[str, Any]:
 def _generation_request_image_count(gen: Generation) -> int:
     request = _json_dict(getattr(gen, "upstream_request", None))
     raw = request.get("n")
+    if raw is None:
+        return 1
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -602,24 +605,54 @@ def _task_substage(
     return None
 
 
-def _task_item(
+def _build_task_item(
     kind: Literal["generation", "completion"],
     task: Generation | Completion,
+    *,
+    conversation_id: str | None = None,
+    message_content: dict[str, Any] | None = None,
+    conversation_default_params: dict[str, Any] | None = None,
+    thumb_url: str | None = None,
+    queue_position: int | None = None,
+    sort_at: datetime | None = None,
 ) -> TaskItemOut:
     request = _task_request(task)
-    diagnostics = request.get("generation_diagnostics")
-    if not isinstance(diagnostics, dict):
-        diagnostics = {}
+    diagnostics = _json_dict(getattr(task, "diagnostics", None))
+    if not diagnostics:
+        diagnostics = _json_dict(request.get("generation_diagnostics"))
+    project_id, workflow_type, workflow_step_key = _task_project_meta(
+        task,
+        message_content,
+    )
+    workflow_type = (
+        workflow_type
+        or getattr(task, "workflow_type", None)
+        or _task_request_str(task, "workflow_type")
+    )
+    workflow_step_key = (
+        workflow_step_key
+        or getattr(task, "workflow_step_key", None)
+        or _task_request_str(task, "workflow_step_key")
+    )
+    source = _task_source(
+        task,
+        project_id=project_id,
+        conversation_default_params=conversation_default_params,
+    )
     status = str(getattr(task, "status", ""))
     error_code = _task_error_code(task)
     retryable = _task_retryable(kind=kind, status=status, error_code=error_code)
     cancelled = status == "canceled"
-    waiting_provider = bool(
-        status in {"queued", "running"} and error_code in _WAITING_PROVIDER_CODES
+    retrying = status == "queued" and bool(error_code) and task.attempt > 0
+    waiting_provider = (
+        status == "queued"
+        and kind == "generation"
+        and error_code in _WAITING_PROVIDER_CODES
     )
-    retrying = bool(status == "queued" and error_code and retryable)
-    substage = request.get("substage") or diagnostics.get("substage")
-    if not isinstance(substage, str):
+    substage = _string_value(request.get("substage")) or _string_value(
+        diagnostics.get("substage")
+    )
+    if substage is None:
         substage = _task_substage(
             task,
             kind=kind,
@@ -628,9 +661,18 @@ def _task_item(
             cancelled=cancelled,
             retryable=retryable,
         )
+    if sort_at is None:
+        sort_at = _task_sort_at(task)
+    cursor = _encode_task_cursor(sort_at, kind, task.id)
+    prompt = getattr(task, "prompt", None) if kind == "generation" else None
     queue_wait = getattr(task, "queue_wait_ms", None)
     if queue_wait is None:
         queue_wait = _task_request_int(task, "queue_wait_ms")
+    title = (
+        prompt
+        if isinstance(prompt, str) and prompt
+        else ("图像生成" if kind == "generation" else "文本回复")
+    )
     return TaskItemOut(
         kind=kind,
         id=task.id,
@@ -638,19 +680,21 @@ def _task_item(
         status=status,
         progress_stage=task.progress_stage,
         stage=task.progress_stage,
+        substage=substage,
         started_at=task.started_at,
-        created_at=getattr(task, "created_at", None),
-        finished_at=getattr(task, "finished_at", None),
-        source=getattr(task, "source", None) or _task_request_str(task, "source"),
+        finished_at=task.finished_at,
+        created_at=task.created_at,
+        date=sort_at,
+        cursor=cursor,
+        conversation_id=conversation_id,
+        project_id=project_id,
+        workflow_type=workflow_type,
+        workflow_step_key=workflow_step_key,
+        source=source,
         action_source=getattr(task, "action_source", None)
         or _task_request_str(task, "action_source"),
-        trace_id=getattr(task, "trace_id", None) or _task_request_str(task, "trace_id"),
-        project_id=_task_request_str(task, "project_id")
-        or _task_request_str(task, "workflow_run_id"),
-        workflow_type=getattr(task, "workflow_type", None)
-        or _task_request_str(task, "workflow_type"),
-        workflow_step_key=getattr(task, "workflow_step_key", None)
-        or _task_request_str(task, "workflow_step_key"),
+        trace_id=getattr(task, "trace_id", None)
+        or _task_request_str(task, "trace_id"),
         queue_lane=getattr(task, "queue_lane", None)
         or _task_request_str(task, "queue_lane"),
         pixel_count=getattr(task, "pixel_count", None)
@@ -660,13 +704,10 @@ def _task_item(
         cost_class=getattr(task, "cost_class", None)
         or _task_request_str(task, "cost_class"),
         queue_wait_ms=queue_wait,
-        queue_position=_task_request_int(task, "queue_position"),
-        substage=substage,
-        retrying=retrying,
-        waiting_provider=waiting_provider,
-        cancelled=cancelled,
+        title=title[:160] if title else None,
+        prompt=prompt if isinstance(prompt, str) else None,
         error_code=error_code,
-        error_message=getattr(task, "error_message", None),
+        error_message=_string_value(getattr(task, "error_message", None)),
         retryable=retryable,
         recommended_actions=_task_recommended_actions(
             kind=kind,
@@ -674,7 +715,16 @@ def _task_item(
             error_code=error_code,
             retryable=retryable,
         ),
-        thumb_url=_task_request_str(task, "thumb_url"),
+        thumb_url=thumb_url,
+        queue_position=queue_position,
+        retrying=retrying,
+        waiting_provider=waiting_provider,
+        cancelled=cancelled,
+        source_image_id=(
+            _string_value(getattr(task, "primary_input_image_id", None))
+            if kind == "generation"
+            else None
+        ),
     )
 
 
@@ -741,8 +791,6 @@ async def _release_queued_task_hold(
 
 
 async def _task_wallet_exists(db: AsyncSession, user_id: str) -> bool:
-    if is_desktop_runtime(settings.lumen_runtime):
-        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 
@@ -821,7 +869,7 @@ async def cancel_generation(
             user_id=user.id,
             ref_type="generation",
             ref_id=_generation_billing_ref_id(
-                gen.id, getattr(gen, "retry_count", 0)
+                gen.id, _generation_billing_retry_count(gen)
             ),
             reason="queued generation cancelled by user",
         )
@@ -892,7 +940,7 @@ async def retry_generation(
     gen.status = GenerationStatus.QUEUED.value
     gen.progress_stage = GenerationStage.QUEUED.value
     gen.attempt = 0
-    gen.retry_count = int(getattr(gen, "retry_count", 0) or 0) + 1
+    gen.billing_retry_count = _generation_billing_retry_count(gen) + 1
     gen.error_code = None
     gen.error_message = None
     gen.started_at = None
@@ -1133,21 +1181,35 @@ async def list_tasks(
     gens: list[Generation] = []
     comps: list[Completion] = []
     if kind in {"all", "generation"}:
-        gens = (
-            await db.execute(
-                gen_stmt.order_by(_task_sort_expr(Generation).desc(), Generation.id.desc())
-                .limit(query_limit)
+        gens = list(
+            (
+                await db.execute(
+                    gen_stmt.order_by(
+                        _task_sort_expr(Generation).desc(),
+                        Generation.id.desc(),
+                    ).limit(query_limit)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     if kind in {"all", "completion"}:
-        comps = (
-            await db.execute(
-                comp_stmt.order_by(_task_sort_expr(Completion).desc(), Completion.id.desc())
-                .limit(query_limit)
+        comps = list(
+            (
+                await db.execute(
+                    comp_stmt.order_by(
+                        _task_sort_expr(Completion).desc(),
+                        Completion.id.desc(),
+                    ).limit(query_limit)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
-    message_ids = [task.message_id for task in [*gens, *comps]]
+    message_ids = [gen.message_id for gen in gens] + [
+        completion.message_id for completion in comps
+    ]
     message_meta: dict[str, tuple[str, dict[str, Any]]] = {}
     if message_ids:
         rows = (
@@ -1224,57 +1286,13 @@ async def list_tasks(
 
     sortable_items: list[tuple[datetime, str, str, TaskItemOut]] = []
 
-    def add_item(task: Generation | Completion, item_kind: str) -> None:
+    def add_item(
+        task: Generation | Completion,
+        item_kind: Literal["generation", "completion"],
+    ) -> None:
         msg_conv_id, msg_content = message_meta.get(task.message_id, (None, {}))
-        task_project_id, workflow_type, workflow_step_key = _task_project_meta(
-            task,
-            msg_content,
-        )
-        workflow_type = (
-            workflow_type
-            or getattr(task, "workflow_type", None)
-            or _task_request_str(task, "workflow_type")
-        )
-        workflow_step_key = (
-            workflow_step_key
-            or getattr(task, "workflow_step_key", None)
-            or _task_request_str(task, "workflow_step_key")
-        )
-        task_source = _task_source(
-            task,
-            project_id=task_project_id,
-            conversation_default_params=conv_defaults.get(msg_conv_id or ""),
-        )
-        if source and task_source != source:
-            return
-        if conversation_id and msg_conv_id != conversation_id:
-            return
-        if project_id and task_project_id != project_id:
-            return
-
-        err_code = _task_error_code(task)
-        is_retryable = _task_retryable(item_kind, task.status, err_code)
-        if retryable is not None and is_retryable is not retryable:
-            return
-        is_cancelled = task.status == "canceled"
-        is_retrying = task.status == "queued" and bool(err_code) and task.attempt > 0
-        is_waiting_provider = (
-            task.status == "queued"
-            and item_kind == "generation"
-            and bool(err_code in _WAITING_PROVIDER_CODES)
-        )
-        substage = _task_substage(
-            task,
-            kind=item_kind,
-            retrying=is_retrying,
-            waiting_provider=is_waiting_provider,
-            cancelled=is_cancelled,
-            retryable=is_retryable,
-        )
         sort_at = _task_sort_at(task)
-        task_cursor = _encode_task_cursor(sort_at, item_kind, task.id)
         thumb_url = None
-        prompt = getattr(task, "prompt", None) if item_kind == "generation" else None
         if item_kind == "generation":
             image = image_by_gen.get(task.id)
             if image is not None:
@@ -1282,68 +1300,30 @@ async def list_tasks(
                     image.id,
                     variant_kinds.get(image.id, set()),
                 )
-        queue_wait = getattr(task, "queue_wait_ms", None)
-        if queue_wait is None:
-            queue_wait = _task_request_int(task, "queue_wait_ms")
-        title = (
-            prompt
-            if isinstance(prompt, str) and prompt
-            else ("图像生成" if item_kind == "generation" else "文本回复")
+        item = _build_task_item(
+            item_kind,
+            task,
+            conversation_id=msg_conv_id,
+            message_content=msg_content,
+            conversation_default_params=conv_defaults.get(msg_conv_id or ""),
+            thumb_url=thumb_url,
+            queue_position=queue_positions.get(task.id),
+            sort_at=sort_at,
         )
+        if source and item.source != source:
+            return
+        if conversation_id and item.conversation_id != conversation_id:
+            return
+        if project_id and item.project_id != project_id:
+            return
+        if retryable is not None and item.retryable is not retryable:
+            return
         sortable_items.append(
             (
                 sort_at,
                 item_kind,
                 task.id,
-                TaskItemOut(
-                    kind=item_kind,  # type: ignore[arg-type]
-                    id=task.id,
-                    message_id=task.message_id,
-                    status=task.status,
-                    progress_stage=task.progress_stage,
-                    stage=task.progress_stage,
-                    substage=substage,
-                    started_at=task.started_at,
-                    finished_at=task.finished_at,
-                    created_at=task.created_at,
-                    date=sort_at,
-                    cursor=task_cursor,
-                    conversation_id=msg_conv_id,
-                    project_id=task_project_id,
-                    workflow_type=workflow_type,
-                    workflow_step_key=workflow_step_key,
-                    source=task_source,
-                    queue_lane=getattr(task, "queue_lane", None)
-                    or _task_request_str(task, "queue_lane"),
-                    pixel_count=getattr(task, "pixel_count", None)
-                    or _task_request_int(task, "pixel_count"),
-                    size_bucket=getattr(task, "size_bucket", None)
-                    or _task_request_str(task, "size_bucket"),
-                    cost_class=getattr(task, "cost_class", None)
-                    or _task_request_str(task, "cost_class"),
-                    queue_wait_ms=queue_wait,
-                    title=title[:160] if title else None,
-                    prompt=prompt if isinstance(prompt, str) else None,
-                    error_code=err_code,
-                    error_message=_string_value(getattr(task, "error_message", None)),
-                    retryable=is_retryable,
-                    recommended_actions=_task_recommended_actions(
-                        kind=item_kind,
-                        status=task.status,
-                        error_code=err_code,
-                        retryable=is_retryable,
-                    ),
-                    thumb_url=thumb_url,
-                    queue_position=queue_positions.get(task.id),
-                    retrying=is_retrying,
-                    waiting_provider=is_waiting_provider,
-                    cancelled=is_cancelled,
-                    source_image_id=(
-                        _string_value(getattr(task, "primary_input_image_id", None))
-                        if item_kind == "generation"
-                        else None
-                    ),
-                ),
+                item,
             )
         )
 

@@ -456,6 +456,173 @@ def test_text_probe_failure_does_not_open_text_circuit() -> None:
     assert h.last_failure_at is not None
 
 
+def test_open_circuit_fallback_failure_keeps_cooldown_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    now = 1000.0
+    h.consecutive_failures = 3
+    h.cooldown_until = now + 30.0
+    monkeypatch.setattr(provider_pool_module.time, "monotonic", lambda: now)
+
+    assert [p.name for p in pool._select_ordered()] == ["acc1"]
+    pool.report_failure("acc1")
+
+    assert h.consecutive_failures == 3
+    assert h.cooldown_until == now + 30.0
+    assert h.total_requests == 1
+    assert h.failed_requests == 1
+    assert h.last_failure_at == now
+
+
+def test_open_fallback_finishing_after_deadline_does_not_reopen_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    clock = [1000.0]
+    original_deadline = clock[0] + 1.0
+    h.consecutive_failures = 3
+    h.cooldown_until = original_deadline
+    monkeypatch.setattr(
+        provider_pool_module.time,
+        "monotonic",
+        lambda: clock[0],
+    )
+
+    assert [p.name for p in pool._select_ordered()] == ["acc1"]
+    assert h.half_open_probe_inflight is False
+    clock[0] = original_deadline + 1.0
+    pool.report_failure("acc1")
+
+    assert h.consecutive_failures == 3
+    assert h.cooldown_until == original_deadline
+    assert h.half_open_probe_inflight is False
+
+
+def test_half_open_allows_only_one_probe_until_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    now = 1000.0
+    h.consecutive_failures = 3
+    h.cooldown_until = now - 1.0
+    monkeypatch.setattr(provider_pool_module.time, "monotonic", lambda: now)
+
+    assert [p.name for p in pool._select_ordered()] == ["acc1"]
+    assert h.half_open_probe_inflight is True
+    with pytest.raises(Exception, match="no upstream providers available"):
+        pool._select_ordered()
+
+    pool.report_success("acc1")
+
+    assert h.half_open_probe_inflight is False
+    assert h.consecutive_failures == 0
+    assert h.cooldown_until is None
+    assert [p.name for p in pool._select_ordered()] == ["acc1"]
+
+
+def test_single_provider_half_open_continuous_request_releases_unreported_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    now = 1000.0
+    h.consecutive_failures = 3
+    h.cooldown_until = now - 1.0
+    monkeypatch.setattr(provider_pool_module.time, "monotonic", lambda: now)
+
+    provider = pool._select_ordered()[0]
+    assert provider.text_circuit_state == "half_open"
+    assert provider.half_open_probe_token == h.half_open_probe_token
+    with pool.text_attempt(provider):
+        with pytest.raises(Exception, match="no upstream providers available"):
+            pool._select_ordered()
+
+    assert h.half_open_probe_inflight is False
+    assert h.half_open_probe_token is None
+    next_provider = pool._select_ordered()[0]
+    with pool.text_attempt(next_provider) as attempt:
+        attempt.report_success()
+
+    assert h.consecutive_failures == 0
+    assert h.cooldown_until is None
+    assert h.half_open_probe_inflight is False
+
+
+def test_half_open_probe_failure_reopens_circuit_and_releases_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    now = 1000.0
+    h.consecutive_failures = 3
+    h.cooldown_until = now - 1.0
+    monkeypatch.setattr(provider_pool_module.time, "monotonic", lambda: now)
+
+    provider = pool._select_ordered()[0]
+    assert provider.name == "acc1"
+    assert h.half_open_probe_inflight is True
+
+    with pool.text_attempt(provider) as attempt:
+        attempt.report_failure()
+
+    assert h.half_open_probe_inflight is False
+    assert h.half_open_probe_token is None
+    assert h.consecutive_failures == 4
+    assert h.cooldown_until == now + provider_pool_module._CB_COOLDOWN_BASE_S * 2
+
+
+def test_open_fallback_failure_does_not_release_concurrent_half_open_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+    clock = [1000.0]
+    h.consecutive_failures = 3
+    h.cooldown_until = clock[0] + 1.0
+    monkeypatch.setattr(
+        provider_pool_module.time,
+        "monotonic",
+        lambda: clock[0],
+    )
+
+    open_fallback = pool._select_ordered()[0]
+    assert open_fallback.text_circuit_state == "open"
+    clock[0] += 2.0
+    half_open_probe = pool._select_ordered()[0]
+    half_open_token = half_open_probe.half_open_probe_token
+    assert half_open_token is not None
+
+    with pool.text_attempt(open_fallback) as attempt:
+        attempt.report_failure()
+
+    assert h.consecutive_failures == 3
+    assert h.half_open_probe_inflight is True
+    assert h.half_open_probe_token == half_open_token
+
+    with pool.text_attempt(half_open_probe) as attempt:
+        attempt.report_failure()
+
+    assert h.consecutive_failures == 4
+    assert h.half_open_probe_inflight is False
+    assert h.half_open_probe_token is None
+
+
 @pytest.mark.asyncio
 async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import provider_pool as provider_pool_module

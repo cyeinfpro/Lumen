@@ -93,8 +93,6 @@ const NAV_ICONS: Record<AppNavKey, CommandIcon> = {
   me: User,
 };
 
-const IS_DESKTOP_RUNTIME = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
-
 const SHARED_COMMANDS: Command[] = [
   command({
     id: "toggle-sidebar",
@@ -157,7 +155,7 @@ const DOCKER_ONLY_COMMANDS: Command[] = [
 
 const STATIC_COMMANDS: Command[] = [
   ...SHARED_COMMANDS,
-  ...(IS_DESKTOP_RUNTIME ? [] : DOCKER_ONLY_COMMANDS),
+  ...DOCKER_ONLY_COMMANDS,
 ];
 
 export function CommandPalette() {
@@ -542,7 +540,7 @@ export function CommandPalette() {
   }
 
   return (
-    <div className="fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]">
+    <div className="mobile-dialog-shell fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]">
       {/* @backdrop-button: dialog backdrop button，需要 click 但不能用 Button primitive 样式 */}
       <button
         type="button"
@@ -558,7 +556,7 @@ export function CommandPalette() {
         aria-labelledby={headingId}
         aria-describedby={descriptionId}
         className={cn(
-          "relative flex w-full max-w-xl flex-col max-h-[70vh] overflow-hidden rounded-[var(--radius-card)]",
+          "mobile-dialog-panel relative flex w-full max-w-xl flex-col max-h-[70vh] overflow-hidden rounded-[var(--radius-card)]",
           "border border-[var(--border-strong)] bg-[var(--bg-1)]/95",
           "shadow-[var(--shadow-3)] backdrop-blur-xl",
         )}
@@ -577,5 +575,3 @@ export function CommandPalette() {
     </div>
   );
 }
-
-export default CommandPalette;

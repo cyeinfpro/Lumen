@@ -23,6 +23,7 @@ from PIL import Image as _PILImage
 from app import upstream
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 from app.tasks import generation
+from app.tasks.generation_parts import references
 from lumen_core.constants import GenerationErrorCode as EC
 
 
@@ -320,6 +321,21 @@ def test_resize_mask_keeps_bytes_when_already_aligned() -> None:
     assert out is mask or out == mask
 
 
+def test_reference_facade_keeps_pure_helper_aliases() -> None:
+    assert generation._mask_alpha_is_binary is references.mask_alpha_is_binary
+    assert generation._reference_pixel_size is references.reference_pixel_size
+
+
+def test_resize_mask_facade_injects_current_alpha_checker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = _make_png(size=(32, 32))
+    mask = _make_partial_alpha_mask_png(size=(32, 32), alpha=128)
+    monkeypatch.setattr(generation, "_mask_alpha_is_binary", lambda _image: True)
+
+    assert generation._resize_mask_to_reference(mask, ref) == mask
+
+
 def test_resize_mask_resamples_when_size_mismatch() -> None:
     ref = _make_png(size=(128, 96))
     mask = _make_mask_png(size=(64, 64))
@@ -437,6 +453,7 @@ async def test_load_reference_images_falls_back_when_normalized_ref_missing(
             return _Rows()
 
     calls: list[str] = []
+    warnings: list[tuple[object, ...]] = []
 
     async def fake_aget_bytes(key: str) -> bytes:
         calls.append(key)
@@ -444,12 +461,49 @@ async def test_load_reference_images_falls_back_when_normalized_ref_missing(
             raise FileNotFoundError(key)
         return b"original-reference"
 
+    class _Logger:
+        def warning(self, *args: object) -> None:
+            warnings.append(args)
+
     monkeypatch.setattr(generation.storage, "aget_bytes", fake_aget_bytes)
+    monkeypatch.setattr(generation, "logger", _Logger())
 
     refs = await generation._load_reference_images(_Session(), ["img-1"])
 
     assert refs == [("orig-sha", b"original-reference")]
     assert calls == ["u/user/uploads/img-1.ref.webp", "u/user/uploads/img-1.png"]
+    assert warnings and warnings[0][1:] == (
+        "img-1",
+        "u/user/uploads/img-1.ref.webp",
+        "u/user/uploads/img-1.png",
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_mask_image_uses_current_storage_and_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Rows:
+        def first(self) -> Any:
+            return SimpleNamespace(storage_key="u/user/mask.png")
+
+    class _Session:
+        async def execute(self, _stmt: Any) -> _Rows:
+            return _Rows()
+
+    class _Storage:
+        async def aget_bytes(self, key: str) -> bytes:
+            assert key == "u/user/mask.png"
+            return b"four"
+
+    monkeypatch.setattr(generation, "storage", _Storage())
+    monkeypatch.setattr(generation, "_MASK_MAX_BYTES", 3)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await generation._load_mask_image(_Session(), "mask-1")
+
+    assert exc_info.value.error_code == EC.REFERENCE_IMAGE_TOO_LARGE.value
+    assert exc_info.value.payload == {"max_bytes": 3, "actual_bytes": 4}
 
 
 def test_resize_mask_binarizes_partial_alpha_below_threshold() -> None:
@@ -539,6 +593,14 @@ def test_inpaint_size_from_reference_returns_none_for_zero_dims() -> None:
     assert generation._inpaint_size_from_reference(0, 100) is None
     assert generation._inpaint_size_from_reference(100, 0) is None
     assert generation._inpaint_size_from_reference(-1, 100) is None
+
+
+def test_inpaint_size_facade_uses_current_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generation, "MAX_EXPLICIT_ASPECT", 1.1)
+
+    assert generation._inpaint_size_from_reference(1024, 768) is None
 
 
 # --- edit_image top-level mask + prompt wrap ------------------------------

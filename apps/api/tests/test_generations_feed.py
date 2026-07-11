@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
@@ -51,6 +53,10 @@ def test_generation_feed_filters_out_deleted_or_archived_conversations() -> None
     assert "messages.deleted_at IS NULL" in rendered
     assert "conversations.deleted_at IS NULL" in rendered
     assert "conversations.archived IS false" in rendered
+    assert "EXISTS (SELECT images.id" in rendered
+    assert "images.owner_generation_id = generations.id" in rendered
+    assert "images.user_id = 'user-1'" in rendered
+    assert "images.deleted_at IS NULL" in rendered
     assert "(generations.upstream_request ->> 'workflow_run_id') IS NULL" in rendered
 
 
@@ -197,3 +203,74 @@ def test_generation_feed_image_schema_exposes_original_mime() -> None:
     )
 
     assert image.model_dump()["mime"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_generation_feed_empty_race_page_keeps_next_cursor() -> None:
+    created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    first = SimpleNamespace(
+        id="gen-2",
+        created_at=created_at,
+        message_id="msg-2",
+        prompt="first",
+        aspect_ratio="1:1",
+        primary_input_image_id=None,
+        input_image_ids=[],
+        upstream_request={},
+    )
+    second = SimpleNamespace(
+        id="gen-1",
+        created_at=created_at.replace(hour=11),
+        message_id="msg-1",
+        prompt="second",
+        aspect_ratio="1:1",
+        primary_input_image_id=None,
+        input_image_ids=[],
+        upstream_request={},
+    )
+
+    class Result:
+        def __init__(
+            self,
+            *,
+            scalar_value: Any = None,
+            rows: list[Any] | None = None,
+        ) -> None:
+            self.scalar_value = scalar_value
+            self.rows = rows or []
+
+        def scalar(self) -> Any:
+            return self.scalar_value
+
+        def scalars(self) -> Result:
+            return self
+
+        def all(self) -> list[Any]:
+            return self.rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [
+                Result(scalar_value=2),
+                Result(rows=[first, second]),
+                Result(rows=[]),
+                Result(rows=[("msg-2", "conv-2")]),
+            ]
+
+        async def execute(self, _statement: Any) -> Result:
+            return self.results.pop(0)
+
+    out = await generations.list_generation_feed(
+        SimpleNamespace(id="user-1", account_mode="wallet"),  # type: ignore[arg-type]
+        Db(),  # type: ignore[arg-type]
+        limit=1,
+    )
+
+    assert out.items == []
+    assert out.total == 2
+    assert out.next_cursor is not None
+    _created_at, generation_id, cursor_total, _filter_sig = (
+        generations._decode_cursor(out.next_cursor)
+    )
+    assert generation_id == "gen-2"
+    assert cursor_total == 2

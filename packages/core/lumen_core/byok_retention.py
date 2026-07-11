@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Conversation, Image, Message, User
@@ -168,35 +169,44 @@ async def prune_expired_byok_user_data(
         Conversation.user_id.in_(byok_user_ids)
     )
 
-    message_result = await db.execute(
-        update(Message)
-        .where(
-            Message.conversation_id.in_(byok_conversation_ids),
-            Message.deleted_at.is_(None),
-            Message.created_at < cutoff,
-        )
-        .values(deleted_at=deleted_at)
-        .execution_options(synchronize_session=False)
+    message_result = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Message)
+            .where(
+                Message.conversation_id.in_(byok_conversation_ids),
+                Message.deleted_at.is_(None),
+                Message.created_at < cutoff,
+            )
+            .values(deleted_at=deleted_at)
+            .execution_options(synchronize_session=False)
+        ),
     )
-    image_result = await db.execute(
-        update(Image)
-        .where(
-            Image.user_id.in_(byok_user_ids),
-            Image.deleted_at.is_(None),
-            Image.created_at < cutoff,
-        )
-        .values(deleted_at=deleted_at)
-        .execution_options(synchronize_session=False)
+    image_result = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Image)
+            .where(
+                Image.user_id.in_(byok_user_ids),
+                Image.deleted_at.is_(None),
+                Image.created_at < cutoff,
+            )
+            .values(deleted_at=deleted_at)
+            .execution_options(synchronize_session=False)
+        ),
     )
-    conversation_result = await db.execute(
-        update(Conversation)
-        .where(
-            Conversation.user_id.in_(byok_user_ids),
-            Conversation.deleted_at.is_(None),
-            Conversation.last_activity_at < cutoff,
-        )
-        .values(deleted_at=deleted_at)
-        .execution_options(synchronize_session=False)
+    conversation_result = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Conversation)
+            .where(
+                Conversation.user_id.in_(byok_user_ids),
+                Conversation.deleted_at.is_(None),
+                Conversation.last_activity_at < cutoff,
+            )
+            .values(deleted_at=deleted_at)
+            .execution_options(synchronize_session=False)
+        ),
     )
     return {
         "messages_deleted": int(message_result.rowcount or 0),

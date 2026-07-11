@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, TypeVar
 
 from ..redis_client import get_redis
+
+
+_T = TypeVar("_T")
+
+
+async def _resolve_redis_result(value: Awaitable[_T] | _T) -> _T:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 @dataclass(frozen=True)
@@ -42,7 +52,9 @@ class SystemOperationLockService:
         if self.fallback_busy is not None and self.fallback_busy():
             raise LockBusy("system operation already running")
         try:
-            ok = await get_redis().set(self.key, token, nx=True, ex=ttl_sec)
+            ok = await _resolve_redis_result(
+                get_redis().set(self.key, token, nx=True, ex=ttl_sec)
+            )
         except Exception:
             if self.fallback_busy is not None and self.fallback_busy():
                 raise LockBusy("system operation already running")
@@ -67,7 +79,9 @@ end
 return 0
 """
         try:
-            await get_redis().eval(script, 1, self.key, lock.token)
+            await _resolve_redis_result(
+                get_redis().eval(script, 1, self.key, lock.token)
+            )
         except Exception:
             return
 
@@ -81,7 +95,16 @@ end
 return 0
 """
         try:
-            return bool(await get_redis().eval(script, 1, self.key, lock.token, ttl_sec))
+            result = await _resolve_redis_result(
+                get_redis().eval(
+                    script,
+                    1,
+                    self.key,
+                    lock.token,
+                    str(ttl_sec),
+                )
+            )
+            return bool(result)
         except Exception:
             return False
 

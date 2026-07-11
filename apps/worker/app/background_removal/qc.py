@@ -3,7 +3,7 @@ from __future__ import annotations
 from PIL import Image as PILImage
 from PIL import ImageDraw
 
-from .types import TransparentQcReport
+from .types import TransparentQcReport, int_pixel_access
 
 # Thresholds tuned for first-launch leniency (see plan 2026-04-28).
 # Stricter values are intentional follow-ups, not initial rollout.
@@ -112,7 +112,7 @@ def evaluate(rgba: PILImage.Image) -> TransparentQcReport:
 
 def _border_alpha_max(alpha: PILImage.Image) -> int:
     width, height = alpha.size
-    pixels = alpha.load()
+    pixels = int_pixel_access(alpha)
     best = 0
     for x in range(width):
         v = pixels[x, 0]
@@ -137,13 +137,13 @@ def _largest_component_ratio(fg_mask: PILImage.Image) -> float | None:
     if longest > COMPONENT_ANALYSIS_MAX_SIDE:
         scale = COMPONENT_ANALYSIS_MAX_SIDE / longest
         target = (max(1, int(width * scale)), max(1, int(height * scale)))
-        work = fg_mask.resize(target, PILImage.NEAREST)
+        work = fg_mask.resize(target, PILImage.Resampling.NEAREST)
     else:
         work = fg_mask.copy()
 
     try:
         work = work.point(lambda v: 255 if v >= 128 else 0)
-        pixels = work.load()
+        pixels = int_pixel_access(work)
         w, h = work.size
         total_fg = 0
         for y in range(h):

@@ -247,6 +247,7 @@ deploy_systemd_units() {
              lumen-tgbot.service lumen-update-runner.service \
              lumen-update.path lumen-update-warm.service lumen-update-warm.path \
              lumen-backup.service lumen-backup.timer lumen-backup.path \
+             lumen-restore-runner.service lumen-restore.path \
              lumen-health-watchdog.service lumen-health-watchdog.timer \
              lumen-storage-mount.service \
              lumen-storage-apply.service lumen-storage-apply.path \
@@ -255,7 +256,7 @@ deploy_systemd_units() {
             src="${src_dir}/${f}"
             dst="${tmp_dir}/${f}"
             case "${f}" in
-                lumen-update.path|lumen-update-runner.service|lumen-update-warm.path|lumen-update-warm.service|lumen-backup.service|lumen-backup.timer|lumen-backup.path)
+                lumen-update.path|lumen-update-runner.service|lumen-update-warm.path|lumen-update-warm.service|lumen-backup.service|lumen-backup.timer|lumen-backup.path|lumen-restore-runner.service|lumen-restore.path|lumen-storage-mount.service|lumen-storage-apply.service|lumen-storage-apply.path|lumen-storage-test.service|lumen-storage-test.path)
                     render_update_runner_unit "${src}" "${dst}" "${data_root}" "${backup_root}" "${ROOT%/}"
                     ;;
                 *)
@@ -273,16 +274,14 @@ deploy_systemd_units() {
         log_info "  /usr/local/sbin/lumen-storage-mount"
     fi
     # storage 共享目录（host ↔ lumen-api 容器双向 bind）
-    if id lumen >/dev/null 2>&1; then
-        install -d -m 0775 -o root -g lumen /var/lib/lumen-storage
-    else
-        install -d -m 0775 /var/lib/lumen-storage
-    fi
+    install -d -m 0770 -o root -g "${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}" /var/lib/lumen-storage
     systemctl daemon-reload
     log_info "systemctl daemon-reload 完成"
     # 启用 storage path-watcher（admin UI 通过 trigger 文件触发 apply/test）
     systemctl enable --now lumen-storage-apply.path lumen-storage-test.path 2>/dev/null \
         || log_warn "启用 lumen-storage-{apply,test}.path 失败（继续）"
+    systemctl enable lumen-storage-mount.service 2>/dev/null \
+        || log_warn "启用 lumen-storage-mount.service 失败（继续；重启后需手工恢复挂载）"
     systemctl enable --now lumen-update.path 2>/dev/null \
         || log_warn "启用 lumen-update.path 失败（继续；面板一键更新可能不可用）"
     systemctl enable --now lumen-update-warm.path 2>/dev/null \
@@ -291,6 +290,8 @@ deploy_systemd_units() {
         || log_warn "启用 lumen-backup.timer 失败（继续；自动备份可能不可用）"
     systemctl enable --now lumen-backup.path 2>/dev/null \
         || log_warn "启用 lumen-backup.path 失败（继续；管理后台立即备份可能不可用）"
+    systemctl enable --now lumen-restore.path 2>/dev/null \
+        || log_warn "启用 lumen-restore.path 失败（继续；管理后台恢复可能不可用）"
 }
 
 # 修正 ownership：所有迁移产物归 lumen:lumen（如该用户存在）。

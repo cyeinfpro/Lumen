@@ -7,13 +7,6 @@ from pathlib import Path
 from pydantic import Field
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from lumen_core.desktop_runtime import (
-    DESKTOP_PROVIDER_FILE_ENV,
-    DATA_ROOT_ENV,
-    desktop_sqlite_url,
-    desktop_storage_root,
-    is_desktop_runtime,
-)
 
 _ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
@@ -29,12 +22,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str = _DEFAULT_DATABASE_URL
-    lumen_runtime: str = "docker"
-    lumen_data_root: str = Field(default="", alias=DATA_ROOT_ENV)
-    lumen_desktop_provider_file: str = Field(
-        default="",
-        alias=DESKTOP_PROVIDER_FILE_ENV,
-    )
     redis_url: str = _DEFAULT_REDIS_URL
 
     providers: str = ""
@@ -87,7 +74,8 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str = ""
     otel_service_name: str = "lumen-worker"
 
-    worker_metrics_host: str = "0.0.0.0"
+    # Prometheus scrapes this port over the private container network.
+    worker_metrics_host: str = "0.0.0.0"  # nosec B104
     worker_metrics_port: int = 9100
 
     # BYOK 用户 API Key 解密主密钥。必须与 API 服务一致。
@@ -97,14 +85,8 @@ class Settings(BaseSettings):
     def validate_runtime(self) -> "Settings":
         if self.edit_race_lanes < 1:
             raise ValueError("EDIT_RACE_LANES must be at least 1")
-        desktop_runtime = is_desktop_runtime(self.lumen_runtime)
-        if desktop_runtime:
-            if self.database_url == _DEFAULT_DATABASE_URL:
-                self.database_url = desktop_sqlite_url(self.lumen_data_root)
-            if self.storage_root == "/opt/lumendata/storage":
-                self.storage_root = desktop_storage_root(self.lumen_data_root)
         env = self.app_env.strip().lower()
-        is_dev = desktop_runtime or env in {"dev", "development", "local", "test"}
+        is_dev = env in {"dev", "development", "local", "test"}
         image_job_base = self.image_job_base_url.strip().rstrip("/")
         if not is_dev and image_job_base == _DEFAULT_IMAGE_JOB_BASE_URL:
             raise ValueError(

@@ -48,6 +48,17 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+function taskProgressRatio(gen: Generation): number {
+  if (
+    gen.status === "succeeded" ||
+    gen.status === "failed" ||
+    gen.status === "canceled"
+  ) {
+    return 1;
+  }
+  return STAGE_RATIO[gen.stage] ?? 0.2;
+}
+
 export interface TaskItemProps {
   gen: Generation;
   onCancel?: (gen: Generation) => void;
@@ -67,11 +78,7 @@ export const TaskItem = memo(function TaskItem({
   const succeeded = gen.status === "succeeded";
   const canceled = gen.status === "canceled";
 
-  const ratio = succeeded
-    ? 1
-    : failed || canceled
-      ? 1
-      : (STAGE_RATIO[gen.stage] ?? 0.2);
+  const ratio = taskProgressRatio(gen);
 
   // 状态文字
   let statusText: string;
@@ -177,6 +184,7 @@ export const TaskItem = memo(function TaskItem({
           {truncate(gen.prompt || "图像生成", 40)}
         </p>
         <p
+          aria-live="polite"
           className={cn(
             // 窄屏允许换行，避免进度/状态/百分比被 truncate 挤断
             "text-[11px] mt-0.5 break-words sm:truncate",
@@ -283,7 +291,7 @@ function IconBtn({
 }
 
 // 进度环（小号）
-export function ProgressRing({
+function ProgressRing({
   ratio,
   size = 20,
   stroke = 3,

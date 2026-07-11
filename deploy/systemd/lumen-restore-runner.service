@@ -1,0 +1,21 @@
+[Unit]
+Description=Lumen paired PostgreSQL and Redis restore
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lumen/current
+EnvironmentFile=-/opt/lumen/shared/.env
+Environment=BACKUP_ROOT=/opt/lumendata/backup
+Environment=LUMEN_BACKUP_ROOT=/opt/lumendata/backup
+Environment=LUMEN_BACKUP_RESTORE_LOCKFILE=/opt/lumendata/backup/.backup-restore.lock
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/opt/lumendata/backup/.restore.log
+StandardError=append:/opt/lumendata/backup/.restore.log
+ExecStart=/usr/bin/timeout --preserve-status --kill-after=120s 7200s /usr/bin/python3 -I /opt/lumen/current/scripts/restore_runner.py /opt/lumendata/backup/.restore.trigger
+ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.restore.trigger /opt/lumendata/backup/.restore.running"
+TimeoutStartSec=7300
+TimeoutStopSec=180
+KillSignal=SIGTERM
+KillMode=mixed

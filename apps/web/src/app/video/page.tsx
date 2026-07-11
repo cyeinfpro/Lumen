@@ -1,7 +1,5 @@
 "use client";
 
-/* eslint-disable @next/next/no-img-element -- Video posters are authenticated API media URLs. */
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useInfiniteQuery,
@@ -10,61 +8,44 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import {
-  AlertCircle,
   ChevronDown,
-  Copy,
-  Download,
-  Film,
   ImageIcon,
-  ListVideo,
-  Play,
   RefreshCw,
-  RotateCw,
   Sparkles,
   Tags,
-  Trash2,
   Upload,
   Video as VideoIcon,
-  X,
-  XCircle,
 } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 import {
   cancelVideoGeneration,
   createVideoGeneration,
   deleteVideo,
   enhanceVideoPrompt,
-  getVideoGeneration,
-  getVideoOptions,
   imageVariantUrl,
-  listVideoGenerations,
   retryVideoGeneration,
   uploadImage,
-  uploadVideo,
-  videoBinaryUrl,
-  videoDownloadUrl,
   videoPosterUrl,
 } from "@/lib/apiClient";
-import { prewarmImage, prewarmVideoMetadata } from "@/lib/imagePreload";
 import { useSSE } from "@/lib/useSSE";
 import {
+  isVideoRequestFenceCurrent,
   isTerminalVideoEvent,
   mergeVideoGenerationEvent,
   mergeVideoGenerationLists as mergeById,
+  nextVideoRequestFence,
   videoGenerationEventId,
 } from "@/lib/videoEventSnapshot";
+import type { VideoRequestFence } from "@/lib/videoEventSnapshot";
 import type {
   VideoAction,
   VideoCreateIn,
   VideoGenerationOut,
   VideoOptionsOut,
-  VideoReferenceMediaIn,
 } from "@/lib/types";
-import { Button, IconButton, toast } from "@/components/ui/primitives";
+import { Button, toast } from "@/components/ui/primitives";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { DURATION, EASE } from "@/lib/motion";
 import { cn, uuid } from "@/lib/utils";
 import {
   ModeCard,
@@ -75,6 +56,7 @@ import {
   VideoWorkbenchHeader,
   canApplyPromptEnhanceCandidate,
   cleanPromptEnhanceText,
+  focusVideoWorkbenchElement,
   shouldAutoApplyPromptEnhanceCandidate,
 } from "./video-workbench-ui";
 import type {
@@ -82,13 +64,67 @@ import type {
   PromptEnhanceCandidate,
   ReferenceDraft,
 } from "./video-workbench-ui";
-
-type VideoGenerationWithVideo = VideoGenerationOut & {
-  video: NonNullable<VideoGenerationOut["video"]>;
-};
-
-type ReferenceKind = VideoReferenceMediaIn["kind"];
-type ReferenceLimits = Record<ReferenceKind, number>;
+import {
+  fetchVideoGeneration,
+  fetchVideoGenerations,
+  fetchVideoOptions,
+  generationRefreshRequestIsCurrent,
+  isAbortError,
+  recordGenerationRefreshFailure,
+  revokeReferenceObjectUrl,
+  revokeUnusedReferenceObjectUrls,
+  uploadReferenceVideo,
+} from "./video-request-lifecycle";
+import type {
+  DraftUploadRequest,
+  GenerationRefreshRequest,
+  ReferenceUploadRequest,
+  ReferenceUploadResult,
+} from "./video-request-lifecycle";
+import {
+  DEFAULT_REFERENCE_LIMITS,
+  REFERENCE_KINDS,
+  anchorPromptEnhanceCandidates,
+  displayPromptEnhanceCandidates,
+  displayPromptReferenceMentions,
+  isNewApiVideoModel,
+  nextReferenceIdentity,
+  normalizeAssetUrl,
+  promptContainsReferenceMention,
+  promptForVideoAction,
+  referenceCountsFor,
+  referenceDisplayToken,
+  referenceKindNoun,
+  referenceLabel,
+  referenceLimitMessage,
+  referenceLimitViolation,
+  referenceLimitsForModel,
+  referencePayloadForVideoAction,
+  referenceRefId,
+  referencesForVideoAction,
+} from "./video-reference-domain";
+import type {
+  ReferenceKind,
+  ReferenceLimits,
+} from "./video-reference-domain";
+import {
+  MODE_COPY,
+  actionLabel,
+  formatDurationLabel,
+  hasVideo,
+  isActiveVideo,
+  isFailedHistoryVideo,
+  isTerminalVideo,
+} from "./video-task-model";
+import type {
+  VideoGenerationWithVideo,
+  VideoHistoryFilter,
+} from "./video-task-model";
+import {
+  VideoPreviewDialog,
+  VideoTaskDrawer,
+  prewarmVideoItem,
+} from "./video-task-ui";
 
 const VIDEO_EVENTS = [
   "video.queued",
@@ -111,77 +147,27 @@ const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
   "1080p",
   "4k",
 ]);
-const ACTIVE_VIDEO_STATUSES = [
-  "queued",
-  "submitting",
-  "submit_unknown",
-  "submitted",
-  "running",
-] as const;
-const TERMINAL_VIDEO_STATUSES = ["succeeded", "failed", "canceled", "expired"] as const;
-const SETTLING_VIDEO_STAGES = ["fetching"] as const;
 const VIDEO_ACTIVE_POLL_MS = 2500;
 const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
-const VIDEO_REFRESH_RETRY_BASE_MS = 1500;
-const VIDEO_REFRESH_RETRY_MAX_MS = 15000;
 const VIDEO_PROMPT_VARIANT_COUNT = 3;
 const VIDEO_HISTORY_PAGE_SIZE = 12;
 const VIDEO_SEED_MIN = -1;
 const VIDEO_SEED_MAX = 4_294_967_295;
-const VIDEO_DRAWER_FOCUSABLE =
-  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
 const VIDEO_PROMPT_VARIANT_TITLES = [
   "推荐镜头版",
   "动作节奏版",
   "参考一致版",
 ];
-const REFERENCE_REF_ID_RE = /^ref:(image|video|audio):([1-9][0-9]{0,2})$/;
-const REFERENCE_KINDS: ReferenceKind[] = ["image", "video", "audio"];
-const DEFAULT_REFERENCE_LIMITS: ReferenceLimits = { image: 9, video: 3, audio: 1 };
-const NEWAPI_REFERENCE_LIMITS: ReferenceLimits = { image: 4, video: 3, audio: 1 };
-const CHINESE_DIGITS: Record<number, string> = {
-  1: "一",
-  2: "二",
-  3: "三",
-  4: "四",
-  5: "五",
-  6: "六",
-  7: "七",
-  8: "八",
-  9: "九",
+type GenerationRefreshOptions = {
+  forceHistorySync?: boolean;
 };
-
-type VideoHistoryFilter = "all" | "succeeded" | "failed";
-
-const MODE_COPY: Record<
-  VideoAction,
-  {
-    title: string;
-    eyebrow: string;
-    description: string;
-    requirement: string;
-  }
-> = {
-  t2v: {
-    title: "文字生成",
-    eyebrow: "无参考素材",
-    description: "只根据描述生成视频。",
-    requirement: "填写描述",
-  },
-  i2v: {
-    title: "首帧生成",
-    eyebrow: "从图片开始",
-    description: "用一张图片确定第一帧和构图。",
-    requirement: "上传首帧",
-  },
-  reference: {
-    title: "参考生成",
-    eyebrow: "参考图片/视频",
-    description: "用素材约束人物、物体或风格。",
-    requirement: "添加素材",
-  },
+type GenerationRefreshScheduleOptions = GenerationRefreshOptions & {
+  delayMs?: number;
 };
-
+type ScheduleGenerationRefresh = (
+  id: string,
+  opts?: GenerationRefreshScheduleOptions,
+) => void;
 const PROMPT_CHIPS = [
   "近景",
   "推镜",
@@ -193,178 +179,8 @@ const PROMPT_CHIPS = [
   "轻微运动模糊",
 ];
 
-const STAGE_COPY: Record<
-  string,
-  {
-    label: string;
-    detail: string;
-  }
-> = {
-  queued: {
-    label: "排队中",
-    detail: "等待开始。",
-  },
-  submitting: {
-    label: "提交中",
-    detail: "正在提交。",
-  },
-  submitted: {
-    label: "已提交",
-    detail: "等待处理。",
-  },
-  rendering: {
-    label: "生成中",
-    detail: "正在生成。",
-  },
-  running: {
-    label: "生成中",
-    detail: "正在生成。",
-  },
-  fetching: {
-    label: "取回结果",
-    detail: "正在取回文件。",
-  },
-  finished: {
-    label: "已完成",
-    detail: "已保存。",
-  },
-  succeeded: {
-    label: "已完成",
-    detail: "已保存。",
-  },
-  failed: {
-    label: "失败",
-    detail: "失败，可重试。",
-  },
-  canceled: {
-    label: "已取消",
-    detail: "已取消。",
-  },
-  expired: {
-    label: "已过期",
-    detail: "已过期。",
-  },
-};
-
 function holdEstimateDurationS(durationS: number): number {
   return durationS === SMART_VIDEO_DURATION ? SMART_VIDEO_HOLD_DURATION : durationS;
-}
-
-function formatDurationLabel(durationS: number): string {
-  return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
-}
-
-function formatTaskElapsed(ms?: number | null): string | null {
-  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-function taskElapsedLabel(item: VideoGenerationOut): string | null {
-  const elapsed = formatTaskElapsed(item.elapsed_ms);
-  if (!elapsed) return null;
-  return `${isTerminalVideo(item) ? "耗时" : "已耗时"} ${elapsed}`;
-}
-
-function isActiveVideo(item: VideoGenerationOut): boolean {
-  if (ACTIVE_VIDEO_STATUSES.includes(
-    item.status as (typeof ACTIVE_VIDEO_STATUSES)[number],
-  )) {
-    return true;
-  }
-  return SETTLING_VIDEO_STAGES.includes(
-    item.progress_stage as (typeof SETTLING_VIDEO_STAGES)[number],
-  );
-}
-
-function isTerminalVideo(item: VideoGenerationOut): boolean {
-  return TERMINAL_VIDEO_STATUSES.includes(
-    item.status as (typeof TERMINAL_VIDEO_STATUSES)[number],
-  );
-}
-
-function isFailedHistoryVideo(item: VideoGenerationOut): boolean {
-  return ["failed", "canceled", "expired"].includes(item.status);
-}
-
-function videoHistoryFilterLabel(filter: VideoHistoryFilter): string {
-  if (filter === "succeeded") return "成功";
-  if (filter === "failed") return "失败";
-  return "全部";
-}
-
-function nestedVideoErrorText(value: unknown, depth = 0): string | null {
-  if (depth > 4 || value == null) return null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (/^[{["]/.test(trimmed)) {
-      try {
-        const parsed: unknown = JSON.parse(trimmed);
-        const nested = nestedVideoErrorText(parsed, depth + 1);
-        if (nested) return nested;
-      } catch {
-        // Keep the original upstream text when it is not valid JSON.
-      }
-    }
-    return trimmed;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = nestedVideoErrorText(item, depth + 1);
-      if (nested) return nested;
-    }
-    return null;
-  }
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    for (const key of ["message", "detail", "error_description", "error"]) {
-      const nested = nestedVideoErrorText(record[key], depth + 1);
-      if (nested) return nested;
-    }
-  }
-  return null;
-}
-
-function taskErrorSummary(raw: string): string {
-  const extracted = nestedVideoErrorText(raw) ?? raw;
-  if (/specified asset is not an image/i.test(extracted)) {
-    return "参考素材不是有效图片，请检查素材类型或重新上传后再试。";
-  }
-  const normalized = extracted
-    .replace(/\\n/g, " ")
-    .replace(/\s*Request id:\s*[A-Za-z0-9_-]+/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (normalized.length <= 180) return normalized;
-  return `${normalized.slice(0, 177)}...`;
-}
-
-function actionLabel(action: VideoAction): string {
-  return MODE_COPY[action]?.title ?? action.toUpperCase();
-}
-
-function stageCopy(item: VideoGenerationOut): { label: string; detail: string } {
-  return (
-    STAGE_COPY[item.progress_stage] ??
-    STAGE_COPY[item.status] ?? {
-      label: item.status,
-      detail: item.progress_stage,
-    }
-  );
-}
-
-function progressForItem(item: VideoGenerationOut): number {
-  if (item.status === "succeeded") return 100;
-  if (["failed", "canceled", "expired"].includes(item.status)) {
-    return Math.max(0, Math.min(100, item.progress_pct || 0));
-  }
-  return Math.max(4, Math.min(98, item.progress_pct || 0));
 }
 
 function toVideoResolution(value: string): VideoCreateIn["resolution"] {
@@ -559,14 +375,6 @@ function estimateHoldMicro(
   return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
 }
 
-function videoSrc(video: VideoGenerationWithVideo["video"]): string {
-  return video.url?.trim() || videoBinaryUrl(video.id);
-}
-
-function posterSrc(video: VideoGenerationWithVideo["video"]): string | undefined {
-  return video.poster_url?.trim() || undefined;
-}
-
 function cleanReferencePreviewUrl(value: string | null | undefined): string | null {
   const clean = value?.trim();
   if (!clean || /^asset:\/\//i.test(clean)) return null;
@@ -587,32 +395,6 @@ function imageReferencePreviewUrl(image: {
     cleanReferencePreviewUrl(image.url) ??
     imageVariantUrl(image.id, "display2048")
   );
-}
-
-function prewarmVideoItem(item: VideoGenerationWithVideo | null | undefined): void {
-  if (!item) return;
-  prewarmImage(posterSrc(item.video));
-  prewarmVideoMetadata(videoSrc(item.video));
-}
-
-function hasVideo(item: VideoGenerationOut): item is VideoGenerationWithVideo {
-  return item.video != null;
-}
-
-function activeTemporaryDownload(item: VideoGenerationOut) {
-  const download = item.temporary_download;
-  const url = download?.url?.trim();
-  if (!download || !url) return null;
-  const expiresAtMs = Date.parse(download.expires_at);
-  if (!Number.isFinite(expiresAtMs) || download.expires_in_s <= 30) {
-    return null;
-  }
-  return { ...download, url };
-}
-
-function videoDownloadName(item: VideoGenerationOut): string {
-  const ext = hasVideo(item) && item.video.mime === "video/quicktime" ? "mov" : "mp4";
-  return `lumen-video-${item.id.slice(0, 8)}.${ext}`;
 }
 
 function motionSafeScrollBehavior(): ScrollBehavior {
@@ -678,356 +460,6 @@ function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
         },
       ]
     : [];
-}
-
-function normalizeAssetUrl(value: string): string {
-  const raw = value.trim().replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "").trim();
-  if (!raw) return "";
-  const stripped = raw.replace(/^asset\s*:\s*\/\s*\//i, "").replace(/^[/\\]+/, "").trim();
-  const assetId = stripped.toLowerCase();
-  return /^asset-[a-z0-9][a-z0-9_-]*$/.test(assetId) ? `asset://${assetId}` : "";
-}
-
-function isNewApiVideoModel(model: string): boolean {
-  const value = model.trim().toLowerCase().replace(/[_.]/g, "-");
-  return value === "video-ds-2-0" || value.startsWith("video-ds-2-0-");
-}
-
-function referenceLimitsForModel(model: string): ReferenceLimits {
-  return isNewApiVideoModel(model) ? NEWAPI_REFERENCE_LIMITS : DEFAULT_REFERENCE_LIMITS;
-}
-
-function referenceRefId(kind: ReferenceKind, index: number): string {
-  return `ref:${kind}:${index}`;
-}
-
-function referenceRefIndex(
-  refId: string | null | undefined,
-  kind: ReferenceKind,
-): number | null {
-  const match = (refId ?? "").trim().toLowerCase().match(REFERENCE_REF_ID_RE);
-  if (!match || match[1] !== kind) return null;
-  const index = Number(match[2]);
-  return Number.isInteger(index) && index > 0 ? index : null;
-}
-
-function referenceKindNoun(kind: ReferenceKind): string {
-  if (kind === "image") return "图片";
-  if (kind === "audio") return "音频";
-  return "视频";
-}
-
-function referenceKindShortNoun(kind: ReferenceKind): string {
-  if (kind === "image") return "图";
-  return referenceKindNoun(kind);
-}
-
-function referenceLabel(kind: ReferenceKind, index: number): string {
-  return `${referenceKindNoun(kind)} ${index}`;
-}
-
-function referenceLimitMessage(kind: ReferenceKind, limit: number): string {
-  const unit = kind === "image" ? "张" : "个";
-  return `参考${referenceKindNoun(kind)}最多 ${limit} ${unit}`;
-}
-
-function referenceCountsFor(refs: ReferenceDraft[]): ReferenceLimits {
-  return {
-    image: refs.filter((item) => item.kind === "image").length,
-    video: refs.filter((item) => item.kind === "video").length,
-    audio: refs.filter((item) => item.kind === "audio").length,
-  };
-}
-
-function referenceLimitViolation(
-  refs: ReferenceDraft[],
-  limits: ReferenceLimits,
-): string | null {
-  const counts = referenceCountsFor(refs);
-  for (const kind of REFERENCE_KINDS) {
-    if (counts[kind] > limits[kind]) {
-      return referenceLimitMessage(kind, limits[kind]);
-    }
-  }
-  return null;
-}
-
-function nextReferenceIdentity(
-  kind: ReferenceKind,
-  refs: ReferenceDraft[],
-): { refId: string; label: string } {
-  const maxIndex = refs.reduce((max, item) => {
-    if (item.kind !== kind) return max;
-    return Math.max(max, referenceRefIndex(item.ref_id, kind) ?? 0);
-  }, 0);
-  const index = maxIndex + 1;
-  return { refId: referenceRefId(kind, index), label: referenceLabel(kind, index) };
-}
-
-function referencePromptToken(
-  item: Pick<VideoReferenceMediaIn, "kind" | "ref_id">,
-  fallbackIndex = 1,
-): string {
-  const rawRefId = item.ref_id?.trim().toLowerCase() ?? "";
-  const index = referenceRefIndex(rawRefId, item.kind);
-  return `[${index ? rawRefId : referenceRefId(item.kind, fallbackIndex)}]`;
-}
-
-function referenceDisplayToken(
-  item: Pick<VideoReferenceMediaIn, "kind" | "ref_id">,
-  fallbackIndex = 1,
-): string {
-  const rawRefId = item.ref_id?.trim().toLowerCase() ?? "";
-  const index = referenceRefIndex(rawRefId, item.kind) ?? fallbackIndex;
-  return `@${referenceKindNoun(item.kind)}${index}`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function referenceDisplayAliases(item: ReferenceDraft): string[] {
-  const index = referenceRefIndex(item.ref_id, item.kind);
-  if (!index) return [];
-  const noun = referenceKindNoun(item.kind);
-  const shortNoun = referenceKindShortNoun(item.kind);
-  return [
-    referenceDisplayToken(item),
-    `@${noun} ${index}`,
-    `@${shortNoun}${index}`,
-    `@${shortNoun} ${index}`,
-  ];
-}
-
-function referenceRoleAliases(kind: ReferenceKind, index: number): string[] {
-  if (kind === "video") {
-    return [
-      `视频素材 ${index}`,
-      `视频素材${index}`,
-      `参考视频 ${index}`,
-      `参考视频${index}`,
-      `动作参考 ${index}`,
-      `动作参考${index}`,
-      `运动参考 ${index}`,
-      `运动参考${index}`,
-    ];
-  }
-  if (kind === "audio") {
-    return [
-      `音频素材 ${index}`,
-      `音频素材${index}`,
-      `参考音频 ${index}`,
-      `参考音频${index}`,
-    ];
-  }
-  return [];
-}
-
-function numberedReferenceAliases(
-  kind: ReferenceKind,
-  index: number,
-  noun: string,
-  shortNoun: string,
-): string[] {
-  if (kind === "image") {
-    return [`第${index}张${noun}`, `第${index}张${shortNoun}`];
-  }
-  if (kind === "video") {
-    return [
-      `第${index}个${noun}`,
-      `第${index}段${noun}`,
-      `第${index}段素材`,
-      `第${index}个视频素材`,
-    ];
-  }
-  return [
-    `第${index}个${noun}`,
-    `第${index}段${noun}`,
-    `第${index}段音频素材`,
-    `第${index}个音频素材`,
-  ];
-}
-
-function chineseNumberedReferenceAliases(
-  kind: ReferenceKind,
-  zh: string | undefined,
-  noun: string,
-  shortNoun: string,
-): string[] {
-  if (!zh) return [];
-  if (kind === "image") {
-    return [`第${zh}张${noun}`, `第${zh}张${shortNoun}`];
-  }
-  if (kind === "video") {
-    return [
-      `第${zh}个${noun}`,
-      `第${zh}段${noun}`,
-      `第${zh}段素材`,
-      `第${zh}个视频素材`,
-    ];
-  }
-  return [
-    `第${zh}个${noun}`,
-    `第${zh}段${noun}`,
-    `第${zh}段音频素材`,
-    `第${zh}个音频素材`,
-  ];
-}
-
-function referenceMentionAliases(item: ReferenceDraft): string[] {
-  const index = referenceRefIndex(item.ref_id, item.kind);
-  if (!index) return [];
-  const aliases = new Set<string>();
-  const noun = referenceKindNoun(item.kind);
-  const shortNoun = referenceKindShortNoun(item.kind);
-  const zh = CHINESE_DIGITS[index];
-  for (const alias of [
-    item.label,
-    `[${item.label}]`,
-    `${noun} ${index}`,
-    `${noun}${index}`,
-    `${shortNoun}${index}`,
-    ...referenceRoleAliases(item.kind, index),
-    ...numberedReferenceAliases(item.kind, index, noun, shortNoun),
-    ...chineseNumberedReferenceAliases(item.kind, zh, noun, shortNoun),
-  ]) {
-    const clean = alias.trim();
-    if (clean) aliases.add(clean);
-  }
-  return Array.from(aliases);
-}
-
-function replaceReferenceDisplayMentionsWithAnchors(
-  text: string,
-  refs: ReferenceDraft[],
-): string {
-  let next = text;
-  for (const item of refs) {
-    const token = referencePromptToken(item);
-    for (const alias of referenceDisplayAliases(item)) {
-      next = next.replace(new RegExp(escapeRegExp(alias), "g"), token);
-    }
-  }
-  return next;
-}
-
-function normalizePromptReferenceMentions(
-  text: string,
-  refs: ReferenceDraft[],
-): string {
-  if (!text.trim() || refs.length === 0) return text;
-  let next = text;
-  for (const item of refs) {
-    const token = referencePromptToken(item);
-    if (next.includes(token)) continue;
-    for (const alias of referenceMentionAliases(item)) {
-      const pattern = new RegExp(escapeRegExp(alias), "i");
-      if (!pattern.test(next)) continue;
-      next = next.replace(pattern, (match) => `${match} ${token}`);
-      break;
-    }
-  }
-
-  for (const kind of ["image", "video"] as const) {
-    const sameKindRefs = refs.filter((item) => item.kind === kind);
-    if (sameKindRefs.length !== 1) continue;
-    const item = sameKindRefs[0];
-    const token = referencePromptToken(item);
-    if (next.includes(token)) continue;
-    const phrases =
-      kind === "image"
-        ? ["这张参考图", "这个参考图", "这张图片", "这个图片", "这张图", "这个图"]
-        : [
-            "这段参考视频",
-            "这个参考视频",
-            "这段视频素材",
-            "这个视频素材",
-            "这段动作参考",
-            "这个动作参考",
-            "这段运动参考",
-            "这个运动参考",
-            "这段素材",
-            "这个素材",
-            "这段视频",
-            "这个视频",
-          ];
-    for (const phrase of phrases) {
-      const pattern = new RegExp(escapeRegExp(phrase), "i");
-      if (!pattern.test(next)) continue;
-      next = next.replace(pattern, (match) => `${match} ${token}`);
-      break;
-    }
-  }
-  return next;
-}
-
-function serializePromptReferenceMentions(
-  text: string,
-  refs: ReferenceDraft[],
-): string {
-  return normalizePromptReferenceMentions(
-    replaceReferenceDisplayMentionsWithAnchors(text, refs),
-    refs,
-  );
-}
-
-function displayPromptReferenceMentions(
-  text: string,
-  refs: ReferenceDraft[],
-): string {
-  let next = text;
-  for (const item of refs) {
-    next = next.replace(
-      new RegExp(escapeRegExp(referencePromptToken(item)), "g"),
-      referenceDisplayToken(item),
-    );
-  }
-  return next;
-}
-
-function displayPromptEnhanceCandidates(
-  candidates: PromptEnhanceCandidate[],
-  refs: ReferenceDraft[],
-): PromptEnhanceCandidate[] {
-  if (refs.length === 0) return candidates;
-  return candidates.map((candidate) => ({
-    ...candidate,
-    prompt: displayPromptReferenceMentions(candidate.prompt, refs),
-  }));
-}
-
-function promptContainsReferenceMention(text: string, item: ReferenceDraft): boolean {
-  return (
-    text.includes(referencePromptToken(item)) ||
-    referenceDisplayAliases(item).some((alias) => text.includes(alias))
-  );
-}
-
-function preservePromptReferenceTokens(
-  promptText: string,
-  sourceText: string,
-  refs: ReferenceDraft[],
-): string {
-  if (!promptText.trim() || refs.length === 0) return promptText;
-  const missingTokens = refs
-    .map((item) => referencePromptToken(item))
-    .filter((token) => sourceText.includes(token) && !promptText.includes(token));
-  if (missingTokens.length === 0) return promptText;
-  const trimmed = promptText.trimEnd();
-  const suffix = `保持参考锚点 ${missingTokens.join("、")} 对应的素材约束。`;
-  return `${trimmed}${/[。.!?？]$/.test(trimmed) ? " " : "。"}${suffix}`;
-}
-
-function anchorPromptEnhanceCandidates(
-  candidates: PromptEnhanceCandidate[],
-  sourceText: string,
-  refs: ReferenceDraft[],
-): PromptEnhanceCandidate[] {
-  if (refs.length === 0) return candidates;
-  return candidates.map((candidate) => ({
-    ...candidate,
-    prompt: preservePromptReferenceTokens(candidate.prompt, sourceText, refs),
-  }));
 }
 
 function buildPromptEnhanceCandidates(
@@ -1096,54 +528,11 @@ function interruptedPromptEnhanceDescription(description?: string): string {
     : "已保留已生成内容，可继续编辑或重试。";
 }
 
-function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
-  if (item.url) {
-    return {
-      kind: item.kind,
-      url: item.url,
-      label: item.label,
-      ref_id: item.ref_id,
-    };
-  }
-  return {
-    kind: item.kind,
-    image_id: item.kind === "image" ? item.image_id ?? null : null,
-    video_id: item.kind === "video" ? item.video_id ?? null : null,
-    label: item.label,
-    ref_id: item.ref_id,
-  };
-}
-
-function referencesForVideoAction(
-  action: VideoAction,
-  references: ReferenceDraft[],
-): ReferenceDraft[] {
-  return action === "reference" ? references : [];
-}
-
-function promptForVideoAction(
-  action: VideoAction,
-  prompt: string,
-  references: ReferenceDraft[],
-): string {
-  const trimmed = prompt.trim();
-  return action === "reference"
-    ? serializePromptReferenceMentions(trimmed, references)
-    : trimmed;
-}
-
 function inputImageForVideoAction(
   action: VideoAction,
   inputImageId: string,
 ): string | null {
   return action === "i2v" ? inputImageId.trim() || null : null;
-}
-
-function referencePayloadForVideoAction(
-  action: VideoAction,
-  references: ReferenceDraft[],
-): VideoReferenceMediaIn[] {
-  return referencesForVideoAction(action, references).map(referenceMediaPayload);
 }
 
 type VideoHistoryReference = VideoGenerationOut["reference_media"][number];
@@ -1192,6 +581,7 @@ function referenceDraftFromHistory(
 
 function videoConfigurationIssue({
   createPending,
+  uploadPending,
   optionsLoading,
   options,
   selectedModel,
@@ -1201,6 +591,7 @@ function videoConfigurationIssue({
   durationS,
 }: {
   createPending: boolean;
+  uploadPending: boolean;
   optionsLoading: boolean;
   options: VideoOptionsOut | undefined;
   selectedModel: string;
@@ -1210,6 +601,7 @@ function videoConfigurationIssue({
   durationS: number;
 }): string | null {
   if (createPending) return "正在提交";
+  if (uploadPending) return "等待素材上传完成";
   if (optionsLoading) return "正在读取配置";
   if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
   if (!selectedModel) return "没有可用模型";
@@ -1249,6 +641,7 @@ function videoEstimateIssue(
 
 function videoSubmitDisabledReason({
   createPending,
+  uploadPending,
   optionsLoading,
   options,
   selectedModel,
@@ -1265,6 +658,7 @@ function videoSubmitDisabledReason({
   estimate,
 }: {
   createPending: boolean;
+  uploadPending: boolean;
   optionsLoading: boolean;
   options: VideoOptionsOut | undefined;
   selectedModel: string;
@@ -1283,6 +677,7 @@ function videoSubmitDisabledReason({
   return (
     videoConfigurationIssue({
       createPending,
+      uploadPending,
       optionsLoading,
       options,
       selectedModel,
@@ -1309,9 +704,32 @@ export default function VideoPage() {
   const referenceFileRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const promptEnhanceAbortRef = useRef<AbortController | null>(null);
+  const promptEnhanceEpochRef = useRef(0);
+  const firstFrameUploadAbortRef = useRef<AbortController | null>(null);
+  const firstFrameUploadEpochRef = useRef(0);
+  const referenceUploadAbortRef = useRef<AbortController | null>(null);
+  const referenceUploadEpochRef = useRef(0);
+  const draftFenceRef = useRef<VideoRequestFence>({
+    taskId: "draft:new",
+    epoch: 0,
+  });
+  const retryRequestFenceRef = useRef<VideoRequestFence>({
+    taskId: "retry:none",
+    epoch: 0,
+  });
+  const actionRef = useRef<VideoAction>("t2v");
+  const referenceLimitsRef = useRef<ReferenceLimits>(
+    DEFAULT_REFERENCE_LIMITS,
+  );
   const terminalHistorySyncedRef = useRef<Set<string>>(new Set());
-  const refreshInFlightRef = useRef<Set<string>>(new Set());
+  const generationRefreshRequestsRef = useRef<
+    Map<string, GenerationRefreshRequest>
+  >(new Map());
+  const generationRefreshEpochRef = useRef<Map<string, number>>(new Map());
   const scheduledRefreshTimersRef = useRef<Map<string, number>>(new Map());
+  const scheduleGenerationRefreshRef = useRef<ScheduleGenerationRefresh>(
+    () => {},
+  );
   const pendingHistoryRefreshRef = useRef<Set<string>>(new Set());
   const lastRefreshAtRef = useRef<Map<string, number>>(new Map());
   const refreshBackoffUntilRef = useRef<Map<string, number>>(new Map());
@@ -1329,6 +747,7 @@ export default function VideoPage() {
   const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
   const [referencePreviewItem, setReferencePreviewItem] = useState<ReferenceDraft | null>(null);
   const referenceMediaRef = useRef<ReferenceDraft[]>([]);
+  const previousReferenceMediaRef = useRef<ReferenceDraft[]>([]);
   const [assetUrlInput, setAssetUrlInput] = useState("");
   const [assetReferenceKind, setAssetReferenceKind] = useState<ReferenceKind>("video");
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
@@ -1353,18 +772,21 @@ export default function VideoPage() {
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
-    queryFn: getVideoOptions,
+    queryFn: ({ signal }) => fetchVideoOptions(signal),
     retry: false,
     staleTime: 60_000,
     gcTime: 5 * 60_000,
   });
   const historyQ = useInfiniteQuery({
     queryKey: ["video", "generations"],
-    queryFn: ({ pageParam }) =>
-      listVideoGenerations({
-        cursor: pageParam,
-        limit: VIDEO_HISTORY_PAGE_SIZE,
-      }),
+    queryFn: ({ pageParam, signal }) =>
+      fetchVideoGenerations(
+        {
+          cursor: pageParam,
+          limit: VIDEO_HISTORY_PAGE_SIZE,
+        },
+        signal,
+      ),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     retry: false,
@@ -1379,7 +801,16 @@ export default function VideoPage() {
   const options = optionsQ.data;
 
   useEffect(() => {
+    actionRef.current = action;
+  }, [action]);
+
+  useEffect(() => {
     referenceMediaRef.current = referenceMedia;
+    revokeUnusedReferenceObjectUrls(
+      previousReferenceMediaRef.current,
+      referenceMedia,
+    );
+    previousReferenceMediaRef.current = referenceMedia;
   }, [referenceMedia]);
 
   const effectiveItems = useMemo(
@@ -1433,8 +864,22 @@ export default function VideoPage() {
   }, [playbackVideoItem]);
 
   const refreshGeneration = useCallback(
-    async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
-      const next = await getVideoGeneration(id);
+    async (
+      id: string,
+      request: GenerationRefreshRequest,
+      opts: GenerationRefreshOptions = {},
+    ): Promise<boolean> => {
+      const next = await fetchVideoGeneration(id, request.controller.signal);
+      if (
+        !generationRefreshRequestIsCurrent(
+          request,
+          generationRefreshRequestsRef.current.get(id),
+          generationRefreshEpochRef.current.get(id),
+        ) ||
+        next.id !== id
+      ) {
+        return false;
+      }
       setItems((prev) => mergeById(prev, [next]));
       if (next.video) {
         prewarmVideoItem(next as VideoGenerationWithVideo);
@@ -1448,59 +893,86 @@ export default function VideoPage() {
         opts.forceHistorySync ||
         (terminal && !terminalHistorySyncedRef.current.has(id))
       ) {
-        if (terminal) terminalHistorySyncedRef.current.add(id);
         await qc.invalidateQueries({ queryKey: ["video", "generations"] });
+        if (terminal) terminalHistorySyncedRef.current.add(id);
       }
+      return true;
     },
     [qc],
   );
 
   const refreshGenerationSafe = useCallback(
-    async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
+    async (id: string, opts: GenerationRefreshOptions = {}) => {
       if (opts.forceHistorySync) {
         pendingHistoryRefreshRef.current.add(id);
       }
-      if (refreshInFlightRef.current.has(id)) return;
+      const existing = generationRefreshRequestsRef.current.get(id);
+      if (existing && !opts.forceHistorySync) return;
+      existing?.controller.abort();
 
-      refreshInFlightRef.current.add(id);
       const forceHistorySync =
         opts.forceHistorySync || pendingHistoryRefreshRef.current.has(id);
       pendingHistoryRefreshRef.current.delete(id);
+      const request: GenerationRefreshRequest = {
+        controller: new AbortController(),
+        epoch: (generationRefreshEpochRef.current.get(id) ?? 0) + 1,
+      };
+      generationRefreshEpochRef.current.set(id, request.epoch);
+      generationRefreshRequestsRef.current.set(id, request);
 
       try {
-        await refreshGeneration(id, { forceHistorySync });
+        const committed = await refreshGeneration(id, request, {
+          forceHistorySync,
+        });
+        if (!committed) return;
         refreshFailureCountRef.current.delete(id);
         refreshBackoffUntilRef.current.delete(id);
       } catch (err) {
-        const nextFailures = (refreshFailureCountRef.current.get(id) ?? 0) + 1;
-        refreshFailureCountRef.current.set(id, nextFailures);
-        const backoffMs = Math.min(
-          VIDEO_REFRESH_RETRY_MAX_MS,
-          VIDEO_REFRESH_RETRY_BASE_MS * 2 ** Math.min(nextFailures - 1, 4),
-        );
-        refreshBackoffUntilRef.current.set(id, Date.now() + backoffMs);
-        try {
-          console.warn("[video] generation refresh failed", {
-            id,
-            failures: nextFailures,
-            retryInMs: backoffMs,
-            err,
-          });
-        } catch {
-          /* console unavailable */
+        if (
+          isAbortError(err) ||
+          !generationRefreshRequestIsCurrent(
+            request,
+            generationRefreshRequestsRef.current.get(id),
+            generationRefreshEpochRef.current.get(id),
+          )
+        ) {
+          return;
         }
+        recordGenerationRefreshFailure(
+          id,
+          err,
+          refreshFailureCountRef.current,
+          refreshBackoffUntilRef.current,
+        );
+        if (forceHistorySync) {
+          pendingHistoryRefreshRef.current.add(id);
+        }
+        scheduleGenerationRefreshRef.current(id, { forceHistorySync });
       } finally {
-        refreshInFlightRef.current.delete(id);
+        if (generationRefreshRequestsRef.current.get(id) === request) {
+          generationRefreshRequestsRef.current.delete(id);
+        }
       }
     },
     [refreshGeneration],
   );
 
+  const abortGenerationRefresh = useCallback((id: string) => {
+    const request = generationRefreshRequestsRef.current.get(id);
+    request?.controller.abort();
+    generationRefreshRequestsRef.current.delete(id);
+    generationRefreshEpochRef.current.set(
+      id,
+      (generationRefreshEpochRef.current.get(id) ?? 0) + 1,
+    );
+    const timer = scheduledRefreshTimersRef.current.get(id);
+    if (timer != null) window.clearTimeout(timer);
+    scheduledRefreshTimersRef.current.delete(id);
+    pendingHistoryRefreshRef.current.delete(id);
+  }, []);
+
   const scheduleGenerationRefresh = useCallback(
-    (
-      id: string,
-      opts: { forceHistorySync?: boolean; delayMs?: number } = {},
-    ) => {
+    (id: string, opts: GenerationRefreshScheduleOptions = {}) => {
       if (!id) return;
       if (opts.forceHistorySync) {
         pendingHistoryRefreshRef.current.add(id);
@@ -1530,6 +1002,13 @@ export default function VideoPage() {
     },
     [refreshGenerationSafe],
   );
+
+  useEffect(() => {
+    scheduleGenerationRefreshRef.current = scheduleGenerationRefresh;
+    return () => {
+      scheduleGenerationRefreshRef.current = () => {};
+    };
+  }, [scheduleGenerationRefresh]);
 
   const applyVideoEventSnapshot = useCallback(
     (data: unknown): { id: string; terminal: boolean } | null => {
@@ -1606,6 +1085,21 @@ export default function VideoPage() {
         window.clearTimeout(timer);
       }
       scheduledRefreshTimersRef.current.clear();
+      for (const request of generationRefreshRequestsRef.current.values()) {
+        request.controller.abort();
+      }
+      generationRefreshRequestsRef.current.clear();
+      retryRequestFenceRef.current = nextVideoRequestFence(
+        retryRequestFenceRef.current,
+        "retry:disposed",
+      );
+      promptEnhanceAbortRef.current?.abort();
+      firstFrameUploadAbortRef.current?.abort();
+      referenceUploadAbortRef.current?.abort();
+      revokeUnusedReferenceObjectUrls(
+        previousReferenceMediaRef.current,
+        [],
+      );
     },
     [],
   );
@@ -1614,11 +1108,17 @@ export default function VideoPage() {
     () => options?.models.filter((item) => item.actions.includes(action)) ?? [],
     [action, options?.models],
   );
-  const selectedModel = model || firstModelForAction(options, action);
+  const selectedModel =
+    availableModels.find((item) => item.model === model)?.model ??
+    availableModels[0]?.model ??
+    "";
   const referenceLimits = useMemo(
     () => referenceLimitsForModel(selectedModel),
     [selectedModel],
   );
+  useEffect(() => {
+    referenceLimitsRef.current = referenceLimits;
+  }, [referenceLimits]);
   const assetReferenceKindOptions = useMemo<ReferenceKind[]>(
     () =>
       isNewApiVideoModel(selectedModel) ? REFERENCE_KINDS : ["image", "video"],
@@ -1668,7 +1168,97 @@ export default function VideoPage() {
     setSelectedPromptEnhanceCandidateId("");
   }, []);
 
+  const abortPromptEnhancement = useCallback(() => {
+    promptEnhanceEpochRef.current += 1;
+    const controller = promptEnhanceAbortRef.current;
+    promptEnhanceAbortRef.current = null;
+    controller?.abort();
+    setIsEnhancingPrompt(false);
+  }, []);
+
+  const cancelFirstFrameUpload = useCallback(() => {
+    firstFrameUploadEpochRef.current += 1;
+    const controller = firstFrameUploadAbortRef.current;
+    firstFrameUploadAbortRef.current = null;
+    controller?.abort();
+  }, []);
+
+  const cancelReferenceUpload = useCallback(() => {
+    referenceUploadEpochRef.current += 1;
+    const controller = referenceUploadAbortRef.current;
+    referenceUploadAbortRef.current = null;
+    controller?.abort();
+  }, []);
+
+  const commitReferenceMedia = useCallback(
+    (update: (current: ReferenceDraft[]) => ReferenceDraft[]): boolean => {
+      const current = referenceMediaRef.current;
+      const next = update(current);
+      if (next === current) return false;
+      referenceMediaRef.current = next;
+      setReferenceMedia(next);
+      return true;
+    },
+    [],
+  );
+
+  const switchDraftContext = useCallback(
+    (taskId: string, nextAction: VideoAction) => {
+      draftFenceRef.current = nextVideoRequestFence(
+        draftFenceRef.current,
+        taskId,
+      );
+      actionRef.current = nextAction;
+      abortPromptEnhancement();
+      cancelFirstFrameUpload();
+      cancelReferenceUpload();
+      clearPromptEnhanceChoices();
+      setReferencePreviewItem(null);
+    },
+    [
+      abortPromptEnhancement,
+      cancelFirstFrameUpload,
+      cancelReferenceUpload,
+      clearPromptEnhanceChoices,
+    ],
+  );
+
+  const isCurrentFirstFrameUpload = useCallback(
+    (request: DraftUploadRequest): boolean =>
+      firstFrameUploadAbortRef.current === request.controller &&
+      firstFrameUploadEpochRef.current === request.epoch &&
+      !request.controller.signal.aborted &&
+      actionRef.current === request.expectedAction &&
+      isVideoRequestFenceCurrent(draftFenceRef.current, request.draftFence),
+    [],
+  );
+
+  const isCurrentReferenceUpload = useCallback(
+    (request: ReferenceUploadRequest): boolean =>
+      referenceUploadAbortRef.current === request.controller &&
+      referenceUploadEpochRef.current === request.epoch &&
+      !request.controller.signal.aborted &&
+      actionRef.current === request.expectedAction &&
+      isVideoRequestFenceCurrent(draftFenceRef.current, request.draftFence),
+    [],
+  );
+
+  const focusPromptTarget = useCallback(
+    (target: HTMLTextAreaElement, options?: FocusOptions): boolean =>
+      focusVideoWorkbenchElement(
+        target,
+        options,
+        Boolean(
+          promptEnhanceAbortRef.current ||
+            firstFrameUploadAbortRef.current ||
+            referenceUploadAbortRef.current,
+        ),
+      ),
+    [],
+  );
+
   const insertPromptText = useCallback((text: string) => {
+    abortPromptEnhancement();
     clearPromptEnhanceSelection();
     const target = promptRef.current;
     if (!target) {
@@ -1684,36 +1274,59 @@ export default function VideoPage() {
     setPrompt(next);
     requestAnimationFrame(() => {
       const pos = (before + spacer + text).length;
-      target.focus();
+      if (!focusPromptTarget(target)) return;
       target.setSelectionRange(pos, pos);
     });
-  }, [clearPromptEnhanceSelection, prompt]);
+  }, [
+    abortPromptEnhancement,
+    clearPromptEnhanceSelection,
+    focusPromptTarget,
+    prompt,
+  ]);
 
   const insertReferenceTag = useCallback((item: ReferenceDraft) => {
     insertPromptText(referenceDisplayToken(item));
   }, [insertPromptText]);
 
   const uploadMut = useMutation({
-    mutationFn: (file: File) => uploadImage(file),
-    onSuccess: (img) => {
+    mutationFn: (request: DraftUploadRequest) =>
+      uploadImage(request.file, { signal: request.controller.signal }),
+    onSuccess: (img, request) => {
+      if (!isCurrentFirstFrameUpload(request)) return;
+      abortPromptEnhancement();
       clearPromptEnhanceChoices();
       setInputImageId(img.id);
       setUploadedLabel(`${img.width}x${img.height}`);
       toast.success("首帧已上传");
     },
-    onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
+    onError: (err, request) => {
+      if (isAbortError(err) || !isCurrentFirstFrameUpload(request)) return;
+      toast.error("上传失败", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    },
+    onSettled: (_data, _error, request) => {
+      if (firstFrameUploadAbortRef.current === request.controller) {
+        firstFrameUploadAbortRef.current = null;
+      }
+    },
   });
 
   const referenceUploadMut = useMutation({
-    mutationFn: async (file: File) => {
-      if (file.type.startsWith("image/")) {
-        if (
-          referenceMediaRef.current.filter((item) => item.kind === "image").length >=
-          referenceLimits.image
-        ) {
-          throw new Error(referenceLimitMessage("image", referenceLimits.image));
-        }
-        const img = await uploadImage(file);
+    mutationFn: async (
+      request: ReferenceUploadRequest,
+    ): Promise<ReferenceUploadResult> => {
+      if (
+        referenceMediaRef.current.filter(
+          (item) => item.kind === request.kind,
+        ).length >= request.limit
+      ) {
+        throw new Error(referenceLimitMessage(request.kind, request.limit));
+      }
+      if (request.kind === "image") {
+        const img = await uploadImage(request.file, {
+          signal: request.controller.signal,
+        });
         return {
           kind: "image" as const,
           image_id: img.id,
@@ -1721,37 +1334,39 @@ export default function VideoPage() {
           previewUrl: imageReferencePreviewUrl(img),
         };
       }
-      if (file.type.startsWith("video/")) {
-        if (
-          referenceMediaRef.current.filter((item) => item.kind === "video").length >=
-          referenceLimits.video
-        ) {
-          throw new Error(referenceLimitMessage("video", referenceLimits.video));
-        }
-        const video = await uploadVideo(file);
-        return {
-          kind: "video" as const,
-          video_id: video.id,
-          display: video.size_bytes ? `${Math.round(video.size_bytes / 1024 / 1024)}MB` : "视频",
-          previewUrl: cleanReferencePreviewUrl(video.poster_url) ?? videoPosterUrl(video.id),
-        };
-      }
-      throw new Error("只支持图片或视频");
+      const video = await uploadReferenceVideo(
+        request.file,
+        request.controller.signal,
+      );
+      return {
+        kind: "video" as const,
+        video_id: video.id,
+        display: video.size_bytes
+          ? `${Math.round(video.size_bytes / 1024 / 1024)}MB`
+          : "视频",
+        previewUrl:
+          cleanReferencePreviewUrl(video.poster_url) ??
+          videoPosterUrl(video.id),
+      };
     },
-    onSuccess: (ref) => {
+    onSuccess: (ref, request) => {
+      if (!isCurrentReferenceUpload(request)) {
+        revokeReferenceObjectUrl(ref.previewUrl);
+        return;
+      }
+      abortPromptEnhancement();
       clearPromptEnhanceChoices();
-      let accepted = false;
-      setReferenceMedia((prev) => {
-        const limit = referenceLimits[ref.kind];
-        const currentCount = prev.filter((item) => item.kind === ref.kind).length;
+      const limit = referenceLimitsRef.current[ref.kind];
+      const accepted = commitReferenceMedia((current) => {
+        const currentCount = current.filter(
+          (item) => item.kind === ref.kind,
+        ).length;
         if (currentCount >= limit) {
-          toast.error(referenceLimitMessage(ref.kind, limit));
-          return prev;
+          return current;
         }
-        accepted = true;
-        const identity = nextReferenceIdentity(ref.kind, prev);
+        const identity = nextReferenceIdentity(ref.kind, current);
         return [
-          ...prev,
+          ...current,
           {
             _key: uuid(),
             kind: ref.kind,
@@ -1764,12 +1379,99 @@ export default function VideoPage() {
           },
         ];
       });
-      if (accepted) toast.success("参考素材已上传");
+      if (!accepted) {
+        revokeReferenceObjectUrl(ref.previewUrl);
+        toast.error(referenceLimitMessage(ref.kind, limit));
+        return;
+      }
+      toast.success("参考素材已上传");
     },
-    onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
+    onError: (err, request) => {
+      if (isAbortError(err) || !isCurrentReferenceUpload(request)) return;
+      toast.error("上传失败", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    },
+    onSettled: (_data, _error, request) => {
+      if (referenceUploadAbortRef.current === request.controller) {
+        referenceUploadAbortRef.current = null;
+      }
+    },
   });
 
+  const startFirstFrameUpload = useCallback(
+    (file: File) => {
+      if (actionRef.current !== "i2v") return;
+      abortPromptEnhancement();
+      clearPromptEnhanceChoices();
+      cancelFirstFrameUpload();
+      const controller = new AbortController();
+      const request: DraftUploadRequest = {
+        controller,
+        draftFence: { ...draftFenceRef.current },
+        epoch: firstFrameUploadEpochRef.current + 1,
+        expectedAction: "i2v",
+        file,
+      };
+      firstFrameUploadEpochRef.current = request.epoch;
+      firstFrameUploadAbortRef.current = controller;
+      uploadMut.mutate(request);
+    },
+    [
+      abortPromptEnhancement,
+      cancelFirstFrameUpload,
+      clearPromptEnhanceChoices,
+      uploadMut,
+    ],
+  );
+
+  const startReferenceUpload = useCallback(
+    (file: File) => {
+      if (actionRef.current !== "reference") return;
+      const kind = file.type.startsWith("image/")
+        ? "image"
+        : file.type.startsWith("video/")
+          ? "video"
+          : null;
+      if (!kind) {
+        toast.error("上传失败", { description: "只支持图片或视频" });
+        return;
+      }
+      const limit = referenceLimitsRef.current[kind];
+      if (
+        referenceMediaRef.current.filter((item) => item.kind === kind).length >=
+        limit
+      ) {
+        toast.error(referenceLimitMessage(kind, limit));
+        return;
+      }
+      abortPromptEnhancement();
+      clearPromptEnhanceChoices();
+      cancelReferenceUpload();
+      const controller = new AbortController();
+      const request: ReferenceUploadRequest = {
+        controller,
+        draftFence: { ...draftFenceRef.current },
+        epoch: referenceUploadEpochRef.current + 1,
+        expectedAction: "reference",
+        file,
+        kind,
+        limit,
+      };
+      referenceUploadEpochRef.current = request.epoch;
+      referenceUploadAbortRef.current = controller;
+      referenceUploadMut.mutate(request);
+    },
+    [
+      abortPromptEnhancement,
+      cancelReferenceUpload,
+      clearPromptEnhanceChoices,
+      referenceUploadMut,
+    ],
+  );
+
   const addAssetReference = useCallback(() => {
+    if (referenceUploadAbortRef.current) return;
     const url = normalizeAssetUrl(assetUrlInput);
     const kind = selectedAssetReferenceKind;
     if (!url) {
@@ -1778,18 +1480,21 @@ export default function VideoPage() {
       }
       return;
     }
+    const current = referenceMediaRef.current;
+    const limit = referenceLimitsRef.current[kind];
     if (
-      referenceMedia.filter((item) => item.kind === kind).length >=
-      referenceLimits[kind]
+      current.filter((item) => item.kind === kind).length >=
+      limit
     ) {
-      toast.error(referenceLimitMessage(kind, referenceLimits[kind]));
+      toast.error(referenceLimitMessage(kind, limit));
       return;
     }
+    abortPromptEnhancement();
     clearPromptEnhanceChoices();
-    setReferenceMedia((prev) => [
-      ...prev,
+    commitReferenceMedia((references) => [
+      ...references,
       (() => {
-        const identity = nextReferenceIdentity(kind, prev);
+        const identity = nextReferenceIdentity(kind, references);
         return {
           _key: uuid(),
           kind,
@@ -1805,9 +1510,9 @@ export default function VideoPage() {
     toast.success(`官方${referenceKindNoun(kind)}已添加`);
   }, [
     assetUrlInput,
+    abortPromptEnhancement,
     clearPromptEnhanceChoices,
-    referenceLimits,
-    referenceMedia,
+    commitReferenceMedia,
     selectedAssetReferenceKind,
   ]);
 
@@ -1839,7 +1544,8 @@ export default function VideoPage() {
 
   const cancelMut = useMutation({
     mutationFn: cancelVideoGeneration,
-    onSuccess: (gen) => {
+    onSuccess: (gen, requestedId) => {
+      if (gen.id !== requestedId) return;
       setItems((prev) => mergeById(prev, [gen]));
       toast.success("已请求取消", {
         description:
@@ -1854,18 +1560,57 @@ export default function VideoPage() {
     onError: (err) => toast.error("取消失败", { description: err instanceof Error ? err.message : undefined }),
   });
   const retryMut = useMutation({
-    mutationFn: retryVideoGeneration,
-    onSuccess: (gen) => {
+    mutationFn: (request: VideoRequestFence) =>
+      retryVideoGeneration(request.taskId),
+    onSuccess: (gen, request) => {
+      if (
+        !isVideoRequestFenceCurrent(
+          retryRequestFenceRef.current,
+          request,
+        )
+      ) {
+        return;
+      }
       terminalHistorySyncedRef.current.delete(gen.id);
       setItems((prev) => mergeById(prev, [gen]));
-      toast.success("已重新生成");
+      setIsTaskPanelOpen(true);
+      const createdNewTask = gen.id !== request.taskId;
+      toast.success(createdNewTask ? "已创建新的重试任务" : "已重新生成", {
+        description: createdNewTask
+          ? `正在跟踪新任务 ${gen.id.slice(0, 8)}`
+          : undefined,
+      });
       scheduleGenerationRefresh(gen.id, { delayMs: 800 });
+      void qc.invalidateQueries({ queryKey: ["video", "generations"] });
     },
-    onError: (err) => toast.error("重试失败", { description: err instanceof Error ? err.message : undefined }),
+    onError: (err, request) => {
+      if (
+        !isVideoRequestFenceCurrent(
+          retryRequestFenceRef.current,
+          request,
+        )
+      ) {
+        return;
+      }
+      toast.error("重试失败", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    },
   });
+  const requestVideoRetry = (generationId: string) => {
+    const request = nextVideoRequestFence(
+      retryRequestFenceRef.current,
+      generationId,
+    );
+    retryRequestFenceRef.current = request;
+    retryMut.mutate(request);
+  };
   const deleteMut = useMutation({
     mutationFn: deleteVideo,
     onSuccess: async (_data, videoId) => {
+      for (const item of effectiveItems) {
+        if (item.video?.id === videoId) abortGenerationRefresh(item.id);
+      }
       setItems((prev) =>
         prev.map((item) =>
           item.video?.id === videoId ? { ...item, video: null } : item,
@@ -1879,7 +1624,7 @@ export default function VideoPage() {
   });
 
   const loadAsDraft = useCallback((item: VideoGenerationOut) => {
-    clearPromptEnhanceChoices();
+    switchDraftContext(item.id, item.action);
     setAction(item.action);
     setModel(item.model);
     setDurationS(item.duration_s);
@@ -1892,29 +1637,49 @@ export default function VideoPage() {
     const draftReferenceMedia = item.reference_media.map((ref, index) =>
       referenceDraftFromHistory(ref, index, item.reference_media),
     );
-    setReferenceMedia(draftReferenceMedia);
+    commitReferenceMedia(() => draftReferenceMedia);
     setPrompt(displayPromptReferenceMentions(item.prompt, draftReferenceMedia));
-    requestAnimationFrame(() => promptRef.current?.focus());
+    requestAnimationFrame(() => {
+      const target = promptRef.current;
+      if (target) focusPromptTarget(target);
+    });
     toast.success("已套用参数");
-  }, [clearPromptEnhanceChoices]);
+  }, [commitReferenceMedia, focusPromptTarget, switchDraftContext]);
 
   const canEnhancePrompt = Boolean(
-    prompt.trim() ||
-      (action === "i2v" && inputImageId.trim()) ||
-      (action === "reference" && referenceMedia.length > 0),
+    !uploadMut.isPending &&
+      !referenceUploadMut.isPending &&
+      (prompt.trim() ||
+        (action === "i2v" && inputImageId.trim()) ||
+        (action === "reference" && referenceMedia.length > 0)),
   );
 
   const enhancePromptAction = useCallback(async () => {
-    if (isEnhancingPrompt || !canEnhancePrompt) return;
+    if (
+      isEnhancingPrompt ||
+      !canEnhancePrompt ||
+      firstFrameUploadAbortRef.current ||
+      referenceUploadAbortRef.current
+    ) {
+      return;
+    }
     const original = prompt;
     const activeReferenceMedia = referencesForVideoAction(action, referenceMedia);
     const current = promptForVideoAction(action, prompt, activeReferenceMedia);
     const ctl = new AbortController();
     promptEnhanceAbortRef.current?.abort();
+    const requestEpoch = promptEnhanceEpochRef.current + 1;
+    const requestDraftFence = { ...draftFenceRef.current };
+    promptEnhanceEpochRef.current = requestEpoch;
     promptEnhanceAbortRef.current = ctl;
     clearPromptEnhanceChoices();
     setIsEnhancingPrompt(true);
     let accumulated = "";
+    const isCurrentRequest = () =>
+      !ctl.signal.aborted &&
+      promptEnhanceAbortRef.current === ctl &&
+      promptEnhanceEpochRef.current === requestEpoch &&
+      isVideoRequestFenceCurrent(draftFenceRef.current, requestDraftFence);
     try {
       await enhanceVideoPrompt(
         {
@@ -1930,7 +1695,7 @@ export default function VideoPage() {
           reference_media: referencePayloadForVideoAction(action, referenceMedia),
         },
         (delta) => {
-          if (ctl.signal.aborted || promptEnhanceAbortRef.current !== ctl) return;
+          if (!isCurrentRequest()) return;
           accumulated += delta;
           setPromptEnhancePreview(
             displayPromptReferenceMentions(accumulated, activeReferenceMedia),
@@ -1938,6 +1703,7 @@ export default function VideoPage() {
         },
         ctl.signal,
       );
+      if (!isCurrentRequest()) return;
       const candidates = buildPromptEnhanceCandidates(
         accumulated,
         current,
@@ -1962,7 +1728,7 @@ export default function VideoPage() {
         setPrompt(original);
       }
     } catch (err) {
-      if (!ctl.signal.aborted) {
+      if (isCurrentRequest()) {
         const description = err instanceof Error ? err.message : undefined;
         if (accumulated.trim()) {
           const candidates = buildPromptEnhanceCandidates(
@@ -1994,10 +1760,13 @@ export default function VideoPage() {
         }
       }
     } finally {
-      if (promptEnhanceAbortRef.current === ctl) {
+      if (
+        promptEnhanceAbortRef.current === ctl &&
+        promptEnhanceEpochRef.current === requestEpoch
+      ) {
         promptEnhanceAbortRef.current = null;
+        setIsEnhancingPrompt(false);
       }
-      setIsEnhancingPrompt(false);
     }
   }, [
     action,
@@ -2018,21 +1787,25 @@ export default function VideoPage() {
     const target = promptRef.current;
     if (!target) return;
     target.scrollIntoView({ behavior: motionSafeScrollBehavior(), block: "center" });
-    requestAnimationFrame(() => target.focus());
-  }, []);
+    requestAnimationFrame(() => focusPromptTarget(target));
+  }, [focusPromptTarget]);
 
   const applyPromptEnhanceCandidate = useCallback(
     (candidate: PromptEnhanceCandidate) => {
       if (!canApplyPromptEnhanceCandidate(candidate)) return;
       setPrompt(candidate.prompt);
       setSelectedPromptEnhanceCandidateId(candidate.id);
-      requestAnimationFrame(() => promptRef.current?.focus({ preventScroll: true }));
+      requestAnimationFrame(() => {
+        const target = promptRef.current;
+        if (target) focusPromptTarget(target, { preventScroll: true });
+      });
     },
-    [],
+    [focusPromptTarget],
   );
 
   const handlePromptChange = useCallback(
     (value: string) => {
+      abortPromptEnhancement();
       clearPromptEnhanceSelection();
       setPrompt(
         action === "reference"
@@ -2040,7 +1813,12 @@ export default function VideoPage() {
           : value,
       );
     },
-    [action, clearPromptEnhanceSelection, referenceMedia],
+    [
+      abortPromptEnhancement,
+      action,
+      clearPromptEnhanceSelection,
+      referenceMedia,
+    ],
   );
 
   const resizePromptEditor = useCallback(() => {
@@ -2066,9 +1844,12 @@ export default function VideoPage() {
     });
   }, []);
 
+  const uploadsPending =
+    uploadMut.isPending || referenceUploadMut.isPending;
   const submitDisabledReason = useMemo(() => {
     return videoSubmitDisabledReason({
       createPending: createMut.isPending,
+      uploadPending: uploadsPending,
       optionsLoading: optionsQ.isLoading,
       options,
       selectedModel,
@@ -2100,21 +1881,20 @@ export default function VideoPage() {
     seedIsValid,
     effectiveResolution,
     selectedModel,
+    uploadsPending,
   ]);
 
-  const canSubmit =
-    Boolean(options?.enabled) &&
-    Boolean(selectedModel) &&
-    prompt.trim().length > 0 &&
-    availableResolutions.includes(effectiveResolution) &&
-    availableDurations.includes(effectiveDurationS) &&
-    (action === "t2v" ||
-      (action === "i2v" && inputImageId.trim().length > 0) ||
-      (action === "reference" && referenceMedia.length > 0)) &&
-    (action !== "reference" || !referenceLimitError) &&
-    seedIsValid &&
-    estimate !== null &&
-    !createMut.isPending;
+  const canSubmit = submitDisabledReason === "可以提交";
+  const submitVideo = useCallback(() => {
+    if (
+      !canSubmit ||
+      firstFrameUploadAbortRef.current ||
+      referenceUploadAbortRef.current
+    ) {
+      return;
+    }
+    createMut.mutate();
+  }, [canSubmit, createMut]);
   const serviceEnabled = Boolean(options?.enabled);
   const serviceSummary = optionsQ.isLoading
     ? "读取视频服务配置"
@@ -2178,7 +1958,7 @@ export default function VideoPage() {
                       copy={MODE_COPY[key]}
                       selected={action === key}
                       onSelect={() => {
-                        clearPromptEnhanceChoices();
+                        switchDraftContext(`draft:${key}`, key);
                         const nextModel = firstModelForAction(options, key);
                         const nextResolutions = resolutionOptionsForModel(
                           options,
@@ -2214,7 +1994,7 @@ export default function VideoPage() {
                       className="hidden"
                       onChange={(event) => {
                         const file = event.target.files?.[0];
-                        if (file) uploadMut.mutate(file);
+                        if (file) startFirstFrameUpload(file);
                         event.target.value = "";
                       }}
                     />
@@ -2257,6 +2037,8 @@ export default function VideoPage() {
                         <input
                           value={inputImageId}
                           onChange={(event) => {
+                            cancelFirstFrameUpload();
+                            abortPromptEnhancement();
                             clearPromptEnhanceChoices();
                             setInputImageId(event.target.value);
                             setUploadedLabel("");
@@ -2278,7 +2060,7 @@ export default function VideoPage() {
                       className="hidden"
                       onChange={(event) => {
                         const file = event.target.files?.[0];
-                        if (file) referenceUploadMut.mutate(file);
+                        if (file) startReferenceUpload(file);
                         event.target.value = "";
                       }}
                     />
@@ -2299,6 +2081,7 @@ export default function VideoPage() {
                           variant="outline"
                           size="sm"
                           loading={referenceUploadMut.isPending}
+                          disabled={referenceUploadMut.isPending}
                           onClick={() => referenceFileRef.current?.click()}
                           leftIcon={<Upload className="h-3.5 w-3.5" />}
                         >
@@ -2317,12 +2100,13 @@ export default function VideoPage() {
                             onInsert={() => insertReferenceTag(item)}
                             onPreview={() => setReferencePreviewItem(item)}
                             onRemove={() => {
+                              abortPromptEnhancement();
                               clearPromptEnhanceChoices();
                               setReferencePreviewItem((current) =>
                                 current?._key === item._key ? null : current,
                               );
-                              setReferenceMedia((prev) =>
-                                prev.filter((ref) => ref._key !== item._key),
+                              commitReferenceMedia((current) =>
+                                current.filter((ref) => ref._key !== item._key),
                               );
                             }}
                           />
@@ -2330,8 +2114,9 @@ export default function VideoPage() {
                         {referenceMedia.length === 0 && (
                           <button
                             type="button"
+                            disabled={referenceUploadMut.isPending}
                             onClick={() => referenceFileRef.current?.click()}
-                            className="flex min-h-24 min-w-[240px] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]"
+                            className="flex min-h-24 min-w-[240px] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
                           >
                             <Upload className="h-4 w-4" />
                             添加图片或视频参考
@@ -2356,6 +2141,7 @@ export default function VideoPage() {
                                 key={kind}
                                 type="button"
                                 aria-pressed={active}
+                                disabled={referenceUploadMut.isPending}
                                 onClick={() => setAssetReferenceKind(kind)}
                                 className={cn(
                                   "inline-flex min-w-12 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
@@ -2373,9 +2159,14 @@ export default function VideoPage() {
                           <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                           <input
                             value={assetUrlInput}
+                            disabled={referenceUploadMut.isPending}
                             onChange={(event) => setAssetUrlInput(event.target.value)}
                             onKeyDown={(event) => {
-                              if (event.key === "Enter") {
+                              if (
+                                event.key === "Enter" &&
+                                !event.nativeEvent.isComposing &&
+                                !referenceUploadMut.isPending
+                              ) {
                                 event.preventDefault();
                                 addAssetReference();
                               }
@@ -2387,7 +2178,10 @@ export default function VideoPage() {
                         <Button
                           variant="secondary"
                           size="sm"
-                          disabled={!assetUrlInput.trim()}
+                          disabled={
+                            referenceUploadMut.isPending ||
+                            !assetUrlInput.trim()
+                          }
                           onClick={addAssetReference}
                         >
                           添加素材
@@ -2440,7 +2234,7 @@ export default function VideoPage() {
                         <button
                           key={chip}
                           type="button"
-                          disabled={isEnhancingPrompt}
+                          disabled={isEnhancingPrompt || uploadsPending}
                           onClick={() => insertPromptText(chip)}
                           className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
                         >
@@ -2485,8 +2279,9 @@ export default function VideoPage() {
             reason={submitDisabledReason}
             loading={createMut.isPending}
             sourceReady={sourceReady}
-            onSubmit={() => createMut.mutate()}
+            onSubmit={submitVideo}
             onModelChange={(value) => {
+              abortPromptEnhancement();
               clearPromptEnhanceChoices();
               const nextResolutions = resolutionOptionsForModel(options, value);
               const nextResolution = nextResolutions.includes(resolution)
@@ -2499,13 +2294,16 @@ export default function VideoPage() {
                 nextResolution,
               );
               setModel(value);
+              setResolution(nextResolution);
               setDurationS((prev) => durationOrPreferred(prev, nextDurations));
             }}
             onDurationChange={(value) => {
+              abortPromptEnhancement();
               clearPromptEnhanceChoices();
               setDurationS(Number(value));
             }}
             onResolutionChange={(value) => {
+              abortPromptEnhancement();
               clearPromptEnhanceChoices();
               const nextDurations = durationOptionsForModel(
                 options,
@@ -2517,11 +2315,13 @@ export default function VideoPage() {
               setDurationS((prev) => durationOrPreferred(prev, nextDurations));
             }}
             onAspectRatioChange={(value) => {
+              abortPromptEnhancement();
               clearPromptEnhanceChoices();
               setAspectRatio(value);
             }}
             onSeedChange={setSeed}
             onGenerateAudioChange={(value) => {
+              abortPromptEnhancement();
               clearPromptEnhanceChoices();
               setGenerateAudio(value);
             }}
@@ -2548,7 +2348,7 @@ export default function VideoPage() {
         onRefresh={() => void historyQ.refetch()}
         onLoadMore={() => void historyQ.fetchNextPage()}
         onCancel={(item) => cancelMut.mutate(item.id)}
-        onRetry={(item) => retryMut.mutate(item.id)}
+        onRetry={(item) => requestVideoRetry(item.id)}
         onCopy={(item) => {
           void navigator.clipboard?.writeText(item.prompt);
           toast.success("描述已复制");
@@ -2571,7 +2371,7 @@ export default function VideoPage() {
           item={playbackVideoItem}
           onClose={() => setSelectedVideoId("")}
           onUseDraft={() => loadAsDraft(playbackVideoItem)}
-          onRetry={() => retryMut.mutate(playbackVideoItem.id)}
+          onRetry={() => requestVideoRetry(playbackVideoItem.id)}
           onCopy={() => {
             void navigator.clipboard?.writeText(playbackVideoItem.prompt);
             toast.success("描述已复制");
@@ -2593,1057 +2393,5 @@ export default function VideoPage() {
         <MobileTabBar />
       </div>
     </div>
-  );
-}
-
-function activeVideoTaskSummary(
-  activeCount: number,
-  historyCount: number,
-): string {
-  return activeCount > 0
-    ? `${activeCount} 个任务正在处理`
-    : `${historyCount} 条历史记录`;
-}
-
-function videoHistoryCountText({
-  loading,
-  count,
-  hasNextPage,
-}: {
-  loading: boolean;
-  count: number;
-  hasNextPage: boolean;
-}): string {
-  if (loading) return "读取中";
-  return `${count}${hasNextPage ? "+" : ""} 条`;
-}
-
-function videoHistoryEmptyCopy(
-  historyFilter: VideoHistoryFilter,
-  activeCount: number,
-  loading: boolean,
-): { title: string; description: string } {
-  if (loading) {
-    return { title: "读取中", description: "正在读取视频任务记录。" };
-  }
-  if (activeCount > 0) {
-    return {
-      title: `暂无${videoHistoryFilterLabel(historyFilter)}记录`,
-      description: "当前任务完成后会进入历史。",
-    };
-  }
-  return {
-    title: `暂无${videoHistoryFilterLabel(historyFilter)}记录`,
-    description:
-      historyFilter === "all"
-        ? "提交后的任务会在这里保留参数、状态和结果。"
-        : "切换筛选可查看其他状态。",
-  };
-}
-
-function ActiveVideoTaskSection({
-  items,
-  retryDisabled,
-  onCancel,
-  onRetry,
-  onCopy,
-  onUseDraft,
-}: {
-  items: VideoGenerationOut[];
-  retryDisabled: boolean;
-  onCancel: (item: VideoGenerationOut) => void;
-  onRetry: (item: VideoGenerationOut) => void;
-  onCopy: (item: VideoGenerationOut) => void;
-  onUseDraft: (item: VideoGenerationOut) => void;
-}) {
-  if (items.length === 0) return null;
-  return (
-    <section className="space-y-2.5">
-      <div className="flex items-center justify-between gap-3 px-1">
-        <p className="type-caption text-[var(--fg-2)]">正在进行</p>
-        <span className="text-xs tabular-nums text-[var(--fg-2)]">
-          {items.length} 条
-        </span>
-      </div>
-      <div className="grid gap-2.5">
-        {items.map((item) => (
-          <TaskRow
-            key={item.id}
-            item={item}
-            onCancel={() => onCancel(item)}
-            onRetry={() => onRetry(item)}
-            retryDisabled={retryDisabled}
-            onCopy={() => onCopy(item)}
-            onUseDraft={() => onUseDraft(item)}
-            showPreview={false}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function VideoTaskHistorySection({
-  items,
-  activeCount,
-  historyFilter,
-  historyCounts,
-  loading,
-  hasNextPage,
-  fetchingNextPage,
-  retryDisabled,
-  selectedVideoId,
-  onHistoryFilterChange,
-  onLoadMore,
-  onCancel,
-  onRetry,
-  onCopy,
-  onUseDraft,
-  onDelete,
-  onPreview,
-}: {
-  items: VideoGenerationOut[];
-  activeCount: number;
-  historyFilter: VideoHistoryFilter;
-  historyCounts: Record<VideoHistoryFilter, number>;
-  loading: boolean;
-  hasNextPage: boolean;
-  fetchingNextPage: boolean;
-  retryDisabled: boolean;
-  selectedVideoId: string;
-  onHistoryFilterChange: (value: VideoHistoryFilter) => void;
-  onLoadMore: () => void;
-  onCancel: (item: VideoGenerationOut) => void;
-  onRetry: (item: VideoGenerationOut) => void;
-  onCopy: (item: VideoGenerationOut) => void;
-  onUseDraft: (item: VideoGenerationOut) => void;
-  onDelete: (item: VideoGenerationOut) => void;
-  onPreview: (item: VideoGenerationOut) => void;
-}) {
-  const emptyCopy = videoHistoryEmptyCopy(historyFilter, activeCount, loading);
-  return (
-    <section className="space-y-2.5">
-      <div className="flex items-center justify-between gap-3 px-1">
-        <p className="type-caption text-[var(--fg-2)]">历史记录</p>
-        <span className="text-xs tabular-nums text-[var(--fg-2)]">
-          {videoHistoryCountText({
-            loading,
-            count: items.length,
-            hasNextPage,
-          })}
-        </span>
-      </div>
-      <HistoryFilterTabs
-        value={historyFilter}
-        counts={historyCounts}
-        loading={loading}
-        onChange={onHistoryFilterChange}
-      />
-      <div className="grid gap-2.5">
-        {items.map((item) => (
-          <TaskRow
-            key={item.id}
-            item={item}
-            onCancel={() => onCancel(item)}
-            onRetry={() => onRetry(item)}
-            retryDisabled={retryDisabled}
-            onCopy={() => onCopy(item)}
-            onUseDraft={() => onUseDraft(item)}
-            onDelete={() => onDelete(item)}
-            onPreview={hasVideo(item) ? () => onPreview(item) : undefined}
-            selected={selectedVideoId === item.video?.id}
-            showPreview={false}
-          />
-        ))}
-        {items.length === 0 && (
-          <EmptyPanel
-            icon={<Film className="h-5 w-5" />}
-            title={emptyCopy.title}
-            description={emptyCopy.description}
-          />
-        )}
-        {hasNextPage && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full"
-            loading={fetchingNextPage}
-            onClick={onLoadMore}
-            leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-          >
-            {fetchingNextPage ? "加载中" : "加载更早记录"}
-          </Button>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function VideoTaskDrawer({
-  open,
-  onClose,
-  activeItems,
-  historyItems,
-  historyFilter,
-  historyCounts,
-  historyLoading,
-  historyHasNextPage,
-  historyFetchingNextPage,
-  retryDisabled,
-  selectedVideoId,
-  onHistoryFilterChange,
-  onRefresh,
-  onLoadMore,
-  onCancel,
-  onRetry,
-  onCopy,
-  onUseDraft,
-  onDelete,
-  onPreview,
-}: {
-  open: boolean;
-  onClose: () => void;
-  activeItems: VideoGenerationOut[];
-  historyItems: VideoGenerationOut[];
-  historyFilter: VideoHistoryFilter;
-  historyCounts: Record<VideoHistoryFilter, number>;
-  historyLoading: boolean;
-  historyHasNextPage: boolean;
-  historyFetchingNextPage: boolean;
-  retryDisabled: boolean;
-  selectedVideoId: string;
-  onHistoryFilterChange: (value: VideoHistoryFilter) => void;
-  onRefresh: () => void;
-  onLoadMore: () => void;
-  onCancel: (item: VideoGenerationOut) => void;
-  onRetry: (item: VideoGenerationOut) => void;
-  onCopy: (item: VideoGenerationOut) => void;
-  onUseDraft: (item: VideoGenerationOut) => void;
-  onDelete: (item: VideoGenerationOut) => void;
-  onPreview: (item: VideoGenerationOut) => void;
-}) {
-  const reduceMotion = useReducedMotion();
-  const panelRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const previousFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(
-        panelRef.current?.querySelectorAll<HTMLElement>(
-          VIDEO_DRAWER_FOCUSABLE,
-        ) ?? [],
-      ).filter((element) => element.offsetParent !== null);
-      if (focusable.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      previousFocus?.focus();
-    };
-  }, [onClose, open]);
-
-  return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-[var(--surface-scrim)] sm:p-3"
-          initial={{ opacity: reduceMotion ? 1 : 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: reduceMotion ? 1 : 0 }}
-          transition={{ duration: reduceMotion ? 0 : DURATION.quick }}
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) onClose();
-          }}
-        >
-          <motion.section
-            ref={panelRef}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="video-task-panel-title"
-            className="mobile-dialog-panel ml-auto flex h-full w-full max-w-[460px] flex-col overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)]"
-            initial={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
-            transition={{
-              duration: reduceMotion ? 0 : DURATION.normal,
-              ease: EASE.develop,
-            }}
-          >
-            <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3.5">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-                    <ListVideo className="h-4 w-4" />
-                  </span>
-                  <div>
-                    <h2
-                      id="video-task-panel-title"
-                      className="text-sm font-semibold text-[var(--fg-0)]"
-                    >
-                      视频任务
-                    </h2>
-                    <p className="mt-0.5 text-xs text-[var(--fg-2)]">
-                      {activeVideoTaskSummary(
-                        activeItems.length,
-                        historyCounts.all,
-                      )}
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  aria-label="刷新视频任务"
-                  tooltip="刷新"
-                  onClick={onRefresh}
-                >
-                  <RefreshCw className="h-4 w-4" />
-                </IconButton>
-                <IconButton
-                  autoFocus
-                  variant="ghost"
-                  size="sm"
-                  aria-label="关闭视频任务"
-                  tooltip="关闭"
-                  onClick={onClose}
-                >
-                  <X className="h-4 w-4" />
-                </IconButton>
-              </div>
-            </header>
-
-            <div className="mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-3 sm:p-4">
-              <ActiveVideoTaskSection
-                items={activeItems}
-                retryDisabled={retryDisabled}
-                onCancel={onCancel}
-                onRetry={onRetry}
-                onCopy={onCopy}
-                onUseDraft={onUseDraft}
-              />
-              <VideoTaskHistorySection
-                items={historyItems}
-                activeCount={activeItems.length}
-                historyFilter={historyFilter}
-                historyCounts={historyCounts}
-                loading={historyLoading}
-                hasNextPage={historyHasNextPage}
-                fetchingNextPage={historyFetchingNextPage}
-                retryDisabled={retryDisabled}
-                selectedVideoId={selectedVideoId}
-                onHistoryFilterChange={onHistoryFilterChange}
-                onLoadMore={onLoadMore}
-                onCancel={onCancel}
-                onRetry={onRetry}
-                onCopy={onCopy}
-                onUseDraft={onUseDraft}
-                onDelete={onDelete}
-                onPreview={onPreview}
-              />
-            </div>
-          </motion.section>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
-
-
-function EmptyPanel({
-  icon,
-  title,
-  description,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex min-h-[132px] flex-col items-center justify-center rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/60 p-6 text-center">
-      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]">
-        {icon}
-      </div>
-      <p className="text-sm font-medium text-[var(--fg-0)]">{title}</p>
-      <p className="mt-1 max-w-sm text-xs leading-5 text-[var(--fg-2)]">{description}</p>
-    </div>
-  );
-}
-
-function VideoDownloadLink({
-  item,
-  fullWidth = false,
-}: {
-  item: VideoGenerationOut;
-  fullWidth?: boolean;
-}) {
-  const temporaryDownload = activeTemporaryDownload(item);
-  const stableHref = hasVideo(item) ? videoDownloadUrl(item.video.id) : "";
-  const href = temporaryDownload?.url || stableHref;
-  if (!href) return null;
-  const isTemporary = temporaryDownload != null;
-  const expiresTitle =
-    isTemporary
-      ? `火山临时链接，约 ${Math.max(1, Math.floor(temporaryDownload.expires_in_s / 60))} 分钟后过期`
-      : undefined;
-  return (
-    <a
-      href={href}
-      download={isTemporary ? undefined : videoDownloadName(item)}
-      target={isTemporary ? "_blank" : undefined}
-      rel={isTemporary ? "noopener noreferrer" : undefined}
-      title={expiresTitle}
-      className={cn(
-        "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
-        fullWidth && "w-full",
-      )}
-    >
-      <Download className="h-3.5 w-3.5 shrink-0" />
-      {isTemporary ? "快速下载" : "下载"}
-    </a>
-  );
-}
-
-function VideoPosterButton({
-  item,
-  onPreview,
-  selected = false,
-  compact = false,
-}: {
-  item: VideoGenerationWithVideo;
-  onPreview: () => void;
-  selected?: boolean;
-  compact?: boolean;
-}) {
-  const [posterFailure, setPosterFailure] = useState<{
-    videoId: string;
-    failed: boolean;
-  } | null>(null);
-  const poster = posterSrc(item.video);
-  const videoUrl = videoSrc(item.video);
-  const posterFailed =
-    posterFailure?.videoId === item.video.id ? posterFailure.failed : false;
-  const prewarmPreview = useCallback(() => {
-    prewarmImage(poster);
-    prewarmVideoMetadata(videoUrl);
-  }, [poster, videoUrl]);
-  const handlePreview = useCallback(() => {
-    prewarmPreview();
-    onPreview();
-  }, [onPreview, prewarmPreview]);
-
-  useEffect(() => {
-    if (selected) prewarmPreview();
-  }, [prewarmPreview, selected]);
-
-  return (
-    <button
-      type="button"
-      onClick={handlePreview}
-      onFocus={prewarmPreview}
-      onPointerDown={prewarmPreview}
-      onPointerEnter={prewarmPreview}
-      aria-pressed={selected}
-      className={cn(
-        "group relative w-full overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-0)] text-left transition-colors",
-        compact ? "aspect-video" : "mt-3 aspect-video",
-        selected
-          ? "border-[var(--accent-border)] shadow-[var(--shadow-1)]"
-          : "border-[var(--border-subtle)] hover:border-[var(--border)]",
-      )}
-    >
-      {poster && !posterFailed ? (
-        <img
-          src={poster}
-          alt=""
-          loading={selected ? "eager" : "lazy"}
-          decoding="async"
-          fetchPriority={selected ? "high" : "low"}
-          onError={() =>
-            setPosterFailure({ videoId: item.video.id, failed: true })
-          }
-          className="h-full w-full object-contain"
-        />
-      ) : (
-        <div className="grid h-full place-items-center text-[var(--fg-2)]">
-          <Film className="h-6 w-6" />
-        </div>
-      )}
-      <span className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/20">
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--fg-0)]/85 px-3 py-1.5 text-xs font-medium text-[var(--bg-0)] shadow-[var(--shadow-2)]">
-          <Play className="h-3.5 w-3.5" />
-          播放预览
-        </span>
-      </span>
-    </button>
-  );
-}
-
-type VideoPlayerStatus = "loading" | "metadata" | "ready" | "buffering" | "error";
-
-function videoPlayerStatusLabel(status: VideoPlayerStatus): string {
-  switch (status) {
-    case "loading":
-      return "读取视频";
-    case "metadata":
-      return "准备播放";
-    case "buffering":
-      return "缓冲中";
-    case "error":
-      return "载入失败";
-    default:
-      return "";
-  }
-}
-
-function PrimaryVideoPlayer({
-  item,
-  className,
-}: {
-  item: VideoGenerationWithVideo;
-  className?: string;
-}) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [statusState, setStatusState] = useState<{
-    videoId: string;
-    status: VideoPlayerStatus;
-  }>(() => ({ videoId: item.video.id, status: "loading" }));
-  const poster = posterSrc(item.video);
-  const src = videoSrc(item.video);
-  const status =
-    statusState.videoId === item.video.id ? statusState.status : "loading";
-  const setVideoStatus = useCallback(
-    (next: VideoPlayerStatus) =>
-      setStatusState({ videoId: item.video.id, status: next }),
-    [item.video.id],
-  );
-
-  useEffect(() => {
-    prewarmImage(poster);
-    prewarmVideoMetadata(src);
-  }, [poster, src]);
-
-  const retryLoad = useCallback(() => {
-    setVideoStatus("loading");
-    prewarmImage(poster);
-    prewarmVideoMetadata(src);
-    videoRef.current?.load();
-  }, [poster, setVideoStatus, src]);
-
-  const showState =
-    status === "loading" || status === "buffering" || status === "error";
-
-  return (
-    <div
-      className={cn(
-        "relative flex min-h-0 overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] shadow-[var(--shadow-2)]",
-        className,
-      )}
-    >
-      <video
-        key={item.video.id}
-        ref={videoRef}
-        controls
-        playsInline
-        preload="metadata"
-        poster={poster}
-        src={src}
-        onLoadStart={() => setVideoStatus("loading")}
-        onLoadedMetadata={() => setVideoStatus("metadata")}
-        onCanPlay={() => setVideoStatus("ready")}
-        onPlaying={() => setVideoStatus("ready")}
-        onWaiting={() => setVideoStatus("buffering")}
-        onError={() => setVideoStatus("error")}
-        className="h-full min-h-0 w-full bg-[var(--bg-2)] object-contain"
-      />
-      {showState && (
-        <div
-          className={cn(
-            "absolute inset-0 flex items-center justify-center bg-[var(--bg-1)]/70 text-[var(--fg-0)]",
-            status !== "error" && "pointer-events-none",
-          )}
-        >
-          <div
-            role={status === "error" ? "alert" : "status"}
-            aria-live={status === "error" ? "assertive" : "polite"}
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-0)]/90 px-3 py-1.5 text-xs font-medium text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-md"
-          >
-            {status === "error" ? (
-              <button
-                type="button"
-                onClick={retryLoad}
-                className="inline-flex cursor-pointer items-center gap-1.5 text-[var(--fg-0)]"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                重试
-              </button>
-            ) : (
-              <>
-                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                {videoPlayerStatusLabel(status)}
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function VideoPreviewDialog({
-  item,
-  onClose,
-  onUseDraft,
-  onRetry,
-  onCopy,
-  onDelete,
-}: {
-  item: VideoGenerationWithVideo;
-  onClose: () => void;
-  onUseDraft: () => void;
-  onRetry: () => void;
-  onCopy: () => void;
-  onDelete: () => void;
-}) {
-  const elapsedLabel = taskElapsedLabel(item);
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={`video-preview-${item.id}`}
-        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(900px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
-      >
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
-          <div className="min-w-0">
-            <div className="mb-2 flex flex-wrap gap-2">
-              <StatusPill item={item} />
-              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
-                {actionLabel(item.action)} · {item.resolution} · {formatDurationLabel(item.duration_s)}
-              </span>
-              {elapsedLabel && (
-                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
-                  {elapsedLabel}
-                </span>
-              )}
-            </div>
-            <h2
-              id={`video-preview-${item.id}`}
-              className="truncate text-base font-semibold text-[var(--fg-0)]"
-            >
-              视频播放
-            </h2>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-9 w-9 px-0"
-            onClick={onClose}
-            aria-label="关闭视频播放"
-          >
-            <XCircle className="h-4 w-4" />
-          </Button>
-        </header>
-        <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
-          <div className="flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]">
-            <div className="min-h-0 flex-1 lg:h-full">
-              <PrimaryVideoPlayer item={item} className="h-full" />
-            </div>
-            <aside className="max-h-[34%] shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
-              <p className="type-caption text-[var(--fg-2)]">提示词</p>
-              <p className="mt-2 text-sm leading-6 text-[var(--fg-0)]">
-                {item.prompt}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-1.5 text-xs text-[var(--fg-2)]">
-                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
-                  {item.video.width}x{item.video.height}
-                </span>
-                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
-                  {formatDurationLabel(item.duration_s)}
-                </span>
-                {elapsedLabel && (
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
-                    {elapsedLabel}
-                  </span>
-                )}
-                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
-                  {item.video.has_audio ? "含音频" : "无音频"}
-                </span>
-              </div>
-            </aside>
-          </div>
-        </div>
-        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:flex-wrap sm:justify-between sm:overflow-visible sm:px-5">
-          <VideoDownloadLink item={item} />
-          <div className="flex shrink-0 flex-nowrap items-center gap-2 sm:flex-wrap">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onUseDraft}
-              leftIcon={<RotateCw className="h-3.5 w-3.5" />}
-            >
-              套用参数
-            </Button>
-            {isFailedHistoryVideo(item) && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onRetry}
-                leftIcon={<Play className="h-3.5 w-3.5" />}
-              >
-                重新生成
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onCopy}
-              leftIcon={<Copy className="h-3.5 w-3.5" />}
-            >
-              复制
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              leftIcon={<Trash2 className="h-3.5 w-3.5" />}
-            >
-              删除
-            </Button>
-          </div>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
-function HistoryFilterTabs({
-  value,
-  counts,
-  loading,
-  onChange,
-}: {
-  value: VideoHistoryFilter;
-  counts: Record<VideoHistoryFilter, number>;
-  loading: boolean;
-  onChange: (value: VideoHistoryFilter) => void;
-}) {
-  const filters: Array<{ value: VideoHistoryFilter; label: string }> = [
-    { value: "all", label: "全部" },
-    { value: "succeeded", label: "成功" },
-    { value: "failed", label: "失败" },
-  ];
-
-  return (
-    <div className="grid grid-cols-3 gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
-      {filters.map((filter) => {
-        const active = filter.value === value;
-        return (
-          <button
-            key={filter.value}
-            type="button"
-            onClick={() => onChange(filter.value)}
-            className={cn(
-              "min-h-8 rounded-[var(--radius-control)] px-2 text-xs transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
-              active
-                ? "bg-[var(--bg-2)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
-                : "text-[var(--fg-2)] hover:bg-[var(--bg-1)] hover:text-[var(--fg-1)]",
-            )}
-          >
-            <span className="inline-flex min-w-0 items-center justify-center gap-1.5">
-              <span>{filter.label}</span>
-              <span className="rounded-full border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
-                {loading ? "..." : counts[filter.value]}
-              </span>
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function TaskErrorDetails({
-  raw,
-  summary,
-}: {
-  raw: string;
-  summary: string;
-}) {
-  return (
-    <details className="group mt-2 overflow-hidden rounded-[var(--radius-control)] border border-danger-border bg-danger-soft">
-      <summary className="flex cursor-pointer list-none items-start gap-2 px-2.5 py-2 text-xs leading-5 text-[var(--danger-fg)]">
-        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 flex-1">{summary}</span>
-        <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="border-t border-danger-border px-2.5 py-2">
-        <p className="type-caption text-[var(--danger-fg)]">技术详情</p>
-        <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-2 font-mono text-[10px] leading-4 text-[var(--fg-1)]">
-          {raw}
-        </pre>
-      </div>
-    </details>
-  );
-}
-
-function TaskRowActions({
-  item,
-  active,
-  retryable,
-  retryDisabled,
-  videoItem,
-  selected,
-  showPreview,
-  canDownload,
-  onCancel,
-  onRetry,
-  onCopy,
-  onUseDraft,
-  onDelete,
-  onPreview,
-}: {
-  item: VideoGenerationOut;
-  active: boolean;
-  retryable: boolean;
-  retryDisabled: boolean;
-  videoItem: VideoGenerationWithVideo | null;
-  selected: boolean;
-  showPreview: boolean;
-  canDownload: boolean;
-  onCancel: () => void;
-  onRetry: () => void;
-  onCopy: () => void;
-  onUseDraft?: () => void;
-  onDelete?: () => void;
-  onPreview?: () => void;
-}) {
-  return (
-    <div className="mt-3 flex flex-wrap items-center gap-2">
-      {active && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onCancel}
-          leftIcon={<XCircle className="h-3.5 w-3.5" />}
-        >
-          取消
-        </Button>
-      )}
-      {retryable && (
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={retryDisabled}
-          loading={retryDisabled}
-          onClick={onRetry}
-          leftIcon={<Play className="h-3.5 w-3.5" />}
-        >
-          重新生成
-        </Button>
-      )}
-      {!showPreview && videoItem && onPreview && (
-        <Button
-          variant={selected ? "secondary" : "outline"}
-          size="sm"
-          onClick={onPreview}
-          leftIcon={<Play className="h-3.5 w-3.5" />}
-        >
-          预览
-        </Button>
-      )}
-      {canDownload && <VideoDownloadLink item={item} />}
-      {onUseDraft && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onUseDraft}
-          leftIcon={<RotateCw className="h-3.5 w-3.5" />}
-        >
-          套用参数
-        </Button>
-      )}
-      <div className="ml-auto flex items-center gap-1">
-        <IconButton
-          variant="ghost"
-          size="sm"
-          onClick={onCopy}
-          aria-label="复制视频描述"
-          tooltip="复制描述"
-        >
-          <Copy className="h-3.5 w-3.5" />
-        </IconButton>
-        {onDelete && videoItem && (
-          <IconButton
-            variant="ghost"
-            size="sm"
-            onClick={onDelete}
-            aria-label="删除视频"
-            tooltip="删除"
-            className="text-[var(--danger-fg)] hover:text-[var(--danger-fg)]"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </IconButton>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TaskRow({
-  item,
-  onCancel,
-  onRetry,
-  retryDisabled = false,
-  onCopy,
-  onUseDraft,
-  onDelete,
-  onPreview,
-  selected = false,
-  showPreview = true,
-}: {
-  item: VideoGenerationOut;
-  onCancel: () => void;
-  onRetry: () => void;
-  retryDisabled?: boolean;
-  onCopy: () => void;
-  onUseDraft?: () => void;
-  onDelete?: () => void;
-  onPreview?: () => void;
-  selected?: boolean;
-  showPreview?: boolean;
-}) {
-  const active = isActiveVideo(item);
-  const progress = progressForItem(item);
-  const progressScale = Math.max(0, Math.min(1, progress / 100));
-  const reduceMotion = useReducedMotion();
-  const copy = stageCopy(item);
-  const videoItem = hasVideo(item) ? item : null;
-  const retryable = isFailedHistoryVideo(item);
-  const canDownload = videoItem != null || activeTemporaryDownload(item) != null;
-  const elapsedLabel = taskElapsedLabel(item);
-  const errorSummary = item.error_message
-    ? taskErrorSummary(item.error_message)
-    : null;
-  return (
-    <article
-      className={cn(
-        "relative overflow-hidden rounded-[var(--radius-card)] border p-3 transition-colors hover:border-[var(--border)]",
-        active || selected
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60",
-      )}
-    >
-      {(active || selected) && (
-        <span aria-hidden="true" className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-[var(--accent)]" />
-      )}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
-            <span className="font-medium text-[var(--fg-1)]">{item.model}</span>
-            <span>{actionLabel(item.action)}</span>
-            <span>{item.resolution}</span>
-            <span>{formatDurationLabel(item.duration_s)}</span>
-            {elapsedLabel && <span>{elapsedLabel}</span>}
-          </div>
-          <p className="mt-1 line-clamp-2 text-sm text-[var(--fg-0)]">{item.prompt}</p>
-          <p className="mt-1 text-xs leading-5 text-[var(--fg-2)]">{copy.detail}</p>
-        </div>
-        <StatusPill item={item} />
-      </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
-        <motion.div
-          className={cn(
-            "h-full w-full origin-left rounded-full",
-            active ? "bg-[var(--accent)]" : item.status === "succeeded" ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
-          )}
-          initial={false}
-          animate={{ scaleX: progressScale }}
-          transition={{ duration: reduceMotion ? 0 : DURATION.normal, ease: EASE.develop }}
-        />
-      </div>
-      {showPreview && videoItem && onPreview && (
-        <VideoPosterButton
-          item={videoItem}
-          selected={selected}
-          onPreview={onPreview}
-        />
-      )}
-      {item.error_message && errorSummary && (
-        <TaskErrorDetails raw={item.error_message} summary={errorSummary} />
-      )}
-      <TaskRowActions
-        item={item}
-        active={active}
-        retryable={retryable}
-        retryDisabled={retryDisabled}
-        videoItem={videoItem}
-        selected={selected}
-        showPreview={showPreview}
-        canDownload={canDownload}
-        onCancel={onCancel}
-        onRetry={onRetry}
-        onCopy={onCopy}
-        onUseDraft={onUseDraft}
-        onDelete={onDelete}
-        onPreview={onPreview}
-      />
-    </article>
-  );
-}
-
-function StatusPill({ item }: { item: VideoGenerationOut }) {
-  const terminalOk = item.status === "succeeded";
-  const terminalBad = ["failed", "canceled", "expired"].includes(item.status);
-  const copy = stageCopy(item);
-  return (
-    <span
-      className={[
-        "rounded-full border px-2 py-1 text-xs",
-        terminalOk
-          ? "border-success-border bg-success-soft text-success"
-          : terminalBad
-          ? "border-danger-border bg-danger-soft text-danger"
-          : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]",
-      ].join(" ")}
-    >
-      {copy.label} · {Math.round(progressForItem(item))}%
-    </span>
   );
 }

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from app.routes import admin_storage
 
@@ -53,3 +54,39 @@ def test_write_atomic_tolerates_eperm_on_chmod(
     ), "PermissionError must remain a subclass of OSError for the catch to fire"
     # Restore (defense-in-depth in case other tests in this module rely on it).
     monkeypatch.setattr(admin_storage.os, "chmod", real_chmod)
+
+
+def test_normalize_local_root_rejects_system_paths_and_honors_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    monkeypatch.setenv("LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS", str(allowed))
+
+    assert admin_storage._normalize_local_root(str(allowed / "lumen")) == str(
+        allowed / "lumen"
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        admin_storage._normalize_local_root("/etc")
+    assert exc_info.value.detail["error"]["code"] == "unsafe_local_root"
+
+    with pytest.raises(HTTPException) as exc_info:
+        admin_storage._normalize_local_root(str(tmp_path / "outside"))
+    assert exc_info.value.detail["error"]["code"] == "local_root_not_allowed"
+
+
+def test_storage_trigger_staging_rejects_live_pending_and_clears_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    trigger = tmp_path / "apply.trigger"
+    trigger.write_text("pending\n", encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        admin_storage._clear_stale_trigger(trigger, stale_after=60)
+    assert exc_info.value.status_code == 409
+
+    monkeypatch.setattr(admin_storage.time, "time", lambda: 10_000.0)
+    os.utime(trigger, (1.0, 1.0))
+    admin_storage._clear_stale_trigger(trigger, stale_after=60)
+    assert not trigger.exists()

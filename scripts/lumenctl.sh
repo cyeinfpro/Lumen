@@ -37,7 +37,7 @@ Lifecycle commands:
   uninstall-lumen      卸载 Lumen（调用 scripts/uninstall.sh）
   rollback             回滚到 previous release（pull 旧 tag + compose up）
   version              输出 VERSION + 镜像 tag + git sha
-  bootstrap-scripts    应急：从 GitHub main 强制热替换 lib/backup/restore/update/lumenctl
+  bootstrap-scripts    应急：从 GitHub main 强制热替换 shell 脚本与 Python runners/guard
                        （平时入口处自动 self-update，TTL=600s；本命令突破 TTL）
 
 Docker compose runtime:
@@ -279,19 +279,8 @@ ensure_python_min_version() {
     local python_bin="$1"
     local min_major="$2"
     local min_minor="$3"
-    if ! command -v "${python_bin}" >/dev/null 2>&1; then
-        log_error "未找到 Python：${python_bin}"
-        exit 1
-    fi
-    if ! "${python_bin}" - "${min_major}" "${min_minor}" <<'PY' >/dev/null 2>&1
-import sys
-
-major = int(sys.argv[1])
-minor = int(sys.argv[2])
-raise SystemExit(0 if sys.version_info >= (major, minor) else 1)
-PY
-    then
-        log_error "${python_bin} 版本过低：$("${python_bin}" --version 2>&1)，需要 >= ${min_major}.${min_minor}"
+    if ! lumen_require_python_min_version \
+            "${python_bin}" "${min_major}" "${min_minor}"; then
         exit 1
     fi
 }
@@ -624,10 +613,131 @@ lumen_compose_restore() {
     run_lumen_script restore.sh "$@"
 }
 
-# Rollback：切回 previous symlink + pull 旧 LUMEN_IMAGE_TAG + compose up
-# （cutover plan §18.1）。
-# previous symlink / .image-tag 由 update.sh 在切换时写入；缺失时报错让用户手动指定。
+# Rollback：持有维护锁 + update 锁，事务化切回 previous release。
+_lumen_compose_rollback_locked() {
+    local deploy_root="$1"
+    if [ ! -L "${deploy_root}/previous" ]; then
+        log_error "${deploy_root}/previous 不存在，无法自动 rollback。"
+        return 1
+    fi
+
+    local current_target previous_target old_id old_dir old_tag old_version
+    local shared_env="${deploy_root}/shared/.env"
+    current_target="$(readlink "${deploy_root}/current" 2>/dev/null || true)"
+    previous_target="$(readlink "${deploy_root}/previous" 2>/dev/null || true)"
+    old_id="$(basename "${previous_target}")"
+    old_dir="${deploy_root}/releases/${old_id}"
+    if [ -z "${current_target}" ] || [ -z "${old_id}" ] || [ ! -d "${old_dir}" ]; then
+        log_error "无法解析 rollback 的 current/previous release。"
+        return 1
+    fi
+    if [ ! -f "${shared_env}" ]; then
+        log_error "${shared_env} 不存在，无法保证 rollback 配置一致性。"
+        return 1
+    fi
+    old_tag="$(head -n1 "${old_dir}/.image-tag" 2>/dev/null | tr -d '[:space:]' || true)"
+    old_version="$(head -n1 "${old_dir}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -z "${old_tag}" ] || [ -z "${old_version}" ]; then
+        log_error "rollback 目标缺少 .image-tag 或 VERSION，拒绝产生源码/镜像/版本错位。"
+        return 1
+    fi
+
+    if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] \
+            && [ "${LUMEN_ROLLBACK_YES:-}" != "1" ]; then
+        printf '\n'
+        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag}, version=${old_version}），并重启 api/worker/web。"
+        if ! confirm "继续 rollback？"; then
+            log_info "已取消。"
+            return 0
+        fi
+    fi
+
+    local env_snapshot
+    env_snapshot="$(mktemp "${deploy_root}/shared/.env.rollback.XXXXXX")" \
+        || return 1
+    if ! cp -p "${shared_env}" "${env_snapshot}"; then
+        rm -f "${env_snapshot}" 2>/dev/null || true
+        return 1
+    fi
+
+    local switched=0 rollback_rc=0
+    log_step "rollback 到 release ${old_id}"
+    log_info "rollback 目标镜像 tag：${old_tag}"
+    log_info "rollback 目标版本：${old_version}"
+    if ! lumen_set_image_tag_in_env "${shared_env}" "${old_tag}" \
+            || ! lumen_set_env_value_in_file \
+                "${shared_env}" LUMEN_VERSION "${old_version}"; then
+        rollback_rc=1
+    elif ! lumen_release_atomic_switch "${deploy_root}" "${old_id}"; then
+        rollback_rc=1
+    else
+        switched=1
+        if [ -f "${deploy_root}/current/VERSION" ]; then
+            ln -sfn current/VERSION "${deploy_root}/VERSION" 2>/dev/null \
+                || cp "${deploy_root}/current/VERSION" "${deploy_root}/VERSION"
+        fi
+        log_info "current 已切回 releases/${old_id}"
+        log_step "docker compose pull"
+        lumen_compose_in "${deploy_root}/current" pull \
+            || log_warn "compose pull 返回非零，将继续 up 使用本地旧镜像兜底"
+        log_step "docker compose up -d --wait api worker web"
+        if ! lumen_compose_in "${deploy_root}/current" \
+                up --pull missing -d --wait api worker web; then
+            rollback_rc=1
+        fi
+    fi
+
+    if [ "${rollback_rc}" -eq 0 ]; then
+        rm -f "${env_snapshot}"
+        return 0
+    fi
+
+    log_error "rollback 失败，恢复执行前的 env 与 symlink 状态。"
+    local restore_tmp="${deploy_root}/shared/.env.restore.$$" restore_ok=1
+    if ! cp -p "${env_snapshot}" "${restore_tmp}" \
+            || ! mv -f "${restore_tmp}" "${shared_env}"; then
+        rm -f "${restore_tmp}" 2>/dev/null || true
+        restore_ok=0
+        log_error "shared/.env 原字节恢复失败；快照保留在 ${env_snapshot}。"
+    fi
+    if [ "${switched}" -eq 1 ]; then
+        lumen_atomic_replace_symlink \
+            "${current_target}" "${deploy_root}/current" || restore_ok=0
+        lumen_atomic_replace_symlink \
+            "${previous_target}" "${deploy_root}/previous" || restore_ok=0
+    fi
+    if [ -f "${deploy_root}/current/VERSION" ]; then
+        ln -sfn current/VERSION "${deploy_root}/VERSION" 2>/dev/null \
+            || cp "${deploy_root}/current/VERSION" "${deploy_root}/VERSION"
+    fi
+    if [ "${restore_ok}" -eq 1 ]; then
+        rm -f "${env_snapshot}"
+        log_warn "rollback 前状态已恢复，尝试重新拉起原 release 核心服务。"
+        lumen_compose_in "${deploy_root}/current" \
+            up --pull missing -d --wait api worker web \
+            || log_error "原 release 核心服务恢复失败，请人工检查 compose 日志。"
+    fi
+    return 1
+}
+
 lumen_compose_rollback() {
+    if [ "$(detect_os)" = "linux" ] \
+            && [ "${EUID:-$(id -u)}" -ne 0 ] \
+            && [ "${LUMEN_ROLLBACK_PRIVILEGED:-0}" != "1" ]; then
+        ensure_cmd sudo "rollback 需要 root 权限以持有维护锁并原子切换 release。"
+        lumen_sudo env \
+            LUMEN_ROLLBACK_PRIVILEGED=1 \
+            LUMEN_LUMENCTL_SELF_UPDATE=0 \
+            LUMEN_SELF_UPDATE=0 \
+            LUMEN_NONINTERACTIVE="${LUMEN_NONINTERACTIVE:-0}" \
+            LUMEN_ROLLBACK_YES="${LUMEN_ROLLBACK_YES:-0}" \
+            LUMEN_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT}" \
+            LUMEN_BACKUP_ROOT="${LUMEN_BACKUP_ROOT}" \
+            COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT}" \
+            bash "${SCRIPT_DIR}/lumenctl.sh" rollback "$@"
+        return $?
+    fi
+
     lumen_require_docker_access
     local deploy_root
     if [ -L "${ROOT}/current" ]; then
@@ -636,60 +746,16 @@ lumen_compose_rollback() {
         deploy_root="${LUMEN_DEPLOY_ROOT}"
     else
         log_error "找不到 release 布局的 current symlink；rollback 仅适用于 release 布局。"
-        exit 1
+        return 1
     fi
 
-    if [ ! -L "${deploy_root}/previous" ]; then
-        log_error "${deploy_root}/previous 不存在，无法自动 rollback。"
-        log_error "请手动 ln -sfn releases/<old-id> ${deploy_root}/current 后重跑。"
-        exit 1
-    fi
-
-    local old_release old_id old_tag
-    old_release="$(readlink "${deploy_root}/previous" 2>/dev/null || true)"
-    old_id="$(basename "${old_release}")"
-    if [ -z "${old_id}" ]; then
-        log_error "无法解析 ${deploy_root}/previous 指向。"
-        exit 1
-    fi
-
-    if [ -f "${deploy_root}/releases/${old_id}/.image-tag" ]; then
-        old_tag="$(head -n1 "${deploy_root}/releases/${old_id}/.image-tag" 2>/dev/null | tr -d '[:space:]' || true)"
-    fi
-    # rollback 会切 current symlink + 改 .env LUMEN_IMAGE_TAG + compose up，
-    # 影响在线服务；自动化场景用 LUMEN_ROLLBACK_YES=1 跳过确认。
-    if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && [ "${LUMEN_ROLLBACK_YES:-}" != "1" ]; then
-        printf '\n'
-        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag:-<未知>}），并重启 api/worker/web。"
-        if ! confirm "继续 rollback？"; then
-            log_info "已取消。"
-            exit 0
-        fi
-    fi
-    log_step "rollback 到 release ${old_id}"
-    if [ -z "${old_tag}" ]; then
-        log_warn "未找到 ${deploy_root}/releases/${old_id}/.image-tag；rollback 将沿用当前 LUMEN_IMAGE_TAG。"
-    else
-        log_info "rollback 目标镜像 tag：${old_tag}"
-        if [ -f "${deploy_root}/shared/.env" ]; then
-            if grep -qE '^LUMEN_IMAGE_TAG=' "${deploy_root}/shared/.env"; then
-                lumen_run_as_root sed -i.bak -E "s|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${old_tag}|" "${deploy_root}/shared/.env"
-            else
-                printf 'LUMEN_IMAGE_TAG=%s\n' "${old_tag}" | lumen_run_as_root tee -a "${deploy_root}/shared/.env" >/dev/null
-            fi
-        else
-            log_warn "${deploy_root}/shared/.env 不存在，跳过 LUMEN_IMAGE_TAG 写入。"
-        fi
-    fi
-
-    lumen_run_as_root ln -sfn "releases/${old_id}" "${deploy_root}/current"
-    log_info "current 已切回 releases/${old_id}"
-
-    log_step "docker compose pull"
-    (cd "${deploy_root}/current" && lumen_docker compose pull) || log_warn "compose pull 返回非零，将继续 up 兜底"
-
-    log_step "docker compose up -d --wait api worker web"
-    (cd "${deploy_root}/current" && lumen_docker compose up -d --wait api worker web)
+    lumen_acquire_lock "${deploy_root}" "lumenctl rollback"
+    local operation_id rc=0
+    operation_id="rollback-$(date -u +%Y%m%d-%H%M%S)-$$"
+    lumen_with_lock "${operation_id}" 1830 \
+        _lumen_compose_rollback_locked "${deploy_root}" || rc=$?
+    lumen_release_lock
+    return "${rc}"
 }
 
 lumen_compose_version() {
@@ -782,13 +848,9 @@ install_storage_units() {
     fi
 
     # 1) 共享通信目录：/var/lib/lumen-storage（host ↔ lumen-api 容器双向 bind）
-    log_info "创建 /var/lib/lumen-storage（root:lumen 0775）"
-    if id lumen >/dev/null 2>&1; then
-        as_sudo install -d -m 0775 -o root -g lumen /var/lib/lumen-storage
-    else
-        as_sudo install -d -m 0775 /var/lib/lumen-storage
-        log_warn "  未找到 lumen 用户，使用 root:root；安装 Lumen 后再 chgrp。"
-    fi
+    local storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
+    log_info "创建 /var/lib/lumen-storage（root:${storage_gid} 0770）"
+    as_sudo install -d -m 0770 -o root -g "${storage_gid}" /var/lib/lumen-storage
 
     # 2) 主脚本到 /usr/local/sbin
     log_info "安装 mount 脚本：/usr/local/sbin/lumen-storage-mount"
@@ -861,8 +923,16 @@ install_image_job() {
     db_path="${state_dir}/image_jobs.sqlite3"
 
     log_step "复制 image-job 文件"
-    as_sudo install -d "${app_dir}" "${data_dir}/images/temp" "${data_dir}/refs" "${state_dir}"
+    as_sudo install -d -m 0755 "${app_dir}" "${data_dir}" "${data_dir}/images"
+    as_sudo install -d -m 0755 "${data_dir}/images/temp" "${data_dir}/refs"
+    as_sudo install -d -m 0700 "${state_dir}"
     as_sudo install -m 0644 "${ROOT}/image-job/app.py" "${app_dir}/app.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/image_artifacts.py" "${app_dir}/image_artifacts.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/image_url_security.py" "${app_dir}/image_url_security.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/job_persistence.py" "${app_dir}/job_persistence.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/payload_helpers.py" "${app_dir}/payload_helpers.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/request_bodies.py" "${app_dir}/request_bodies.py"
+    as_sudo install -m 0644 "${ROOT}/image-job/runtime_config.py" "${app_dir}/runtime_config.py"
     as_sudo install -m 0644 "${ROOT}/image-job/requirements.txt" "${app_dir}/requirements.txt"
     as_sudo install -m 0644 "${ROOT}/image-job/README.md" "${app_dir}/README.md"
     as_sudo install -m 0644 "${ROOT}/image-job/image-job.md" "${app_dir}/image-job.md"
@@ -906,6 +976,7 @@ EOF
     as_sudo install -m 0644 "${tmp_unit}" /etc/systemd/system/image-job.service
     rm -f "${tmp_unit}"
     as_sudo chown -R "${service_user}:${service_group}" "${app_dir}" "${data_dir}" "${state_dir}"
+    as_sudo chmod 0700 "${state_dir}"
 
     as_sudo systemctl daemon-reload
     as_sudo systemctl enable --now image-job

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -38,6 +37,17 @@ logger = logging.getLogger(__name__)
 _UNDO_TTL_SECONDS = 300
 _UNDO_CLAIM_TTL_SECONDS = 300
 _STAGING_TTL_DAYS = 7
+
+
+@runtime_checkable
+class _RowcountResult(Protocol):
+    rowcount: int | None
+
+
+def _dml_rowcount(result: object) -> int | None:
+    if not isinstance(result, _RowcountResult):
+        raise TypeError("expected a DML result with rowcount")
+    return result.rowcount
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -470,19 +480,6 @@ async def _disable_memory_for_conversation(
         return
 
 
-async def _make_undo_token(redis: Any, payload: dict[str, Any]) -> str | None:
-    token = secrets.token_urlsafe(24)
-    try:
-        await redis.setex(
-            f"memory:undo:{token}",
-            _UNDO_TTL_SECONDS,
-            json.dumps(payload, separators=(",", ":")),
-        )
-        return token
-    except Exception:
-        return None
-
-
 async def _build_memory_settings(
     user: User, db: AsyncSession
 ) -> MemorySettingsOut:
@@ -715,9 +712,16 @@ async def clear_memories(
         .values(disabled=True, deleted_at=now)
         .execution_options(synchronize_session=False)
     )
-    db.add(_audit(user_id=user.id, event_type="clear", details={"count": result.rowcount or 0}))
+    deleted_count = int(_dml_rowcount(result) or 0)
+    db.add(
+        _audit(
+            user_id=user.id,
+            event_type="clear",
+            details={"count": deleted_count},
+        )
+    )
     await db.commit()
-    return {"deleted": int(result.rowcount or 0)}
+    return {"deleted": deleted_count}
 
 
 @router.get("/me/memories/export")
@@ -1170,10 +1174,11 @@ async def delete_memory_scope(
         .values(scope_id=default.id)
         .execution_options(synchronize_session=False)
     )
+    moved_count = int(_dml_rowcount(result) or 0)
     await db.delete(scope)
     await db.commit()
     await _publish_account_settings_updated(get_redis(), user.id)
-    return {"moved": int(result.rowcount or 0)}
+    return {"moved": moved_count}
 
 
 @router.patch(

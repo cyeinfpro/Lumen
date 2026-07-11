@@ -3,145 +3,212 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import copy
 import hashlib
 import hmac
-import ipaddress
-import json
+import importlib.util
 import logging
 import os
 import secrets
-import socket
+import socket as socket
 import sqlite3
+import sys
 import time
-import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from ipaddress import IPv4Address, IPv6Address
-from io import BytesIO
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Iterable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
+
+
+_LOCAL_MODULE_DIR = Path(__file__).resolve().parent
+_LOCAL_MODULE_NAMESPACE = (
+    "_lumen_image_job_"
+    + hashlib.sha256(str(_LOCAL_MODULE_DIR).encode("utf-8")).hexdigest()[:12]
+    + "_"
+    + secrets.token_hex(6)
+)
+
+
+def _load_local_module(name: str) -> ModuleType:
+    path = _LOCAL_MODULE_DIR / f"{name}.py"
+    module_name = f"{_LOCAL_MODULE_NAMESPACE}_{name}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load image-job module {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+_runtime_config = _load_local_module("runtime_config")
+_payload_helpers = _load_local_module("payload_helpers")
+_request_bodies_module = _load_local_module("request_bodies")
+_image_url_security_module = _load_local_module("image_url_security")
+_job_persistence_module = _load_local_module("job_persistence")
+_image_artifacts_module = _load_local_module("image_artifacts")
+
+ImageArtifactFacade = _image_artifacts_module.ImageArtifactFacade
+PublicImageDownloadTarget = _image_url_security_module.PublicImageDownloadTarget
+ImageDownloadResolutionError = _image_url_security_module.ImageDownloadResolutionError
+pinned_async_http_transport = _image_url_security_module.pinned_async_http_transport
+resolve_public_image_download_target = (
+    _image_url_security_module.resolve_public_image_download_target
+)
+
+_ALLOWED_SQLITE_JOURNAL_MODES = _job_persistence_module.ALLOWED_SQLITE_JOURNAL_MODES
+JobPersistenceFacade = _job_persistence_module.JobPersistenceFacade
+ReferencePersistenceFacade = _job_persistence_module.ReferencePersistenceFacade
+RetentionFacade = _job_persistence_module.RetentionFacade
+_persistence_db_all_sync = _job_persistence_module.db_all_sync
+_persistence_db_exec_sync = _job_persistence_module.db_exec_sync
+_persistence_db_one_sync = _job_persistence_module.db_one_sync
+_persistence_init_storage = _job_persistence_module.init_storage
+_persistence_open_connection = _job_persistence_module.open_connection
+sqlite_tuning_pragmas = _job_persistence_module.sqlite_tuning_pragmas
+
+PayloadPolicy = _payload_helpers.PayloadPolicy
+JsonShapeLimits = _request_bodies_module.JsonShapeLimits
+_load_json_bytes = _request_bodies_module.load_json_bytes
+_download_content_length = _request_bodies_module.parse_content_length
+parse_json_bytes = _request_bodies_module.parse_json_bytes
+_read_request_body_bounded = _request_bodies_module.read_request_body_bounded
+_validate_json_shape = _request_bodies_module.validate_json_shape
+
+
+ALLOWED_FIXED_ENDPOINTS = _runtime_config.ALLOWED_FIXED_ENDPOINTS
+ALLOWED_PREFIX_ENDPOINTS = _runtime_config.ALLOWED_PREFIX_ENDPOINTS
+CONCURRENCY = _runtime_config.CONCURRENCY
+DATA_DIR = _runtime_config.DATA_DIR
+DB_PATH = _runtime_config.DB_PATH
+DEFAULT_IMAGE_OUTPUT_COMPRESSION = _runtime_config.DEFAULT_IMAGE_OUTPUT_COMPRESSION
+DEFAULT_IMAGE_OUTPUT_FORMAT = _runtime_config.DEFAULT_IMAGE_OUTPUT_FORMAT
+DEFAULT_RETENTION_DAYS = _runtime_config.DEFAULT_RETENTION_DAYS
+GRACEFUL_SHUTDOWN_S = _runtime_config.GRACEFUL_SHUTDOWN_S
+HTTP_POOL_KEEPALIVE = _runtime_config.HTTP_POOL_KEEPALIVE
+HTTP_POOL_MAX = _runtime_config.HTTP_POOL_MAX
+IMAGE_OUTPUT_FORMATS = _runtime_config.IMAGE_OUTPUT_FORMATS
+JOB_HEARTBEAT_INTERVAL_S = _runtime_config.JOB_HEARTBEAT_INTERVAL_S
+JOB_TTL_DAYS = _runtime_config.JOB_TTL_DAYS
+MAX_ENDPOINT_CHARS = _runtime_config.MAX_ENDPOINT_CHARS
+MAX_IDEMPOTENCY_KEY_BYTES = _runtime_config.MAX_IDEMPOTENCY_KEY_BYTES
+MAX_IMAGE_BYTES = _runtime_config.MAX_IMAGE_BYTES
+MAX_IMAGE_CANDIDATES = _runtime_config.MAX_IMAGE_CANDIDATES
+MAX_IMAGE_JOB_REQUEST_BYTES = _runtime_config.MAX_IMAGE_JOB_REQUEST_BYTES
+MAX_IMAGE_PIXELS = _runtime_config.MAX_IMAGE_PIXELS
+MAX_IMAGE_URL_REDIRECTS = _runtime_config.MAX_IMAGE_URL_REDIRECTS
+MAX_JSON_ARRAY_ITEMS = _runtime_config.MAX_JSON_ARRAY_ITEMS
+MAX_JSON_DEPTH = _runtime_config.MAX_JSON_DEPTH
+MAX_JSON_KEY_CHARS = _runtime_config.MAX_JSON_KEY_CHARS
+MAX_JSON_OBJECT_ITEMS = _runtime_config.MAX_JSON_OBJECT_ITEMS
+MAX_JSON_STRING_CHARS = _runtime_config.MAX_JSON_STRING_CHARS
+MAX_JSON_TOTAL_VALUES = _runtime_config.MAX_JSON_TOTAL_VALUES
+MAX_REF_BYTES = _runtime_config.MAX_REF_BYTES
+MAX_REQUEST_TYPE_CHARS = _runtime_config.MAX_REQUEST_TYPE_CHARS
+MAX_RETENTION_DAYS = _runtime_config.MAX_RETENTION_DAYS
+MAX_TOTAL_IMAGE_BYTES = _runtime_config.MAX_TOTAL_IMAGE_BYTES
+MAX_UPSTREAM_ERROR_BODY_BYTES = _runtime_config.MAX_UPSTREAM_ERROR_BODY_BYTES
+MAX_UPSTREAM_RESPONSE_BYTES = _runtime_config.MAX_UPSTREAM_RESPONSE_BYTES
+PUBLIC_BASE_URL = _runtime_config.PUBLIC_BASE_URL
+QUEUE_MAX = _runtime_config.QUEUE_MAX
+REFS_DIR = _runtime_config.REFS_DIR
+RESPONSES_STREAM_IDLE_TIMEOUT_S = _runtime_config.RESPONSES_STREAM_IDLE_TIMEOUT_S
+RESPONSES_STREAM_MAX_BYTES = _runtime_config.RESPONSES_STREAM_MAX_BYTES
+RESPONSES_STRIP_PARTIAL_IMAGES = _runtime_config.RESPONSES_STRIP_PARTIAL_IMAGES
+RETENTION_SWEEP_INTERVAL_S = _runtime_config.RETENTION_SWEEP_INTERVAL_S
+RETRY_BACKOFF_S = _runtime_config.RETRY_BACKOFF_S
+RETRY_NETWORK_MAX = _runtime_config.RETRY_NETWORK_MAX
+RETRY_RESPONSES_STREAM_MAX = _runtime_config.RETRY_RESPONSES_STREAM_MAX
+RETRY_UPSTREAM_5XX_MAX = _runtime_config.RETRY_UPSTREAM_5XX_MAX
+ROOT_DIR = _runtime_config.ROOT_DIR
+SQLITE_JOURNAL_MODE = _runtime_config.SQLITE_JOURNAL_MODE
+STATE_DIR = _runtime_config.STATE_DIR
+STUCK_QUEUED_AFTER_S = _runtime_config.STUCK_QUEUED_AFTER_S
+STUCK_RECONCILE_BATCH = _runtime_config.STUCK_RECONCILE_BATCH
+STUCK_RECONCILE_INTERVAL_S = _runtime_config.STUCK_RECONCILE_INTERVAL_S
+STUCK_RUNNING_AFTER_S = _runtime_config.STUCK_RUNNING_AFTER_S
+UPSTREAM_BASE_URL = _runtime_config.UPSTREAM_BASE_URL
+UPSTREAM_CONNECT_TIMEOUT_S = _runtime_config.UPSTREAM_CONNECT_TIMEOUT_S
+UPSTREAM_IDEMPOTENCY_GUARANTEED = _runtime_config.UPSTREAM_IDEMPOTENCY_GUARANTEED
+UPSTREAM_TIMEOUT_S = _runtime_config.UPSTREAM_TIMEOUT_S
 
 
 LOG = logging.getLogger("image-job")
 
-UPSTREAM_BASE_URL = os.getenv("IMAGE_JOB_UPSTREAM_BASE_URL", "http://127.0.0.1:8081").rstrip("/")
-PUBLIC_BASE_URL = os.getenv("IMAGE_JOB_PUBLIC_BASE_URL", "https://example.com").rstrip("/")
-ROOT_DIR = Path(os.getenv("IMAGE_JOB_ROOT_DIR", "/opt/image-job"))
-DATA_DIR = Path(os.getenv("IMAGE_JOB_DATA_DIR", str(ROOT_DIR / "data")))
-# 参考图临时存储目录——由 /v1/refs 端点写入，nginx 静态暴露在 /refs/{token}.{ext}。
-# 给 caller（如 lumen worker）一个把 reference 转 URL 的通道，避免 base64 内联到 Codex
-# 请求里（4K 图 base64 ~7MB body 在跨地域 / 高延迟链路上易断流）。
-REFS_DIR = DATA_DIR / "refs"
-# Reference 上传单个文件大小上限——保守取 50MB（已 normalize 后的图通常 <10MB）。
-MAX_REF_BYTES = int(os.getenv("IMAGE_JOB_MAX_REF_BYTES", str(50 * 1024 * 1024)))
-# Reference 文件 retention 天数；与 jobs 复用 MAX_RETENTION_DAYS。文件 mtime < cutoff 的会被 sweeper 清。
-STATE_DIR = Path(os.getenv("IMAGE_JOB_STATE_DIR", "/var/lib/image-job/state"))
-DB_PATH = Path(os.getenv("IMAGE_JOB_DB_PATH", str(STATE_DIR / "image_jobs.sqlite3")))
-CONCURRENCY = max(1, int(os.getenv("IMAGE_JOB_CONCURRENCY", "2")))
-UPSTREAM_TIMEOUT_S = float(os.getenv("IMAGE_JOB_UPSTREAM_TIMEOUT_S", "1800"))
-UPSTREAM_CONNECT_TIMEOUT_S = float(os.getenv("IMAGE_JOB_UPSTREAM_CONNECT_TIMEOUT_S", "5"))
-MAX_IMAGE_BYTES = int(os.getenv("IMAGE_JOB_MAX_IMAGE_BYTES", str(80 * 1024 * 1024)))
-MAX_IMAGE_PIXELS = max(
-    1,
-    int(os.getenv("IMAGE_JOB_MAX_IMAGE_PIXELS", str(100 * 1000 * 1000))),
-)
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
-QUEUE_MAX = max(1, int(os.getenv("IMAGE_JOB_QUEUE_MAX", "1000")))
-RETRY_NETWORK_MAX = max(0, int(os.getenv("IMAGE_JOB_RETRY_NETWORK_MAX", "1")))
-RETRY_BACKOFF_S = float(os.getenv("IMAGE_JOB_RETRY_BACKOFF_S", "2"))
-RETRY_RESPONSES_STREAM_MAX = max(
-    0,
-    int(os.getenv("IMAGE_JOB_RETRY_RESPONSES_STREAM_MAX", str(RETRY_NETWORK_MAX))),
-)
-RETRY_UPSTREAM_5XX_MAX = max(0, int(os.getenv("IMAGE_JOB_RETRY_UPSTREAM_5XX_MAX", "1")))
-RESPONSES_STRIP_PARTIAL_IMAGES = os.getenv(
-    "IMAGE_JOB_RESPONSES_STRIP_PARTIAL_IMAGES", "1"
-).strip().lower() not in {"0", "false", "no", "off"}
-RESPONSES_STREAM_MAX_BYTES = int(
-    os.getenv(
-        "IMAGE_JOB_RESPONSES_STREAM_MAX_BYTES",
-        str(max(MAX_IMAGE_BYTES * 2, 64 * 1024 * 1024)),
-    )
-)
-JOB_HEARTBEAT_INTERVAL_S = max(
-    5, int(os.getenv("IMAGE_JOB_HEARTBEAT_INTERVAL_S", "15"))
-)
-# image-stability-hardening §P0：SSE 流 idle 上限。上游 TCP 活但没新行（codex 端
-# 偶发 stall）时，过去 sidecar 只能等到 client 全局 timeout 才放手。给读循环加每
-# 行级 idle wait，>60s 没新数据即抛 retryable JobFailure，让 worker 端可以 failover。
-RESPONSES_STREAM_IDLE_TIMEOUT_S = max(
-    10.0, float(os.getenv("IMAGE_JOB_RESPONSES_STREAM_IDLE_TIMEOUT_S", "60"))
-)
-RETENTION_SWEEP_INTERVAL_S = max(60, int(os.getenv("IMAGE_JOB_RETENTION_SWEEP_INTERVAL_S", "3600")))
-DEFAULT_RETENTION_DAYS = min(30, max(1, int(os.getenv("IMAGE_JOB_RETENTION_DAYS", "1"))))
-MAX_RETENTION_DAYS = min(
-    30, max(1, int(os.getenv("IMAGE_JOB_MAX_RETENTION_DAYS", str(DEFAULT_RETENTION_DAYS))))
-)
-if DEFAULT_RETENTION_DAYS > MAX_RETENTION_DAYS:
-    DEFAULT_RETENTION_DAYS = MAX_RETENTION_DAYS
-JOB_TTL_DAYS = max(1, int(os.getenv("IMAGE_JOB_JOB_TTL_DAYS", "30")))
-GRACEFUL_SHUTDOWN_S = max(0, int(os.getenv("IMAGE_JOB_GRACEFUL_SHUTDOWN_S", "60")))
-HTTP_POOL_KEEPALIVE = max(1, int(os.getenv("IMAGE_JOB_HTTP_POOL_KEEPALIVE", "8")))
-HTTP_POOL_MAX = max(HTTP_POOL_KEEPALIVE, int(os.getenv("IMAGE_JOB_HTTP_POOL_MAX", "32")))
-MAX_IMAGE_URL_REDIRECTS = max(0, int(os.getenv("IMAGE_JOB_MAX_IMAGE_URL_REDIRECTS", "5")))
-SQLITE_JOURNAL_MODE = os.getenv("IMAGE_JOB_SQLITE_JOURNAL_MODE", "WAL").strip().upper()
-STUCK_RECONCILE_INTERVAL_S = max(
-    15, int(os.getenv("IMAGE_JOB_STUCK_RECONCILE_INTERVAL_S", "60"))
-)
-STUCK_QUEUED_AFTER_S = max(30, int(os.getenv("IMAGE_JOB_STUCK_QUEUED_AFTER_S", "120")))
-STUCK_RUNNING_AFTER_S = max(60, int(os.getenv("IMAGE_JOB_STUCK_RUNNING_AFTER_S", "300")))
-STUCK_RECONCILE_BATCH = max(1, int(os.getenv("IMAGE_JOB_STUCK_RECONCILE_BATCH", "100")))
-
-ALLOWED_FIXED_ENDPOINTS = (
-    "/v1/images/generations",
-    "/v1/images/edits",
-    "/v1/responses",
-)
-ALLOWED_PREFIX_ENDPOINTS = ("/v1beta/models/",)
-
-IMAGE_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
-DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
-DEFAULT_IMAGE_OUTPUT_COMPRESSION = 0
 
 
 # Error classification — emitted to DB and exposed in the failed-job response
 # so the caller can decide between "switch endpoint" and "switch provider".
-ERROR_CLASS_NETWORK = "network"            # connect/read/timeout — switch provider
-ERROR_CLASS_UPSTREAM_4XX = "upstream_4xx"  # 4xx HTTP — switch endpoint (likely format mismatch)
-ERROR_CLASS_UPSTREAM_5XX = "upstream_5xx"  # 5xx HTTP — switch provider
-ERROR_CLASS_NO_IMAGE = "no_image"          # 200 but no image extractable — switch endpoint
-ERROR_CLASS_IMAGE_SAVE = "image_save"      # save/decode failure — switch provider
-ERROR_CLASS_INTERNAL = "internal"          # sidecar bug — switch provider
-ERROR_CLASS_VALIDATION = "validation"      # bad input from caller — terminal
-
-_PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
-_FORBIDDEN_HOST_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("::/128"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
+ERROR_CLASS_NETWORK = "network"  # connect/read/timeout — switch provider
+ERROR_CLASS_UPSTREAM_4XX = (
+    "upstream_4xx"  # 4xx HTTP — switch endpoint (likely format mismatch)
 )
+ERROR_CLASS_UPSTREAM_5XX = "upstream_5xx"  # 5xx HTTP — switch provider
+ERROR_CLASS_NO_IMAGE = "no_image"  # 200 but no image extractable — switch endpoint
+ERROR_CLASS_IMAGE_SAVE = "image_save"  # save/decode failure — switch provider
+ERROR_CLASS_INTERNAL = "internal"  # sidecar bug — switch provider
+ERROR_CLASS_VALIDATION = "validation"  # bad input from caller — terminal
+
 _IMAGE_DOWNLOAD_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES = 64 * 1024
 
 
 @dataclass
 class ImageCandidate:
     data: bytes
     mime_type: str | None = None
+
+
+@dataclass
+class ImageCandidateBudget:
+    count: int = 0
+    total_bytes: int = 0
+
+    def next_max_bytes(self) -> int:
+        if self.count >= MAX_IMAGE_CANDIDATES:
+            raise JobFailure(
+                f"上游图片候选数超过限制（max {MAX_IMAGE_CANDIDATES}）",
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            )
+        remaining = MAX_TOTAL_IMAGE_BYTES - self.total_bytes
+        if remaining <= 0:
+            raise JobFailure(
+                f"上游图片总字节超过限制（max {MAX_TOTAL_IMAGE_BYTES}）",
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            )
+        return min(MAX_IMAGE_BYTES, remaining)
+
+    def record(self, candidate: ImageCandidate) -> ImageCandidate:
+        size = len(candidate.data)
+        if size > MAX_IMAGE_BYTES:
+            raise JobFailure(
+                f"上游单图超过大小限制（max {MAX_IMAGE_BYTES}）",
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            )
+        if self.count >= MAX_IMAGE_CANDIDATES:
+            raise JobFailure(
+                f"上游图片候选数超过限制（max {MAX_IMAGE_CANDIDATES}）",
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            )
+        if self.total_bytes + size > MAX_TOTAL_IMAGE_BYTES:
+            raise JobFailure(
+                f"上游图片总字节超过限制（max {MAX_TOTAL_IMAGE_BYTES}）",
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            )
+        self.count += 1
+        self.total_bytes += size
+        return candidate
 
 
 class JobFailure(Exception):
@@ -152,6 +219,8 @@ class JobFailure(Exception):
         upstream_status: int | None = None,
         upstream_body: Any | None = None,
         retryable: bool = False,
+        retry_requires_idempotency: bool = False,
+        outcome_uncertain: bool = False,
         error_class: str = ERROR_CLASS_INTERNAL,
     ) -> None:
         super().__init__(error)
@@ -159,6 +228,9 @@ class JobFailure(Exception):
         self.upstream_status = upstream_status
         self.upstream_body = upstream_body
         self.retryable = retryable
+        self.retry_requires_idempotency = retry_requires_idempotency
+        self.outcome_uncertain = outcome_uncertain
+        self.retry_suppressed = False
         self.error_class = error_class
 
 
@@ -174,6 +246,19 @@ _shutdown = asyncio.Event()
 _http_client: httpx.AsyncClient | None = None
 
 
+def _reset_runtime_state() -> None:
+    global _queue, _workers, _background_tasks
+    global _inflight, _queued_ids, _queue_state_lock, _shutdown
+
+    _queue = asyncio.Queue(maxsize=QUEUE_MAX)
+    _workers = []
+    _background_tasks = []
+    _inflight = set()
+    _queued_ids = set()
+    _queue_state_lock = asyncio.Lock()
+    _shutdown = asyncio.Event()
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -182,156 +267,39 @@ def iso(dt: datetime | None = None) -> str:
     return (dt or utc_now()).isoformat()
 
 
-def auth_hash(auth_header: str) -> str:
-    return hashlib.sha256(auth_header.encode("utf-8")).hexdigest()
+auth_hash = _payload_helpers.auth_hash
+json_dump = _payload_helpers.json_dump
+stable_json_dump = _payload_helpers.stable_json_dump
+request_hash = _payload_helpers.request_hash
 
 
-def json_dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def stable_json_dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def request_hash(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(stable_json_dump(payload).encode("utf-8")).hexdigest()
-
-
-def canonical_host(host: str) -> str:
-    return host.strip().strip("[]").rstrip(".").lower()
-
-
-def _is_forbidden_ip_address(ip: IPv4Address | IPv6Address) -> bool:
-    embedded_ipv4: list[IPv4Address] = []
-    if isinstance(ip, IPv6Address):
-        if ip.ipv4_mapped is not None:
-            embedded_ipv4.append(ip.ipv4_mapped)
-        if ip.sixtofour is not None:
-            embedded_ipv4.append(ip.sixtofour)
-        if ip.teredo is not None:
-            embedded_ipv4.append(ip.teredo[1])
-
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-        or any(ip in network for network in _FORBIDDEN_HOST_NETWORKS)
-        or any(_is_forbidden_ip_address(item) for item in embedded_ipv4)
+def _new_pinned_image_download_client(
+    target: PublicImageDownloadTarget,
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=pinned_async_http_transport(target),
+        timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S),
+        follow_redirects=False,
+        trust_env=False,
+        headers={
+            "Accept-Encoding": "identity",
+            "User-Agent": "lumen-image",
+        },
     )
-
-
-def is_forbidden_ip(value: str) -> bool:
-    return _is_forbidden_ip_address(
-        ipaddress.ip_address(value.strip().strip("[]").split("%", 1)[0])
-    )
-
-
-def _parse_legacy_ipv4_part(part: str) -> int | None:
-    if not part:
-        return None
-    try:
-        if part.lower().startswith("0x"):
-            return int(part[2:], 16)
-        if len(part) > 1 and part.startswith("0"):
-            return int(part[1:] or "0", 8)
-        return int(part, 10)
-    except ValueError:
-        return None
-
-
-def _parse_legacy_ipv4_host(host: str) -> IPv4Address | None:
-    parts = host.split(".")
-    if len(parts) > 4:
-        return None
-    numbers: list[int] = []
-    for part in parts:
-        number = _parse_legacy_ipv4_part(part)
-        if number is None:
-            return None
-        numbers.append(number)
-    if len(numbers) == 1:
-        if numbers[0] > 0xFFFFFFFF:
-            return None
-        return IPv4Address(numbers[0])
-    if any(part > 0xFF for part in numbers[:-1]):
-        return None
-    last_bits = 8 * (5 - len(numbers))
-    if numbers[-1] >= 1 << last_bits:
-        return None
-    value = numbers[-1]
-    shift = last_bits
-    for part in reversed(numbers[:-1]):
-        value |= part << shift
-        shift += 8
-    return IPv4Address(value)
-
-
-def is_private_host(host: str) -> bool:
-    clean = canonical_host(host)
-    if not clean or clean in _PRIVATE_HOSTS:
-        return True
-    if clean.endswith(".localhost") or clean.endswith(".local"):
-        return True
-    if clean.isdigit():
-        return True
-    legacy_ipv4 = _parse_legacy_ipv4_host(clean)
-    if legacy_ipv4 is not None:
-        if clean != str(legacy_ipv4):
-            return True
-        return is_forbidden_ip(str(legacy_ipv4))
-    try:
-        return is_forbidden_ip(clean)
-    except ValueError:
-        return False
-
-
-async def assert_public_image_download_url(url: str) -> str:
-    value = url.strip()
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("image URL must be http(s)")
-    if parsed.username or parsed.password:
-        raise ValueError("image URL must not contain username or password")
-    host = canonical_host(parsed.hostname or "")
-    if is_private_host(host):
-        raise ValueError("image URL host is not allowed")
-
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    loop = asyncio.get_running_loop()
-    try:
-        infos = await asyncio.wait_for(
-            loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
-            timeout=2.0,
-        )
-    except (socket.gaierror, TimeoutError) as exc:
-        raise ValueError("image URL host cannot be resolved") from exc
-
-    ips = {str(info[4][0]) for info in infos if info and info[4]}
-    if not ips:
-        raise ValueError("image URL host cannot be resolved")
-    if any(is_forbidden_ip(ip) for ip in ips):
-        raise ValueError("image URL resolves to a private address")
-    return value
 
 
 def request_idempotency_key(request: Request, raw_payload: Any) -> str | None:
-    raw = (request.headers.get("Idempotency-Key") or "").strip()
-    if not raw and isinstance(raw_payload, dict):
-        candidate = raw_payload.get("idempotency_key")
-        raw = candidate.strip() if isinstance(candidate, str) else ""
-    if not raw:
-        return None
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return _payload_helpers.request_idempotency_key(
+        request,
+        raw_payload,
+        max_bytes=MAX_IDEMPOTENCY_KEY_BYTES,
+    )
 
 
-def normalize_image_edit_input_transport(value: Any) -> str:
-    if isinstance(value, str) and value.strip().lower() == "file":
-        return "file"
-    return "url"
+upstream_idempotency_key = _payload_helpers.upstream_idempotency_key
+normalize_image_edit_input_transport = (
+    _payload_helpers.normalize_image_edit_input_transport
+)
 
 
 # --- SQLite layer ------------------------------------------------------------
@@ -341,152 +309,35 @@ def normalize_image_edit_input_transport(value: Any) -> str:
 # completed jobs appear stuck as queued/running. Every DB call is dispatched via
 # ``asyncio.to_thread`` so writes never block the event loop.
 
-_ALLOWED_SQLITE_JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}
 if SQLITE_JOURNAL_MODE not in _ALLOWED_SQLITE_JOURNAL_MODES:
     SQLITE_JOURNAL_MODE = "WAL"
 
-_DB_TUNING_PRAGMAS = (
-    f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}",
-    "PRAGMA synchronous = NORMAL",
-    "PRAGMA temp_store = MEMORY",
-    "PRAGMA mmap_size = 67108864",
-    "PRAGMA cache_size = -16384",
-    "PRAGMA busy_timeout = 5000",
-)
+_DB_TUNING_PRAGMAS = sqlite_tuning_pragmas(SQLITE_JOURNAL_MODE)
 
 
 def _open_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    for pragma in _DB_TUNING_PRAGMAS:
-        conn.execute(pragma)
-    return conn
-
-
-def _ensure_column(conn: sqlite3.Connection, table: str, name: str, decl: str) -> None:
-    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if name not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-
-
-def _create_refs_table_sql() -> str:
-    return """
-    CREATE TABLE IF NOT EXISTS refs (
-        auth_hash TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        token TEXT NOT NULL,
-        ext TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(auth_hash, sha256)
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS refs_auth_sha_idx
-        ON refs(auth_hash, sha256);
-    CREATE INDEX IF NOT EXISTS refs_created_idx ON refs(created_at);
-    """
-
-
-def _ensure_refs_auth_schema(conn: sqlite3.Connection) -> None:
-    rows = list(conn.execute("PRAGMA table_info(refs)"))
-    if not rows:
-        conn.executescript(_create_refs_table_sql())
-        return
-    cols = {row["name"] for row in rows}
-    pk_cols = [row["name"] for row in rows if int(row["pk"] or 0) > 0]
-    if "auth_hash" in cols and pk_cols != ["sha256"]:
-        conn.executescript(_create_refs_table_sql())
-        return
-
-    legacy = "refs_legacy_auth_migration"
-    conn.execute(f"DROP TABLE IF EXISTS {legacy}")
-    conn.execute(f"ALTER TABLE refs RENAME TO {legacy}")
-    conn.executescript(_create_refs_table_sql())
-    conn.execute(
-        f"""
-        INSERT OR IGNORE INTO refs (auth_hash, sha256, token, ext, size, created_at)
-        SELECT 'legacy:' || sha256, sha256, token, ext, size, created_at
-        FROM {legacy}
-        """
-    )
-    conn.execute(f"DROP TABLE {legacy}")
+    return _persistence_open_connection(DB_PATH, _DB_TUNING_PRAGMAS)
 
 
 def init_storage_sync() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    REFS_DIR.mkdir(parents=True, exist_ok=True)
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = _open_conn()
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                job_id TEXT PRIMARY KEY,
-                auth_hash TEXT NOT NULL,
-                auth_header TEXT,
-                idempotency_key TEXT,
-                request_hash TEXT,
-                request_type TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                relay_url TEXT NOT NULL,
-                retention_days INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                started_at TEXT,
-                finished_at TEXT,
-                elapsed_ms INTEGER,
-                upstream_status INTEGER,
-                image_count INTEGER NOT NULL DEFAULT 0,
-                images_json TEXT,
-                error TEXT,
-                upstream_body TEXT
-            );
-            CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status);
-            CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_at);
-            CREATE INDEX IF NOT EXISTS jobs_finished_idx ON jobs(finished_at);
-            """
-        )
-        _ensure_refs_auth_schema(conn)
-        _ensure_column(conn, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "jobs", "error_class", "TEXT")
-        _ensure_column(conn, "jobs", "endpoint_used", "TEXT")
-        _ensure_column(conn, "jobs", "idempotency_key", "TEXT")
-        _ensure_column(conn, "jobs", "request_hash", "TEXT")
-        conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS jobs_auth_idempotency_idx
-                ON jobs(auth_hash, idempotency_key)
-                WHERE idempotency_key IS NOT NULL
-            """
-        )
-    finally:
-        conn.close()
+    _persistence_init_storage(
+        data_dir=DATA_DIR,
+        refs_dir=REFS_DIR,
+        db_path=DB_PATH,
+        open_conn=_open_conn,
+    )
 
 
 def _db_one_sync(sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
-    conn = _open_conn()
-    try:
-        return conn.execute(sql, params).fetchone()
-    finally:
-        conn.close()
+    return _persistence_db_one_sync(_open_conn, sql, params)
 
 
 def _db_all_sync(sql: str, params: tuple[Any, ...]) -> list[sqlite3.Row]:
-    conn = _open_conn()
-    try:
-        return list(conn.execute(sql, params).fetchall())
-    finally:
-        conn.close()
+    return _persistence_db_all_sync(_open_conn, sql, params)
 
 
 def _db_exec_sync(sql: str, params: tuple[Any, ...]) -> int:
-    conn = _open_conn()
-    try:
-        cur = conn.execute(sql, params)
-        return cur.rowcount
-    finally:
-        conn.close()
+    return _persistence_db_exec_sync(_open_conn, sql, params)
 
 
 async def db_one(sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
@@ -519,123 +370,95 @@ async def enqueue_job(job_id: str) -> str:
         return "enqueued"
 
 
+async def insert_and_enqueue_job(
+    job_id: str,
+    payload: dict[str, Any],
+    auth_header: str,
+    *,
+    idempotency_key: str | None = None,
+    payload_hash: str | None = None,
+) -> str:
+    """Persist only after queue capacity is reserved under the queue lock."""
+
+    async with _queue_state_lock:
+        if _queue.full():
+            return "full"
+        await insert_job(
+            job_id,
+            payload,
+            auth_header,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+        )
+        _queue.put_nowait(job_id)
+        _queued_ids.add(job_id)
+        return "enqueued"
+
+
 # --- Validation --------------------------------------------------------------
 
 
-def parse_json_bytes(data: bytes) -> Any | None:
-    try:
-        return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+def _json_shape_limits() -> JsonShapeLimits:
+    return JsonShapeLimits(
+        max_depth=MAX_JSON_DEPTH,
+        max_array_items=MAX_JSON_ARRAY_ITEMS,
+        max_object_items=MAX_JSON_OBJECT_ITEMS,
+        max_total_values=MAX_JSON_TOTAL_VALUES,
+        max_key_chars=MAX_JSON_KEY_CHARS,
+        max_string_chars=MAX_JSON_STRING_CHARS,
+    )
 
 
-def body_preview(data: bytes, limit: int = 20000) -> Any:
-    parsed = parse_json_bytes(data)
-    if parsed is not None:
-        return parsed
-    text = data.decode("utf-8", "replace")
-    if len(text) > limit:
-        return text[:limit] + "...[truncated]"
-    return text
+def load_image_job_json(data: bytes) -> Any:
+    return _load_json_bytes(data, _json_shape_limits())
 
 
-def require_auth(request: Request) -> str:
-    auth = request.headers.get("authorization", "").strip()
-    if not auth.lower().startswith("bearer ") or len(auth) <= len("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization: Bearer token")
-    return auth
+def validate_json_shape(value: Any) -> None:
+    _validate_json_shape(value, _json_shape_limits())
+
+
+body_preview = _payload_helpers.body_preview
+require_auth = _payload_helpers.require_auth
+infer_request_type = _payload_helpers.infer_request_type
+
+
+def _payload_policy() -> PayloadPolicy:
+    return PayloadPolicy(
+        allowed_fixed_endpoints=ALLOWED_FIXED_ENDPOINTS,
+        allowed_prefix_endpoints=ALLOWED_PREFIX_ENDPOINTS,
+        image_output_formats=IMAGE_OUTPUT_FORMATS,
+        default_image_output_format=DEFAULT_IMAGE_OUTPUT_FORMAT,
+        default_image_output_compression=DEFAULT_IMAGE_OUTPUT_COMPRESSION,
+        responses_strip_partial_images=RESPONSES_STRIP_PARTIAL_IMAGES,
+        max_endpoint_chars=MAX_ENDPOINT_CHARS,
+        max_request_type_chars=MAX_REQUEST_TYPE_CHARS,
+        default_retention_days=DEFAULT_RETENTION_DAYS,
+        max_retention_days=MAX_RETENTION_DAYS,
+    )
 
 
 def normalize_endpoint(value: Any) -> str:
-    if not isinstance(value, str) or not value.startswith("/"):
-        raise HTTPException(status_code=400, detail="endpoint must be an absolute API path")
-    if "://" in value or ".." in value:
-        raise HTTPException(status_code=400, detail="invalid endpoint")
-    if value in ALLOWED_FIXED_ENDPOINTS:
-        return value
-    if any(value.startswith(prefix) for prefix in ALLOWED_PREFIX_ENDPOINTS):
-        return value
-    raise HTTPException(status_code=400, detail="unsupported image endpoint")
-
-
-def infer_request_type(endpoint: str) -> str:
-    if endpoint == "/v1/images/generations":
-        return "generations"
-    if endpoint == "/v1/images/edits":
-        return "edits"
-    if endpoint == "/v1/responses":
-        return "responses"
-    if endpoint.startswith("/v1beta/models/"):
-        return "gemini"
-    return "image"
+    return _payload_helpers.normalize_endpoint(value, _payload_policy())
 
 
 def normalize_image_output_options(target: dict[str, Any]) -> None:
-    """Fill image-generation output defaults without overriding explicit choices."""
-    background = target.get("background")
-    if background == "transparent":
-        target["output_format"] = "png"
-        target.pop("output_compression", None)
-        return
-
-    output_format = target.get("output_format")
-    if output_format not in IMAGE_OUTPUT_FORMATS:
-        output_format = DEFAULT_IMAGE_OUTPUT_FORMAT
-        target["output_format"] = output_format
-
-    if output_format in {"jpeg", "webp"} and target.get("output_compression") is None:
-        target["output_compression"] = DEFAULT_IMAGE_OUTPUT_COMPRESSION
-    elif output_format == "png":
-        target.pop("output_compression", None)
-
-    if target.get("background") not in {"auto", "opaque", "transparent"}:
-        target["background"] = "auto"
-    if target.get("moderation") not in {"auto", "low"}:
-        target["moderation"] = "low"
+    _payload_helpers.normalize_image_output_options(target, _payload_policy())
 
 
-def normalize_payload_body(endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Normalize sidecar-submitted image request bodies to the caller's JPEG default."""
-    normalized = copy.deepcopy(body)
-    if endpoint in {"/v1/images/generations", "/v1/images/edits"}:
-        normalize_image_output_options(normalized)
-    elif endpoint == "/v1/responses":
-        tools = normalized.get("tools")
-        if isinstance(tools, list):
-            for tool in tools:
-                if isinstance(tool, dict) and tool.get("type") == "image_generation":
-                    normalize_image_output_options(tool)
-                    if RESPONSES_STRIP_PARTIAL_IMAGES:
-                        tool.pop("partial_images", None)
-    return normalized
+def normalize_payload_body(
+    endpoint: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    return _payload_helpers.normalize_payload_body(
+        endpoint,
+        body,
+        _payload_policy(),
+    )
 
 
 def validate_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="JSON body must be an object")
-    endpoint = normalize_endpoint(payload.get("endpoint"))
-    body = payload.get("body")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-    body = normalize_payload_body(endpoint, body)
-    request_type = payload.get("request_type") or infer_request_type(endpoint)
-    if not isinstance(request_type, str) or not request_type:
-        raise HTTPException(status_code=400, detail="request_type must be a string")
-    try:
-        retention_days = int(payload.get("retention_days", DEFAULT_RETENTION_DAYS))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="retention_days must be an integer") from None
-    if retention_days < 1 or retention_days > MAX_RETENTION_DAYS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"retention_days must be between 1 and {MAX_RETENTION_DAYS}",
-        )
-    return {
-        "request_type": request_type,
-        "endpoint": endpoint,
-        "body": body,
-        "retention_days": retention_days,
-    }
+    validate_json_shape(payload)
+    return _payload_helpers.validate_payload(payload, _payload_policy())
 
 
 def make_job_id() -> str:
@@ -645,228 +468,39 @@ def make_job_id() -> str:
 # --- Job CRUD ----------------------------------------------------------------
 
 
-async def insert_job(
-    job_id: str,
-    payload: dict[str, Any],
-    auth_header: str,
-    *,
-    idempotency_key: str | None = None,
-    payload_hash: str | None = None,
-) -> None:
-    now = iso()
-    await db_exec(
-        """
-        INSERT INTO jobs (
-            job_id, auth_hash, auth_header, idempotency_key, request_hash,
-            request_type, endpoint, payload_json, status, relay_url,
-            retention_days, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
-        """,
-        (
-            job_id,
-            auth_hash(auth_header),
-            auth_header,
-            idempotency_key,
-            payload_hash,
-            payload["request_type"],
-            payload["endpoint"],
-            json_dump(payload),
-            UPSTREAM_BASE_URL,
-            payload["retention_days"],
-            now,
-            now,
-        ),
-    )
+_job_persistence = JobPersistenceFacade(
+    db_exec=lambda sql, params=(): db_exec(sql, params),
+    enqueue_job=lambda job_id: enqueue_job(job_id),
+    now_iso=lambda: iso(),
+    auth_hash=lambda value: auth_hash(value),
+    json_dump=lambda value: json_dump(value),
+    upstream_base_url=lambda: UPSTREAM_BASE_URL,
+    upstream_idempotency_guaranteed=(lambda: UPSTREAM_IDEMPOTENCY_GUARANTEED),
+    error_class_internal=lambda: ERROR_CLASS_INTERNAL,
+    error_class_network=lambda: ERROR_CLASS_NETWORK,
+    log=LOG,
+)
 
-
-async def ensure_queued_job_scheduled(row: sqlite3.Row) -> None:
-    if row["status"] != "queued" or not row["auth_header"]:
-        return
-    result = await enqueue_job(row["job_id"])
-    if result == "enqueued":
-        await db_exec(
-            "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'queued'",
-            (iso(), row["job_id"]),
-        )
-
-
-async def mark_running(job_id: str) -> bool:
-    now = iso()
-    changed = await db_exec(
-        "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), "
-        "updated_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
-        (now, now, job_id),
-    )
-    return changed == 1
-
-
-async def touch_running(job_id: str) -> None:
-    await db_exec(
-        "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'",
-        (iso(), job_id),
-    )
-
-
-async def mark_succeeded(
-    job_id: str,
-    *,
-    upstream_status: int,
-    elapsed_ms: int,
-    images: list[dict[str, Any]],
-    endpoint_used: str | None = None,
-) -> None:
-    now = iso()
-    await db_exec(
-        """
-        UPDATE jobs
-        SET status = 'succeeded', auth_header = NULL, finished_at = ?, updated_at = ?,
-            elapsed_ms = ?, upstream_status = ?, image_count = ?, images_json = ?,
-            error = NULL, upstream_body = NULL, error_class = NULL,
-            endpoint_used = COALESCE(?, endpoint_used)
-        WHERE job_id = ?
-        """,
-        (
-            now,
-            now,
-            elapsed_ms,
-            upstream_status,
-            len(images),
-            json_dump(images),
-            endpoint_used,
-            job_id,
-        ),
-    )
-
-
-async def mark_failed(
-    job_id: str,
-    *,
-    error: str,
-    upstream_status: int | None = None,
-    upstream_body: Any | None = None,
-    elapsed_ms: int | None = None,
-    error_class: str = ERROR_CLASS_INTERNAL,
-    endpoint_used: str | None = None,
-) -> None:
-    now = iso()
-    await db_exec(
-        """
-        UPDATE jobs
-        SET status = 'failed', auth_header = NULL, finished_at = ?, updated_at = ?,
-            elapsed_ms = ?, upstream_status = ?, error = ?, upstream_body = ?,
-            error_class = ?, endpoint_used = COALESCE(?, endpoint_used)
-        WHERE job_id = ?
-        """,
-        (
-            now,
-            now,
-            elapsed_ms,
-            upstream_status,
-            error,
-            json_dump(upstream_body) if upstream_body is not None else None,
-            error_class,
-            endpoint_used,
-            job_id,
-        ),
-    )
-
-
-async def fail_interrupted_running_jobs() -> None:
-    """Sidecar 重启恢复语义（image-stability-hardening §image-job）：
-    - running + auth_header 在 → 重新排队（生图任务有 30-120s，重启不应丢）
-    - running + auth_header 缺 → 没法重发上游，只能标 failed
-
-    重新排队后 attempts +=1，retention_sweeper 不会立即清掉（status != succeeded/failed），
-    lifespan 启动末尾的 backlog 恢复循环会把它们 enqueue。
-    """
-    now = iso()
-    # 1) 有 auth_header 的 running 任务：转回 queued，清 started_at
-    requeued = await db_exec(
-        """
-        UPDATE jobs
-        SET status = 'queued',
-            started_at = NULL,
-            updated_at = ?,
-            attempts = COALESCE(attempts, 0) + 1
-        WHERE status = 'running' AND auth_header IS NOT NULL AND auth_header != ''
-        """,
-        (now,),
-    )
-    if requeued:
-        LOG.info("restored %d running jobs to queue after restart", requeued)
-    # 2) 无 auth_header 的 running 任务：没法重发上游，标 failed
-    failed = await db_exec(
-        """
-        UPDATE jobs
-        SET status = 'failed', finished_at = ?, updated_at = ?,
-            error = 'image job worker restarted; no auth header to retry',
-            error_class = ?
-        WHERE status = 'running'
-        """,
-        (now, now, ERROR_CLASS_INTERNAL),
-    )
-    if failed:
-        LOG.warning("failed %d running jobs without auth header after restart", failed)
-
-
-def row_to_response(row: sqlite3.Row) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "job_id": row["job_id"],
-        "status": row["status"],
-        "request_type": row["request_type"],
-        "endpoint": row["endpoint"],
-        "relay_url": row["relay_url"],
-        "retention_days": row["retention_days"],
-    }
-    endpoint_used = _row_get(row, "endpoint_used")
-    if endpoint_used:
-        payload["endpoint_used"] = endpoint_used
-    if row["status"] == "succeeded":
-        payload.update(
-            {
-                "upstream_status": row["upstream_status"],
-                "elapsed_ms": row["elapsed_ms"],
-                "image_count": row["image_count"],
-                "images": json.loads(row["images_json"] or "[]"),
-            }
-        )
-    elif row["status"] == "failed":
-        upstream_body: Any = None
-        if row["upstream_body"]:
-            try:
-                upstream_body = json.loads(row["upstream_body"])
-            except json.JSONDecodeError:
-                upstream_body = row["upstream_body"]
-        payload.update(
-            {
-                "upstream_status": row["upstream_status"],
-                "elapsed_ms": row["elapsed_ms"],
-                "error": row["error"],
-                "error_class": _row_get(row, "error_class") or ERROR_CLASS_INTERNAL,
-                "upstream_body": upstream_body,
-            }
-        )
-    return payload
-
-
-def _row_get(row: sqlite3.Row, key: str) -> Any:
-    """Tolerant accessor — older rows written before a column existed lack it."""
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return None
+insert_job = _job_persistence.insert_job
+ensure_queued_job_scheduled = _job_persistence.ensure_queued_job_scheduled
+mark_running = _job_persistence.mark_running
+touch_running = _job_persistence.touch_running
+mark_succeeded = _job_persistence.mark_succeeded
+mark_failed = _job_persistence.mark_failed
+fail_interrupted_running_jobs = _job_persistence.fail_interrupted_running_jobs
+row_to_response = _job_persistence.row_to_response
 
 
 # --- Image decoding / extraction --------------------------------------------
 
 _IMAGE_SIGNATURES: tuple[bytes, ...] = (
-    b"\xff\xd8\xff",                # JPEG
-    b"\x89PNG\r\n\x1a\n",           # PNG
+    b"\xff\xd8\xff",  # JPEG
+    b"\x89PNG\r\n\x1a\n",  # PNG
     b"GIF87a",
     b"GIF89a",
-    b"RIFF",                        # WEBP container starts with RIFF
-    b"BM",                          # BMP (rare but harmless)
-    b"\x00\x00\x00\x0cftypheic",    # HEIC (offset 0)
+    b"RIFF",  # WEBP container starts with RIFF
+    b"BM",  # BMP (rare but harmless)
+    b"\x00\x00\x00\x0cftypheic",  # HEIC (offset 0)
     b"\x00\x00\x00\x18ftypheic",
 )
 
@@ -883,50 +517,72 @@ def looks_like_image(data: bytes) -> bool:
     return False
 
 
-def decode_data_url(value: str) -> ImageCandidate | None:
+def _candidate_size_error(max_bytes: int) -> JobFailure:
+    if max_bytes < MAX_IMAGE_BYTES:
+        return JobFailure(
+            f"上游图片总字节超过限制（max {MAX_TOTAL_IMAGE_BYTES}）",
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        )
+    return JobFailure(
+        f"上游单图超过大小限制（max {MAX_IMAGE_BYTES}）",
+        error_class=ERROR_CLASS_IMAGE_SAVE,
+    )
+
+
+def decode_data_url(
+    value: str,
+    *,
+    max_bytes: int | None = None,
+) -> ImageCandidate | None:
     if not value.startswith("data:image/") or "," not in value:
         return None
+    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
     header, encoded = value.split(",", 1)
     mime_type = header.removeprefix("data:").split(";", 1)[0]
     is_b64 = ";base64" in header
     if is_b64:
-        data = _b64_decode(encoded)
+        data = _b64_decode(encoded, max_bytes=effective_max)
         if data is None:
             return None
     else:
         data = encoded.encode("utf-8", "replace")
-    if len(data) > MAX_IMAGE_BYTES:
-        raise JobFailure("上游图片超过大小限制", error_class=ERROR_CLASS_IMAGE_SAVE)
+    if len(data) > effective_max:
+        raise _candidate_size_error(effective_max)
     if not looks_like_image(data):
         return None
     return ImageCandidate(data, mime_type)
 
 
-def _b64_decode(value: str) -> bytes | None:
+def _b64_decode(value: str, *, max_bytes: int | None = None) -> bytes | None:
     compact = "".join(value.split())
     if not compact:
         return None
     pad = len(compact) % 4
     if pad:
         compact += "=" * (4 - pad)
+    padding = len(compact) - len(compact.rstrip("="))
+    decoded_size = len(compact) // 4 * 3 - min(padding, 2)
+    if max_bytes is not None and decoded_size > max_bytes:
+        raise _candidate_size_error(max_bytes)
     try:
         return base64.b64decode(compact, validate=True)
     except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
         return None
 
 
-def decode_base64(value: str) -> bytes | None:
+def decode_base64(value: str, *, max_bytes: int | None = None) -> bytes | None:
     value = value.strip()
     if not value:
         return None
+    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
     if value.startswith("data:image/"):
-        candidate = decode_data_url(value)
+        candidate = decode_data_url(value, max_bytes=effective_max)
         return candidate.data if candidate else None
-    data = _b64_decode(value)
+    data = _b64_decode(value, max_bytes=effective_max)
     if data is None:
         return None
-    if len(data) > MAX_IMAGE_BYTES:
-        raise JobFailure("上游图片超过大小限制", error_class=ERROR_CLASS_IMAGE_SAVE)
+    if len(data) > effective_max:
+        raise _candidate_size_error(effective_max)
     if not looks_like_image(data):
         return None
     return data
@@ -977,112 +633,190 @@ def _is_responses_error_terminal(event: Any) -> bool:
     return str(event.get("type", "")) in _RESPONSES_ERROR_TERMINAL_EVENTS
 
 
+async def _read_download_body_bounded(
+    response: Any,
+    *,
+    max_bytes: int,
+    truncate: bool,
+) -> tuple[bytes, bool, int]:
+    body = bytearray()
+    async for chunk in response.aiter_raw():
+        if not chunk:
+            continue
+        next_size = len(body) + len(chunk)
+        if next_size > max_bytes:
+            if truncate:
+                remaining = max_bytes - len(body)
+                if remaining > 0:
+                    body.extend(chunk[:remaining])
+            return bytes(body), True, next_size
+        body.extend(chunk)
+    return bytes(body), False, len(body)
+
+
+async def _read_response_body_bounded(
+    response: Any,
+    *,
+    max_bytes: int,
+    truncate: bool,
+) -> tuple[bytes, bool, int]:
+    declared_size = _download_content_length(response.headers)
+    if declared_size is not None and declared_size > max_bytes:
+        return b"", True, declared_size
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        next_size = len(body) + len(chunk)
+        if next_size > max_bytes:
+            if truncate:
+                remaining = max_bytes - len(body)
+                if remaining > 0:
+                    body.extend(chunk[:remaining])
+            return bytes(body), True, next_size
+        body.extend(chunk)
+    return bytes(body), False, len(body)
+
+
 async def download_image_url(
     client: httpx.AsyncClient,
     url: str,
     *,
     cache: dict[str, ImageCandidate],
+    max_bytes: int | None = None,
+    retry_requires_idempotency: bool = True,
 ) -> ImageCandidate | None:
-    if url.startswith("data:image/"):
-        return decode_data_url(url)
-    if not (url.startswith("http://") or url.startswith("https://")):
+    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
+    candidate_url = url.strip()
+    if candidate_url.startswith("data:image/"):
+        return decode_data_url(candidate_url, max_bytes=effective_max)
+    if not candidate_url.lower().startswith(("http://", "https://")):
         return None
     cached = cache.get(url)
     if cached is not None:
         return cached
-    try:
-        current_url = await assert_public_image_download_url(url)
-    except ValueError as exc:
-        raise JobFailure(
-            f"图片 URL 不允许下载: {exc}",
-            upstream_status=400,
-            error_class=ERROR_CLASS_VALIDATION,
-        ) from exc
-    # image-stability-hardening §image-job：用 streaming 边读边累计，超
-    # MAX_IMAGE_BYTES 立即中断，避免恶意 URL 返回巨型 body 把 sidecar 内存撑爆
-    # （旧实现 client.get 全量缓存后才检查大小）。Content-Length 提前可信时直接拒。
+    _ = client
+    current_url = candidate_url
     try:
         redirects = 0
         while True:
-            async with client.stream(
-                "GET",
-                current_url,
-                timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S),
-                follow_redirects=False,
-            ) as resp:
-                if resp.status_code in _IMAGE_DOWNLOAD_REDIRECT_STATUSES:
-                    location = resp.headers.get("location")
-                    if not location:
-                        raise JobFailure(
-                            "上游图片重定向缺少 Location",
-                            upstream_status=resp.status_code,
-                            error_class=ERROR_CLASS_UPSTREAM_4XX,
-                        )
-                    if redirects >= MAX_IMAGE_URL_REDIRECTS:
-                        raise JobFailure(
-                            "上游图片重定向次数过多",
-                            upstream_status=resp.status_code,
-                            error_class=ERROR_CLASS_UPSTREAM_4XX,
-                        )
-                    redirects += 1
-                    next_url = urljoin(current_url, location)
-                    try:
-                        current_url = await assert_public_image_download_url(next_url)
-                    except ValueError as exc:
-                        raise JobFailure(
-                            f"图片重定向目标不允许下载: {exc}",
-                            upstream_status=resp.status_code,
-                            error_class=ERROR_CLASS_VALIDATION,
-                        ) from exc
-                    continue
+            try:
+                target = await resolve_public_image_download_target(current_url)
+            except ImageDownloadResolutionError as exc:
+                raise JobFailure(
+                    f"下载上游图片失败: {exc}",
+                    retryable=True,
+                    retry_requires_idempotency=retry_requires_idempotency,
+                    outcome_uncertain=retry_requires_idempotency,
+                    error_class=ERROR_CLASS_NETWORK,
+                ) from exc
+            except ValueError as exc:
+                prefix = (
+                    "图片重定向目标不允许下载" if redirects else "图片 URL 不允许下载"
+                )
+                raise JobFailure(
+                    f"{prefix}: {exc}",
+                    upstream_status=400,
+                    error_class=ERROR_CLASS_VALIDATION,
+                ) from exc
 
-                if not resp.is_success:
-                    # 错误体不会很大（一般 JSON），可以全读
-                    err_content = await resp.aread()
-                    ec = (
-                        ERROR_CLASS_UPSTREAM_5XX
-                        if resp.status_code >= 500
-                        else ERROR_CLASS_UPSTREAM_4XX
-                    )
-                    raise JobFailure(
-                        f"下载上游图片失败 HTTP {resp.status_code}",
-                        upstream_status=resp.status_code,
-                        upstream_body=body_preview(err_content),
-                        error_class=ec,
-                    )
-                # Content-Length 已超 → 不下载
-                cl_raw = resp.headers.get("content-length")
-                if cl_raw:
-                    try:
-                        if int(cl_raw) > MAX_IMAGE_BYTES:
+            async with _new_pinned_image_download_client(target) as download_client:
+                async with download_client.stream(
+                    "GET",
+                    target.url,
+                    follow_redirects=False,
+                ) as resp:
+                    if resp.status_code in _IMAGE_DOWNLOAD_REDIRECT_STATUSES:
+                        location = (resp.headers.get("location") or "").strip()
+                        if not location:
                             raise JobFailure(
-                                "上游图片超过大小限制（Content-Length 预检）",
+                                "上游图片重定向缺少 Location",
                                 upstream_status=resp.status_code,
-                                error_class=ERROR_CLASS_IMAGE_SAVE,
+                                error_class=ERROR_CLASS_UPSTREAM_4XX,
                             )
-                    except ValueError:
-                        pass
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    if not chunk:
+                        if redirects >= MAX_IMAGE_URL_REDIRECTS:
+                            raise JobFailure(
+                                "上游图片重定向次数过多",
+                                upstream_status=resp.status_code,
+                                error_class=ERROR_CLASS_UPSTREAM_4XX,
+                            )
+                        redirects += 1
+                        current_url = urljoin(target.url, location)
                         continue
-                    # 累计判，超阈值立即中断 stream（async with 退出会 aclose）
-                    if len(buf) + len(chunk) > MAX_IMAGE_BYTES:
+
+                    if not 200 <= resp.status_code < 300:
+                        error_limit = min(
+                            MAX_IMAGE_BYTES,
+                            _IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES,
+                        )
+                        declared_size = _download_content_length(resp.headers)
+                        if declared_size is not None and declared_size > error_limit:
+                            err_content = b""
+                            body_truncated = True
+                        else:
+                            (
+                                err_content,
+                                body_truncated,
+                                _received_bytes,
+                            ) = await _read_download_body_bounded(
+                                resp,
+                                max_bytes=error_limit,
+                                truncate=True,
+                            )
+                        upstream_body: Any = body_preview(err_content)
+                        if body_truncated:
+                            upstream_body = {
+                                "preview": upstream_body,
+                                "truncated": True,
+                            }
+                        ec = (
+                            ERROR_CLASS_UPSTREAM_5XX
+                            if resp.status_code >= 500
+                            else ERROR_CLASS_UPSTREAM_4XX
+                        )
                         raise JobFailure(
-                            "上游图片超过大小限制",
+                            f"下载上游图片失败 HTTP {resp.status_code}",
+                            upstream_status=resp.status_code,
+                            upstream_body=upstream_body,
+                            retryable=resp.status_code >= 500,
+                            retry_requires_idempotency=retry_requires_idempotency,
+                            outcome_uncertain=(
+                                resp.status_code >= 500 and retry_requires_idempotency
+                            ),
+                            error_class=ec,
+                        )
+
+                    declared_size = _download_content_length(resp.headers)
+                    if declared_size is not None and declared_size > effective_max:
+                        raise JobFailure(
+                            "上游图片超过大小限制（Content-Length 预检）",
                             upstream_status=resp.status_code,
                             error_class=ERROR_CLASS_IMAGE_SAVE,
                         )
-                    buf.extend(chunk)
-                content = bytes(buf)
-                content_type = resp.headers.get("content-type")
-                break
+                    (
+                        content,
+                        body_truncated,
+                        _received_bytes,
+                    ) = await _read_download_body_bounded(
+                        resp,
+                        max_bytes=effective_max,
+                        truncate=False,
+                    )
+                    if body_truncated:
+                        failure = _candidate_size_error(effective_max)
+                        failure.upstream_status = resp.status_code
+                        raise failure
+                    content_type = resp.headers.get("content-type")
+                    break
     except JobFailure:
         raise
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, OSError) as exc:
         raise JobFailure(
             f"下载上游图片失败: {exc.__class__.__name__}: {exc}",
             retryable=True,
+            retry_requires_idempotency=retry_requires_idempotency,
+            outcome_uncertain=retry_requires_idempotency,
             error_class=ERROR_CLASS_NETWORK,
         ) from exc
     candidate = ImageCandidate(content, content_type)
@@ -1097,14 +831,23 @@ async def extract_candidates(
     *,
     image_context: bool = False,
     cache: dict[str, ImageCandidate] | None = None,
+    budget: ImageCandidateBudget | None = None,
 ) -> list[ImageCandidate]:
     if cache is None:
         cache = {}
+    if budget is None:
+        budget = ImageCandidateBudget()
     candidates: list[ImageCandidate] = []
     if isinstance(value, list):
         for item in value:
             candidates.extend(
-                await extract_candidates(item, client, image_context=image_context, cache=cache)
+                await extract_candidates(
+                    item,
+                    client,
+                    image_context=image_context,
+                    cache=cache,
+                    budget=budget,
+                )
             )
         return candidates
     if not isinstance(value, dict):
@@ -1115,33 +858,70 @@ async def extract_candidates(
     for inline_key in ("inlineData", "inline_data"):
         inline = value.get(inline_key)
         if isinstance(inline, dict) and isinstance(inline.get("data"), str):
-            data = decode_base64(inline["data"])
+            data = decode_base64(
+                inline["data"],
+                max_bytes=budget.next_max_bytes(),
+            )
             if data is not None:
                 candidates.append(
-                    ImageCandidate(data, inline.get("mimeType") or inline.get("mime_type"))
+                    budget.record(
+                        ImageCandidate(
+                            data,
+                            inline.get("mimeType") or inline.get("mime_type"),
+                        )
+                    )
                 )
 
     for key, item in value.items():
+        if key in {"inlineData", "inline_data"}:
+            continue
         if isinstance(item, str):
-            if key in {"b64_json", "image_b64", "image_base64", "base64_image", "partial_image_b64"}:
-                data = decode_base64(item)
+            if key in {
+                "b64_json",
+                "image_b64",
+                "image_base64",
+                "base64_image",
+                "partial_image_b64",
+            }:
+                data = decode_base64(item, max_bytes=budget.next_max_bytes())
                 if data is not None:
                     candidates.append(
-                        ImageCandidate(data, value.get("mimeType") or value.get("mime_type"))
+                        budget.record(
+                            ImageCandidate(
+                                data,
+                                value.get("mimeType") or value.get("mime_type"),
+                            )
+                        )
                     )
             elif key in {"result", "data"} and context:
-                data = decode_base64(item)
+                data = decode_base64(item, max_bytes=budget.next_max_bytes())
                 if data is not None:
                     candidates.append(
-                        ImageCandidate(data, value.get("mimeType") or value.get("mime_type"))
+                        budget.record(
+                            ImageCandidate(
+                                data,
+                                value.get("mimeType") or value.get("mime_type"),
+                            )
+                        )
                     )
             elif key in {"url", "image_url"}:
-                downloaded = await download_image_url(client, item, cache=cache)
+                downloaded = await download_image_url(
+                    client,
+                    item,
+                    cache=cache,
+                    max_bytes=budget.next_max_bytes(),
+                )
                 if downloaded is not None:
-                    candidates.append(downloaded)
+                    candidates.append(budget.record(downloaded))
         elif isinstance(item, (dict, list)):
             candidates.extend(
-                await extract_candidates(item, client, image_context=context, cache=cache)
+                await extract_candidates(
+                    item,
+                    client,
+                    image_context=context,
+                    cache=cache,
+                    budget=budget,
+                )
             )
 
     return candidates
@@ -1156,10 +936,9 @@ def parse_sse_json_objects(text: str) -> list[Any]:
         data = line.removeprefix("data:").strip()
         if not data or data == "[DONE]":
             continue
-        try:
-            objects.append(json.loads(data))
-        except json.JSONDecodeError:
-            continue
+        parsed = parse_json_bytes(data.encode("utf-8"))
+        if parsed is not None:
+            objects.append(parsed)
     return objects
 
 
@@ -1167,10 +946,7 @@ def _try_parse_sse_data(data: str) -> Any | None:
     data = data.strip()
     if not data or data == "[DONE]":
         return None
-    try:
-        return json.loads(data)
-    except json.JSONDecodeError:
-        return None
+    return parse_json_bytes(data.encode("utf-8"))
 
 
 def _sse_data_from_lines(lines: list[str]) -> str | None:
@@ -1184,6 +960,19 @@ def _sse_data_from_lines(lines: list[str]) -> str | None:
     if not parts:
         return None
     return "\n".join(parts)
+
+
+def _contains_result_key(value: Any) -> bool:
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if "result" in current:
+                return True
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return False
 
 
 def _first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
@@ -1211,10 +1000,7 @@ def _first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
         if event_type == "response.incomplete":
             response = event.get("response")
             if isinstance(response, dict):
-                detail = (
-                    response.get("incomplete_details")
-                    or response.get("error")
-                )
+                detail = response.get("incomplete_details") or response.get("error")
                 if isinstance(detail, dict):
                     out = dict(detail)
                     out.setdefault("type", "response_incomplete")
@@ -1233,7 +1019,11 @@ def _classify_stream_error(error: dict[str, Any]) -> str:
     error_type = str(error.get("type") or "").lower()
     message = str(error.get("message") or "").lower()
     joined = " ".join((code, error_type, message))
-    if "moderation" in joined or "safety" in joined or error_type.endswith("_user_error"):
+    if (
+        "moderation" in joined
+        or "safety" in joined
+        or error_type.endswith("_user_error")
+    ):
         return ERROR_CLASS_VALIDATION
     if "invalid" in joined or "bad_request" in joined or "bad request" in joined:
         return ERROR_CLASS_UPSTREAM_4XX
@@ -1242,16 +1032,24 @@ def _classify_stream_error(error: dict[str, Any]) -> str:
 
 def _stream_error_message(error: dict[str, Any]) -> str:
     code = str(error.get("code") or error.get("type") or "stream_error")
-    message = str(error.get("message") or "Responses stream failed before returning an image")
+    message = str(
+        error.get("message") or "Responses stream failed before returning an image"
+    )
     return f"上游流式错误 {code}: {message}"
 
 
 async def extract_response_images(
-    resp: httpx.Response, client: httpx.AsyncClient
+    resp: httpx.Response,
+    client: httpx.AsyncClient,
+    *,
+    budget: ImageCandidateBudget | None = None,
 ) -> list[ImageCandidate]:
+    if budget is None:
+        budget = ImageCandidateBudget()
     content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type.startswith("image/"):
-        return [ImageCandidate(resp.content, content_type)]
+        budget.next_max_bytes()
+        return [budget.record(ImageCandidate(resp.content, content_type))]
 
     parsed = parse_json_bytes(resp.content)
     if parsed is not None:
@@ -1263,7 +1061,7 @@ async def extract_response_images(
                 upstream_body=body_preview(resp.content),
                 error_class=_classify_stream_error(stream_error),
             )
-        return await extract_candidates(parsed, client)
+        return await extract_candidates(parsed, client, budget=budget)
 
     text = resp.content.decode("utf-8", "replace")
     cache: dict[str, ImageCandidate] = {}
@@ -1277,8 +1075,9 @@ async def extract_response_images(
             error_class=_classify_stream_error(stream_error),
         )
     has_terminal = any(
-        isinstance(ev, dict) and not _is_responses_partial_event(ev)
-        and "result" in json.dumps(ev)  # cheap check: a terminal event normally carries result
+        isinstance(ev, dict)
+        and not _is_responses_partial_event(ev)
+        and _contains_result_key(ev)
         for ev in events
     )
     candidates: list[ImageCandidate] = []
@@ -1289,7 +1088,14 @@ async def extract_response_images(
         # back to whatever partial frames we have — better one image than none.
         if has_terminal and _is_responses_partial_event(obj):
             continue
-        candidates.extend(await extract_candidates(obj, client, cache=cache))
+        candidates.extend(
+            await extract_candidates(
+                obj,
+                client,
+                cache=cache,
+                budget=budget,
+            )
+        )
     return candidates
 
 
@@ -1314,6 +1120,7 @@ async def extract_responses_stream_images(
       已到的极少数兼容网关也能识别（避免错判 retryable）。
     """
     cache: dict[str, ImageCandidate] = {}
+    budget = ImageCandidateBudget()
     event_lines: list[str] = []
     events_seen = 0
     bytes_seen = 0
@@ -1335,7 +1142,12 @@ async def extract_responses_stream_images(
             )
         if _is_responses_success_terminal(obj):
             saw_success_terminal = True
-        extracted = await extract_candidates(obj, client, cache=cache)
+        extracted = await extract_candidates(
+            obj,
+            client,
+            cache=cache,
+            budget=budget,
+        )
         if not extracted:
             return
         if _is_responses_partial_event(obj):
@@ -1362,6 +1174,8 @@ async def extract_responses_stream_images(
                     "saw_success_terminal": saw_success_terminal,
                 },
                 retryable=True,
+                retry_requires_idempotency=True,
+                outcome_uncertain=True,
                 error_class=ERROR_CLASS_NETWORK,
             ) from None
         bytes_seen += len(line) + 1
@@ -1369,6 +1183,9 @@ async def extract_responses_stream_images(
             raise JobFailure(
                 "Responses stream exceeded sidecar byte budget before final image",
                 upstream_status=resp.status_code,
+                retryable=True,
+                retry_requires_idempotency=True,
+                outcome_uncertain=True,
                 error_class=ERROR_CLASS_NETWORK,
             )
         now = time.monotonic()
@@ -1415,6 +1232,8 @@ async def extract_responses_stream_images(
             upstream_status=resp.status_code,
             upstream_body=detail,
             retryable=True,
+            retry_requires_idempotency=True,
+            outcome_uncertain=True,
             error_class=ERROR_CLASS_NETWORK,
         )
     raise JobFailure(
@@ -1422,278 +1241,65 @@ async def extract_responses_stream_images(
         upstream_status=resp.status_code,
         upstream_body=detail,
         retryable=True,
+        retry_requires_idempotency=True,
+        outcome_uncertain=True,
         error_class=ERROR_CLASS_NETWORK,
     )
 
 
-def image_metadata(data: bytes, mime_type: str | None) -> tuple[int | None, int | None, str]:
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(BytesIO(data)) as image:
-                width, height = image.size
-                fmt = (image.format or "").lower()
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise JobFailure(
-            f"图片像素超过限制（max {MAX_IMAGE_PIXELS} pixels）",
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        ) from exc
-    except (UnidentifiedImageError, OSError):
-        width = height = None
-        fmt = ""
-
-    if width is not None and height is not None and width * height > MAX_IMAGE_PIXELS:
-        raise JobFailure(
-            f"图片像素超过限制（{width}x{height}, max {MAX_IMAGE_PIXELS} pixels）",
-            error_class=ERROR_CLASS_IMAGE_SAVE,
+_image_artifacts = ImageArtifactFacade(
+    data_dir=lambda: DATA_DIR,
+    public_base_url=lambda: PUBLIC_BASE_URL,
+    max_image_bytes=lambda: MAX_IMAGE_BYTES,
+    max_image_candidates=lambda: MAX_IMAGE_CANDIDATES,
+    max_total_image_bytes=lambda: MAX_TOTAL_IMAGE_BYTES,
+    max_image_pixels=lambda: MAX_IMAGE_PIXELS,
+    error_class_image_save=lambda: ERROR_CLASS_IMAGE_SAVE,
+    error_class_validation=lambda: ERROR_CLASS_VALIDATION,
+    job_failure=lambda error, **kwargs: JobFailure(error, **kwargs),
+    image_candidate=lambda data, mime_type=None: ImageCandidate(data, mime_type),
+    decode_data_url=lambda value: decode_data_url(value),
+    decode_base64=lambda value: decode_base64(value),
+    download_image_url=(
+        lambda client, url, **kwargs: download_image_url(
+            client,
+            url,
+            **kwargs,
         )
-
-    if fmt in {"jpg", "jpeg"}:
-        return width, height, "jpeg"
-    if fmt in {"png", "webp", "gif"}:
-        return width, height, fmt
-
-    mime = (mime_type or "").split(";", 1)[0].strip().lower()
-    if mime == "image/jpeg":
-        return width, height, "jpeg"
-    if mime == "image/png":
-        return width, height, "png"
-    if mime == "image/webp":
-        return width, height, "webp"
-    if mime == "image/gif":
-        return width, height, "gif"
-    return width, height, "bin"
-
-
-def job_image_dir(job_id: str, created_at: str) -> tuple[Path, str]:
-    created = datetime.fromisoformat(created_at)
-    rel = (
-        Path("images")
-        / "temp"
-        / created.strftime("%Y")
-        / created.strftime("%m")
-        / created.strftime("%d")
-        / job_id
-    )
-    return DATA_DIR / rel, rel.as_posix()
-
-
-def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_suffix(path.suffix + f".tmp-{secrets.token_hex(4)}")
-    try:
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
-    except Exception:
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
-        raise
-
-
-def _save_one_image_sync(image_dir: Path, filename: str, data: bytes) -> None:
-    image_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(image_dir / filename, data)
-
-
-async def save_images(
-    job_id: str,
-    created_at: str,
-    retention_days: int,
-    candidates: Iterable[ImageCandidate],
-) -> list[dict[str, Any]]:
-    image_dir, rel_dir = job_image_dir(job_id, created_at)
-    expires_at = (datetime.fromisoformat(created_at) + timedelta(days=retention_days)).isoformat()
-
-    seen: set[str] = set()
-    plan: list[tuple[str, ImageCandidate, int, int | None, int | None, str]] = []
-    for candidate in candidates:
-        digest = hashlib.sha256(candidate.data).hexdigest()
-        if digest in seen:
-            continue
-        seen.add(digest)
-        width, height, fmt = await asyncio.to_thread(
-            image_metadata, candidate.data, candidate.mime_type
+    ),
+    json_dump=lambda value: json_dump(value),
+    job_image_dir_fn=lambda job_id, created_at: job_image_dir(
+        job_id,
+        created_at,
+    ),
+    image_metadata_fn=lambda data, mime_type: image_metadata(data, mime_type),
+    atomic_write_fn=lambda path, data: _atomic_write(path, data),
+    save_one_image_sync_fn=(
+        lambda image_dir, filename, data: _save_one_image_sync(
+            image_dir,
+            filename,
+            data,
         )
-        index = len(plan) + 1
-        filename = f"image-{index}.{fmt}"
-        plan.append((filename, candidate, len(candidate.data), width, height, fmt))
+    ),
+    save_input_image_fn=(lambda *args, **kwargs: save_input_image(*args, **kwargs)),
+    image_candidate_from_ref_fn=lambda ref: image_candidate_from_ref(ref),
+    candidate_filename_fn=lambda stem, candidate: _candidate_filename(
+        stem,
+        candidate,
+    ),
+    token_hex=lambda size: secrets.token_hex(size),
+)
 
-    await asyncio.gather(
-        *(
-            asyncio.to_thread(_save_one_image_sync, image_dir, filename, candidate.data)
-            for filename, candidate, _, _, _, _ in plan
-        )
-    )
-
-    return [
-        {
-            "url": f"{PUBLIC_BASE_URL}/{rel_dir}/{filename}",
-            "width": width,
-            "height": height,
-            "bytes": size,
-            "format": fmt,
-            "expires_at": expires_at,
-        }
-        for filename, _, size, width, height, fmt in plan
-    ]
-
-
-async def save_input_image(
-    job_id: str,
-    created_at: str,
-    retention_days: int,
-    candidate: ImageCandidate,
-    *,
-    stem: str,
-) -> str:
-    image_dir, rel_dir = job_image_dir(job_id, created_at)
-    width, height, fmt = await asyncio.to_thread(
-        image_metadata, candidate.data, candidate.mime_type
-    )
-    if width is None or height is None or fmt == "bin":
-        raise JobFailure("图生图输入不是可识别的图片", upstream_status=400)
-    filename = f"{stem}.{fmt}"
-    await asyncio.to_thread(_save_one_image_sync, image_dir, filename, candidate.data)
-    return f"{PUBLIC_BASE_URL}/{rel_dir}/{filename}"
-
-
-def image_candidate_from_ref(ref: dict[str, Any]) -> ImageCandidate | None:
-    url = ref.get("image_url")
-    if isinstance(url, str) and url.startswith("data:image/"):
-        return decode_data_url(url)
-    for key in ("b64_json", "image_b64", "image_base64", "base64_image", "data"):
-        value = ref.get(key)
-        if isinstance(value, str):
-            data = decode_base64(value)
-            if data is not None:
-                return ImageCandidate(data, ref.get("mimeType") or ref.get("mime_type"))
-    return None
-
-
-async def materialize_edit_input_urls(row: sqlite3.Row, body: dict[str, Any]) -> dict[str, Any]:
-    rewritten = copy.deepcopy(body)
-    images = rewritten.get("images")
-    if isinstance(images, list):
-        for index, item in enumerate(images, start=1):
-            if not isinstance(item, dict):
-                continue
-            url = item.get("image_url")
-            if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
-                continue
-            candidate = image_candidate_from_ref(item)
-            if candidate is None:
-                continue
-            new_url = await save_input_image(
-                row["job_id"],
-                row["created_at"],
-                row["retention_days"],
-                candidate,
-                stem=f"input-{index}",
-            )
-            item.clear()
-            item["image_url"] = new_url
-
-    mask = rewritten.get("mask")
-    if isinstance(mask, dict):
-        url = mask.get("image_url")
-        if not (isinstance(url, str) and (url.startswith("http://") or url.startswith("https://"))):
-            candidate = image_candidate_from_ref(mask)
-            if candidate is not None:
-                new_url = await save_input_image(
-                    row["job_id"],
-                    row["created_at"],
-                    row["retention_days"],
-                    candidate,
-                    stem="mask",
-                )
-                mask.clear()
-                mask["image_url"] = new_url
-    return rewritten
-
-
-def _candidate_filename(stem: str, candidate: ImageCandidate) -> tuple[str, str]:
-    width, height, fmt = image_metadata(candidate.data, candidate.mime_type)
-    if width is None or height is None or fmt == "bin":
-        raise JobFailure("图生图输入不是可识别的图片", upstream_status=400)
-    if fmt in {"jpg", "jpeg"}:
-        return f"{stem}.jpg", "image/jpeg"
-    if fmt == "webp":
-        return f"{stem}.webp", "image/webp"
-    if fmt == "png":
-        return f"{stem}.png", "image/png"
-    # gif 等其他格式：file 模式（OpenAI/new-api 风格）只接受 png/jpeg/webp。
-    # 之前 fallback 到 "image/png" 是 silent mismatch（声明 png 但字节是 gif），上游解析必失败。
-    raise JobFailure(
-        f"file 模式不支持图片格式 {fmt}（仅 png/jpeg/webp）",
-        upstream_status=400,
-        error_class=ERROR_CLASS_VALIDATION,
-    )
-
-
-async def materialize_edit_input_files(
-    client: httpx.AsyncClient,
-    body: dict[str, Any],
-) -> tuple[dict[str, str], list[tuple[str, tuple[str, bytes, str]]]]:
-    data: dict[str, str] = {}
-    for key, value in body.items():
-        if key in {"images", "mask"}:
-            continue
-        if value is None:
-            continue
-        # OpenAI/new-api 期望 multipart 字段是文本：dict/list 必须 JSON 序列化（直接 str() 会变 Python repr）；
-        # bool 用小写 true/false（json 风格，str(True) 给的是 "True" 上游 strict 解析会拒）。
-        if isinstance(value, bool):
-            data[key] = "true" if value else "false"
-        elif isinstance(value, (dict, list)):
-            data[key] = json_dump(value)
-        else:
-            data[key] = str(value)
-
-    files: list[tuple[str, tuple[str, bytes, str]]] = []
-    cache: dict[str, ImageCandidate] = {}
-    images = body.get("images")
-    if not isinstance(images, list) or not images:
-        raise JobFailure(
-            "图生图 file 模式缺少 images",
-            upstream_status=400,
-            error_class=ERROR_CLASS_VALIDATION,
-        )
-    for index, item in enumerate(images):
-        if not isinstance(item, dict):
-            continue
-        candidate = image_candidate_from_ref(item)
-        url = item.get("image_url")
-        if candidate is None and isinstance(url, str):
-            candidate = await download_image_url(client, url, cache=cache)
-        if candidate is None:
-            continue
-        filename, mime = await asyncio.to_thread(
-            _candidate_filename,
-            f"ref-{index}",
-            candidate,
-        )
-        files.append(("image[]", (filename, candidate.data, mime)))
-    if not files:
-        raise JobFailure(
-            "图生图 file 模式没有可上传的参考图",
-            upstream_status=400,
-            error_class=ERROR_CLASS_VALIDATION,
-        )
-
-    mask = body.get("mask")
-    if isinstance(mask, dict):
-        candidate = image_candidate_from_ref(mask)
-        url = mask.get("image_url")
-        if candidate is None and isinstance(url, str):
-            candidate = await download_image_url(client, url, cache=cache)
-        if candidate is not None:
-            filename, mime = await asyncio.to_thread(
-                _candidate_filename,
-                "mask",
-                candidate,
-            )
-            files.append(("mask", (filename, candidate.data, mime)))
-
-    return data, files
+image_metadata = _image_artifacts.image_metadata
+job_image_dir = _image_artifacts.job_image_dir
+_atomic_write = _image_artifacts.atomic_write
+_save_one_image_sync = _image_artifacts.save_one_image_sync
+save_images = _image_artifacts.save_images
+save_input_image = _image_artifacts.save_input_image
+image_candidate_from_ref = _image_artifacts.image_candidate_from_ref
+materialize_edit_input_urls = _image_artifacts.materialize_edit_input_urls
+_candidate_filename = _image_artifacts.candidate_filename
+materialize_edit_input_files = _image_artifacts.materialize_edit_input_files
 
 
 # --- Upstream call -----------------------------------------------------------
@@ -1715,6 +1321,17 @@ def _classify_httpx_error(exc: httpx.HTTPError) -> bool:
     )
 
 
+def _httpx_error_requires_idempotency(exc: httpx.HTTPError) -> bool:
+    return not isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.PoolTimeout,
+        ),
+    )
+
+
 def _is_retryable_job_failure(exc: JobFailure) -> bool:
     if exc.retryable:
         return True
@@ -1723,6 +1340,15 @@ def _is_retryable_job_failure(exc: JobFailure) -> bool:
     if exc.error_class == ERROR_CLASS_UPSTREAM_5XX:
         return True
     return False
+
+
+def _mark_post_dispatch_failure(exc: JobFailure) -> JobFailure:
+    if _is_retryable_job_failure(exc) and (
+        exc.retry_requires_idempotency or exc.error_class == ERROR_CLASS_UPSTREAM_5XX
+    ):
+        exc.retry_requires_idempotency = True
+        exc.outcome_uncertain = True
+    return exc
 
 
 def _retry_budget_for_failure(exc: JobFailure, *, endpoint: str) -> int:
@@ -1735,11 +1361,55 @@ def _retry_budget_for_failure(exc: JobFailure, *, endpoint: str) -> int:
     return 0
 
 
+async def _raise_upstream_http_error(resp: httpx.Response) -> None:
+    content, truncated, _received = await _read_response_body_bounded(
+        resp,
+        max_bytes=MAX_UPSTREAM_ERROR_BODY_BYTES,
+        truncate=True,
+    )
+    upstream_body: Any = body_preview(content)
+    if truncated:
+        upstream_body = {
+            "preview": upstream_body,
+            "truncated": True,
+        }
+    is_5xx = resp.status_code >= 500
+    raise JobFailure(
+        f"上游返回 HTTP {resp.status_code}",
+        upstream_status=resp.status_code,
+        upstream_body=upstream_body,
+        retryable=is_5xx,
+        retry_requires_idempotency=is_5xx,
+        outcome_uncertain=is_5xx,
+        error_class=(ERROR_CLASS_UPSTREAM_5XX if is_5xx else ERROR_CLASS_UPSTREAM_4XX),
+    )
+
+
 async def _extract_non_stream_response_images(
     resp: httpx.Response,
     client: httpx.AsyncClient,
 ) -> list[ImageCandidate]:
-    content = await resp.aread()
+    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    is_direct_image = content_type.startswith("image/")
+    body_limit = (
+        min(MAX_UPSTREAM_RESPONSE_BYTES, MAX_IMAGE_BYTES)
+        if is_direct_image
+        else MAX_UPSTREAM_RESPONSE_BYTES
+    )
+    content, truncated, _received = await _read_response_body_bounded(
+        resp,
+        max_bytes=body_limit,
+        truncate=False,
+    )
+    if truncated:
+        limit_name = "单图" if is_direct_image else "非流式响应"
+        raise JobFailure(
+            f"上游{limit_name}超过大小限制（max {body_limit} bytes）",
+            upstream_status=resp.status_code,
+            retry_requires_idempotency=True,
+            outcome_uncertain=True,
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        )
     buffered = httpx.Response(
         resp.status_code,
         headers=resp.headers,
@@ -1758,97 +1428,68 @@ async def _call_upstream_once(
     image_edit_input_transport: str = "url",
 ) -> tuple[int, list[dict[str, Any]]]:
     assert _http_client is not None
-    if endpoint == "/v1/responses":
-        async with _http_client.stream("POST", url, headers=headers, json=body) as resp:
-            if resp.status_code >= 400:
-                content = await resp.aread()
-                ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
-                raise JobFailure(
-                    f"上游返回 HTTP {resp.status_code}",
-                    upstream_status=resp.status_code,
-                    upstream_body=body_preview(content),
-                    error_class=ec,
-                )
-            content_type = resp.headers.get("content-type", "").lower()
-            if "text/event-stream" in content_type:
-                try:
-                    candidates = await extract_responses_stream_images(
-                        resp,
-                        _http_client,
-                        job_id=row["job_id"],
-                    )
-                except (JobFailure, httpx.HTTPError):
-                    raise
-                except Exception as exc:
-                    raise JobFailure(
-                        f"解析上游流式响应失败: {exc.__class__.__name__}: {exc}",
-                        upstream_status=resp.status_code,
-                        error_class=ERROR_CLASS_IMAGE_SAVE,
-                    ) from exc
-            else:
-                try:
-                    candidates = await _extract_non_stream_response_images(resp, _http_client)
-                except (JobFailure, httpx.HTTPError):
-                    raise
-                except Exception as exc:
-                    raise JobFailure(
-                        f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
-                        upstream_status=resp.status_code,
-                        error_class=ERROR_CLASS_IMAGE_SAVE,
-                    ) from exc
-        status_code = resp.status_code
-    elif endpoint == "/v1/images/edits" and image_edit_input_transport == "file":
+    request_headers = headers
+    request_kwargs: dict[str, Any]
+    if endpoint == "/v1/images/edits" and image_edit_input_transport == "file":
         multipart_headers = dict(headers)
         multipart_headers.pop("Content-Type", None)
         data, files = await materialize_edit_input_files(_http_client, body)
-        resp = await _http_client.post(
-            url,
-            headers=multipart_headers,
-            data=data,
-            files=files,
-        )
-        status_code = resp.status_code
-        if resp.status_code >= 400:
-            ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
-            raise JobFailure(
-                f"上游返回 HTTP {resp.status_code}",
-                upstream_status=resp.status_code,
-                upstream_body=body_preview(resp.content),
-                error_class=ec,
-            )
-        try:
-            candidates = await extract_response_images(resp, _http_client)
-        except (JobFailure, httpx.HTTPError):
-            raise
-        except Exception as exc:
-            raise JobFailure(
-                f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
-                upstream_status=resp.status_code,
-                upstream_body=body_preview(resp.content),
-                error_class=ERROR_CLASS_IMAGE_SAVE,
-            ) from exc
+        request_headers = multipart_headers
+        request_kwargs = {
+            "data": data,
+            "files": files,
+        }
     else:
-        resp = await _http_client.post(url, headers=headers, json=body)
+        request_kwargs = {"json": body}
+
+    async with _http_client.stream(
+        "POST",
+        url,
+        headers=request_headers,
+        **request_kwargs,
+    ) as resp:
         status_code = resp.status_code
         if resp.status_code >= 400:
-            ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
-            raise JobFailure(
-                f"上游返回 HTTP {resp.status_code}",
-                upstream_status=resp.status_code,
-                upstream_body=body_preview(resp.content),
-                error_class=ec,
-            )
-        try:
-            candidates = await extract_response_images(resp, _http_client)
-        except (JobFailure, httpx.HTTPError):
-            raise
-        except Exception as exc:
-            raise JobFailure(
-                f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
-                upstream_status=resp.status_code,
-                upstream_body=body_preview(resp.content),
-                error_class=ERROR_CLASS_IMAGE_SAVE,
-            ) from exc
+            await _raise_upstream_http_error(resp)
+
+        content_type = resp.headers.get("content-type", "").lower()
+        if endpoint == "/v1/responses" and "text/event-stream" in content_type:
+            try:
+                candidates = await extract_responses_stream_images(
+                    resp,
+                    _http_client,
+                    job_id=row["job_id"],
+                )
+            except JobFailure as exc:
+                raise _mark_post_dispatch_failure(exc)
+            except httpx.HTTPError:
+                raise
+            except Exception as exc:
+                raise JobFailure(
+                    f"解析上游流式响应失败: {exc.__class__.__name__}: {exc}",
+                    upstream_status=resp.status_code,
+                    retry_requires_idempotency=True,
+                    outcome_uncertain=True,
+                    error_class=ERROR_CLASS_IMAGE_SAVE,
+                ) from exc
+        else:
+            try:
+                candidates = await _extract_non_stream_response_images(
+                    resp,
+                    _http_client,
+                )
+            except JobFailure as exc:
+                raise _mark_post_dispatch_failure(exc)
+            except httpx.HTTPError:
+                raise
+            except Exception as exc:
+                raise JobFailure(
+                    f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
+                    upstream_status=resp.status_code,
+                    retry_requires_idempotency=True,
+                    outcome_uncertain=True,
+                    error_class=ERROR_CLASS_IMAGE_SAVE,
+                ) from exc
 
     if not candidates:
         # Most common cause: caller asked /v1/images/generations against a
@@ -1883,7 +1524,12 @@ async def _call_upstream_once(
 async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
     if _http_client is None:
         raise JobFailure("HTTP client not ready", error_class=ERROR_CLASS_INTERNAL)
-    payload = json.loads(row["payload_json"])
+    payload = parse_json_bytes(row["payload_json"].encode("utf-8"))
+    if not isinstance(payload, dict):
+        raise JobFailure(
+            "job payload is not valid strict JSON",
+            error_class=ERROR_CLASS_INTERNAL,
+        )
     auth_header = row["auth_header"]
     if not auth_header:
         raise JobFailure(
@@ -1896,6 +1542,8 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
         "Authorization": auth_header,
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream, image/*",
+        "Accept-Encoding": "identity",
+        "Idempotency-Key": upstream_idempotency_key(row["job_id"]),
     }
 
     body = payload["body"]
@@ -1906,8 +1554,9 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
         if image_edit_input_transport == "url":
             body = await materialize_edit_input_urls(row, body)
 
-    last_failure: JobFailure | None = None
-    max_budget = max(RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX, RETRY_UPSTREAM_5XX_MAX)
+    max_budget = max(
+        RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX, RETRY_UPSTREAM_5XX_MAX
+    )
     for attempt in range(max_budget + 1):
         try:
             return await _call_upstream_once(
@@ -1919,17 +1568,35 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
                 image_edit_input_transport=image_edit_input_transport,
             )
         except httpx.HTTPError as exc:
+            requires_idempotency = _httpx_error_requires_idempotency(exc)
             failure = JobFailure(
                 f"上游请求失败: {exc.__class__.__name__}: {exc}",
                 retryable=_classify_httpx_error(exc),
+                retry_requires_idempotency=requires_idempotency,
+                outcome_uncertain=requires_idempotency,
                 error_class=ERROR_CLASS_NETWORK,
             )
         except JobFailure as exc:
             failure = exc
 
-        last_failure = failure
         retry_budget = _retry_budget_for_failure(failure, endpoint=endpoint)
-        if attempt < retry_budget and _is_retryable_job_failure(failure):
+        retryable = _is_retryable_job_failure(failure)
+        requires_idempotency = (
+            failure.retry_requires_idempotency
+            or failure.error_class == ERROR_CLASS_UPSTREAM_5XX
+        )
+        if retryable and requires_idempotency and not UPSTREAM_IDEMPOTENCY_GUARANTEED:
+            failure.retry_suppressed = attempt < retry_budget
+            if failure.retry_suppressed:
+                LOG.warning(
+                    "image job %s automatic retry suppressed endpoint=%s class=%s; "
+                    "upstream idempotency is not guaranteed",
+                    row["job_id"],
+                    endpoint,
+                    failure.error_class,
+                )
+            raise failure
+        if attempt < retry_budget and retryable:
             LOG.warning(
                 "image job %s upstream retryable failure, retry %d/%d endpoint=%s class=%s: %s",
                 row["job_id"],
@@ -1942,10 +1609,6 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
             await asyncio.sleep(RETRY_BACKOFF_S * (2**attempt))
             continue
         raise failure
-
-    if last_failure is not None:
-        raise last_failure
-    raise JobFailure("upstream retry loop exited unexpectedly", error_class=ERROR_CLASS_INTERNAL)
 
 
 # --- Worker loop -------------------------------------------------------------
@@ -1970,7 +1633,9 @@ async def process_job(job_id: str) -> None:
         return
     started = time.monotonic()
     endpoint_used = row["endpoint"]
-    heartbeat = asyncio.create_task(running_heartbeat(job_id), name=f"image-job-heartbeat-{job_id}")
+    heartbeat = asyncio.create_task(
+        running_heartbeat(job_id), name=f"image-job-heartbeat-{job_id}"
+    )
     try:
         fresh_row = await db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         if fresh_row is None:
@@ -2001,10 +1666,14 @@ async def process_job(job_id: str) -> None:
             elapsed_ms=elapsed_ms,
             error_class=exc.error_class,
             endpoint_used=endpoint_used,
+            retryable=_is_retryable_job_failure(exc),
+            retry_suppressed=exc.retry_suppressed,
+            outcome_uncertain=exc.outcome_uncertain,
         )
         LOG.warning(
-            "image job %s failed endpoint=%s class=%s: %s",
+            "image job %s terminal status=%s endpoint=%s class=%s: %s",
             job_id,
+            "uncertain" if exc.outcome_uncertain else "failed",
             endpoint_used,
             exc.error_class,
             exc.error,
@@ -2043,7 +1712,9 @@ async def worker_loop(worker_id: int) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                LOG.exception("worker %d unexpected error processing %s", worker_id, job_id)
+                LOG.exception(
+                    "worker %d unexpected error processing %s", worker_id, job_id
+                )
             finally:
                 async with _queue_state_lock:
                     _inflight.discard(job_id)
@@ -2064,6 +1735,7 @@ async def reconcile_stuck_jobs() -> dict[str, int]:
     stats = {
         "queued_requeued": 0,
         "running_requeued": 0,
+        "running_uncertain": 0,
         "failed_missing_auth": 0,
         "active": 0,
         "queue_full": 0,
@@ -2122,25 +1794,39 @@ async def reconcile_stuck_jobs() -> dict[str, int]:
             stats["failed_missing_auth"] += 1
             continue
 
+        mark_uncertain = False
         async with _queue_state_lock:
             if job_id in _queued_ids or job_id in _inflight:
                 stats["active"] += 1
                 continue
-            if _queue.full():
+            if not UPSTREAM_IDEMPOTENCY_GUARANTEED:
+                mark_uncertain = True
+            elif _queue.full():
                 stats["queue_full"] += 1
                 continue
-            updated = await db_exec(
-                """
-                UPDATE jobs
-                SET status = 'queued', updated_at = ?
-                WHERE job_id = ? AND status = 'running' AND updated_at < ?
-                """,
-                (iso(), job_id, running_cutoff),
+            else:
+                updated = await db_exec(
+                    """
+                    UPDATE jobs
+                    SET status = 'queued', updated_at = ?
+                    WHERE job_id = ? AND status = 'running' AND updated_at < ?
+                    """,
+                    (iso(), job_id, running_cutoff),
+                )
+                if updated:
+                    _queue.put_nowait(job_id)
+                    _queued_ids.add(job_id)
+                    stats["running_requeued"] += 1
+        if mark_uncertain:
+            await mark_failed(
+                job_id,
+                error="stuck running job has an unresolved upstream result",
+                error_class=ERROR_CLASS_NETWORK,
+                retryable=True,
+                retry_suppressed=True,
+                outcome_uncertain=True,
             )
-            if updated:
-                _queue.put_nowait(job_id)
-                _queued_ids.add(job_id)
-                stats["running_requeued"] += 1
+            stats["running_uncertain"] += 1
     return stats
 
 
@@ -2154,14 +1840,21 @@ async def stuck_reconciler() -> None:
     try:
         while not _shutdown.is_set():
             try:
-                await asyncio.wait_for(_shutdown.wait(), timeout=STUCK_RECONCILE_INTERVAL_S)
+                await asyncio.wait_for(
+                    _shutdown.wait(), timeout=STUCK_RECONCILE_INTERVAL_S
+                )
                 break
             except asyncio.TimeoutError:
                 pass
             try:
                 stats = await reconcile_stuck_jobs()
                 requeued = stats["queued_requeued"] + stats["running_requeued"]
-                if requeued or stats["failed_missing_auth"] or stats["queue_full"]:
+                if (
+                    requeued
+                    or stats["running_uncertain"]
+                    or stats["failed_missing_auth"]
+                    or stats["queue_full"]
+                ):
                     LOG.warning("stuck reconciler repaired jobs stats=%s", stats)
             except asyncio.CancelledError:
                 raise
@@ -2171,73 +1864,23 @@ async def stuck_reconciler() -> None:
         raise
 
 
-def _sweep_dir_sync(base: Path, cutoff_ts: float) -> tuple[int, int]:
-    """单个目录的 mtime-based 清理；返回 (删除文件数, 释放字节)。"""
-    if not base.exists():
-        return 0, 0
-    removed_files = 0
-    removed_bytes = 0
-    for path in base.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        if stat.st_mtime < cutoff_ts:
-            try:
-                size = stat.st_size
-                path.unlink()
-                removed_files += 1
-                removed_bytes += size
-            except OSError:
-                continue
-    # Drop empty directories bottom-up.
-    for path in sorted(base.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        if path.is_dir():
-            try:
-                path.rmdir()
-            except OSError:
-                continue
-    return removed_files, removed_bytes
+_retention = RetentionFacade(
+    data_dir=lambda: DATA_DIR,
+    refs_dir=lambda: REFS_DIR,
+    db_exec_sync=lambda sql, params: _db_exec_sync(sql, params),
+    db_exec=lambda sql, params=(): db_exec(sql, params),
+    db_all=lambda sql, params=(): db_all(sql, params),
+    utc_now=lambda: utc_now(),
+    max_retention_days=lambda: MAX_RETENTION_DAYS,
+    job_ttl_days=lambda: JOB_TTL_DAYS,
+    log=LOG,
+    sweep_dir_fn=lambda base, cutoff: _sweep_dir_sync(base, cutoff),
+    sweep_filesystem_fn=lambda cutoff: _sweep_filesystem_sync(cutoff),
+)
 
-
-def _sweep_filesystem_sync(cutoff_ts: float) -> tuple[int, int]:
-    """清两条数据通道：generated images 和 reference 临时文件。
-    refs 目录额外清 sqlite 行（基于 cutoff），避免 DB/FS 漂移导致复用拿到失效 URL。
-    """
-    total_files = 0
-    total_bytes = 0
-    for base in (DATA_DIR / "images" / "temp", REFS_DIR):
-        f, b = _sweep_dir_sync(base, cutoff_ts)
-        total_files += f
-        total_bytes += b
-    # 清理 refs 表里 created_at < cutoff 的行（与 FS 保持一致；缺行没事，多行只会让下次复用 miss）。
-    cutoff_iso = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).isoformat()
-    try:
-        _db_exec_sync("DELETE FROM refs WHERE created_at < ?", (cutoff_iso,))
-    except sqlite3.OperationalError:
-        # refs 表不存在（旧 db 升级前）→ 忽略，下次 init_storage_sync 会建好。
-        pass
-    return total_files, total_bytes
-
-
-async def _run_retention_pass() -> None:
-    """单次清理：FS sweep + job rows。提取为独立函数让启动时也能直接调用。"""
-    cutoff = utc_now() - timedelta(days=MAX_RETENTION_DAYS)
-    files, freed = await asyncio.to_thread(
-        _sweep_filesystem_sync, cutoff.timestamp()
-    )
-    if files:
-        LOG.info("retention sweeper removed %d files (%d bytes)", files, freed)
-
-    job_cutoff = (utc_now() - timedelta(days=JOB_TTL_DAYS)).isoformat()
-    removed_jobs = await db_exec(
-        "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
-        (job_cutoff,),
-    )
-    if removed_jobs:
-        LOG.info("retention sweeper removed %d job rows", removed_jobs)
+_sweep_dir_sync = _retention.sweep_dir
+_sweep_filesystem_sync = _retention.sweep_filesystem
+_run_retention_pass = _retention.run_pass
 
 
 async def retention_sweeper() -> None:
@@ -2257,7 +1900,9 @@ async def retention_sweeper() -> None:
     try:
         while not _shutdown.is_set():
             try:
-                await asyncio.wait_for(_shutdown.wait(), timeout=RETENTION_SWEEP_INTERVAL_S)
+                await asyncio.wait_for(
+                    _shutdown.wait(), timeout=RETENTION_SWEEP_INTERVAL_S
+                )
                 break
             except asyncio.TimeoutError:
                 pass
@@ -2276,14 +1921,20 @@ async def retention_sweeper() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _http_client
+
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+    _reset_runtime_state()
+
     await asyncio.to_thread(init_storage_sync)
     await fail_interrupted_running_jobs()
 
-    global _http_client
     timeout = httpx.Timeout(
         UPSTREAM_TIMEOUT_S,
         connect=UPSTREAM_CONNECT_TIMEOUT_S,
@@ -2308,11 +1959,17 @@ async def lifespan(app: FastAPI):
     ):
         result = await enqueue_job(row["job_id"])
         if result == "full":
-            LOG.warning("queue full while restoring backlog; remaining queued jobs deferred")
+            LOG.warning(
+                "queue full while restoring backlog; remaining queued jobs deferred"
+            )
             break
 
     for index in range(CONCURRENCY):
-        _workers.append(asyncio.create_task(worker_loop(index + 1), name=f"image-worker-{index+1}"))
+        _workers.append(
+            asyncio.create_task(
+                worker_loop(index + 1), name=f"image-worker-{index + 1}"
+            )
+        )
     _background_tasks.append(
         asyncio.create_task(retention_sweeper(), name="image-retention-sweeper")
     )
@@ -2369,10 +2026,13 @@ async def health() -> dict[str, Any]:
 @app.post("/v1/image-jobs")
 async def create_image_job(request: Request) -> dict[str, Any]:
     auth_header = require_auth(request)
-    try:
-        raw_payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON body") from None
+    raw = await _read_request_body_bounded(
+        request,
+        max_bytes=MAX_IMAGE_JOB_REQUEST_BYTES,
+    )
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty JSON body")
+    raw_payload = load_image_job_json(raw)
     payload = validate_payload(raw_payload)
     auth_digest = auth_hash(auth_header)
     idempotency_key = request_idempotency_key(request, raw_payload)
@@ -2392,7 +2052,7 @@ async def create_image_job(request: Request) -> dict[str, Any]:
             return row_to_response(existing)
     job_id = make_job_id()
     try:
-        await insert_job(
+        result = await insert_and_enqueue_job(
             job_id,
             payload,
             auth_header,
@@ -2413,13 +2073,22 @@ async def create_image_job(request: Request) -> dict[str, Any]:
             status_code=409,
             detail="idempotency key already used for a different image job",
         ) from None
-    result = await enqueue_job(job_id)
     if result == "full":
-        await mark_failed(
-            job_id,
-            error="queue full; rejected before processing",
-            error_class=ERROR_CLASS_INTERNAL,
-        )
+        if idempotency_key is not None:
+            existing = await db_one(
+                "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
+                (auth_digest, idempotency_key),
+            )
+            if existing is not None:
+                if existing["request_hash"] != payload_hash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "idempotency key already used for a different image job"
+                        ),
+                    )
+                await ensure_queued_job_scheduled(existing)
+                return row_to_response(existing)
         raise HTTPException(status_code=503, detail="image job queue full") from None
     return {
         "job_id": job_id,
@@ -2438,7 +2107,9 @@ async def get_image_job(job_id: str, request: Request) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="image job not found")
     if not hmac.compare_digest(row["auth_hash"], auth_hash(auth_header)):
-        raise HTTPException(status_code=403, detail="image job belongs to a different key")
+        raise HTTPException(
+            status_code=403, detail="image job belongs to a different key"
+        )
     return row_to_response(row)
 
 
@@ -2450,70 +2121,22 @@ _REF_MIME_EXT: dict[str, str] = {
 }
 
 
-def _refs_file_path(token: str, ext: str) -> Path:
-    # token 是 url-safe base64（_ - 字母数字），ext 是白名单——拼接安全。
-    return REFS_DIR / f"{token}.{ext}"
-
-
 def _refs_public_url(token: str, ext: str) -> str:
     return f"{PUBLIC_BASE_URL}/refs/{token}.{ext}"
 
 
-def _existing_ref_sync(auth_digest: str, sha: str) -> tuple[str, str] | None:
-    """返回 (token, ext) 或 None。如果 DB 有行但文件已被 sweep，则同时清 DB 行。"""
-    row = _db_one_sync(
-        "SELECT token, ext FROM refs WHERE auth_hash = ? AND sha256 = ?",
-        (auth_digest, sha),
-    )
-    if row is None:
-        return None
-    token = row["token"]
-    ext = row["ext"]
-    if _refs_file_path(token, ext).exists():
-        return token, ext
-    # 文件已被 sweep，但 DB 行还在——清掉让上层重新写入。
-    _db_exec_sync(
-        "DELETE FROM refs WHERE auth_hash = ? AND sha256 = ?",
-        (auth_digest, sha),
-    )
-    return None
+_reference_persistence = ReferencePersistenceFacade(
+    db_one_sync=lambda sql, params: _db_one_sync(sql, params),
+    db_exec_sync=lambda sql, params: _db_exec_sync(sql, params),
+    refs_dir=lambda: REFS_DIR,
+    now_iso=lambda: iso(),
+    token_hex=lambda size: secrets.token_hex(size),
+    file_path_fn=lambda token, ext: _refs_file_path(token, ext),
+)
 
-
-def _write_ref_sync(
-    auth_digest: str,
-    sha: str,
-    token: str,
-    ext: str,
-    raw: bytes,
-) -> None:
-    """原子写盘 + 落库：先写临时文件再 rename，再 INSERT。
-    INSERT 失败（并发同 sha）→ 回退用已有 token；调用方 deduped。
-    """
-    path = _refs_file_path(token, ext)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    try:
-        tmp.write_bytes(raw)
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-    try:
-        _db_exec_sync(
-            """
-            INSERT INTO refs (auth_hash, sha256, token, ext, size, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (auth_digest, sha, token, ext, len(raw), iso()),
-        )
-    except sqlite3.IntegrityError:
-        # 并发场景：另一请求已经为同 sha 落库；保留我们的文件，但 DB 视图维持 first-writer-wins。
-        # 调用方下次查 _existing_ref_sync 会拿到同 auth 下 first writer 的 token。
-        # 我们这次写的文件是孤儿，retention sweeper 会按 mtime 清掉。
-        pass
+_refs_file_path = _reference_persistence.file_path
+_existing_ref_sync = _reference_persistence.existing_ref
+_write_ref_sync = _reference_persistence.write_ref
 
 
 @app.post("/v1/refs")
@@ -2528,13 +2151,9 @@ async def upload_reference(request: Request) -> dict[str, Any]:
     """
     auth_header = require_auth(request)
     auth_digest = auth_hash(auth_header)
-    raw = await request.body()
+    raw = await _read_request_body_bounded(request, max_bytes=MAX_REF_BYTES)
     if not raw:
         raise HTTPException(status_code=400, detail="empty body")
-    if len(raw) > MAX_REF_BYTES:
-        raise HTTPException(
-            status_code=413, detail=f"reference exceeds {MAX_REF_BYTES} bytes"
-        )
 
     mime = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     ext = _REF_MIME_EXT.get(mime)
@@ -2546,7 +2165,8 @@ async def upload_reference(request: Request) -> dict[str, Any]:
     try:
         width, height, fmt = await asyncio.to_thread(image_metadata, raw, mime)
     except JobFailure as exc:
-        raise HTTPException(status_code=413, detail=exc.error) from exc
+        status_code = exc.upstream_status if exc.upstream_status in {400, 413} else 400
+        raise HTTPException(status_code=status_code, detail=exc.error) from exc
     if width is None or height is None or fmt == "bin":
         raise HTTPException(status_code=400, detail="reference is not a valid image")
 

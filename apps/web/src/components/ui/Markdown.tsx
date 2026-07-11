@@ -283,5 +283,3 @@ function MarkdownImpl({
 }
 
 export const Markdown = memo(MarkdownImpl);
-
-export default Markdown;

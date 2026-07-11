@@ -237,7 +237,9 @@ def test_observability_sensitive_key_matching_avoids_token_substrings() -> None:
 
 
 @pytest.mark.asyncio
-async def test_settings_view_does_not_expose_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_settings_view_exposes_non_sensitive_env_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from lumen_core.runtime_settings import SUPPORTED_SETTINGS
 
     class Result:
@@ -248,11 +250,11 @@ async def test_settings_view_does_not_expose_env_fallback(monkeypatch: pytest.Mo
         async def execute(self, _stmt):
             return Result()
 
-    spec = next(s for s in SUPPORTED_SETTINGS if not s.sensitive)
-    monkeypatch.setenv(spec.env_fallback, "env-value")
+    spec = next(s for s in SUPPORTED_SETTINGS if s.key == "ui.nav.studio_visible")
+    monkeypatch.setenv(spec.env_fallback, "0")
 
     items = await get_settings_view(Db())  # type: ignore[arg-type]
     item = next(i for i in items if i.key == spec.key)
 
     assert item.has_value is True
-    assert item.value is None
+    assert item.value == "0"

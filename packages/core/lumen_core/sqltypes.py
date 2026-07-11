@@ -1,8 +1,8 @@
 """Portable SQLAlchemy column type helpers.
 
-The Docker runtime keeps PostgreSQL-specific storage types.  Desktop uses the
-same ORM classes against SQLite, so JSON-like fields need a SQLite variant
-without forcing the Postgres deployment to change schema.
+Production keeps PostgreSQL-specific storage types. Tests and lightweight
+metadata tooling also create the same ORM models on SQLite, so JSON-like fields
+need a SQLite variant without changing the PostgreSQL schema.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ def JsonType() -> TypeEngine[object]:
     return PG_JSONB().with_variant(JSON(), "sqlite")
 
 
-def StringListType(length: int = 36) -> TypeEngine[object]:
+def StringListType(length: int = 36) -> PG_ARRAY[str]:
     return PG_ARRAY(String(length)).with_variant(JSON(), "sqlite")
 
 

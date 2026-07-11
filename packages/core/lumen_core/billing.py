@@ -131,6 +131,20 @@ def retry_billing_ref_id(task_id: str, retry_count: int | None) -> str:
     return task_id if count <= 0 else f"{task_id}:retry:{count}"
 
 
+def generation_billing_retry_count(generation: Any) -> int:
+    try:
+        return max(0, int(getattr(generation, "billing_retry_count", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def generation_billing_ref_id(generation: Any) -> str:
+    return retry_billing_ref_id(
+        str(getattr(generation, "id")),
+        generation_billing_retry_count(generation),
+    )
+
+
 def completion_billing_retry_count(completion_or_request: Any) -> int:
     upstream_request = getattr(
         completion_or_request,
@@ -236,6 +250,16 @@ async def get_wallet(
         wallet = UserWallet(user_id=user_id)
         db.add(wallet)
         await db.flush()
+    return wallet
+
+
+def _require_wallet(wallet: UserWallet | None) -> UserWallet:
+    if wallet is None:
+        raise BillingError(
+            "WALLET_UNAVAILABLE",
+            "wallet could not be initialized",
+            500,
+        )
     return wallet
 
 
@@ -517,8 +541,7 @@ async def hold(
     amount = int(amount_micro)
     if amount <= 0:
         raise BillingError("INVALID_AMOUNT", "hold amount must be positive", 422)
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -627,8 +650,7 @@ async def settle(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -684,8 +706,7 @@ async def release(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -735,8 +756,7 @@ async def charge(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -782,8 +802,7 @@ async def adjust(
     existing = await _existing_tx(db, user_id, key)
     if existing is not None:
         return existing
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, key)
     if existing is not None:
         return existing
@@ -833,8 +852,7 @@ async def topup_redeem(
     existing = await _existing_tx(db, user_id, key)
     if existing is not None:
         return existing
-    wallet = await get_wallet(db, user_id, lock=True)
-    assert wallet is not None
+    wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
     existing = await _existing_tx(db, user_id, key)
     if existing is not None:
         return existing

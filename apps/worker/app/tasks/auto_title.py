@@ -363,7 +363,7 @@ async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
     - 单 provider terminal 失败 → 直接停止 provider 链，避免同一无效输入烧多账号
     - 所有候选都失败 → 抛 UpstreamError 让 caller 判定不重试
     """
-    from ..provider_pool import get_pool
+    from ..provider_pool import get_pool, text_provider_attempt
     from ..retry import is_retriable as classify_retriable
 
     pool = await get_pool()
@@ -383,7 +383,17 @@ async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
                 proxy = getattr(provider, "proxy", None)
                 if proxy is not None:
                     kwargs["proxy"] = proxy
-                return await _call_upstream_one(input_list, **kwargs)
+                with text_provider_attempt(pool, provider) as provider_attempt:
+                    try:
+                        result = await _call_upstream_one(input_list, **kwargs)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        provider_attempt.report_exception(exc)
+                        raise
+                    else:
+                        provider_attempt.report_success()
+                return result
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 decision = classify_retriable(

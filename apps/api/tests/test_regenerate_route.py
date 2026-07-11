@@ -225,6 +225,33 @@ async def test_image_params_from_target_preserves_explicit_format() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_params_from_target_falls_back_for_invalid_stored_aspect() -> None:
+    gen = Generation(
+        id="gen-old",
+        message_id="assistant-old",
+        user_id="user-1",
+        action=GenerationAction.GENERATE.value,
+        prompt="old prompt",
+        size_requested="2048x2048",
+        aspect_ratio="invalid",
+        input_image_ids=[],
+        status=GenerationStatus.SUCCEEDED.value,
+        idempotency_key="old-idem",
+        upstream_request={"render_quality": "medium"},
+    )
+    db = _Db([_Result(all_values=[gen])])
+
+    out = await regenerate._image_params_from_target(
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        target_msg_id="assistant-old",
+    )
+
+    assert out == regenerate.ImageParamsIn()
+
+
+@pytest.mark.asyncio
 async def test_mask_image_id_from_target_preserves_alive_mask() -> None:
     # Why: mask must come from the SAME canonical "first generation" row
     # that _image_params_from_target uses (gens[0]). This test feeds an
@@ -454,6 +481,7 @@ async def test_cancel_regenerate_target_active_tasks_releases_holds(
         finished_at=None,
         error_code=None,
         error_message=None,
+        billing_retry_count=1,
     )
     gen_running = SimpleNamespace(
         id="gen-running",
@@ -517,22 +545,20 @@ async def test_cancel_regenerate_target_active_tasks_releases_holds(
     assert cleanup == {
         "generations_canceled": 2,
         "completions_canceled": 2,
-        "holds_released": 4,
+        "holds_released": 2,
         "queued_generation_ids": ["gen-queued"],
         "running_generation_ids": ["gen-running"],
         "streaming_completion_ids": ["comp-streaming"],
     }
     assert [call["ref_id"] for call in released] == [
-        "gen-queued",
-        "gen-running",
+        "gen-queued:retry:1",
         "comp-queued:retry:1",
-        "comp-streaming",
     ]
     assert all(call["committed"] is False for call in released)
     assert gen_queued.status == GenerationStatus.CANCELED.value
-    assert gen_running.status == GenerationStatus.CANCELED.value
+    assert gen_running.status == GenerationStatus.RUNNING.value
     assert comp_queued.status == CompletionStatus.CANCELED.value
-    assert comp_streaming.status == CompletionStatus.CANCELED.value
+    assert comp_streaming.status == CompletionStatus.STREAMING.value
 
 
 @pytest.mark.asyncio

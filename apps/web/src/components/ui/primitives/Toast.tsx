@@ -41,7 +41,7 @@ interface ToastState {
 
 const DEFAULT_DURATION_MS = 3000;
 
-export const useToastStore = create<ToastState>((set) => ({
+const useToastStore = create<ToastState>((set) => ({
   items: [],
   push: (t) => {
     const id =
@@ -212,5 +212,3 @@ export function ToastViewport() {
     </div>
   );
 }
-
-export default ToastViewport;

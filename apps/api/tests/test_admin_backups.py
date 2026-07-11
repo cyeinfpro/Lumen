@@ -445,3 +445,104 @@ async def test_backup_now_reports_skipped_script_as_busy(
     assert getattr(exc_info.value, "status_code", None) == 409
     assert audit_events == ["admin.backup.create.skipped"]
     assert not (backup_root / ".backup.trigger").exists()
+
+
+@pytest.mark.asyncio
+async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (scripts_dir / "restore.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    pg_dir.mkdir(parents=True)
+    redis_dir.mkdir()
+    ts = "20260519-010203"
+    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
+    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.setenv("LUMEN_RESTORE_VIA_TRIGGER", "1")
+
+    release_calls: list[dict[str, object]] = []
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **kwargs) -> None:
+            release_calls.append(kwargs)
+
+    async def fake_wait_for_log_append(*_args, **_kwargs) -> bool:
+        return True
+
+    async def fake_audit(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "_wait_for_log_append", fake_wait_for_log_append)
+    monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
+
+    out = await admin_backups.restore_backup(
+        admin_backups.RestoreIn(timestamp=ts),
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+    )
+
+    assert out.accepted is True
+    assert (backup_root / ".restore.trigger").read_text(encoding="utf-8") == f"{ts}\n"
+    marker = (backup_root / ".restore.running").read_text(encoding="utf-8")
+    assert f"unit={admin_backups._RESTORE_RUNNER_UNIT}" in marker
+    assert release_calls == [{"succeeded": True, "reason": "restore_launched"}]
+
+
+@pytest.mark.asyncio
+async def test_restore_without_host_runner_or_docker_fails_before_false_accept(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (scripts_dir / "restore.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    pg_dir.mkdir(parents=True)
+    redis_dir.mkdir()
+    ts = "20260519-010203"
+    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
+    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.delenv("LUMEN_RESTORE_VIA_TRIGGER", raising=False)
+    monkeypatch.setattr(admin_backups.shutil, "which", lambda _name: None)
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_backups.restore_backup(
+            admin_backups.RestoreIn(timestamp=ts),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 503
+    assert exc_info.value.detail["error"]["code"] == "restore_host_runner_required"

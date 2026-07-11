@@ -18,8 +18,11 @@ import time
 import uuid
 from typing import Any
 
-from lumen_core.constants import EVENTS_STREAM_MAXLEN, EVENTS_STREAM_PREFIX
-from lumen_core.desktop_runtime import is_desktop_runtime
+from lumen_core.constants import (
+    EVENTS_STREAM_MAXLEN,
+    EVENTS_STREAM_PREFIX,
+    EVENTS_STREAM_TTL_SECONDS,
+)
 from lumen_core.models import OutboxDeadLetter
 
 logger = logging.getLogger(__name__)
@@ -83,6 +86,20 @@ async def _monotonic_ts_ms() -> int:
         return now
 
 
+async def _refresh_stream_ttl(redis: Any, stream_key: str) -> None:
+    expire_fn = getattr(redis, "expire", None)
+    if not callable(expire_fn):
+        return
+    try:
+        await expire_fn(stream_key, EVENTS_STREAM_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "publish_event: stream ttl refresh failed key=%s err=%s",
+            stream_key,
+            exc,
+        )
+
+
 async def _envelope(
     event_name: str,
     channel: str,
@@ -142,10 +159,6 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
             "xadd" in message and ("unsupported" in message or "not allowed" in message)
         )
     )
-
-
-def _live_only_sse_id() -> str:
-    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
 
 
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
@@ -367,20 +380,6 @@ async def _xadd_event_without_lua(
         )
     except Exception as exc:  # noqa: BLE001
         if _is_stream_command_unsupported(exc):
-            if is_desktop_runtime():
-                # Desktop bundles Garnet without Streams. The SSE gateway drops
-                # live-* from Last-Event-ID, so this remains explicitly live-only.
-                stream_id = _live_only_sse_id()
-                await _store_dedupe_stream_id(
-                    redis,
-                    dedupe_key=dedupe_key,
-                    stream_id=stream_id,
-                )
-                logger.info(
-                    "desktop redis streams unavailable; using live-only event id key=%s",
-                    stream_key,
-                )
-                return stream_id
             raise RuntimeError(
                 "redis stream xadd unsupported; cannot create recoverable sse id"
             ) from exc
@@ -496,6 +495,7 @@ async def publish_event(
                 await asyncio.sleep(_XADD_RETRY_DELAYS_SECONDS[attempt])
 
     if stream_id is not None:
+        await _refresh_stream_ttl(redis, stream_key)
         envelope["sse_id"] = stream_id
     else:
         envelope["dlq_id"] = f"dlq-{envelope['ts_ms']}-{uuid.uuid4().hex[:12]}"
@@ -514,6 +514,7 @@ async def publish_event(
         if redis_dlq_ok:
             try:
                 await redis.ltrim(f"{stream_key}:dlq", 0, _EVENTS_DLQ_MAXLEN - 1)
+                await _refresh_stream_ttl(redis, f"{stream_key}:dlq")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "publish_event: DLQ trim failed key=%s err=%s",
@@ -571,16 +572,16 @@ async def _persist_sse_dlq(
 
     from .db import SessionLocal
 
-    envelope = payload.get("envelope") if isinstance(payload, dict) else None
+    raw_envelope = payload.get("envelope")
+    envelope = raw_envelope if isinstance(raw_envelope, dict) else {}
     sse_id: str | None = None
     ts_ms: int | None = None
-    if isinstance(envelope, dict):
-        raw_id = envelope.get("sse_id")
-        if isinstance(raw_id, str):
-            sse_id = raw_id
-        raw_ts = envelope.get("ts_ms")
-        if isinstance(raw_ts, int):
-            ts_ms = raw_ts
+    raw_id = envelope.get("sse_id")
+    if isinstance(raw_id, str):
+        sse_id = raw_id
+    raw_ts = envelope.get("ts_ms")
+    if isinstance(raw_ts, int):
+        ts_ms = raw_ts
 
     try:
         async with SessionLocal() as session, session.begin():

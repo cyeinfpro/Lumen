@@ -20,40 +20,6 @@ export interface SSEHandlers {
   [eventName: string]: SSEHandler;
 }
 
-// 模块级注册表：允许调用方在 useSSE 之外按事件名挂全局 handler（通常用于
-// 上游新增的事件类型，例如 reasoning_summary / compaction_summary）。
-// 这里只暴露能力，不在本文件主动调用——保持与 useSSE 局部 handlers 解耦。
-const globalSSEHandlers: Map<string, Set<SSEHandler>> = new Map();
-
-/**
- * 注册一个全局 SSE handler。返回取消注册的函数。
- * 被注册的 handler 由 useSSE 在收到匹配事件时调用，且不会替代局部 handlers。
- * 若同一事件类型存在多个 handler，按注册顺序依次调用，单个 handler 抛错不影响其他。
- */
-export function registerSSEHandler(type: string, handler: SSEHandler): () => void {
-  if (!type || typeof handler !== "function") {
-    return () => {};
-  }
-  let set = globalSSEHandlers.get(type);
-  if (!set) {
-    set = new Set();
-    globalSSEHandlers.set(type, set);
-  }
-  set.add(handler);
-  for (const connection of sharedSSEConnections.values()) {
-    connection.ensureNamedListener(type);
-  }
-  return () => {
-    const cur = globalSSEHandlers.get(type);
-    if (!cur) return;
-    cur.delete(handler);
-    if (cur.size === 0) globalSSEHandlers.delete(type);
-    for (const connection of sharedSSEConnections.values()) {
-      connection.syncNamedListeners();
-    }
-  };
-}
-
 // 未知事件类型 console.warn 去重缓存：每种 type 只警告一次，避免日志风暴。
 const warnedUnknownTypes: Set<string> = new Set();
 const sharedSSEConnections: Map<string, SharedSSEConnection> = new Map();
@@ -208,7 +174,6 @@ class SharedSSEConnection {
     for (const subscriber of this.subscribers) {
       for (const name of subscriber.eventNames) eventNames.add(name);
     }
-    for (const name of globalSSEHandlers.keys()) eventNames.add(name);
     for (const [name, listener] of Array.from(this.namedListeners)) {
       if (eventNames.has(name)) continue;
       if (this.es) {
@@ -362,7 +327,6 @@ class SharedSSEConnection {
   private dispatchNamed(ev: MessageEvent): void {
     const name = ev.type;
     if (ev.lastEventId) this.lastEventId = ev.lastEventId;
-    const globalSet = globalSSEHandlers.get(name);
     let delivered = false;
 
     let parsed: unknown = ev.data;
@@ -383,20 +347,6 @@ class SharedSSEConnection {
         localFn(parsed, ev.lastEventId);
       } catch (err) {
         logError(err, { scope: "useSSE", extra: { event: name } });
-      }
-    }
-
-    if (globalSet && globalSet.size > 0) {
-      delivered = true;
-      for (const fn of Array.from(globalSet)) {
-        try {
-          fn(parsed, ev.lastEventId);
-        } catch (err) {
-          logError(err, {
-            scope: "useSSE",
-            extra: { event: name, source: "global" },
-          });
-        }
       }
     }
 

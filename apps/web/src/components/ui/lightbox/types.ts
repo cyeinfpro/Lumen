@@ -112,19 +112,3 @@ export interface OpenLightboxDetail {
 
 export const OPEN_EVENT = "lumen:open-lightbox";
 export const CLOSE_EVENT = "lumen:close-lightbox";
-
-/** 解析 aspect_ratio 字符串（"16:9" / "1:1"）为 width/height 比值。 */
-export function parseAspectRatio(
-  item: LightboxItem | null | undefined,
-): number | null {
-  if (!item) return null;
-  if (item.width && item.height && item.height > 0) {
-    return item.width / item.height;
-  }
-  const ar = item.aspect_ratio;
-  if (ar && /^\d+\s*:\s*\d+$/.test(ar)) {
-    const [w, h] = ar.split(":").map((s) => Number(s.trim()));
-    if (w > 0 && h > 0) return w / h;
-  }
-  return null;
-}

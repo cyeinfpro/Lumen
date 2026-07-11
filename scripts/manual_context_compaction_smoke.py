@@ -8,11 +8,22 @@ import time
 from http.client import HTTPResponse
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 
 FORBIDDEN_RESPONSE_KEYS = {"text", "summary_text", "prompt", "system_prompt", "upstream_request"}
+ALLOWED_BASE_URL_SCHEMES = {"http", "https"}
+
+
+def _validated_base_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme.lower() not in ALLOWED_BASE_URL_SCHEMES or not parsed.hostname:
+        raise ValueError("--base-url must be an absolute http:// or https:// URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("--base-url must not contain embedded credentials")
+    return normalized
 
 
 def _json_request(
@@ -35,14 +46,16 @@ def _json_request(
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
+    normalized_base_url = _validated_base_url(base_url)
     req = Request(
-        urljoin(base_url.rstrip("/") + "/", path.lstrip("/")),
+        urljoin(normalized_base_url + "/", path.lstrip("/")),
         data=data,
         headers=headers,
         method=method,
     )
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        # The base URL scheme and host are validated before constructing the request.
+        with urlopen(req, timeout=timeout) as resp:  # nosec B310
             return resp.status, dict(resp.headers), _read_json(resp)
     except HTTPError as exc:
         return exc.code, dict(exc.headers), _read_json(exc)
@@ -94,6 +107,10 @@ def main() -> int:
     parser.add_argument("--extra-instruction", default="Smoke test: preserve IDs and user decisions.")
     parser.add_argument("--skip-force", action="store_true", help="Only run dry_run and context checks")
     args = parser.parse_args()
+    try:
+        args.base_url = _validated_base_url(args.base_url)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     conv_path = f"/conversations/{args.conversation_id}"
     compact_path = f"{conv_path}/compact"

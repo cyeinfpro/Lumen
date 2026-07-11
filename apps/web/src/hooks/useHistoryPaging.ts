@@ -132,7 +132,7 @@ function restoreScrollAnchor(snapshot: ScrollAnchorSnapshot | null) {
   window.setTimeout(restore, 280);
 }
 
-export function useHistoryStoreState() {
+function useHistoryStoreState() {
   const currentConvId = useChatStore((s) => s.currentConvId);
   const loadHistoricalMessages = useChatStore(
     (s) => s.loadHistoricalMessages as LoadHistoricalMessages,

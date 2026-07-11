@@ -337,7 +337,7 @@ export function getLightboxRevisedPrompt(item: LightboxItem): string | null {
   ]);
 }
 
-export function extensionFromMime(mime: string | null | undefined): string | null {
+function extensionFromMime(mime: string | null | undefined): string | null {
   if (!mime) return null;
   const normalized = mime.split(";")[0]?.trim().toLowerCase();
   if (!normalized) return null;
@@ -351,7 +351,7 @@ export function extensionFromMime(mime: string | null | undefined): string | nul
   return ext.replace(/[^a-z0-9]+/g, "");
 }
 
-export function extensionFromSrc(
+function extensionFromSrc(
   src: string | null | undefined,
   baseUrl = FALLBACK_URL_BASE,
 ): string | null {
@@ -370,7 +370,7 @@ export function extensionFromSrc(
   }
 }
 
-export function getLightboxMimeType(
+function getLightboxMimeType(
   item: Pick<LightboxItem, "mime" | "mime_type" | "content_type" | "type">,
 ): string | null {
   const value = item.mime ?? item.mime_type ?? item.content_type ?? item.type;
@@ -378,7 +378,7 @@ export function getLightboxMimeType(
   return value.includes("/") ? value : null;
 }
 
-export function inferLightboxFileExtension(item: LightboxItem): string {
+function inferLightboxFileExtension(item: LightboxItem): string {
   return (
     extensionFromMime(getLightboxMimeType(item)) ??
     extensionFromSrc(item.filename ?? item.file_name) ??
@@ -398,7 +398,7 @@ export function getLightboxDownloadFilename(item: LightboxItem): string {
   return `${base}.${ext}`;
 }
 
-export function formatImageDimensions(
+function formatImageDimensions(
   item: Pick<LightboxItem, "size_actual" | "width" | "height">,
 ): string | null {
   if (hasText(item.size_actual)) return item.size_actual;
@@ -413,7 +413,7 @@ export function formatImageDimensions(
   return null;
 }
 
-export function formatLightboxDate(
+function formatLightboxDate(
   value: string | number | Date | null | undefined,
   locale = "zh-CN",
 ): string | null {
@@ -429,15 +429,9 @@ export function formatLightboxDate(
   });
 }
 
-export function buildCompactLightboxMetadata(item: LightboxItem): string[] {
-  return [
-    item.aspect_ratio ? `比例 ${item.aspect_ratio}` : null,
-    formatImageDimensions(item),
-    item.seed !== undefined && item.seed !== null ? `seed ${String(item.seed)}` : null,
-    item.quality ? `render ${item.quality}` : null,
-    formatBooleanMode(item.fast),
-    item.model ?? item.model_id ?? null,
-  ].filter((value): value is string => Boolean(value));
+function distinctLightboxType(item: LightboxItem, mime: string | null): string | null {
+  if (!item.type || item.type === mime) return null;
+  return item.type;
 }
 
 export function buildLightboxMetadataSections(
@@ -445,7 +439,7 @@ export function buildLightboxMetadataSections(
 ): LightboxMetadataSection[] {
   const dimensions = formatImageDimensions(item);
   const mime = getLightboxMimeType(item);
-  const type = item.type && item.type !== mime ? item.type : null;
+  const type = distinctLightboxType(item, mime);
   const createdAt = formatLightboxDate(item.created_at);
   const effectiveParams = effectiveParamRecords(item);
   const renderQuality =
@@ -836,7 +830,7 @@ function compactRows(
   return rows.filter((row): row is LightboxMetadataRow => Boolean(row?.value));
 }
 
-export async function fetchImageBlob(src: string): Promise<Blob> {
+async function fetchImageBlob(src: string): Promise<Blob> {
   const response = src.startsWith("data:")
     ? await fetch(src)
     : await fetch(src, { credentials: "include" });

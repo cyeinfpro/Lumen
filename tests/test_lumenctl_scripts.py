@@ -4,8 +4,10 @@ import gzip
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -14,8 +16,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 LUMENCTL = ROOT / "scripts" / "lumenctl.sh"
 LIB = ROOT / "scripts" / "lib.sh"
+LIB_MODULE_DIR = ROOT / "scripts" / "lib"
+LIB_MODULES = sorted(LIB_MODULE_DIR.glob("*.sh"))
 SCRIPT_FILES = [
     LIB,
+    *LIB_MODULES,
     LUMENCTL,
     ROOT / "scripts" / "install.sh",
     ROOT / "scripts" / "update.sh",
@@ -28,6 +33,12 @@ UPDATE = ROOT / "scripts" / "update.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 RESTORE = ROOT / "scripts" / "restore.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
+
+
+def lib_source_text() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (LIB, *LIB_MODULES)
+    )
 
 
 def script_env() -> dict[str, str]:
@@ -70,6 +81,392 @@ def test_operations_scripts_parse_with_bash_n() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+def test_operations_scripts_parse_with_zsh_n() -> None:
+    result = subprocess.run(
+        ["zsh", "-n", *map(str, SCRIPT_FILES)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_lib_facade_loads_structured_modules_and_stays_below_2000_lines() -> None:
+    facade = LIB.read_text(encoding="utf-8")
+
+    assert len(facade.splitlines()) < 2000
+    assert {"container_release.sh", "locking.sh", "runtime.sh"} <= {
+        path.name for path in LIB_MODULES
+    }
+    assert "lib/runtime.sh" in facade
+    assert "lib/locking.sh" in facade
+    assert "lib/container_release.sh" in facade
+    assert '. "${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}"' in facade
+
+
+def test_lib_facade_handles_space_path_set_u_and_post_source_monkeypatch(
+    tmp_path: Path,
+) -> None:
+    scripts_dir = tmp_path / "release with spaces" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(LIB, scripts_dir / "lib.sh")
+    shutil.copytree(LIB_MODULE_DIR, scripts_dir / "lib")
+    digest_lock = tmp_path / "digest locks" / "images.lock"
+    digest = f"sha256:{'b' * 64}"
+
+    result = assert_bash_ok(
+        f"""
+        set -u
+        unset SCRIPT_DIR
+        . {shlex.quote(str(scripts_dir / "lib.sh"))}
+        type lumen_start_local_runtime >/dev/null
+        type lumen_with_lock >/dev/null
+        type lumen_verify_release_manifest_images >/dev/null
+        lumen_docker() {{
+            test "$1" = image
+            printf '%s\\n' ghcr.io/example/lumen-api@{digest}
+        }}
+        LUMEN_IMAGE_DIGEST_LOCK_FILE={shlex.quote(str(digest_lock))}
+        lumen_record_image_digest ghcr.io/example/lumen-api:v1.2.3
+        grep -Fq 'ghcr.io/example/lumen-api@{digest}' \
+            {shlex.quote(str(digest_lock))}
+        """
+    )
+
+    assert "镜像 digest" in result.stdout
+
+
+def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
+    remote = tmp_path / "remote scripts"
+    target = tmp_path / "target scripts"
+    fakebin = tmp_path / "fake bin"
+    (remote / "lib").mkdir(parents=True)
+    target.mkdir()
+    fakebin.mkdir()
+    files = {
+        "lib.sh": "#!/usr/bin/env bash\nREMOTE_FACADE=1\n",
+        "lib/runtime.sh": "#!/usr/bin/env bash\nREMOTE_RUNTIME=1\n",
+        "lib/locking.sh": "#!/usr/bin/env bash\nREMOTE_LOCKING=1\n",
+        "lib/container_release.sh": (
+            "#!/usr/bin/env bash\nREMOTE_CONTAINER_RELEASE=1\n"
+        ),
+        "release_manifest_guard.py": (
+            "#!/usr/bin/env python3\nREMOTE_RELEASE_GUARD = 1\n"
+        ),
+        "update_runner.py": "#!/usr/bin/env python3\nREMOTE_UPDATE_RUNNER = 1\n",
+        "restore_runner.py": "#!/usr/bin/env python3\nREMOTE_RESTORE_RUNNER = 1\n",
+    }
+    for relative, content in files.items():
+        path = remote / relative
+        path.write_text(content, encoding="utf-8")
+
+    curl = fakebin / "curl"
+    curl.write_text(
+        """#!/usr/bin/env bash
+set -u
+url=""
+output=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)
+            output="$2"
+            shift 2
+            ;;
+        http*)
+            url="$1"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+relative="${url#*/scripts/}"
+cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
+""",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    (target / ".lumen-self-update.last").write_text(
+        f"{int(time.time())}\n",
+        encoding="utf-8",
+    )
+
+    result = assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LIB))}
+        PATH={shlex.quote(str(fakebin))}:$PATH
+        TEST_REMOTE_ROOT={shlex.quote(str(remote))}
+        export PATH TEST_REMOTE_ROOT
+        LUMEN_SELF_UPDATE=1
+        LUMEN_REPO_URL=https://github.com/example/Lumen.git
+        lumen_self_update_scripts {shlex.quote(str(target))} main 0 lib.sh
+        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        printf 'changed=%s\\n' "$LUMEN_SELF_UPDATE_CHANGED"
+        """
+    )
+
+    assert "result=ok" in result.stdout
+    for relative, content in files.items():
+        assert (target / relative).read_text(encoding="utf-8") == content
+        assert relative in result.stdout
+    coverage = (target / ".lumen-self-update.files").read_text(encoding="utf-8")
+    for helper in (
+        "release_manifest_guard.py",
+        "update_runner.py",
+        "restore_runner.py",
+    ):
+        assert helper in coverage
+
+    updated_runtime = "#!/usr/bin/env bash\nREMOTE_RUNTIME=2\n"
+    (remote / "lib" / "runtime.sh").write_text(updated_runtime, encoding="utf-8")
+    update_script = "#!/usr/bin/env bash\nREMOTE_UPDATE=1\n"
+    (remote / "update.sh").write_text(update_script, encoding="utf-8")
+    (target / "update.sh").write_text(update_script, encoding="utf-8")
+
+    module_update = assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LIB))}
+        PATH={shlex.quote(str(fakebin))}:$PATH
+        TEST_REMOTE_ROOT={shlex.quote(str(remote))}
+        export PATH TEST_REMOTE_ROOT
+        LUMEN_SELF_UPDATE=1
+        LUMEN_REPO_URL=https://github.com/example/Lumen.git
+        lumen_self_update_scripts \
+            {shlex.quote(str(target))} main 0 lib.sh update.sh
+        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        printf 'changed=%s\\n' "$LUMEN_SELF_UPDATE_CHANGED"
+        """
+    )
+
+    assert "result=ok" in module_update.stdout
+    changed_line = next(
+        line for line in module_update.stdout.splitlines() if line.startswith("changed=")
+    )
+    assert "lib/runtime.sh" in changed_line
+    assert "lib.sh" in changed_line
+    assert "update.sh" in changed_line
+    assert (target / "lib" / "runtime.sh").read_text(
+        encoding="utf-8"
+    ) == updated_runtime
+
+    bootstrap_scripts = tmp_path / "bootstrap only facade" / "scripts"
+    bootstrap_scripts.mkdir(parents=True)
+    shutil.copy2(LIB, bootstrap_scripts / "lib.sh")
+    bootstrap = assert_bash_ok(
+        f"""
+        PATH={shlex.quote(str(fakebin))}:$PATH
+        TEST_REMOTE_ROOT={shlex.quote(str(remote))}
+        export PATH TEST_REMOTE_ROOT
+        LUMEN_SELF_UPDATE=1
+        LUMEN_REPO_URL=https://github.com/example/Lumen.git
+        . {shlex.quote(str(bootstrap_scripts / "lib.sh"))}
+        printf 'runtime=%s\\n' "$REMOTE_RUNTIME"
+        printf 'locking=%s\\n' "$REMOTE_LOCKING"
+        printf 'container=%s\\n' "$REMOTE_CONTAINER_RELEASE"
+        """
+    )
+
+    assert "runtime=2" in bootstrap.stdout
+    assert "locking=1" in bootstrap.stdout
+    assert "container=1" in bootstrap.stdout
+    assert (bootstrap_scripts / "lib" / "runtime.sh").is_file()
+    assert (bootstrap_scripts / "lib" / "locking.sh").is_file()
+    assert (bootstrap_scripts / "lib" / "container_release.sh").is_file()
+
+
+def test_self_update_validation_is_file_type_specific(tmp_path: Path) -> None:
+    good_shell = tmp_path / "good.sh"
+    good_python = tmp_path / "good.py"
+    bad_shell = tmp_path / "bad.sh"
+    bad_python = tmp_path / "bad.py"
+    unknown = tmp_path / "unknown.txt"
+    good_shell.write_text("#!/usr/bin/env bash\nprintf 'ok\\n'\n", encoding="utf-8")
+    good_python.write_text(
+        "#!/usr/bin/env python3\nVALUE = {'ok': True}\n",
+        encoding="utf-8",
+    )
+    bad_shell.write_text("#!/usr/bin/env bash\nif then\n", encoding="utf-8")
+    bad_python.write_text("#!/usr/bin/env python3\nif True print('bad')\n", encoding="utf-8")
+    unknown.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LIB))}
+        lumen_validate_self_update_file good.sh {shlex.quote(str(good_shell))}
+        lumen_validate_self_update_file good.py {shlex.quote(str(good_python))}
+        ! lumen_validate_self_update_file bad.sh {shlex.quote(str(bad_shell))}
+        ! lumen_validate_self_update_file bad.py {shlex.quote(str(bad_python))}
+        ! lumen_validate_self_update_file unknown.txt {shlex.quote(str(unknown))}
+        """
+    )
+
+
+def test_operations_host_artifact_snapshot_restores_units_and_sbin(
+    tmp_path: Path,
+) -> None:
+    unit_dir = tmp_path / "systemd"
+    sbin_dir = tmp_path / "sbin"
+    runtime_dir = tmp_path / "no-systemd-runtime"
+    snapshot = tmp_path / "snapshot"
+    unit_dir.mkdir()
+    sbin_dir.mkdir()
+    update_path = unit_dir / "lumen-update.path"
+    restore_path = unit_dir / "lumen-restore.path"
+    storage_script = sbin_dir / "lumen-storage-mount"
+    update_path.write_bytes(b"old-update-unit\n")
+    storage_script.write_bytes(b"#!/bin/sh\nold-storage\n")
+
+    assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LIB))}
+        lumen_run_as_root() {{ "$@"; }}
+        LUMEN_SYSTEMD_UNIT_DIR={shlex.quote(str(unit_dir))}
+        LUMEN_SYSTEMD_RUNTIME_DIR={shlex.quote(str(runtime_dir))}
+        LUMEN_LOCAL_SBIN_DIR={shlex.quote(str(sbin_dir))}
+        lumen_snapshot_operations_host_artifacts {shlex.quote(str(snapshot))}
+        printf 'new-update-unit\\n' > {shlex.quote(str(update_path))}
+        printf 'new-restore-unit\\n' > {shlex.quote(str(restore_path))}
+        printf '#!/bin/sh\\nnew-storage\\n' > {shlex.quote(str(storage_script))}
+        lumen_restore_operations_host_artifacts {shlex.quote(str(snapshot))}
+        """
+    )
+
+    assert update_path.read_bytes() == b"old-update-unit\n"
+    assert storage_script.read_bytes() == b"#!/bin/sh\nold-storage\n"
+    assert not restore_path.exists()
+
+
+def test_install_and_update_transactions_include_host_artifact_snapshots() -> None:
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    runtime = (ROOT / "scripts" / "lib" / "runtime.sh").read_text(encoding="utf-8")
+
+    assert "lumen_snapshot_operations_host_artifacts" in runtime
+    assert "lumen_restore_operations_host_artifacts" in runtime
+    assert "lumen-storage-mount" in runtime
+    assert "INSTALL_HOST_ARTIFACT_SNAPSHOT" in install
+    assert "lumen_restore_operations_host_artifacts" in install
+    assert "UPDATE_HOST_ARTIFACT_SNAPSHOT" in update
+    assert "lumen_restore_operations_host_artifacts" in update
+
+
+def test_image_job_install_copies_all_python_runtime_modules() -> None:
+    text = LUMENCTL.read_text(encoding="utf-8")
+
+    for module in (
+        "app.py",
+        "image_artifacts.py",
+        "image_url_security.py",
+        "job_persistence.py",
+        "payload_helpers.py",
+        "request_bodies.py",
+        "runtime_config.py",
+    ):
+        assert (
+            f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"'
+            in text
+        )
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
+def test_release_bootstrap_updates_only_current_scripts(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "deploy"
+    release = deploy_root / "releases" / "20260711-010101"
+    current_scripts = release / "scripts"
+    current_scripts.mkdir(parents=True)
+    (release / "apps" / "api").mkdir(parents=True)
+    (release / "apps" / "api" / "sentinel.txt").write_text(
+        "keep-release-source\n",
+        encoding="utf-8",
+    )
+    (current_scripts / "install.sh").write_text(
+        "#!/usr/bin/env bash\nexit 99\n",
+        encoding="utf-8",
+    )
+    (deploy_root / "shared").mkdir()
+    (deploy_root / "current").symlink_to("releases/20260711-010101")
+
+    remote = tmp_path / "remote"
+    (remote / "scripts" / "lib").mkdir(parents=True)
+    (remote / "apps" / "api").mkdir(parents=True)
+    exec_log = tmp_path / "exec.log"
+    (remote / "scripts" / "install.sh").write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"${TEST_EXEC_LOG:?}\"\n",
+        encoding="utf-8",
+    )
+    (remote / "scripts" / "lib.sh").write_text(
+        "#!/usr/bin/env bash\nREMOTE_LIB=1\n",
+        encoding="utf-8",
+    )
+    (remote / "scripts" / "lib" / "runtime.sh").write_text(
+        "#!/usr/bin/env bash\nREMOTE_RUNTIME=1\n",
+        encoding="utf-8",
+    )
+    (remote / "apps" / "api" / "sentinel.txt").write_text(
+        "must-not-overlay-release-source\n",
+        encoding="utf-8",
+    )
+    (remote / "REMOTE_ONLY.txt").write_text("no\n", encoding="utf-8")
+    for path in (remote / "scripts").rglob("*.sh"):
+        path.chmod(0o755)
+
+    bootstrap_dir = tmp_path / "bootstrap"
+    bootstrap_dir.mkdir()
+    bootstrap_script = bootstrap_dir / "install.sh"
+    shutil.copy2(INSTALL, bootstrap_script)
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    fake_git = fakebin / "git"
+    fake_git.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" != "clone" ]; then
+  exit 2
+fi
+dest="${@: -1}"
+mkdir -p "${dest}"
+cp -R "${TEST_REMOTE_ROOT:?}/." "${dest}/"
+""",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "LUMEN_INSTALL_DIR": str(deploy_root),
+            "LUMEN_REPO_URL": "https://github.com/example/Lumen.git",
+            "LUMEN_BRANCH": "main",
+            "TEST_REMOTE_ROOT": str(remote),
+            "TEST_EXEC_LOG": str(exec_log),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(bootstrap_script), "--update"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert exec_log.read_text(encoding="utf-8").strip() == "--update"
+    assert (current_scripts / "lib.sh").read_text(encoding="utf-8") == (
+        "#!/usr/bin/env bash\nREMOTE_LIB=1\n"
+    )
+    assert (current_scripts / "lib" / "runtime.sh").is_file()
+    assert (release / "apps" / "api" / "sentinel.txt").read_text(
+        encoding="utf-8"
+    ) == "keep-release-source\n"
+    assert not (release / "REMOTE_ONLY.txt").exists()
 
 
 def test_restore_stages_postgres_before_service_stop_and_active_swap() -> None:
@@ -259,6 +656,280 @@ def test_install_pull_failure_fallback_to_main_requires_opt_in() -> None:
     assert "fallback main 后仍失败" in text
     assert "main 镜像也未发布 → 使用 --build 本地构建" in text
     assert "stable 安装不会自动回退 main" in text
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
+def test_install_failure_restores_existing_env_and_release_links(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    data_root = tmp_path / "data"
+    current_id = "20260711-030303"
+    previous_id = "20260710-030303"
+    current = deploy_root / "releases" / current_id
+    previous = deploy_root / "releases" / previous_id
+    current.mkdir(parents=True)
+    previous.mkdir(parents=True)
+    (deploy_root / "shared").mkdir()
+    (deploy_root / "current").symlink_to(f"releases/{current_id}")
+    (deploy_root / "previous").symlink_to(f"releases/{previous_id}")
+    env_bytes = (
+        f"# existing install env\n"
+        f"LUMEN_IMAGE_REGISTRY=example.invalid\n"
+        f"LUMEN_IMAGE_TAG=v1.2.44\n"
+        f"LUMEN_VERSION=1.2.44\n"
+        f"LUMEN_DATA_ROOT={data_root}\n"
+        f"LUMEN_DB_ROOT={data_root}\n"
+        "DATABASE_URL=postgresql://lumen:secret@postgres:5432/lumen\n"
+        "REDIS_URL=redis://redis:6379/0\n"
+        "SESSION_SECRET='keep-install-bytes'\n"
+    ).encode()
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.write_bytes(env_bytes)
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    fake_docker = fakebin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -u
+case "$*" in
+  "--version")
+    printf 'Docker version 26.0.0, build fake\\n'
+    exit 0
+    ;;
+  "compose version"|*"compose version"*|"info")
+    exit 0
+    ;;
+  *"config --images"*)
+    printf 'example.invalid/lumen-api:main\\n'
+    exit 0
+    ;;
+esac
+if [ "${1:-}" = "pull" ]; then
+  exit 42
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_sleep = fakebin / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+    fake_sudo = fakebin / "sudo"
+    fake_sudo.write_text(
+        """#!/usr/bin/env bash
+set -u
+[ "${1:-}" = "-n" ] && shift
+case "${1:-}" in
+  chown) exit 0 ;;
+  *) command "$@" ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_df = fakebin / "df"
+    fake_df.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf '/dev/fake 99999999 1 90000000 1%% /\\n'\n",
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "LUMEN_DEPLOY_ROOT": str(deploy_root),
+            "LUMEN_DATA_ROOT": str(data_root),
+            "LUMEN_DB_ROOT": str(data_root),
+            "LUMEN_NONINTERACTIVE": "1",
+            "LUMEN_SELF_UPDATE": "0",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(INSTALL), "--install", "--image-tag=main"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert shared_env.read_bytes() == env_bytes
+    assert os.readlink(deploy_root / "current") == f"releases/{current_id}"
+    assert os.readlink(deploy_root / "previous") == f"releases/{previous_id}"
+    assert sorted(path.name for path in (deploy_root / "releases").iterdir()) == [
+        previous_id,
+        current_id,
+    ]
+    assert "shared/.env 已按安装前快照原字节恢复" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
+def test_rerun_install_late_failure_restarts_previously_running_old_services(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    data_root = tmp_path / "data"
+    current_id = "20260711-040404"
+    previous_id = "20260710-040404"
+    current = deploy_root / "releases" / current_id
+    previous = deploy_root / "releases" / previous_id
+    current.mkdir(parents=True)
+    previous.mkdir(parents=True)
+    (current / "docker-compose.yml").write_text(
+        "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+        encoding="utf-8",
+    )
+    (current / "VERSION").write_text("1.2.44\n", encoding="utf-8")
+    (current / ".image-tag").write_text("main\n", encoding="utf-8")
+    (previous / "VERSION").write_text("1.2.43\n", encoding="utf-8")
+    (deploy_root / "shared").mkdir()
+    (deploy_root / "current").symlink_to(f"releases/{current_id}")
+    (deploy_root / "previous").symlink_to(f"releases/{previous_id}")
+    for path in (
+        data_root / "postgres",
+        data_root / "redis",
+        data_root / "storage",
+        data_root / "backup",
+    ):
+        path.mkdir(parents=True)
+
+    env_bytes = (
+        f"# existing healthy install\n"
+        f"LUMEN_IMAGE_REGISTRY=example.invalid\n"
+        f"LUMEN_IMAGE_TAG=main\n"
+        f"LUMEN_VERSION=1.2.44\n"
+        f"LUMEN_DATA_ROOT={data_root}\n"
+        f"LUMEN_DB_ROOT={data_root}\n"
+        "APP_ENV=development\n"
+        "DATABASE_URL=postgresql+asyncpg://lumen:secret@postgres:5432/lumen\n"
+        "REDIS_URL=redis://:redis-secret@redis:6379/0\n"
+        "SESSION_SECRET='keep-late-failure-bytes'\n"
+        "IMAGE_PROXY_SECRET='keep-image-proxy-secret'\n"
+        "BYOK_API_KEY_MASTER_SECRET='keep-byok-secret'\n"
+        "TELEGRAM_BOT_SHARED_SECRET='keep-telegram-shared-secret'\n"
+        "DB_USER=lumen\n"
+        "DB_PASSWORD=secret\n"
+        "DB_NAME=lumen\n"
+        "REDIS_PASSWORD=redis-secret\n"
+        "LUMEN_BOOTSTRAPPED=1\n"
+        "WEB_BIND_HOST=127.0.0.1\n"
+    ).encode()
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.write_bytes(env_bytes)
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    fake_docker = fakebin / "docker"
+    fake_docker.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >> {shlex.quote(str(docker_log))}
+case "$*" in
+  "--version")
+    printf 'Docker version 26.0.0, build fake\n'
+    exit 0
+    ;;
+  "compose version"|*"compose version"*|"info")
+    exit 0
+    ;;
+  *"ps --status running --services"*)
+    printf 'postgres\nredis\napi\nworker\nweb\n'
+    exit 0
+    ;;
+  *"config --images"*)
+    printf 'example.invalid/lumen-api:main\n'
+    exit 0
+    ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_curl = fakebin / "curl"
+    fake_curl.write_text("#!/usr/bin/env bash\nexit 22\n", encoding="utf-8")
+    fake_curl.chmod(0o755)
+    fake_sleep = fakebin / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+    fake_sudo = fakebin / "sudo"
+    fake_sudo.write_text(
+        """#!/usr/bin/env bash
+set -u
+[ "${1:-}" = "-n" ] && shift
+case "${1:-}" in
+  chown) exit 0 ;;
+  *) command "$@" ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_df = fakebin / "df"
+    fake_df.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf '/dev/fake 99999999 1 90000000 1%% /\\n'\n",
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "LUMEN_DEPLOY_ROOT": str(deploy_root),
+            "LUMEN_DATA_ROOT": str(data_root),
+            "LUMEN_DB_ROOT": str(data_root),
+            "LUMEN_NONINTERACTIVE": "1",
+            "LUMEN_SELF_UPDATE": "0",
+            "LUMEN_POSTGRES_UID": str(os.getuid()),
+            "LUMEN_POSTGRES_GID": str(os.getgid()),
+            "LUMEN_REDIS_UID": str(os.getuid()),
+            "LUMEN_REDIS_GID": str(os.getgid()),
+            "LUMEN_APP_UID": str(os.getuid()),
+            "LUMEN_APP_GID": str(os.getgid()),
+            "LUMEN_APP_STORAGE_GID": str(os.getgid()),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(INSTALL), "--install", "--image-tag=main"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert shared_env.read_bytes() == env_bytes
+    assert os.readlink(deploy_root / "current") == f"releases/{current_id}"
+    assert os.readlink(deploy_root / "previous") == f"releases/{previous_id}"
+    assert sorted(path.name for path in (deploy_root / "releases").iterdir()) == [
+        previous_id,
+        current_id,
+    ]
+    log_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    restored = [
+        line
+        for line in log_lines
+        if line.startswith(f"{deploy_root / 'current'}|")
+        and " up " in f" {line.split('|', 1)[1]} "
+        and "--force-recreate" in line
+    ]
+    assert restored, "\n".join(log_lines)
+    assert all(
+        service in restored[-1]
+        for service in ("postgres", "redis", "api", "worker", "web")
+    )
+    assert "重新拉起安装前运行中的旧 release 服务" in result.stderr
 
 
 def test_install_generates_all_required_compose_secrets() -> None:
@@ -466,6 +1137,8 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     assert "systemctl enable --now lumen-update.path" in install
     assert "systemctl enable --now lumen-backup.timer" in install
     assert "systemctl enable --now lumen-backup.path" in install
+    assert "lumen-restore-runner.service" in install
+    assert "systemctl enable --now lumen-restore.path" in install
     assert "LUMEN_BACKUP_ROOT" in install
     assert "__LUMEN_BACKUP_ROOT__" in install
     assert "__LUMEN_DEPLOY_ROOT__" in install
@@ -478,6 +1151,8 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     assert "systemctl enable --now lumen-update.path" in update
     assert "systemctl enable --now lumen-backup.timer" in update
     assert "systemctl enable --now lumen-backup.path" in update
+    assert "lumen-restore-runner.service" in update
+    assert "systemctl enable --now lumen-restore.path" in update
     assert "__LUMEN_BACKUP_ROOT__" in update
     assert "__LUMEN_DEPLOY_ROOT__" in update
     assert "lumen_install_optional_systemd_unit" in install
@@ -488,8 +1163,53 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     assert "systemctl enable --now lumen-update.path" in migrate
     assert "systemctl enable --now lumen-backup.timer" in migrate
     assert "systemctl enable --now lumen-backup.path" in migrate
+    assert "lumen-restore-runner.service" in migrate
+    assert "systemctl enable --now lumen-restore.path" in migrate
     assert "__LUMEN_BACKUP_ROOT__" in migrate
     assert "__LUMEN_DEPLOY_ROOT__" in migrate
+
+
+def test_fresh_install_provisions_storage_control_plane_for_container_gid() -> None:
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(
+        encoding="utf-8"
+    )
+    lumenctl = LUMENCTL.read_text(encoding="utf-8")
+
+    assert "install_storage_control_plane" in install
+    assert 'LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount' in install
+    assert "systemctl enable --now lumen-storage-apply.path lumen-storage-test.path" in install
+    assert 'storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"' in install
+    assert "install -d -m 0770 -o root -g" in install
+
+    for text in (update, migrate, lumenctl):
+        assert "LUMEN_APP_STORAGE_GID" in text
+        assert "/var/lib/lumen-storage" in text
+        assert "0770" in text
+
+    for unit in (
+        "lumen-storage-mount.service",
+        "lumen-storage-apply.service",
+        "lumen-storage-test.service",
+    ):
+        text = (ROOT / "deploy/systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=LUMEN_STORAGE_TARGET=/opt/lumendata" in text
+
+
+def test_storage_apply_restarts_all_backup_mount_path_watchers() -> None:
+    unit = (
+        ROOT / "deploy/systemd/lumen-storage-apply.service"
+    ).read_text(encoding="utf-8")
+
+    for watcher in (
+        "lumen-update.path",
+        "lumen-update-warm.path",
+        "lumen-backup.path",
+        "lumen-restore.path",
+    ):
+        assert watcher in unit
+    assert 'systemctl try-restart "$$unit"' in unit
 
 
 def test_admin_update_panel_arms_stream_after_trigger_success() -> None:
@@ -562,7 +1282,7 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
 
 def test_update_preserves_web_bind_and_proxy_env() -> None:
     update = UPDATE.read_text(encoding="utf-8")
-    lib = LIB.read_text(encoding="utf-8")
+    lib = lib_source_text()
 
     assert "SCRIPT_ROOT=" in update
     assert 'ROOT="${LUMEN_DEPLOY_ROOT}"' in update
@@ -599,6 +1319,226 @@ def test_update_preserves_web_bind_and_proxy_env() -> None:
     assert "lumen_record_image_digest" in lib
     assert "LUMEN_IMAGE_DIGEST_LOCK_FILE" in lib
     assert "拒绝执行未校验的 docker compose pull" in lib
+
+
+def test_update_failure_restores_env_bytes_and_removes_staged_release(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    data_root = tmp_path / "data"
+    current_id = "20260711-010101"
+    previous_id = "20260710-010101"
+    current = deploy_root / "releases" / current_id
+    previous = deploy_root / "releases" / previous_id
+    shutil.copytree(ROOT / "scripts", current / "scripts")
+    previous.mkdir(parents=True)
+    (current / "docker-compose.yml").write_text(
+        "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+        encoding="utf-8",
+    )
+    (current / "VERSION").write_text("1.2.44\n", encoding="utf-8")
+    (current / ".image-tag").write_text("v1.2.44\n", encoding="utf-8")
+    (previous / "VERSION").write_text("1.2.43\n", encoding="utf-8")
+    (previous / ".image-tag").write_text("v1.2.43\n", encoding="utf-8")
+    (deploy_root / "shared").mkdir(parents=True)
+    (deploy_root / "current").symlink_to(f"releases/{current_id}")
+    (deploy_root / "previous").symlink_to(f"releases/{previous_id}")
+    (current / ".env").symlink_to(deploy_root / "shared" / ".env")
+    main_image_root = tmp_path / "main-image"
+    shutil.copytree(ROOT / "scripts", main_image_root / "scripts")
+    (main_image_root / "deploy").mkdir()
+    (main_image_root / "docker-compose.yml").write_text(
+        "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+        encoding="utf-8",
+    )
+    (main_image_root / "VERSION").write_text("1.2.99\n", encoding="utf-8")
+    (main_image_root / "scripts" / "fallback-main-marker").write_text(
+        "main-source\n",
+        encoding="utf-8",
+    )
+    for path in (
+        data_root / "postgres",
+        data_root / "redis",
+        data_root / "storage",
+        data_root / "backup",
+    ):
+        path.mkdir(parents=True)
+
+    env_bytes = (
+        f"# preserve exact bytes\n"
+        f"LUMEN_IMAGE_REGISTRY=example.invalid\n"
+        f"LUMEN_IMAGE_TAG=v1.2.44\n"
+        f"LUMEN_VERSION=1.2.44\n"
+        f"LUMEN_UPDATE_CHANNEL=stable\n"
+        f"LUMEN_DATA_ROOT={data_root}\n"
+        f"LUMEN_DB_ROOT={data_root}\n"
+        "APP_ENV=development\n"
+        "DATABASE_URL=postgresql://lumen:secret@postgres:5432/lumen\n"
+        "REDIS_URL=redis://redis:6379/0\n"
+        "SESSION_SECRET='keep-this-format'\n"
+        "DB_USER=lumen\n"
+        "DB_PASSWORD=secret\n"
+        "DB_NAME=lumen\n"
+        "REDIS_PASSWORD=\n"
+    ).encode()
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.write_bytes(env_bytes)
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    fake_docker = fakebin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -u
+args=" $* "
+if [ "${1:-}" = "pull" ]; then
+  case "${2:-}" in
+    *:v1.2.45) exit 42 ;;
+    *) exit 0 ;;
+  esac
+fi
+if [ "${1:-}" = "create" ]; then
+  printf 'cid-main\\n'
+  exit 0
+fi
+if [ "${1:-}" = "cp" ]; then
+  relative="${2#*:/app/}"
+  source_path="${TEST_MAIN_IMAGE_ROOT:?}/${relative}"
+  if [ ! -e "${source_path}" ]; then
+    exit 1
+  fi
+  cp -R "${source_path}" "$3"
+  exit 0
+fi
+if [ "${1:-}" = "rm" ]; then
+  exit 0
+fi
+case "$*" in
+  "info"|*"compose version"*)
+    exit 0
+    ;;
+  *"inspect lumen-api"*)
+    exit 1
+    ;;
+  *"config --images"*)
+    printf 'example.invalid/lumen-api:%s\\n' "${LUMEN_IMAGE_TAG:?}"
+    exit 0
+    ;;
+  *"alembic heads"*|*"alembic current"*)
+    printf '0043_test_head\\n'
+    exit 0
+    ;;
+esac
+if [[ "${args}" == *" up "* && "${args}" == *" worker"* ]]; then
+  if [ ! -f "${TEST_DOCKER_FAIL_STATE:?}" ]; then
+    : > "${TEST_DOCKER_FAIL_STATE}"
+    marker="missing"
+    [ -f "${LUMEN_UPDATE_ROOT:?}/current/scripts/fallback-main-marker" ] \
+      && marker="$(cat "${LUMEN_UPDATE_ROOT}/current/scripts/fallback-main-marker")"
+    version="$(sed -n 's/^LUMEN_VERSION=//p' \
+      "${LUMEN_UPDATE_ROOT}/shared/.env" | head -n1)"
+    printf '%s|%s\\n' "${marker}" "${version}" \
+      > "${TEST_FALLBACK_SOURCE_STATE:?}"
+    exit 42
+  fi
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_sleep = fakebin / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+    fake_curl = fakebin / "curl"
+    fake_curl.write_text("#!/usr/bin/env bash\nexit 22\n", encoding="utf-8")
+    fake_curl.chmod(0o755)
+    fake_df = fakebin / "df"
+    fake_df.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf '/dev/fake 99999999 1 90000000 1%% /\\n'\n",
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "LUMEN_UPDATE_ROOT": str(deploy_root),
+            "LUMEN_DEPLOY_ROOT": str(deploy_root),
+            "LUMEN_DATA_ROOT": str(data_root),
+            "LUMEN_DB_ROOT": str(data_root),
+            "LUMEN_BACKUP_ROOT": str(data_root / "backup"),
+            "LUMEN_POSTGRES_UID": str(os.getuid()),
+            "LUMEN_POSTGRES_GID": str(os.getgid()),
+            "LUMEN_REDIS_UID": str(os.getuid()),
+            "LUMEN_REDIS_GID": str(os.getgid()),
+            "LUMEN_APP_UID": str(os.getuid()),
+            "LUMEN_APP_GID": str(os.getgid()),
+            "LUMEN_APP_STORAGE_GID": str(os.getgid()),
+            "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.45",
+            "LUMEN_UPDATE_FALLBACK_MAIN": "1",
+            "LUMEN_UPDATE_FAST_EXPLICIT_PULL": "1",
+            "LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY": "1",
+            "LUMEN_UPDATE_SKIP_BACKUP": "1",
+            "LUMEN_UPDATE_SELF_UPDATE_SCRIPTS": "0",
+            "SKIP_STORAGE_CHECK": "1",
+            "TEST_DOCKER_FAIL_STATE": str(tmp_path / "docker-failed-once"),
+            "TEST_FALLBACK_SOURCE_STATE": str(tmp_path / "fallback-source-state"),
+            "TEST_MAIN_IMAGE_ROOT": str(main_image_root),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(current / "scripts" / "update.sh")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert shared_env.read_bytes() == env_bytes
+    assert os.readlink(deploy_root / "current") == f"releases/{current_id}"
+    assert os.readlink(deploy_root / "previous") == f"releases/{previous_id}"
+    release_ids = sorted(path.name for path in (deploy_root / "releases").iterdir())
+    assert release_ids == sorted((current_id, previous_id))
+    assert (tmp_path / "docker-failed-once").is_file()
+    assert (tmp_path / "fallback-source-state").read_text(
+        encoding="utf-8"
+    ).strip() == "main-source|1.2.99"
+    assert "已用 v1.2.44 回滚成功" in result.stderr
+    assert "shared/.env 已按更新前快照原字节恢复" in result.stderr
+
+
+def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() -> (
+    None
+):
+    update = UPDATE.read_text(encoding="utf-8")
+    install = INSTALL.read_text(encoding="utf-8")
+
+    assert update.count("sync_main_fallback_release") >= 3
+    assert "fallback 镜像一致" in update
+    assert 'if [ "${TGBOT_IMAGE_READY}" -eq 1 ]; then' in update
+    assert 'if [ "${tgbot_image_ready}" -eq 1 ]; then' in install
+    assert "跳过 tgbot manifest 校验" in install
+
+
+def test_release_manifest_python_prerequisite_is_consistent() -> None:
+    lib = LIB.read_text(encoding="utf-8")
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    guard = (ROOT / "scripts" / "release_manifest_guard.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "lumen_require_python_min_version()" in lib
+    assert "lumen_require_python_min_version python3 3 8" in install
+    assert "lumen_require_python_min_version python3 3 8" in update
+    assert "Optional[urllib.request.Request]" in guard
+    assert "urllib.request.Request | None" not in guard
 
 
 def test_signature_verification_fails_closed_when_compose_images_cannot_be_enumerated(
@@ -697,6 +1637,12 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert "rsync_repo_to_release" in text
     assert "sync_repo_to_release" in text
     assert "git archive" in text
+    assert 'git archive --format=tar "${archive_ref}"' in text
+    assert (
+        'sync_repo_to_release "${REPO_DIR}" "${NEW_RELEASE}" "${RELEASE_SOURCE_REF}"'
+        in text
+    )
+    assert "git checkout --quiet" not in text
     assert (
         'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
     )
@@ -893,6 +1839,126 @@ def test_rollback_script_validates_compose_env_before_compose_up() -> None:
     assert "_maintenance_marker_busy()" in text
     assert "await asyncio.to_thread(_start_rollback_subprocess" not in text
     assert "asyncio.to_thread(_list_releases, limit=None)" in text
+
+
+def _prepare_lumenctl_rollback_layout(
+    tmp_path: Path,
+) -> tuple[Path, bytes, str, str]:
+    deploy_root = tmp_path / "deploy"
+    current_id = "20260711-020202"
+    previous_id = "20260710-020202"
+    current = deploy_root / "releases" / current_id
+    previous = deploy_root / "releases" / previous_id
+    current.mkdir(parents=True)
+    previous.mkdir(parents=True)
+    for release, version, tag in (
+        (current, "1.2.44", "v1.2.44"),
+        (previous, "1.2.43", "v1.2.43"),
+    ):
+        (release / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+        (release / ".image-tag").write_text(f"{tag}\n", encoding="utf-8")
+        (release / "docker-compose.yml").write_text(
+            "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+            encoding="utf-8",
+        )
+    (deploy_root / "shared").mkdir()
+    env_bytes = (
+        b"# keep formatting\n"
+        b"LUMEN_IMAGE_TAG=v1.2.44\n"
+        b"LUMEN_VERSION=1.2.44\n"
+        b"DATABASE_URL=postgresql://lumen:secret@postgres/lumen\n"
+    )
+    (deploy_root / "shared" / ".env").write_bytes(env_bytes)
+    (deploy_root / "current").symlink_to(f"releases/{current_id}")
+    (deploy_root / "previous").symlink_to(f"releases/{previous_id}")
+    (deploy_root / "VERSION").symlink_to("current/VERSION")
+    return deploy_root, env_bytes, current_id, previous_id
+
+
+def test_lumenctl_rollback_failure_restores_env_links_and_releases_lock(
+    tmp_path: Path,
+) -> None:
+    deploy_root, env_bytes, current_id, previous_id = (
+        _prepare_lumenctl_rollback_layout(tmp_path)
+    )
+    result = assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        ROOT={shlex.quote(str(deploy_root))}
+        LUMEN_DEPLOY_ROOT=$ROOT
+        LUMEN_BACKUP_ROOT={shlex.quote(str(tmp_path / "backup"))}
+        LUMEN_NONINTERACTIVE=1
+        LUMEN_ROLLBACK_PRIVILEGED=1
+        detect_os() {{ printf 'macos\\n'; }}
+        lumen_require_docker_access() {{ :; }}
+        rollback_up_count=0
+        lumen_compose_in() {{
+            case " $* " in
+                *" up "*)
+                    rollback_up_count=$((rollback_up_count + 1))
+                    [ "$rollback_up_count" -gt 1 ]
+                    ;;
+                *) return 0 ;;
+            esac
+        }}
+        rollback_rc=0
+        lumen_compose_rollback || rollback_rc=$?
+        test "$rollback_rc" -ne 0
+        test -z "${{LUMEN_LOCK_KIND:-}}"
+        test ! -d "$ROOT/.lumen-maintenance.lock.d"
+        """
+    )
+
+    assert "rollback 失败" in result.stderr
+    assert (deploy_root / "shared" / ".env").read_bytes() == env_bytes
+    assert os.readlink(deploy_root / "current") == f"releases/{current_id}"
+    assert os.readlink(deploy_root / "previous") == f"releases/{previous_id}"
+
+
+def test_lumenctl_rollback_success_updates_tag_version_and_previous(
+    tmp_path: Path,
+) -> None:
+    deploy_root, _, current_id, previous_id = _prepare_lumenctl_rollback_layout(
+        tmp_path
+    )
+    result = assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        ROOT={shlex.quote(str(deploy_root))}
+        LUMEN_DEPLOY_ROOT=$ROOT
+        LUMEN_BACKUP_ROOT={shlex.quote(str(tmp_path / "backup"))}
+        LUMEN_NONINTERACTIVE=1
+        LUMEN_ROLLBACK_PRIVILEGED=1
+        detect_os() {{ printf 'macos\\n'; }}
+        lumen_require_docker_access() {{ :; }}
+        lumen_compose_in() {{ return 0; }}
+        lumen_compose_rollback
+        test -z "${{LUMEN_LOCK_KIND:-}}"
+        """
+    )
+
+    assert "rollback 目标版本：1.2.43" in result.stdout
+    env_file = deploy_root / "shared" / ".env"
+    assert (
+        subprocess.run(
+            [
+                "bash",
+                "-lc",
+                f". {shlex.quote(str(LIB))}; "
+                f"lumen_env_value LUMEN_IMAGE_TAG {shlex.quote(str(env_file))}; "
+                "printf '\\n'; "
+                f"lumen_env_value LUMEN_VERSION {shlex.quote(str(env_file))}",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env=script_env(),
+            check=True,
+        ).stdout.splitlines()
+        == ["v1.2.43", "1.2.43"]
+    )
+    assert os.readlink(deploy_root / "current") == f"releases/{previous_id}"
+    assert os.readlink(deploy_root / "previous") == f"releases/{current_id}"
 
 
 def _strip_shell_comments(text: str) -> str:
@@ -1126,7 +2192,7 @@ def test_update_installs_missing_uv_to_system_path_before_runtime_home() -> None
 
 
 def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
-    text = LIB.read_text(encoding="utf-8")
+    text = lib_source_text()
     assert "lumen_check_runtime_health()" in text
     assert "http://127.0.0.1:8000/healthz" in text
     assert "http://127.0.0.1:3000/" in text
@@ -1136,7 +2202,7 @@ def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
 
 
 def test_local_runtime_stops_persisted_pids_before_port_scan() -> None:
-    text = LIB.read_text(encoding="utf-8")
+    text = lib_source_text()
     start = text.index("lumen_start_local_runtime()")
     persisted = text.index('lumen_stop_persisted_runtime "${root}"', start)
     api_port_scan = text.index('lumen_prepare_port_for_runtime 8000 "API"', start)
@@ -2096,7 +3162,10 @@ def test_update_script_runner_default_pull_not_build() -> None:
     runner_unit = (
         ROOT / "deploy" / "systemd" / "lumen-update-runner.service"
     ).read_text(encoding="utf-8")
-    assert "LUMEN_UPDATE_BUILD=0" in runner_unit
+    runner = (ROOT / "scripts" / "update_runner.py").read_text(encoding="utf-8")
+    assert "update_runner.py" in runner_unit
+    assert "EnvironmentFile=" not in runner_unit
+    assert '"LUMEN_UPDATE_BUILD": "0"' in runner
 
 
 def test_uninstall_script_uses_docker_compose_down() -> None:
@@ -2127,13 +3196,15 @@ def test_lib_provides_compose_helpers_required_by_cutover() -> None:
     """
     docker cutover: lib.sh 必须暴露 cutover plan §3.1 / §11 / §13 列出的全部 helper。
     """
-    text = LIB.read_text(encoding="utf-8")
+    text = lib_source_text()
     for fn in (
         "lumen_compose()",
         "lumen_compose_in()",
         "lumen_health_http()",
         "lumen_health_compose()",
         "lumen_image_tag_resolve()",
+        "lumen_resolve_release_alias()",
+        "lumen_verify_release_manifest_images()",
         "lumen_set_image_tag_in_env()",
         "lumen_emit_step()",
         "lumen_emit_info()",
@@ -2247,6 +3318,39 @@ def test_image_tag_is_rolling_matches_main_and_semver_aliases() -> None:
     assert "v1.2=rolling" in result.stdout
     assert "v1.2.3=fixed" in result.stdout
     assert "sha-deadbee=fixed" in result.stdout
+
+
+def test_release_manifest_verifier_checks_alias_image_against_concrete_digest(
+    tmp_path: Path,
+) -> None:
+    digest = f"sha256:{'a' * 64}"
+    guard = tmp_path / "guard.py"
+    guard.write_text(
+        "print("
+        f"'api\\tghcr.io/cyeinfpro/lumen-api:v1.2.10\\t{digest}"
+        f"\\tghcr.io/cyeinfpro/lumen-api@{digest}'"
+        ")\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        LUMEN_RELEASE_MANIFEST_GUARD={shlex.quote(str(guard))}
+        lumen_docker() {{
+            test "$1" = image
+            test "$2" = inspect
+            test "$5" = ghcr.io/cyeinfpro/lumen-api:v1.2
+            printf '%s\\n' ghcr.io/cyeinfpro/lumen-api@{digest}
+        }}
+        lumen_verify_release_manifest_images \
+            {shlex.quote(str(manifest))} v1.2.10 v1.2 --service api
+        """
+    )
+
+    assert "release manifest digest 通过" in result.stdout
 
 
 def test_docker_release_workflow_builds_amd64_and_arm64() -> None:

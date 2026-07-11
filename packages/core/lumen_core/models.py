@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import cached_property
+from importlib import import_module
 from typing import Any
 
 from sqlalchemy import (
@@ -17,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Enum as SAEnum,
     ForeignKey,
+    ForeignKeyConstraint,
     Float,
     Index,
     Integer,
@@ -45,8 +47,7 @@ USER_API_CREDENTIAL_STATUSES: tuple[str, ...] = (
 
 def new_uuid7() -> str:
     # uuid7 在 Python 里返回 UUID；我们存字符串便于 JSON 直出。
-    from uuid_extensions import uuid7
-
+    uuid7 = import_module("uuid_extensions").uuid7
     return str(uuid7())
 
 
@@ -290,6 +291,11 @@ class UserApiCredential(Base, TimestampMixin, SoftDeleteMixin):
 
     __tablename__ = "user_api_credentials"
     __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "user_id",
+            name="uq_user_api_credentials_id_user",
+        ),
         Index("ix_user_api_credentials_user_status", "user_id", "status"),
         Index("ix_user_api_credentials_supplier", "supplier_id"),
         # review #2：上游 401 反查 / dedup 命中 key_hash 直接走索引。
@@ -654,7 +660,13 @@ class Generation(Base, TimestampMixin):
         UniqueConstraint("user_id", "idempotency_key", name="uq_gen_user_idemp"),
         Index("ix_gen_user_status_created", "user_id", "status", "created_at"),
         Index("ix_generations_user_created", "user_id", "created_at"),
-        Index("ix_generations_user_message_created", "user_id", "message_id", "created_at", "id"),
+        Index(
+            "ix_generations_user_message_created",
+            "user_id",
+            "message_id",
+            "created_at",
+            "id",
+        ),
         Index(
             "ix_gen_queued_created",
             "created_at",
@@ -719,6 +731,9 @@ class Generation(Base, TimestampMixin):
         String(32), nullable=False, default="queued"
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    billing_retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
@@ -903,7 +918,13 @@ class Completion(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_comp_user_idemp"),
         Index("ix_completions_user_status_created", "user_id", "status", "created_at"),
-        Index("ix_completions_user_message_created", "user_id", "message_id", "created_at", "id"),
+        Index(
+            "ix_completions_user_message_created",
+            "user_id",
+            "message_id",
+            "created_at",
+            "id",
+        ),
         Index(
             "ix_completions_active_updated",
             "status",
@@ -1578,7 +1599,15 @@ class WalletTransaction(Base):
         UniqueConstraint("user_id", "idempotency_key", name="uq_wallet_tx_idemp"),
         Index("ix_wallet_tx_user_created", "user_id", "created_at"),
         Index("ix_wallet_tx_ref", "ref_type", "ref_id"),
-        Index("ix_wallet_tx_user_ref_kind", "user_id", "ref_type", "ref_id", "kind", "created_at", "id"),
+        Index(
+            "ix_wallet_tx_user_ref_kind",
+            "user_id",
+            "ref_type",
+            "ref_id",
+            "kind",
+            "created_at",
+            "id",
+        ),
         Index(
             "ix_wallet_hold_created",
             "created_at",
@@ -1615,6 +1644,16 @@ class BillingWindowUsageEvent(Base):
 
     __tablename__ = "billing_window_usage_events"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["credential_id", "user_id"],
+            ["user_api_credentials.id", "user_api_credentials.user_id"],
+            name="fk_billing_window_credential_user",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "amount_micro > 0",
+            name="ck_billing_window_amount_positive",
+        ),
         Index(
             "ix_billing_window_credential_created",
             "credential_id",
@@ -1666,6 +1705,53 @@ class PricingRule(Base, TimestampMixin):
         Boolean, default=True, nullable=False, server_default=text("true")
     )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RedemptionBatch(Base, TimestampMixin):
+    __tablename__ = "redemption_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "created_by",
+            "idempotency_key",
+            name="uq_redemption_batch_creator_idemp",
+        ),
+        CheckConstraint(
+            "amount_micro > 0",
+            name="ck_redemption_batch_amount_positive",
+        ),
+        CheckConstraint(
+            "code_count >= 1",
+            name="ck_redemption_batch_count_positive",
+        ),
+        CheckConstraint(
+            "max_redemptions >= 1",
+            name="ck_redemption_batch_max_positive",
+        ),
+        Index(
+            "ix_redemption_batches_creator_created",
+            "created_by",
+            "created_at",
+        ),
+        Index(
+            "ix_redemption_batches_creator_request_created",
+            "created_by",
+            "request_hash",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    created_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    code_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_redemptions: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class RedemptionCode(Base, TimestampMixin):

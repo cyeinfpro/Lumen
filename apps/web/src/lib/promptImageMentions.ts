@@ -35,7 +35,7 @@ function needsTrailingSpace(after: string): boolean {
   );
 }
 
-export function imageMentionLabel(imageNumber: number): string {
+function imageMentionLabel(imageNumber: number): string {
   return `@图${normalizeImageNumber(imageNumber)}`;
 }
 

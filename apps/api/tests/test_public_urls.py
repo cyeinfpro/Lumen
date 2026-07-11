@@ -135,7 +135,6 @@ async def test_resolve_public_base_url_requires_config_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(public_urls.settings, "app_env", "prod")
-    monkeypatch.setattr(public_urls.settings, "lumen_runtime", "docker")
     monkeypatch.setattr(
         public_urls.settings, "public_base_url", "http://localhost:3000"
     )
@@ -143,25 +142,3 @@ async def test_resolve_public_base_url_requires_config_in_production(
 
     with pytest.raises(RuntimeError):
         await resolve_public_base_url(request, _Db(None))  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_resolve_public_base_url_allows_local_origin_in_desktop_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(public_urls.settings, "app_env", "desktop")
-    monkeypatch.setattr(public_urls.settings, "lumen_runtime", "desktop")
-    monkeypatch.setattr(
-        public_urls.settings, "public_base_url", "http://localhost:3000"
-    )
-    request = _request(
-        [
-            (b"origin", b"http://127.0.0.1:24609"),
-            (b"host", b"127.0.0.1:24444"),
-        ]
-    )
-
-    assert (
-        await resolve_public_base_url(request, _Db(None))  # type: ignore[arg-type]
-        == "http://127.0.0.1:24609"
-    )

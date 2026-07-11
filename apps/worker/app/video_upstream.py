@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import os
+import tempfile
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Literal, Protocol
+from pathlib import Path
+from typing import Any, Callable, Literal, Protocol
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from lumen_core.providers import socks_proxy_url
 from lumen_core.url_security import (
+    PublicHttpTarget,
     pinned_async_http_transport,
     resolve_public_http_target,
 )
@@ -20,6 +25,12 @@ from lumen_core.video_billing import VIDEO_BILLING_TOKENS_PER_SECOND
 from lumen_core.video_providers import VideoProviderDefinition
 
 from .config import settings
+from .video_artifacts import (
+    DownloadedVideo,
+    UnsupportedVideoMediaError,
+    detect_video_media,
+    downloaded_video_from_bytes,
+)
 
 
 VideoProviderStatus = Literal[
@@ -107,6 +118,13 @@ class VideoProviderAdapter(Protocol):
 
     async def poll(self, provider_task_id: str) -> PollResult: ...
 
+    async def download_result(
+        self,
+        video_url: str,
+        *,
+        ensure_active: Callable[[], None] | None = None,
+    ) -> DownloadedVideo: ...
+
     async def fetch_result(self, video_url: str) -> bytes: ...
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None: ...
@@ -141,7 +159,7 @@ def _int_or_none(value: Any) -> int | None:
 
 def _status(raw: Any) -> VideoProviderStatus:
     value = str(raw or "").strip().lower()
-    mapping = {
+    mapping: dict[str, VideoProviderStatus] = {
         "queued": "queued",
         "pending": "queued",
         "created": "queued",
@@ -168,7 +186,7 @@ def _status(raw: Any) -> VideoProviderStatus:
     }
     if not value:
         return "running"
-    return mapping.get(value, "failed")  # type: ignore[return-value]
+    return mapping.get(value, "failed")
 
 
 def _failure_class(payload: dict[str, Any]) -> str | None:
@@ -528,7 +546,6 @@ def _image_data_url(data: bytes, mime: str | None) -> str:
 _OMNI_FALLBACK_IMAGE_MAX_BYTES = 64 * 1024 * 1024
 _SEEDANCE_INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 _VIDEO_FETCH_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_VIDEO_FETCH_MIN_MAGIC_BYTES = 12
 
 
 def _submit_headers(req: VideoSubmitRequest) -> dict[str, str]:
@@ -584,34 +601,7 @@ def _validated_image_data_url_mime(
     )
 
 
-def _looks_like_iso_bmff_video(data: bytes) -> bool:
-    return len(data) >= _VIDEO_FETCH_MIN_MAGIC_BYTES and data[4:8] == b"ftyp"
-
-
-def _validate_video_response_bytes(data: bytes, content_type: str) -> None:
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type.startswith("video/"):
-        return
-    if media_type in {"application/octet-stream", "binary/octet-stream", ""}:
-        if _looks_like_iso_bmff_video(data):
-            return
-    raise VideoUpstreamError(
-        "video fetch response was not a video",
-        error_code="fetch_failed",
-        status_code=502,
-        raw={"content_type": media_type or None},
-    )
-
-
-async def _fetch_video_url_bytes(video_url: str) -> bytes:
-    try:
-        target = await resolve_public_http_target(video_url, allow_http=True)
-    except ValueError as exc:
-        raise VideoUpstreamError(
-            "video result URL must be public HTTP(S)",
-            error_code="invalid_input",
-            status_code=422,
-        ) from exc
+def _video_download_client(target: PublicHttpTarget) -> httpx.AsyncClient:
     transport = (
         pinned_async_http_transport(target)
         if getattr(target, "resolved_ips", ())
@@ -629,47 +619,145 @@ async def _fetch_video_url_bytes(video_url: str) -> bytes:
     }
     if transport is not None:
         client_kwargs["transport"] = transport
-    async with httpx.AsyncClient(**client_kwargs) as client:
-        async with client.stream("GET", target.url) as response:
-            if response.status_code >= 400:
-                raise VideoUpstreamError(
-                    f"video fetch failed status={response.status_code}",
-                    error_code="fetch_failed",
-                    status_code=response.status_code,
-                )
-            content_length = response.headers.get("content-length")
-            if content_length:
-                parsed_length = _int_or_none(content_length)
-                if parsed_length is not None and parsed_length > _VIDEO_FETCH_MAX_BYTES:
-                    raise VideoUpstreamError(
-                        "video fetch response exceeds maximum size",
-                        error_code="fetch_failed",
-                        status_code=413,
-                    )
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                if not chunk:
+    return httpx.AsyncClient(**client_kwargs)
+
+
+def _video_redirect_url(response: httpx.Response) -> str | None:
+    if response.status_code not in {301, 302, 303, 307, 308}:
+        return None
+    location = response.headers.get("location")
+    if not location:
+        raise VideoUpstreamError(
+            "video fetch redirect did not include a location",
+            error_code="fetch_failed",
+            status_code=response.status_code,
+        )
+    return urljoin(str(response.url), location)
+
+
+def _validate_video_download_response(response: httpx.Response) -> None:
+    if response.status_code >= 400:
+        raise VideoUpstreamError(
+            f"video fetch failed status={response.status_code}",
+            error_code="fetch_failed",
+            status_code=response.status_code,
+        )
+    content_length = response.headers.get("content-length")
+    if not content_length:
+        return
+    parsed_length = _int_or_none(content_length)
+    if parsed_length is not None and parsed_length > _VIDEO_FETCH_MAX_BYTES:
+        raise VideoUpstreamError(
+            "video fetch response exceeds maximum size",
+            error_code="fetch_failed",
+            status_code=413,
+        )
+
+
+async def _download_video_url(
+    video_url: str,
+    *,
+    max_redirects: int = 0,
+    headers_for_url: Callable[[str], dict[str, str]] | None = None,
+    client_factory: Callable[[PublicHttpTarget], httpx.AsyncClient] | None = None,
+    ensure_active: Callable[[], None] | None = None,
+) -> DownloadedVideo:
+    current_url = video_url
+    make_client = client_factory or _video_download_client
+    for _redirect in range(max(0, max_redirects) + 1):
+        if ensure_active is not None:
+            ensure_active()
+        try:
+            target = await resolve_public_http_target(current_url, allow_http=True)
+        except ValueError as exc:
+            raise VideoUpstreamError(
+                "video result URL must be public HTTP(S)",
+                error_code="invalid_input",
+                status_code=422,
+            ) from exc
+        async with make_client(target) as client:
+            async with client.stream(
+                "GET",
+                target.url,
+                headers=headers_for_url(target.url) if headers_for_url else None,
+            ) as response:
+                redirect_url = _video_redirect_url(response)
+                if redirect_url is not None:
+                    current_url = redirect_url
                     continue
-                total += len(chunk)
-                if total > _VIDEO_FETCH_MAX_BYTES:
-                    raise VideoUpstreamError(
-                        "video fetch response exceeds maximum size",
-                        error_code="fetch_failed",
-                        status_code=413,
-                    )
-                chunks.append(bytes(chunk))
-            data = b"".join(chunks)
-            if not data:
-                raise VideoUpstreamError(
-                    "video fetch response was empty",
-                    error_code="fetch_failed",
-                    status_code=response.status_code,
+                _validate_video_download_response(response)
+                fd, raw_path = tempfile.mkstemp(
+                    prefix="lumen-video-download-",
+                    suffix=".part",
                 )
-            _validate_video_response_bytes(
-                data, response.headers.get("content-type", "")
-            )
-            return data
+                path = Path(raw_path)
+                total = 0
+                prefix = bytearray()
+                declared_mime = response.headers.get("content-type")
+                try:
+                    with os.fdopen(fd, "wb") as file_obj:
+                        async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                            if ensure_active is not None:
+                                ensure_active()
+                            if not chunk:
+                                continue
+                            total += len(chunk)
+                            if total > _VIDEO_FETCH_MAX_BYTES:
+                                raise VideoUpstreamError(
+                                    "video fetch response exceeds maximum size",
+                                    error_code="fetch_failed",
+                                    status_code=413,
+                                )
+                            if len(prefix) < 4096:
+                                remaining = 4096 - len(prefix)
+                                prefix.extend(chunk[:remaining])
+                            file_obj.write(chunk)
+                    if not total:
+                        raise VideoUpstreamError(
+                            "video fetch response was empty",
+                            error_code="fetch_failed",
+                            status_code=response.status_code,
+                        )
+                    try:
+                        mime, extension = detect_video_media(
+                            bytes(prefix),
+                            declared_mime,
+                        )
+                    except UnsupportedVideoMediaError as exc:
+                        raise VideoUpstreamError(
+                            "video fetch response was not a supported video",
+                            error_code="fetch_failed",
+                            status_code=415,
+                            raw={"content_type": declared_mime},
+                        ) from exc
+                    if ensure_active is not None:
+                        ensure_active()
+                    return DownloadedVideo(
+                        path=path,
+                        mime=mime,
+                        extension=extension,
+                        size_bytes=total,
+                        declared_mime=declared_mime,
+                    )
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
+    raise VideoUpstreamError(
+        "video fetch exceeded redirect limit",
+        error_code="fetch_failed",
+        status_code=508,
+    )
+
+
+async def _downloaded_video_bytes(downloaded: DownloadedVideo) -> bytes:
+    try:
+        return await asyncio.to_thread(downloaded.path.read_bytes)
+    finally:
+        downloaded.cleanup()
+
+
+async def _fetch_video_url_bytes(video_url: str) -> bytes:
+    return await _downloaded_video_bytes(await _download_video_url(video_url))
 
 
 async def _fetch_image_url_as_data_url(
@@ -1112,8 +1200,16 @@ class VolcanoSeedanceAdapter:
             raw=raw,
         )
 
+    async def download_result(
+        self,
+        video_url: str,
+        *,
+        ensure_active: Callable[[], None] | None = None,
+    ) -> DownloadedVideo:
+        return await _download_video_url(video_url, ensure_active=ensure_active)
+
     async def fetch_result(self, video_url: str) -> bytes:
-        return await _fetch_video_url_bytes(video_url)
+        return await _downloaded_video_bytes(await self.download_result(video_url))
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         async with self._client() as client:
@@ -1382,7 +1478,9 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
                 ("percent",),
             )
         )
-        video_url = _absolute_url(_explicit_video_result_url(raw), self._client_base_url())
+        video_url = _absolute_url(
+            _explicit_video_result_url(raw), self._client_base_url()
+        )
         if status == "succeeded" and not video_url:
             video_url = self._content_url(provider_task_id)
         upstream_billable = _billable(raw)
@@ -1412,7 +1510,7 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
             return {"Authorization": f"Bearer {self.provider.api_key}"}
         return {}
 
-    def _raw_client(self, target: Any | None = None) -> httpx.AsyncClient:
+    def _raw_client(self, target: PublicHttpTarget | None = None) -> httpx.AsyncClient:
         proxy_url = (
             socks_proxy_url(self.provider.proxy) if self.provider.proxy else None
         )
@@ -1429,83 +1527,22 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         }
         if proxy_url:
             kwargs["proxy"] = proxy_url
-        elif getattr(target, "resolved_ips", ()):
+        elif target is not None and target.resolved_ips:
             kwargs["transport"] = pinned_async_http_transport(target)
         return httpx.AsyncClient(**kwargs)
 
-    async def fetch_result(self, video_url: str) -> bytes:
-        current_url = video_url
-        for _redirect in range(self._MAX_CONTENT_REDIRECTS + 1):
-            try:
-                target = await resolve_public_http_target(current_url, allow_http=True)
-            except ValueError as exc:
-                raise VideoUpstreamError(
-                    "video result URL must be public HTTP(S)",
-                    error_code="invalid_input",
-                    status_code=422,
-                ) from exc
-            async with self._raw_client(target) as client:
-                async with client.stream(
-                    "GET",
-                    target.url,
-                    headers=self._content_request_headers(target.url),
-                ) as response:
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("location")
-                        if not location:
-                            raise VideoUpstreamError(
-                                "video fetch redirect did not include a location",
-                                error_code="fetch_failed",
-                                status_code=response.status_code,
-                            )
-                        current_url = urljoin(str(response.url), location)
-                        continue
-                    if response.status_code >= 400:
-                        raise VideoUpstreamError(
-                            f"video fetch failed status={response.status_code}",
-                            error_code="fetch_failed",
-                            status_code=response.status_code,
-                        )
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        parsed_length = _int_or_none(content_length)
-                        if (
-                            parsed_length is not None
-                            and parsed_length > _VIDEO_FETCH_MAX_BYTES
-                        ):
-                            raise VideoUpstreamError(
-                                "video fetch response exceeds maximum size",
-                                error_code="fetch_failed",
-                                status_code=413,
-                            )
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        if not chunk:
-                            continue
-                        total += len(chunk)
-                        if total > _VIDEO_FETCH_MAX_BYTES:
-                            raise VideoUpstreamError(
-                                "video fetch response exceeds maximum size",
-                                error_code="fetch_failed",
-                                status_code=413,
-                            )
-                        chunks.append(bytes(chunk))
-                    data = b"".join(chunks)
-                    if not data:
-                        raise VideoUpstreamError(
-                            "video fetch response was empty",
-                            error_code="fetch_failed",
-                            status_code=response.status_code,
-                        )
-                    _validate_video_response_bytes(
-                        data, response.headers.get("content-type", "")
-                    )
-                    return data
-        raise VideoUpstreamError(
-            "video fetch exceeded redirect limit",
-            error_code="fetch_failed",
-            status_code=508,
+    async def download_result(
+        self,
+        video_url: str,
+        *,
+        ensure_active: Callable[[], None] | None = None,
+    ) -> DownloadedVideo:
+        return await _download_video_url(
+            video_url,
+            max_redirects=self._MAX_CONTENT_REDIRECTS,
+            headers_for_url=self._content_request_headers,
+            client_factory=self._raw_client,
+            ensure_active=ensure_active,
         )
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
@@ -1967,8 +2004,16 @@ class DashScopeHappyHorseAdapter:
             raw=raw,
         )
 
+    async def download_result(
+        self,
+        video_url: str,
+        *,
+        ensure_active: Callable[[], None] | None = None,
+    ) -> DownloadedVideo:
+        return await _download_video_url(video_url, ensure_active=ensure_active)
+
     async def fetch_result(self, video_url: str) -> bytes:
-        return await _fetch_video_url_bytes(video_url)
+        return await _downloaded_video_bytes(await self.download_result(video_url))
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         # DashScope's documented async task API does not expose a portable
@@ -2000,11 +2045,24 @@ class FakeVideoAdapter:
             raw={"id": provider_task_id, "status": "succeeded"},
         )
 
-    async def fetch_result(self, video_url: str) -> bytes:
+    async def download_result(
+        self,
+        video_url: str,
+        *,
+        ensure_active: Callable[[], None] | None = None,
+    ) -> DownloadedVideo:
         del video_url
+        if ensure_active is not None:
+            ensure_active()
         # A tiny ftyp+mdat-ish placeholder. Metadata extraction may fail, but
         # storage and API media serving remain testable.
-        return b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08mdat"
+        return downloaded_video_from_bytes(
+            b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08mdat",
+            declared_mime="video/mp4",
+        )
+
+    async def fetch_result(self, video_url: str) -> bytes:
+        return await _downloaded_video_bytes(await self.download_result(video_url))
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         return CancelResult(

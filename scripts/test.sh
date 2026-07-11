@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 export STORAGE_ROOT
 
 echo "==> scripts/uninstall"
-bash -n scripts/lib.sh scripts/uninstall.sh scripts/test_uninstall.sh
+bash -n scripts/lib.sh scripts/lib/*.sh scripts/uninstall.sh scripts/test_uninstall.sh
 bash scripts/test_uninstall.sh
 
 echo

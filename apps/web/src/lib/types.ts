@@ -680,7 +680,7 @@ export interface ProviderProxyOut {
 export interface ProvidersOut {
   items: ProviderItemOut[];
   proxies: ProviderProxyOut[];
-  source: "db" | "env" | "none" | "desktop";
+  source: "db" | "env" | "none";
 }
 
 export interface ProviderItemIn {
@@ -738,7 +738,7 @@ export interface VideoProvidersOut {
   enabled: boolean;
   items: VideoProviderItemOut[];
   proxies: ProviderProxyOut[];
-  source: "db" | "env" | "none" | "desktop";
+  source: "db" | "env" | "none";
 }
 
 export interface VideoProviderItemIn {

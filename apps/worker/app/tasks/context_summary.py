@@ -9,15 +9,13 @@ completion path.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, or_, select, text as sa_text
@@ -26,18 +24,69 @@ from lumen_core.constants import GenerationErrorCode as EC, Role
 from lumen_core.context_window import (
     SUMMARY_KIND,
     SUMMARY_VERSION,
+    compare_message_position,
     estimate_message_tokens,
     estimate_text_tokens,
     is_summary_usable,
 )
 from lumen_core.models import Conversation, Image, Message
 
-from ..db import SessionLocal
+from ..db import SessionLocal, engine
 from ..observability import (
     context_compaction_duration_seconds,
     context_compaction_total,
 )
 from ..upstream import UpstreamError
+from .context_summary_parts.common import (
+    LoadedSummaryMessages,
+    SummaryCoverage as _SummaryCoverage,
+    SummaryLock as _SummaryLock,
+    SummarySegment as _SummarySegment,
+    boundary_created_at as _boundary_created_at,
+    boundary_id as _boundary_id,
+    coerce_aware as _coerce_aware,  # noqa: F401
+    current_summary_wins_equal_boundary as _current_summary_wins_equal_boundary,
+    extra_instruction_hash as _extra_instruction_hash,
+    iso as _iso,
+    parse_iso_datetime as _parse_iso_datetime,  # noqa: F401
+    public_summary_result as _public_summary_result,
+    settings_float as _settings_float,
+    settings_get as _settings_get,  # noqa: F401
+    settings_int as _settings_int,
+    settings_str as _settings_str,
+    summary_covers_boundary as _summary_covers_boundary,  # noqa: F401
+    summary_dt as _summary_dt,  # noqa: F401
+    summary_int as _summary_int,  # noqa: F401
+    summary_quality_rank as _summary_quality_rank,  # noqa: F401
+    summary_satisfies_request as _summary_satisfies_request,
+    truncate as _truncate,
+    utc_now as _utc_now,
+)
+from .context_summary_parts.messages import (
+    loaded_summary_prefix as _loaded_summary_prefix,
+    uncaptioned_image_ids as _uncaptioned_image_ids,
+)
+from .context_summary_parts.segments import (
+    bounded_summary_segments as _bounded_summary_segments_impl,
+    chunk_lines_by_budget as _chunk_lines_by_budget,  # noqa: F401
+    split_oversized_lines as _split_oversized_lines,  # noqa: F401
+    summary_segments_by_budget as _summary_segments_by_budget,
+)
+from .context_summary_parts.text import (
+    extract_code_anchors as _extract_code_anchors,  # noqa: F401
+    local_fallback_summary_text as _local_fallback_summary_text_impl,
+    looks_like_file_read as _looks_like_file_read,  # noqa: F401
+    message_to_summary_line as _message_to_summary_line_impl,
+    summarize_code_blob as _summarize_code_blob,  # noqa: F401
+    summarize_json_blob as _summarize_json_blob,  # noqa: F401
+    summarize_text_blob as _summarize_text_blob,
+)
+from .context_summary_parts.upstream_payloads import (
+    compose_summary_input as _compose_summary_input,
+    parse_response_dict as _parse_response_dict,
+    summary_provider_kwargs as _summary_provider_kwargs,
+    summary_response_body as _summary_response_body_impl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +119,20 @@ _CIRCUIT_SAMPLES_KEY = "context:circuit:breaker:samples"
 _CIRCUIT_TTL_S = 10 * 60
 _CIRCUIT_SAMPLE_WINDOW = 20
 _CIRCUIT_MIN_SAMPLES = 5
+
+_RELEASE_SUMMARY_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_SUMMARY_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
 
 _SUMMARY_INSTRUCTIONS = """你是 Lumen 的上下文压缩器。把较早对话压缩成后续回答可用的历史摘要。
 
@@ -104,447 +167,17 @@ _SUMMARY_INSTRUCTIONS = """你是 Lumen 的上下文压缩器。把较早对话�
 如果某节没有内容，省略整节。"""
 
 
-@dataclass(frozen=True)
-class LoadedSummaryMessages:
-    messages: list[Message]
-    source_message_count: int
-    source_token_estimate: int
-    image_caption_count: int
-    image_captions: dict[str, str] | None = None
-
-
-@dataclass
-class _SummaryLock:
-    kind: str
-    token: str | None = None
-    lost_reason: str | None = None
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    if limit <= 20:
-        return text[:limit]
-    return text[: limit - 15].rstrip() + " [...truncated]"
-
-
-def _settings_get(settings: Any, key: str, default: Any) -> Any:
-    if settings is None:
-        return default
-    if isinstance(settings, dict):
-        if key in settings:
-            return settings[key]
-        alt = key.replace(".", "_")
-        return settings.get(alt, default)
-    if hasattr(settings, "get"):
-        try:
-            value = settings.get(key)  # type: ignore[call-arg]
-            if value is not None:
-                return value
-        except Exception:  # noqa: BLE001
-            pass
-    return getattr(settings, key.replace(".", "_"), default)
-
-
-def _settings_int(settings: Any, key: str, default: int) -> int:
-    value = _settings_get(settings, key, default)
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _settings_float(settings: Any, key: str, default: float) -> float:
-    value = _settings_get(settings, key, default)
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _settings_str(settings: Any, key: str, default: str) -> str:
-    value = _settings_get(settings, key, default)
-    if value is None:
-        return default
-    text = str(value).strip()
-    return text or default
-
-
-def _extra_instruction_hash(extra_instruction: str | None) -> str | None:
-    if not extra_instruction or not extra_instruction.strip():
-        return None
-    digest = hashlib.sha1(extra_instruction.strip().encode("utf-8")).hexdigest()
-    return f"sha1:{digest}"
-
-
-def _boundary_id(boundary: Any) -> str | None:
-    if boundary is None:
-        return None
-    if isinstance(boundary, str):
-        return boundary
-    if isinstance(boundary, dict):
-        for key in ("message_id", "id", "boundary_id", "up_to_message_id"):
-            value = boundary.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return None
-    value = getattr(boundary, "id", None)
-    return value if isinstance(value, str) and value else None
-
-
-def _boundary_created_at(boundary: Any) -> datetime | None:
-    if isinstance(boundary, dict):
-        value = boundary.get("created_at") or boundary.get("up_to_created_at")
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-    value = getattr(boundary, "created_at", None)
-    return value if isinstance(value, datetime) else None
-
-
-def _coerce_aware(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _parse_iso_datetime(raw: str) -> datetime | None:
-    try:
-        return _coerce_aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
-    except ValueError:
-        return None
-
-
-def _compare_message_position(
-    left_created_at: datetime,
-    left_id: str | None,
-    right_created_at: datetime,
-    right_id: str | None,
-) -> int:
-    """Compare the (created_at, id) order used by summary boundary queries."""
-    left_created_at = _coerce_aware(left_created_at)
-    right_created_at = _coerce_aware(right_created_at)
-    if left_created_at > right_created_at:
-        return 1
-    if left_created_at < right_created_at:
-        return -1
-    if not left_id or not right_id:
-        return 0 if left_id == right_id else -1
-    if left_id > right_id:
-        return 1
-    if left_id < right_id:
-        return -1
-    return 0
-
-
-def _summary_covers_boundary(summary: dict[str, Any] | None, boundary: Any) -> bool:
-    if not is_summary_usable(summary):
-        return False
-    bid = _boundary_id(boundary)
-    summary_id = summary.get("up_to_message_id")
-    summary_id = summary_id if isinstance(summary_id, str) and summary_id else None
-    if bid and summary_id == bid:
-        return True
-    bdt = _boundary_created_at(boundary)
-    if bdt is None:
-        return False
-    raw = summary.get("up_to_created_at")
-    if not isinstance(raw, str):
-        return False
-    sdt = _parse_iso_datetime(raw)
-    if sdt is None:
-        return False
-    return _compare_message_position(sdt, summary_id, bdt, bid) >= 0
-
-
-def _summary_satisfies_request(
-    summary: dict[str, Any] | None,
-    boundary: Any,
-    extra_hash: str | None,
-) -> bool:
-    if not _summary_covers_boundary(summary, boundary):
-        return False
-    existing_hash = summary.get("extra_instruction_hash") if isinstance(summary, dict) else None
-    return existing_hash == extra_hash
-
-
-def _summary_quality_rank(summary: dict[str, Any] | None) -> int:
-    if not is_summary_usable(summary):
-        return -1
-    fallback_reason = summary.get("fallback_reason") or summary.get("last_quality_signal")
-    return 0 if fallback_reason else 1
-
-
-def _summary_int(summary: dict[str, Any] | None, key: str) -> int:
-    if not isinstance(summary, dict):
-        return 0
-    try:
-        return max(0, int(summary.get(key) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _summary_dt(summary: dict[str, Any] | None, key: str) -> datetime | None:
-    if not isinstance(summary, dict):
-        return None
-    raw = summary.get(key)
-    if isinstance(raw, datetime):
-        return _coerce_aware(raw)
-    if isinstance(raw, str):
-        return _parse_iso_datetime(raw)
-    return None
-
-
-def _current_summary_wins_equal_boundary(
-    current: dict[str, Any],
-    new: dict[str, Any],
-    *,
-    allow_equal_boundary_refresh: bool = False,
-) -> bool:
-    """Return True when an equal-boundary CAS write should keep current.
-
-    Same-boundary writes are common when two workers compact the same message
-    range. Coverage alone cannot justify replacing the row; prefer non-fallback
-    summaries, then higher run counters. A forced/manual refresh can replace an
-    equal-quality row, but not with a lower-quality fallback.
-    """
-    if current.get("extra_instruction_hash") != new.get("extra_instruction_hash"):
-        return False
-
-    current_quality = _summary_quality_rank(current)
-    new_quality = _summary_quality_rank(new)
-    if current_quality > new_quality:
-        return True
-    if current_quality < new_quality:
-        return False
-
-    current_runs = _summary_int(current, "compression_runs")
-    new_runs = _summary_int(new, "compression_runs")
-    if current_runs > new_runs:
-        return True
-    if current_runs < new_runs:
-        return False
-
-    current_compressed_at = _summary_dt(current, "compressed_at")
-    new_compressed_at = _summary_dt(new, "compressed_at")
-    if (
-        current_compressed_at
-        and new_compressed_at
-        and current_compressed_at > new_compressed_at
-    ):
-        return True
-
-    return not allow_equal_boundary_refresh
-
-
-def _public_summary_result(
-    summary: dict[str, Any], *, created: bool, status: str
-) -> dict[str, Any]:
-    source_tokens = int(summary.get("source_token_estimate") or 0)
-    summary_tokens = int(summary.get("tokens") or 0)
-    return {
-        "status": status,
-        "summary_created": created,
-        "summary_used": True,
-        "summary_up_to_message_id": summary.get("up_to_message_id"),
-        "summary_up_to_created_at": summary.get("up_to_created_at"),
-        "summary_tokens": summary_tokens,
-        "source_message_count": int(summary.get("source_message_count") or 0),
-        "source_token_estimate": source_tokens,
-        "image_caption_count": int(summary.get("image_caption_count") or 0),
-        "tokens_freed": max(0, source_tokens - summary_tokens),
-        "extra_instruction_hash": summary.get("extra_instruction_hash"),
-        "fallback_reason": summary.get("fallback_reason"),
-    }
-
-
-def _looks_like_file_read(text: str) -> tuple[str, int] | None:
-    stripped = text.lstrip()
-    first_line = stripped.splitlines()[0] if stripped else ""
-    match = re.match(r"(?:cat|Read)\s+([~/A-Za-z0-9_.\-/]+)", first_line)
-    if not match:
-        match = re.match(r"#\s*([~/A-Za-z0-9_.\-/]+)", first_line)
-    if not match:
-        return None
-    return match.group(1), len(stripped.splitlines())
-
-
-def _summarize_json_blob(text: str) -> str | None:
-    stripped = text.strip()
-    if len(stripped) <= 800 or not stripped.startswith(("{", "[")):
-        return None
-    try:
-        payload = json.loads(stripped)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if isinstance(payload, dict):
-        keys = ", ".join(sorted(str(k) for k in payload.keys())[:40])
-    elif isinstance(payload, list) and payload and isinstance(payload[0], dict):
-        keys = ", ".join(sorted(str(k) for k in payload[0].keys())[:40])
-        keys = f"list[{len(payload)}] item_keys={keys}"
-    else:
-        keys = f"{type(payload).__name__}"
-    return (
-        f"{stripped[:200]}\n"
-        f"[json summary: top-level keys={keys}]\n"
-        f"{stripped[-100:]}"
-    )
-
-
-def _extract_code_anchors(text: str) -> list[str]:
-    anchors: list[str] = []
-    patterns = (
-        r"^\s*(?:async\s+def|def|class)\s+[A-Za-z_][\w_]*[^\n]*",
-        r"^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_][\w_]*[^\n]*",
-        r"^\s*(?:const|let|var)\s+[A-Za-z_][\w_]*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>",
-        r"^\s*(?:public|private|protected)?\s*(?:static\s+)?"
-        r"[A-Za-z_<>,\[\]]+\s+[A-Za-z_][\w_]*\([^)]*\)",
-    )
-    for line in text.splitlines():
-        for pattern in patterns:
-            if re.match(pattern, line):
-                anchors.append(line.strip())
-                break
-        if len(anchors) >= 40:
-            break
-    return anchors
-
-
-def _summarize_code_blob(text: str) -> str:
-    lines = text.splitlines()
-    anchors = _extract_code_anchors(text)
-    code_blocks = re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.DOTALL)
-    block_summaries: list[str] = []
-    for block in code_blocks[:12]:
-        block_lines = block.strip("\n").splitlines()
-        if not block_lines:
-            continue
-        first = block_lines[0].strip()
-        last = block_lines[-1].strip()
-        block_summaries.append(
-            f"[code block: first={first!r} last={last!r} lines={len(block_lines)}]"
-        )
-    parts = [_truncate(text[:800], 800)]
-    if anchors:
-        parts.append("[code anchors]\n" + "\n".join(anchors))
-    if block_summaries:
-        parts.append("\n".join(block_summaries))
-    parts.append(f"[... {max(0, len(lines) - 20)} lines elided ...]")
-    return "\n".join(part for part in parts if part)
-
-
-def _summarize_text_blob(text: str) -> str:
-    """Serialize large text for summary input without mutating source messages."""
-    if not text:
-        return ""
-    if len(text) <= 1500:
-        return text
-    file_read = _looks_like_file_read(text)
-    if file_read is not None:
-        path, line_count = file_read
-        return f"[file read summary: {path} - {line_count} lines]"
-    json_summary = _summarize_json_blob(text)
-    if json_summary is not None:
-        return json_summary
-    if "```" in text or _extract_code_anchors(text):
-        return _summarize_code_blob(text)
-    return f"{text[:600].rstrip()}\n[... elided ...]\n{text[-400:].lstrip()}"
-
-
 def _message_to_summary_line(
     msg: Message,
     image_captions: Mapping[str, str] | None = None,
 ) -> str:
-    role = str(getattr(msg, "role", "") or "").upper() or "UNKNOWN"
-    created_at = getattr(msg, "created_at", None)
-    created = _iso(created_at) if isinstance(created_at, datetime) else ""
-    parts: list[str] = [f"[{role} #{getattr(msg, 'id', '')} @ {created}]"]
-
-    content = getattr(msg, "content", None)
-    if not isinstance(content, dict):
-        content = {}
-
-    text = content.get("text") or ""
-    if isinstance(text, str):
-        text = _summarize_text_blob(text)
-        if text:
-            parts.append(text)
-
-    for att in content.get("attachments") or []:
-        if not isinstance(att, dict):
-            continue
-        kind = att.get("kind")
-        image_id = att.get("image_id")
-        if kind == "image" or image_id:
-            ref = f"[user_image image_id={image_id}]"
-            caption = att.get("caption")
-            if (
-                (not isinstance(caption, str) or not caption.strip())
-                and image_id
-                and image_captions
-            ):
-                caption = image_captions.get(str(image_id))
-            if isinstance(caption, str) and caption.strip():
-                ref += f" caption={_truncate(caption.strip(), 280)!r}"
-            parts.append(ref)
-        elif kind == "file":
-            parts.append(
-                f"[user_file name={att.get('name')!r} "
-                f"mime={att.get('mime')!r} size={att.get('size')}]"
-            )
-        else:
-            parts.append(f"[attachment kind={kind!r}]")
-
-    if role == "ASSISTANT":
-        generated: list[dict[str, Any]] = []
-        seen_generated_ids: set[str] = set()
-
-        def add_generated(candidate: Any) -> None:
-            if not isinstance(candidate, dict):
-                return
-            image_id = candidate.get("image_id")
-            dedupe_key = (
-                str(image_id)
-                if image_id
-                else json.dumps(candidate, sort_keys=True, default=str)
-            )
-            if dedupe_key in seen_generated_ids:
-                return
-            seen_generated_ids.add(dedupe_key)
-            generated.append(candidate)
-
-        add_generated(content.get("generation_summary"))
-        images = content.get("images")
-        if isinstance(images, list):
-            for image in images:
-                add_generated(image)
-
-        for gen in generated:
-            caption = gen.get("caption") or ""
-            parts.append(
-                f"[generated_image image_id={gen.get('image_id')} "
-                f"width={gen.get('width')} height={gen.get('height')} "
-                f"caption={_truncate(str(caption), 280)!r}]"
-            )
-
-    return "\n".join(parts)
+    return _message_to_summary_line_impl(
+        msg,
+        image_captions,
+        iso_fn=_iso,
+        truncate_fn=_truncate,
+        summarize_text_fn=_summarize_text_blob,
+    )
 
 
 async def _message_position(session: Any, message_id: str) -> tuple[datetime, str] | None:
@@ -610,27 +243,6 @@ async def _load_messages_for_summary(
     )
 
 
-def _uncaptioned_image_ids(messages: Sequence[Message]) -> list[str]:
-    seen: set[str] = set()
-    image_ids: list[str] = []
-    for msg in messages:
-        content = msg.content if isinstance(msg.content, dict) else {}
-        for att in content.get("attachments") or []:
-            if not isinstance(att, dict):
-                continue
-            image_id = att.get("image_id")
-            if not isinstance(image_id, str) or not image_id:
-                continue
-            caption = att.get("caption")
-            if isinstance(caption, str) and caption.strip():
-                continue
-            if image_id in seen:
-                continue
-            seen.add(image_id)
-            image_ids.append(image_id)
-    return image_ids
-
-
 async def _caption_images_for_summary(
     session: Any,
     messages: Sequence[Message],
@@ -659,6 +271,7 @@ async def _caption_images_for_summary(
         return {}
     if not rows:
         return {}
+    await _release_business_transaction(session)
 
     try:
         from . import context_image_caption
@@ -678,34 +291,6 @@ async def _caption_images_for_summary(
         return {}
 
 
-def _parse_response_dict(payload: Any) -> tuple[str, dict[str, Any]]:
-    """从 /v1/responses 返回的 dict 里抽 (output_text, usage)。
-
-    payload 可能来自两条路径：
-    - JSON 顶层 body（`stream:false` 被上游尊重时）
-    - SSE `response.completed` 帧里的 `response` 子对象（上游忽略 stream:false 时）
-    两者结构一致——都带 `output` / `output_text` / `usage`，所以共用同一份解析。
-    """
-    usage: dict[str, Any] = {}
-    if not isinstance(payload, dict):
-        return "", usage
-    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip(), usage
-    chunks: list[str] = []
-    for item in payload.get("output") or []:
-        if not isinstance(item, dict):
-            continue
-        for part in item.get("content") or []:
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text") or part.get("output_text")
-            if isinstance(text, str):
-                chunks.append(text)
-    return "".join(chunks).strip(), usage
-
-
 def _summary_response_body(
     input_text: str,
     *,
@@ -713,19 +298,115 @@ def _summary_response_body(
     model: str,
     instructions: str,
 ) -> dict[str, Any]:
-    return {
-        "model": model,
-        "instructions": instructions,
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": input_text}],
-            }
-        ],
-        "stream": False,
-        "store": False,
-        "reasoning": {"effort": _SUMMARY_REASONING_EFFORT},
-    }
+    return _summary_response_body_impl(
+        input_text,
+        target_tokens=target_tokens,
+        model=model,
+        instructions=instructions,
+        reasoning_effort=_SUMMARY_REASONING_EFFORT,
+    )
+
+
+@dataclass(frozen=True)
+class _SummaryProviderAttemptResult:
+    text: str | None = None
+    usage: dict[str, Any] | None = None
+    error: Exception | None = None
+    provider_failed: bool = False
+
+
+async def _run_summary_provider_attempt(
+    *,
+    pool: Any,
+    provider: Any,
+    input_text: str,
+    target_tokens: int,
+    model: str,
+    instructions: str,
+    timeout_s: float,
+    responses_call: Callable[..., Awaitable[Any]],
+) -> _SummaryProviderAttemptResult:
+    try:
+        # responses_call mutates the body while normalizing defaults and tools,
+        # so each retry must receive a fresh object.
+        body = _summary_response_body(
+            input_text,
+            target_tokens=target_tokens,
+            model=model,
+            instructions=instructions,
+        )
+        kwargs = _summary_provider_kwargs(provider, timeout_s)
+        with pool.text_attempt(provider) as provider_attempt:
+            try:
+                data = await responses_call(body, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                provider_attempt.report_failure()
+                return _SummaryProviderAttemptResult(
+                    error=exc,
+                    provider_failed=True,
+                )
+            provider_attempt.report_success()
+
+        try:
+            text, usage = _parse_response_dict(data)
+            text = text.strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "context_summary.local_parse_failed provider=%s err=%.300s",
+                getattr(provider, "name", "<unknown>"),
+                str(exc),
+            )
+            return _SummaryProviderAttemptResult(error=exc)
+        if not text:
+            error = UpstreamError(
+                "context summary empty output",
+                error_code=EC.EMPTY_OUTPUT.value,
+                status_code=502,
+            )
+            logger.warning(
+                "context_summary.local_parse_empty provider=%s",
+                getattr(provider, "name", "<unknown>"),
+            )
+            return _SummaryProviderAttemptResult(error=error)
+        return _SummaryProviderAttemptResult(text=text, usage=usage)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "context_summary.local_attempt_failed provider=%s err=%.300s",
+            getattr(provider, "name", "<unknown>"),
+            str(exc),
+        )
+        return _SummaryProviderAttemptResult(error=exc)
+
+
+def _summary_provider_failure_retriable(
+    *,
+    provider: Any,
+    attempt: int,
+    attempt_started: float,
+    error: Exception,
+    classify_retriable: Callable[..., Any],
+) -> bool:
+    decision = classify_retriable(
+        getattr(error, "error_code", None),
+        getattr(error, "status_code", None),
+        error_message=str(error),
+    )
+    logger.warning(
+        "context_summary.provider_attempt_failed provider=%s attempt=%d/%d elapsed=%.2fs retriable=%s code=%s status=%s err=%.300s",
+        getattr(provider, "name", "<unknown>"),
+        attempt + 1,
+        _PER_PROVIDER_RETRY_ATTEMPTS,
+        time.monotonic() - attempt_started,
+        decision.retriable,
+        getattr(error, "error_code", None),
+        getattr(error, "status_code", None),
+        str(error),
+    )
+    return bool(decision.retriable)
 
 
 async def _call_summary_upstream(
@@ -763,66 +444,40 @@ async def _call_summary_upstream(
     for provider in providers:
         for attempt in range(_PER_PROVIDER_RETRY_ATTEMPTS):
             attempt_started = time.monotonic()
-            # 每次重试都用全新 body——responses_call 会原地修改 body
-            # （instructions 默认值注入 / tools 排序），共享同一个 dict 会让
-            # 第二次调用看到第一次的副作用，影响 prompt cache 前缀。
-            body = _summary_response_body(
-                input_text,
+            result = await _run_summary_provider_attempt(
+                pool=pool,
+                provider=provider,
+                input_text=input_text,
                 target_tokens=target_tokens,
                 model=model,
                 instructions=instructions,
+                timeout_s=timeout_s,
+                responses_call=responses_call,
             )
-            try:
-                kwargs: dict[str, Any] = {
-                    "route": "text",
-                    "api_key_override": provider.api_key,
-                    "base_url_override": provider.base_url,
-                    "timeout_s": timeout_s,
-                    "endpoint_label": "responses_summary",
-                }
-                proxy = getattr(provider, "proxy", None)
-                if proxy is not None:
-                    kwargs["proxy_override"] = proxy
-                data = await responses_call(body, **kwargs)
-                text, usage = _parse_response_dict(data)
-                text = text.strip()
-                if not text:
-                    raise UpstreamError(
-                        "context summary empty output",
-                        error_code=EC.EMPTY_OUTPUT.value,
-                        status_code=502,
-                    )
+            if result.text is not None:
                 elapsed = time.monotonic() - started
                 if elapsed > 8.0:
                     logger.warning(
                         "context_summary.slow_upstream provider=%s elapsed=%.2fs usage=%s",
                         provider.name,
                         elapsed,
-                        usage,
+                        result.usage or {},
                     )
-                return text
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                decision = classify_retriable(
-                    getattr(exc, "error_code", None),
-                    getattr(exc, "status_code", None),
-                    error_message=str(exc),
-                )
-                logger.warning(
-                    "context_summary.provider_attempt_failed provider=%s attempt=%d/%d elapsed=%.2fs retriable=%s code=%s status=%s err=%.300s",
-                    getattr(provider, "name", "<unknown>"),
-                    attempt + 1,
-                    _PER_PROVIDER_RETRY_ATTEMPTS,
-                    time.monotonic() - attempt_started,
-                    decision.retriable,
-                    getattr(exc, "error_code", None),
-                    getattr(exc, "status_code", None),
-                    str(exc),
-                )
-                if not decision.retriable:
-                    break
-                if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
-                    await asyncio.sleep(_PER_PROVIDER_RETRY_BACKOFF_S * (2**attempt))
+                return result.text
+
+            last_exc = result.error
+            if not result.provider_failed or result.error is None:
+                break
+            if not _summary_provider_failure_retriable(
+                provider=provider,
+                attempt=attempt,
+                attempt_started=attempt_started,
+                error=result.error,
+                classify_retriable=classify_retriable,
+            ):
+                break
+            if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
+                await asyncio.sleep(_PER_PROVIDER_RETRY_BACKOFF_S * (2**attempt))
 
     logger.warning(
         "context_summary.all_providers_failed providers=%s last_code=%s last_status=%s last=%.300s",
@@ -834,14 +489,6 @@ async def _call_summary_upstream(
     return None
 
 
-def _compose_summary_input(previous_summary: str | None, lines: Sequence[str]) -> str:
-    parts: list[str] = []
-    if previous_summary and previous_summary.strip():
-        parts.append("[PREVIOUS_ROLLING_SUMMARY]\n" + previous_summary.strip())
-    parts.append("[MESSAGES_TO_COMPRESS]\n" + "\n\n".join(lines))
-    return "\n\n".join(parts)
-
-
 def _local_fallback_summary_text(
     *,
     previous_summary: str | None,
@@ -850,65 +497,15 @@ def _local_fallback_summary_text(
     extra_instruction: str | None = None,
     image_captions: Mapping[str, str] | None = None,
 ) -> str | None:
-    lines = [_message_to_summary_line(m, image_captions=image_captions) for m in messages]
-    if not lines and not previous_summary:
-        return None
-
-    budget_chars = max(2000, target_tokens * 4)
-    parts: list[str] = [
-        "## Earlier Context Summary",
-        "### Local Fallback",
-        "Upstream summarization did not finish; this deterministic fallback preserves the latest compacted source facts.",
-    ]
-    if previous_summary and previous_summary.strip():
-        parts.extend(
-            [
-                "### Previous Summary",
-                _truncate(previous_summary.strip(), max(800, budget_chars // 3)),
-            ]
-        )
-    if extra_instruction and extra_instruction.strip():
-        parts.extend(["### Additional Hints From User", extra_instruction.strip()])
-
-    source_budget = max(1000, budget_chars - sum(len(p) for p in parts) - 400)
-    selected: list[str] = []
-    used = 0
-    # Prefer the most recent source lines because they are the ones most likely
-    # to be needed immediately after compaction. Include a small prefix too so
-    # the original task is not lost when the source window is very long.
-    prefix_count = min(6, len(lines))
-    for line in lines[:prefix_count]:
-        item = _truncate(line, 1200)
-        cost = len(item) + 2
-        if used + cost > source_budget:
-            break
-        selected.append(item)
-        used += cost
-
-    remaining_budget = source_budget - used
-    suffix: list[str] = []
-    for line in reversed(lines[prefix_count:]):
-        item = _truncate(line, 1200)
-        cost = len(item) + 2
-        if suffix and used + cost > source_budget:
-            break
-        if not suffix and cost > remaining_budget:
-            item = _truncate(item, max(200, remaining_budget))
-            cost = len(item) + 2
-        if used + cost > source_budget:
-            break
-        suffix.append(item)
-        used += cost
-    suffix.reverse()
-
-    omitted = max(0, len(lines) - len(selected) - len(suffix))
-    parts.append("### Source Messages")
-    if omitted > 0:
-        parts.append(f"[{omitted} older source messages omitted by local fallback budget]")
-    parts.extend(selected)
-    parts.extend(suffix)
-    text = "\n\n".join(part for part in parts if part)
-    return _truncate(text, budget_chars)
+    return _local_fallback_summary_text_impl(
+        previous_summary=previous_summary,
+        messages=messages,
+        target_tokens=target_tokens,
+        extra_instruction=extra_instruction,
+        image_captions=image_captions,
+        message_to_line=_message_to_summary_line,
+        truncate_fn=_truncate,
+    )
 
 
 async def _call_summary_upstream_compatible(
@@ -938,40 +535,13 @@ async def _call_summary_upstream_compatible(
         )
 
 
-def _chunk_lines_by_budget(lines: Sequence[str], budget: int) -> list[list[str]]:
-    chunks: list[list[str]] = []
-    current: list[str] = []
-    used = 0
-    limit = max(1000, budget)
-    for line in _split_oversized_lines(lines, limit):
-        cost = max(1, estimate_text_tokens(line))
-        if current and used + cost > limit:
-            chunks.append(current)
-            current = []
-            used = 0
-        current.append(line)
-        used += cost
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _split_oversized_lines(lines: Sequence[str], limit: int) -> list[str]:
-    split_lines: list[str] = []
-    for line in lines:
-        if estimate_text_tokens(line) <= limit:
-            split_lines.append(line)
-            continue
-
-        remaining = line
-        max_chars = max(1000, limit * 3)
-        while remaining:
-            piece = remaining[:max_chars]
-            while len(piece) > 1 and estimate_text_tokens(piece) > limit:
-                piece = piece[: max(1, int(len(piece) * 0.8))]
-            split_lines.append(piece)
-            remaining = remaining[len(piece) :]
-    return split_lines
+def _bounded_summary_segments(
+    segments: Sequence[_SummarySegment],
+) -> tuple[list[_SummarySegment], str | None]:
+    return _bounded_summary_segments_impl(
+        segments,
+        _SUMMARY_MAX_SEGMENTS,
+    )
 
 
 async def _safe_set_partial(redis: Any, conv_id: str, text: str, segment_index: int) -> None:
@@ -1056,6 +626,7 @@ async def _segment_and_summarize(
     image_captions: Mapping[str, str] | None = None,
     redis: Any = None,
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+    coverage: _SummaryCoverage | None = None,
 ) -> str | None:
     lines = [_message_to_summary_line(m, image_captions=image_captions) for m in messages]
     if not lines and not previous_summary:
@@ -1066,54 +637,64 @@ async def _segment_and_summarize(
         line_tokens += estimate_text_tokens(previous_summary)
 
     if line_tokens <= input_budget:
-        return await _call_summary_upstream_compatible(
+        result = await _call_summary_upstream_compatible(
             _compose_summary_input(previous_summary, lines),
             target_tokens,
             model,
             extra_instruction=extra_instruction,
             timeout_s=timeout_s,
         )
+        if result and coverage is not None:
+            coverage.covered_message_count = len(messages)
+        return result
 
-    chunks = _chunk_lines_by_budget(lines, max(1, input_budget // 2))
-    if len(chunks) > _SUMMARY_MAX_SEGMENTS:
+    all_segments = _summary_segments_by_budget(
+        lines,
+        max(1, input_budget // 2),
+    )
+    segments, bounded_reason = _bounded_summary_segments(all_segments)
+    if bounded_reason:
         logger.warning(
-            "context_summary.too_many_segments conv=%s segments=%s max=%s",
+            "context_summary.too_many_segments conv=%s segments=%s planned=%s max=%s",
             conv_id,
-            len(chunks),
+            len(all_segments),
+            len(segments),
             _SUMMARY_MAX_SEGMENTS,
         )
-        chunks = [chunks[-1]]
-        previous_summary = None
 
     current_summary = previous_summary
-    total = len(chunks)
-    for idx, chunk in enumerate(chunks, start=1):
+    last_committable_summary: str | None = None
+    total = len(segments)
+    for idx, segment in enumerate(segments, start=1):
         result = await _call_summary_upstream_compatible(
-            _compose_summary_input(current_summary, chunk),
+            _compose_summary_input(current_summary, segment.lines),
             target_tokens,
             model,
             extra_instruction=extra_instruction,
             timeout_s=timeout_s,
         )
         if not result:
-            # Robustness: if at least one earlier segment already produced a
-            # rolling summary, return it as a best-effort partial result rather
-            # than throwing away everything. The user gets a slightly less
-            # complete summary instead of "compression failed" plus a totally
-            # untouched conversation. previous_summary alone (idx == 1, no
-            # successful upstream call yet) does not count — we never want to
-            # write a "fresh" summary that is just the prior cached one.
-            if current_summary and current_summary != previous_summary:
+            if coverage is not None:
+                coverage.partial_reason = "partial_segment_failure"
+            # Only a result ending at a complete message boundary is safe to
+            # commit. An intermediate oversized-message segment may contain
+            # facts beyond the stored boundary and must never advance it.
+            if last_committable_summary:
                 logger.warning(
-                    "context_summary.partial_segment_fallback conv=%s done=%d total=%d",
+                    "context_summary.partial_segment_fallback conv=%s done=%d total=%d covered_messages=%d",
                     conv_id,
                     idx - 1,
                     total,
+                    coverage.covered_message_count if coverage is not None else 0,
                 )
-                return current_summary
+                return last_committable_summary
             return None
         current_summary = result
         await _safe_set_partial(redis, conv_id, current_summary, idx)
+        if segment.ends_at_message_boundary:
+            last_committable_summary = current_summary
+            if coverage is not None:
+                coverage.covered_message_count = segment.covered_message_count
         if progress_callback and total > 1:
             try:
                 await progress_callback(idx, total)
@@ -1123,7 +704,9 @@ async def _segment_and_summarize(
                     conv_id,
                     exc,
                 )
-    return current_summary
+    if coverage is not None:
+        coverage.partial_reason = bounded_reason
+    return last_committable_summary
 
 
 async def _publish_compaction_event(redis: Any, conv_id: str, payload: dict[str, Any]) -> None:
@@ -1229,13 +812,16 @@ async def record_summary_metrics(
             f"{trigger}.{outcome}.source_tokens": max(0, source_tokens),
             f"{trigger}.{outcome}.summary_tokens": max(0, summary_tokens),
         }
-        fields["summary_attempts"] = 1
-        if outcome == "ok":
-            fields["summary_successes"] = 1
+        if outcome == "circuit_open":
+            fields["fallback_reason:circuit_open"] = 1
         else:
-            fields["summary_failures"] = 1
-            reason = "summary_failed" if outcome == "failed" else outcome
-            fields[f"fallback_reason:{reason}"] = 1
+            fields["summary_attempts"] = 1
+            if outcome == "ok":
+                fields["summary_successes"] = 1
+            else:
+                fields["summary_failures"] = 1
+                reason = "summary_failed" if outcome == "failed" else outcome
+                fields[f"fallback_reason:{reason}"] = 1
         if trigger == "manual":
             fields["manual_compact_calls"] = 1
         if pipe is not None:
@@ -1296,7 +882,11 @@ def _get_redis_from_settings(settings: Any) -> Any:
     return getattr(settings, "redis", None) or getattr(settings, "_redis", None)
 
 
-async def _acquire_summary_lock(session: Any, redis: Any, conv_id: str) -> _SummaryLock | None:
+async def _acquire_summary_lock(
+    _session: Any,
+    redis: Any,
+    conv_id: str,
+) -> _SummaryLock | None:
     token = uuid.uuid4().hex
     key = f"context:summary:lock:{conv_id}"
     if redis is not None:
@@ -1307,33 +897,85 @@ async def _acquire_summary_lock(session: Any, redis: Any, conv_id: str) -> _Summ
             return None
         except Exception as exc:  # noqa: BLE001
             logger.warning("context_summary.redis_lock_failed conv=%s err=%s", conv_id, exc)
+            # Redis-backed workers must fail closed here. Falling back to a
+            # session-level PostgreSQL advisory lock holds one connection from
+            # the main business pool across the upstream summary call and can
+            # exhaust the pool during a Redis outage.
+            return None
 
+    connection = None
     try:
-        result = await session.execute(
-            sa_text("select pg_try_advisory_xact_lock(hashtext(:key))"),
+        connection = await engine.connect()
+        result = await connection.execute(
+            sa_text("select pg_try_advisory_lock(hashtext(:key))"),
             {"key": key},
         )
+        await connection.commit()
         got_pg_lock = bool(result.scalar_one_or_none())
         if got_pg_lock:
-            return _SummaryLock("pg")
+            return _SummaryLock(
+                "pg",
+                pg_connection=connection,
+                pg_key=key,
+            )
+        await connection.close()
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("context_summary.pg_lock_failed conv=%s err=%s", conv_id, exc)
+        if connection is not None:
+            try:
+                await connection.close()
+            except Exception:  # noqa: BLE001
+                pass
         return None
 
 
 async def _release_summary_lock(redis: Any, conv_id: str, lock: _SummaryLock | None) -> None:
-    if redis is None or lock is None or lock.kind != "redis" or lock.token is None:
+    if lock is None:
+        return
+    if lock.kind == "pg" and lock.pg_connection is not None and lock.pg_key:
+        connection = lock.pg_connection
+        try:
+            await connection.execute(
+                sa_text("select pg_advisory_unlock(hashtext(:key))"),
+                {"key": lock.pg_key},
+            )
+            await connection.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "context_summary.pg_unlock_failed conv=%s err=%s",
+                conv_id,
+                exc,
+            )
+            try:
+                await connection.invalidate()
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            try:
+                await connection.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    if redis is None or lock.kind != "redis" or lock.token is None:
         return
     key = f"context:summary:lock:{conv_id}"
     try:
-        value = await redis.get(key)
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", errors="replace")
-        if value == lock.token:
-            await redis.delete(key)
+        await redis.eval(
+            _RELEASE_SUMMARY_LOCK_LUA,
+            1,
+            key,
+            lock.token,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("context_summary.redis_unlock_failed conv=%s err=%r", conv_id, exc)
+
+
+async def _release_business_transaction(session: Any) -> None:
+    """Return the application DB connection before any upstream network wait."""
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
 
 
 async def _renew_summary_lock_loop(
@@ -1358,10 +1000,17 @@ async def _renew_summary_lock_loop(
         while True:
             await asyncio.sleep(interval_s)
             try:
-                value = await redis.get(key)
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8", errors="replace")
-                if value != lock.token:
+                renewed = await redis.eval(
+                    _RENEW_SUMMARY_LOCK_LUA,
+                    1,
+                    key,
+                    lock.token,
+                    str(_SUMMARY_LOCK_TTL_S),
+                )
+                if int(renewed or 0) != 1:
+                    value = await redis.get(key)
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", errors="replace")
                     # Lock已过期或被其他持有者覆盖；主流程需要停止写入，
                     # 不能继续假装自己仍然持锁。
                     lock.lost_reason = "expired" if value is None else "stolen"
@@ -1370,7 +1019,6 @@ async def _renew_summary_lock_loop(
                         conv_id, value, lock.lost_reason,
                     )
                     return
-                await redis.expire(key, _SUMMARY_LOCK_TTL_S)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "context_summary.lock_renew_failed conv=%s err=%s",
@@ -1382,7 +1030,7 @@ async def _renew_summary_lock_loop(
 
 async def _read_current_summary(session: Any, conv_id: str) -> dict[str, Any] | None:
     try:
-        row = await session.get(Conversation, conv_id)
+        row = await session.get(Conversation, conv_id, populate_existing=True)
         if row is None:
             return None
         summary = row.summary_jsonb
@@ -1410,7 +1058,10 @@ async def _cas_write_summary(
         return False
     try:
         result = await session.execute(
-            select(Conversation).where(Conversation.id == conv_id).with_for_update()
+            select(Conversation)
+            .where(Conversation.id == conv_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         current = result.scalar_one_or_none()
         if current is None:
@@ -1427,7 +1078,7 @@ async def _cas_write_summary(
                 pass
             return False
         current_summary = current.summary_jsonb if isinstance(current.summary_jsonb, dict) else None
-        if is_summary_usable(current_summary):
+        if isinstance(current_summary, dict) and is_summary_usable(current_summary):
             current_raw = current_summary.get("up_to_created_at")
             new_raw = summary.get("up_to_created_at")
             if isinstance(current_raw, str) and isinstance(new_raw, str):
@@ -1436,7 +1087,7 @@ async def _cas_write_summary(
                     new_dt = datetime.fromisoformat(new_raw.replace("Z", "+00:00"))
                     current_id = current_summary.get("up_to_message_id")
                     new_id = summary.get("up_to_message_id")
-                    position_cmp = _compare_message_position(
+                    position_cmp = compare_message_position(
                         current_dt,
                         current_id if isinstance(current_id, str) else None,
                         new_dt,
@@ -1464,6 +1115,614 @@ async def _cas_write_summary(
         return False
 
 
+@dataclass(frozen=True)
+class _SummaryRequest:
+    conv_id: str
+    boundary: Any
+    boundary_id: str
+    boundary_dt: datetime
+    settings: Any
+    target_tokens: int
+    input_budget: int
+    summary_timeout_s: float
+    model: str
+    circuit_threshold: int
+    extra_instruction: str | None
+    extra_hash: str | None
+    existing_summary: dict[str, Any] | None
+    previous_summary_text: str | None
+    loaded: LoadedSummaryMessages
+    trigger: str
+    force: bool
+
+
+@dataclass(frozen=True)
+class _SummaryTiming:
+    started_at: datetime
+    started_monotonic: float
+
+
+@dataclass(frozen=True)
+class _SummaryGenerationResult:
+    text: str
+    loaded: LoadedSummaryMessages
+    coverage: _SummaryCoverage
+    fallback_reason: str | None
+
+
+def _summary_event_payload(
+    request: _SummaryRequest,
+    timing: _SummaryTiming,
+    *,
+    phase: str,
+    ok: bool | None,
+    fallback_reason: str | None,
+    progress: tuple[int, int] | None = None,
+    public: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "conversation_id": request.conv_id,
+        "phase": phase,
+        "trigger": request.trigger,
+        "started_at": timing.started_at.isoformat(),
+        "completed_at": _utc_now().isoformat() if phase == "completed" else None,
+        "elapsed_ms": (
+            int((time.monotonic() - timing.started_monotonic) * 1000)
+            if phase == "completed"
+            else None
+        ),
+        "ok": ok,
+        "fallback_reason": fallback_reason,
+    }
+    if progress is not None:
+        payload["progress"] = {
+            "current_segment": progress[0],
+            "total_segments": progress[1],
+        }
+    if public is not None:
+        payload["stats"] = {
+            "summary_tokens": public["summary_tokens"],
+            "source_message_count": public["source_message_count"],
+            "source_token_estimate": public["source_token_estimate"],
+            "image_caption_count": public["image_caption_count"],
+            "tokens_freed": public["tokens_freed"],
+            "summary_up_to_message_id": public["summary_up_to_message_id"],
+        }
+    return payload
+
+
+async def _attach_summary_image_captions(
+    session: Any,
+    request: _SummaryRequest,
+) -> LoadedSummaryMessages:
+    image_captions = await _caption_images_for_summary(
+        session,
+        request.loaded.messages,
+        request.settings,
+    )
+    if not image_captions:
+        return request.loaded
+    return LoadedSummaryMessages(
+        request.loaded.messages,
+        request.loaded.source_message_count,
+        request.loaded.source_token_estimate,
+        request.loaded.image_caption_count + len(image_captions),
+        image_captions,
+    )
+
+
+def _normalize_summary_coverage(
+    summary_text: str | None,
+    coverage: _SummaryCoverage,
+    loaded: LoadedSummaryMessages,
+) -> None:
+    # Older monkeypatches return a successful string without the coverage object.
+    if (
+        summary_text
+        and coverage.covered_message_count == 0
+        and coverage.partial_reason is None
+    ):
+        coverage.covered_message_count = len(loaded.messages)
+
+
+async def _report_summary_generation_failure(
+    request: _SummaryRequest,
+    timing: _SummaryTiming,
+    redis: Any,
+    *,
+    circuit_open: bool,
+) -> None:
+    _observe_compaction_duration(
+        trigger=request.trigger,
+        outcome="failed",
+        elapsed_s=time.monotonic() - timing.started_monotonic,
+    )
+    await record_summary_metrics(
+        redis,
+        conv_id=request.conv_id,
+        trigger=request.trigger,
+        outcome="failed",
+        circuit_threshold_percent=(
+            None if circuit_open else request.circuit_threshold
+        ),
+    )
+    await _publish_compaction_event(
+        redis,
+        request.conv_id,
+        _summary_event_payload(
+            request,
+            timing,
+            phase="completed",
+            ok=False,
+            fallback_reason="summary_failed",
+        ),
+    )
+
+
+async def _generate_summary_result(
+    session: Any,
+    request: _SummaryRequest,
+    timing: _SummaryTiming,
+    redis: Any,
+    *,
+    circuit_open: bool,
+    progress_callback: Callable[[int, int], Awaitable[None]],
+) -> _SummaryGenerationResult | None:
+    loaded = await _attach_summary_image_captions(session, request)
+    coverage = _SummaryCoverage()
+    summary_text: str | None = None
+    if not circuit_open:
+        summary_text = await _segment_and_summarize(
+            conv_id=request.conv_id,
+            messages=loaded.messages,
+            previous_summary=request.previous_summary_text,
+            target_tokens=request.target_tokens,
+            model=request.model,
+            input_budget=request.input_budget,
+            timeout_s=request.summary_timeout_s,
+            extra_instruction=request.extra_instruction,
+            image_captions=loaded.image_captions,
+            redis=redis,
+            progress_callback=progress_callback,
+            coverage=coverage,
+        )
+    _normalize_summary_coverage(summary_text, coverage, loaded)
+
+    fallback_reason = coverage.partial_reason if summary_text else None
+    if fallback_reason == "partial_segment_failure":
+        await _record_circuit_sample(
+            redis,
+            success=False,
+            threshold_percent=request.circuit_threshold,
+        )
+    if summary_text:
+        return _SummaryGenerationResult(
+            summary_text,
+            loaded,
+            coverage,
+            fallback_reason,
+        )
+
+    if not circuit_open and coverage.partial_reason != "segment_limit":
+        await _record_circuit_sample(
+            redis,
+            success=False,
+            threshold_percent=request.circuit_threshold,
+        )
+    summary_text = _local_fallback_summary_text(
+        previous_summary=request.previous_summary_text,
+        messages=loaded.messages,
+        target_tokens=request.target_tokens,
+        extra_instruction=request.extra_instruction,
+        image_captions=loaded.image_captions,
+    )
+    fallback_reason = (
+        "circuit_open_local_fallback" if circuit_open else "local_fallback"
+    )
+    if not summary_text:
+        await _report_summary_generation_failure(
+            request,
+            timing,
+            redis,
+            circuit_open=circuit_open,
+        )
+        return None
+    logger.warning(
+        "context_summary.local_fallback_used conv=%s source_messages=%d",
+        request.conv_id,
+        loaded.source_message_count,
+    )
+    return _SummaryGenerationResult(
+        summary_text,
+        loaded,
+        coverage,
+        fallback_reason,
+    )
+
+
+def _effective_summary_window(
+    request: _SummaryRequest,
+    generated: _SummaryGenerationResult,
+) -> tuple[LoadedSummaryMessages, str, datetime] | None:
+    if (
+        generated.fallback_reason
+        not in {"partial_segment_failure", "segment_limit"}
+        or generated.coverage.covered_message_count >= len(generated.loaded.messages)
+    ):
+        return generated.loaded, request.boundary_id, request.boundary_dt
+
+    effective_loaded = _loaded_summary_prefix(
+        generated.loaded,
+        generated.coverage.covered_message_count,
+    )
+    if not effective_loaded.messages:
+        return None
+    covered_boundary = effective_loaded.messages[-1]
+    return effective_loaded, str(covered_boundary.id), covered_boundary.created_at
+
+
+def _normalize_summary_output(
+    request: _SummaryRequest,
+    summary_text: str,
+) -> tuple[str, int]:
+    summary_tokens = estimate_text_tokens(summary_text)
+    if summary_tokens <= request.target_tokens * 2:
+        return summary_text, summary_tokens
+    max_chars = max(1000, int(request.target_tokens * 1.5 * 4))
+    summary_text = _truncate(summary_text, max_chars)
+    summary_tokens = estimate_text_tokens(summary_text)
+    logger.warning(
+        "context_summary.output_truncated conv=%s tokens=%s",
+        request.conv_id,
+        summary_tokens,
+    )
+    return summary_text, summary_tokens
+
+
+async def _first_summary_user_message_id(
+    session: Any,
+    conv_id: str,
+    fallback_id: str,
+) -> str:
+    first_user_message_id = None
+    try:
+        first_user_message_id = (
+            await session.execute(
+                select(Message.id)
+                .where(
+                    Message.conversation_id == conv_id,
+                    Message.deleted_at.is_(None),
+                    Message.role == Role.USER.value,
+                )
+                .order_by(Message.created_at.asc(), Message.id.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "context_summary.first_user_lookup_failed conv=%s err=%r",
+            conv_id,
+            exc,
+        )
+    return str(first_user_message_id or fallback_id)
+
+
+def _build_summary_jsonb(
+    request: _SummaryRequest,
+    generated: _SummaryGenerationResult,
+    effective_loaded: LoadedSummaryMessages,
+    *,
+    summary_boundary_id: str,
+    summary_boundary_dt: datetime,
+    first_user_message_id: str,
+    summary_text: str,
+    summary_tokens: int,
+) -> dict[str, Any]:
+    previous_runs = (
+        int(request.existing_summary.get("compression_runs") or 0)
+        if request.existing_summary is not None
+        else 0
+    )
+    return {
+        "version": SUMMARY_VERSION,
+        "kind": SUMMARY_KIND,
+        "up_to_message_id": summary_boundary_id,
+        "up_to_created_at": _iso(summary_boundary_dt),
+        "first_user_message_id": first_user_message_id,
+        "text": summary_text,
+        "tokens": summary_tokens,
+        "source_message_count": effective_loaded.source_message_count,
+        "source_token_estimate": effective_loaded.source_token_estimate,
+        "model": request.model,
+        "image_caption_count": effective_loaded.image_caption_count,
+        "extra_instruction_hash": request.extra_hash,
+        "compressed_at": _utc_now().isoformat(),
+        "compression_runs": previous_runs + 1,
+        "last_quality_signal": generated.fallback_reason,
+        "fallback_reason": generated.fallback_reason,
+    }
+
+
+async def _handle_lost_summary_lock(
+    session: Any,
+    request: _SummaryRequest,
+    timing: _SummaryTiming,
+    redis: Any,
+    lock: _SummaryLock,
+) -> dict[str, Any] | None:
+    latest = await _read_current_summary(session, request.conv_id)
+    if _summary_satisfies_request(latest, request.boundary, request.extra_hash):
+        return _public_summary_result(
+            latest,
+            created=False,
+            status="cached_after_lock_lost",
+        )
+    _observe_compaction_duration(
+        trigger=request.trigger,
+        outcome="lock_lost",
+        elapsed_s=time.monotonic() - timing.started_monotonic,
+    )
+    await record_summary_metrics(
+        redis,
+        conv_id=request.conv_id,
+        trigger=request.trigger,
+        outcome="lock_lost",
+    )
+    await _publish_compaction_event(
+        redis,
+        request.conv_id,
+        _summary_event_payload(
+            request,
+            timing,
+            phase="completed",
+            ok=False,
+            fallback_reason=f"lock_{lock.lost_reason}",
+        ),
+    )
+    return None
+
+
+async def _persist_summary_result(
+    session: Any,
+    request: _SummaryRequest,
+    timing: _SummaryTiming,
+    redis: Any,
+    lock: _SummaryLock,
+    generated: _SummaryGenerationResult,
+) -> dict[str, Any] | None:
+    window = _effective_summary_window(request, generated)
+    if window is None:
+        return {"status": "summary_failed"}
+    effective_loaded, summary_boundary_id, summary_boundary_dt = window
+    summary_text, summary_tokens = _normalize_summary_output(
+        request,
+        generated.text,
+    )
+    first_user_message_id = await _first_summary_user_message_id(
+        session,
+        request.conv_id,
+        summary_boundary_id,
+    )
+    summary_jsonb = _build_summary_jsonb(
+        request,
+        generated,
+        effective_loaded,
+        summary_boundary_id=summary_boundary_id,
+        summary_boundary_dt=summary_boundary_dt,
+        first_user_message_id=first_user_message_id,
+        summary_text=summary_text,
+        summary_tokens=summary_tokens,
+    )
+
+    if lock.lost_reason:
+        return await _handle_lost_summary_lock(
+            session,
+            request,
+            timing,
+            redis,
+            lock,
+        )
+    wrote = await _cas_write_summary(
+        session,
+        request.conv_id,
+        summary_jsonb,
+        lock=lock,
+        allow_equal_boundary_refresh=request.force,
+    )
+    if not wrote:
+        latest = await _read_current_summary(session, request.conv_id)
+        if _summary_satisfies_request(
+            latest,
+            request.boundary,
+            request.extra_hash,
+        ):
+            return _public_summary_result(
+                latest,
+                created=False,
+                status="cas_reused",
+            )
+        _observe_compaction_duration(
+            trigger=request.trigger,
+            outcome="cas_failed",
+            elapsed_s=time.monotonic() - timing.started_monotonic,
+        )
+        await record_summary_metrics(
+            redis,
+            conv_id=request.conv_id,
+            trigger=request.trigger,
+            outcome="cas_failed",
+        )
+        return None
+
+    await _safe_delete_partial(redis, request.conv_id)
+    public_status = (
+        "created_local_fallback"
+        if generated.fallback_reason
+        in {"circuit_open_local_fallback", "local_fallback"}
+        else "created"
+    )
+    public = _public_summary_result(
+        summary_jsonb,
+        created=True,
+        status=public_status,
+    )
+    _observe_compaction_duration(
+        trigger=request.trigger,
+        outcome="ok",
+        elapsed_s=time.monotonic() - timing.started_monotonic,
+    )
+    await record_summary_metrics(
+        redis,
+        conv_id=request.conv_id,
+        trigger=request.trigger,
+        outcome="ok",
+        source_tokens=effective_loaded.source_token_estimate,
+        summary_tokens=summary_tokens,
+        circuit_threshold_percent=(
+            request.circuit_threshold
+            if generated.fallback_reason in {None, "segment_limit"}
+            else None
+        ),
+    )
+    await _publish_compaction_event(
+        redis,
+        request.conv_id,
+        _summary_event_payload(
+            request,
+            timing,
+            phase="completed",
+            ok=True,
+            fallback_reason=generated.fallback_reason,
+            public=public,
+        ),
+    )
+    return public
+
+
+async def _stop_summary_lock_renewal(
+    renew_task: asyncio.Task[None] | None,
+) -> None:
+    if renew_task is None:
+        return
+    renew_task.cancel()
+    try:
+        await renew_task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+async def _run_locked_context_summary(
+    session: Any,
+    request: _SummaryRequest,
+    redis: Any,
+    lock: _SummaryLock,
+    *,
+    circuit_open: bool,
+) -> dict[str, Any] | None:
+    renew_task: asyncio.Task[None] | None = None
+    try:
+        # Release caller-owned business transactions before network waits.
+        await _release_business_transaction(session)
+        timing = _SummaryTiming(_utc_now(), time.monotonic())
+
+        async def progress(current_segment: int, total_segments: int) -> None:
+            await _publish_compaction_event(
+                redis,
+                request.conv_id,
+                _summary_event_payload(
+                    request,
+                    timing,
+                    phase="progress",
+                    ok=None,
+                    fallback_reason=None,
+                    progress=(current_segment, total_segments),
+                ),
+            )
+
+        await _publish_compaction_event(
+            redis,
+            request.conv_id,
+            _summary_event_payload(
+                request,
+                timing,
+                phase="started",
+                ok=None,
+                fallback_reason=None,
+            ),
+        )
+        if redis is not None and lock.kind == "redis" and lock.token is not None:
+            renew_task = asyncio.create_task(
+                _renew_summary_lock_loop(redis, request.conv_id, lock)
+            )
+
+        generated = await _generate_summary_result(
+            session,
+            request,
+            timing,
+            redis,
+            circuit_open=circuit_open,
+            progress_callback=progress,
+        )
+        if generated is None:
+            return {"status": "summary_failed"}
+        return await _persist_summary_result(
+            session,
+            request,
+            timing,
+            redis,
+            lock,
+            generated,
+        )
+    finally:
+        await _stop_summary_lock_renewal(renew_task)
+        await _release_summary_lock(redis, request.conv_id, lock)
+
+
+def _summary_dry_run_result(request: _SummaryRequest) -> dict[str, Any]:
+    return {
+        "status": "dry_run",
+        "dry_run": True,
+        "would_call_upstream": (
+            request.loaded.source_message_count > 0
+            or bool(request.previous_summary_text)
+        ),
+        "summary_created": False,
+        "summary_used": False,
+        "summary_up_to_message_id": request.boundary_id,
+        "summary_up_to_created_at": _iso(request.boundary_dt),
+        "source_message_count": request.loaded.source_message_count,
+        "source_token_estimate": request.loaded.source_token_estimate,
+        "image_caption_count": request.loaded.image_caption_count,
+        "extra_instruction_hash": request.extra_hash,
+    }
+
+
+async def _wait_for_summary_lock(
+    session: Any,
+    request: _SummaryRequest,
+    redis: Any,
+) -> dict[str, Any] | None:
+    await asyncio.sleep(_SUMMARY_LOCK_WAIT_S)
+    latest = await _read_current_summary(session, request.conv_id)
+    if _summary_satisfies_request(
+        latest,
+        request.boundary,
+        request.extra_hash,
+    ):
+        return _public_summary_result(
+            latest,
+            created=False,
+            status="cached_after_lock_wait",
+        )
+    await record_summary_metrics(
+        redis,
+        conv_id=request.conv_id,
+        trigger=request.trigger,
+        outcome="lock_busy",
+    )
+    return None
+
+
 async def ensure_context_summary(
     session: Any,
     conv: Conversation,
@@ -1475,18 +1734,22 @@ async def ensure_context_summary(
     dry_run: bool = False,
     trigger: str = "auto",
 ) -> dict[str, Any] | None:
-    """Ensure a rolling summary exists up to ``boundary``.
-
-    Returns public metadata only. The summary text is intentionally never
-    exposed to callers.
-    """
+    """Ensure a rolling summary exists up to ``boundary``."""
     conv_id = str(conv.id)
     boundary_id = _boundary_id(boundary)
     if not boundary_id:
         return None
 
-    target_tokens = _settings_int(settings, "context.summary_target_tokens", _SUMMARY_TARGET_TOKENS)
-    input_budget = _settings_int(settings, "context.summary_input_budget", _SUMMARY_INPUT_BUDGET)
+    target_tokens = _settings_int(
+        settings,
+        "context.summary_target_tokens",
+        _SUMMARY_TARGET_TOKENS,
+    )
+    input_budget = _settings_int(
+        settings,
+        "context.summary_input_budget",
+        _SUMMARY_INPUT_BUDGET,
+    )
     summary_timeout_s = _settings_float(
         settings,
         "context.summary_http_timeout_s",
@@ -1500,361 +1763,96 @@ async def ensure_context_summary(
     )
     extra_hash = _extra_instruction_hash(extra_instruction)
     existing_summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else None
-
+    usable_existing_summary = (
+        existing_summary
+        if existing_summary is not None and is_summary_usable(existing_summary)
+        else None
+    )
     if (
         not dry_run
         and not force
-        and _summary_satisfies_request(existing_summary, boundary, extra_hash)
+        and _summary_satisfies_request(
+            usable_existing_summary,
+            boundary,
+            extra_hash,
+        )
     ):
         return _public_summary_result(
-            existing_summary, created=False, status="cached"
-        )  # type: ignore[arg-type]
+            usable_existing_summary,
+            created=False,
+            status="cached",
+        )
 
     previous_summary_text = (
-        existing_summary.get("text")
-        if is_summary_usable(existing_summary) and isinstance(existing_summary.get("text"), str)
+        usable_existing_summary.get("text")
+        if usable_existing_summary is not None
+        and isinstance(usable_existing_summary.get("text"), str)
         else None
     )
     previous_up_to_id = (
-        existing_summary.get("up_to_message_id")
-        if is_summary_usable(existing_summary)
-        and isinstance(existing_summary.get("up_to_message_id"), str)
+        usable_existing_summary.get("up_to_message_id")
+        if usable_existing_summary is not None
+        and isinstance(usable_existing_summary.get("up_to_message_id"), str)
         else None
     )
     if force:
         previous_summary_text = None
         previous_up_to_id = None
 
-    loaded = await _load_messages_for_summary(session, conv_id, previous_up_to_id, boundary_id)
+    loaded = await _load_messages_for_summary(
+        session,
+        conv_id,
+        previous_up_to_id,
+        boundary_id,
+    )
     boundary_dt = _boundary_created_at(boundary)
     if boundary_dt is None:
-        pos = await _message_position(session, boundary_id)
-        boundary_dt = pos[0] if pos is not None else None
+        position = await _message_position(session, boundary_id)
+        boundary_dt = position[0] if position is not None else None
     if boundary_dt is None:
         return None
 
-    dry_run_result = {
-        "status": "dry_run",
-        "dry_run": True,
-        "would_call_upstream": loaded.source_message_count > 0 or bool(previous_summary_text),
-        "summary_created": False,
-        "summary_used": False,
-        "summary_up_to_message_id": boundary_id,
-        "summary_up_to_created_at": _iso(boundary_dt),
-        "source_message_count": loaded.source_message_count,
-        "source_token_estimate": loaded.source_token_estimate,
-        "image_caption_count": loaded.image_caption_count,
-        "extra_instruction_hash": extra_hash,
-    }
+    request = _SummaryRequest(
+        conv_id=conv_id,
+        boundary=boundary,
+        boundary_id=boundary_id,
+        boundary_dt=boundary_dt,
+        settings=settings,
+        target_tokens=target_tokens,
+        input_budget=input_budget,
+        summary_timeout_s=summary_timeout_s,
+        model=model,
+        circuit_threshold=circuit_threshold,
+        extra_instruction=extra_instruction,
+        extra_hash=extra_hash,
+        existing_summary=existing_summary,
+        previous_summary_text=previous_summary_text,
+        loaded=loaded,
+        trigger=trigger,
+        force=force,
+    )
     if dry_run:
-        return dry_run_result
+        return _summary_dry_run_result(request)
 
     redis = _get_redis_from_settings(settings)
-    # Circuit breaker short-circuit used to fail manual compact outright. Keep
-    # avoiding upstream while still allowing the deterministic local fallback to
-    # finish the compaction.
     circuit_open = await _is_circuit_open(redis)
     if circuit_open:
-        await record_summary_metrics(
-            redis, conv_id=conv_id, trigger=trigger, outcome="circuit_open"
-        )
-    lock = await _acquire_summary_lock(session, redis, conv_id)
-    if lock is None:
-        await asyncio.sleep(_SUMMARY_LOCK_WAIT_S)
-        latest = await _read_current_summary(session, conv_id)
-        if _summary_satisfies_request(latest, boundary, extra_hash):
-            return _public_summary_result(
-                latest, created=False, status="cached_after_lock_wait"
-            )  # type: ignore[arg-type]
-        await record_summary_metrics(redis, conv_id=conv_id, trigger=trigger, outcome="lock_busy")
-        return None
-
-    started_at = _utc_now()
-    started_monotonic = time.monotonic()
-    started_payload = {
-        "conversation_id": conv_id,
-        "phase": "started",
-        "trigger": trigger,
-        "started_at": started_at.isoformat(),
-        "completed_at": None,
-        "elapsed_ms": None,
-        "ok": None,
-        "fallback_reason": None,
-    }
-
-    async def progress(current_segment: int, total_segments: int) -> None:
-        await _publish_compaction_event(
-            redis,
-            conv_id,
-            {
-                "conversation_id": conv_id,
-                "phase": "progress",
-                "trigger": trigger,
-                "started_at": started_at.isoformat(),
-                "completed_at": None,
-                "elapsed_ms": None,
-                "ok": None,
-                "fallback_reason": None,
-                "progress": {
-                    "current_segment": current_segment,
-                    "total_segments": total_segments,
-                },
-            },
-        )
-
-    await _publish_compaction_event(redis, conv_id, started_payload)
-    renew_task: asyncio.Task[None] | None = None
-    if redis is not None and lock.kind == "redis" and lock.token is not None:
-        renew_task = asyncio.create_task(
-            _renew_summary_lock_loop(redis, conv_id, lock)
-        )
-    try:
-        image_captions = await _caption_images_for_summary(
-            session,
-            loaded.messages,
-            settings,
-        )
-        if image_captions:
-            loaded = LoadedSummaryMessages(
-                loaded.messages,
-                loaded.source_message_count,
-                loaded.source_token_estimate,
-                loaded.image_caption_count + len(image_captions),
-                image_captions,
-            )
-
-        summary_text = None
-        if not circuit_open:
-            summary_text = await _segment_and_summarize(
-                conv_id=conv_id,
-                messages=loaded.messages,
-                previous_summary=previous_summary_text,
-                target_tokens=target_tokens,
-                model=model,
-                input_budget=input_budget,
-                timeout_s=summary_timeout_s,
-                extra_instruction=extra_instruction,
-                image_captions=loaded.image_captions,
-                redis=redis,
-                progress_callback=progress,
-            )
-        fallback_reason: str | None = None
-        if not summary_text:
-            await _record_circuit_sample(
-                redis,
-                success=False,
-                threshold_percent=circuit_threshold,
-            )
-            summary_text = _local_fallback_summary_text(
-                previous_summary=previous_summary_text,
-                messages=loaded.messages,
-                target_tokens=target_tokens,
-                extra_instruction=extra_instruction,
-                image_captions=loaded.image_captions,
-            )
-            fallback_reason = (
-                "circuit_open_local_fallback" if circuit_open else "local_fallback"
-            )
-            if summary_text:
-                logger.warning(
-                    "context_summary.local_fallback_used conv=%s source_messages=%d",
-                    conv_id,
-                    loaded.source_message_count,
-                )
-            else:
-                _observe_compaction_duration(
-                    trigger=trigger,
-                    outcome="failed",
-                    elapsed_s=time.monotonic() - started_monotonic,
-                )
-                await record_summary_metrics(
-                    redis,
-                    conv_id=conv_id,
-                    trigger=trigger,
-                    outcome="failed",
-                    circuit_threshold_percent=circuit_threshold,
-                )
-                await _publish_compaction_event(
-                    redis,
-                    conv_id,
-                    {
-                        "conversation_id": conv_id,
-                        "phase": "completed",
-                        "trigger": trigger,
-                        "started_at": started_at.isoformat(),
-                        "completed_at": _utc_now().isoformat(),
-                        "elapsed_ms": int((time.monotonic() - started_monotonic) * 1000),
-                        "ok": False,
-                        "fallback_reason": "summary_failed",
-                    },
-                )
-                # Why: returning None used to make _classify_compact_failure fall
-                # through to "lock_busy", which told the user "正在压缩中，稍后再试"
-                # while upstream was actually broken — encouraging futile retries.
-                # Returning a structured status lets the route surface
-                # reason="upstream_error" so the toast says "上游服务异常".
-                # is_summary_usable still rejects this dict because text is missing,
-                # so completion-path callers continue to fall back to truncation.
-                return {"status": "summary_failed"}
-
-        summary_tokens = estimate_text_tokens(summary_text)
-        max_chars = max(1000, int(target_tokens * 1.5 * 4))
-        if summary_tokens > target_tokens * 2:
-            summary_text = _truncate(summary_text, max_chars)
-            summary_tokens = estimate_text_tokens(summary_text)
-            logger.warning(
-                "context_summary.output_truncated conv=%s tokens=%s",
-                conv_id,
-                summary_tokens,
-            )
-
-        first_user_message_id = None
-        try:
-            first_user_message_id = (
-                await session.execute(
-                    select(Message.id)
-                    .where(
-                        Message.conversation_id == conv_id,
-                        Message.deleted_at.is_(None),
-                        Message.role == Role.USER.value,
-                    )
-                    .order_by(Message.created_at.asc(), Message.id.asc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("context_summary.first_user_lookup_failed conv=%s err=%r", conv_id, exc)
-        if not first_user_message_id:
-            first_user_message_id = boundary_id
-
-        now = _utc_now()
-        previous_runs = (
-            int(existing_summary.get("compression_runs") or 0)
-            if isinstance(existing_summary, dict)
-            else 0
-        )
-        summary_jsonb = {
-            "version": SUMMARY_VERSION,
-            "kind": SUMMARY_KIND,
-            "up_to_message_id": boundary_id,
-            "up_to_created_at": _iso(boundary_dt),
-            "first_user_message_id": first_user_message_id,
-            "text": summary_text,
-            "tokens": summary_tokens,
-            "source_message_count": loaded.source_message_count,
-            "source_token_estimate": loaded.source_token_estimate,
-            "model": model,
-            "image_caption_count": loaded.image_caption_count,
-            "extra_instruction_hash": extra_hash,
-            "compressed_at": now.isoformat(),
-            "compression_runs": previous_runs + 1,
-            "last_quality_signal": fallback_reason,
-            "fallback_reason": fallback_reason,
-        }
-        if lock.lost_reason:
-            latest = await _read_current_summary(session, conv_id)
-            if _summary_satisfies_request(latest, boundary, extra_hash):
-                return _public_summary_result(
-                    latest, created=False, status="cached_after_lock_lost"
-                )  # type: ignore[arg-type]
-            _observe_compaction_duration(
-                trigger=trigger,
-                outcome="lock_lost",
-                elapsed_s=time.monotonic() - started_monotonic,
-            )
-            await record_summary_metrics(
-                redis, conv_id=conv_id, trigger=trigger, outcome="lock_lost"
-            )
-            await _publish_compaction_event(
-                redis,
-                conv_id,
-                {
-                    "conversation_id": conv_id,
-                    "phase": "completed",
-                    "trigger": trigger,
-                    "started_at": started_at.isoformat(),
-                    "completed_at": _utc_now().isoformat(),
-                    "elapsed_ms": int((time.monotonic() - started_monotonic) * 1000),
-                    "ok": False,
-                    "fallback_reason": f"lock_{lock.lost_reason}",
-                },
-            )
-            return None
-        wrote = await _cas_write_summary(
-            session,
-            conv_id,
-            summary_jsonb,
-            lock=lock,
-            allow_equal_boundary_refresh=force,
-        )
-        if not wrote:
-            latest = await _read_current_summary(session, conv_id)
-            if _summary_satisfies_request(latest, boundary, extra_hash):
-                return _public_summary_result(
-                    latest, created=False, status="cas_reused"
-                )  # type: ignore[arg-type]
-            _observe_compaction_duration(
-                trigger=trigger,
-                outcome="cas_failed",
-                elapsed_s=time.monotonic() - started_monotonic,
-            )
-            await record_summary_metrics(
-                redis, conv_id=conv_id, trigger=trigger, outcome="cas_failed"
-            )
-            return None
-
-        await _safe_delete_partial(redis, conv_id)
-        public_status = "created_local_fallback" if fallback_reason else "created"
-        public = _public_summary_result(
-            summary_jsonb,
-            created=True,
-            status=public_status,
-        )
-        _observe_compaction_duration(
-            trigger=trigger,
-            outcome="ok",
-            elapsed_s=time.monotonic() - started_monotonic,
-        )
         await record_summary_metrics(
             redis,
             conv_id=conv_id,
             trigger=trigger,
-            outcome="ok",
-            source_tokens=loaded.source_token_estimate,
-            summary_tokens=summary_tokens,
-            circuit_threshold_percent=None if fallback_reason else circuit_threshold,
+            outcome="circuit_open",
         )
-        await _publish_compaction_event(
-            redis,
-            conv_id,
-            {
-                "conversation_id": conv_id,
-                "phase": "completed",
-                "trigger": trigger,
-                "started_at": started_at.isoformat(),
-                "completed_at": _utc_now().isoformat(),
-                "elapsed_ms": int((time.monotonic() - started_monotonic) * 1000),
-                "ok": True,
-                "fallback_reason": fallback_reason,
-                "stats": {
-                    "summary_tokens": public["summary_tokens"],
-                    "source_message_count": public["source_message_count"],
-                    "source_token_estimate": public["source_token_estimate"],
-                    "image_caption_count": public["image_caption_count"],
-                    "tokens_freed": public["tokens_freed"],
-                    "summary_up_to_message_id": public["summary_up_to_message_id"],
-                },
-            },
-        )
-        return public
-    finally:
-        if renew_task is not None:
-            renew_task.cancel()
-            try:
-                await renew_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        await _release_summary_lock(redis, conv_id, lock)
+    lock = await _acquire_summary_lock(session, redis, conv_id)
+    if lock is None:
+        return await _wait_for_summary_lock(session, request, redis)
+    return await _run_locked_context_summary(
+        session,
+        request,
+        redis,
+        lock,
+        circuit_open=circuit_open,
+    )
 
 
 def _worker_compact_summary_payload(
@@ -1865,9 +1863,10 @@ def _worker_compact_summary_payload(
     summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else {}
     summary_tokens = int(result.get("summary_tokens") or 0)
     source_token_estimate = int(result.get("source_token_estimate") or 0)
-    tokens_freed = int(
-        result.get("tokens_freed")
-        if result.get("tokens_freed") is not None
+    raw_tokens_freed = result.get("tokens_freed")
+    tokens_freed = (
+        int(raw_tokens_freed)
+        if raw_tokens_freed is not None
         else max(0, source_token_estimate - summary_tokens)
     )
     return {

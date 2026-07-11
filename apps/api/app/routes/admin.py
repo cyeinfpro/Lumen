@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Awaitable, Literal, cast
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import and_, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,16 +34,18 @@ from lumen_core.models import (
     ImageVariant,
     Message,
     OutboxDeadLetter,
+    OutboxEvent,
     User,
+    VideoGeneration,
+    WorkflowRun,
 )
 from lumen_core.schemas import AdminUserOut, AllowedEmailOut
 from lumen_core.utils import ensure_utc
 from lumen_core.byok_retention import retention_state as byok_retention_state
 
-from ..arq_pool import get_arq_pool
 from ..audit import hash_email
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
-from ..db import get_db
+from ..db import affected_rows, get_db
 from ..deps import AdminUser, verify_csrf
 from ..redis_client import get_redis
 from ..security import hash_password
@@ -382,6 +384,7 @@ def _build_live_lanes_from_snapshot(
     dual_race：返回 ("A vs B", [{label="image2", ...}, {label="responses", ...}])，
     任一 lane 还没选到 provider 时填 "?" 占位（视觉上仍能看到正在等待）。
     """
+    summary: str | None
     mode = snapshot.get("mode") or ""
     if mode == "dual_race":
         lane_a_label = snapshot.get("lane_a_label") or "image2"
@@ -757,7 +760,12 @@ async def context_health(_admin: AdminUser) -> dict:
         state, until = await _read_context_circuit(redis, now)
         metric_rows = []
         for key in _hourly_context_metric_keys(now):
-            metric_rows.append(await redis.hgetall(key))
+            metric_rows.append(
+                await cast(
+                    Awaitable[dict[str, str]],
+                    redis.hgetall(key),
+                )
+            )
         out["circuit_breaker_state"] = state
         out["circuit_breaker_until"] = until
         out["last_24h"] = _fold_context_metrics(metric_rows)
@@ -885,7 +893,7 @@ def _encode_cursor(created_at: datetime, user_id: str) -> str:
 def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-    except (ValueError, UnicodeDecodeError, base64.binascii.Error) as exc:
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise _http("invalid_cursor", "invalid cursor", 400) from exc
     if "|" not in raw:
         raise _http("invalid_cursor", "invalid cursor", 400)
@@ -1263,9 +1271,9 @@ async def delete_user(
         target_user_id=target.id,
         details={
             "target_email_hash": hash_email(target.email),
-            "sessions_revoked": int(sessions_result.rowcount or 0),
-            "conversations_deleted": int(conversations_result.rowcount or 0),
-            "images_deleted": int(images_result.rowcount or 0),
+            "sessions_revoked": affected_rows(sessions_result),
+            "conversations_deleted": affected_rows(conversations_result),
+            "images_deleted": affected_rows(images_result),
             "generations_canceled": task_cleanup["generations_canceled"],
             "completions_canceled": task_cleanup["completions_canceled"],
         },
@@ -1397,16 +1405,6 @@ def _message_output_image_refs(content: Any) -> list[tuple[str, str | None]]:
     return refs
 
 
-def _request_event_model_stats(
-    items: list[_RequestEventOut],
-) -> list[_RequestEventModelStatOut]:
-    counts: dict[str, int] = {}
-    for item in items:
-        model = _request_event_model_stat_label(item.model)
-        counts[model] = counts.get(model, 0) + 1
-    return _request_event_model_stats_from_counts(counts)
-
-
 def _request_event_model_stats_from_counts(
     counts: dict[str, int],
 ) -> list[_RequestEventModelStatOut]:
@@ -1483,6 +1481,13 @@ async def _request_event_model_stats_for_filters(
             counts[stat_label] = counts.get(stat_label, 0) + 1
 
     return _request_event_model_stats_from_counts(counts)
+
+
+def _request_event_prompt(user_content: Any) -> str | None:
+    if not isinstance(user_content, dict):
+        return None
+    text = user_content.get("text")
+    return text if isinstance(text, str) else None
 
 
 @router.get("/request_events", response_model=_RequestEventsOut)
@@ -1583,9 +1588,6 @@ async def list_request_events(
             assistant_intent,
             user_content,
         ) in (await db.execute(comp_stmt)).all():
-            prompt = None
-            if isinstance(user_content, dict) and isinstance(user_content.get("text"), str):
-                prompt = user_content["text"]
             event_rows.append(
                 {
                     "kind": "completion",
@@ -1594,7 +1596,7 @@ async def list_request_events(
                     "conversation_id": conversation_id,
                     "conversation_title": conversation_title,
                     "assistant_intent": assistant_intent,
-                    "prompt": prompt,
+                    "prompt": _request_event_prompt(user_content),
                 }
             )
 
@@ -1728,21 +1730,25 @@ async def list_request_events(
         req = task.upstream_request if isinstance(task.upstream_request, dict) else {}
         event_images: list[_RequestEventImageOut] = []
         roles_for_event = image_roles_by_event.get(task.id, {})
+        def image_created_at(image_id: str) -> datetime:
+            image = image_by_id.get(image_id)
+            return image.created_at if image is not None else now
+
         ordered_image_ids = sorted(
             roles_for_event,
             key=lambda image_id: (
                 0 if "output" in roles_for_event[image_id] else 1,
-                image_by_id.get(image_id).created_at if image_by_id.get(image_id) else now,
+                image_created_at(image_id),
             ),
             reverse=False,
         )
         for image_id in ordered_image_ids:
-            img = image_by_id.get(image_id)
-            if img is None:
+            event_image = image_by_id.get(image_id)
+            if event_image is None:
                 continue
             event_images.append(
                 _event_image_out(
-                    img,
+                    event_image,
                     roles_for_event[image_id],
                     variant_map.get(image_id, set()),
                 )
@@ -1829,7 +1835,7 @@ async def get_admin_image_binary(
     image_id: str,
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     img = (
         await db.execute(
             select(Image).where(Image.id == image_id, Image.deleted_at.is_(None))
@@ -1851,7 +1857,7 @@ async def get_admin_image_variant(
     kind: str,
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     if kind not in ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
     img = (
@@ -1894,6 +1900,154 @@ class _DlqItemOut(BaseModel):
     retry_count: int
     failed_at: datetime
     resolved_at: datetime | None
+
+
+DlqTaskKind = Literal[
+    "generation",
+    "completion",
+    "video_generation",
+    "storyboard_assembly",
+]
+
+DlqKind = DlqTaskKind | Literal["sse"]
+
+_DLQ_KIND_BY_EVENT_TYPE: dict[str, DlqKind] = {
+    "outbox.generation": "generation",
+    "outbox.completion": "completion",
+    "outbox.video_generation": "video_generation",
+    "outbox.storyboard_assembly": "storyboard_assembly",
+    "outbox.sse": "sse",
+}
+
+
+async def _dlq_task_exists(
+    db: AsyncSession,
+    *,
+    kind: DlqTaskKind,
+    task_id: str,
+) -> bool:
+    if kind == "generation":
+        stmt = select(Generation.id).join(User, User.id == Generation.user_id)
+    elif kind == "completion":
+        stmt = select(Completion.id).join(User, User.id == Completion.user_id)
+    elif kind == "video_generation":
+        stmt = select(VideoGeneration.id).join(
+            User,
+            User.id == VideoGeneration.user_id,
+        )
+    else:
+        stmt = (
+            select(WorkflowRun.id)
+            .join(User, User.id == WorkflowRun.user_id)
+            .where(WorkflowRun.type == "storyboard")
+        )
+    exists = (
+        await db.execute(
+            stmt.where(
+                stmt.selected_columns[0] == task_id,
+                User.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    return exists is not None
+
+
+async def _soft_deleted_dlq_task_ids(
+    db: AsyncSession,
+    *,
+    kind: DlqTaskKind,
+    task_ids: set[str],
+) -> set[str]:
+    if not task_ids:
+        return set()
+    if kind == "generation":
+        stmt = (
+            select(Generation.id)
+            .join(User, User.id == Generation.user_id)
+            .where(
+                Generation.id.in_(task_ids),
+                User.deleted_at.is_not(None),
+            )
+        )
+    elif kind == "completion":
+        stmt = (
+            select(Completion.id)
+            .join(User, User.id == Completion.user_id)
+            .where(
+                Completion.id.in_(task_ids),
+                User.deleted_at.is_not(None),
+            )
+        )
+    elif kind == "video_generation":
+        stmt = (
+            select(VideoGeneration.id)
+            .join(User, User.id == VideoGeneration.user_id)
+            .where(
+                VideoGeneration.id.in_(task_ids),
+                User.deleted_at.is_not(None),
+            )
+        )
+    else:
+        stmt = (
+            select(WorkflowRun.id)
+            .join(User, User.id == WorkflowRun.user_id)
+            .where(
+                WorkflowRun.id.in_(task_ids),
+                WorkflowRun.type == "storyboard",
+                User.deleted_at.is_not(None),
+            )
+        )
+    return set((await db.execute(stmt)).scalars())
+
+
+async def _soft_deleted_dlq_row_ids(
+    db: AsyncSession,
+    rows: list[OutboxDeadLetter],
+) -> set[str]:
+    task_rows_by_kind: dict[DlqTaskKind, dict[str, set[str]]] = {}
+    sse_rows_by_user: dict[str, set[str]] = {}
+
+    for row in rows:
+        kind = _DLQ_KIND_BY_EVENT_TYPE.get(row.event_type)
+        if kind is None:
+            continue
+        payload = dict(row.payload or {})
+        if kind == "sse":
+            user_id = payload.get("user_id")
+            if isinstance(user_id, str) and user_id:
+                sse_rows_by_user.setdefault(user_id, set()).add(row.id)
+            continue
+        task_id = payload.get("task_id") or payload.get("id")
+        if isinstance(task_id, str) and task_id:
+            task_rows_by_kind.setdefault(kind, {}).setdefault(task_id, set()).add(
+                row.id
+            )
+
+    row_ids: set[str] = set()
+    for kind, rows_by_task in task_rows_by_kind.items():
+        deleted_task_ids = await _soft_deleted_dlq_task_ids(
+            db,
+            kind=kind,
+            task_ids=set(rows_by_task),
+        )
+        for task_id in deleted_task_ids:
+            row_ids.update(rows_by_task[task_id])
+
+    if sse_rows_by_user:
+        deleted_user_ids = set(
+            (
+                await db.execute(
+                    select(User.id).where(
+                        User.id.in_(sse_rows_by_user),
+                        User.deleted_at.is_not(None),
+                    )
+                )
+            ).scalars()
+        )
+        for user_id in deleted_user_ids:
+            row_ids.update(sse_rows_by_user[user_id])
+
+    return row_ids
 
 
 @router.get("/dlq")
@@ -1944,83 +2098,90 @@ async def retry_dlq(
     if row.resolved_at is not None:
         raise _http("already_resolved", "dlq item already resolved", 409)
 
+    kind = _DLQ_KIND_BY_EVENT_TYPE.get(row.event_type)
+    if kind is None:
+        raise _http(
+            "unsupported_event_type",
+            f"DLQ retry does not support {row.event_type}",
+            422,
+        )
+    if row.error_class not in {"OutboxEnqueueFailed", "OutboxPublishFailed"}:
+        raise _http(
+            "unrepairable_dlq_payload",
+            "malformed or invalid outbox payload must be repaired before retry",
+            422,
+        )
+
     payload = dict(row.payload or {})
     task_id = payload.get("task_id") or payload.get("id")
-    job_name: str | None = None
-    if row.event_type == "outbox.generation":
-        job_name = "run_generation"
-    elif row.event_type == "outbox.completion":
-        job_name = "run_completion"
-
-    # Why: defense-in-depth — validate that the task referenced by the DLQ
-    # payload actually exists in our DB before re-enqueuing it. This protects
-    # against payload tampering / malformed DLQ rows being used to enqueue
-    # arbitrary task_ids on the worker pool.
-    if job_name and task_id:
+    if kind == "sse":
+        user_id = payload.get("user_id")
+        if (
+            not isinstance(user_id, str)
+            or not user_id
+            or not isinstance(payload.get("channel"), str)
+            or not payload.get("channel")
+            or not isinstance(payload.get("event_name"), str)
+            or not payload.get("event_name")
+            or not isinstance(payload.get("data"), dict)
+        ):
+            raise _http("invalid_payload", "DLQ SSE payload is invalid", 400)
+        exists = (
+            await db.execute(
+                select(User.id).where(
+                    User.id == user_id,
+                    User.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    else:
         if not isinstance(task_id, str) or not task_id:
             raise _http("invalid_task_id", "dlq payload task_id is invalid", 400)
-        if row.event_type == "outbox.generation":
-            exists = (
-                await db.execute(
-                    select(Generation.id)
-                    .join(User, User.id == Generation.user_id)
-                    .where(
-                        Generation.id == task_id,
-                        User.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-        else:
-            exists = (
-                await db.execute(
-                    select(Completion.id)
-                    .join(User, User.id == Completion.user_id)
-                    .where(
-                        Completion.id == task_id,
-                        User.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-        if exists is None:
-            # Why: this branch fires when the referenced task is gone OR its
-            # owner was soft-deleted (the join filters User.deleted_at IS NULL).
-            # Both cases mean the DLQ row is unresolvable via retry; log so
-            # operators notice if soft-deleted users are accumulating dead
-            # letters, and call the sweeper helper to bulk-resolve them.
-            logger.info(
-                "dlq retry skipped: task_or_user_missing dlq_id=%s task_id=%s "
-                "event_type=%s — consider POST /admin/dlq/sweep-deleted-users",
-                dlq_id,
-                task_id,
-                row.event_type,
-            )
-            raise _http(
-                "task_not_found",
-                "dlq payload references unknown task",
-                404,
-            )
+        exists = task_id if await _dlq_task_exists(
+            db,
+            kind=kind,
+            task_id=task_id,
+        ) else None
+    if exists is None:
+        logger.info(
+            "dlq retry skipped: task_or_user_missing dlq_id=%s task_id=%s "
+            "event_type=%s",
+            dlq_id,
+            task_id,
+            row.event_type,
+        )
+        raise _http(
+            "task_not_found",
+            "dlq payload references an unknown task or deleted user",
+            404,
+        )
 
-    requeued = False
-    if job_name and task_id:
-        try:
-            pool = await get_arq_pool()
-            await pool.enqueue_job(job_name, task_id)
-            requeued = True
-        except Exception as exc:  # noqa: BLE001
-            row.retry_count = (row.retry_count or 0) + 1
-            row.error_message = f"retry failed: {exc!r}"
-            await write_admin_audit(
-                db,
-                request,
-                admin,
-                event_type="admin.dlq.retry.fail",
-                details={"dlq_id": dlq_id, "task_id": task_id, "error": str(exc)},
+    outbox = None
+    if row.outbox_id:
+        outbox = (
+            await db.execute(
+                select(OutboxEvent)
+                .where(OutboxEvent.id == row.outbox_id)
+                .with_for_update()
             )
-            await db.commit()
-            raise _http("retry_failed", f"failed to enqueue: {exc}", 500)
+        ).scalar_one_or_none()
+    if outbox is None:
+        outbox = OutboxEvent(kind=kind, payload={}, published_at=None)
+        db.add(outbox)
+        await db.flush()
+        row.outbox_id = outbox.id
+    elif outbox.kind != kind:
+        raise _http(
+            "outbox_kind_mismatch",
+            "DLQ event type does not match its outbox row",
+            409,
+        )
 
+    payload["outbox_id"] = str(outbox.id)
+    outbox.payload = payload
+    outbox.published_at = None
     row.retry_count = (row.retry_count or 0) + 1
-    row.resolved_at = datetime.now(timezone.utc)
+    row.error_message = "retry scheduled via durable outbox"
     await write_admin_audit(
         db,
         request,
@@ -2029,12 +2190,19 @@ async def retry_dlq(
         details={
             "dlq_id": dlq_id,
             "event_type": row.event_type,
-            "requeued": requeued,
+            "requeued": True,
             "task_id": task_id,
+            "outbox_id": outbox.id,
         },
     )
     await db.commit()
-    return {"ok": True, "dlq_id": dlq_id, "requeued": requeued}
+    return {
+        "ok": True,
+        "dlq_id": dlq_id,
+        "requeued": True,
+        "resolved": False,
+        "outbox_id": outbox.id,
+    }
 
 
 @router.post("/dlq/sweep-deleted-users", dependencies=[Depends(verify_csrf)])
@@ -2052,76 +2220,66 @@ async def sweep_dlq_for_deleted_users(
     physically deleted, so the audit/forensics trail is preserved) and
     writes an admin audit row capturing the sweep size.
     """
-    rows = list(
-        (
-            await db.execute(
-                select(OutboxDeadLetter)
-                .where(OutboxDeadLetter.resolved_at.is_(None))
-                .order_by(OutboxDeadLetter.failed_at.asc())
-                .limit(limit)
-            )
-        ).scalars()
-    )
     swept_ids: list[str] = []
+    scanned = 0
     now = datetime.now(timezone.utc)
-    for row in rows:
-        payload = dict(row.payload or {})
-        task_id = payload.get("task_id") or payload.get("id")
-        if not isinstance(task_id, str) or not task_id:
-            continue
-        if row.event_type == "outbox.generation":
-            owner_active = (
-                await db.execute(
-                    select(Generation.id)
-                    .join(User, User.id == Generation.user_id)
-                    .where(
-                        Generation.id == task_id,
-                        User.deleted_at.is_(None),
-                    )
+    cursor: tuple[datetime, str] | None = None
+    while True:
+        stmt = select(OutboxDeadLetter).where(
+            OutboxDeadLetter.resolved_at.is_(None),
+            OutboxDeadLetter.event_type.in_(tuple(_DLQ_KIND_BY_EVENT_TYPE)),
+        )
+        if cursor is not None:
+            failed_at, dlq_id = cursor
+            stmt = stmt.where(
+                or_(
+                    OutboxDeadLetter.failed_at > failed_at,
+                    and_(
+                        OutboxDeadLetter.failed_at == failed_at,
+                        OutboxDeadLetter.id > dlq_id,
+                    ),
                 )
-            ).scalar_one_or_none()
-            owner_exists = (
+            )
+        rows = list(
+            (
                 await db.execute(
-                    select(Generation.id).where(Generation.id == task_id)
+                    stmt.order_by(
+                        OutboxDeadLetter.failed_at.asc(),
+                        OutboxDeadLetter.id.asc(),
+                    ).limit(limit)
                 )
-            ).scalar_one_or_none()
-        elif row.event_type == "outbox.completion":
-            owner_active = (
-                await db.execute(
-                    select(Completion.id)
-                    .join(User, User.id == Completion.user_id)
-                    .where(
-                        Completion.id == task_id,
-                        User.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            owner_exists = (
-                await db.execute(
-                    select(Completion.id).where(Completion.id == task_id)
-                )
-            ).scalar_one_or_none()
-        else:
-            continue
-        if owner_active is None and owner_exists is not None:
+            ).scalars()
+        )
+        if not rows:
+            break
+
+        scanned += len(rows)
+        deleted_owner_row_ids = await _soft_deleted_dlq_row_ids(db, rows)
+        for row in rows:
+            if row.id not in deleted_owner_row_ids:
+                continue
             row.resolved_at = now
             row.error_message = (
-                (row.error_message or "")
-                + " | swept: owner soft-deleted"
+                (row.error_message or "") + " | swept: owner soft-deleted"
             ).strip(" |")
             swept_ids.append(row.id)
+
+        cursor = (rows[-1].failed_at, rows[-1].id)
+        if len(rows) < limit:
+            break
+
     await write_admin_audit(
         db,
         request,
         admin,
         event_type="admin.dlq.sweep_deleted_users",
-        details={"swept": len(swept_ids), "scanned": len(rows)},
+        details={"swept": len(swept_ids), "scanned": scanned},
     )
     await db.commit()
     logger.info(
         "dlq sweep deleted-users admin=%s swept=%d scanned=%d",
         admin.id,
         len(swept_ids),
-        len(rows),
+        scanned,
     )
-    return {"ok": True, "swept": len(swept_ids), "scanned": len(rows)}
+    return {"ok": True, "swept": len(swept_ids), "scanned": scanned}

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import os
-import ipaddress
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -21,7 +20,6 @@ from lumen_core.byok_retention import (
     is_user_visible as byok_retention_is_user_visible,
 )
 from lumen_core.constants import ImageSource
-from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import Generation, Image, ImageVariant, Share, User
 from lumen_core.runtime_settings import get_spec, parse_value
 from lumen_core.schemas import PublicShareImageOut, PublicShareOut, ShareOut
@@ -39,6 +37,7 @@ from ..ratelimit import (
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services import storage_files
 
 
 router_authed = APIRouter(tags=["shares"])
@@ -118,24 +117,11 @@ def _to_share_out(s: Share, public_base_url: str) -> ShareOut:
 
 
 def _fs_path(storage_key: str) -> Path:
-    root = Path(settings.storage_root).resolve()
-    if not storage_key or "\x00" in storage_key:
-        raise _http("invalid_path", "invalid storage path", 400)
-    key_path = PurePosixPath(storage_key)
-    if key_path.is_absolute():
-        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    parts = key_path.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise _http("invalid_path", "storage path escapes root", 400)
-    current = root
-    for part in parts[:-1]:
-        current = current / part
-        try:
-            if current.is_symlink():
-                raise _http("invalid_path", "symlink storage paths are not allowed", 400)
-        except OSError as exc:
-            raise _http("invalid_path", "invalid storage path", 400) from exc
-    return root.joinpath(*parts)
+    return storage_files.resolve_storage_path(
+        settings.storage_root,
+        storage_key,
+        error_factory=_http,
+    )
 
 
 def _open_storage_file_safe(storage_key: str) -> tuple[BinaryIO, int]:
@@ -172,14 +158,7 @@ def _storage_key_exists(storage_key: str) -> bool:
 
 
 def _iter_open_file_and_close(f: BinaryIO):
-    try:
-        while True:
-            chunk = f.read(64 * 1024)
-            if not chunk:
-                break
-            yield chunk
-    finally:
-        f.close()
+    yield from storage_files.iter_open_file_and_close(f)
 
 
 def _share_image_response(
@@ -207,30 +186,15 @@ def _image_etag(img: Image) -> str:
     return f'"{sha}"' if isinstance(sha, str) and sha else f'"{img.id}-orig"'
 
 
-def _is_desktop_loopback_client(ip: str) -> bool:
-    if not is_desktop_runtime(settings.lumen_runtime):
-        return False
-    if ip.strip().lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(ip).is_loopback
-    except ValueError:
-        return False
-
-
 async def _check_share_preview_rate_limit(request: Request) -> None:
     # Public unauthenticated route: refuse to share a single "unknown" bucket.
     ip = require_client_ip(request)
-    if _is_desktop_loopback_client(ip):
-        return
     await PUBLIC_PREVIEW_LIMITER.check(get_redis(), f"rl:share_meta:{ip}")
 
 
 async def _check_share_image_rate_limit(request: Request) -> None:
     # Public unauthenticated route: refuse to share a single "unknown" bucket.
     ip = require_client_ip(request)
-    if _is_desktop_loopback_client(ip):
-        return
     await PUBLIC_IMAGE_LIMITER.check(get_redis(), f"rl:share_image:{ip}")
 
 

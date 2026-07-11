@@ -198,14 +198,42 @@ overlay_repo_into_existing() {
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/.env.local' \
         --exclude='/apps/web/node_modules/' \
-        --exclude='/apps/desktop/target/' \
-        --exclude='/apps/desktop/dist/' \
-        --exclude='/apps/desktop/binaries/' \
-        --exclude='/apps/desktop/resources/' \
-        --exclude='/apps/desktop/gen/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
         "${tmp_dir}/repo/" "${install_dir}/"
+}
+
+overlay_release_scripts() {
+    local repo_url="$1"
+    local branch="$2"
+    local release_dir="$3"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '${tmp_dir}'" RETURN
+    printf '[INFO] 在临时目录 clone 最新 %s scripts/\n' "${branch}"
+    if ! git clone --quiet --depth 1 --branch "${branch}" \
+            "${repo_url}" "${tmp_dir}/repo"; then
+        printf '[ERROR] git clone 失败。\n' >&2
+        return 1
+    fi
+    if ! raw_have_cmd rsync; then
+        printf '[INFO] 缺少 rsync，尝试自动安装。\n'
+        raw_install_packages rsync || true
+    fi
+    if ! raw_have_cmd rsync; then
+        printf '[ERROR] 没有 rsync，无法同步 release scripts/。\n' >&2
+        return 1
+    fi
+    if [ ! -f "${tmp_dir}/repo/scripts/install.sh" ] \
+            || [ ! -f "${tmp_dir}/repo/scripts/lib.sh" ]; then
+        printf '[ERROR] 远端仓库缺少 scripts/install.sh 或 scripts/lib.sh。\n' >&2
+        return 1
+    fi
+    mkdir -p "${release_dir}/scripts"
+    printf '[INFO] 只同步 scripts/ 到 %s；release 其余源码保持不变。\n' \
+        "${release_dir}"
+    rsync -a "${tmp_dir}/repo/scripts/" "${release_dir}/scripts/"
 }
 
 bootstrap_from_raw_script() {
@@ -255,8 +283,11 @@ bootstrap_from_raw_script() {
             printf '[INFO] 已是 release 布局，先同步 scripts/ 到最新再交给 update.sh。\n'
             local current_release="${install_dir}/current"
             if [ -L "${current_release}" ]; then
-                # 把 scripts/ 覆盖到 current 指向的 release 内
-                overlay_repo_into_existing "${repo_url}" "${branch}" "${install_dir}/current"
+                if ! overlay_release_scripts \
+                        "${repo_url}" "${branch}" "${current_release}"; then
+                    printf '[ERROR] release scripts/ 同步失败。\n' >&2
+                    exit 1
+                fi
             else
                 printf '[WARN] %s 不是 symlink，跳过 scripts 同步，直接交给 update.sh。\n' "${current_release}" >&2
             fi
@@ -314,7 +345,7 @@ bootstrap_from_raw_script() {
     # 优先用 /dev/tty 接管 stdin（让交互菜单能读键），没 tty 就直接 exec。
     # --auto / --update 都是非交互的，没 tty 也能跑通。
     raw_drain_bootstrap_stdin
-    if [ -r /dev/tty ]; then
+    if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
         exec bash "${script_path}" "${args[@]}" </dev/tty
     fi
     exec bash "${script_path}" "${args[@]}"
@@ -479,9 +510,136 @@ dispatch_entrypoint "$@"
 # ---------------------------------------------------------------------------
 INSTALL_PHASE=""               # 当前阶段名（用于错误时报告 + step protocol）
 INSTALL_STARTED_SERVICES=()    # 已启动的 compose service 列表（失败时 stop）
-INSTALL_SWITCHED=0             # current symlink 是否已切到本次 RELEASE_DIR
 INSTALL_TGBOT_STATUS=""        # started / failed / skipped；print_summary 汇报
-INSTALL_PREV_CURRENT_TARGET="" # switch 前 current 指向的相对路径（失败回滚用）
+INSTALL_STATE_SNAPSHOT_READY=0
+INSTALL_ENV_SNAPSHOT=""
+INSTALL_ORIGINAL_CURRENT_PRESENT=0
+INSTALL_ORIGINAL_CURRENT_TARGET=""
+INSTALL_ORIGINAL_PREVIOUS_PRESENT=0
+INSTALL_ORIGINAL_PREVIOUS_TARGET=""
+INSTALL_ORIGINAL_RUNNING_SERVICES=""
+INSTALL_HOST_ARTIFACT_SNAPSHOT=""
+
+snapshot_install_state() {
+    local shared_env="${SHARED_DIR}/.env"
+    if [ -L "${DEPLOY_ROOT}/current" ]; then
+        INSTALL_ORIGINAL_CURRENT_PRESENT=1
+        INSTALL_ORIGINAL_CURRENT_TARGET="$(readlink "${DEPLOY_ROOT}/current")"
+    fi
+    if [ -L "${DEPLOY_ROOT}/previous" ]; then
+        INSTALL_ORIGINAL_PREVIOUS_PRESENT=1
+        INSTALL_ORIGINAL_PREVIOUS_TARGET="$(readlink "${DEPLOY_ROOT}/previous")"
+    fi
+    if [ "${INSTALL_ORIGINAL_CURRENT_PRESENT}" -eq 1 ] \
+            && [ -f "${DEPLOY_ROOT}/current/docker-compose.yml" ]; then
+        local running service
+        running="$(lumen_compose_in "${DEPLOY_ROOT}/current" \
+            ps --status running --services 2>/dev/null || true)"
+        while IFS= read -r service; do
+            case "${service}" in
+                postgres|redis|api|worker|web|tgbot)
+                    INSTALL_ORIGINAL_RUNNING_SERVICES="${INSTALL_ORIGINAL_RUNNING_SERVICES}${service}"$'\n'
+                    ;;
+            esac
+        done <<< "${running}"
+    fi
+    if [ -f "${shared_env}" ]; then
+        INSTALL_ENV_SNAPSHOT="$(mktemp "${SHARED_DIR}/.env.install.XXXXXX")" \
+            || return 1
+        if ! cp -p "${shared_env}" "${INSTALL_ENV_SNAPSHOT}"; then
+            rm -f "${INSTALL_ENV_SNAPSHOT}" 2>/dev/null || true
+            INSTALL_ENV_SNAPSHOT=""
+            return 1
+        fi
+    fi
+    if lumen_systemd_runtime_available; then
+        if ! INSTALL_HOST_ARTIFACT_SNAPSHOT="$(mktemp -d "${SHARED_DIR}/.host.install.XXXXXX")"; then
+            rm -f "${INSTALL_ENV_SNAPSHOT}" 2>/dev/null || true
+            INSTALL_ENV_SNAPSHOT=""
+            return 1
+        fi
+        if ! lumen_snapshot_operations_host_artifacts \
+                "${INSTALL_HOST_ARTIFACT_SNAPSHOT}"; then
+            lumen_discard_host_artifact_snapshot "${INSTALL_HOST_ARTIFACT_SNAPSHOT}"
+            INSTALL_HOST_ARTIFACT_SNAPSHOT=""
+            rm -f "${INSTALL_ENV_SNAPSHOT}" 2>/dev/null || true
+            INSTALL_ENV_SNAPSHOT=""
+            return 1
+        fi
+    fi
+    INSTALL_STATE_SNAPSHOT_READY=1
+    return 0
+}
+
+restore_install_original_services() {
+    [ "${INSTALL_ORIGINAL_CURRENT_PRESENT}" -eq 1 ] || return 0
+    [ -d "${DEPLOY_ROOT}/current" ] || return 1
+    local services=()
+    local service
+    while IFS= read -r service; do
+        [ -n "${service}" ] && services+=("${service}")
+    done <<< "${INSTALL_ORIGINAL_RUNNING_SERVICES}"
+    if [ "${#services[@]}" -eq 0 ]; then
+        return 0
+    fi
+    log_warn "  重新拉起安装前运行中的旧 release 服务：${services[*]}"
+    lumen_compose_in "${DEPLOY_ROOT}/current" --profile tgbot up \
+        --pull missing -d --wait --force-recreate "${services[@]}"
+}
+
+restore_install_state_snapshot() {
+    [ "${INSTALL_STATE_SNAPSHOT_READY}" -eq 1 ] || return 0
+    local rc=0 shared_env="${SHARED_DIR}/.env"
+    if [ "${INSTALL_ORIGINAL_CURRENT_PRESENT}" -eq 1 ]; then
+        lumen_atomic_replace_symlink \
+            "${INSTALL_ORIGINAL_CURRENT_TARGET}" "${DEPLOY_ROOT}/current" || rc=1
+    elif [ -L "${DEPLOY_ROOT}/current" ]; then
+        rm -f "${DEPLOY_ROOT}/current" || rc=1
+    fi
+    if [ "${INSTALL_ORIGINAL_PREVIOUS_PRESENT}" -eq 1 ]; then
+        lumen_atomic_replace_symlink \
+            "${INSTALL_ORIGINAL_PREVIOUS_TARGET}" "${DEPLOY_ROOT}/previous" || rc=1
+    elif [ -L "${DEPLOY_ROOT}/previous" ]; then
+        rm -f "${DEPLOY_ROOT}/previous" || rc=1
+    fi
+    if [ -n "${INSTALL_ENV_SNAPSHOT}" ] \
+            && [ -f "${INSTALL_ENV_SNAPSHOT}" ]; then
+        local restore_tmp="${SHARED_DIR}/.env.restore.$$"
+        if ! cp -p "${INSTALL_ENV_SNAPSHOT}" "${restore_tmp}" \
+                || ! mv -f "${restore_tmp}" "${shared_env}"; then
+            rm -f "${restore_tmp}" 2>/dev/null || true
+            log_error "  shared/.env 原字节恢复失败；快照保留在 ${INSTALL_ENV_SNAPSHOT}"
+            rc=1
+        else
+            log_warn "  shared/.env 已按安装前快照原字节恢复。"
+        fi
+    fi
+    if [ -n "${INSTALL_HOST_ARTIFACT_SNAPSHOT}" ]; then
+        if ! lumen_restore_operations_host_artifacts \
+                "${INSTALL_HOST_ARTIFACT_SNAPSHOT}"; then
+            log_error "  systemd units 或 host 脚本未能完整恢复。"
+            rc=1
+        else
+            log_warn "  systemd units 与 host 脚本已恢复到安装前快照。"
+        fi
+    fi
+    if ! restore_install_original_services; then
+        log_error "  安装前旧 release 服务恢复失败。"
+        rc=1
+    fi
+    return "${rc}"
+}
+
+discard_install_state_snapshot() {
+    if [ -n "${INSTALL_ENV_SNAPSHOT}" ]; then
+        rm -f "${INSTALL_ENV_SNAPSHOT}" 2>/dev/null || true
+    fi
+    INSTALL_ENV_SNAPSHOT=""
+    lumen_discard_host_artifact_snapshot "${INSTALL_HOST_ARTIFACT_SNAPSHOT}"
+    INSTALL_HOST_ARTIFACT_SNAPSHOT=""
+    INSTALL_ORIGINAL_RUNNING_SERVICES=""
+    INSTALL_STATE_SNAPSHOT_READY=0
+}
 
 on_error() {
     local line="$1"
@@ -507,16 +665,15 @@ cleanup_on_failure() {
             fi
         fi
 
-        # 如果 current 已经被切到本次 RELEASE_DIR，但后续阶段失败，则切回 previous（如有）。
-        # DEPLOY_ROOT 在主流程里赋值，可能在 lumen_acquire_lock 失败时还未定义；用 :- 防御。
+        # 恢复安装开始时的 current / previous / shared env 状态。已有 .env
+        # 按原字节恢复；首次安装生成的新 .env 仍保留，方便修复后幂等重跑。
         local _deploy_root="${DEPLOY_ROOT:-}"
         if [ -n "${_deploy_root}" ] \
-                && [ "${INSTALL_SWITCHED}" = "1" ] \
-                && [ -n "${INSTALL_PREV_CURRENT_TARGET:-}" ] \
-                && [ -d "${_deploy_root}/${INSTALL_PREV_CURRENT_TARGET}" ]; then
-            log_warn "回滚 current symlink → ${INSTALL_PREV_CURRENT_TARGET}（${INSTALL_PHASE} 之后失败）"
-            if ! lumen_atomic_replace_symlink "${INSTALL_PREV_CURRENT_TARGET}" "${_deploy_root}/current" 2>/dev/null; then
-                log_error "  current 回滚失败！请手动：ln -sfn ${INSTALL_PREV_CURRENT_TARGET} ${_deploy_root}/current"
+                && [ "${INSTALL_STATE_SNAPSHOT_READY}" -eq 1 ]; then
+            if restore_install_state_snapshot; then
+                discard_install_state_snapshot
+            else
+                log_error "  安装前状态未能完整恢复，请检查 current/previous 与 ${SHARED_DIR:-<shared>}/.env。"
             fi
         fi
 
@@ -547,6 +704,9 @@ cleanup_on_failure() {
         log_error "  COMPOSE_PROJECT_NAME=lumen docker compose ps"
         log_error "  COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=200 api worker web"
         log_error "  bash ${SCRIPT_DIR}/install.sh --install   # 修复后重跑（幂等）"
+    fi
+    if [ "${rc}" -eq 0 ]; then
+        discard_install_state_snapshot
     fi
     # lumen_release_lock 由 lumen_acquire_lock 安装的 EXIT trap 处理；这里手动也调一次幂等
     if command -v lumen_release_lock >/dev/null 2>&1; then
@@ -1071,12 +1231,12 @@ _auto_install_docker() {
 
 # ---------------------------------------------------------------------------
 # A. 前置检查
-# 必装：docker / docker compose v2 / openssl / curl
-# 可选：python3（仅 backup 脚本用），systemd（仅 update-runner 路径用）
+# 必装：docker / docker compose v2 / openssl / curl / python3 >= 3.8
+# 可选：systemd（仅 update-runner 路径用）
 # 磁盘：/opt 至少 10GB
 # ---------------------------------------------------------------------------
 check_prerequisites() {
-    emit_step_start prepare "前置检查（docker / compose v2 / openssl / curl）"
+    emit_step_start prepare "前置检查（docker / compose v2 / openssl / curl / python3）"
     case "${OS}" in
         macos|linux) ;;
         *)
@@ -1091,6 +1251,7 @@ check_prerequisites() {
     command -v openssl >/dev/null 2>&1 || basics_missing+=("openssl")
     command -v curl    >/dev/null 2>&1 || basics_missing+=("curl")
     command -v rsync   >/dev/null 2>&1 || basics_missing+=("rsync")
+    command -v python3 >/dev/null 2>&1 || basics_missing+=("python3")
     if [ "${#basics_missing[@]}" -gt 0 ]; then
         if ! _auto_install_basics "${basics_missing[@]}"; then
             log_error "缺少必备命令：${basics_missing[*]}（自动安装失败）"
@@ -1104,6 +1265,11 @@ check_prerequisites() {
                 exit 1
             fi
         done
+    fi
+
+    if ! lumen_require_python_min_version python3 3 8; then
+        log_error "release manifest 校验器需要 Python >= 3.8。"
+        exit 1
     fi
 
     # 2) docker 缺则走官方一键脚本（Linux）；macOS 仍 fail-fast 让用户装 Desktop。
@@ -1153,11 +1319,6 @@ check_prerequisites() {
         log_error "  Linux：sudo systemctl start docker；将用户加入 docker 组后重新登录"
         log_error "  macOS：启动 Docker Desktop 等待初始化"
         exit 1
-    fi
-
-    # 可选：python3（备份脚本辅助）
-    if ! command -v python3 >/dev/null 2>&1; then
-        log_warn "未检测到 python3；备份/恢复脚本会有部分辅助功能不可用，但安装可继续。"
     fi
 
     # 磁盘空间：分别探测 LUMEN_DATA_ROOT (storage/backup) 与 LUMEN_DB_ROOT
@@ -1326,7 +1487,8 @@ _render_update_runner_units() {
             "${deploy_root}"
     fi
     local backup_unit
-    for backup_unit in lumen-backup.service lumen-backup.timer lumen-backup.path; do
+    for backup_unit in lumen-backup.service lumen-backup.timer lumen-backup.path \
+            lumen-restore-runner.service lumen-restore.path; do
         if [ -f "${src_dir}/${backup_unit}" ]; then
             _render_systemd_unit_template \
                 "${src_dir}/${backup_unit}" \
@@ -1423,11 +1585,6 @@ prepare_release_layout() {
         --exclude='/apps/worker/var/' \
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
-        --exclude='/apps/desktop/target/' \
-        --exclude='/apps/desktop/dist/' \
-        --exclude='/apps/desktop/binaries/' \
-        --exclude='/apps/desktop/resources/' \
-        --exclude='/apps/desktop/gen/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
         --exclude='/.install-logs/' \
@@ -1639,6 +1796,42 @@ probe_ghcr_image_tag() {
 # F. 拉镜像 / 构建 -> 起 PG/Redis -> migrate -> bootstrap -> api/worker/web (+tgbot)
 # ---------------------------------------------------------------------------
 pull_or_build_images() {
+    local shared_env="${SHARED_DIR}/.env"
+    local registry current_tag release_manifest="" tgbot_image_ready=0
+    registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
+    current_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
+    if [ "${INSTALL_BUILD_FLAG}" != "1" ] && [ "${current_tag}" = "latest" ] \
+            && [ "${registry%/}" = "ghcr.io/cyeinfpro" ]; then
+        local guard="${RELEASE_DIR}/scripts/release_manifest_guard.py"
+        local resolved_tag=""
+        resolved_tag="$(python3 "${guard}" latest-tag 2>/dev/null || true)"
+        if ! lumen_release_manifest_required "${resolved_tag}"; then
+            log_error "无法把 mutable latest 解析为正式 GitHub Release tag。"
+            exit 1
+        fi
+        env_file_set "${shared_env}" LUMEN_IMAGE_TAG "${resolved_tag}" || exit 1
+        current_tag="${resolved_tag}"
+        export LUMEN_IMAGE_TAG="${resolved_tag}"
+        log_info "已把 latest 固定为 ${resolved_tag}。"
+    fi
+    if [ "${INSTALL_BUILD_FLAG}" != "1" ] \
+            && lumen_release_manifest_required "${current_tag}"; then
+        if [ "${registry%/}" != "ghcr.io/cyeinfpro" ]; then
+            if ! lumen_env_truthy "${LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY:-0}"; then
+                log_error "正式 release tag 使用自定义 registry 时无法核对官方 digest。"
+                log_error "如确认镜像源可信，请显式设置 LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY=1。"
+                exit 1
+            fi
+            log_warn "已显式允许未核验的自定义 registry。"
+        else
+            release_manifest="${RELEASE_DIR}/release-manifest.json"
+            if ! lumen_fetch_release_manifest "${current_tag}" "${release_manifest}"; then
+                log_error "无法获取或校验 ${current_tag} 的 release-manifest.json。"
+                exit 1
+            fi
+        fi
+    fi
+
     if [ "${INSTALL_BUILD_FLAG}" = "1" ]; then
         emit_step_start containers "本地构建镜像（lumen_compose build）"
         # build 失败通常是 Dockerfile / 资源问题，重试 2 次（每次都是 from-scratch 的网络拉基础镜像）。
@@ -1650,16 +1843,15 @@ pull_or_build_images() {
         emit_step_start containers "拉取镜像（lumen_compose pull）"
         # 网络抖动是 pull 失败最常见的原因；先重试 3 次（指数退避 5/10/20），仍失败再走 fallback。
         if ! lumen_retry 3 5 "docker compose pull" _install_compose_pull_per_image; then
-            local shared_env="${SHARED_DIR}/.env"
-            local registry current_tag
-            registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
-            current_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
             if [ -z "${INSTALL_IMAGE_TAG_OVERRIDE}" ] \
                 && [[ "${registry}" == ghcr.io/cyeinfpro* ]] \
                 && [ "${current_tag}" != "main" ] \
                 && [ "${LUMEN_INSTALL_FALLBACK_MAIN:-0}" = "1" ]; then
                 log_warn "docker compose pull 失败，疑似默认镜像 tag=${current_tag} 尚未发布；回退到 main 后重试一次。"
                 env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
+                current_tag="main"
+                export LUMEN_IMAGE_TAG="${current_tag}"
+                release_manifest=""
                 if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
                     printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
                 fi
@@ -1678,7 +1870,32 @@ pull_or_build_images() {
                 exit 1
             fi
         fi
+        if env_key_present "${shared_env}" "TELEGRAM_BOT_TOKEN"; then
+            if lumen_retry 2 5 "docker compose pull tgbot" \
+                    _install_compose --profile tgbot pull tgbot; then
+                tgbot_image_ready=1
+            else
+                log_warn "tgbot pull 失败，跳过 tgbot manifest 校验；主栈安装继续。"
+            fi
+        fi
+        if [ -n "${release_manifest}" ]; then
+            local manifest_args=(
+                --service api
+                --service worker
+                --service web
+            )
+            if [ "${tgbot_image_ready}" -eq 1 ]; then
+                manifest_args+=(--service tgbot)
+            fi
+            if ! lumen_verify_release_manifest_images \
+                    "${release_manifest}" "${current_tag}" "${current_tag}" \
+                    "${manifest_args[@]}"; then
+                log_error "本地镜像 digest 未通过 release manifest 校验。"
+                exit 1
+            fi
+        fi
     fi
+    printf '%s\n' "${current_tag}" > "${RELEASE_DIR}/.image-tag"
     emit_step_done
 }
 
@@ -1912,13 +2129,10 @@ start_application_services() {
 switch_current_symlink() {
     emit_step_start switch "切换 current symlink → releases/${RELEASE_ID}"
     local cur="${DEPLOY_ROOT}/current"
-    # 保存切换前的 target，cleanup_on_failure 在后续 health 失败时切回。
-    INSTALL_PREV_CURRENT_TARGET=""
     if [ -L "${cur}" ]; then
         local prev_target
         prev_target="$(readlink "${cur}" 2>/dev/null || true)"
         if [ -n "${prev_target}" ] && [ "${prev_target}" != "releases/${RELEASE_ID}" ]; then
-            INSTALL_PREV_CURRENT_TARGET="${prev_target}"
             if ! lumen_atomic_replace_symlink "${prev_target}" "${DEPLOY_ROOT}/previous" 2>/dev/null; then
                 log_warn "无法更新 previous symlink → ${prev_target}（已忽略，不阻断 switch）"
             fi
@@ -1928,7 +2142,6 @@ switch_current_symlink() {
         log_error "切换 current → releases/${RELEASE_ID} 失败。"
         exit 1
     fi
-    INSTALL_SWITCHED=1
     log_info "${cur} → releases/${RELEASE_ID}"
     emit_step_done
 }
@@ -1938,7 +2151,7 @@ switch_current_symlink() {
 # ---------------------------------------------------------------------------
 install_update_runner_units() {
     emit_step_start prepare "安装一键更新 runner（systemd path）"
-    if [ "${OS}" != "linux" ] || ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+    if [ "${OS}" != "linux" ] || ! lumen_systemd_runtime_available; then
         log_warn "未检测到 Linux systemd，跳过一键更新 runner 安装；命令行 update-lumen 不受影响。"
         emit_step_done
         return 0
@@ -1970,27 +2183,29 @@ install_update_runner_units() {
 
     lumen_ensure_backup_service_user "${backup_root}"
 
-    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update.path"; then
         log_warn "安装 lumen-update.path 失败，面板一键更新将不可用。"
         rm -rf "${tmp_dir}"
         emit_step_done
         return 0
     fi
-    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" /etc/systemd/system/lumen-update-runner.service; then
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-runner.service"; then
         log_warn "安装 lumen-update-runner.service 失败，面板一键更新将不可用。"
         rm -rf "${tmp_dir}"
         emit_step_done
         return 0
     fi
     if [ -f "${tmp_dir}/lumen-update-warm.path" ] && [ -f "${tmp_dir}/lumen-update-warm.service" ]; then
-        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" /etc/systemd/system/lumen-update-warm.path \
+        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-warm.path" \
             || log_warn "安装 lumen-update-warm.path 失败，镜像预热将不可用。"
-        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" /etc/systemd/system/lumen-update-warm.service \
+        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-warm.service" \
             || log_warn "安装 lumen-update-warm.service 失败，镜像预热将不可用。"
     fi
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.service "安装 lumen-backup.service 失败，自动/手动触发备份将不可用。"
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "安装 lumen-backup.timer 失败，自动备份将不可用。"
     lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.path "安装 lumen-backup.path 失败，管理后台立即备份将无法触发宿主机备份。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-restore-runner.service "安装 lumen-restore-runner.service 失败，管理后台恢复将不可用。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-restore.path "安装 lumen-restore.path 失败，管理后台恢复将不可用。"
     if ! lumen_run_as_root systemctl daemon-reload; then
         log_warn "systemctl daemon-reload 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
@@ -2009,14 +2224,64 @@ install_update_runner_units() {
     fi
     lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "启用 lumen-backup.timer 失败，自动备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.timer。"
     lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.path "启用 lumen-backup.path 失败，管理后台立即备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.path。"
+    lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-restore.path "启用 lumen-restore.path 失败，管理后台恢复将不可用；可稍后手动执行 systemctl enable --now lumen-restore.path。"
     rm -rf "${tmp_dir}"
 
     log_info "一键更新 runner 已启用：监听 ${backup_root}/.update.trigger"
     emit_info "key=update_trigger" "value=${backup_root}/.update.trigger"
     emit_info "key=warm_trigger" "value=${backup_root}/.warm.trigger"
     emit_info "key=backup_trigger" "value=${backup_root}/.backup.trigger"
+    emit_info "key=restore_trigger" "value=${backup_root}/.restore.trigger"
     emit_step_done
 }
+
+
+install_storage_control_plane() {
+    if [ "${OS}" != "linux" ] || ! lumen_systemd_runtime_available; then
+        log_warn "未检测到 Linux systemd，跳过存储控制面安装。"
+        return 0
+    fi
+
+    local src_systemd="${RELEASE_DIR}/deploy/systemd"
+    local src_script="${RELEASE_DIR}/deploy/scripts/lumen_storage_mount.sh"
+    if [ ! -f "${src_script}" ]; then
+        log_warn "找不到 ${src_script}，管理后台存储切换将不可用。"
+        return 0
+    fi
+
+    local tmp_dir storage_gid unit
+    tmp_dir="$(mktemp -d)"
+    storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
+    for unit in lumen-storage-mount.service \
+        lumen-storage-apply.service lumen-storage-apply.path \
+        lumen-storage-test.service lumen-storage-test.path; do
+        [ -f "${src_systemd}/${unit}" ] || continue
+        _render_systemd_unit_template \
+            "${src_systemd}/${unit}" \
+            "${tmp_dir}/${unit}" \
+            "${LUMEN_DATA_ROOT%/}" \
+            "${LUMEN_BACKUP_ROOT:-${LUMEN_DATA_ROOT%/}/backup}" \
+            "${DEPLOY_ROOT%/}"
+        lumen_run_as_root install -m 0644 "${tmp_dir}/${unit}" "${LUMEN_SYSTEMD_UNIT_DIR%/}/${unit}" \
+            || log_warn "安装 ${unit} 失败，管理后台存储切换可能不可用。"
+    done
+    lumen_run_as_root install -m 0755 "${src_script}" "${LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount" \
+        || log_warn "安装 lumen-storage-mount 失败，管理后台存储切换不可用。"
+    lumen_run_as_root install -d -m 0770 -o root -g "${storage_gid}" /var/lib/lumen-storage \
+        || log_warn "创建 /var/lib/lumen-storage 失败，API 可能无法写入存储触发文件。"
+    lumen_run_as_root systemctl daemon-reload \
+        || log_warn "刷新 storage systemd units 失败。"
+    lumen_run_as_root systemctl enable --now lumen-storage-apply.path lumen-storage-test.path \
+        || log_warn "启用 storage path watchers 失败，管理后台存储切换不可用。"
+    # Boot-time mount is enabled for future reboots, but deliberately not
+    # started during install. The first admin apply performs the controlled
+    # stop/remount/start cycle after explicit configuration.
+    lumen_run_as_root systemctl enable lumen-storage-mount.service \
+        || log_warn "启用 lumen-storage-mount.service 失败，重启后需手工恢复挂载。"
+    rm -rf "${tmp_dir}"
+    log_info "存储控制面已安装，共享目录 gid=${storage_gid}。"
+}
+
 
 # ---------------------------------------------------------------------------
 # I. 健康检查（HTTP + Compose 状态）
@@ -2180,6 +2445,10 @@ log_step "Lumen Docker Compose 全栈安装（OS=${OS}, deploy=${DEPLOY_ROOT}, d
 check_prerequisites
 prepare_data_dirs
 prepare_release_layout
+if ! snapshot_install_state; then
+    log_error "无法创建安装事务快照，拒绝继续。"
+    exit 1
+fi
 prepare_env_file
 probe_ghcr_image_tag
 pull_or_build_images
@@ -2189,10 +2458,12 @@ run_bootstrap_admin
 start_application_services
 switch_current_symlink
 install_update_runner_units
+install_storage_control_plane
 run_health_checks
 warn_about_legacy_systemd
 print_summary
 
 trap - ERR EXIT
+discard_install_state_snapshot
 lumen_release_lock 2>/dev/null || true
 exit 0

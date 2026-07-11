@@ -233,7 +233,11 @@ async def test_compact_returns_summary_for_owner(
             "extra_instruction_hash": None,
         }
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations,
+        "_import_worker_context_summary",
+        lambda: SimpleNamespace(ensure_context_summary=fake_ensure),
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
@@ -266,7 +270,10 @@ async def test_compact_returns_summary_for_owner(
     assert captured["trigger"] == "manual"
     assert captured["extra_instruction"] == "keep file paths"
     assert captured["boundary_id"] == "msg-latest"
-    assert "FOR UPDATE" in str(db.statements[0].compile(dialect=postgresql.dialect())).upper()
+    assert (
+        "FOR UPDATE"
+        not in str(db.statements[0].compile(dialect=postgresql.dialect())).upper()
+    )
 
 
 # ---------- 2. cross-user 404 ----------

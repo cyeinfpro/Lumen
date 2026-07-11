@@ -14,10 +14,11 @@ import time
 import uuid
 from typing import Any, TypedDict
 
-from lumen_core.constants import EVENTS_STREAM_MAXLEN, EVENTS_STREAM_PREFIX
-from lumen_core.desktop_runtime import is_desktop_runtime
-
-
+from lumen_core.constants import (
+    EVENTS_STREAM_MAXLEN,
+    EVENTS_STREAM_PREFIX,
+    EVENTS_STREAM_TTL_SECONDS,
+)
 logger = logging.getLogger(__name__)
 
 _XADD_RETRY_DELAYS_SECONDS = (0.05, 0.2)
@@ -77,6 +78,20 @@ async def _monotonic_ts_ms() -> int:
         return now
 
 
+async def _refresh_stream_ttl(redis: Any, stream_key: str) -> None:
+    expire_fn = getattr(redis, "expire", None)
+    if not callable(expire_fn):
+        return
+    try:
+        await expire_fn(stream_key, EVENTS_STREAM_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "api publish_sse_event stream ttl refresh failed key=%s err=%s",
+            stream_key,
+            exc,
+        )
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -128,10 +143,6 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
             "xadd" in message and ("unsupported" in message or "not allowed" in message)
         )
     )
-
-
-def _live_only_sse_id() -> str:
-    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
 
 
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
@@ -215,20 +226,6 @@ async def _xadd_event_without_lua(
         )
     except Exception as exc:  # noqa: BLE001
         if _is_stream_command_unsupported(exc):
-            if is_desktop_runtime():
-                # Desktop bundles Garnet without Streams. The SSE gateway drops
-                # live-* from Last-Event-ID, so this remains explicitly live-only.
-                stream_id = _live_only_sse_id()
-                await _store_dedupe_stream_id(
-                    redis,
-                    dedupe_key=dedupe_key,
-                    stream_id=stream_id,
-                )
-                logger.info(
-                    "desktop redis streams unavailable; using live-only event id key=%s",
-                    stream_key,
-                )
-                return stream_id
             raise RuntimeError(
                 "redis stream xadd unsupported; cannot create recoverable sse id"
             ) from exc
@@ -428,6 +425,8 @@ async def publish_sse_events(
     if stream_ids is None:
         raise RuntimeError(f"publish_sse_events: xadd failed for {len(events)} events")
 
+    for stream_key in set(stream_keys):
+        await _refresh_stream_ttl(redis, stream_key)
     publish_pipe = pipe_fn(transaction=False)
     for event, envelope, stream_id in zip(events, envelopes, stream_ids, strict=False):
         envelope["sse_id"] = stream_id
@@ -481,6 +480,7 @@ async def _publish_sse_event_single(
     if stream_id is None:
         raise RuntimeError(f"publish_sse_event: xadd failed for {stream_key}")
 
+    await _refresh_stream_ttl(redis, stream_key)
     envelope["sse_id"] = stream_id
     await redis.publish(channel, _json(envelope))
     return stream_id

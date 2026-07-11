@@ -34,13 +34,6 @@ export const EASE = {
   curtain: [0.80, 0, 0.20, 1] as const,
 } as const;
 
-export const OPACITY = {
-  hover: 0.92,
-  press: 0.88,
-  disabled: 0.40,
-  hint: 0.60,
-} as const;
-
 export const PRESS_SCALE = {
   tight: 0.96,
   soft: 0.98,

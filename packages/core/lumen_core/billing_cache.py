@@ -9,10 +9,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import BillingWindowUsageEvent, UserApiCredential, UserWallet
+from .models import (
+    BillingWindowUsageEvent,
+    UserApiCredential,
+    UserWallet,
+    WalletTransaction,
+)
 
 # Bound only rate-limit window increments. Balance-cache decrements mirror the
 # ledger amount and should not silently skip legitimate large charges.
@@ -293,6 +298,7 @@ class BillingCacheService:
         *,
         limit_micro: int,
         now: datetime | None = None,
+        user_id: str | None = None,
     ) -> WindowUsage:
         ttl_map = {"5h": 5 * 3600, "1d": 24 * 3600, "7d": 7 * 24 * 3600}
         ttl = ttl_map.get(window)
@@ -300,24 +306,44 @@ class BillingCacheService:
             return WindowUsage(limit_micro=max(0, int(limit_micro)))
         current = now or datetime.now(timezone.utc)
         cutoff = current - timedelta(seconds=ttl)
-        row = (
-            await db.execute(
-                select(
-                    func.coalesce(func.sum(BillingWindowUsageEvent.amount_micro), 0),
-                    func.min(BillingWindowUsageEvent.created_at),
-                ).where(
-                    BillingWindowUsageEvent.credential_id == key_id,
-                    BillingWindowUsageEvent.created_at >= cutoff,
-                )
+        stmt = (
+            select(
+                func.coalesce(func.sum(BillingWindowUsageEvent.amount_micro), 0),
+                func.min(BillingWindowUsageEvent.created_at),
             )
-        ).one()
+            .select_from(BillingWindowUsageEvent)
+            .join(
+                WalletTransaction,
+                and_(
+                    WalletTransaction.id
+                    == BillingWindowUsageEvent.wallet_transaction_id,
+                    WalletTransaction.user_id == BillingWindowUsageEvent.user_id,
+                ),
+            )
+            .join(
+                UserApiCredential,
+                and_(
+                    UserApiCredential.id == BillingWindowUsageEvent.credential_id,
+                    UserApiCredential.user_id == BillingWindowUsageEvent.user_id,
+                ),
+            )
+            .where(
+                BillingWindowUsageEvent.credential_id == key_id,
+                BillingWindowUsageEvent.amount_micro > 0,
+                BillingWindowUsageEvent.created_at >= cutoff,
+                BillingWindowUsageEvent.created_at <= current,
+                WalletTransaction.ref_type == "completion",
+                WalletTransaction.kind.in_(("charge", "charge_completion", "settle")),
+            )
+        )
+        if user_id is not None:
+            stmt = stmt.where(BillingWindowUsageEvent.user_id == user_id)
+        row = (await db.execute(stmt)).one()
         used = max(0, int(row[0] or 0))
         earliest = row[1]
         if earliest is not None and earliest.tzinfo is None:
             earliest = earliest.replace(tzinfo=timezone.utc)
-        resets_at = (
-            earliest + timedelta(seconds=ttl) if earliest is not None else None
-        )
+        resets_at = earliest + timedelta(seconds=ttl) if earliest is not None else None
         return WindowUsage(
             used_micro=used,
             limit_micro=max(0, int(limit_micro)),

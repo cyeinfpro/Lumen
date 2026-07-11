@@ -113,6 +113,31 @@ def test_extract_response_output_text_handles_responses_shapes() -> None:
     )
 
 
+def test_build_provider_probe_request_preserves_fixed_payload() -> None:
+    assert byok.build_provider_probe_request() == {
+        "model": "gpt-5.4-mini",
+        "instructions": (
+            "You are a precise calculator. Return only the final integer."
+        ),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "What is 99 times 99? Reply with only the integer result, "
+                            "no words, no explanation."
+                        ),
+                    }
+                ],
+            }
+        ],
+        "stream": False,
+        "store": False,
+    }
+
+
 def test_extract_sse_output_text_handles_delta_and_nested_responses() -> None:
     raw = "\n\n".join(
         [

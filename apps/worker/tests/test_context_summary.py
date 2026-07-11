@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import time
 from typing import Any
 
 import pytest
@@ -49,9 +51,12 @@ class _CasSession:
         self.rollbacks = 0
         self.execute_calls = 0
         self.after_execute: Any | None = None
+        self.statements: list[Any] = []
 
-    async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+    async def execute(self, *args: Any, **_kwargs: Any) -> _ScalarResult:
         self.execute_calls += 1
+        if args:
+            self.statements.append(args[0])
         if self.after_execute is not None:
             self.after_execute()
         return _ScalarResult(self.conv)
@@ -68,6 +73,8 @@ class _FakeRedis:
         self.kv: dict[str, str] = {}
         self.published: list[tuple[str, dict[str, Any]]] = []
         self.deleted: list[str] = []
+        self.eval_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.expirations: dict[str, int] = {}
 
     async def set(self, key: str, value: str, **kwargs: Any) -> bool:
         if kwargs.get("nx") and key in self.kv:
@@ -83,8 +90,26 @@ class _FakeRedis:
         self.kv.pop(key, None)
 
     async def expire(self, key: str, ttl: int) -> None:
-        _ = (key, ttl)
-        return None
+        self.expirations[key] = ttl
+
+    async def eval(
+        self,
+        script: str,
+        _numkeys: int,
+        *args: Any,
+    ) -> int:
+        self.eval_calls.append((script, args))
+        key = str(args[0])
+        token = str(args[1])
+        if self.kv.get(key) != token:
+            return 0
+        if "DEL" in script:
+            await self.delete(key)
+            return 1
+        if "EXPIRE" in script:
+            self.expirations[key] = int(args[2])
+            return 1
+        raise AssertionError("unexpected Lua script")
 
     async def publish(self, channel: str, payload: str) -> None:
         self.published.append((channel, json.loads(payload)))
@@ -122,6 +147,169 @@ class _MetricsRedis:
 
     async def set(self, key: str, value: str, **_kwargs: Any) -> None:
         self.values[key] = value
+
+
+def _half_open_text_pool() -> tuple[Any, Any]:
+    from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
+
+    pool = ProviderPool()
+    provider = ProviderConfig(
+        name="summary-provider",
+        base_url="https://summary.example",
+        api_key="sk-summary",
+    )
+    health = ProviderHealth(
+        consecutive_failures=3,
+        cooldown_until=time.monotonic() - 1.0,
+    )
+    pool._providers = [provider]
+    pool._health = {provider.name: health}
+    pool._config_loaded_at = time.monotonic() + 60.0
+    return pool, health
+
+
+@pytest.mark.asyncio
+async def test_call_summary_upstream_reports_actual_success_and_closes_half_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, upstream
+
+    pool, health = _half_open_text_pool()
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def fake_responses_call(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {"output_text": "summary text"}
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(upstream, "responses_call", fake_responses_call)
+
+    result = await context_summary._call_summary_upstream(
+        "input",
+        100,
+        "gpt-test",
+    )
+
+    assert result == "summary text"
+    assert health.consecutive_failures == 0
+    assert health.cooldown_until is None
+    assert health.half_open_probe_inflight is False
+    assert health.half_open_probe_token is None
+    assert health.total_requests == 1
+    assert health.successful_requests == 1
+    assert health.failed_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_call_summary_upstream_reports_actual_failure_and_reopens_half_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, upstream
+
+    pool, health = _half_open_text_pool()
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def fail_responses_call(*_args: Any, **_kwargs: Any) -> None:
+        raise context_summary.UpstreamError(
+            "upstream unavailable",
+            error_code=context_summary.EC.SERVICE_UNAVAILABLE.value,
+            status_code=503,
+        )
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(upstream, "responses_call", fail_responses_call)
+
+    result = await context_summary._call_summary_upstream(
+        "input",
+        100,
+        "gpt-test",
+    )
+
+    assert result is None
+    assert health.consecutive_failures == 4
+    assert health.cooldown_until is not None
+    assert health.cooldown_until > time.monotonic()
+    assert health.half_open_probe_inflight is False
+    assert health.half_open_probe_token is None
+    assert health.total_requests == 1
+    assert health.successful_requests == 0
+    assert health.failed_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_call_summary_upstream_cancellation_only_releases_half_open_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, upstream
+
+    pool, health = _half_open_text_pool()
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def cancel_responses_call(*_args: Any, **_kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(upstream, "responses_call", cancel_responses_call)
+
+    with pytest.raises(asyncio.CancelledError):
+        await context_summary._call_summary_upstream(
+            "input",
+            100,
+            "gpt-test",
+        )
+
+    assert health.consecutive_failures == 3
+    assert health.half_open_probe_inflight is False
+    assert health.half_open_probe_token is None
+    assert health.total_requests == 0
+    assert health.successful_requests == 0
+    assert health.failed_requests == 0
+
+    provider = (await pool.select(route="text"))[0]
+    with pool.text_attempt(provider):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_call_summary_upstream_local_parse_error_is_not_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, upstream
+
+    pool, health = _half_open_text_pool()
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def fake_responses_call(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {"output_text": "valid upstream response"}
+
+    def fail_local_parse(_payload: Any) -> tuple[str, dict[str, Any]]:
+        raise ValueError("local parser failed")
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(upstream, "responses_call", fake_responses_call)
+    monkeypatch.setattr(context_summary, "_parse_response_dict", fail_local_parse)
+
+    result = await context_summary._call_summary_upstream(
+        "input",
+        100,
+        "gpt-test",
+    )
+
+    assert result is None
+    assert health.consecutive_failures == 0
+    assert health.cooldown_until is None
+    assert health.half_open_probe_inflight is False
+    assert health.half_open_probe_token is None
+    assert health.total_requests == 1
+    assert health.successful_requests == 1
+    assert health.failed_requests == 0
 
 
 def test_summarize_text_blob_handles_json_code_plain_and_file_read() -> None:
@@ -214,28 +402,75 @@ def test_summary_response_body_uses_gpt54_high_reasoning() -> None:
     assert body["store"] is False
 
 
-def test_summary_boundary_uses_message_id_when_timestamps_equal() -> None:
+@pytest.mark.asyncio
+async def test_ensure_context_summary_uses_message_id_when_timestamps_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     boundary = _message(10)
     boundary.id = "msg-b"
     same_created_at = boundary.created_at.isoformat()
-    base = {
+    base_summary = {
         "version": SUMMARY_VERSION,
         "kind": SUMMARY_KIND,
-        "up_to_message_id": "msg-a",
         "up_to_created_at": same_created_at,
         "first_user_message_id": "msg-001",
         "text": "old summary",
         "tokens": 10,
     }
 
-    assert context_summary._summary_covers_boundary(base, boundary) is False
-    assert (
-        context_summary._summary_covers_boundary(
-            {**base, "up_to_message_id": "msg-c"},
-            boundary,
-        )
-        is True
+    async def fail_load(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("newer equal-timestamp summary must be reused")
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fail_load)
+    cached = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        Conversation(
+            id="conv-1",
+            user_id="user-1",
+            summary_jsonb={**base_summary, "up_to_message_id": "msg-c"},
+        ),
+        boundary,
+        {},
     )
+    assert cached is not None
+    assert cached["status"] == "cached"
+
+    load_calls = 0
+
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
+        nonlocal load_calls
+        load_calls += 1
+        return context_summary.LoadedSummaryMessages([], 0, 0, 0)
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_read(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_acquire_summary_lock", fake_acquire)
+    monkeypatch.setattr(context_summary, "_read_current_summary", fake_read)
+    monkeypatch.setattr(context_summary.asyncio, "sleep", fake_sleep)
+
+    stale = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        Conversation(
+            id="conv-1",
+            user_id="user-1",
+            summary_jsonb={**base_summary, "up_to_message_id": "msg-a"},
+        ),
+        boundary,
+        {},
+    )
+
+    assert stale is None
+    assert load_calls == 1
 
 
 def test_worker_compact_summary_payload_preserves_public_stats() -> None:
@@ -313,6 +548,23 @@ async def test_record_summary_metrics_opens_circuit_after_failure_threshold() ->
 
 
 @pytest.mark.asyncio
+async def test_record_summary_metrics_circuit_open_is_not_another_failure() -> None:
+    redis = _MetricsRedis()
+
+    await context_summary.record_summary_metrics(
+        redis,
+        conv_id="conv-1",
+        trigger="auto",
+        outcome="circuit_open",
+    )
+
+    row = next(iter(redis.hashes.values()))
+    assert row["fallback_reason:circuit_open"] == 1
+    assert "summary_attempts" not in row
+    assert "summary_failures" not in row
+
+
+@pytest.mark.asyncio
 async def test_segment_and_summarize_uses_segments_and_partial_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,6 +606,208 @@ async def test_segment_and_summarize_uses_segments_and_partial_cache(
     assert "context:summary:partial:conv-1" in redis.kv
 
 
+@pytest.mark.asyncio
+async def test_segment_and_summarize_limits_safe_prefix_instead_of_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_call(
+        input_text: str,
+        _target_tokens: int,
+        _model: str,
+        *,
+        extra_instruction: str | None = None,
+        timeout_s: float,
+    ) -> str:
+        _ = (extra_instruction, timeout_s)
+        calls.append(input_text)
+        return f"summary-{len(calls)}"
+
+    monkeypatch.setattr(context_summary, "_call_summary_upstream", fake_call)
+    monkeypatch.setattr(
+        context_summary,
+        "_message_to_summary_line",
+        lambda message, **_kwargs: f"{message.id} " + ("x" * 3000),
+    )
+    coverage = context_summary._SummaryCoverage()
+    messages = [_message(i, "x" * 3000) for i in range(1, 10)]
+
+    result = await context_summary._segment_and_summarize(
+        conv_id="conv-1",
+        messages=messages,
+        previous_summary=None,
+        target_tokens=100,
+        model="gpt-test",
+        input_budget=80,
+        coverage=coverage,
+    )
+
+    assert result == "summary-8"
+    assert len(calls) == context_summary._SUMMARY_MAX_SEGMENTS
+    assert "msg-001" in calls[0]
+    assert "msg-008" in calls[-1]
+    assert all("msg-009" not in call for call in calls)
+    assert coverage.covered_message_count == 8
+    assert coverage.partial_reason == "segment_limit"
+
+
+@pytest.mark.asyncio
+async def test_segment_limit_does_not_cross_cap_for_one_oversized_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_call(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("no complete message boundary exists within the segment cap")
+
+    monkeypatch.setattr(context_summary, "_call_summary_upstream", fail_call)
+    monkeypatch.setattr(
+        context_summary,
+        "_message_to_summary_line",
+        lambda message, **_kwargs: f"{message.id} " + ("x" * 100_000),
+    )
+    coverage = context_summary._SummaryCoverage()
+
+    result = await context_summary._segment_and_summarize(
+        conv_id="conv-1",
+        messages=[_message(1)],
+        previous_summary=None,
+        target_tokens=100,
+        model="gpt-test",
+        input_budget=80,
+        coverage=coverage,
+    )
+
+    assert result is None
+    assert coverage.covered_message_count == 0
+    assert coverage.partial_reason == "segment_limit"
+
+
+@pytest.mark.asyncio
+async def test_segment_failure_returns_last_complete_message_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_call(
+        input_text: str,
+        _target_tokens: int,
+        _model: str,
+        *,
+        extra_instruction: str | None = None,
+        timeout_s: float,
+    ) -> str | None:
+        _ = (extra_instruction, timeout_s)
+        calls.append(input_text)
+        if len(calls) == 3:
+            return None
+        return f"summary-{len(calls)}"
+
+    monkeypatch.setattr(context_summary, "_call_summary_upstream", fake_call)
+    monkeypatch.setattr(
+        context_summary,
+        "_message_to_summary_line",
+        lambda message, **_kwargs: (
+            f"{message.id} "
+            + ("x" * (500 if message.id == "msg-001" else 20_000))
+        ),
+    )
+    coverage = context_summary._SummaryCoverage()
+
+    result = await context_summary._segment_and_summarize(
+        conv_id="conv-1",
+        messages=[_message(1), _message(2)],
+        previous_summary=None,
+        target_tokens=100,
+        model="gpt-test",
+        input_budget=80,
+        coverage=coverage,
+    )
+
+    assert len(calls) == 3
+    assert result == "summary-1"
+    assert coverage.covered_message_count == 1
+    assert coverage.partial_reason == "partial_segment_failure"
+
+
+@pytest.mark.asyncio
+async def test_partial_segment_commit_resumes_after_covered_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(3, "x" * 3000)
+    messages = [_message(i, "x" * 3000) for i in range(1, 4)]
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    redis = _FakeRedis()
+    load_after_ids: list[str | None] = []
+    written: list[dict[str, Any]] = []
+
+    async def fake_load(
+        _session: Any,
+        _conv_id: str,
+        after_message_id: str | None,
+        _before_boundary_id: str,
+    ) -> context_summary.LoadedSummaryMessages:
+        load_after_ids.append(after_message_id)
+        selected = messages if after_message_id is None else messages[1:]
+        return context_summary.LoadedSummaryMessages(
+            selected,
+            len(selected),
+            sum(
+                context_summary.estimate_message_tokens(msg.role, msg.content)
+                for msg in selected
+            ),
+            0,
+        )
+
+    async def fake_segment(**kwargs: Any) -> str:
+        coverage = kwargs["coverage"]
+        current_messages = kwargs["messages"]
+        if len(load_after_ids) == 1:
+            coverage.covered_message_count = 1
+            coverage.partial_reason = "partial_segment_failure"
+            return "summary-through-msg-001"
+        coverage.covered_message_count = len(current_messages)
+        return "summary-through-msg-003"
+
+    async def fake_cas(
+        _session: Any,
+        _conv_id: str,
+        summary: dict[str, Any],
+        **_kwargs: Any,
+    ) -> bool:
+        written.append(summary)
+        conv.summary_jsonb = summary
+        return True
+
+    async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", fake_segment)
+    monkeypatch.setattr(context_summary, "_cas_write_summary", fake_cas)
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fake_caption)
+
+    first = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": redis},
+    )
+    second = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": redis},
+    )
+
+    assert first is not None
+    assert first["summary_up_to_message_id"] == "msg-001"
+    assert first["source_message_count"] == 1
+    assert written[0]["up_to_message_id"] == "msg-001"
+    assert second is not None
+    assert second["summary_up_to_message_id"] == "msg-003"
+    assert load_after_ids == [None, "msg-001"]
+
+
 def test_chunk_lines_by_budget_splits_single_oversized_line() -> None:
     chunks = context_summary._chunk_lines_by_budget(["x" * 80_000], 1000)
 
@@ -385,6 +839,68 @@ async def test_renew_summary_lock_marks_lock_lost_when_key_expires(
     )
 
     assert lock.lost_reason == "expired"
+
+
+@pytest.mark.asyncio
+async def test_redis_summary_lock_release_does_not_delete_new_owner() -> None:
+    class SwitchingRedis(_FakeRedis):
+        async def eval(
+            self,
+            script: str,
+            numkeys: int,
+            *args: Any,
+        ) -> int:
+            self.kv[str(args[0])] = "token-new"
+            return await super().eval(script, numkeys, *args)
+
+    redis = SwitchingRedis()
+    key = "context:summary:lock:conv-1"
+    redis.kv[key] = "token-old"
+
+    await context_summary._release_summary_lock(
+        redis,
+        "conv-1",
+        context_summary._SummaryLock("redis", "token-old"),
+    )
+
+    assert redis.kv[key] == "token-new"
+    assert key not in redis.deleted
+    assert len(redis.eval_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_redis_summary_lock_renew_does_not_expire_new_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SwitchingRedis(_FakeRedis):
+        async def eval(
+            self,
+            script: str,
+            numkeys: int,
+            *args: Any,
+        ) -> int:
+            self.kv[str(args[0])] = "token-new"
+            return await super().eval(script, numkeys, *args)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(context_summary.asyncio, "sleep", fake_sleep)
+    redis = SwitchingRedis()
+    key = "context:summary:lock:conv-1"
+    redis.kv[key] = "token-old"
+    lock = context_summary._SummaryLock("redis", "token-old")
+
+    await context_summary._renew_summary_lock_loop(
+        redis,
+        "conv-1",
+        lock,
+        interval_s=1,
+    )
+
+    assert redis.kv[key] == "token-new"
+    assert key not in redis.expirations
+    assert lock.lost_reason == "stolen"
 
 
 @pytest.mark.asyncio
@@ -422,6 +938,8 @@ async def test_cas_write_refuses_equal_boundary_fallback_downgrade() -> None:
     assert wrote is False
     assert conv.summary_jsonb == current_summary
     assert session.commits == 0
+    assert session.rollbacks == 0
+    assert session.statements[0].get_execution_options()["populate_existing"] is True
 
 
 @pytest.mark.asyncio
@@ -638,6 +1156,115 @@ async def test_ensure_context_summary_writes_local_fallback_when_upstream_fails(
 
 
 @pytest.mark.asyncio
+async def test_open_circuit_local_fallback_does_not_record_failure_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(3)
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    redis = _FakeRedis()
+    metric_outcomes: list[str] = []
+
+    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+        return context_summary.LoadedSummaryMessages(
+            [_message(1, "goal"), _message(2, "decision")],
+            2,
+            100,
+            0,
+        )
+
+    async def fail_segment(**_kwargs: Any) -> str:
+        raise AssertionError("open circuit must not call upstream summarization")
+
+    async def fail_circuit_sample(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("open circuit fallback must not refresh failure TTL")
+
+    async def fake_metrics(
+        _redis: Any,
+        *,
+        conv_id: str,
+        trigger: str,
+        outcome: str,
+        **_kwargs: Any,
+    ) -> None:
+        _ = (conv_id, trigger)
+        metric_outcomes.append(outcome)
+
+    async def fake_cas(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    async def circuit_open(_redis: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(context_summary, "_is_circuit_open", circuit_open)
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", fail_segment)
+    monkeypatch.setattr(context_summary, "_record_circuit_sample", fail_circuit_sample)
+    monkeypatch.setattr(context_summary, "record_summary_metrics", fake_metrics)
+    monkeypatch.setattr(context_summary, "_cas_write_summary", fake_cas)
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fake_caption)
+
+    result = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": redis},
+    )
+
+    assert result is not None
+    assert result["status"] == "created_local_fallback"
+    assert result["fallback_reason"] == "circuit_open_local_fallback"
+    assert metric_outcomes == ["circuit_open", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_segment_limit_local_fallback_does_not_record_failure_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(2)
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    redis = _FakeRedis()
+
+    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+        return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
+
+    async def segment_limited(**kwargs: Any) -> None:
+        kwargs["coverage"].partial_reason = "segment_limit"
+        return None
+
+    async def fail_circuit_sample(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("local segment cap must not count as an upstream failure")
+
+    async def fake_metrics(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_cas(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", segment_limited)
+    monkeypatch.setattr(context_summary, "_record_circuit_sample", fail_circuit_sample)
+    monkeypatch.setattr(context_summary, "record_summary_metrics", fake_metrics)
+    monkeypatch.setattr(context_summary, "_cas_write_summary", fake_cas)
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fake_caption)
+
+    result = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": redis},
+    )
+
+    assert result is not None
+    assert result["status"] == "created_local_fallback"
+
+
+@pytest.mark.asyncio
 async def test_ensure_context_summary_lock_busy_waits_and_reuses_latest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -733,3 +1360,123 @@ async def test_ensure_context_summary_lock_busy_does_not_reuse_mismatched_extra_
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_summary_lock_uses_dedicated_session_lock_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Connection:
+        commits = 0
+        closed = False
+
+        async def execute(self, statement: Any, _params: Any) -> _ScalarResult:
+            statements.append(str(statement))
+            return _ScalarResult(True)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def invalidate(self) -> None:
+            raise AssertionError("valid unlock must not invalidate connection")
+
+    connection = Connection()
+
+    class Engine:
+        async def connect(self) -> Connection:
+            return connection
+
+    monkeypatch.setattr(context_summary, "engine", Engine())
+
+    lock = await context_summary._acquire_summary_lock(  # noqa: SLF001
+        object(),
+        None,
+        "conv-pg-lock",
+    )
+
+    assert lock is not None
+    assert lock.kind == "pg"
+    assert "pg_try_advisory_lock" in statements[0]
+    assert "pg_try_advisory_xact_lock" not in statements[0]
+    await context_summary._release_summary_lock(  # noqa: SLF001
+        None,
+        "conv-pg-lock",
+        lock,
+    )
+    assert "pg_advisory_unlock" in statements[1]
+    assert connection.commits == 2
+    assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_redis_summary_lock_failure_does_not_consume_postgres_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Engine:
+        async def connect(self) -> None:
+            raise AssertionError("postgres fallback must stay unused")
+
+    class BrokenRedis:
+        async def set(self, *_args: Any, **_kwargs: Any) -> bool:
+            raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(context_summary, "engine", Engine())
+
+    lock = await context_summary._acquire_summary_lock(  # noqa: SLF001
+        object(),
+        BrokenRedis(),
+        "conv-redis-down",
+    )
+
+    assert lock is None
+
+
+@pytest.mark.asyncio
+async def test_summary_releases_business_transaction_before_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(3)
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    session = _FakeSession()
+    commits = 0
+
+    async def commit() -> None:
+        nonlocal commits
+        commits += 1
+
+    session.commit = commit  # type: ignore[method-assign]
+
+    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+        return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
+
+    async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        assert commits >= 1
+        return {}
+
+    async def fake_segment(**_kwargs: Any) -> str:
+        assert commits >= 1
+        return "summary"
+
+    async def fake_cas(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fake_caption)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", fake_segment)
+    monkeypatch.setattr(context_summary, "_cas_write_summary", fake_cas)
+
+    result = await context_summary.ensure_context_summary(
+        session,
+        conv,
+        boundary,
+        {"redis": _FakeRedis()},
+        force=True,
+    )
+
+    assert result is not None
+    assert commits >= 1

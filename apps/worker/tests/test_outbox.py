@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,8 +28,11 @@ class FakeRedis:
         self.enqueued: list[tuple[str, str]] = []
         self.keys: dict[str, str] = {}
         self.deleted: list[str] = []
+        self.renewed: list[tuple[str, str, str]] = []
 
-    async def set(self, key: str, value: str, **_kwargs):
+    async def set(self, key: str, value: str, **kwargs):
+        if kwargs.get("nx") and key in self.keys:
+            return False
         self.keys[key] = value
         return True
 
@@ -46,7 +50,20 @@ class FakeRedis:
         self.enqueued.append((job_name, task_id))
         return SimpleNamespace(job_id=f"job:{task_id}")
 
-    async def eval(self, _script: str, _keys: int, key: str, field: str, ttl: str):
+    async def eval(self, script: str, _keys: int, key: str, *args: str):
+        if script == outbox._RELEASE_OWNED_LOCK_LUA:  # noqa: SLF001
+            token = args[0]
+            if self.keys.get(key) != token:
+                return 0
+            self.keys.pop(key, None)
+            return 1
+        if script == outbox._RENEW_OWNED_LOCK_LUA:  # noqa: SLF001
+            token, ttl = args
+            if self.keys.get(key) != token:
+                return 0
+            self.renewed.append((key, token, ttl))
+            return 1
+        field, ttl = args
         value = int(self.keys.get(f"{key}:{field}") or 0) + 1
         self.keys[f"{key}:{field}"] = str(value)
         self.keys[f"{key}:ttl"] = str(ttl)
@@ -58,7 +75,8 @@ class FakeRedis:
     async def expire(self, _key: str, _ttl: int):
         return True
 
-    async def hdel(self, _key: str, _field: str):
+    async def hdel(self, key: str, field: str):
+        self.keys.pop(f"{key}:{field}", None)
         return 1
 
     async def lpush(self, _key: str, _payload: str):
@@ -88,6 +106,7 @@ class FakeSession:
     def __init__(self, events: list[OutboxEvent]) -> None:
         self.events = events
         self.added: list[object] = []
+        self.dead_letters: list[OutboxDeadLetter] = []
 
     async def __aenter__(self):
         return self
@@ -99,10 +118,26 @@ class FakeSession:
         return self
 
     async def execute(self, statement):
+        statement_text = str(statement)
         if statement.is_select:
+            if "FROM outbox_dead_letter" in statement_text:
+                return FakeScalarResult(
+                    [
+                        row.id
+                        for row in self.dead_letters
+                        if row.resolved_at is None
+                    ]
+                )
             return FakeScalarResult(
                 [ev for ev in self.events if ev.published_at is None]
             )
+        if getattr(statement, "is_update", False):
+            if "outbox_dead_letter" in statement_text:
+                now = datetime.now(timezone.utc)
+                for row in self.dead_letters:
+                    if row.resolved_at is None:
+                        row.resolved_at = now
+            return FakeUpdateResult(1)
         rowcount = 0
         for ev in self.events:
             if ev.published_at is None:
@@ -116,6 +151,10 @@ class FakeSession:
 
     def add(self, row: object) -> None:
         self.added.append(row)
+        if isinstance(row, OutboxDeadLetter):
+            if row.id is None:
+                row.id = f"dlq-{len(self.dead_letters) + 1}"
+            self.dead_letters.append(row)
 
 
 class FakeReconSession:
@@ -128,6 +167,7 @@ class FakeReconSession:
         self.generations = generations
         self.completions = completions
         self.messages = messages or {}
+        self.outbox_events: list[OutboxEvent] = []
         self.select_skip_locked: list[bool] = []
         self.info: dict[str, object] = {}
         self.commits = 0
@@ -138,25 +178,43 @@ class FakeReconSession:
     async def __aexit__(self, *_args):
         return None
 
+    def begin(self):
+        return self
+
     async def execute(self, statement):
         text = str(statement)
         arg = getattr(statement, "_for_update_arg", None)
         if statement.is_select:
             self.select_skip_locked.append(arg is not None and arg.skip_locked is True)
+        if "FROM outbox_events" in text:
+            return FakeScalarResult(
+                [event for event in self.outbox_events if event.published_at is None]
+            )
         if "FROM generations" in text:
             return FakeScalarResult(self.generations)
         if "FROM completions" in text:
             return FakeScalarResult(self.completions)
+        if getattr(statement, "is_update", False):
+            return FakeUpdateResult(0)
         return FakeScalarResult([])
 
     async def get(self, model, object_id: str):
         if model is Message:
             return self.messages.get(object_id)
+        if model is OutboxEvent:
+            return next(
+                (event for event in self.outbox_events if event.id == object_id),
+                None,
+            )
         return None
 
     async def commit(self) -> None:
         self.commits += 1
         return None
+
+    def add(self, row: object) -> None:
+        if isinstance(row, OutboxEvent):
+            self.outbox_events.append(row)
 
 
 def _patch_session_local(
@@ -230,6 +288,57 @@ async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_publish_outbox_lock_release_does_not_delete_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    observed_token: str | None = None
+
+    async def process_batch(_redis, _cutoff, _limit):
+        nonlocal observed_token
+        observed_token = redis.keys[outbox._OUTBOX_LOCK_KEY]  # noqa: SLF001
+        redis.keys[outbox._OUTBOX_LOCK_KEY] = "successor-token"  # noqa: SLF001
+        return 0
+
+    monkeypatch.setattr(outbox, "_process_outbox_batch", process_batch)
+
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == 0
+    assert observed_token is not None
+    assert observed_token != "1"
+    assert redis.keys[outbox._OUTBOX_LOCK_KEY] == "successor-token"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_owned_redis_lock_renews_only_while_token_is_owner() -> None:
+    redis = FakeRedis()
+
+    async with outbox._owned_redis_lock(  # noqa: SLF001
+        redis,
+        key="lock:test",
+        ttl_s=1,
+    ) as acquired:
+        assert acquired is True
+        token = redis.keys["lock:test"]
+        await asyncio.sleep(0.4)
+        assert redis.renewed
+        assert all(call == ("lock:test", token, "1") for call in redis.renewed)
+        redis.keys["lock:test"] = "new-owner"
+        assert (
+            await outbox._renew_owned_lock(  # noqa: SLF001
+                redis,
+                key="lock:test",
+                token=token,
+                ttl_s=1,
+            )
+            is False
+        )
+
+    assert redis.keys["lock:test"] == "new-owner"
+
+
+@pytest.mark.asyncio
 async def test_publish_outbox_delivers_sse_with_stable_outbox_id(monkeypatch):
     event = OutboxEvent(
         id="event-sse-1",
@@ -265,6 +374,7 @@ async def test_publish_outbox_delivers_sse_with_stable_outbox_id(monkeypatch):
                 "status": "failed",
                 "submission_epoch": 2,
                 "outbox_id": "event-sse-1",
+                "event_id": "event-sse-1",
             },
         }
     ]
@@ -305,6 +415,48 @@ async def test_publish_outbox_keeps_event_retryable_when_enqueue_fails(monkeypat
     assert not any(
         key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
     )
+
+
+@pytest.mark.asyncio
+async def test_storyboard_outbox_dlq_keeps_redrive_until_enqueue_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(
+        event_id="storyboard-event-1",
+        task_id="storyboard-run-1",
+        kind="storyboard_assembly",
+    )
+    session = _patch_session_local(monkeypatch, [event])
+    redis = FakeRedis(fail_enqueue=True)
+    redis.keys[
+        f"{outbox._OUTBOX_FAIL_COUNT_HASH}:{event.id}"  # noqa: SLF001
+    ] = str(outbox._OUTBOX_MAX_FAIL_COUNT - 1)  # noqa: SLF001
+
+    first_processed = await outbox.publish_outbox({"redis": redis})
+
+    assert first_processed == 0
+    assert event.published_at is None
+    assert len(session.dead_letters) == 1
+    dead_letter = session.dead_letters[0]
+    assert dead_letter.event_type == "outbox.storyboard_assembly"
+    assert dead_letter.error_class == "OutboxEnqueueFailed"
+    assert dead_letter.resolved_at is None
+
+    second_processed = await outbox.publish_outbox({"redis": redis})
+
+    assert second_processed == 0
+    assert event.published_at is None
+    assert len(session.dead_letters) == 1
+
+    redis.fail_enqueue = False
+    recovered_processed = await outbox.publish_outbox({"redis": redis})
+
+    assert recovered_processed == 1
+    assert redis.enqueued == [
+        ("run_storyboard_assembly", "storyboard-run-1")
+    ]
+    assert event.published_at is not None
+    assert dead_letter.resolved_at is not None
 
 
 @pytest.mark.asyncio
@@ -450,6 +602,81 @@ async def test_publish_outbox_redis_dlq_failure_does_not_roll_back_pg(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_persists_outbox_and_commits_before_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = Generation(
+        id="gen-commit-order",
+        user_id="user-1",
+        message_id="msg-1",
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
+    _patch_publish_event(monkeypatch)
+
+    class CommitAwareRedis(FakeRedis):
+        async def enqueue_job(self, job_name: str, task_id: str, **kwargs):
+            assert fake_session.commits >= 1
+            assert any(
+                event.kind == "generation"
+                and event.payload.get("task_id") == task_id
+                for event in fake_session.outbox_events
+            )
+            return await super().enqueue_job(job_name, task_id, **kwargs)
+
+    redis = CommitAwareRedis()
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 1
+    assert redis.enqueued == [("run_generation", "gen-commit-order")]
+    assert {event.kind for event in fake_session.outbox_events} == {
+        "generation",
+        "sse",
+    }
+    assert all(
+        event.published_at is not None for event in fake_session.outbox_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_enqueue_failure_leaves_durable_outbox_for_publisher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = Generation(
+        id="gen-redrive",
+        user_id="user-1",
+        message_id="msg-1",
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
+    _patch_publish_event(monkeypatch)
+    redis = FakeRedis(fail_enqueue=True)
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    task_event = next(
+        event for event in fake_session.outbox_events if event.kind == "generation"
+    )
+    assert touched == 1
+    assert generation.status == GenerationStatus.QUEUED.value
+    assert redis.enqueued == []
+    assert task_event.published_at is None
+    assert fake_session.commits >= 1
+
+    redis.fail_enqueue = False
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == 1
+    assert redis.enqueued == [("run_generation", "gen-redrive")]
+    assert task_event.published_at is not None
+
+
+@pytest.mark.asyncio
 async def test_reconcile_requeues_stale_generation_with_string_status(monkeypatch):
     generation = Generation(
         id="gen-1",
@@ -470,6 +697,8 @@ async def test_reconcile_requeues_stale_generation_with_string_status(monkeypatc
     assert generation.status == GenerationStatus.QUEUED.value
     assert isinstance(generation.status, str)
     assert fake_session.select_skip_locked == [True, True]
+    published_outbox_id = published[0]["data"].pop("outbox_id")
+    assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [
         {
             "user_id": "user-1",
@@ -540,6 +769,8 @@ async def test_reconcile_marks_max_attempt_completion_failed_with_string_status(
     assert completion.error_code == "timeout"
     assert completion.finished_at is not None
     assert message.status == MessageStatus.FAILED.value
+    published_outbox_id = published[0]["data"].pop("outbox_id")
+    assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [
         {
             "user_id": "user-1",
@@ -589,6 +820,8 @@ async def test_reconcile_marks_max_attempt_generation_failed_and_message_failed(
     assert generation.error_code == "timeout"
     assert generation.finished_at is not None
     assert message.status == MessageStatus.FAILED.value
+    published_outbox_id = published[0]["data"].pop("outbox_id")
+    assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [
         {
             "user_id": "user-1",
@@ -712,6 +945,8 @@ async def test_reconcile_requeues_stale_completion_and_publishes_event(monkeypat
     assert touched == 1
     assert redis.enqueued == [("run_completion", "comp-1")]
     assert completion.status == CompletionStatus.QUEUED.value
+    published_outbox_id = published[0]["data"].pop("outbox_id")
+    assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [
         {
             "user_id": "user-1",

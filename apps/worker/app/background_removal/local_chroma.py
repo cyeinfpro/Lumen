@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import statistics
+from typing import cast
 
 from PIL import Image as PILImage
 from PIL import ImageChops
 from PIL import ImageDraw
 from PIL import ImageFilter
 
-from .types import BackgroundRemovalResult
+from .types import BackgroundRemovalResult, rgb_pixel_access
 
 
 def recover_solid_background_transparency(orig: PILImage.Image) -> PILImage.Image | None:
@@ -20,7 +21,7 @@ def recover_solid_background_transparency(orig: PILImage.Image) -> PILImage.Imag
             sample.close()
             return None
 
-        pixels = sample.load()
+        pixels = rgb_pixel_access(sample)
         edge_pixels: list[tuple[int, int, int]] = []
         for x in range(width):
             edge_pixels.append(pixels[x, 0])
@@ -98,7 +99,8 @@ def recover_solid_background_transparency(orig: PILImage.Image) -> PILImage.Imag
         alpha.paste(soft_alpha, mask=matte_mask)
         matte_mask.close()
         soft_alpha.close()
-        if alpha.getextrema()[0] >= 255:
+        alpha_min, _alpha_max = cast(tuple[int, int], alpha.getextrema())
+        if alpha_min >= 255:
             alpha.close()
             return None
 

@@ -129,6 +129,10 @@ test("global focus and light text contracts remain accessible", () => {
   match(globalsSource, /--content-workbench: 1440px/);
   doesNotMatch(globalsSource, /body::before/);
 
+  const studioBackground = cssBlock("  .lumen-studio-bg {");
+  match(studioBackground, /var\(--bg-0\)/);
+  doesNotMatch(studioBackground, /data:image|feTurbulence/);
+
   const darkTheme = cssBlock("  .dark {");
   const lightTheme = cssBlock("  .theme-light {");
   ok(

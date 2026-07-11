@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- Reference previews are authenticated API media URLs. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   CircleCheck,
@@ -61,6 +61,86 @@ type ModeCardCopy = {
 
 const SMART_VIDEO_DURATION = -1;
 const REFERENCE_REF_ID_RE = /^ref:(image|video|audio):([1-9][0-9]{0,2})$/;
+const VIDEO_DIALOG_SELECTOR = '[role="dialog"][aria-modal="true"]';
+const VIDEO_DIALOG_FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
+
+function openVideoDialogs(): HTMLElement[] {
+  if (typeof document === "undefined") return [];
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(VIDEO_DIALOG_SELECTOR),
+  ).filter((dialog) => dialog.isConnected);
+}
+
+export function isTopmostVideoDialog(
+  dialog: HTMLElement | null,
+): boolean {
+  if (!dialog?.isConnected) return false;
+  const dialogs = openVideoDialogs();
+  return dialogs[dialogs.length - 1] === dialog;
+}
+
+export function focusVideoWorkbenchElement(
+  target: HTMLElement | null,
+  options?: FocusOptions,
+  blocked = false,
+): boolean {
+  if (!target?.isConnected || blocked) return false;
+  const dialogs = openVideoDialogs();
+  const topmostDialog = dialogs[dialogs.length - 1];
+  if (topmostDialog && !topmostDialog.contains(target)) return false;
+  target.focus(options);
+  return true;
+}
+
+export function restoreVideoWorkbenchFocus(
+  previousFocus: HTMLElement | null,
+  closingDialog: HTMLElement | null,
+): void {
+  if (typeof window === "undefined") return;
+  window.requestAnimationFrame(() => {
+    if (!previousFocus?.isConnected) return;
+    const otherDialogOpen = openVideoDialogs().some(
+      (dialog) => dialog !== closingDialog,
+    );
+    if (otherDialogOpen) return;
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      active.isConnected &&
+      !closingDialog?.contains(active)
+    ) {
+      return;
+    }
+    previousFocus.focus({ preventScroll: true });
+  });
+}
+
+export function trapVideoDialogFocus(
+  event: KeyboardEvent,
+  dialog: HTMLElement | null,
+): void {
+  if (event.key !== "Tab" || !dialog) return;
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(VIDEO_DIALOG_FOCUSABLE),
+  ).filter((element) => element.offsetParent !== null);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    dialog.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !dialog.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 function formatDurationLabel(durationS: number): string {
   return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
@@ -947,8 +1027,9 @@ function ReferenceThumbnail({
   item: ReferenceDraft;
   active: boolean;
 }) {
-  const [failed, setFailed] = useState(false);
   const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null);
+  const failed = previewUrl != null && failedPreviewUrl === previewUrl;
   const showPreview = Boolean(previewUrl && !failed);
   const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
 
@@ -961,7 +1042,7 @@ function ReferenceThumbnail({
           className="h-full w-full object-cover"
           loading="lazy"
           decoding="async"
-          onError={() => setFailed(true)}
+          onError={() => setFailedPreviewUrl(previewUrl)}
         />
       ) : (
         <span className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center">
@@ -999,18 +1080,43 @@ export function ReferenceMediaPreviewDialog({
   onClose: () => void;
   onInsert: () => void;
 }) {
-  const [failed, setFailed] = useState(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
   const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null);
+  const failed = previewUrl != null && failedPreviewUrl === previewUrl;
   const displayToken = referenceDisplayToken(item);
   const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
 
   useEffect(() => {
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const dialog = dialogRef.current;
+    const focusFrame = window.requestAnimationFrame(() => {
+      focusVideoWorkbenchElement(dialog, { preventScroll: true });
+    });
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (!isTopmostVideoDialog(dialog)) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      trapVideoDialogFocus(event, dialog);
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+      restoreVideoWorkbenchFocus(previousFocus, dialog);
+    };
+  }, []);
 
   return (
     <div
@@ -1020,9 +1126,11 @@ export function ReferenceMediaPreviewDialog({
       }}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={`reference-preview-${item._key}`}
+        tabIndex={-1}
         className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-4xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(760px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
@@ -1058,7 +1166,7 @@ export function ReferenceMediaPreviewDialog({
                 alt={`${displayToken} 预览`}
                 className="h-full w-full object-contain"
                 decoding="async"
-                onError={() => setFailed(true)}
+                onError={() => setFailedPreviewUrl(previewUrl)}
               />
             ) : (
               <div className="flex flex-col items-center justify-center gap-2 px-5 text-center text-[var(--fg-2)]">

@@ -75,6 +75,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         await cb.answer(f"重画提交失败：{exc.message}", show_alert=True)
         return
     new_ids = result.get("generation_ids") or []
+    user_id = str(result.get("user_id") or "")
     if not new_ids:
         await cb.answer("提交成功但没有 generation_id 返回。", show_alert=True)
         return
@@ -91,6 +92,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
                 status_message_id=status.message_id,
                 prompt=prompt,
                 params={k: v for k, v in payload.items() if k != "idempotency_key"},
+                user_id=user_id,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -184,6 +186,7 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
         await message.answer(f"❌ 迭代提交失败：{exc.message}")
         return
     new_ids = result.get("generation_ids") or []
+    user_id = str(result.get("user_id") or "")
     if not new_ids:
         await state.clear()
         await message.answer("⚠️ 提交成功但没有 generation_id 返回。")
@@ -201,6 +204,7 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
                 status_message_id=status.message_id,
                 prompt=text,
                 params={k: v for k, v in payload.items() if k != "idempotency_key"},
+                user_id=user_id,
             ),
         )
     except Exception as exc:  # noqa: BLE001

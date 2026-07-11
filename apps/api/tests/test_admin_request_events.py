@@ -224,48 +224,41 @@ def test_safe_upstream_details_includes_queue_observability_fields() -> None:
     }
 
 
-def test_request_event_model_stats_merge_codex_native_variants() -> None:
-    created_at = admin.datetime(
-        2026,
-        4,
-        29,
-        tzinfo=admin.timezone.utc,
+@pytest.mark.asyncio
+async def test_request_events_merge_codex_native_model_stats() -> None:
+    class _Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class _Db:
+        def __init__(self):
+            self.results = [
+                _Rows([("5.4",), ("image2",), ("5.4",), ("5.4 mini",)]),
+                _Rows([]),
+            ]
+
+        async def execute(self, _stmt):
+            return self.results.pop(0)
+
+    response = await admin.list_request_events(
+        SimpleNamespace(role="admin"),  # type: ignore[arg-type]
+        _Db(),  # type: ignore[arg-type]
+        limit=100,
+        kind="completion",
+        status=None,
+        range="24h",
     )
 
-    def event(event_id: str, model: str) -> admin._RequestEventOut:
-        return admin._RequestEventOut(
-            id=event_id,
-            kind="generation",
-            created_at=created_at,
-            started_at=None,
-            finished_at=None,
-            duration_ms=None,
-            status="succeeded",
-            progress_stage="finalizing",
-            attempt=1,
-            model=model,
-            user_id="user-1",
-            user_email="admin@example.com",
-            conversation_id=None,
-            conversation_title=None,
-            message_id=f"msg-{event_id}",
-        )
-
-    stats = admin._request_event_model_stats(
-        [
-            event("gen-1", "5.4"),
-            event("gen-2", "image2"),
-            event("gen-3", "5.4"),
-            event("gen-4", "5.4 mini"),
-        ]
-    )
-
-    assert [(stat.model, stat.count) for stat in stats] == [
+    assert response.items == []
+    assert [(stat.model, stat.count) for stat in response.model_stats] == [
         ("Codex 原生", 3),
         ("image2 直连", 1),
     ]
-    assert stats[0].share == pytest.approx(3 / 4)
-    assert stats[1].share == pytest.approx(1 / 4)
+    assert response.model_stats[0].share == pytest.approx(3 / 4)
+    assert response.model_stats[1].share == pytest.approx(1 / 4)
 
 
 def test_request_provider_prefers_actual_provider_over_dual_race_strategy() -> None:

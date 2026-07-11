@@ -128,6 +128,29 @@ const OMNI_FLASH_MODEL = "omni-flash";
 const TEST_VIDEO_MODEL = "test-video";
 const VIDEO_ACTIONS: VideoAction[] = ["t2v", "i2v", "reference"];
 
+function videoProviderKindCanBeEnabled(kind: VideoProviderKind): boolean {
+  return kind !== "veo";
+}
+
+function normalizeVideoProviderEnabled(
+  kind: VideoProviderKind,
+  enabled: boolean,
+): boolean {
+  return videoProviderKindCanBeEnabled(kind) && enabled;
+}
+
+function isOmniFlashPlaceholderBaseUrl(
+  kind: VideoProviderKind,
+  baseUrl: string,
+): boolean {
+  if (kind !== "omni_flash") return false;
+  try {
+    return new URL(baseUrl.trim()).hostname.toLowerCase() === "api.example.com";
+  } catch {
+    return false;
+  }
+}
+
 const ACTION_LABELS: Record<VideoAction, string> = {
   t2v: "文字生成",
   i2v: "首帧生成",
@@ -312,7 +335,7 @@ function toDraft(item: VideoProviderItemOut): Draft {
     kind: item.kind,
     base_url: item.base_url,
     api_key: "",
-    enabled: item.enabled,
+    enabled: normalizeVideoProviderEnabled(item.kind, item.enabled),
     priority: item.priority,
     weight: item.weight,
     concurrency: item.concurrency,
@@ -414,7 +437,7 @@ function emptyOmniFlashDraft(): Draft {
     kind: "omni_flash",
     base_url: OMNI_FLASH_BASE_URL,
     api_key: "",
-    enabled: true,
+    enabled: false,
     priority: 90,
     weight: 1,
     concurrency: 2,
@@ -515,7 +538,7 @@ function veoPresetPatch(draft: Draft): Partial<Draft> {
     name: presetName(draft, "google-veo"),
     kind: "veo",
     base_url: VEO_BASE_URL,
-    enabled: draft.enabled,
+    enabled: false,
     priority: draft.priority || 80,
     weight: Math.max(1, Number(draft.weight) || 1),
     concurrency: Math.max(1, Number(draft.concurrency) || 2),
@@ -528,7 +551,7 @@ function omniFlashPresetPatch(draft: Draft): Partial<Draft> {
     name: presetName(draft, "google-omni-flash"),
     kind: "omni_flash",
     base_url: OMNI_FLASH_BASE_URL,
-    enabled: draft.enabled,
+    enabled: false,
     priority: draft.priority || 90,
     weight: Math.max(1, Number(draft.weight) || 1),
     concurrency: Math.max(1, Number(draft.concurrency) || 2),
@@ -590,7 +613,6 @@ function saveError(err: Error): string {
 function sourceLabel(source: string | undefined): string {
   if (source === "db") return "数据库";
   if (source === "env") return "环境变量";
-  if (source === "desktop") return "本机配置";
   return "未配置";
 }
 
@@ -616,8 +638,19 @@ function analyzeProvider(
   if (item.enabled && capabilities.size === 0) {
     issues.push({ severity: "error", message: "没有可用动作" });
   }
-  if (item.enabled && item.kind === "veo") {
-    issues.push({ severity: "warning", message: "Veo 适配器尚未接入 Worker" });
+  if (item.kind === "veo") {
+    issues.push({
+      severity: item.enabled ? "error" : "warning",
+      message: item.enabled
+        ? "Veo 适配器尚未接入 Worker，必须停用"
+        : "Veo 适配器尚未接入 Worker，暂不可启用",
+    });
+  }
+  if (isOmniFlashPlaceholderBaseUrl(item.kind, item.base_url)) {
+    issues.push({
+      severity: "error",
+      message: "Omni Flash 仍使用占位 Base URL",
+    });
   }
   if (!item.enabled) {
     issues.push({ severity: "warning", message: "供应商已停用" });
@@ -632,6 +665,36 @@ function analyzeProvider(
     concurrency: item.concurrency,
     issues,
   };
+}
+
+function draftBaseUrlIssues(draft: Draft): Issue[] {
+  const baseUrl = draft.base_url.trim();
+  if (!baseUrl) {
+    return [{ severity: "error", message: "缺少 Base URL" }];
+  }
+
+  const issues: Issue[] = [];
+  try {
+    const url = new URL(baseUrl);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      issues.push({ severity: "error", message: "Base URL 只能使用 HTTP 或 HTTPS" });
+    }
+    if (!url.hostname) {
+      issues.push({ severity: "error", message: "Base URL 必须包含主机名" });
+    }
+    if (url.username || url.password) {
+      issues.push({ severity: "error", message: "Base URL 不能包含用户名或密码" });
+    }
+    if (isOmniFlashPlaceholderBaseUrl(draft.kind, baseUrl)) {
+      issues.push({
+        severity: "error",
+        message: "Omni Flash 的 Base URL 仍是占位地址，请替换为真实网关",
+      });
+    }
+  } catch {
+    issues.push({ severity: "error", message: "Base URL 格式不合法" });
+  }
+  return issues;
 }
 
 function analyzeDraft(
@@ -650,24 +713,7 @@ function analyzeDraft(
   if (duplicate) {
     issues.push({ severity: "error", message: "供应商名称重复" });
   }
-  if (!draft.base_url.trim()) {
-    issues.push({ severity: "error", message: "缺少 Base URL" });
-  } else {
-    try {
-      const url = new URL(draft.base_url.trim());
-      if (!["http:", "https:"].includes(url.protocol)) {
-        issues.push({ severity: "error", message: "Base URL 只能使用 HTTP 或 HTTPS" });
-      }
-      if (!url.hostname) {
-        issues.push({ severity: "error", message: "Base URL 必须包含主机名" });
-      }
-      if (url.username || url.password) {
-        issues.push({ severity: "error", message: "Base URL 不能包含用户名或密码" });
-      }
-    } catch {
-      issues.push({ severity: "error", message: "Base URL 格式不合法" });
-    }
-  }
+  issues.push(...draftBaseUrlIssues(draft));
   if (draft.enabled && !hasDraftKey(draft, serverItems)) {
     issues.push({ severity: "error", message: "启用状态下必须填写 API Key" });
   }
@@ -678,7 +724,7 @@ function analyzeDraft(
     issues.push({ severity: "error", message: "至少需要一个可用动作" });
   }
   if (draft.kind === "veo" && draft.enabled) {
-    issues.push({ severity: "warning", message: "Veo 适配器尚未接入 Worker" });
+    issues.push({ severity: "error", message: "Veo 适配器尚未接入 Worker，暂不可启用" });
   }
   if (!draft.enabled) {
     issues.push({ severity: "warning", message: "保存后不会参与视频任务路由" });
@@ -721,6 +767,17 @@ function actionCoverageLabel(capabilities: Set<VideoAction>): string {
   return VIDEO_ACTIONS.filter((action) => capabilities.has(action))
     .map((action) => ACTION_LABELS[action])
     .join(" / ");
+}
+
+function draftStatusLabel(
+  globalIssue: string | null,
+  errorCount: number,
+  warningCount: number,
+): string {
+  if (globalIssue) return globalIssue;
+  if (errorCount > 0) return `还有 ${errorCount} 个错误需要处理`;
+  if (warningCount > 0) return `${warningCount} 个提示不会阻止保存`;
+  return "配置可以保存";
 }
 
 export function VideoProvidersPanel() {
@@ -789,13 +846,11 @@ export function VideoProvidersPanel() {
     enabledDraft && draftUsableCount === 0
       ? "启用视频生成前至少需要一个启用且可用的供应商"
       : null;
-  const draftStatusText = globalDraftIssue
-    ? globalDraftIssue
-    : draftErrorCount > 0
-      ? `还有 ${draftErrorCount} 个错误需要处理`
-      : draftWarningCount > 0
-        ? `${draftWarningCount} 个提示不会阻止保存`
-        : "配置可以保存";
+  const draftStatusText = draftStatusLabel(
+    globalDraftIssue,
+    draftErrorCount,
+    draftWarningCount,
+  );
 
   const startEdit = () => {
     setDrafts(serverItems.map(toDraft));
@@ -812,7 +867,11 @@ export function VideoProvidersPanel() {
     setDrafts((prev) => {
       if (!prev) return prev;
       const next = [...prev];
-      next[idx] = { ...next[idx], ...patch };
+      const patched = { ...next[idx], ...patch };
+      next[idx] = {
+        ...patched,
+        enabled: normalizeVideoProviderEnabled(patched.kind, patched.enabled),
+      };
       return next;
     });
   };
@@ -867,7 +926,7 @@ export function VideoProvidersPanel() {
         kind: draft.kind,
         base_url: draft.base_url.trim(),
         ...(draft.api_key.trim() ? { api_key: draft.api_key.trim() } : {}),
-        enabled: draft.enabled,
+        enabled: normalizeVideoProviderEnabled(draft.kind, draft.enabled),
         priority: Number(draft.priority) || 0,
         weight: Math.max(1, Number(draft.weight) || 1),
         concurrency: Math.max(1, Math.min(32, Number(draft.concurrency) || 1)),
@@ -1709,11 +1768,26 @@ function ProviderEditor({
 
         <div className="space-y-3">
           <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
-            <span>启用此供应商</span>
+            <span>
+              <span className="block">启用此供应商</span>
+              {draft.kind === "veo" && (
+                <span className="mt-0.5 block text-[11px] text-warning">
+                  Veo 适配器尚未接入 Worker
+                </span>
+              )}
+            </span>
             <input
               type="checkbox"
-              checked={draft.enabled}
-              onChange={(event) => onPatch({ enabled: event.target.checked })}
+              checked={normalizeVideoProviderEnabled(draft.kind, draft.enabled)}
+              disabled={!videoProviderKindCanBeEnabled(draft.kind)}
+              onChange={(event) =>
+                onPatch({
+                  enabled: normalizeVideoProviderEnabled(
+                    draft.kind,
+                    event.target.checked,
+                  ),
+                })
+              }
             />
           </label>
           <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">

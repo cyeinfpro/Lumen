@@ -69,6 +69,12 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 
 ```text
 /opt/image-job/app.py
+/opt/image-job/image_artifacts.py
+/opt/image-job/image_url_security.py
+/opt/image-job/job_persistence.py
+/opt/image-job/payload_helpers.py
+/opt/image-job/request_bodies.py
+/opt/image-job/runtime_config.py
 /opt/image-job/README.md
 /opt/image-job/image-job.md
 ```
@@ -105,6 +111,19 @@ IMAGE_JOB_STATE_DIR=/var/lib/image-job/state
 IMAGE_JOB_DB_PATH=/var/lib/image-job/state/image_jobs.sqlite3
 IMAGE_JOB_CONCURRENCY=2
 IMAGE_JOB_UPSTREAM_TIMEOUT_S=1800
+IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED=0
+IMAGE_JOB_MAX_REQUEST_BYTES=67108864
+IMAGE_JOB_MAX_JSON_DEPTH=32
+IMAGE_JOB_MAX_JSON_ARRAY_ITEMS=256
+IMAGE_JOB_MAX_JSON_OBJECT_ITEMS=256
+IMAGE_JOB_MAX_JSON_TOTAL_VALUES=10000
+IMAGE_JOB_MAX_JSON_KEY_CHARS=256
+IMAGE_JOB_MAX_JSON_STRING_CHARS=67108864
+IMAGE_JOB_MAX_IMAGE_BYTES=83886080
+IMAGE_JOB_MAX_IMAGE_CANDIDATES=8
+IMAGE_JOB_MAX_TOTAL_IMAGE_BYTES=167772160
+IMAGE_JOB_MAX_UPSTREAM_RESPONSE_BYTES=268435456
+IMAGE_JOB_MAX_UPSTREAM_ERROR_BODY_BYTES=65536
 IMAGE_JOB_RETENTION_DAYS=1
 IMAGE_JOB_MAX_RETENTION_DAYS=1
 IMAGE_JOB_JOB_TTL_DAYS=1
@@ -119,7 +138,22 @@ IMAGE_JOB_DATA_DIR           临时图片落盘目录的根目录
 IMAGE_JOB_DB_PATH            任务状态 SQLite 文件，必须放本机磁盘
 IMAGE_JOB_CONCURRENCY        同时处理的图片任务数
 IMAGE_JOB_UPSTREAM_TIMEOUT_S 单个上游请求最长等待时间
+IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED
+                             只有确认上游会按 Idempotency-Key 去重计费请求时才设为 1
+IMAGE_JOB_MAX_REQUEST_BYTES  创建任务 JSON 的总字节上限
+IMAGE_JOB_MAX_JSON_*         创建任务 JSON 的深度、数组、对象、总节点和字符串上限
+IMAGE_JOB_MAX_IMAGE_BYTES    单张结果图的字节上限
+IMAGE_JOB_MAX_IMAGE_CANDIDATES
+                             单个上游响应允许提取的图片候选数
+IMAGE_JOB_MAX_TOTAL_IMAGE_BYTES
+                             单个任务全部图片候选的总字节上限
+IMAGE_JOB_MAX_UPSTREAM_RESPONSE_BYTES
+                             非流式上游成功响应的总字节上限
 ```
+
+`IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED` 默认必须保持 `0`。sidecar
+始终把持久 `job_id` 派生出的稳定 `Idempotency-Key` 发给上游，但只有上游网关
+明确承诺同 key 不重复执行、不重复扣费时，才能把该配置设为 `1`。
 
 不要把真实 API Key、Bearer token、数据库密码写进环境变量示例、文档或日志。
 
@@ -328,6 +362,11 @@ def wait_image_job(job_id: str, timeout_s: int = 1900) -> list[dict]:
 
         if data["status"] == "succeeded":
             return data["images"]
+        if data["status"] == "uncertain":
+            raise RuntimeError(
+                "upstream may have accepted or charged this job; "
+                "do not automatically submit a replacement"
+            )
         if data["status"] == "failed":
             raise RuntimeError(f"{data.get('error_class')}: {data.get('error')}")
 
@@ -349,7 +388,7 @@ Authorization: Bearer <UPSTREAM_API_KEY>
 
 ```text
 POST 时 image-job 会保存 Authorization 的哈希，并临时保存原始 Authorization 用于转发上游。
-任务成功或失败后，原始 Authorization 会从 SQLite 中清掉。
+任务进入 `succeeded`、`failed` 或 `uncertain` 终态后，原始 Authorization 会从 SQLite 中清掉。
 GET 时必须带同一个 Authorization，否则返回 403。
 ```
 
@@ -398,7 +437,11 @@ endpoint        必填，上游 API path，只能是允许的图片 endpoint。
 body            必填，原本要发给上游的 JSON body。
 request_type    可选，不传时按 endpoint 推断。
 retention_days  可选，线上建议固定为 1；默认 1。
+idempotency_key 可选，也可使用同名 HTTP header；同一 Authorization 下重复提交会返回同一 job。
 ```
+
+调用方应为一次业务生图意图生成稳定的 `Idempotency-Key`。网络超时后重提
+`POST /v1/image-jobs` 时复用该 key，可以拿回原 job，而不是创建第二个计费任务。
 
 允许的 endpoint：
 
@@ -518,14 +561,32 @@ curl -sS https://example.com/v1/image-jobs/img_20260430_xxxxx \
 }
 ```
 
+结果不确定返回：
+
+```json
+{
+  "job_id": "img_20260430_xxxxx",
+  "status": "uncertain",
+  "error": "upstream result unresolved",
+  "error_class": "network",
+  "retryable": true,
+  "retry_suppressed": true,
+  "outcome_uncertain": true,
+  "retry_policy": "automatic retry suppressed because upstream idempotency is not guaranteed"
+}
+```
+
+`uncertain` 是终态：上游可能已经接收请求或产生费用，但 sidecar 没拿到可信的
+最终结果。调用方不得自动新建替代任务；应先通过上游账单、请求日志或人工流程核对。
+
 ## 十四、错误分类与调用方策略
 
 调用方不要只看 HTTP 状态。任务查询接口自身可能是 200，但任务状态是 `failed`。失败时按 `error_class` 决策：
 
 ```text
-network       连接、读取、超时问题。建议切换 provider 或稍后重试。
+network       连接、读取、超时问题。先看 status/retry_suppressed，再决定是否重试。
 upstream_4xx  上游认为请求格式不对。建议切换 endpoint 或调整请求体。
-upstream_5xx  上游服务错误。建议切换 provider 或稍后重试。
+upstream_5xx  上游服务错误。网关错误可能结果不确定，不得忽略 retry_suppressed。
 no_image      上游 200 但没有可提取图片。建议切换 endpoint。
 image_save    图片下载、解码或落盘失败。建议切换 provider 或重试。
 internal      sidecar 内部错误。建议切换 provider，并检查 sidecar 日志。
@@ -538,6 +599,7 @@ validation    调用方提交参数错误。不要重试，修正请求。
 queued/running -> 继续轮询
 succeeded      -> 下载 images[].url，入正式存储，业务任务完成
 failed         -> 根据 error_class 决定切 endpoint、切 provider、重试或终止
+uncertain      -> 终止自动重试，核对上游结果或计费记录
 404            -> job_id 错误或任务已清理
 403            -> 查询时 Authorization 和提交时不一致
 ```

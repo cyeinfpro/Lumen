@@ -25,12 +25,17 @@ from .constants import (
 
 AspectRatio = Literal[
     "1:1",
-    "16:9", "9:16",
-    "21:9", "9:21",
-    "10:7", "7:10",
+    "16:9",
+    "9:16",
+    "21:9",
+    "9:21",
+    "10:7",
+    "7:10",
     "4:5",  # 兼容历史；UI 不再单独露出
-    "3:4", "4:3",
-    "3:2", "2:3",
+    "3:4",
+    "4:3",
+    "3:2",
+    "2:3",
 ]
 SizeMode = Literal["auto", "fixed"]
 
@@ -38,18 +43,18 @@ SizeMode = Literal["auto", "fixed"]
 # 每条均满足 validate_explicit_size：16 对齐、最长边 ≤ 3840、总像素 ≤ 8,294,400、长宽比 ≤ 3:1。
 # 横/竖构图配对：3:2↔2:3 / 4:3↔3:4 / 16:9↔9:16 / 21:9↔9:21
 _PRESET: dict[str, tuple[int, int]] = {
-    "1:1":  (2880, 2880),  # 8,294,400
+    "1:1": (2880, 2880),  # 8,294,400
     "16:9": (3840, 2160),  # 8,294,400
     "9:16": (2160, 3840),
     "21:9": (3808, 1632),  # 6,214,656（21:9 = 2.333…，已取最接近的 16 对齐）
     "9:21": (1632, 3808),
     "10:7": (3424, 2400),  # 8,217,600
     "7:10": (2400, 3424),
-    "4:5":  (2560, 3200),  # 8,192,000
-    "3:4":  (2448, 3264),  # 7,989,072
-    "4:3":  (3264, 2448),
-    "3:2":  (3504, 2336),  # 8,185,344
-    "2:3":  (2336, 3504),
+    "4:5": (2560, 3200),  # 8,192,000
+    "3:4": (2448, 3264),  # 7,989,072
+    "4:3": (3264, 2448),
+    "3:2": (3504, 2336),  # 8,185,344
+    "2:3": (2336, 3504),
 }
 
 _RATIO_MAP: dict[str, tuple[int, int]] = {
@@ -92,14 +97,10 @@ def validate_explicit_size(w: int, h: int) -> None:
     if w <= 0 or h <= 0:
         raise ValueError(f"size must be positive, got {w}x{h}")
     if w % EXPLICIT_ALIGN or h % EXPLICIT_ALIGN:
-        raise ValueError(
-            f"size must be multiple of {EXPLICIT_ALIGN}, got {w}x{h}"
-        )
+        raise ValueError(f"size must be multiple of {EXPLICIT_ALIGN}, got {w}x{h}")
     longest = max(w, h)
     if longest > MAX_EXPLICIT_SIDE:
-        raise ValueError(
-            f"longest side must be <= {MAX_EXPLICIT_SIDE}, got {longest}"
-        )
+        raise ValueError(f"longest side must be <= {MAX_EXPLICIT_SIDE}, got {longest}")
     px = w * h
     if px < MIN_EXPLICIT_PIXELS or px > MAX_EXPLICIT_PIXELS:
         raise ValueError(
@@ -125,7 +126,10 @@ def resolve_size(
     """
     if mode == "auto":
         return ResolvedSize(
-            size="auto", width=None, height=None, prompt_suffix=ratio_instruction(aspect)
+            size="auto",
+            width=None,
+            height=None,
+            prompt_suffix=ratio_instruction(aspect),
         )
 
     # fixed 模式：显式尺寸按上游真实能力校验，允许 4K 等大图直通
@@ -174,13 +178,7 @@ def _fallback_by_budget(aspect: AspectRatio, budget: int) -> tuple[int, int]:
     height_seeds = aligned_near(raw_h) | {max_h_at_min_w}
 
     def add_candidate(w: int, h: int) -> None:
-        if (
-            w >= 16
-            and h >= 16
-            and w % 16 == 0
-            and h % 16 == 0
-            and w * h <= budget
-        ):
+        if w >= 16 and h >= 16 and w % 16 == 0 and h % 16 == 0 and w * h <= budget:
             candidates.add((w, h))
 
     for w in width_seeds:
@@ -205,5 +203,6 @@ def _fallback_by_budget(aspect: AspectRatio, budget: int) -> tuple[int, int]:
             -(item[0] * item[1]),
         ),
     )
-    assert w >= 16 and h >= 16 and w * h <= budget
+    if w < 16 or h < 16 or w * h > budget:
+        raise RuntimeError("size resolver selected an invalid fallback candidate")
     return w, h

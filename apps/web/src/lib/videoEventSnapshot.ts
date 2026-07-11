@@ -2,6 +2,7 @@ import type {
   VideoGenerationOut,
   VideoStage,
   VideoStatus,
+  VideoTemporaryDownloadOut,
 } from "@/lib/types";
 
 const STATUS_RANK: Record<VideoStatus, number> = {
@@ -32,6 +33,12 @@ const TERMINAL_STATUSES = new Set<VideoStatus>([
   "canceled",
   "expired",
 ]);
+const TEMPORARY_DOWNLOAD_MIN_REMAINING_MS = 30_000;
+
+export type VideoRequestFence = {
+  taskId: string;
+  epoch: number;
+};
 
 type LifecycleSnapshot = {
   epoch: number;
@@ -71,6 +78,12 @@ function progressOf(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, Math.min(100, value))
     : undefined;
+}
+
+function timestampOf(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
 function nullableString(value: unknown): string | null | undefined {
@@ -126,6 +139,46 @@ function rejectsLifecycle(
   );
 }
 
+function lifecycleAdvances(
+  current: VideoGenerationOut,
+  incoming: LifecycleSnapshot,
+): boolean {
+  const currentEpoch = Math.max(0, current.submission_epoch ?? 0);
+  if (incoming.epoch > currentEpoch) return true;
+  if (incoming.epoch < currentEpoch) return false;
+  if (
+    incoming.status &&
+    STATUS_RANK[incoming.status] > STATUS_RANK[current.status]
+  ) {
+    return true;
+  }
+  if (
+    incoming.stage &&
+    STAGE_RANK[incoming.stage] > STAGE_RANK[current.progress_stage]
+  ) {
+    return true;
+  }
+  return (
+    incoming.progress !== undefined &&
+    incoming.progress > current.progress_pct
+  );
+}
+
+function rejectsOlderSnapshotMetadata(
+  current: VideoGenerationOut,
+  incoming: VideoGenerationOut,
+  lifecycle: LifecycleSnapshot,
+): boolean {
+  if (lifecycleAdvances(current, lifecycle)) return false;
+  const currentUpdatedAt = timestampOf(current.updated_at);
+  const incomingUpdatedAt = timestampOf(incoming.updated_at);
+  return (
+    currentUpdatedAt !== undefined &&
+    incomingUpdatedAt !== undefined &&
+    incomingUpdatedAt < currentUpdatedAt
+  );
+}
+
 function applyLifecycle(
   base: VideoGenerationOut,
   current: VideoGenerationOut,
@@ -159,6 +212,51 @@ export function isTerminalVideoEvent(data: unknown): boolean {
   return status !== undefined && TERMINAL_STATUSES.has(status);
 }
 
+export function nextVideoRequestFence(
+  current: VideoRequestFence,
+  taskId: string,
+): VideoRequestFence {
+  return {
+    taskId,
+    epoch: Math.max(0, Math.trunc(current.epoch)) + 1,
+  };
+}
+
+export function isVideoRequestFenceCurrent(
+  current: VideoRequestFence,
+  request: VideoRequestFence,
+): boolean {
+  return current.taskId === request.taskId && current.epoch === request.epoch;
+}
+
+export function activeVideoTemporaryDownload(
+  item: VideoGenerationOut,
+  nowMs = Date.now(),
+): VideoTemporaryDownloadOut | null {
+  const download = item.temporary_download;
+  const url = download?.url?.trim();
+  if (!download || !url) return null;
+  const expiresAtMs = Date.parse(download.expires_at);
+  const reportedRemainingMs = Number(download.expires_in_s) * 1000;
+  if (
+    !Number.isFinite(expiresAtMs) ||
+    !Number.isFinite(reportedRemainingMs) ||
+    !Number.isFinite(nowMs)
+  ) {
+    return null;
+  }
+  const remainingMs = Math.min(
+    expiresAtMs - nowMs,
+    reportedRemainingMs,
+  );
+  if (remainingMs <= TEMPORARY_DOWNLOAD_MIN_REMAINING_MS) return null;
+  return {
+    ...download,
+    url,
+    expires_in_s: Math.max(0, Math.floor(remainingMs / 1000)),
+  };
+}
+
 export function mergeVideoGenerationEvent(
   current: VideoGenerationOut,
   data: unknown,
@@ -180,7 +278,12 @@ export function mergeVideoGenerationSnapshot(
     raw,
     Math.max(0, current.submission_epoch ?? 0),
   );
-  if (rejectsLifecycle(current, lifecycle)) return current;
+  if (
+    rejectsLifecycle(current, lifecycle) ||
+    rejectsOlderSnapshotMetadata(current, incoming, lifecycle)
+  ) {
+    return current;
+  }
   return applyLifecycle({ ...current, ...incoming }, current, lifecycle);
 }
 

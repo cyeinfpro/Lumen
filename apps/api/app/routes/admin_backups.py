@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -44,6 +45,9 @@ _BACKUP_TRIGGER_NAME = ".backup.trigger"
 _BACKUP_LOG_NAME = ".backup.log"
 _BACKUP_RUNNING_MARKER = ".backup.running"
 _RESTORE_RUNNING_MARKER = ".restore.running"
+_RESTORE_TRIGGER_NAME = ".restore.trigger"
+_RESTORE_LOG_NAME = ".restore.log"
+_RESTORE_RUNNER_UNIT = "lumen-restore-runner.service"
 _UPDATE_RUNNING_MARKER = ".update.running"
 
 
@@ -115,6 +119,18 @@ def _backup_trigger_only_mode() -> bool:
     return os.environ.get("LUMEN_BACKUP_VIA_TRIGGER", "").strip() == "1"
 
 
+def _restore_trigger_only_mode() -> bool:
+    return os.environ.get("LUMEN_RESTORE_VIA_TRIGGER", "").strip() == "1"
+
+
+def _restore_trigger_path() -> Path:
+    return _backup_root() / _RESTORE_TRIGGER_NAME
+
+
+def _restore_log_path() -> Path:
+    return _backup_root() / _RESTORE_LOG_NAME
+
+
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -172,18 +188,30 @@ def _read_pid_marker(path: Path) -> bool:
     return False
 
 
-def _write_pid_marker(path: Path, pid: int, started_at: datetime) -> None:
+def _write_pid_marker(
+    path: Path,
+    pid: int,
+    started_at: datetime,
+    *,
+    unit: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(
-        f"pid={pid}\nstarted_at={started_at.isoformat()}\n",
-        encoding="utf-8",
-    )
+    lines = [f"pid={pid}", f"started_at={started_at.isoformat()}"]
+    if unit:
+        lines.append(f"unit={unit}")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(path)
 
 
-def _try_write_pid_marker(path: Path, pid: int, started_at: datetime) -> bool:
+def _try_write_pid_marker(
+    path: Path,
+    pid: int,
+    started_at: datetime,
+    *,
+    unit: str | None = None,
+) -> bool:
     """Atomically create a maintenance marker.
 
     The Redis system lock is the cross-process guard in normal operation. When
@@ -191,7 +219,10 @@ def _try_write_pid_marker(path: Path, pid: int, started_at: datetime) -> bool:
     creation itself must be exclusive to close the local check/write race.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = f"pid={pid}\nstarted_at={started_at.isoformat()}\n".encode("utf-8")
+    lines = [f"pid={pid}", f"started_at={started_at.isoformat()}"]
+    if unit:
+        lines.append(f"unit={unit}")
+    payload = ("\n".join(lines) + "\n").encode()
     for _ in range(2):
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -532,6 +563,14 @@ def _write_backup_trigger(path: Path, started_at: datetime) -> None:
     tmp.replace(path)
 
 
+def _write_restore_trigger(path: Path, timestamp: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(timestamp + "\n", encoding="utf-8")
+    _chmod_tolerate_eperm(tmp, 0o600)
+    tmp.replace(path)
+
+
 @router.post("/now", response_model=BackupNowOut, dependencies=[Depends(verify_csrf)])
 async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
     backup_script = _backup_script()
@@ -741,9 +780,70 @@ async def restore_backup(
             409,
         )
 
-    # Fire-and-forget：脚本里会 `systemctl stop lumen-api`，这个请求的进程会被杀掉，
-    # 所以必须脱离进程组（start_new_session=True），让 systemd 的 stop 不牵连子进程。
-    log_path = backup_root / ".restore.log"
+    marker = _maintenance_marker_path(_RESTORE_RUNNING_MARKER)
+    started_at = datetime.now(timezone.utc)
+    if _restore_trigger_only_mode():
+        if not _try_write_pid_marker(
+            marker,
+            0,
+            started_at,
+            unit=_RESTORE_RUNNER_UNIT,
+        ):
+            await lock_service.release(
+                lock, succeeded=False, reason="maintenance_busy"
+            )
+            raise _http(
+                "maintenance_busy",
+                "another maintenance operation is running",
+                409,
+            )
+        log_path = _restore_log_path()
+        try:
+            initial_log_size = log_path.stat().st_size
+        except OSError:
+            initial_log_size = 0
+        trigger_path = _restore_trigger_path()
+        _write_restore_trigger(trigger_path, ts)
+        if not await _wait_for_log_append(
+            log_path,
+            initial_size=initial_log_size,
+            timeout_sec=_BACKUP_TRIGGER_START_TIMEOUT_SECONDS,
+        ):
+            _unlink_marker(trigger_path)
+            _unlink_marker(marker)
+            await lock_service.release(
+                lock, succeeded=False, reason="restore_trigger_not_started"
+            )
+            raise _http(
+                "restore_trigger_not_started",
+                "restore trigger was written, but host restore service did not start",
+                504,
+            )
+        await lock_service.release(lock, succeeded=True, reason="restore_launched")
+        await write_admin_audit_isolated(
+            request,
+            admin,
+            event_type="admin.backup.restore",
+            details={"timestamp": ts, "unit": _RESTORE_RUNNER_UNIT},
+        )
+        return RestoreOut(
+            accepted=True,
+            timestamp=ts,
+            note="恢复已由宿主机服务接管；完成前其他维护操作会被阻止",
+        )
+
+    if shutil.which("docker") is None:
+        await lock_service.release(
+            lock, succeeded=False, reason="restore_host_runner_required"
+        )
+        raise _http(
+            "restore_host_runner_required",
+            "restore requires the host path runner in containerized deployments",
+            503,
+        )
+
+    # Non-container fallback: detach because restore stops API/worker itself.
+    log_path = _restore_log_path()
     log_fh = _open_private_append(log_path)
     try:
         log_fh.write(
@@ -759,9 +859,9 @@ async def restore_backup(
             close_fds=True,
         )
         _write_pid_marker(
-            _maintenance_marker_path(_RESTORE_RUNNING_MARKER),
+            marker,
             proc.pid,
-            datetime.now(timezone.utc),
+            started_at,
         )
     except Exception:
         await lock_service.release(lock, succeeded=False, reason="restore_launch_failed")

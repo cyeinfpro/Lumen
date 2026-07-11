@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { getMe, type AuthUser } from "@/lib/apiClient";
+import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
 import { isPublicPath } from "@/lib/auth/publicPaths";
 import {
   getRedirectForHiddenNavPath,
@@ -48,6 +48,16 @@ function writeRuntimeDefaultsCookie(defaults: RuntimeDefaults) {
   } catch {
     // Cookie warm cache is best-effort; React Query remains authoritative.
   }
+}
+
+function shouldClearChatIdentity(
+  isPublicAuthPath: boolean,
+  error: unknown,
+): boolean {
+  return (
+    isPublicAuthPath ||
+    (error instanceof ApiError && error.status === 401)
+  );
 }
 
 // SSR 阶段把 layout.tsx 抓到的 defaults 同步到 store（首屏不闪烁），
@@ -107,9 +117,16 @@ export function RuntimeDefaultsBootstrap({
 
   useLayoutEffect(() => {
     if (!meQuery.data) return;
-    useChatStore.getState().applyRuntimeDefaults(runtimeDefaults);
+    const chatStore = useChatStore.getState();
+    chatStore.setCurrentUser(meQuery.data.id);
+    chatStore.applyRuntimeDefaults(runtimeDefaults);
     useUiStore.getState().setNavVisibility(runtimeDefaults.nav_visibility);
   }, [meQuery.data, runtimeDefaults]);
+
+  useLayoutEffect(() => {
+    if (!shouldClearChatIdentity(isPublicAuthPath, meQuery.error)) return;
+    useChatStore.getState().setCurrentUser(null);
+  }, [isPublicAuthPath, meQuery.error]);
 
   useEffect(() => {
     if (!meQuery.data) return;

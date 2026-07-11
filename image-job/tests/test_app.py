@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import sys
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from PIL import Image
-from io import BytesIO
 
 
 def load_app_module():
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    asyncio.set_event_loop(asyncio.new_event_loop())
     path = Path(__file__).resolve().parents[1] / "app.py"
+    module_dir = str(path.parent)
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
     spec = importlib.util.spec_from_file_location("image_job_app_under_test", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -76,6 +77,31 @@ def test_validate_payload_strips_responses_partial_images() -> None:
     assert tool["output_format"] == "jpeg"
 
 
+def test_validate_payload_preserves_image_edit_input_transport() -> None:
+    app = load_app_module()
+
+    payload = app.validate_payload(
+        {
+            "endpoint": "/v1/images/edits",
+            "body": {"prompt": "edit", "images": []},
+            "image_edit_input_transport": "FILE",
+        }
+    )
+
+    assert payload["image_edit_input_transport"] == "file"
+
+
+def test_authorization_scheme_is_normalized_and_hashes_only_credential() -> None:
+    app = load_app_module()
+    request = SimpleNamespace(headers={"authorization": "bEaReR   sk-shared-secret"})
+
+    normalized = app.require_auth(request)
+
+    assert normalized == "Bearer sk-shared-secret"
+    assert app.auth_hash(normalized) == hashlib.sha256(b"sk-shared-secret").hexdigest()
+    assert app.auth_hash("bearer sk-shared-secret") == app.auth_hash(normalized)
+
+
 def _tiny_png_b64() -> str:
     buf = BytesIO()
     Image.new("RGB", (2, 2), color=(128, 128, 128)).save(buf, format="PNG")
@@ -95,7 +121,9 @@ class _FakeSseResponse:
             yield line
 
 
-def test_responses_stream_partial_only_is_retryable_network_failure(monkeypatch) -> None:
+def test_responses_stream_partial_only_is_retryable_network_failure(
+    monkeypatch,
+) -> None:
     app = load_app_module()
     partial_b64 = _tiny_png_b64()
     resp = _FakeSseResponse(
@@ -142,9 +170,7 @@ def test_responses_stream_final_image_succeeds() -> None:
     )
 
     images = asyncio.run(
-        app.extract_responses_stream_images(
-            resp, SimpleNamespace(), job_id="job_final"
-        )
+        app.extract_responses_stream_images(resp, SimpleNamespace(), job_id="job_final")
     )
 
     assert len(images) == 1
@@ -199,15 +225,30 @@ def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None
 
     tiny_png = base64.b64decode(_tiny_png_b64())
     calls: list[dict[str, object]] = []
+    response_content = (
+        b'{"data":[{"b64_json":"' + _tiny_png_b64().encode("ascii") + b'"}]}'
+    )
+
+    class _MultipartResponse:
+        status_code = 200
+        headers = {
+            "content-type": "application/json",
+            "content-length": str(len(response_content)),
+        }
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield response_content
 
     class _MultipartClient:
-        async def post(self, url: str, **kwargs: object):
+        def stream(self, _method: str, url: str, **kwargs: object):
             calls.append({"url": url, **kwargs})
-            return SimpleNamespace(
-                status_code=200,
-                headers={"content-type": "application/json"},
-                content=b'{"data":[{"b64_json":"' + _tiny_png_b64().encode("ascii") + b'"}]}',
-            )
+            return _MultipartResponse()
 
     app._http_client = _MultipartClient()
     row = {
@@ -250,6 +291,9 @@ def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None
     assert call["data"]["prompt"] == "edit"  # type: ignore[index]
     assert call["files"][0][0] == "image[]"  # type: ignore[index]
     assert call["headers"]["Authorization"] == "Bearer sk-test"  # type: ignore[index]
+    assert call["headers"]["Idempotency-Key"] == app.upstream_idempotency_key(
+        "job_file"
+    )  # type: ignore[index]
     assert "Content-Type" not in call["headers"]  # type: ignore[operator]
 
 
@@ -292,9 +336,7 @@ def test_materialize_edit_input_files_serializes_dict_and_bool() -> None:
         ],
     }
 
-    data, files = asyncio.run(
-        app.materialize_edit_input_files(_NoOpClient(), body)
-    )
+    data, files = asyncio.run(app.materialize_edit_input_files(_NoOpClient(), body))
 
     assert data["prompt"] == "edit"
     assert data["model"] == "gpt-image-2"

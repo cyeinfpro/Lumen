@@ -124,10 +124,6 @@ async def _amain() -> None:
     if not settings.telegram_bot_shared_secret.strip():
         logger.error("no TELEGRAM_BOT_SHARED_SECRET, refusing to start")
         return
-    if settings.bot_mode == "webhook" and not settings.webhook_url.strip():
-        logger.error("WEBHOOK_URL is required when BOT_MODE=webhook")
-        return
-
     api = LumenApi()
     proxy_mgr = ProxyManager(api)
 
@@ -171,13 +167,12 @@ async def _amain() -> None:
         logger.warning("no outbound proxy configured; TG calls will go direct (likely fail in CN)")
 
     session = FailoverSession(proxy_mgr, proxy=initial_proxy_url) if initial_proxy_url else None
-    bot_kwargs: dict[str, object] = {
-        "token": bot_token,
-        "default": DefaultBotProperties(parse_mode=None),
-    }
-    if session is not None:
-        bot_kwargs["session"] = session
-    bot = Bot(**bot_kwargs)
+    defaults = DefaultBotProperties(parse_mode=None)
+    bot = (
+        Bot(token=bot_token, default=defaults, session=session)
+        if session is not None
+        else Bot(token=bot_token, default=defaults)
+    )
 
     # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
     # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
@@ -227,27 +222,18 @@ async def _amain() -> None:
             pass  # Windows fallback
 
     try:
-        if settings.bot_mode == "polling":
-            logger.info("starting polling; api=%s", settings.lumen_api_base)
-            polling = asyncio.create_task(
-                dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
-                name="lumen-polling",
-            )
-            stop_wait = asyncio.create_task(stop_event.wait(), name="lumen-stopwait")
-            await asyncio.wait(
-                [polling, stop_wait], return_when=asyncio.FIRST_COMPLETED
-            )
-            polling.cancel()
-            try:
-                await polling
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        else:
-            # webhook mode：交给 nginx + aiohttp。MVP 不内置，托管在外层。
-            logger.error(
-                "webhook mode not implemented in this entrypoint; deploy via nginx + a webhook server"
-            )
-            stop_event.set()
+        logger.info("starting polling; api=%s", settings.lumen_api_base)
+        polling = asyncio.create_task(
+            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
+            name="lumen-polling",
+        )
+        stop_wait = asyncio.create_task(stop_event.wait(), name="lumen-stopwait")
+        await asyncio.wait([polling, stop_wait], return_when=asyncio.FIRST_COMPLETED)
+        polling.cancel()
+        try:
+            await polling
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
     finally:
         stop_event.set()
         for t in (listener_task, control_task):

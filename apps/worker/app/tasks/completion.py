@@ -15,21 +15,16 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import hashlib
-import io
 import json
 import logging
-import time
 from contextlib import suppress
-from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 import httpx
 from PIL import Image as PILImage
-from sqlalchemy import and_, desc, or_, select, text as sa_text, update
+from sqlalchemy import select, text as sa_text, update
 
 from .. import billing as worker_billing
 from lumen_core import billing as billing_core
@@ -47,33 +42,20 @@ from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
     GenerationErrorCode as EC,
-    ImageSource,
     MessageStatus,
     RETRY_BACKOFF_SECONDS,
-    Role,
     task_channel,
 )
 from lumen_core.context_window import (
     CONTEXT_INPUT_TOKEN_BUDGET,
-    HISTORY_FETCH_BATCH,
-    IMAGE_INPUT_ESTIMATED_TOKENS,
-    MESSAGE_OVERHEAD_TOKENS,
-    compose_summary_guardrail,
+    compose_summary_guardrail as compose_summary_guardrail,
     count_tokens,
-    estimate_summary_tokens,
     estimate_system_prompt_tokens,
-    format_sticky_input_text,
-    format_summary_input_text,
     get_input_budget,
-    is_summary_usable,
 )
 from lumen_core.chat_tools import (
-    TOOL_TERMINAL_STATUSES,
     ToolStatus,
     normalize_tool_idle_timeout_seconds,
-    normalize_tool_status as normalize_upstream_tool_status,
-    tool_status_idle_timed_out,
-    tool_status_idle_timeout_remaining_seconds,
 )
 from lumen_core.byok_retention import (
     BYOK_DEFAULT_DELETE_ENABLED,
@@ -94,8 +76,7 @@ from lumen_core.pricing import parse_usage
 from lumen_core.queue_metadata import completion_queue_metadata, merge_queue_metadata
 
 from .. import completion_billing, runtime_settings
-from ..config import settings
-from ..db import SessionLocal
+from ..db import SessionLocal, affected_rows
 from ..byok_runtime import (
     byok_error_message,
     byok_error_to_generation_code,
@@ -110,23 +91,96 @@ from ..observability import (
     task_duration_seconds,
     upstream_calls_total,
 )
-from ..retry import RetryDecision, is_retriable
-from ..sse_publish import publish_event
-from ..storage import storage
-from ..upstream import UpstreamCancelled, UpstreamError, stream_completion
-from ..upstream import (
-    _extract_response_image_b64,
-    _extract_response_revised_prompt,
-)
-from .state import is_completion_terminal
-
-from .generation import (
-    _cleanup_storage_on_error,
+from ..image_artifacts import (
     _compute_blurhash as _generation_compute_blurhash,
     _make_display,
     _make_preview,
     _make_thumb,
     _sha256,
+)
+from ..retry import RetryDecision, is_retriable
+from ..sse_publish import publish_event
+from ..storage import storage
+from ..upstream import UpstreamError, stream_completion
+from ..upstream import (
+    _extract_response_image_b64,
+    _extract_response_revised_prompt,
+)
+from .state import is_completion_terminal
+from .completion_parts.context import (
+    PackedContext as PackedContext,
+    _estimated_summary_source as _estimated_summary_source,
+    _fallback_pack as _fallback_pack,
+    _make_quality_probes as _make_quality_probes,
+    _pack_with_existing_summary as _pack_with_existing_summary,
+    _packed_with_input as _packed_with_input,
+)
+from .completion_parts.citation_text import (
+    _apply_url_citations as _apply_url_citations,
+    _extract_completed_output_text as _extract_completed_output_text,
+    _extract_url_citations as _extract_url_citations,
+    _finalize_completion_text as _finalize_completion_text,
+    _markdown_link as _markdown_link,
+)
+from .completion_parts.tool_state import (
+    _CODE_INTERPRETER_TOOL_TYPE as _CODE_INTERPRETER_TOOL_TYPE,
+    _CompletionToolTracker as _CompletionToolTracker,
+    _FILE_SEARCH_TOOL_TYPE as _FILE_SEARCH_TOOL_TYPE,
+    _IMAGE_GENERATION_TOOL_TYPE as _IMAGE_GENERATION_TOOL_TYPE,
+    _ToolCallState as _ToolCallState,
+    _WEB_SEARCH_TOOL_TYPE as _WEB_SEARCH_TOOL_TYPE,
+    _extract_tool_call_update as _extract_tool_call_update,
+    _first_str as _first_str,
+    _merge_tool_call_state as _merge_tool_call_state,
+    _normalize_tool_status as _normalize_tool_status,
+    _normalize_tool_type as _normalize_tool_type,
+    _summarize_tool_error as _summarize_tool_error,
+    _tool_display_label as _tool_display_label,
+    _tool_status_rank as _tool_status_rank,
+)
+from .completion_parts.history import (
+    _STICKY_TEXT_CHAR_LIMIT as _STICKY_TEXT_CHAR_LIMIT,
+    _SummaryBoundary as _SummaryBoundary,
+    _instructions_with_summary_guardrail as _instructions_with_summary_guardrail,
+    _message_after_summary as _message_after_summary,
+    _message_created_at as _message_created_at,
+    _role_eq as _role_eq,
+    _sticky_text_from_message as _sticky_text_from_message,
+    _summary_age_seconds as _summary_age_seconds,
+    _summary_compressed_at as _summary_compressed_at,
+    _summary_covers_boundary as _summary_covers_boundary,
+    _summary_created_at as _summary_created_at,
+    _truncate_sticky_text as _truncate_sticky_text,
+    _with_summary_guardrail as _with_summary_guardrail,
+)
+from .completion_parts import history as _completion_history
+from .completion_parts import context_loading as _completion_context_loading
+from .completion_parts import stream as _completion_stream
+from .completion_parts import tool_images as _completion_tool_images
+from .completion_parts.context_loading import (
+    _context_circuit_open as _context_circuit_open,
+    _pick_current_user as _pick_current_user,
+    _pick_first_user as _pick_first_user,
+)
+from .completion_parts.stream import (
+    _LeaseLost as _LeaseLost,
+    _TaskCancelled as _TaskCancelled,
+    _ToolIdleTimeout as _ToolIdleTimeout,
+    _extract_reasoning_delta as _extract_reasoning_delta,
+    _extract_reasoning_text_from_item as _extract_reasoning_text_from_item,
+    _extract_reasoning_text_from_response as _extract_reasoning_text_from_response,
+    _next_completion_stream_event as _next_completion_stream_event,
+    _raise_for_terminal_response_event as _raise_for_terminal_response_event,
+)
+from .completion_parts.tool_images import (
+    _decode_upstream_image_b64 as _decode_upstream_image_b64,
+    _extract_image_events_from_response as _extract_image_events_from_response,
+    _settle_cancelled_completion_billing as _settle_cancelled_completion_billing,
+    _tool_image_dedupe_key as _tool_image_dedupe_key,
+)
+
+from .generation import (
+    _cleanup_storage_on_error,
     _write_generation_files,
 )
 
@@ -188,11 +242,6 @@ _CONTEXT_COMPRESSION_TRIGGER_PERCENT_DEFAULT = 80
 _CONTEXT_SUMMARY_TARGET_TOKENS_DEFAULT = 1200
 _CONTEXT_SUMMARY_MIN_RECENT_MESSAGES_DEFAULT = 16
 _CONTEXT_SUMMARY_MIN_INTERVAL_SECONDS_DEFAULT = 30
-_STICKY_TEXT_CHAR_LIMIT = 16_000
-_WEB_SEARCH_TOOL_TYPE = "web_search"
-_FILE_SEARCH_TOOL_TYPE = "file_search"
-_CODE_INTERPRETER_TOOL_TYPE = "code_interpreter"
-_IMAGE_GENERATION_TOOL_TYPE = "image_generation"
 _CHAT_TOOL_VECTOR_STORE_SETTING = "chat.file_search_vector_store_ids"
 _CHAT_IMAGE_TOOL_SIZE = "1024x1024"
 # GEN-P1-4: 用户点取消后 API 在 Redis 设 task:{id}:cancel=1。worker 在 SSE 循环
@@ -208,192 +257,16 @@ _TOOL_LIMIT_FALLBACK_TEXT = (
 )
 
 
-@dataclass(frozen=True)
-class _SummaryBoundary:
-    conversation_id: str
-    up_to_message_id: str
-    up_to_created_at: datetime
-    first_user_message_id: str | None
-    recent_message_ids: list[str]
-    summary_message_ids: list[str]
-    source_message_count: int
-    source_token_estimate: int
-
-
-@dataclass(frozen=True)
-class PackedContext:
-    input_list: list[dict[str, Any]]
-    estimated_tokens: int
-    summary_used: bool
-    summary_created: bool
-    summary_up_to_message_id: str | None
-    sticky_used: bool
-    included_messages_count: int
-    truncated_without_summary: bool
-    fallback_reason: str | None
-    compression_enabled: bool = False
-    recent_messages_count: int = 0
-    summary_tokens: int = 0
-    summary_age_seconds: int | None = None
-    compressor_model: str | None = None
-    image_caption_count: int = 0
-    quality_probes: dict[str, Any] | None = None
-    _system_prompt: str | None = None
-    _sticky_message: Message | None = None
-    _summary_text: str | None = None
-    _recent_rows: tuple[Message, ...] = ()
-
-
-class _TaskCancelled(RuntimeError):
-    """GEN-P1-4: 用户取消信号——上层捕获走终态分支，不当作错误重试。"""
-
-
-class _ToolIdleTimeout(RuntimeError):
-    """No upstream events arrived while a tool call was active."""
-
-
 class _CompletionToolInsufficientBalance(UpstreamError):
     """Wallet balance fell below the image tool budget before publishing output."""
 
 
-class _LeaseLost(UpstreamCancelled):
-    """Lease renewer gave up; this worker must stop before another attempt runs."""
-
-
-@dataclass(frozen=True)
-class _ToolCallState:
-    id: str
-    type: str
-    status: str
-    name: str | None = None
-    label: str | None = None
-    title: str | None = None
-    error: str | None = None
-
-    def payload(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "id": self.id,
-            "type": self.type,
-            "status": self.status,
-            "label": self.label or _tool_display_label(self.type, self.name),
-        }
-        if self.name:
-            out["name"] = self.name
-        if self.title:
-            out["title"] = self.title
-        if self.error:
-            out["error"] = self.error
-        return out
-
-
-class _CompletionToolTracker:
-    """Normalize Responses tool-call events and suppress duplicate progress.
-
-    Responses streams can expose built-in tools in several shapes:
-    tool-specific events (``response.web_search_call.searching``), generic
-    output item events, and a final ``response.completed.response.output``
-    snapshot.  This tracker makes those shapes idempotent for both SSE and DB
-    content persistence.
-    """
-
-    def __init__(self) -> None:
-        self._calls: dict[str, _ToolCallState] = {}
-        self._last_published: dict[str, tuple[Any, ...]] = {}
-        self.last_update_ts: float | None = None
-
-    def _publish_if_changed(self, state: _ToolCallState) -> dict[str, Any] | None:
-        signature = (
-            state.type,
-            state.status,
-            state.name,
-            state.label,
-            state.title,
-            state.error,
-        )
-        if self._last_published.get(state.id) == signature:
-            return None
-        self._last_published[state.id] = signature
-        self.last_update_ts = time.monotonic()
-        return state.payload()
-
-    def update(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        update = _extract_tool_call_update(event)
-        if update is None:
-            return None
-        call_id = update["id"]
-        previous = self._calls.get(call_id)
-        next_state = _merge_tool_call_state(previous, update)
-        self._calls[call_id] = next_state
-        return self._publish_if_changed(next_state)
-
-    def update_from_response(
-        self, response: dict[str, Any] | None
-    ) -> list[dict[str, Any]]:
-        if not isinstance(response, dict):
-            return []
-        output = response.get("output")
-        if not isinstance(output, list):
-            return []
-        published: list[dict[str, Any]] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            event = {"type": "response.output_item.done", "item": item}
-            payload = self.update(event)
-            if payload is not None:
-                published.append(payload)
-        return published
-
-    def finalize_active(
-        self,
-        status: str,
-        *,
-        error: str | None = None,
-    ) -> list[dict[str, Any]]:
-        published: list[dict[str, Any]] = []
-        for call_id, state in list(self._calls.items()):
-            if state.status in TOOL_TERMINAL_STATUSES:
-                continue
-            next_state = replace(
-                state,
-                status=status,
-                error=error or state.error,
-            )
-            self._calls[call_id] = next_state
-            payload = self._publish_if_changed(next_state)
-            if payload is not None:
-                published.append(payload)
-        return published
-
-    @property
-    def invocation_count(self) -> int:
-        return len(self._calls)
-
-    @property
-    def has_active(self) -> bool:
-        return any(
-            state.status not in TOOL_TERMINAL_STATUSES for state in self._calls.values()
-        )
-
-    def idle_timeout_remaining(self, timeout_s: float) -> float | None:
-        if not self.has_active:
-            return None
-        now = time.monotonic()
-        if tool_status_idle_timed_out(
-            self.last_update_ts,
-            now=now,
-            timeout_s=timeout_s,
-        ):
-            return 0.0
-        remaining = tool_status_idle_timeout_remaining_seconds(
-            self.last_update_ts,
-            now=now,
-            timeout_s=timeout_s,
-        )
-        return None if remaining is None else max(0.001, remaining)
-
-    def content(self) -> list[dict[str, Any]]:
-        return [state.payload() for state in self._calls.values()]
+def _count_message_tokens(role: str, content: dict[str, Any] | None) -> int:
+    return _completion_history._count_message_tokens_with_counter(
+        role,
+        content,
+        token_counter=count_tokens,
+    )
 
 
 def _split_csv_ids(raw: str | None) -> list[str]:
@@ -579,34 +452,6 @@ def _configure_chat_tools(body: dict[str, Any], tools: list[dict[str, Any]]) -> 
     body["parallel_tool_calls"] = False
 
 
-def _decode_upstream_image_b64(value: str) -> bytes:
-    raw = value.strip()
-    if raw[:5].lower() == "data:" and "," in raw:
-        raw = raw.split(",", 1)[1]
-    raw = "".join(raw.split())
-    return base64.b64decode(raw, validate=True)
-
-
-def _tool_image_dedupe_key(event: dict[str, Any], b64_image: str) -> str:
-    item = event.get("item")
-    if isinstance(item, dict):
-        raw_id = item.get("id")
-        if isinstance(raw_id, str) and raw_id:
-            return f"id:{raw_id}"
-    raw = b64_image.strip()
-    if raw[:5].lower() == "data:" and "," in raw:
-        raw = raw.split(",", 1)[1]
-    if len(raw) <= 8192:
-        normalized_b64 = "".join(raw.split())
-        digest = hashlib.sha1(
-            normalized_b64.encode("ascii", errors="ignore")
-        ).hexdigest()
-        return f"b64sha1:{digest}"
-    sample = f"{len(raw)}:{raw[:512]}:{raw[-512:]}"
-    digest = hashlib.sha1(sample.encode("ascii", errors="ignore")).hexdigest()
-    return f"b64sig:{len(raw)}:{digest}"
-
-
 def _fallback_completion_usage_tokens(
     input_list: list[dict[str, Any]],
     output_text: str,
@@ -626,179 +471,20 @@ def _fallback_completion_usage_tokens(
     return next_in, next_out
 
 
-def _tool_display_label(tool_type: str, name: str | None = None) -> str:
-    if tool_type == _WEB_SEARCH_TOOL_TYPE:
-        return "联网搜索"
-    if tool_type == _FILE_SEARCH_TOOL_TYPE:
-        return "检索文件"
-    if tool_type == _CODE_INTERPRETER_TOOL_TYPE:
-        return "运行代码"
-    if tool_type == _IMAGE_GENERATION_TOOL_TYPE:
-        return "生成图片"
-    if name:
-        return f"调用{name}"
-    return "调用工具"
-
-
-def _normalize_tool_type(raw: Any, *, event_type: str = "") -> str | None:
-    value = raw if isinstance(raw, str) else ""
-    if value.endswith("_call"):
-        value = value[: -len("_call")]
-    if value in {
-        _WEB_SEARCH_TOOL_TYPE,
-        _FILE_SEARCH_TOOL_TYPE,
-        _CODE_INTERPRETER_TOOL_TYPE,
-        _IMAGE_GENERATION_TOOL_TYPE,
-        "function",
-        "tool",
-    }:
-        return value
-    if value == "function_call":
-        return "function"
-    if value == "tool_call":
-        return "tool"
-
-    # Tool-specific Responses events are shaped like
-    # response.web_search_call.searching / response.code_interpreter_call.completed.
-    if event_type.startswith("response.") and "_call." in event_type:
-        middle = event_type[len("response.") :].split(".", 1)[0]
-        return _normalize_tool_type(middle, event_type="")
-    return None
-
-
-def _normalize_tool_status(raw: Any, *, event_type: str = "") -> str | None:
-    normalized = normalize_upstream_tool_status(raw, event_type=event_type)
-    if normalized is ToolStatus.UNKNOWN:
-        if raw is not None and str(raw).strip():
-            logger.warning(
-                "unknown upstream tool status raw=%r event_type=%s", raw, event_type
-            )
-        else:
-            normalized = ToolStatus.RUNNING
-    return normalized.value
-
-
-def _tool_status_rank(status: str | None) -> int:
-    return {
-        "unknown": 0,
-        "queued": 0,
-        "running": 1,
-        "succeeded": 2,
-        "failed": 3,
-        "cancelled": 3,
-        "timed_out": 3,
-    }.get(status or "", -1)
-
-
-def _summarize_tool_error(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()[:500]
-    if isinstance(value, dict):
-        code = value.get("code") or value.get("type")
-        message = value.get("message") or value.get("reason")
-        if code and message:
-            return f"{code}: {message}"[:500]
-        if message:
-            return str(message)[:500]
-        if code:
-            return str(code)[:500]
-    return None
-
-
-def _first_str(*values: Any) -> str | None:
-    for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _extract_tool_call_update(event: dict[str, Any]) -> dict[str, Any] | None:
-    event_type = event.get("type")
-    event_type = event_type if isinstance(event_type, str) else ""
-    item = event.get("item")
-    call = event.get("tool_call") or event.get("call")
-    source: dict[str, Any] | None = None
-    if isinstance(item, dict):
-        source = item
-    elif isinstance(call, dict):
-        source = call
-    else:
-        source = event
-
-    tool_type = _normalize_tool_type(source.get("type"), event_type=event_type)
-    if tool_type is None:
-        tool_type = _normalize_tool_type(event.get("tool_type"), event_type=event_type)
-    if tool_type is None:
-        return None
-
-    call_id = _first_str(
-        source.get("id"),
-        source.get("call_id"),
-        source.get("tool_call_id"),
-        event.get("item_id"),
-        event.get("output_item_id"),
-        event.get("call_id"),
-        event.get("tool_call_id"),
-        event.get("id"),
-    )
-    if call_id is None:
-        return None
-
-    name = _first_str(source.get("name"), event.get("name"))
-    title = _first_str(
-        source.get("query"),
-        event.get("query"),
-        source.get("title"),
-        event.get("title"),
-    )
-    status = _normalize_tool_status(source.get("status"), event_type=event_type)
-    error = _summarize_tool_error(
-        source.get("error")
-        or source.get("incomplete_details")
-        or event.get("error")
-        or event.get("incomplete_details")
-    )
-    if error and status in (None, ToolStatus.UNKNOWN.value):
-        status = ToolStatus.FAILED.value
-    status = status or ToolStatus.RUNNING.value
-
-    return {
-        "id": call_id,
-        "type": tool_type,
-        "status": status,
-        "name": name,
-        "title": title,
-        "label": _tool_display_label(tool_type, name),
-        "error": error,
-    }
-
-
-def _merge_tool_call_state(
-    previous: _ToolCallState | None,
-    update: dict[str, Any],
-) -> _ToolCallState:
-    next_status = update["status"]
-    if previous is not None:
-        if (
-            previous.status in TOOL_TERMINAL_STATUSES
-            and next_status in TOOL_TERMINAL_STATUSES
-        ) or _tool_status_rank(previous.status) > _tool_status_rank(next_status):
-            next_status = previous.status
-    next_type = update["type"] or (previous.type if previous is not None else "tool")
-    next_name = update.get("name") or (previous.name if previous is not None else None)
-    next_label = update.get("label") or (
-        previous.label
-        if previous is not None
-        else _tool_display_label(next_type, next_name)
-    )
-    return _ToolCallState(
-        id=update["id"],
-        type=next_type,
-        status=next_status,
-        name=next_name,
-        label=next_label,
-        title=update.get("title") or (previous.title if previous is not None else None),
-        error=update.get("error") or (previous.error if previous is not None else None),
+async def _settle_failed_completion_billing(
+    session: Any,
+    completion: Completion,
+    *,
+    usage_values: tuple[Any, ...],
+    reason: str,
+) -> None:
+    if any(int(value or 0) > 0 for value in usage_values):
+        await worker_billing.charge_completion(session, completion)
+        return
+    await worker_billing.release_completion(
+        session,
+        completion,
+        reason=reason,
     )
 
 
@@ -892,206 +578,11 @@ def _tool_limited_completion_body(body: dict[str, Any]) -> dict[str, Any]:
     return fallback
 
 
-def _markdown_link(label: str, url: str) -> str:
-    safe_label = (label or url).replace("\\", "\\\\").replace("]", "\\]")
-    safe_url = url.replace(")", "%29").replace(" ", "%20")
-    return f"[{safe_label}]({safe_url})"
-
-
-def _extract_url_citations(response: dict[str, Any]) -> list[dict[str, Any]]:
-    citations: list[dict[str, Any]] = []
-    output = response.get("output")
-    if not isinstance(output, list):
-        return citations
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        for part in item.get("content") or []:
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text")
-            for ann in part.get("annotations") or []:
-                if not isinstance(ann, dict):
-                    continue
-                raw_citation = ann.get("url_citation")
-                raw = raw_citation if isinstance(raw_citation, dict) else ann
-                url = raw.get("url") if isinstance(raw, dict) else None
-                if not isinstance(url, str) or not url.startswith(
-                    ("http://", "https://")
-                ):
-                    continue
-                title = raw.get("title") if isinstance(raw, dict) else None
-                citations.append(
-                    {
-                        "url": url,
-                        "title": title if isinstance(title, str) and title else url,
-                        "text": text if isinstance(text, str) else None,
-                        "start_index": ann.get("start_index"),
-                        "end_index": ann.get("end_index"),
-                    }
-                )
-    return citations
-
-
-def _apply_url_citations(text: str, citations: list[dict[str, Any]]) -> str:
-    if not text or not citations:
-        return text
-    replacements: list[tuple[int, int, str]] = []
-    seen_urls: set[str] = set()
-    for citation in citations:
-        url = citation["url"]
-        start = citation.get("start_index")
-        end = citation.get("end_index")
-        if not isinstance(start, int) or not isinstance(end, int):
-            continue
-        if start < 0 or end <= start or end > len(text):
-            continue
-        label = text[start:end].strip()
-        if not label:
-            continue
-        replacements.append((start, end, _markdown_link(label, url)))
-        seen_urls.add(url)
-    if replacements:
-        # Apply from the end so earlier indexes remain valid.
-        for start, end, link in sorted(
-            replacements,
-            key=lambda item: item[0],
-            reverse=True,
-        ):
-            text = f"{text[:start]}{link}{text[end:]}"
-    if not seen_urls:
-        unique: list[dict[str, Any]] = []
-        for citation in citations:
-            if citation["url"] in seen_urls:
-                continue
-            seen_urls.add(citation["url"])
-            unique.append(citation)
-        if unique:
-            links: list[str] = []
-            for idx, citation in enumerate(unique[:8], start=1):
-                label = str(citation.get("title") or citation["url"])
-                links.append(f"{idx}. {_markdown_link(label, citation['url'])}")
-            text = f"{text.rstrip()}\n\n来源\n" + "\n".join(links)
-    return text
-
-
-def _extract_completed_output_text(response: dict[str, Any]) -> str:
-    output_text = response.get("output_text")
-    if isinstance(output_text, str) and output_text:
-        return output_text
-    chunks: list[str] = []
-    output = response.get("output")
-    if not isinstance(output, list):
-        return ""
-    for item in output:
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        for part in item.get("content") or []:
-            if (
-                isinstance(part, dict)
-                and part.get("type") == "output_text"
-                and isinstance(part.get("text"), str)
-            ):
-                chunks.append(part["text"])
-    return "".join(chunks)
-
-
-def _finalize_completion_text(text: str, response: dict[str, Any] | None) -> str:
-    if not isinstance(response, dict):
-        return text
-    completed_text = _extract_completed_output_text(response)
-    base = completed_text or text
-    return _apply_url_citations(base, _extract_url_citations(response))
-
-
-_REASONING_DELTA_EVENT_TYPES = {
-    "response.reasoning_summary_text.delta",
-    "response.reasoning_text.delta",
-    "response.reasoning_summary.delta",
-}
-
-
-def _extract_reasoning_delta(event: dict[str, Any]) -> str:
-    ev_type = event.get("type")
-    if ev_type in _REASONING_DELTA_EVENT_TYPES:
-        for key in ("delta", "text", "summary"):
-            value = event.get(key)
-            if isinstance(value, str) and value:
-                return value
-    if ev_type == "response.output_item.done":
-        item = event.get("item")
-        if isinstance(item, dict) and item.get("type") == "reasoning":
-            return _extract_reasoning_text_from_item(item)
-    return ""
-
-
-def _extract_reasoning_text_from_item(item: dict[str, Any]) -> str:
-    chunks: list[str] = []
-    for key in ("summary_text", "text"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            chunks.append(value)
-    summary = item.get("summary")
-    if isinstance(summary, str) and summary:
-        chunks.append(summary)
-    elif isinstance(summary, list):
-        for part in summary:
-            if isinstance(part, str) and part:
-                chunks.append(part)
-            elif isinstance(part, dict):
-                for key in ("text", "summary_text"):
-                    value = part.get(key)
-                    if isinstance(value, str) and value:
-                        chunks.append(value)
-                        break
-    content = item.get("content")
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict):
-                value = part.get("text")
-                if isinstance(value, str) and value:
-                    chunks.append(value)
-    return "\n".join(chunks)
-
-
-def _extract_reasoning_text_from_response(response: dict[str, Any] | None) -> str:
-    if not isinstance(response, dict):
-        return ""
-    output = response.get("output")
-    if not isinstance(output, list):
-        return ""
-    chunks: list[str] = []
-    for item in output:
-        if isinstance(item, dict) and item.get("type") == "reasoning":
-            text = _extract_reasoning_text_from_item(item)
-            if text:
-                chunks.append(text)
-    return "\n\n".join(chunks)
-
-
-def _extract_image_events_from_response(
-    response: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    if not isinstance(response, dict):
-        return []
-    output = response.get("output")
-    if not isinstance(output, list):
-        return []
-    events: list[dict[str, Any]] = []
-    for item in output:
-        if (
-            isinstance(item, dict)
-            and item.get("type") == _IMAGE_GENERATION_TOOL_TYPE + "_call"
-        ):
-            events.append({"type": "response.output_item.done", "item": item})
-    return events
-
-
 def _compute_blurhash(img: PILImage.Image) -> str | None:
-    width, height = img.size
-    if width < 4 or height < 4:
-        return None
-    return _generation_compute_blurhash(img)
+    return _completion_tool_images._compute_blurhash(
+        img,
+        compute_blurhash=_generation_compute_blurhash,
+    )
 
 
 def _image_format_and_meta(
@@ -1109,54 +600,16 @@ def _image_format_and_meta(
     bytes,
     tuple[int, int],
 ]:
-    try:
-        with PILImage.open(io.BytesIO(raw_image)) as pil:
-            pil.load()
-            if pil.format not in ("PNG", "WEBP", "JPEG"):
-                raise UpstreamError(
-                    f"upstream returned unexpected image format: {pil.format}",
-                    error_code=EC.BAD_RESPONSE.value,
-                    status_code=200,
-                )
-            width, height = pil.size
-            if width < 1 or height < 1 or width > 10000 or height > 10000:
-                raise UpstreamError(
-                    f"upstream image dimensions out of range: {width}x{height}",
-                    error_code=EC.BAD_RESPONSE.value,
-                    status_code=200,
-                )
-            blurhash_str = _compute_blurhash(pil)
-            display_bytes, display_size = _make_display(pil)
-            preview_bytes, preview_size = _make_preview(pil)
-            thumb_bytes, thumb_size = _make_thumb(pil)
-            orig_format = pil.format
-    except UpstreamError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise UpstreamError(
-            f"pillow could not decode image: {exc}",
-            error_code=EC.BAD_RESPONSE.value,
-            status_code=200,
-        ) from exc
-
-    ext_by_format = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}
-    mime_by_format = {
-        "PNG": "image/png",
-        "WEBP": "image/webp",
-        "JPEG": "image/jpeg",
-    }
-    return (
-        ext_by_format[orig_format],
-        mime_by_format[orig_format],
-        width,
-        height,
-        blurhash_str,
-        display_bytes,
-        display_size,
-        preview_bytes,
-        preview_size,
-        thumb_bytes,
-        thumb_size,
+    return _completion_tool_images._image_format_and_meta(
+        raw_image,
+        hooks=_completion_tool_images.ToolImageFormatHooks(
+            compute_blurhash=_compute_blurhash,
+            make_display=_make_display,
+            make_preview=_make_preview,
+            make_thumb=_make_thumb,
+            upstream_error_type=UpstreamError,
+            bad_response_error_code=EC.BAD_RESPONSE.value,
+        ),
     )
 
 
@@ -1164,122 +617,44 @@ async def _store_completion_tool_image(
     *,
     session: Any,
     task_id: str,
+    attempt_epoch: int,
     user_id: str,
     message_id: str,
     raw_image: bytes,
     revised_prompt: str | None,
+    billing_budget_micro: int,
 ) -> dict[str, Any]:
-    (
-        orig_ext,
-        orig_mime,
-        width,
-        height,
-        blurhash_str,
-        display_bytes,
-        display_size,
-        preview_bytes,
-        preview_size,
-        thumb_bytes,
-        thumb_size,
-    ) = _image_format_and_meta(raw_image)
-    image_id = new_uuid7()
-    sha = _sha256(raw_image)
-    key_prefix = f"u/{user_id}/completion-tools/{task_id}/{image_id}"
-    key_orig = f"{key_prefix}/orig.{orig_ext}"
-    key_display = f"{key_prefix}/display2048.webp"
-    key_preview = f"{key_prefix}/preview1024.webp"
-    key_thumb = f"{key_prefix}/thumb256.jpg"
-
-    created_storage_keys = await _write_generation_files(
-        [
-            (key_orig, raw_image),
-            (key_display, display_bytes),
-            (key_preview, preview_bytes),
-            (key_thumb, thumb_bytes),
-        ]
+    return await _completion_tool_images._store_completion_tool_image(
+        session=session,
+        task_id=task_id,
+        attempt_epoch=attempt_epoch,
+        user_id=user_id,
+        message_id=message_id,
+        raw_image=raw_image,
+        revised_prompt=revised_prompt,
+        billing_budget_micro=billing_budget_micro,
+        hooks=_completion_tool_images.ToolImageStorageHooks(
+            image_format_and_meta=_image_format_and_meta,
+            new_uuid7=new_uuid7,
+            sha256=_sha256,
+            write_generation_files=_write_generation_files,
+            cleanup_storage_on_error=_cleanup_storage_on_error,
+            record_image_usage=partial(
+                _completion_tool_images._record_completion_tool_image_usage,
+                hooks=_completion_tool_images.ToolImageUsageHooks(
+                    acquire_lock=_acquire_completion_xact_lock,
+                    completion_model=Completion,
+                    running_statuses=_RUNNING_COMPLETION_STATUSES,
+                    superseded_error_type=_CompletionEpochSuperseded,
+                    fallback_image_tokens=_fallback_completion_tool_image_tokens,
+                ),
+            ),
+            image_model=Image,
+            image_variant_model=ImageVariant,
+            message_model=Message,
+            storage_public_url=storage.public_url,
+        ),
     )
-    async with _cleanup_storage_on_error(created_storage_keys):
-        img = Image(
-            id=image_id,
-            user_id=user_id,
-            owner_generation_id=None,
-            source=ImageSource.GENERATED,
-            parent_image_id=None,
-            storage_key=key_orig,
-            mime=orig_mime,
-            width=width,
-            height=height,
-            size_bytes=len(raw_image),
-            sha256=sha,
-            blurhash=blurhash_str,
-            visibility="private",
-            metadata_jsonb={
-                "source": "completion_tool",
-                "completion_id": task_id,
-                **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-            },
-        )
-        session.add(img)
-        session.add(
-            ImageVariant(
-                image_id=image_id,
-                kind="display2048",
-                storage_key=key_display,
-                width=display_size[0],
-                height=display_size[1],
-            )
-        )
-        session.add(
-            ImageVariant(
-                image_id=image_id,
-                kind="preview1024",
-                storage_key=key_preview,
-                width=preview_size[0],
-                height=preview_size[1],
-            )
-        )
-        session.add(
-            ImageVariant(
-                image_id=image_id,
-                kind="thumb256",
-                storage_key=key_thumb,
-                width=thumb_size[0],
-                height=thumb_size[1],
-            )
-        )
-
-        msg = await session.get(Message, message_id)
-        if msg is not None:
-            content = dict(msg.content or {})
-            images_list = list(content.get("images") or [])
-            images_list.append(
-                {
-                    "image_id": image_id,
-                    "from_completion_id": task_id,
-                    "width": width,
-                    "height": height,
-                    "mime": orig_mime,
-                    "url": storage.public_url(key_orig),
-                    "display_url": f"/api/images/{image_id}/variants/display2048",
-                    "preview_url": f"/api/images/{image_id}/variants/preview1024",
-                    "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                    **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-                }
-            )
-            content["images"] = images_list
-            msg.content = content
-
-        return {
-            "image_id": image_id,
-            "from_completion_id": task_id,
-            "actual_size": f"{width}x{height}",
-            "mime": orig_mime,
-            "url": storage.public_url(key_orig),
-            "display_url": f"/api/images/{image_id}/variants/display2048",
-            "preview_url": f"/api/images/{image_id}/variants/preview1024",
-            "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-            **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-        }
 
 
 async def _ensure_completion_tool_image_wallet_budget(
@@ -1288,76 +663,20 @@ async def _ensure_completion_tool_image_wallet_budget(
     task_id: str,
     reserved_micro: int = 0,
 ) -> int:
-    base_budget_micro = await runtime_settings.resolve_int(
-        _CHAT_TOOL_IMAGE_BUDGET_SETTING,
-        0,
+    return await _completion_tool_images._ensure_completion_tool_image_wallet_budget(
+        user_id=user_id,
+        task_id=task_id,
+        reserved_micro=reserved_micro,
+        hooks=_completion_tool_images.ToolImageBudgetHooks(
+            runtime_settings=runtime_settings,
+            session_factory=SessionLocal,
+            completion_model=Completion,
+            worker_billing=worker_billing,
+            billing_core=billing_core,
+            insufficient_balance_error_type=_CompletionToolInsufficientBalance,
+            budget_setting=_CHAT_TOOL_IMAGE_BUDGET_SETTING,
+        ),
     )
-    if base_budget_micro <= 0:
-        return 0
-    async with SessionLocal() as session:
-        comp = await session.get(Completion, task_id)
-        billing_ref_id = (
-            worker_billing.completion_billing_ref_id(comp)
-            if comp is not None
-            else task_id
-        )
-        if not await worker_billing._wallet_billing_applies(  # noqa: SLF001
-            session,
-            user_id=user_id,
-            ref_type="completion",
-            ref_id=billing_ref_id,
-        ):
-            return 0
-        if not await worker_billing.billing_enabled():
-            return 0
-        snapshot_multiplier = (
-            worker_billing._snapshot_rate_multiplier_x10000(comp)  # noqa: SLF001
-            if comp is not None
-            else None
-        )
-        rate_multiplier = (
-            snapshot_multiplier
-            if snapshot_multiplier is not None
-            else await worker_billing._rate_multiplier_x10000(session, user_id)  # noqa: SLF001
-        )
-        budget_micro = worker_billing._apply_rate_multiplier_micro(  # noqa: SLF001
-            base_budget_micro,
-            rate_multiplier,
-        )
-        if budget_micro <= 0:
-            return 0
-        already_reserved_micro = max(0, int(reserved_micro or 0))
-        required_micro = already_reserved_micro + int(budget_micro)
-        wallet = await billing_core.get_wallet(
-            session, user_id, lock=True, create=False
-        )
-        balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
-        held_micro = await worker_billing.held_amount_for_ref(
-            session,
-            user_id,
-            "completion",
-            billing_ref_id,
-        )
-        available_micro = balance_micro + int(held_micro or 0)
-        if (
-            available_micro >= required_micro
-            or await worker_billing.allow_negative_balance()
-        ):
-            return int(budget_micro)
-        raise _CompletionToolInsufficientBalance(
-            "insufficient wallet balance for image_generation tool",
-            error_code="INSUFFICIENT_BALANCE",
-            status_code=402,
-            payload={
-                "required_micro": int(budget_micro),
-                "cumulative_required_micro": int(required_micro),
-                "balance_micro": balance_micro,
-                "held_micro": int(held_micro or 0),
-                "reserved_micro": already_reserved_micro,
-                "rate_multiplier_x10000": rate_multiplier,
-                "completion_id": task_id,
-            },
-        )
 
 
 async def _store_and_publish_completion_tool_image(
@@ -1373,61 +692,39 @@ async def _store_and_publish_completion_tool_image(
     revised_prompt: str | None,
     reserved_tool_image_micro: int = 0,
 ) -> tuple[dict[str, Any] | None, int]:
-    budget_reserved_micro = await _ensure_completion_tool_image_wallet_budget(
+    return await _completion_tool_images._store_and_publish_completion_tool_image(
+        redis=redis,
         user_id=user_id,
+        channel=channel,
         task_id=task_id,
-        reserved_micro=reserved_tool_image_micro,
+        message_id=message_id,
+        attempt=attempt,
+        attempt_epoch=attempt_epoch,
+        b64_image=b64_image,
+        revised_prompt=revised_prompt,
+        reserved_tool_image_micro=reserved_tool_image_micro,
+        hooks=_completion_tool_images.ToolImagePublishHooks(
+            ensure_wallet_budget=_ensure_completion_tool_image_wallet_budget,
+            decode_upstream_image_b64=_decode_upstream_image_b64,
+            session_factory=SessionLocal,
+            store_tool_image=_store_completion_tool_image,
+            publish_event=publish_event,
+            upstream_error_type=UpstreamError,
+            bad_response_error_code=EC.BAD_RESPONSE.value,
+            image_event=EV_COMP_IMAGE,
+        ),
     )
-    try:
-        raw_image = _decode_upstream_image_b64(b64_image)
-    except binascii.Error as exc:
-        raise UpstreamError(
-            f"bad base64 from image_generation tool: {exc}",
-            error_code=EC.BAD_RESPONSE.value,
-            status_code=200,
-        ) from exc
-    async with SessionLocal() as session:
-        image_payload = await _store_completion_tool_image(
-            session=session,
-            task_id=task_id,
-            user_id=user_id,
-            message_id=message_id,
-            raw_image=raw_image,
-            revised_prompt=revised_prompt,
-        )
-        await session.commit()
-
-    await publish_event(
-        redis,
-        user_id,
-        channel,
-        EV_COMP_IMAGE,
-        {
-            "completion_id": task_id,
-            "message_id": message_id,
-            "attempt": attempt,
-            "attempt_epoch": attempt_epoch,
-            "images": [image_payload],
-        },
-    )
-    return image_payload, budget_reserved_micro
 
 
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        try:
-            v = await redis.get(f"task:{task_id}:cancel")
-            return bool(v)
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < 2:
-                await asyncio.sleep(0.05 * (attempt + 1))
-    completion_cancel_check_errors_total.inc()
-    logger.warning(
-        "completion cancel check failed closed task=%s err=%s", task_id, last_exc
+    return await _completion_stream._is_cancelled(
+        redis,
+        task_id,
+        hooks=_completion_stream.CancellationCheckHooks(
+            cancel_check_errors_total=completion_cancel_check_errors_total,
+            logger=logger,
+        ),
     )
-    return True
 
 
 async def _raise_if_completion_cancelled(
@@ -1435,33 +732,11 @@ async def _raise_if_completion_cancelled(
     task_id: str,
     reason: str,
 ) -> None:
-    if await _is_cancelled(redis, task_id):
-        raise _TaskCancelled(reason)
-
-
-def _raise_for_terminal_response_event(
-    ev_type: str,
-    resp: dict[str, Any],
-    event_error: Any = None,
-) -> None:
-    _ = event_error
-    terminal_status = (
-        ToolStatus.CANCELLED.value
-        if ev_type in {"response.cancelled", "response.canceled"}
-        else ToolStatus.FAILED.value
-    )
-    error_code = (
-        EC.CANCELLED.value
-        if terminal_status == ToolStatus.CANCELLED.value
-        else EC.BAD_RESPONSE.value
-    )
-    if terminal_status == ToolStatus.CANCELLED.value:
-        raise _TaskCancelled("upstream response cancelled")
-    raise UpstreamError(
-        f"upstream {ev_type}",
-        error_code=error_code,
-        status_code=200,
-        payload=resp or None,
+    await _completion_stream._raise_if_completion_cancelled(
+        redis,
+        task_id,
+        reason,
+        is_cancelled=_is_cancelled,
     )
 
 
@@ -1473,64 +748,14 @@ async def _watch_completion_cancel(
     stop_requested: asyncio.Event,
     poll_interval_s: float = _CANCEL_POLL_INTERVAL_S,
 ) -> None:
-    while not stop_requested.is_set() and not cancel_requested.is_set():
-        if await _is_cancelled(redis, task_id):
-            cancel_requested.set()
-            return
-        try:
-            await asyncio.wait_for(stop_requested.wait(), timeout=poll_interval_s)
-        except TimeoutError:
-            continue
-
-
-async def _next_completion_stream_event(
-    stream: Any,
-    *,
-    cancel_requested: asyncio.Event,
-    lease_lost: asyncio.Event,
-    idle_timeout_s: float | None = None,
-) -> dict[str, Any]:
-    next_task = asyncio.create_task(anext(stream))
-    cancel_task = asyncio.create_task(cancel_requested.wait())
-    lease_task = asyncio.create_task(lease_lost.wait())
-    timeout_task = (
-        asyncio.create_task(asyncio.sleep(idle_timeout_s))
-        if idle_timeout_s is not None and idle_timeout_s > 0
-        else None
+    await _completion_stream._watch_completion_cancel(
+        redis,
+        task_id,
+        cancel_requested=cancel_requested,
+        stop_requested=stop_requested,
+        poll_interval_s=poll_interval_s,
+        is_cancelled=_is_cancelled,
     )
-    wait_for_tasks = {next_task, cancel_task, lease_task}
-    if timeout_task is not None:
-        wait_for_tasks.add(timeout_task)
-    try:
-        done, _pending = await asyncio.wait(
-            wait_for_tasks, return_when=asyncio.FIRST_COMPLETED
-        )
-        if next_task in done:
-            return await next_task
-
-        next_task.cancel()
-        with suppress(BaseException):
-            await next_task
-        with suppress(Exception):
-            await stream.aclose()
-
-        if cancel_requested.is_set():
-            raise _TaskCancelled("cancelled during stream")
-        if lease_lost.is_set():
-            raise _LeaseLost("lease lost during stream")
-        if timeout_task is not None and timeout_task in done:
-            raise _ToolIdleTimeout("tool call idle timeout")
-        raise UpstreamError(
-            "completion stream aborted",
-            error_code=EC.TEXT_STREAM_INTERRUPTED.value,
-            status_code=None,
-        )
-    finally:
-        for task in (cancel_task, lease_task, timeout_task):
-            if task is not None and not task.done():
-                task.cancel()
-                with suppress(BaseException):
-                    await task
 
 
 async def _iter_completion_stream_with_abort(
@@ -1541,24 +766,15 @@ async def _iter_completion_stream_with_abort(
     tool_tracker: _CompletionToolTracker,
     tool_idle_timeout_s: float,
 ) -> Any:
-    try:
-        while True:
-            try:
-                yield await _next_completion_stream_event(
-                    stream,
-                    cancel_requested=cancel_requested,
-                    lease_lost=lease_lost,
-                    idle_timeout_s=tool_tracker.idle_timeout_remaining(
-                        tool_idle_timeout_s
-                    ),
-                )
-            except StopAsyncIteration:
-                break
-    finally:
-        close = getattr(stream, "aclose", None)
-        if callable(close):
-            with suppress(Exception):
-                await close()
+    async for event in _completion_stream._iter_completion_stream_with_abort(
+        stream,
+        cancel_requested=cancel_requested,
+        lease_lost=lease_lost,
+        tool_tracker=tool_tracker,
+        tool_idle_timeout_s=tool_idle_timeout_s,
+        next_event=_next_completion_stream_event,
+    ):
+        yield event
 
 
 class _CompletionEpochSuperseded(RuntimeError):
@@ -1613,19 +829,24 @@ return 0
 _RUNNING_COMPLETION_STATUSES = (CompletionStatus.STREAMING.value,)
 
 
-async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
-    ok = await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S, nx=True)
+async def _acquire_lease(redis: Any, task_id: str, worker_token: str) -> None:
+    ok = await redis.set(
+        f"task:{task_id}:lease",
+        worker_token,
+        ex=_LEASE_TTL_S,
+        nx=True,
+    )
     if not ok:
         raise _LeaseLost(f"lease already held task={task_id}")
 
 
-async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
+async def _release_lease(redis: Any, task_id: str, worker_token: str) -> None:
     try:
         await redis.eval(
             _RELEASE_LEASE_LUA,
             1,
             f"task:{task_id}:lease",
-            worker_id,
+            worker_token,
         )
     except Exception:  # noqa: BLE001
         logger.debug("completion lease release failed task=%s", task_id, exc_info=True)
@@ -1634,7 +855,7 @@ async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
 async def _lease_renewer(
     redis: Any,
     task_id: str,
-    worker_id: str,
+    worker_token: str,
     lease_lost: asyncio.Event | None = None,
 ) -> None:
     """每 30s owner-CAS 续租一次；连续 3 次 Redis 失败或 owner 丢失即退出。"""
@@ -1647,7 +868,7 @@ async def _lease_renewer(
                     _RENEW_LEASE_LUA,
                     1,
                     f"task:{task_id}:lease",
-                    worker_id,
+                    worker_token,
                     str(_LEASE_TTL_S),
                 )
                 if int(ok or 0) != 1:
@@ -1656,7 +877,7 @@ async def _lease_renewer(
                     logger.warning(
                         "completion lease ownership lost task=%s worker=%s",
                         task_id,
-                        worker_id,
+                        worker_token,
                     )
                     return
                 consecutive_failures = 0
@@ -1681,434 +902,105 @@ async def _lease_renewer(
         raise
 
 
+async def _cleanup_completion_runtime(
+    *,
+    redis: Any,
+    task_id: str,
+    lease_token: str,
+    lease_acquired: bool,
+    renewer: asyncio.Task[None] | None,
+    cancel_stop_requested: asyncio.Event | None,
+    cancel_watcher: asyncio.Task[None] | None,
+    stream_span_cm: Any | None,
+    task_start: float,
+    task_outcome: str,
+) -> None:
+    """Stop background work and release the owned lease even under cancellation."""
+    if cancel_stop_requested is not None:
+        cancel_stop_requested.set()
+
+    async def _critical_cleanup() -> None:
+        for label, task in (
+            ("cancel watcher", cancel_watcher),
+            ("lease renewer", renewer),
+        ):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except BaseException:  # noqa: BLE001
+                logger.debug(
+                    "completion %s cleanup failed task=%s",
+                    label,
+                    task_id,
+                    exc_info=True,
+                )
+        if lease_acquired:
+            await _release_lease(redis, task_id, lease_token)
+
+    cleanup_future = asyncio.ensure_future(_critical_cleanup())
+    cancel_during_cleanup = False
+    try:
+        await asyncio.shield(cleanup_future)
+    except asyncio.CancelledError:
+        cancel_during_cleanup = True
+
+        def _consume_late_cleanup(task: asyncio.Task[None]) -> None:
+            with suppress(BaseException):
+                task.result()
+            logger.debug("completion late cleanup finished task=%s", task_id)
+
+        cleanup_future.add_done_callback(_consume_late_cleanup)
+    finally:
+        if stream_span_cm is not None:
+            with suppress(BaseException):
+                stream_span_cm.__exit__(None, None, None)
+        try:
+            duration = asyncio.get_event_loop().time() - task_start
+            task_duration_seconds.labels(
+                kind="completion",
+                outcome=safe_outcome(task_outcome),
+            ).observe(duration)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if cancel_during_cleanup:
+        raise asyncio.CancelledError()
+
+
 # ---------------------------------------------------------------------------
 # History packing (§22.2)
 # ---------------------------------------------------------------------------
 
 
 async def _attachment_to_data_url(session: Any, image_id: str) -> str | None:
-    """读图片 bytes → base64 data URL；优先 preview1024 变体（节省 token）。
-
-    DESIGN §22.3：completion 链路传 preview 即可，原图仅用于 image_to_image。
-    单张图读失败返回 None，调用方跳过；不让单张坏图拖垮整条消息。
-    """
-    img = await session.get(Image, image_id)
-    if img is None or getattr(img, "deleted_at", None) is not None:
-        return None
-
-    preview = (
-        await session.execute(
-            select(ImageVariant).where(
-                ImageVariant.image_id == image_id,
-                ImageVariant.kind == "preview1024",
-            )
-        )
-    ).scalar_one_or_none()
-
-    if preview is not None:
-        key = preview.storage_key
-        mime = "image/webp"
-    else:
-        key = img.storage_key
-        mime = img.mime or "image/png"
-
-    try:
-        raw = await asyncio.to_thread(storage.get_bytes, key)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("attachment read failed image_id=%s err=%s", image_id, exc)
-        return None
-    b64 = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{b64}"
-
-
-def _role_eq(role: Any, expected: Role) -> bool:
-    return role == expected or role == expected.value
-
-
-def _message_created_at(m: Message) -> datetime:
-    value = m.created_at
-    if isinstance(value, datetime):
-        return value
-    return datetime.min.replace(tzinfo=timezone.utc)
-
-
-def _summary_created_at(summary: dict[str, Any] | None) -> datetime | None:
-    if not isinstance(summary, dict):
-        return None
-    raw = summary.get("up_to_created_at")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _summary_compressed_at(summary: dict[str, Any] | None) -> datetime | None:
-    if not isinstance(summary, dict):
-        return None
-    raw = summary.get("compressed_at") or summary.get("updated_at")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _summary_covers_boundary(
-    summary: dict[str, Any] | None,
-    boundary_message: Message | None,
-) -> bool:
-    if boundary_message is None or not is_summary_usable(summary):
-        return False
-    summary_id = summary.get("up_to_message_id")
-    summary_id = summary_id if isinstance(summary_id, str) and summary_id else None
-    if summary_id == boundary_message.id:
-        return True
-    summary_dt = _summary_created_at(summary)
-    boundary_dt = _message_created_at(boundary_message)
-    if summary_dt is None:
-        return False
-    if summary_dt.tzinfo is None and boundary_dt.tzinfo is not None:
-        summary_dt = summary_dt.replace(tzinfo=boundary_dt.tzinfo)
-    if boundary_dt.tzinfo is None and summary_dt.tzinfo is not None:
-        boundary_dt = boundary_dt.replace(tzinfo=summary_dt.tzinfo)
-    if summary_dt > boundary_dt:
-        return True
-    if summary_dt < boundary_dt:
-        return False
-    return bool(summary_id and summary_id >= boundary_message.id)
-
-
-def _message_after_summary(summary: dict[str, Any] | None, message: Message) -> bool:
-    return not _summary_covers_boundary(summary, message)
-
-
-def _summary_age_seconds(summary: dict[str, Any] | None) -> int | None:
-    compressed_at = _summary_compressed_at(summary)
-    if compressed_at is None:
-        return None
-    now = datetime.now(compressed_at.tzinfo or timezone.utc)
-    return max(0, int((now - compressed_at).total_seconds()))
-
-
-def _truncate_sticky_text(text: str) -> str:
-    if len(text) <= _STICKY_TEXT_CHAR_LIMIT:
-        return text
-    return text[:_STICKY_TEXT_CHAR_LIMIT] + "\n[... truncated original task ...]"
-
-
-def _sticky_text_from_message(message: Message) -> str:
-    content = message.content or {}
-    text = _truncate_sticky_text(content.get("text") or "")
-    refs: list[str] = []
-    for att in content.get("attachments") or []:
-        if not isinstance(att, dict):
-            continue
-        image_id = att.get("image_id")
-        if image_id:
-            refs.append(f"[user_image image_id={image_id}]")
-        elif att.get("kind"):
-            refs.append(f"[attachment kind={att.get('kind')!r}]")
-    if refs:
-        return "\n".join([text, *refs]).strip()
-    return text
-
-
-def _count_message_tokens(role: str, content: dict[str, Any] | None) -> int:
-    """Precise token count for a message using tiktoken (via count_tokens).
-
-    Mirrors estimate_message_tokens() but uses count_tokens() for text
-    instead of the char/4 heuristic, giving accurate counts for CJK content
-    where the heuristic can be off by +/-20%.
-    """
-    content = content or {}
-    text = content.get("text") or ""
-
-    if role == Role.USER.value:
-        attachments = content.get("attachments") or []
-        image_count = sum(
-            1 for att in attachments if isinstance(att, dict) and att.get("image_id")
-        )
-        if not text and image_count == 0:
-            return 0
-        return (
-            MESSAGE_OVERHEAD_TOKENS
-            + count_tokens(text)
-            + image_count * IMAGE_INPUT_ESTIMATED_TOKENS
-        )
-    if role in (Role.ASSISTANT.value, Role.SYSTEM.value):
-        if not text:
-            return 0
-        return MESSAGE_OVERHEAD_TOKENS + count_tokens(text)
-    return 0
-
-
-def _with_summary_guardrail(system_prompt: str | None, *, enabled: bool) -> str | None:
-    if not enabled:
-        return system_prompt
-    guardrail = compose_summary_guardrail()
-    if system_prompt:
-        if guardrail in system_prompt:
-            return system_prompt
-        return f"{system_prompt.rstrip()}\n\n{guardrail}"
-    return None
-
-
-def _instructions_with_summary_guardrail(
-    system_prompt: str | None,
-    *,
-    enabled: bool,
-) -> str:
-    base = system_prompt or DEFAULT_CHAT_INSTRUCTIONS
-    if not enabled:
-        return base
-    guardrail = compose_summary_guardrail()
-    if guardrail in base:
-        return base
-    return f"{base.rstrip()}\n\n{guardrail}"
+    return await _completion_context_loading._attachment_to_data_url(
+        session,
+        image_id,
+        storage_get_bytes=storage.get_bytes,
+        logger=logger,
+    )
 
 
 async def _message_to_input_item(session: Any, m: Message) -> dict[str, Any] | None:
-    content = m.content or {}
-    text = content.get("text") or ""
-    if _role_eq(m.role, Role.USER):
-        parts: list[dict[str, Any]] = []
-        if text:
-            parts.append({"type": "input_text", "text": text})
-        # DESIGN §22.3：附图优先走 preview1024.webp（节省 token），
-        # 原图只在 image_to_image 场景才内联；completion 这里统一用 preview。
-        for att in content.get("attachments") or []:
-            if not isinstance(att, dict):
-                continue
-            image_id = att.get("image_id")
-            if not image_id:
-                continue
-            data_url = await _attachment_to_data_url(session, image_id)
-            if data_url:
-                parts.append({"type": "input_image", "image_url": data_url})
-        if parts:
-            return {"role": "user", "content": parts}
-    elif _role_eq(m.role, Role.ASSISTANT):
-        # 只把 completion 文本塞回；generation 默认不塞（§22.2 步骤 2.c）
-        if text:
-            return {
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
-            }
-    return None
+    return await _completion_context_loading._message_to_input_item(
+        session,
+        m,
+        attachment_to_data_url=_attachment_to_data_url,
+    )
 
 
 async def _build_input_from_packed_context(
     session: Any,
     packed: PackedContext,
 ) -> list[dict[str, Any]]:
-    input_list: list[dict[str, Any]] = []
-    include_guardrail = packed.summary_used or packed.sticky_used
-    system_prompt = _with_summary_guardrail(
-        packed._system_prompt,
-        enabled=include_guardrail,
-    )
-    if system_prompt:
-        input_list.append(
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            }
-        )
-
-    if packed.sticky_used and packed._sticky_message is not None:
-        sticky_text = _sticky_text_from_message(packed._sticky_message)
-        if sticky_text:
-            input_list.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": format_sticky_input_text(sticky_text),
-                        }
-                    ],
-                }
-            )
-
-    if packed.summary_used and packed._summary_text:
-        input_list.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": format_summary_input_text(packed._summary_text),
-                    }
-                ],
-            }
-        )
-
-    for m in packed._recent_rows:
-        item = await _message_to_input_item(session, m)
-        if item is not None:
-            input_list.append(item)
-    return input_list
-
-
-def _make_quality_probes(packed: PackedContext) -> dict[str, Any]:
-    return {
-        "summary_used": packed.summary_used,
-        "summary_age_seconds": packed.summary_age_seconds,
-        "summary_tokens": packed.summary_tokens,
-        "recent_messages_count": packed.recent_messages_count,
-        "first_user_message_pinned": packed.sticky_used,
-        "user_repeated_facts_score": None,
-        "model_signaled_missing_context": False,
-    }
-
-
-def _packed_with_input(
-    input_list: list[dict[str, Any]], packed: PackedContext
-) -> PackedContext:
-    return replace(
+    return await _completion_context_loading._build_input_from_packed_context(
+        session,
         packed,
-        input_list=input_list,
-        quality_probes=packed.quality_probes or _make_quality_probes(packed),
-    )
-
-
-def _estimated_summary_source(
-    rows: list[Message], *, skip_message_id: str | None
-) -> int:
-    """Estimate tokens for summary source messages using tiktoken via JSON serialization."""
-    import json
-
-    total = 0
-    for m in rows:
-        if m.id == skip_message_id:
-            continue
-        content_json = json.dumps(m.content or {}, ensure_ascii=False)
-        total += MESSAGE_OVERHEAD_TOKENS + count_tokens(content_json)
-    return total
-
-
-def _pack_with_existing_summary(
-    *,
-    system_prompt: str | None,
-    all_rows_desc: list[Message],
-    summary: dict[str, Any],
-    summary_model: str,
-    input_budget: int,
-    current_user: Message | None,
-    first_user: Message | None,
-) -> PackedContext:
-    summary_token_count = estimate_summary_tokens(summary)
-    sticky_message = (
-        first_user
-        if first_user is not None and not _message_after_summary(summary, first_user)
-        else None
-    )
-    sticky_tokens = 0
-    if sticky_message is not None:
-        sticky_input_text = format_sticky_input_text(
-            _sticky_text_from_message(sticky_message)
-        )
-        sticky_tokens = MESSAGE_OVERHEAD_TOKENS + count_tokens(sticky_input_text)
-
-    used_tokens = (
-        estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
-        )
-        + sticky_tokens
-        + MESSAGE_OVERHEAD_TOKENS
-        + summary_token_count
-    )
-    after_summary_desc = [
-        m
-        for m in all_rows_desc
-        if _count_message_tokens(m.role, m.content) > 0
-        and _message_after_summary(summary, m)
-    ]
-    recent_desc: list[Message] = []
-    recent_ids: set[str] = set()
-
-    if current_user is not None and _message_after_summary(summary, current_user):
-        current_tokens = _count_message_tokens(current_user.role, current_user.content)
-        if current_tokens > 0:
-            recent_desc.append(current_user)
-            recent_ids.add(current_user.id)
-            used_tokens += current_tokens
-
-    for m in after_summary_desc:
-        if m.id in recent_ids:
-            continue
-        est = _count_message_tokens(m.role, m.content)
-        if used_tokens + est > input_budget:
-            break
-        recent_desc.append(m)
-        recent_ids.add(m.id)
-        used_tokens += est
-
-    summary_text = str(summary.get("text") or "")
-    recent_rows = tuple(reversed(recent_desc))
-    return PackedContext(
-        input_list=[],
-        estimated_tokens=used_tokens,
-        summary_used=True,
-        summary_created=False,
-        summary_up_to_message_id=str(summary.get("up_to_message_id") or ""),
-        sticky_used=sticky_message is not None,
-        included_messages_count=len(recent_rows)
-        + (1 if sticky_message is not None else 0),
-        truncated_without_summary=False,
-        fallback_reason=None,
-        compression_enabled=True,
-        recent_messages_count=len(recent_rows),
-        summary_tokens=summary_token_count,
-        summary_age_seconds=_summary_age_seconds(summary),
-        compressor_model=summary_model,
-        image_caption_count=int(summary.get("image_caption_count") or 0),
-        _system_prompt=system_prompt,
-        _sticky_message=sticky_message,
-        _summary_text=summary_text,
-        _recent_rows=recent_rows,
-    )
-
-
-def _fallback_pack(
-    *,
-    system_prompt: str | None,
-    rows_desc: list[Message],
-    used_tokens: int,
-    truncated: bool,
-    compression_enabled: bool = False,
-    fallback_reason: str | None = None,
-    force_include_message: Message | None = None,
-    compressor_model: str | None = None,
-) -> PackedContext:
-    selected_desc = list(rows_desc)
-    if force_include_message is not None and all(
-        m.id != force_include_message.id for m in selected_desc
-    ):
-        selected_desc.insert(0, force_include_message)
-        used_tokens += _count_message_tokens(
-            force_include_message.role,
-            force_include_message.content,
-        )
-    selected = tuple(reversed(selected_desc))
-    return PackedContext(
-        input_list=[],
-        estimated_tokens=used_tokens,
-        summary_used=False,
-        summary_created=False,
-        summary_up_to_message_id=None,
-        sticky_used=False,
-        included_messages_count=len(selected),
-        truncated_without_summary=truncated,
-        fallback_reason=fallback_reason,
-        compression_enabled=compression_enabled,
-        recent_messages_count=len(selected),
-        compressor_model=compressor_model,
-        _system_prompt=system_prompt,
-        _recent_rows=selected,
+        message_to_input_item=_message_to_input_item,
     )
 
 
@@ -2121,59 +1013,16 @@ async def _load_rows_desc(
     system_prompt: str | None,
     retention_filter: Any | None = None,
 ) -> tuple[list[Message], int, bool]:
-    rows_desc: list[Message] = []
-    used_tokens = estimate_system_prompt_tokens(system_prompt)
-    cursor_created_at = target.created_at
-    cursor_id = target.id
-    cursor_inclusive = True
-    truncated = False
-
-    while True:
-        same_timestamp_filter = (
-            Message.id <= cursor_id if cursor_inclusive else Message.id < cursor_id
-        )
-        q = (
-            select(Message)
-            .where(
-                Message.conversation_id == conversation_id,
-                Message.deleted_at.is_(None),
-                or_(
-                    Message.created_at < cursor_created_at,
-                    and_(
-                        Message.created_at == cursor_created_at,
-                        same_timestamp_filter,
-                    ),
-                ),
-                *((retention_filter,) if retention_filter is not None else ()),
-            )
-            .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(HISTORY_FETCH_BATCH)
-        )
-        batch = list((await session.execute(q)).scalars())
-        if not batch:
-            break
-
-        stop = False
-        for m in batch:
-            est_tokens = _count_message_tokens(m.role, m.content)
-            if est_tokens <= 0:
-                cursor_created_at = m.created_at
-                cursor_id = m.id
-                continue
-            if budget_tokens is not None and used_tokens + est_tokens > budget_tokens:
-                stop = True
-                truncated = True
-                break
-            rows_desc.append(m)
-            used_tokens += est_tokens
-            cursor_created_at = m.created_at
-            cursor_id = m.id
-
-        if stop or len(batch) < HISTORY_FETCH_BATCH:
-            break
-        cursor_inclusive = False
-
-    return rows_desc, used_tokens, truncated
+    return await _completion_context_loading._load_rows_desc(
+        session,
+        conversation_id=conversation_id,
+        target=target,
+        budget_tokens=budget_tokens,
+        system_prompt=system_prompt,
+        retention_filter=retention_filter,
+        count_message_tokens=_count_message_tokens,
+        estimate_system_prompt_tokens=estimate_system_prompt_tokens,
+    )
 
 
 async def _load_rows_desc_after_summary(
@@ -2184,73 +1033,32 @@ async def _load_rows_desc_after_summary(
     summary: dict[str, Any],
     retention_filter: Any | None = None,
 ) -> list[Message]:
-    rows_desc: list[Message] = []
-    cursor_created_at = target.created_at
-    cursor_id = target.id
-    cursor_inclusive = True
-
-    while True:
-        same_timestamp_filter = (
-            Message.id <= cursor_id if cursor_inclusive else Message.id < cursor_id
-        )
-        q = (
-            select(Message)
-            .where(
-                Message.conversation_id == conversation_id,
-                Message.deleted_at.is_(None),
-                or_(
-                    Message.created_at < cursor_created_at,
-                    and_(
-                        Message.created_at == cursor_created_at,
-                        same_timestamp_filter,
-                    ),
-                ),
-                *((retention_filter,) if retention_filter is not None else ()),
-            )
-            .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(HISTORY_FETCH_BATCH)
-        )
-        batch = list((await session.execute(q)).scalars())
-        if not batch:
-            break
-
-        stop = False
-        for m in batch:
-            cursor_created_at = m.created_at
-            cursor_id = m.id
-            if not _message_after_summary(summary, m):
-                stop = True
-                break
-            rows_desc.append(m)
-
-        if stop or len(batch) < HISTORY_FETCH_BATCH:
-            break
-        cursor_inclusive = False
-
-    return rows_desc
+    return await _completion_context_loading._load_rows_desc_after_summary(
+        session,
+        conversation_id=conversation_id,
+        target=target,
+        summary=summary,
+        retention_filter=retention_filter,
+    )
 
 
 async def _get_message(session: Any, message_id: str | None) -> Message | None:
-    if not message_id:
-        return None
-    try:
-        return await session.get(Message, message_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("completion.message_lookup_failed id=%s err=%r", message_id, exc)
-        return None
+    return await _completion_context_loading._get_message(
+        session,
+        message_id,
+        logger=logger,
+    )
 
 
 async def _pick_first_user_from_summary(
     session: Any,
     summary: dict[str, Any],
 ) -> Message | None:
-    first_id = summary.get("first_user_message_id")
-    if not isinstance(first_id, str) or not first_id:
-        return None
-    msg = await _get_message(session, first_id)
-    if msg is not None and _role_eq(msg.role, Role.USER):
-        return msg
-    return None
+    return await _completion_context_loading._pick_first_user_from_summary(
+        session,
+        summary,
+        get_message=_get_message,
+    )
 
 
 async def _pick_current_user_with_lookup(
@@ -2259,66 +1067,29 @@ async def _pick_current_user_with_lookup(
     target: Message,
     summary: dict[str, Any] | None = None,
 ) -> Message | None:
-    current = _pick_current_user(rows_desc, target)
-    if current is not None:
-        return current
-    parent_id = getattr(target, "parent_message_id", None)
-    if not parent_id:
-        return None
-    candidate = await _get_message(session, parent_id)
-    if candidate is None or not _role_eq(candidate.role, Role.USER):
-        return None
-    if is_summary_usable(summary) and not _message_after_summary(summary, candidate):
-        return None
-    return candidate
-
-
-def _pick_first_user(rows_desc: list[Message]) -> Message | None:
-    users = [m for m in rows_desc if _role_eq(m.role, Role.USER)]
-    if not users:
-        return None
-    return min(users, key=lambda m: (_message_created_at(m), m.id))
-
-
-def _pick_current_user(rows_desc: list[Message], target: Message) -> Message | None:
-    parent_id = getattr(target, "parent_message_id", None)
-    if parent_id:
-        for m in rows_desc:
-            if m.id == parent_id and _role_eq(m.role, Role.USER):
-                return m
-    for m in rows_desc:
-        if _role_eq(m.role, Role.USER):
-            return m
-    return None
-
-
-async def _context_circuit_open(redis: Any | None) -> bool:
-    if redis is None:
-        return False
-    try:
-        value = await redis.get("context:circuit:breaker:state")
-    except Exception:  # noqa: BLE001
-        return False
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    return bool(value and str(value).lower() not in {"0", "closed", "false"})
+    return await _completion_context_loading._pick_current_user_with_lookup(
+        session,
+        rows_desc,
+        target,
+        summary,
+        get_message=_get_message,
+    )
 
 
 async def _resolve_summary_model() -> str:
-    try:
-        raw = await runtime_settings.resolve("context.summary_model")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("context summary model setting fallback err=%s", exc)
-        raw = None
-    return raw or "gpt-5.4"
+    return await _completion_context_loading._resolve_summary_model(
+        runtime_settings=runtime_settings,
+        logger=logger,
+    )
 
 
 async def _resolve_int_setting(spec_key: str, default: int) -> int:
-    try:
-        return await runtime_settings.resolve_int(spec_key, default)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("context int setting fallback key=%s err=%s", spec_key, exc)
-        return default
+    return await _completion_context_loading._resolve_int_setting(
+        spec_key,
+        default,
+        runtime_settings=runtime_settings,
+        logger=logger,
+    )
 
 
 async def _ensure_context_summary(
@@ -2330,48 +1101,50 @@ async def _ensure_context_summary(
     model: str,
     redis: Any | None,
 ) -> dict[str, Any] | None:
-    service = context_summary
-    ensure = (
-        getattr(service, "ensure_context_summary", None)
-        if service is not None
-        else None
-    )
-    if ensure is None:
-        return None
-    settings_payload = {
-        "context.summary_target_tokens": target_tokens,
-        "context.summary_model": model,
-        "target_tokens": target_tokens,
-        "summary_target_tokens": target_tokens,
-        "model": model,
-        "summary_model": model,
-        "redis": redis,
-        "trigger": "auto",
-    }
-    result = await ensure(
+    return await _completion_context_loading._ensure_context_summary(
         session,
         conv,
         boundary,
-        settings_payload,
-        force=False,
-        extra_instruction=None,
-        dry_run=False,
+        target_tokens=target_tokens,
+        model=model,
+        redis=redis,
+        service=context_summary,
+        logger=logger,
     )
-    if isinstance(result, dict):
-        summary = result.get("summary_jsonb") or result.get("summary") or result
-        if is_summary_usable(summary):
-            return summary
-    # The context summary service intentionally returns public metadata only.
-    # Reload the conversation row after it commits so completion packing can
-    # inject the private summary text without exposing it through the service API.
-    try:
-        await session.refresh(conv)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("context summary refresh failed conv=%s err=%s", conv.id, exc)
-    latest_summary = getattr(conv, "summary_jsonb", None)
-    if is_summary_usable(latest_summary):
-        return latest_summary
-    return None
+
+
+def _context_loading_hooks() -> _completion_context_loading.ContextLoadingHooks:
+    return _completion_context_loading.ContextLoadingHooks(
+        count_message_tokens=_count_message_tokens,
+        count_tokens=count_tokens,
+        estimate_system_prompt_tokens=estimate_system_prompt_tokens,
+        get_input_budget=get_input_budget,
+        message_retention_filter_for_account=_message_retention_filter_for_account,
+        resolve_summary_model=_resolve_summary_model,
+        resolve_int_setting=_resolve_int_setting,
+        ensure_context_summary=_ensure_context_summary,
+        build_input_from_packed_context=_build_input_from_packed_context,
+        load_rows_desc=_load_rows_desc,
+        load_rows_desc_after_summary=_load_rows_desc_after_summary,
+        pick_first_user_from_summary=_pick_first_user_from_summary,
+        pick_current_user_with_lookup=_pick_current_user_with_lookup,
+        pick_first_user=_pick_first_user,
+        pick_current_user=_pick_current_user,
+        context_circuit_open=_context_circuit_open,
+        input_token_budget=CONTEXT_INPUT_TOKEN_BUDGET,
+        compression_enabled_default=_CONTEXT_COMPRESSION_ENABLED_DEFAULT,
+        compression_trigger_percent_default=(
+            _CONTEXT_COMPRESSION_TRIGGER_PERCENT_DEFAULT
+        ),
+        summary_target_tokens_default=_CONTEXT_SUMMARY_TARGET_TOKENS_DEFAULT,
+        summary_min_recent_messages_default=(
+            _CONTEXT_SUMMARY_MIN_RECENT_MESSAGES_DEFAULT
+        ),
+        summary_min_interval_seconds_default=(
+            _CONTEXT_SUMMARY_MIN_INTERVAL_SECONDS_DEFAULT
+        ),
+        logger=logger,
+    )
 
 
 async def _pack_recent_history(
@@ -2384,401 +1157,15 @@ async def _pack_recent_history(
     chat_model: str | None = None,
     account_mode: str | None = None,
 ) -> PackedContext:
-    # 按模型查 input budget；未传 chat_model（旧调用 / 测试桩）时退回模块级
-    # CONTEXT_INPUT_TOKEN_BUDGET，保持现有 monkeypatch 测试可以收紧预算。
-    input_budget = (
-        get_input_budget(chat_model) if chat_model else CONTEXT_INPUT_TOKEN_BUDGET
-    )
-    target = await session.get(Message, up_to_message_id)
-    if target is None:
-        return PackedContext(
-            input_list=[],
-            estimated_tokens=0,
-            summary_used=False,
-            summary_created=False,
-            summary_up_to_message_id=None,
-            sticky_used=False,
-            included_messages_count=0,
-            truncated_without_summary=False,
-            fallback_reason=None,
-            _system_prompt=system_prompt,
-        )
-
-    summary_model = await _resolve_summary_model()
-    conv = await session.get(Conversation, conversation_id)
-    summary = getattr(conv, "summary_jsonb", None) if conv is not None else None
-    retention_filter = await _message_retention_filter_for_account(account_mode)
-    if retention_filter is not None:
-        summary = None
-    all_rows_desc: list[Message] | None = None
-    total_used_tokens = 0
-    total_truncated = False
-
-    compression_enabled = bool(
-        await _resolve_int_setting(
-            "context.compression_enabled",
-            _CONTEXT_COMPRESSION_ENABLED_DEFAULT,
-        )
-    )
-    trigger_percent = await _resolve_int_setting(
-        "context.compression_trigger_percent",
-        _CONTEXT_COMPRESSION_TRIGGER_PERCENT_DEFAULT,
-    )
-    trigger_tokens = input_budget * trigger_percent // 100
-    existing_summary_packed: PackedContext | None = None
-    if is_summary_usable(summary):
-        rows_after_summary = await _load_rows_desc_after_summary(
-            session,
-            conversation_id=conversation_id,
-            target=target,
-            summary=summary,  # type: ignore[arg-type]
-            retention_filter=retention_filter,
-        )
-        first_user = await _pick_first_user_from_summary(session, summary)  # type: ignore[arg-type]
-        current_user = await _pick_current_user_with_lookup(
-            session,
-            rows_after_summary,
-            target,
-            summary,  # type: ignore[arg-type]
-        )
-        existing_summary_packed = _pack_with_existing_summary(
-            system_prompt=system_prompt,
-            all_rows_desc=rows_after_summary,
-            summary=summary,  # type: ignore[arg-type]
-            summary_model=summary_model,
-            input_budget=input_budget,
-            current_user=current_user,
-            first_user=first_user,
-        )
-        # A persisted manual summary is authoritative even when auto compression
-        # is disabled. Only roll it forward when auto compression is enabled and
-        # new post-summary history has grown back toward the trigger threshold.
-        if (
-            not compression_enabled
-            or existing_summary_packed.estimated_tokens < trigger_tokens
-        ):
-            return _packed_with_input(
-                await _build_input_from_packed_context(
-                    session, existing_summary_packed
-                ),
-                existing_summary_packed,
-            )
-
-    all_rows_desc, total_used_tokens, total_truncated = await _load_rows_desc(
+    return await _completion_context_loading._pack_recent_history(
         session,
         conversation_id=conversation_id,
-        target=target,
-        budget_tokens=None,
+        up_to_message_id=up_to_message_id,
         system_prompt=system_prompt,
-        retention_filter=retention_filter,
-    )
-    first_user = _pick_first_user(all_rows_desc)
-    current_user = await _pick_current_user_with_lookup(
-        session,
-        all_rows_desc,
-        target,
-    )
-
-    if not compression_enabled:
-        rows_desc = []
-        used_tokens = estimate_system_prompt_tokens(system_prompt)
-        truncated = False
-        for m in all_rows_desc:
-            est = _count_message_tokens(m.role, m.content)
-            if est <= 0:
-                continue
-            if used_tokens + est > input_budget:
-                truncated = True
-                break
-            rows_desc.append(m)
-            used_tokens += est
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=rows_desc,
-            used_tokens=used_tokens,
-            truncated=truncated,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    if await _context_circuit_open(redis):
-        rows_desc, used_tokens, truncated = await _load_rows_desc(
-            session,
-            conversation_id=conversation_id,
-            target=target,
-            budget_tokens=input_budget,
-            system_prompt=system_prompt,
-            retention_filter=retention_filter,
-        )
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=rows_desc,
-            used_tokens=used_tokens,
-            truncated=truncated,
-            compression_enabled=True,
-            fallback_reason="circuit_open",
-            force_include_message=_pick_current_user(rows_desc, target),
-            compressor_model=summary_model,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    target_tokens = await _resolve_int_setting(
-        "context.summary_target_tokens",
-        _CONTEXT_SUMMARY_TARGET_TOKENS_DEFAULT,
-    )
-    min_recent_messages = max(
-        1,
-        await _resolve_int_setting(
-            "context.summary_min_recent_messages",
-            _CONTEXT_SUMMARY_MIN_RECENT_MESSAGES_DEFAULT,
-        ),
-    )
-    min_interval_s = await _resolve_int_setting(
-        "context.summary_min_interval_seconds",
-        _CONTEXT_SUMMARY_MIN_INTERVAL_SECONDS_DEFAULT,
-    )
-
-    if (
-        not is_summary_usable(summary)
-        and total_used_tokens < trigger_tokens
-        and not total_truncated
-    ):
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=all_rows_desc,
-            used_tokens=total_used_tokens,
-            truncated=False,
-            compression_enabled=True,
-            compressor_model=summary_model,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    forced_recent_desc: list[Message] = []
-    for m in all_rows_desc:
-        if _count_message_tokens(m.role, m.content) <= 0:
-            continue
-        if len(forced_recent_desc) < min_recent_messages:
-            forced_recent_desc.append(m)
-    if current_user is not None and all(
-        m.id != current_user.id for m in forced_recent_desc
-    ):
-        forced_recent_desc.insert(0, current_user)
-
-    forced_ids = {m.id for m in forced_recent_desc}
-    first_user_in_recent = first_user is not None and first_user.id in forced_ids
-    sticky_message = (
-        first_user if first_user is not None and not first_user_in_recent else None
-    )
-    sticky_tokens = 0
-    if sticky_message is not None:
-        sticky_input_text = format_sticky_input_text(
-            _sticky_text_from_message(sticky_message)
-        )
-        # P1-4: sticky 文本是 trigger 判定后续 used_tokens 累加的种子值之一，
-        # 用 tiktoken 精确计数收紧 ±15% 偏差；其它估算点不动以避免破坏现有 monkeypatch 测试。
-        sticky_tokens = MESSAGE_OVERHEAD_TOKENS + count_tokens(sticky_input_text)
-
-    used_tokens = (
-        estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
-        )
-        + sticky_tokens
-        + target_tokens
-        + MESSAGE_OVERHEAD_TOKENS
-    )
-    recent_desc = list(forced_recent_desc)
-    for m in forced_recent_desc:
-        used_tokens += _count_message_tokens(m.role, m.content)
-
-    for m in all_rows_desc:
-        if m.id in forced_ids:
-            continue
-        if sticky_message is not None and m.id == sticky_message.id:
-            continue
-        est = _count_message_tokens(m.role, m.content)
-        if est <= 0:
-            continue
-        if used_tokens + est > input_budget:
-            break
-        recent_desc.append(m)
-        forced_ids.add(m.id)
-        used_tokens += est
-
-    recent_ids = {m.id for m in recent_desc}
-    summary_rows = [
-        m
-        for m in all_rows_desc
-        if _count_message_tokens(m.role, m.content) > 0
-        and m.id not in recent_ids
-        and (sticky_message is None or m.id != sticky_message.id)
-    ]
-    if not summary_rows:
-        if existing_summary_packed is not None:
-            return _packed_with_input(
-                await _build_input_from_packed_context(
-                    session, existing_summary_packed
-                ),
-                existing_summary_packed,
-            )
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=all_rows_desc,
-            used_tokens=total_used_tokens,
-            truncated=False,
-            compression_enabled=True,
-            compressor_model=summary_model,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    boundary_message = max(summary_rows, key=lambda m: (_message_created_at(m), m.id))
-    summary_created = False
-
-    summary_recently_refreshed = False
-    if is_summary_usable(summary) and min_interval_s > 0:
-        compressed_at = _summary_compressed_at(summary)
-        if compressed_at is not None:
-            now = datetime.now(compressed_at.tzinfo or timezone.utc)
-            summary_recently_refreshed = (
-                now - compressed_at
-            ).total_seconds() < min_interval_s
-
-    if summary_recently_refreshed and not _summary_covers_boundary(
-        summary,
-        boundary_message,
-    ):
-        fallback_rows_desc, fallback_tokens, fallback_truncated = await _load_rows_desc(
-            session,
-            conversation_id=conversation_id,
-            target=target,
-            budget_tokens=input_budget,
-            system_prompt=system_prompt,
-            retention_filter=retention_filter,
-        )
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=fallback_rows_desc,
-            used_tokens=fallback_tokens,
-            truncated=fallback_truncated,
-            compression_enabled=True,
-            fallback_reason="rate_limited",
-            force_include_message=current_user,
-            compressor_model=summary_model,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    if not _summary_covers_boundary(summary, boundary_message) and conv is not None:
-        boundary = _SummaryBoundary(
-            conversation_id=conversation_id,
-            up_to_message_id=boundary_message.id,
-            up_to_created_at=_message_created_at(boundary_message),
-            first_user_message_id=first_user.id if first_user is not None else None,
-            recent_message_ids=[m.id for m in reversed(recent_desc)],
-            summary_message_ids=[m.id for m in reversed(summary_rows)],
-            source_message_count=len(summary_rows),
-            source_token_estimate=_estimated_summary_source(
-                summary_rows,
-                skip_message_id=sticky_message.id
-                if sticky_message is not None
-                else None,
-            ),
-        )
-        try:
-            new_summary = await _ensure_context_summary(
-                session,
-                conv,
-                boundary,
-                target_tokens=target_tokens,
-                model=summary_model,
-                redis=redis,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "context summary generation failed conversation=%s err=%s",
-                conversation_id,
-                exc,
-            )
-            new_summary = None
-        if is_summary_usable(new_summary):
-            summary_created = True
-            summary = new_summary
-
-    if not _summary_covers_boundary(summary, boundary_message):
-        fallback_rows_desc, fallback_tokens, fallback_truncated = await _load_rows_desc(
-            session,
-            conversation_id=conversation_id,
-            target=target,
-            budget_tokens=input_budget,
-            system_prompt=system_prompt,
-            retention_filter=retention_filter,
-        )
-        packed = _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=fallback_rows_desc,
-            used_tokens=fallback_tokens,
-            truncated=fallback_truncated,
-            compression_enabled=True,
-            fallback_reason="summary_failed",
-            force_include_message=current_user,
-            compressor_model=summary_model,
-        )
-        return _packed_with_input(
-            await _build_input_from_packed_context(session, packed),
-            packed,
-        )
-
-    summary_text = str((summary or {}).get("text") or "")
-    summary_token_count = estimate_summary_tokens(summary)
-    recent_rows = tuple(reversed(recent_desc))
-    estimated_tokens = (
-        estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
-        )
-        + (sticky_tokens if sticky_message is not None else 0)
-        + MESSAGE_OVERHEAD_TOKENS
-        + summary_token_count
-        + sum(_count_message_tokens(m.role, m.content) for m in recent_rows)
-    )
-    packed = PackedContext(
-        input_list=[],
-        estimated_tokens=estimated_tokens,
-        summary_used=True,
-        summary_created=summary_created,
-        summary_up_to_message_id=str(
-            (summary or {}).get("up_to_message_id") or boundary_message.id
-        ),
-        sticky_used=sticky_message is not None,
-        included_messages_count=len(recent_rows)
-        + (1 if sticky_message is not None else 0),
-        truncated_without_summary=False,
-        fallback_reason=None,
-        compression_enabled=True,
-        recent_messages_count=len(recent_rows),
-        summary_tokens=summary_token_count,
-        summary_age_seconds=_summary_age_seconds(summary),
-        compressor_model=summary_model,
-        image_caption_count=int((summary or {}).get("image_caption_count") or 0),
-        _system_prompt=system_prompt,
-        _sticky_message=sticky_message,
-        _summary_text=summary_text,
-        _recent_rows=recent_rows,
-    )
-    return _packed_with_input(
-        await _build_input_from_packed_context(session, packed),
-        packed,
+        redis=redis,
+        chat_model=chat_model,
+        account_mode=account_mode,
+        hooks=_context_loading_hooks(),
     )
 
 
@@ -2789,22 +1176,13 @@ async def _build_input_from_history(
     up_to_message_id: str,
     system_prompt: str | None,
 ) -> list[dict[str, Any]]:
-    """按 §22.2 规则把会话历史转成 Responses `input` 列表。
-
-    - 仅取 up_to_message_id 及其之前
-    - 最近消息优先，按估算 token 累计到 200k input budget
-    - user.content.text + attachments → {role:user, [input_text, input_image...]}
-    - assistant.content.text (completion) → {role:assistant, [output_text]}
-    - assistant.content.images (generation) → 默认不塞
-    - system_prompt 作为第一条
-    """
-    packed = await _pack_recent_history(
+    return await _completion_context_loading._build_input_from_history(
         session,
         conversation_id=conversation_id,
         up_to_message_id=up_to_message_id,
         system_prompt=system_prompt,
+        pack_recent_history=_pack_recent_history,
     )
-    return packed.input_list
 
 
 # ---------------------------------------------------------------------------
@@ -2999,7 +1377,7 @@ async def _flush_completion_text(
                     )
                     .values(text=text)
                 )
-                if (res.rowcount or 0) == 0:
+                if affected_rows(res) == 0:
                     raise _CompletionEpochSuperseded(
                         f"completion epoch superseded task={task_id} "
                         f"attempt_epoch={attempt_epoch}"
@@ -3061,6 +1439,7 @@ async def _completion_preflight_failure(
 async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PLR0915, PLR0912
     redis = ctx["redis"]
     worker_id = str(ctx.get("worker_id") or ctx.get("job_id") or "worker")
+    lease_token = f"{worker_id}:{new_uuid7()}"
     _task_start = asyncio.get_event_loop().time()
     _task_outcome = "unknown"
     attempt = 0
@@ -3069,179 +1448,223 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     account_mode = "wallet"
     runtime_override: Any | None = None
     queue_metadata_payload: dict[str, Any] = {}
+    lease_lost = asyncio.Event()
+    lease_acquired = False
+    renewer: asyncio.Task[None] | None = None
+    cancel_stop_requested: asyncio.Event | None = None
+    cancel_watcher: asyncio.Task[None] | None = None
+    _stream_span_cm = None
+    setup_complete = False
 
-    # --- 1. 读 completion 行 ---
-    async with SessionLocal() as session:
-        # GEN-P0-6: 在事务粒度抢 pg_advisory_xact_lock，保证同一 completion 的
-        # "claim → attempt++ → 切状态" 与其他 worker 互斥；事务 commit/rollback 自动释放。
-        await _acquire_completion_xact_lock(session, task_id)
+    try:
+        # Redis lease is the first ownership fence. No completion row mutation
+        # may happen until this invocation owns its unique token.
+        await _acquire_lease(redis, task_id, lease_token)
+        lease_acquired = True
+        renewer = asyncio.create_task(
+            _lease_renewer(redis, task_id, lease_token, lease_lost)
+        )
 
-        comp: Completion | None = (
-            await session.execute(
-                select(Completion).where(Completion.id == task_id).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if comp is None:
-            logger.warning("completion not found task_id=%s", task_id)
-            return
-        if is_completion_terminal(comp.status):
-            logger.info(
-                "completion terminal task_id=%s status=%s", task_id, comp.status
-            )
-            return
+        # --- 1. claim completion row after lease ownership ---
+        async with SessionLocal() as session:
+            # The PG lock serializes claim transitions among lease owners and
+            # protects against mixed-version workers during rolling updates.
+            await _acquire_completion_xact_lock(session, task_id)
 
-        # 判断是否是"被接管重跑"——attempt > 0 且 text 非空 ⇒ 上一个 worker 挂了
-        was_restarted = (comp.attempt or 0) > 0 and bool(comp.text)
-
-        user_id = comp.user_id
-        message_id = comp.message_id
-        system_prompt = comp.system_prompt
-        user_api_credential_id = getattr(comp, "user_api_credential_id", None)
-        user_row = await session.get(User, user_id)
-        account_mode = getattr(user_row, "account_mode", "wallet")
-        # 关键：chat 走 /v1/responses 但要用聊天模型（gpt-5.5 等），
-        # 而 UPSTREAM_MODEL 是图像模型 gpt-image-2，不能跨用
-        chat_model = comp.model or DEFAULT_CHAT_MODEL
-
-        attempt, preflight_failure = await _completion_preflight_failure(session, comp)
-        attempt_epoch = attempt
-        if preflight_failure is not None:
-            err_code, err_msg = preflight_failure
-            comp.status = CompletionStatus.FAILED.value
-            comp.progress_stage = CompletionStage.FINALIZING
-            comp.attempt = attempt
-            comp.finished_at = datetime.now(timezone.utc)
-            comp.error_code = err_code
-            comp.error_message = err_msg
-            msg_failed = await session.get(Message, message_id)
-            if msg_failed is not None:
-                msg_failed.status = MessageStatus.FAILED
-            comp_failed = await session.get(Completion, task_id)
-            if comp_failed is not None:
-                await worker_billing.release_completion(
-                    session,
-                    comp_failed,
-                    reason=err_code,
+            comp: Completion | None = (
+                await session.execute(
+                    select(Completion).where(Completion.id == task_id).with_for_update()
                 )
+            ).scalar_one_or_none()
+            if comp is None:
+                logger.warning("completion not found task_id=%s", task_id)
+                _task_outcome = "not_found"
+                return
+            if is_completion_terminal(comp.status):
+                logger.info(
+                    "completion terminal task_id=%s status=%s", task_id, comp.status
+                )
+                _task_outcome = "terminal"
+                return
+            if lease_lost.is_set():
+                raise _LeaseLost("lease lost before completion claim")
+
+            # 判断是否是"被接管重跑"——attempt > 0 且 text 非空 ⇒ 上一个 worker 挂了
+            was_restarted = (comp.attempt or 0) > 0 and bool(comp.text)
+
+            user_id = comp.user_id
+            message_id = comp.message_id
+            system_prompt = comp.system_prompt
+            user_api_credential_id = getattr(comp, "user_api_credential_id", None)
+            user_row = await session.get(User, user_id)
+            account_mode = getattr(user_row, "account_mode", "wallet")
+            # 关键：chat 走 /v1/responses 但要用聊天模型（gpt-5.5 等），
+            # 而 UPSTREAM_MODEL 是图像模型 gpt-image-2，不能跨用
+            chat_model = comp.model or DEFAULT_CHAT_MODEL
+
+            attempt, preflight_failure = await _completion_preflight_failure(
+                session,
+                comp,
+            )
+            attempt_epoch = attempt
+            if lease_lost.is_set():
+                raise _LeaseLost("lease lost during completion preflight")
+            if preflight_failure is not None:
+                err_code, err_msg = preflight_failure
+                comp.status = CompletionStatus.FAILED.value
+                comp.progress_stage = CompletionStage.FINALIZING
+                comp.attempt = attempt
+                comp.finished_at = datetime.now(timezone.utc)
+                comp.error_code = err_code
+                comp.error_message = err_msg
+                msg_failed = await session.get(Message, message_id)
+                if (
+                    msg_failed is not None
+                    and msg_failed.status != MessageStatus.CANCELED
+                ):
+                    msg_failed.status = MessageStatus.FAILED
+                comp_failed = await session.get(Completion, task_id)
+                if comp_failed is not None:
+                    await worker_billing.release_completion(
+                        session,
+                        comp_failed,
+                        reason=err_code,
+                    )
+                if lease_lost.is_set():
+                    raise _LeaseLost("lease lost before preflight failure commit")
+                await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
+                await publish_event(
+                    redis,
+                    user_id,
+                    task_channel(task_id),
+                    EV_COMP_FAILED,
+                    {
+                        "completion_id": task_id,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "attempt_epoch": attempt_epoch,
+                        "code": err_code,
+                        "message": err_msg,
+                        "retriable": False,
+                    },
+                )
+                _task_outcome = "failed"
+                return
+
+            comp.status = CompletionStatus.STREAMING.value
+            comp.progress_stage = CompletionStage.STREAMING
+            started_at = datetime.now(timezone.utc)
+            comp.started_at = started_at
+            comp.attempt = attempt
+            upstream_request = dict(comp.upstream_request or {})
+            queue_metadata_payload = completion_queue_metadata(
+                upstream_request=upstream_request,
+                created_at=comp.created_at,
+                started_at=started_at,
+                finished_at=comp.finished_at,
+                now=started_at,
+            )
+            comp.upstream_request = merge_queue_metadata(
+                upstream_request,
+                queue_metadata_payload,
+            )
+            # 流中断恢复：清空已写 text（§6.9 策略 1）
+            if was_restarted:
+                comp.text = ""
+            if lease_lost.is_set():
+                raise _LeaseLost("lease lost before completion claim commit")
             await session.commit()
-            await worker_billing.flush_balance_cache_refreshes(session)
+
+            # 查 conversation_id（通过 message）
+            msg = await session.get(Message, message_id)
+            conversation_id = msg.conversation_id if msg is not None else None
+
+        channel = task_channel(task_id)
+
+        # --- 2. publish started / restarted ---
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost before completion start event")
+        if was_restarted:
             await publish_event(
                 redis,
                 user_id,
-                task_channel(task_id),
-                EV_COMP_FAILED,
+                channel,
+                EV_COMP_RESTARTED,
                 {
                     "completion_id": task_id,
                     "message_id": message_id,
                     "attempt": attempt,
                     "attempt_epoch": attempt_epoch,
-                    "code": err_code,
-                    "message": err_msg,
-                    "retriable": False,
+                    **queue_metadata_payload,
                 },
             )
-            _task_outcome = "failed"
-            try:
-                _duration = asyncio.get_event_loop().time() - _task_start
-                task_duration_seconds.labels(
-                    kind="completion", outcome=safe_outcome(_task_outcome)
-                ).observe(_duration)
-            except Exception:  # noqa: BLE001
-                pass
-            return
+        else:
+            await publish_event(
+                redis,
+                user_id,
+                channel,
+                EV_COMP_STARTED,
+                {
+                    "completion_id": task_id,
+                    "message_id": message_id,
+                    "attempt": attempt,
+                    "attempt_epoch": attempt_epoch,
+                    **queue_metadata_payload,
+                },
+            )
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost during completion start event")
 
-        comp.status = CompletionStatus.STREAMING.value
-        comp.progress_stage = CompletionStage.STREAMING
-        started_at = datetime.now(timezone.utc)
-        comp.started_at = started_at
-        comp.attempt = attempt
-        upstream_request = dict(comp.upstream_request or {})
-        queue_metadata_payload = completion_queue_metadata(
-            upstream_request=upstream_request,
-            created_at=comp.created_at,
-            started_at=started_at,
-            finished_at=comp.finished_at,
-            now=started_at,
-        )
-        comp.upstream_request = merge_queue_metadata(
-            upstream_request,
-            queue_metadata_payload,
-        )
-        # 流中断恢复：清空已写 text（§6.9 策略 1）
-        if was_restarted:
-            comp.text = ""
-        await session.commit()
+        accumulated_text = ""
+        accumulated_thinking = ""
+        flushed_len = 0
+        has_partial = False
+        tool_images: list[dict[str, Any]] = []
+        stored_image_call_ids: set[str] = set()
+        reserved_tool_image_budget_micro = 0
+        tool_tracker = _CompletionToolTracker()
+        tokens_in = 0
+        tokens_out = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
+        cache_creation_5m_tokens = 0
+        cache_creation_1h_tokens = 0
+        reasoning_tokens = 0
+        image_output_tokens = 0
+        upstream_provider_event: dict[str, str] | None = None
 
-        # 查 conversation_id（通过 message）
-        msg = await session.get(Message, message_id)
-        conversation_id = msg.conversation_id if msg is not None else None
+        # 观测：整个 upstream 流式阶段一层 span；手动 enter/exit 以免嵌套大块改缩进
+        try:
+            span_cm = _tracer.start_as_current_span("upstream.stream_completion")
+            stream_span = span_cm.__enter__()
+            _stream_span_cm = span_cm
+            stream_span.set_attribute("lumen.task_id", task_id)
+        except Exception:  # noqa: BLE001
+            if _stream_span_cm is not None:
+                with suppress(BaseException):
+                    _stream_span_cm.__exit__(None, None, None)
+                _stream_span_cm = None
 
-    channel = task_channel(task_id)
-
-    # --- 2. lease ---
-    await _acquire_lease(redis, task_id, worker_id)
-    lease_lost = asyncio.Event()
-    renewer = asyncio.create_task(_lease_renewer(redis, task_id, worker_id, lease_lost))
-
-    # --- 3. publish started / restarted ---
-    if was_restarted:
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_COMP_RESTARTED,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                **queue_metadata_payload,
-            },
-        )
-    else:
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_COMP_STARTED,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                **queue_metadata_payload,
-            },
-        )
-
-    accumulated_text = ""
-    accumulated_thinking = ""
-    flushed_len = 0
-    has_partial = False
-    tool_images: list[dict[str, Any]] = []
-    stored_image_call_ids: set[str] = set()
-    reserved_tool_image_budget_micro = 0
-    tool_tracker = _CompletionToolTracker()
-    tokens_in = 0
-    tokens_out = 0
-    cache_read_tokens = 0
-    cache_creation_tokens = 0
-    cache_creation_5m_tokens = 0
-    cache_creation_1h_tokens = 0
-    reasoning_tokens = 0
-    image_output_tokens = 0
-    upstream_provider_event: dict[str, str] | None = None
-
-    # 观测：整个 upstream 流式阶段一层 span；手动 enter/exit 以免嵌套大块改缩进
-    _stream_span_cm = None
-    try:
-        _stream_span_cm = _tracer.start_as_current_span("upstream.stream_completion")
-        _stream_span = _stream_span_cm.__enter__()
-        _stream_span.set_attribute("lumen.task_id", task_id)
-    except Exception:  # noqa: BLE001
-        _stream_span_cm = None
-
-    cancel_stop_requested: asyncio.Event | None = None
-    cancel_watcher: asyncio.Task[None] | None = None
+        setup_complete = True
+    except _LeaseLost as exc:
+        _task_outcome = "lease_lost"
+        logger.info("completion lease unavailable task=%s err=%s", task_id, exc)
+        return
+    finally:
+        if not setup_complete:
+            await _cleanup_completion_runtime(
+                redis=redis,
+                task_id=task_id,
+                lease_token=lease_token,
+                lease_acquired=lease_acquired,
+                renewer=renewer,
+                cancel_stop_requested=cancel_stop_requested,
+                cancel_watcher=cancel_watcher,
+                stream_span_cm=_stream_span_cm,
+                task_start=_task_start,
+                task_outcome=_task_outcome,
+            )
 
     try:
         if user_api_credential_id:
@@ -4002,13 +2425,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     error_message=None,
                 )
             )
-            if (res.rowcount or 0) == 0:
+            if affected_rows(res) == 0:
                 raise _CompletionEpochSuperseded(
                     f"completion epoch superseded before success task={task_id} "
                     f"attempt_epoch={attempt_epoch}"
                 )
             msg = await session.get(Message, message_id)
-            if msg is not None:
+            if msg is not None and msg.status != MessageStatus.CANCELED:
                 content = dict(msg.content or {})
                 content["text"] = final_text
                 if accumulated_thinking:
@@ -4126,6 +2549,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         exc_info=True,
                     )
 
+    except _LeaseLost as exc:
+        logger.warning(
+            "completion lease lost task=%s attempt=%s err=%s",
+            task_id,
+            attempt,
+            exc,
+        )
+        _task_outcome = "lease_lost"
+        return
+
     except _CompletionEpochSuperseded as exc:
         logger.info("completion worker superseded task=%s err=%s", task_id, exc)
         _task_outcome = "superseded"
@@ -4162,7 +2595,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         error_message="cancelled by user",
                     )
                 )
-                if (res.rowcount or 0) == 0:
+                if affected_rows(res) == 0:
                     raise _CompletionEpochSuperseded(
                         f"completion cancel superseded task={task_id} "
                         f"attempt_epoch={attempt_epoch}"
@@ -4171,6 +2604,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 if msg_c is not None and msg_c.status not in (
                     MessageStatus.SUCCEEDED,
                     MessageStatus.FAILED,
+                    MessageStatus.CANCELED,
                 ):
                     tool_calls = tool_tracker.content()
                     if tool_calls:
@@ -4180,9 +2614,22 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     msg_c.status = MessageStatus.FAILED
                 comp_cancel = await session.get(Completion, task_id)
                 if comp_cancel is not None:
-                    await worker_billing.release_completion(
+                    await _settle_cancelled_completion_billing(
                         session,
                         comp_cancel,
+                        has_partial=has_partial,
+                        input_list=input_list if "input_list" in locals() else None,
+                        accumulated_text=accumulated_text,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_creation_tokens=cache_creation_tokens,
+                        cache_creation_5m_tokens=cache_creation_5m_tokens,
+                        cache_creation_1h_tokens=cache_creation_1h_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        image_output_tokens=image_output_tokens,
+                        tool_images=tool_images,
+                        reserved_tool_image_budget_micro=reserved_tool_image_budget_micro,
                         reason=EC.CANCELLED.value,
                     )
                 await session.commit()
@@ -4304,7 +2751,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                 )
                 await session.commit()
-                if (res.rowcount or 0) == 0:
+                if affected_rows(res) == 0:
                     logger.info(
                         "completion retry skipped by newer epoch task=%s "
                         "attempt_epoch=%s",
@@ -4313,9 +2760,6 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                     _task_outcome = "superseded"
                     return
-
-            renewer.cancel()
-            await _release_lease(redis, task_id, worker_id)
 
             try:
                 await redis.enqueue_job(
@@ -4355,7 +2799,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             error_message=enqueue_msg,
                         )
                     )
-                    if (res.rowcount or 0) == 0:
+                    if affected_rows(res) == 0:
                         await session.commit()
                         logger.info(
                             "completion retry enqueue failure skipped by newer epoch task=%s "
@@ -4366,7 +2810,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         _task_outcome = "superseded"
                         return
                     msg = await session.get(Message, message_id)
-                    if msg is not None:
+                    if msg is not None and msg.status != MessageStatus.CANCELED:
                         msg.status = MessageStatus.FAILED
                     comp_failed = await session.get(Completion, task_id)
                     if comp_failed is not None:
@@ -4426,7 +2870,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     error_message=err_msg,
                 )
             )
-            if (res.rowcount or 0) == 0:
+            if affected_rows(res) == 0:
                 await session.commit()
                 logger.info(
                     "completion failure skipped by newer epoch task=%s "
@@ -4437,7 +2881,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 _task_outcome = "superseded"
                 return
             msg = await session.get(Message, message_id)
-            if msg is not None:
+            if msg is not None and msg.status != MessageStatus.CANCELED:
                 tool_calls = tool_tracker.content()
                 if tool_calls:
                     content = dict(msg.content or {})
@@ -4491,21 +2935,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         reasoning_tokens,
                         image_output_tokens,
                     )
-                    if any(int(value or 0) > 0 for value in usage_values):
-                        try:
-                            await worker_billing.charge_completion(
-                                session, comp_partial
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "partial-stream charge failed comp=%s", task_id
-                            )
-                    else:
-                        await worker_billing.release_completion(
-                            session,
-                            comp_partial,
-                            reason=str(err_code),
-                        )
+                    await _settle_failed_completion_billing(
+                        session,
+                        comp_partial,
+                        usage_values=usage_values,
+                        reason=str(err_code),
+                    )
             else:
                 comp_failed = await session.get(Completion, task_id)
                 if comp_failed is not None:
@@ -4534,44 +2969,18 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
 
     finally:
-        if cancel_stop_requested is not None:
-            cancel_stop_requested.set()
-        if cancel_watcher is not None:
-            cancel_watcher.cancel()
-            with suppress(BaseException):
-                await cancel_watcher
-        renewer.cancel()
-        try:
-            await renewer
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        release_future = asyncio.ensure_future(
-            _release_lease(redis, task_id, worker_id)
+        await _cleanup_completion_runtime(
+            redis=redis,
+            task_id=task_id,
+            lease_token=lease_token,
+            lease_acquired=lease_acquired,
+            renewer=renewer,
+            cancel_stop_requested=cancel_stop_requested,
+            cancel_watcher=cancel_watcher,
+            stream_span_cm=_stream_span_cm,
+            task_start=_task_start,
+            task_outcome=_task_outcome,
         )
-        try:
-            await asyncio.shield(release_future)
-        except asyncio.CancelledError:
-            release_future.add_done_callback(
-                lambda _t: logger.debug(
-                    "completion late lease release finished task=%s", task_id
-                )
-            )
-            raise
-        if _stream_span_cm is not None:
-            try:
-                _stream_span_cm.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            _duration = asyncio.get_event_loop().time() - _task_start
-            task_duration_seconds.labels(
-                kind="completion", outcome=safe_outcome(_task_outcome)
-            ).observe(_duration)
-        except Exception:  # noqa: BLE001
-            pass
 
-
-# settings reserved for future per-user caps / timeouts override
-_ = settings
 
 __all__ = ["run_completion"]

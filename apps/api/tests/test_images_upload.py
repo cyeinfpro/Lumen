@@ -383,23 +383,17 @@ def test_prepare_upload_image_normalizes_mpo_to_jpeg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = _jpeg_bytes((640, 480), (30, 60, 90))
-    with PILImage.open(io.BytesIO(original)) as sample:
-        image_cls = type(sample)
-        original_get_format_mimetype = image_cls.get_format_mimetype
+    original_image_mime_type = images._image_mime_type
     calls = 0
 
-    def fake_get_format_mimetype(self) -> str | None:
+    def fake_image_mime_type(image: PILImage.Image) -> str:
         nonlocal calls
         calls += 1
         if calls == 1:
             return "image/mpo"
-        return original_get_format_mimetype(self)
+        return original_image_mime_type(image)
 
-    monkeypatch.setattr(
-        image_cls,
-        "get_format_mimetype",
-        fake_get_format_mimetype,
-    )
+    monkeypatch.setattr(images, "_image_mime_type", fake_image_mime_type)
 
     data, mime, width, height, metadata, normalized_ref, normalized_meta = (
         images._prepare_upload_image(original, "iphone-photo.mpo")
@@ -414,7 +408,7 @@ def test_prepare_upload_image_normalizes_mpo_to_jpeg(
         "reason": "unsupported_upload_mime",
     }
     with PILImage.open(io.BytesIO(data)) as im:
-        assert im.get_format_mimetype() == "image/jpeg"
+        assert images._image_mime_type(im) == "image/jpeg"
         assert im.size == (640, 480)
     assert normalized_meta["mime"] == "image/webp"
     assert normalized_meta["bytes"] == len(normalized_ref)

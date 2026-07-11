@@ -12,7 +12,6 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -64,23 +63,11 @@ class Settings(BaseSettings):
     # 图片下载临时目录（可选；默认走内存）。
     download_tmp_dir: str = ""
 
-    # 部署模式：polling 或 webhook。先用 polling，后切 webhook。
-    bot_mode: str = Field(default="polling", pattern="^(polling|webhook)$")
-    webhook_url: str = ""  # https://your-domain.example.com/tgbot/<secret>/webhook
-
     log_level: str = "INFO"
 
     # 仅允许这些 TG user_id（数字）使用 bot；逗号分隔。空 = 不限制（仅靠 chat_id 绑定）。
     # 与 telegram_bindings 形成双因子：拿到 X-Bot-Token 又知道 chat_id 也没用，因为
     # 进 bot 这层会先按 from_user.id 拒掉。
     telegram_allowed_user_ids: str = ""
-
-    @field_validator("bot_mode", mode="before")
-    @classmethod
-    def _normalize_bot_mode(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip().lower()
-        return value
-
 
 settings = Settings()
