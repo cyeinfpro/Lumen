@@ -100,7 +100,7 @@ export default function UsagePage() {
               </p>
             )}
           </div>
-          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center md:w-auto">
+          <div className="min-w-0 w-full md:w-auto">
             <UsageRangePicker value={days} onChange={setDays} pending={q.isFetching} />
             <Link
               href="/me"
@@ -151,10 +151,10 @@ function UsageRangePicker({
 }) {
   return (
     <div
-      className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-white/[0.04] p-1"
+      className="grid w-full grid-cols-4 gap-1 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-1 sm:inline-flex sm:w-auto sm:items-center"
       aria-label="用量时间范围"
     >
-      <CalendarDays className="ml-2 h-3.5 w-3.5 text-[var(--fg-2)]" />
+      <CalendarDays className="hidden h-3.5 w-3.5 text-[var(--fg-2)] sm:ml-2 sm:block" />
       {USAGE_PERIODS.map((period) => {
         const active = value === period.value;
         // segmented control 内部按钮：保留原生 button，避免 Button 物理动效干扰相邻态
@@ -165,10 +165,10 @@ function UsageRangePicker({
             onClick={() => onChange(period.value)}
             disabled={pending && active}
             className={
-              "min-h-9 rounded-[var(--radius-control)] px-2.5 type-caption transition-colors " +
+              "min-h-11 min-w-0 rounded-[var(--radius-control)] px-1.5 type-caption transition-colors sm:px-2.5 " +
               (active
                 ? "bg-accent text-black"
-                : "text-[var(--fg-1)] hover:bg-white/8 hover:text-[var(--fg-0)]")
+                : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
             }
           >
             {period.label}
@@ -254,7 +254,7 @@ function UsageView({ data }: { data: UsageOut }) {
               </div>
               <div className="type-caption text-[var(--fg-2)] mt-0.5">输入</div>
             </div>
-            <div className="h-px w-full md:h-8 md:w-px bg-white/8" />
+            <div className="h-px w-full bg-[var(--border-subtle)] md:h-8 md:w-px" />
             <div>
               <div className="type-metric text-[24px] md:text-[28px]">
                 {formatThousands(data.total_tokens_out)}
@@ -400,7 +400,7 @@ function LinkButton({
   return (
     <Link
       href={href}
-      className="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
+      className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption text-[var(--fg-0)] hover:bg-[var(--bg-2)] sm:min-h-8"
     >
       {icon}
       {children}
@@ -474,7 +474,7 @@ function StatCard({
         <div className="type-caption text-[var(--fg-2)] mt-1">{sublabel}</div>
       )}
       {ratio != null && (
-        <div className="mt-3 h-1 rounded-full bg-white/5 overflow-hidden">
+        <div className="mt-3 h-1 overflow-hidden rounded-full bg-[var(--bg-2)]">
           <motion.div
             initial={{ width: 0 }}
             animate={{ width: `${Math.max(0, Math.min(100, ratio))}%` }}
@@ -527,7 +527,7 @@ function SkeletonGrid() {
         {PRIMARY_SKELETON_KEYS.map((key, i) => (
           <div
             key={key}
-            className="h-28 rounded-[var(--radius-card)] bg-white/5 animate-pulse"
+            className="h-28 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-2)]"
             style={{ animationDelay: `${i * 80}ms` }}
           />
         ))}
@@ -536,7 +536,7 @@ function SkeletonGrid() {
         {SECONDARY_SKELETON_KEYS.map((key, i) => (
           <div
             key={key}
-            className="h-32 rounded-[var(--radius-card)] bg-white/5 animate-pulse"
+            className="h-32 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-2)]"
             style={{ animationDelay: `${(i + 4) * 80}ms` }}
           />
         ))}
@@ -553,7 +553,7 @@ function ErrorBox({
   onRetry: () => void;
 }) {
   return (
-    <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-6 flex items-center justify-between gap-4 flex-wrap">
+    <div role="alert" className="flex flex-wrap items-center justify-between gap-4 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-4 sm:p-6">
       <div className="flex items-start gap-3 min-w-0">
         <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
         <div>

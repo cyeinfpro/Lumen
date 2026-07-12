@@ -20,7 +20,7 @@ const SKELETON_RATIOS = [
 
 export function StreamLoadingState({ columns = 2 }: { columns?: number }) {
   const columnCount = Math.max(1, Math.floor(columns));
-  const gap = columnCount > 2 ? 14 : 10;
+  const gap = columnCount > 2 ? 14 : 8;
   const skeletonColumns = Array.from(
     { length: columnCount },
     () => [] as Array<{ ratio: string; index: number }>,
@@ -30,7 +30,7 @@ export function StreamLoadingState({ columns = 2 }: { columns?: number }) {
   });
 
   return (
-    <div className="px-3 py-4 md:px-0" aria-label="正在加载图库">
+    <div className="px-2 py-3 md:px-0 md:py-4" aria-label="正在加载图库">
       <div
         className="grid"
         style={{
@@ -90,7 +90,7 @@ export function StreamErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <RefreshCw className="h-4 w-4" />
           重新加载
@@ -99,7 +99,7 @@ export function StreamErrorState({
       secondaryAction={
         <Link
           href="/"
-          className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           回到创作
         </Link>
@@ -141,7 +141,7 @@ export function StreamNoResultsState({
         <button
           type="button"
           onClick={onClear}
-          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 text-sm font-medium text-[var(--warning-fg)] transition-colors hover:bg-warning-soft focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 text-sm font-medium text-[var(--warning-fg)] transition-colors hover:bg-warning-soft focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <FilterX className="h-4 w-4" />
           清除条件
@@ -170,7 +170,7 @@ export function StreamNeverState() {
         <button
           type="button"
           onClick={() => router.push("/")}
-          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <WandSparkles className="h-4 w-4" />
           去创作
@@ -179,7 +179,7 @@ export function StreamNeverState() {
       secondaryAction={
         <Link
           href="/projects"
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <ImagePlus className="h-4 w-4" />
           看项目
@@ -215,7 +215,7 @@ function StreamStatePanel({
   children?: ReactNode;
 }) {
   return (
-    <section className="grid min-h-[420px] place-items-center px-3 py-10 text-center animate-fade-in md:min-h-[520px] md:px-0">
+    <section className="grid min-h-[min(420px,62dvh)] place-items-center px-3 py-8 text-center animate-fade-in md:min-h-[520px] md:px-0 md:py-10">
       <div className="w-full max-w-3xl rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/84 p-4 text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-sm sm:p-5 md:p-6">
         <div className="mx-auto flex max-w-2xl flex-col items-center">
           <span className={stateIconClass(tone)}>

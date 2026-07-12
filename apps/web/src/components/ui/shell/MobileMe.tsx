@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ChevronRight, Mail } from "lucide-react";
 
 import { MeTopBar } from "@/components/ui/me/MeTopBar";
@@ -27,7 +27,7 @@ export function MobileMe() {
   const createMut = useCreateConversationMutation({
     onSuccess: (conv) => {
       setCurrentConv(conv.id);
-      router.push("/");
+      router.push(`/?conversationId=${encodeURIComponent(conv.id)}`);
     },
     onError: (err) => {
       pushMobileToast(
@@ -47,13 +47,17 @@ export function MobileMe() {
   const userLabel = meQuery.data?.name || meQuery.data?.email || "";
   const avatarChar = userLabel ? userLabel.slice(0, 1).toUpperCase() : "U";
 
-  const openSettings = () => {
+  const openSettings = useCallback(() => {
     haptic("light");
     setSettingsOpen(true);
-  };
+  }, [haptic]);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div
+      data-app-viewport
+      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
+    >
       <MeTopBar
         query={query}
         onQueryChange={setQuery}
@@ -68,10 +72,10 @@ export function MobileMe() {
       />
 
       <main
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        data-app-scroll
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         style={{
-          paddingBottom:
-            "calc(56px + 12px + env(safe-area-inset-bottom, 0px))",
+          paddingBottom: "calc(var(--mobile-tabbar-height) + 12px)",
         }}
       >
         <div className="mx-auto max-w-[640px]">
@@ -79,13 +83,13 @@ export function MobileMe() {
           <div className="px-4 pt-2 pb-3">
             <Pressable
               size="default"
-              minHit={false}
+              minHit
               pressScale="soft"
               haptic="light"
               onPress={openSettings}
               aria-label="打开账户与设置"
               className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-[var(--radius-dialog)]",
+                "min-h-16 w-full flex items-center gap-3 p-3 rounded-[var(--radius-dialog)]",
                 "bg-[var(--bg-1)] border border-[var(--border-subtle)]",
                 "shadow-[var(--shadow-1)]",
                 "text-left",
@@ -135,7 +139,7 @@ export function MobileMe() {
 
       <AccountSheet
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         user={meQuery.data ?? null}
         loading={meQuery.isLoading}
       />

@@ -1,0 +1,65 @@
+.root {
+  min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .root {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+
+  .root :is(button, [role="button"], a[href]) {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  .root :is(input, select, textarea) {
+    min-height: 44px;
+    max-width: 100%;
+    font-size: 16px;
+  }
+
+  .root textarea {
+    min-height: 112px;
+  }
+
+  .root :is(form, fieldset, label, section, article, header, footer, nav, div) {
+    min-width: 0;
+  }
+
+  .root :is(table) {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .root :is(pre, code) {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .root :is([role="tablist"]) {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .root :is([role="tab"]) {
+    min-width: max-content;
+  }
+
+  .root :global(.mobile-dialog-scroll) {
+    scroll-padding-bottom: calc(6rem + env(safe-area-inset-bottom));
+  }
+
+  .root :global(.mobile-dialog-footer) {
+    gap: 0.75rem;
+  }
+
+  .root :global(.mobile-dialog-footer) > * {
+    min-height: 44px;
+  }
+}

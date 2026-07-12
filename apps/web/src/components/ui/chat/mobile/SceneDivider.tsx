@@ -17,7 +17,7 @@ export function SceneDivider({ index, collapsed, onToggle }: SceneDividerProps) 
     <button
       type="button"
       onClick={onToggle}
-      className="flex items-center gap-2.5 my-2 w-full select-none min-h-[36px] cursor-pointer active:opacity-60 transition-opacity"
+      className="my-2 flex min-h-11 w-full items-center gap-2.5 select-none cursor-pointer active:opacity-60 transition-opacity motion-reduce:transition-none"
       aria-label={collapsed ? `${label} (已折叠，点击展开)` : `${label} (点击折叠)`}
       aria-expanded={!collapsed}
     >

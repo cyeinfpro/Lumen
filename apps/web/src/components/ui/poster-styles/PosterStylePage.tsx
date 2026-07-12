@@ -80,11 +80,16 @@ export function PosterStylePage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-1 md:mb-0 md:px-6 md:pb-6 md:pt-3">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(var(--mobile-tabbar-h)+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-[max(0.75rem,env(safe-area-inset-left,0px))] pb-[calc(1rem+env(safe-area-inset-bottom,0px))] pt-1 md:mb-0 md:px-6 md:pb-6 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1520px] gap-3">
           <LibraryHeader current={tab} onChange={setTab} />
 
-          <Tabs current={tab} onChange={setTab} className="md:hidden" compact />
+          <Tabs
+            current={tab}
+            onChange={setTab}
+            className="sticky top-0 z-20 -mx-3 overflow-x-auto border-b bg-[var(--bg-0)]/95 px-3 shadow-[var(--shadow-1)] backdrop-blur-xl [scrollbar-width:none] md:hidden"
+            compact
+          />
 
           {tab === "browse" ? (
             <div className="flex min-h-[56vh] flex-col">
@@ -177,7 +182,7 @@ function Tabs({
             className={cn(
               "group relative inline-flex shrink-0 cursor-pointer items-center font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               compact
-                ? "min-h-9 px-3 py-1.5 text-[12px]"
+                ? "min-h-11 px-3 py-1.5 text-[12px] md:min-h-9"
                 : "min-h-10 px-3 py-2.5 text-[13px] md:min-h-9 md:px-3 md:py-2",
               active
                 ? "text-[var(--fg-0)]"

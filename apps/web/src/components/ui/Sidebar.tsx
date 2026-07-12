@@ -40,7 +40,7 @@ import { SearchBox } from "./sidebar/SearchBox";
 // 虚拟化阈值：当列表超过此数量时启用本地窗口渲染（archived tab 总是平铺,
 // active tab 走分桶,只在 archived tab 数量极多时虚拟化以避免重渲全部 row）。
 const VIRTUALIZE_AFTER = 60;
-const ARCHIVED_ROW_HEIGHT = 44;
+const ARCHIVED_ROW_HEIGHT = 56;
 const ARCHIVED_ROW_OVERSCAN = 8;
 
 type Bucket = "today" | "yesterday" | "last7" | "older";
@@ -85,9 +85,11 @@ type TabKind = "active" | "archived";
 export function Sidebar({
   embedded = false,
   showBrand = !embedded,
+  onNavigate,
 }: {
   embedded?: boolean;
   showBrand?: boolean;
+  onNavigate?: () => void;
 } = {}) {
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
   const currentConvId = useChatStore((s) => s.currentConvId);
@@ -178,6 +180,7 @@ export function Sidebar({
   const createMut = useCreateConversationMutation({
     onSuccess: (conv) => {
       setCurrentConv(conv.id);
+      onNavigate?.();
     },
   });
   const deleteMut = useDeleteConversationMutation();
@@ -251,17 +254,28 @@ export function Sidebar({
 
   const handleSelect = useCallback(
     async (conv: ConversationSummary) => {
-      if (conv.id === currentConvId) return;
+      if (conv.id === currentConvId) {
+        onNavigate?.();
+        if (
+          !embedded &&
+          typeof window !== "undefined" &&
+          window.matchMedia("(max-width: 767px)").matches
+        ) {
+          setSidebarOpen(false);
+        }
+        return;
+      }
       setCurrentConv(conv.id);
       try {
         await loadHistoricalMessages(conv.id);
-        // 加载成功后再关移动端抽屉，失败不关避免用户失去上下文
+        onNavigate?.();
+        // 加载成功后再关移动端抽屉，失败不关避免用户失去上下文。
         if (
+          !embedded &&
           typeof window !== "undefined" &&
-          window.innerWidth < 1440 &&
-          sidebarOpen
+          window.matchMedia("(max-width: 767px)").matches
         ) {
-          toggleSidebar();
+          setSidebarOpen(false);
         }
       } catch (err) {
         logWarn("sidebar.load_historical_messages_failed", {
@@ -270,7 +284,14 @@ export function Sidebar({
         });
       }
     },
-    [currentConvId, setCurrentConv, loadHistoricalMessages, sidebarOpen, toggleSidebar],
+    [
+      currentConvId,
+      embedded,
+      loadHistoricalMessages,
+      onNavigate,
+      setCurrentConv,
+      setSidebarOpen,
+    ],
   );
 
   const handleRename = useCallback(
@@ -340,7 +361,7 @@ export function Sidebar({
   const isInitialLoading = list.isLoading && allConvs.length === 0;
 
   const innerChrome = (
-    <div className="flex-1 flex flex-col w-full min-h-0">
+    <div className="flex min-h-0 w-full flex-1 flex-col">
         {/* ——— 品牌栏 ——— */}
         <SidebarBrand visible={showBrand} onClose={toggleSidebar} />
 
@@ -376,7 +397,7 @@ export function Sidebar({
             </kbd>
           </motion.button>
           {createMut.isError && (
-            <p className="mt-2 text-[11px] text-danger leading-snug">
+            <p role="alert" className="mt-2 text-[11px] text-danger leading-snug">
               新建失败：{createMut.error?.message ?? "未知错误"}
             </p>
           )}
@@ -463,7 +484,7 @@ export function Sidebar({
           onKeyDown={handleListKey}
           role="region"
           aria-label={tab === "active" ? "会话列表" : "归档会话列表"}
-          className="flex-1 overflow-y-auto px-2 pb-2 space-y-5 scrollbar-thin"
+          className="scrollbar-thin flex-1 space-y-5 overflow-y-auto overscroll-contain px-2 pb-2"
         >
           {isInitialLoading && <ListSkeleton />}
 
@@ -549,37 +570,16 @@ export function Sidebar({
             })}
 
           {/* 分页 */}
-          {list.hasNextPage && (
-            <div className="px-4 pt-1">
-              {list.isFetchNextPageError ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  fullWidth
-                  onClick={() => list.fetchNextPage()}
-                  disabled={list.isFetchingNextPage}
-                  className="bg-danger-soft border-danger-border text-danger hover:opacity-90"
-                >
-                  {list.isFetchingNextPage ? "重试中" : "加载失败,重试"}
-                </Button>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  fullWidth
-                  onClick={() => list.fetchNextPage()}
-                  disabled={list.isFetchingNextPage}
-                  loading={list.isFetchingNextPage}
-                >
-                  {list.isFetchingNextPage ? copy.state.loading : "加载更多"}
-                </Button>
-              )}
-            </div>
-          )}
+          <SidebarPagination
+            hasNextPage={Boolean(list.hasNextPage)}
+            hasError={list.isFetchNextPageError}
+            loading={list.isFetchingNextPage}
+            onLoadMore={() => list.fetchNextPage()}
+          />
         </div>
 
       {/* 分隔底栏（保持视觉节奏） */}
-      <div className="h-4 shrink-0" />
+      <div className="h-[max(var(--space-4),env(safe-area-inset-bottom,0px))] shrink-0" />
     </div>
   );
 
@@ -617,10 +617,11 @@ export function Sidebar({
             exit={{ x: "-100%" }}
             transition={{ type: "spring", damping: 32, stiffness: 360 }}
             className={cn(
-              "md:hidden fixed top-0 left-0 z-40 h-[100dvh]",
-              "w-[min(320px,85vw)] max-[375px]:w-[85vw]",
+              "fixed inset-y-0 left-0 z-40 md:hidden",
+              "w-[min(320px,calc(100vw-44px))] min-w-[min(276px,calc(100vw-44px))]",
               "bg-[var(--bg-1)] border-r border-[var(--border-subtle)] flex flex-col overflow-hidden shrink-0",
-              "pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
+              "pl-[env(safe-area-inset-left,0px)] pt-[env(safe-area-inset-top,0px)]",
+              "max-h-[100dvh] [@media(orientation:landscape)_and_(max-height:520px)]:w-[min(360px,55vw)]",
             )}
           >
             {innerChrome}
@@ -632,7 +633,7 @@ export function Sidebar({
       <aside
         {...ariaCommon}
         className={cn(
-          "hidden md:flex relative h-[100dvh] shrink-0 flex-col overflow-hidden",
+          "relative hidden h-[100dvh] shrink-0 flex-col overflow-hidden md:flex",
           "bg-[var(--bg-1)] border-r border-[var(--border-subtle)]",
           "transition-[width,border-color] duration-200 ease-out",
           sidebarOpen ? "w-72" : "w-0 border-r-0 pointer-events-none",
@@ -641,6 +642,50 @@ export function Sidebar({
         {innerChrome}
       </aside>
     </>
+  );
+}
+
+function SidebarPagination({
+  hasNextPage,
+  hasError,
+  loading,
+  onLoadMore,
+}: {
+  hasNextPage: boolean;
+  hasError: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  if (!hasNextPage) return null;
+
+  return (
+    <div className="px-4 pt-1">
+      {hasError ? (
+        <div role="alert">
+          <Button
+            variant="secondary"
+            size="sm"
+            fullWidth
+            onClick={onLoadMore}
+            disabled={loading}
+            className="bg-danger-soft border-danger-border text-danger hover:opacity-90"
+          >
+            {loading ? "重试中" : "加载失败,重试"}
+          </Button>
+        </div>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          fullWidth
+          onClick={onLoadMore}
+          disabled={loading}
+          loading={loading}
+        >
+          {loading ? copy.state.loading : "加载更多"}
+        </Button>
+      )}
+    </div>
   );
 }
 

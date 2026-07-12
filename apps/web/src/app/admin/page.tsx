@@ -7,13 +7,12 @@
 // - 用户：搜索 + 角色过滤 + 表格（数字 tabular-nums）+ 加载更多
 // - 子 panel 另见 _panels/*
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NextImage from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { format } from "date-fns";
 import {
   Activity,
   AlertCircle,
@@ -24,7 +23,6 @@ import {
   Eye,
   HardDrive,
   Images,
-  Inbox,
   KeyRound,
   Link2,
   Loader2,
@@ -43,18 +41,17 @@ import {
 } from "lucide-react";
 
 import {
-  useAddAllowedEmailMutation,
   useAdminUserHistoryQuery,
   useAdminUsersInfiniteQuery,
-  useAllowedEmailsQuery,
   useDeleteAdminUserMutation,
-  useRemoveAllowedEmailMutation,
   useSetAdminUserPasswordMutation,
 } from "@/lib/queries";
 import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
 import type { AdminUserOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
 import { ByokPanel } from "./_panels/ByokPanel";
@@ -67,6 +64,18 @@ import { SettingsPanel } from "./_panels/SettingsPanel";
 import { StoragePanel } from "./_panels/StoragePanel";
 import { TelegramPanel } from "./_panels/TelegramPanel";
 import { VideoProvidersPanel } from "./_panels/VideoProvidersPanel";
+import { AllowedEmailsPanel } from "./_components/AllowedEmailsPanel";
+import {
+  EmptyBlock,
+  ErrorBlock,
+  ListSkeleton,
+} from "./_components/AdminFeedback";
+import {
+  adminInputShellClassName,
+  formatISODate,
+  tableShellClassName,
+} from "./_components/adminUi";
+import adminMobileStyles from "./admin-mobile.module.css";
 
 type MaybeAdminUser = AuthUser & { role?: "admin" | "member" };
 
@@ -96,6 +105,8 @@ type TabMeta = {
   description: string;
   icon: LucideIcon;
 };
+
+type UserRoleFilter = "all" | "admin" | "member";
 
 const TAB_GROUPS: {
   key: TabGroup;
@@ -239,12 +250,6 @@ const TABS: TabMeta[] = [
   },
 ];
 
-const adminInputShellClassName =
-  "flex items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 transition-colors focus-within:border-accent-border focus-within:ring-2 focus-within:ring-accent/20";
-
-const tableShellClassName =
-  "overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 shadow-[var(--shadow-1)] backdrop-blur-sm";
-
 const AUTH_STORAGE_KEYS = new Set([
   "lumen.auth",
   "lumen.session",
@@ -257,6 +262,16 @@ function isAuthStorageEvent(e: StorageEvent): boolean {
   if (e.storageArea !== window.localStorage) return false;
   if (e.key === null) return true;
   return AUTH_STORAGE_KEYS.has(e.key) || e.key.startsWith("lumen.auth.");
+}
+
+function adminAuthRedirectPath(error: unknown): string | null {
+  if (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403)
+  ) {
+    return "/login?next=" + encodeURIComponent("/admin");
+  }
+  return null;
 }
 
 export default function AdminPage() {
@@ -281,13 +296,8 @@ export default function AdminPage() {
       router.replace("/");
     }
     if (meQuery.isError) {
-      const err = meQuery.error;
-      // 401/403：另一 tab 登出或权限失效后再切回本 tab → 走 /login（保留 next 回到 admin）
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-        router.replace("/login?next=" + encodeURIComponent("/admin"));
-      } else {
-        router.replace("/");
-      }
+      const redirectPath = adminAuthRedirectPath(meQuery.error);
+      if (redirectPath) router.replace(redirectPath);
     }
   }, [meQuery.isSuccess, meQuery.isError, meQuery.error, role, router]);
 
@@ -312,10 +322,23 @@ export default function AdminPage() {
         <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-5">
           <div className="h-8 w-48 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-1)]" />
           <div className="h-4 w-64 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-1)]" />
-          <div className="mt-6 h-10 w-80 animate-pulse rounded-full bg-[var(--bg-1)]" />
+          <div className="mt-6 h-10 w-full max-w-80 animate-pulse rounded-full bg-[var(--bg-1)]" />
           <div className="mt-4 h-72 w-full animate-pulse rounded-[var(--radius-panel)] bg-[var(--bg-1)]" />
         </div>
       </div>
+    );
+  }
+
+  if (meQuery.isError) {
+    const redirectPath = adminAuthRedirectPath(meQuery.error);
+    if (redirectPath) {
+      return <AdminAccessPending message="登录状态已失效，正在跳转登录…" />;
+    }
+    return (
+      <AdminAccessError
+        onRetry={refreshMe}
+        pending={meQuery.isFetching}
+      />
     );
   }
 
@@ -341,6 +364,46 @@ export default function AdminPage() {
   return <AdminInner me={meQuery.data} />;
 }
 
+function AdminAccessPending({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-[100dvh] w-full flex-1 items-center justify-center bg-[var(--bg-0)] px-4 text-[var(--fg-1)]">
+      <div role="status" className="flex items-center gap-2 text-sm">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {message}
+      </div>
+    </div>
+  );
+}
+
+function AdminAccessError({
+  onRetry,
+  pending,
+}: {
+  onRetry: () => void;
+  pending: boolean;
+}) {
+  return (
+    <div className="flex min-h-[100dvh] w-full flex-1 items-center justify-center bg-[var(--bg-0)] px-4 text-[var(--fg-0)]">
+      <div className="w-full max-w-sm rounded-[var(--radius-panel)] border border-danger-border bg-danger-soft p-5 text-center">
+        <AlertCircle className="mx-auto h-6 w-6 text-danger" />
+        <h1 className="mt-3 type-card-title">无法验证管理员身份</h1>
+        <p className="mt-1.5 type-body-sm text-[var(--fg-1)]">
+          登录服务暂时不可用，请重试。为避免误放行，管理内容不会展示。
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={pending}
+          className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-1)] px-4 text-sm transition-colors hover:bg-[var(--bg-2)] disabled:opacity-50"
+        >
+          {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+          {pending ? "重试中" : "重新验证"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   const [tab, setTab] = useState<Tab>("health");
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
@@ -348,12 +411,15 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   return (
     <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
       <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-thin">
-        <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
+        <div
+          className={cn(
+            "mx-auto max-w-7xl px-3 py-4 min-[380px]:px-4 md:px-8 md:py-10",
+            adminMobileStyles.root,
+          )}
+        >
           <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
             <div className="min-w-0">
-              <h1 className="type-page-title">
-                管理后台
-              </h1>
+              <h1 className="type-page-title">管理后台</h1>
               <p className="type-body mt-1.5">
                 按任务分组管理访问、运行状态、基础设施和系统配置。
               </p>
@@ -392,35 +458,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.18, ease: "easeOut" }}
               >
-                {tab === "health" ? (
-                  <HealthPanel onOpenTab={setTab} />
-                ) : tab === "emails" ? (
-                  <AllowedEmailsPanel />
-                ) : tab === "users" ? (
-                  <UsersPanel />
-                ) : tab === "events" ? (
-                  <RequestEventsPanel />
-                ) : tab === "invites" ? (
-                  <InvitesPanel />
-                ) : tab === "byok" ? (
-                  <ByokPanel />
-                ) : tab === "billing" ? (
-                  <BillingPanel />
-                ) : tab === "providers" ? (
-                  <ProvidersPanel />
-                ) : tab === "video_providers" ? (
-                  <VideoProvidersPanel />
-                ) : tab === "proxies" ? (
-                  <ProxiesPanel />
-                ) : tab === "telegram" ? (
-                  <TelegramPanel />
-                ) : tab === "settings" ? (
-                  <SettingsPanel />
-                ) : tab === "storage" ? (
-                  <StoragePanel />
-                ) : (
-                  <BackupsPanel />
-                )}
+                <AdminPanelContent tab={tab} onOpenTab={setTab} />
               </motion.div>
             </AnimatePresence>
           </div>
@@ -430,14 +468,76 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   );
 }
 
+function AdminPanelContent({
+  tab,
+  onOpenTab,
+}: {
+  tab: Tab;
+  onOpenTab: (tab: Tab) => void;
+}) {
+  const panels: Record<Tab, React.ReactNode> = {
+    health: <HealthPanel onOpenTab={onOpenTab} />,
+    emails: <AllowedEmailsPanel />,
+    users: <UsersPanel />,
+    events: <RequestEventsPanel />,
+    invites: <InvitesPanel />,
+    byok: <ByokPanel />,
+    billing: <BillingPanel />,
+    providers: <ProvidersPanel />,
+    video_providers: <VideoProvidersPanel />,
+    proxies: <ProxiesPanel />,
+    telegram: <TelegramPanel />,
+    settings: <SettingsPanel />,
+    storage: <StoragePanel />,
+    backups: <BackupsPanel />,
+  };
+
+  return panels[tab];
+}
+
 function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
+  const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
+  const ActiveTabIcon = activeTab.icon;
+
   return (
     <nav
       aria-label="管理后台菜单"
       data-testid="admin-tab-menu"
       className="space-y-3"
     >
-      <div className="grid gap-3 lg:grid-cols-4">
+      <div className="sticky top-0 z-20 -mx-3 border-y border-[var(--border-subtle)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[380px]:-mx-4 min-[380px]:px-4 md:hidden">
+        <label htmlFor="admin-mobile-navigation" className="sr-only">
+          管理后台页面
+        </label>
+        <div className="relative">
+          <ActiveTabIcon
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-accent"
+          />
+          <select
+            id="admin-mobile-navigation"
+            value={tab}
+            onChange={(event) => onChange(event.target.value as Tab)}
+            className="h-11 w-full appearance-none rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-10 text-base font-medium text-[var(--fg-0)] shadow-[var(--shadow-1)] outline-none focus:border-accent-border focus:ring-2 focus:ring-accent/20"
+          >
+            {TAB_GROUPS.map((group) => (
+              <optgroup key={group.key} label={group.label}>
+                {TABS.filter((item) => item.group === group.key).map((item) => (
+                  <option key={item.key} value={item.key}>
+                    {item.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <SlidersHorizontal
+            aria-hidden="true"
+            className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]"
+          />
+        </div>
+      </div>
+
+      <div className="hidden gap-3 md:grid md:grid-cols-2 lg:grid-cols-4">
         {TAB_GROUPS.map((group) => {
           const items = TABS.filter((item) => item.group === group.key);
           return (
@@ -464,7 +564,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                       aria-current={active ? "page" : undefined}
                       onClick={() => onChange(item.key)}
                       className={cn(
-                        "flex min-h-[40px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left type-caption transition-colors",
+                        "flex min-h-[44px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left type-caption transition-colors",
                         active
                           ? "border-accent-border bg-accent text-[var(--accent-on)] shadow-[var(--shadow-amber)]"
                           : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -473,7 +573,9 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                       <Icon
                         className={cn(
                           "h-3.5 w-3.5 shrink-0",
-                          active ? "text-[var(--accent-on)]" : "text-[var(--fg-2)]",
+                          active
+                            ? "text-[var(--accent-on)]"
+                            : "text-[var(--fg-2)]",
                         )}
                       />
                       <span className="min-w-0 truncate">{item.label}</span>
@@ -508,284 +610,6 @@ function PanelIntro({ tab }: { tab: TabMeta }) {
   );
 }
 
-// ———————————————————— 白名单 ————————————————————
-
-function AllowedEmailsPanel() {
-  const q = useAllowedEmailsQuery();
-  const [email, setEmail] = useState("");
-  const [search, setSearch] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-  const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
-
-  const addMut = useAddAllowedEmailMutation({
-    onSuccess: () => {
-      setEmail("");
-      setFormError(null);
-    },
-    onError: (err) => {
-      if (err instanceof ApiError && err.status === 409) {
-        setFormError("该邮箱已在白名单中");
-      } else {
-        setFormError(err.message || "添加失败");
-      }
-    },
-  });
-
-  const removeMut = useRemoveAllowedEmailMutation({
-    onSettled: () => setPendingRemoveId(null),
-  });
-
-  const onSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setFormError(null);
-    const trimmed = email.trim();
-    if (!trimmed) {
-      setFormError("邮箱未填");
-      return;
-    }
-    addMut.mutate(trimmed);
-  };
-
-  const filtered = useMemo(() => {
-    const rows = q.data?.items ?? [];
-    const s = search.trim().toLowerCase();
-    if (!s) return rows;
-    return rows.filter(
-      (r) =>
-        r.email.toLowerCase().includes(s) ||
-        (r.invited_by_email ?? "").toLowerCase().includes(s),
-    );
-  }, [q.data, search]);
-
-  return (
-    <section className="space-y-5">
-      {/* —— 添加 / 搜索行 —— */}
-      <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm md:p-5">
-        <form
-          onSubmit={onSubmit}
-          className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center"
-        >
-          <div className={`h-10 flex-1 ${adminInputShellClassName}`}>
-            <label htmlFor="add-allowed-email" className="sr-only">
-              邮箱
-            </label>
-            <input
-              id="add-allowed-email"
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@示例.com"
-              autoComplete="off"
-              className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-[var(--fg-2)]"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={addMut.isPending}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-[var(--accent-on)] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-50"
-          >
-            {addMut.isPending ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> 添加中
-              </>
-            ) : (
-              "添加白名单"
-            )}
-          </button>
-        </form>
-        {formError && (
-          <p className="flex items-center gap-1.5 type-caption text-danger">
-            <AlertCircle className="w-3.5 h-3.5" />
-            {formError}
-          </p>
-        )}
-
-        <div className={`mt-3 h-10 ${adminInputShellClassName}`}>
-          <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
-          <label htmlFor="search-allowed" className="sr-only">
-            搜索白名单
-          </label>
-          <input
-            id="search-allowed"
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索邮箱或邀请人"
-            className="flex-1 bg-transparent text-xs focus:outline-none placeholder:text-[var(--fg-2)]"
-          />
-        </div>
-      </div>
-
-      {/* —— 列表 —— */}
-      <div className={tableShellClassName}>
-        {q.isLoading ? (
-          <ListSkeleton rows={4} />
-        ) : q.isError ? (
-          <ErrorBlock
-            message={q.error?.message ?? "未知错误"}
-            onRetry={() => void q.refetch()}
-          />
-        ) : filtered.length === 0 ? (
-          <EmptyBlock
-            title={search ? "没有匹配结果" : "白名单为空"}
-            description={
-              search
-                ? "试试换个关键词"
-                : "添加邮箱允许该用户注册 Lumen"
-            }
-          />
-        ) : (
-          <>
-            {/* 桌面端表格 */}
-            <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
-              <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
-                  <tr>
-                    <th className="text-left py-3 px-4 font-medium">邮箱</th>
-                    <th className="text-left py-3 px-4 font-medium">邀请人</th>
-                    <th className="text-left py-3 px-4 font-medium">创建时间</th>
-                    <th className="text-right py-3 px-4 font-medium">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((row, i) => (
-                    <motion.tr
-                      key={row.id}
-                      initial={{ opacity: 0, y: 4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{
-                        duration: 0.18,
-                        delay: Math.min(i * 0.03, 0.18),
-                      }}
-                      className="border-t border-[var(--border-subtle)] transition-colors hover:bg-[var(--bg-2)]/60 align-middle"
-                    >
-                      <td className="py-3 px-4 text-[var(--fg-0)] break-all">{row.email}</td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] break-all">
-                        {row.invited_by_email ?? "—"}
-                      </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums whitespace-nowrap">
-                        {formatISODate(row.created_at)}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <ConfirmInlineRemove
-                          pending={
-                            removeMut.isPending && pendingRemoveId === row.id
-                          }
-                          active={pendingRemoveId === row.id}
-                          onActivate={() => setPendingRemoveId(row.id)}
-                          onCancel={() => setPendingRemoveId(null)}
-                          onConfirm={() => removeMut.mutate(row.id)}
-                          email={row.email}
-                        />
-                      </td>
-                    </motion.tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {/* 移动端卡片列表 */}
-            <ul className="divide-y divide-[var(--border-subtle)] md:hidden">
-              {filtered.map((row) => (
-                <li key={row.id} className="p-4 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm text-[var(--fg-0)] break-all min-w-0">
-                      {row.email}
-                    </span>
-                    <ConfirmInlineRemove
-                      pending={
-                        removeMut.isPending && pendingRemoveId === row.id
-                      }
-                      active={pendingRemoveId === row.id}
-                      onActivate={() => setPendingRemoveId(row.id)}
-                      onCancel={() => setPendingRemoveId(null)}
-                      onConfirm={() => removeMut.mutate(row.id)}
-                      email={row.email}
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
-                        邀请人
-                      </div>
-                      <div className="text-[var(--fg-1)] break-all">
-                        {row.invited_by_email ?? "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
-                        创建
-                      </div>
-                      <div className="text-[var(--fg-1)] font-mono tabular-nums">
-                        {formatISODate(row.created_at)}
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ConfirmInlineRemove({
-  pending,
-  active,
-  onActivate,
-  onCancel,
-  onConfirm,
-  email,
-}: {
-  pending: boolean;
-  active: boolean;
-  onActivate: () => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-  email: string;
-}) {
-  if (!active) {
-    return (
-      <button
-        type="button"
-        onClick={onActivate}
-        className="shrink-0 inline-flex items-center justify-center min-h-[32px] px-2.5 type-caption text-danger hover:opacity-90 transition-colors"
-        aria-label={`移除 ${email}`}
-      >
-        移除
-      </button>
-    );
-  }
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.96 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.14 }}
-      className="inline-flex items-center gap-2 shrink-0"
-    >
-      <span className="text-xs text-[var(--fg-1)] hidden sm:inline">确认?</span>
-      <button
-        type="button"
-        onClick={onConfirm}
-        disabled={pending}
-        className="type-caption px-3 py-1.5 min-h-[32px] rounded-[var(--radius-control)] border border-danger-border bg-danger-soft text-[var(--danger-fg)] hover:brightness-110 disabled:opacity-50 transition-colors"
-      >
-        {pending ? "移除中" : "移除"}
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={pending}
-        className="min-h-[32px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
-      >
-        取消
-      </button>
-    </motion.div>
-  );
-}
-
 // ———————————————————— 用户 ————————————————————
 
 function UsersPanel() {
@@ -793,17 +617,28 @@ function UsersPanel() {
   const q = useAdminUsersInfiniteQuery({ limit: PAGE_SIZE });
 
   const [search, setSearch] = useState("");
-  const [roleFilter, setRoleFilter] = useState<"all" | "admin" | "member">(
-    "all",
-  );
+  const [roleFilter, setRoleFilter] = useState<UserRoleFilter>("all");
   const [historyUser, setHistoryUser] = useState<AdminUserOut | null>(null);
   const [passwordUser, setPasswordUser] = useState<AdminUserOut | null>(null);
   const [deleteUser, setDeleteUser] = useState<AdminUserOut | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const passwordGuardRef = useRef(false);
+  const deleteGuardRef = useRef(false);
   const passwordMut = useSetAdminUserPasswordMutation({
     onSuccess: () => setPasswordUser(null),
+    onSettled: () => {
+      passwordGuardRef.current = false;
+    },
   });
   const deleteMut = useDeleteAdminUserMutation({
-    onSuccess: () => setDeleteUser(null),
+    onSuccess: () => {
+      setDeleteUser(null);
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message || "删除失败"),
+    onSettled: () => {
+      deleteGuardRef.current = false;
+    },
   });
 
   const rows = useMemo(
@@ -812,22 +647,19 @@ function UsersPanel() {
   );
 
   const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
-    return rows.filter((u) => {
-      if (roleFilter !== "all" && u.role !== roleFilter) return false;
-      if (!s) return true;
-      return (
-        u.email.toLowerCase().includes(s) ||
-        (u.display_name ?? "").toLowerCase().includes(s)
-      );
-    });
+    const normalizedSearch = search.trim().toLowerCase();
+    return rows.filter((user) =>
+      userMatchesFilters(user, roleFilter, normalizedSearch),
+    );
   }, [rows, search, roleFilter]);
 
   return (
     <section className="space-y-5">
       {/* —— 过滤行 —— */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center">
-        <div className={`h-10 w-full flex-1 md:min-w-[220px] ${adminInputShellClassName}`}>
+        <div
+          className={`min-h-11 w-full flex-1 md:min-h-10 md:min-w-[220px] ${adminInputShellClassName}`}
+        >
           <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
           <label htmlFor="search-users" className="sr-only">
             搜索用户
@@ -838,13 +670,13 @@ function UsersPanel() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索邮箱或名称"
-            className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-[var(--fg-2)]"
+            className="flex-1 bg-transparent text-base focus:outline-none placeholder:text-[var(--fg-2)] md:text-sm"
           />
         </div>
         <div
           role="tablist"
           aria-label="按角色过滤"
-          className="inline-flex h-10 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5 text-xs"
+          className="inline-flex min-h-11 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5 text-xs"
         >
           {(["all", "admin", "member"] as const).map((r) => (
             <button
@@ -853,14 +685,9 @@ function UsersPanel() {
               aria-selected={roleFilter === r}
               type="button"
               onClick={() => setRoleFilter(r)}
-              className={
-                "h-8 rounded-[var(--radius-control)] px-3 transition-colors " +
-                (roleFilter === r
-                  ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
-                  : "text-[var(--fg-1)] hover:text-[var(--fg-0)]")
-              }
+              className={userRoleFilterClassName(roleFilter === r)}
             >
-              {r === "all" ? "全部" : r === "admin" ? "管理员" : "成员"}
+              {userRoleFilterLabel(r)}
             </button>
           ))}
         </div>
@@ -877,12 +704,8 @@ function UsersPanel() {
           />
         ) : filtered.length === 0 ? (
           <EmptyBlock
-            title={rows.length === 0 ? "暂无用户" : "没有匹配结果"}
-            description={
-              rows.length === 0
-                ? "注册的用户会出现在这里"
-                : "试试切换角色或换个关键词"
-            }
+            title={emptyUsersTitle(rows.length)}
+            description={emptyUsersDescription(rows.length)}
           />
         ) : (
           <>
@@ -913,7 +736,9 @@ function UsersPanel() {
                       }}
                       className="border-t border-[var(--border-subtle)] transition-colors hover:bg-[var(--bg-2)]/60"
                     >
-                      <td className="py-3 px-4 text-[var(--fg-0)] break-all">{u.email}</td>
+                      <td className="py-3 px-4 text-[var(--fg-0)] break-all">
+                        {u.email}
+                      </td>
                       <td className="py-3 px-4">
                         <RoleBadge role={u.role} />
                       </td>
@@ -935,8 +760,15 @@ function UsersPanel() {
                       <td className="py-3 px-4">
                         <UserActions
                           onHistory={() => setHistoryUser(u)}
-                          onPassword={() => setPasswordUser(u)}
-                          onDelete={() => setDeleteUser(u)}
+                          onPassword={() => {
+                            passwordMut.reset();
+                            setPasswordUser(u);
+                          }}
+                          onDelete={() => {
+                            deleteMut.reset();
+                            setDeleteError(null);
+                            setDeleteUser(u);
+                          }}
                         />
                       </td>
                     </motion.tr>
@@ -971,8 +803,15 @@ function UsersPanel() {
                   </div>
                   <UserActions
                     onHistory={() => setHistoryUser(u)}
-                    onPassword={() => setPasswordUser(u)}
-                    onDelete={() => setDeleteUser(u)}
+                    onPassword={() => {
+                      passwordMut.reset();
+                      setPasswordUser(u);
+                    }}
+                    onDelete={() => {
+                      deleteMut.reset();
+                      setDeleteError(null);
+                      setDeleteUser(u);
+                    }}
                     mobile
                   />
                 </li>
@@ -988,7 +827,7 @@ function UsersPanel() {
             type="button"
             onClick={() => void q.fetchNextPage()}
             disabled={q.isFetchingNextPage}
-            className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-5 text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-5 text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 md:min-h-9"
           >
             {q.isFetchingNextPage ? (
               <>
@@ -1012,36 +851,110 @@ function UsersPanel() {
           user={passwordUser}
           pending={passwordMut.isPending}
           error={passwordMut.error?.message ?? null}
-          onClose={() => setPasswordUser(null)}
-          onSubmit={(password) =>
-            passwordMut.mutate({ userId: passwordUser.id, password })
-          }
+          onClose={() => {
+            if (passwordMut.isPending) return;
+            passwordMut.reset();
+            setPasswordUser(null);
+          }}
+          onSubmit={(password) => {
+            if (passwordGuardRef.current) return;
+            passwordGuardRef.current = true;
+            passwordMut.mutate({ userId: passwordUser.id, password });
+          }}
         />
       )}
       <ConfirmDialog
         open={deleteUser != null}
         onOpenChange={(open) => {
-          if (!open && !deleteMut.isPending) setDeleteUser(null);
+          if (!open && !deleteMut.isPending) {
+            deleteMut.reset();
+            setDeleteError(null);
+            setDeleteUser(null);
+          }
         }}
         title="删除用户"
         description={
-          deleteUser ? (
-            <span>
-              将软删除 <span className="font-mono">{deleteUser.email}</span>，
-              并撤销会话、隐藏会话和图片。
-            </span>
-          ) : null
+          <DeleteUserDescription user={deleteUser} error={deleteError} />
         }
         confirmText="删除"
         cancelText="取消"
         tone="danger"
         confirming={deleteMut.isPending}
         onConfirm={() => {
-          if (deleteUser) deleteMut.mutate(deleteUser.id);
+          if (!deleteUser || deleteGuardRef.current) return;
+          deleteGuardRef.current = true;
+          setDeleteError(null);
+          deleteMut.mutate(deleteUser.id);
         }}
       />
     </section>
   );
+}
+
+function DeleteUserDescription({
+  user,
+  error,
+}: {
+  user: AdminUserOut | null;
+  error: string | null;
+}) {
+  if (!user) return null;
+  return (
+    <span className="block">
+      <span>
+        将软删除 <span className="font-mono">{user.email}</span>
+        ，并撤销会话、隐藏会话和图片。
+      </span>
+      {error && (
+        <span
+          role="alert"
+          aria-live="assertive"
+          className="mt-2 block text-danger"
+        >
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function userMatchesFilters(
+  user: AdminUserOut,
+  roleFilter: UserRoleFilter,
+  normalizedSearch: string,
+): boolean {
+  const matchesRole = roleFilter === "all" || user.role === roleFilter;
+  const matchesSearch =
+    normalizedSearch.length === 0 ||
+    user.email.toLowerCase().includes(normalizedSearch) ||
+    (user.display_name ?? "").toLowerCase().includes(normalizedSearch);
+  return matchesRole && matchesSearch;
+}
+
+function userRoleFilterLabel(role: UserRoleFilter): string {
+  const labels: Record<UserRoleFilter, string> = {
+    all: "全部",
+    admin: "管理员",
+    member: "成员",
+  };
+  return labels[role];
+}
+
+function userRoleFilterClassName(active: boolean): string {
+  return cn(
+    "min-h-11 rounded-[var(--radius-control)] px-3 transition-colors md:min-h-8",
+    active
+      ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
+      : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+  );
+}
+
+function emptyUsersDescription(rowCount: number): string {
+  return rowCount === 0 ? "注册的用户会出现在这里" : "试试切换角色或换个关键词";
+}
+
+function emptyUsersTitle(rowCount: number): string {
+  return rowCount === 0 ? "暂无用户" : "没有匹配结果";
 }
 
 function UserActions({
@@ -1064,12 +977,7 @@ function UserActions({
     >
       <ActionIcon label="历史" icon={Eye} onClick={onHistory} />
       <ActionIcon label="改密码" icon={KeyRound} onClick={onPassword} />
-      <ActionIcon
-        label="删除"
-        icon={Trash2}
-        onClick={onDelete}
-        danger
-      />
+      <ActionIcon label="删除" icon={Trash2} onClick={onDelete} danger />
     </div>
   );
 }
@@ -1092,7 +1000,7 @@ function ActionIcon({
       aria-label={label}
       onClick={onClick}
       className={cn(
-        "inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border transition-colors",
+        "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] border transition-colors md:h-8 md:w-8",
         danger
           ? "border-danger-border bg-danger-soft text-[var(--danger-fg)] hover:brightness-110"
           : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
@@ -1110,6 +1018,13 @@ function UserHistoryDialog({
   user: AdminUserOut;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useBodyScrollLock(true);
+  const onDialogKeyDown = useModalLayer({
+    open: true,
+    rootRef: dialogRef,
+    onClose,
+  });
   const q = useAdminUserHistoryQuery(user.id);
   const items = q.data?.items ?? [];
 
@@ -1124,20 +1039,28 @@ function UserHistoryDialog({
       }}
     >
       <motion.div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`生成历史：${user.email}`}
+        tabIndex={-1}
         initial={{ opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
+        onKeyDown={onDialogKeyDown}
         className="surface-dialog mobile-dialog-panel flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden sm:rounded-[var(--radius-dialog)]"
       >
         <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] p-4">
           <div className="min-w-0">
             <h2 className="type-card-title">生成历史</h2>
-            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">{user.email}</p>
+            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">
+              {user.email}
+            </p>
           </div>
           <button
             type="button"
             aria-label="关闭"
             onClick={onClose}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] sm:h-8 sm:w-8"
           >
             <X className="h-4 w-4" />
           </button>
@@ -1187,7 +1110,9 @@ function UserHistoryDialog({
                           className="relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)]"
                         >
                           <NextImage
-                            src={image.thumb_url ?? image.preview_url ?? image.url}
+                            src={
+                              image.thumb_url ?? image.preview_url ?? image.url
+                            }
                             alt=""
                             fill
                             sizes="64px"
@@ -1226,6 +1151,7 @@ function PasswordDialog({
   onClose: () => void;
   onSubmit: (password: string) => void;
 }) {
+  useBodyScrollLock(true);
   const [password, setPassword] = useState("");
   const canSubmit = password.length >= 8 && !pending;
 
@@ -1239,25 +1165,33 @@ function PasswordDialog({
       }}
     >
       <motion.form
+        role="dialog"
+        aria-modal="true"
+        aria-label={`修改密码：${user.email}`}
         initial={{ opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         onSubmit={(e) => {
           e.preventDefault();
           if (canSubmit) onSubmit(password);
         }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !pending) onClose();
+        }}
         className="surface-dialog mobile-dialog-panel w-full max-w-sm space-y-4 overflow-hidden p-5 sm:rounded-[var(--radius-dialog)]"
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="type-card-title">修改密码</h2>
-            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">{user.email}</p>
+            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">
+              {user.email}
+            </p>
           </div>
           <button
             type="button"
             aria-label="关闭"
             onClick={onClose}
             disabled={pending}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 sm:h-8 sm:w-8"
           >
             <X className="h-4 w-4" />
           </button>
@@ -1265,29 +1199,35 @@ function PasswordDialog({
         <label className="block space-y-1.5">
           <span className="text-xs text-[var(--fg-2)]">新密码</span>
           <input
+            name="new-password"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             minLength={8}
             maxLength={128}
             autoFocus
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-strong)]"
+            autoComplete="new-password"
+            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-strong)] sm:h-10 sm:text-sm"
           />
         </label>
-        {error && <p className="text-xs text-[var(--danger)]">{error}</p>}
-        <div className="flex justify-end gap-2">
+        {error && (
+          <p role="alert" className="text-xs text-[var(--danger)]">
+            {error}
+          </p>
+        )}
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button
             type="button"
             onClick={onClose}
             disabled={pending}
-            className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 sm:h-9 sm:text-xs"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={!canSubmit}
-            className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--fg-0)] px-3 text-xs text-[var(--bg-0)] transition-colors disabled:opacity-50"
+            className="inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--fg-0)] px-3 text-sm text-[var(--bg-0)] transition-colors disabled:opacity-50 sm:h-9 sm:text-xs"
           >
             {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             保存
@@ -1306,11 +1246,7 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-function RetentionPill({
-  state,
-}: {
-  state: "active" | "hidden" | "deleted";
-}) {
+function RetentionPill({ state }: { state: "active" | "hidden" | "deleted" }) {
   const label =
     state === "hidden" ? "已隐藏" : state === "deleted" ? "已删除" : "可见";
   return (
@@ -1333,86 +1269,6 @@ function MiniStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-// ———————————————————— shared ————————————————————
-
-export function ListSkeleton({ rows = 5 }: { rows?: number }) {
-  const keys = Array.from(
-    { length: rows },
-    (_, i) => `admin-list-skeleton-${i + 1}`,
-  );
-
-  return (
-    <div className="p-4 space-y-3">
-      {keys.map((key, i) => (
-        <div
-          key={key}
-          className="flex items-center gap-3 animate-pulse"
-          style={{ animationDelay: `${i * 60}ms` }}
-        >
-          <div className="h-4 w-1/3 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
-          <div className="h-4 w-16 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
-          <div className="h-4 flex-1 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
-          <div className="h-4 w-20 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function EmptyBlock({
-  title,
-  description,
-  cta,
-}: {
-  title: string;
-  description?: string;
-  cta?: React.ReactNode;
-}) {
-  return (
-    <div className="py-14 flex flex-col items-center gap-3 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-2)]">
-        <Inbox className="w-5 h-5 text-[var(--fg-2)]" />
-      </div>
-      <div>
-        <p className="text-sm text-[var(--fg-0)]">{title}</p>
-        {description && (
-          <p className="text-xs text-[var(--fg-2)] mt-1">{description}</p>
-        )}
-      </div>
-      {cta}
-    </div>
-  );
-}
-
-export function ErrorBlock({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry?: () => void;
-}) {
-  return (
-    <div className="p-6 flex items-center justify-between gap-4 rounded-[var(--radius-dialog)] border border-danger-border bg-danger-soft">
-      <div className="flex items-start gap-3">
-        <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
-        <div>
-          <p className="type-body-sm text-danger">加载失败</p>
-          <p className="type-caption text-[var(--fg-2)] mt-1">{message}</p>
-        </div>
-      </div>
-      {onRetry && (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="h-8 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-2)] px-3 text-xs transition-colors hover:bg-[var(--bg-3)]"
-        >
-          重试
-        </button>
-      )}
-    </div>
-  );
-}
-
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
@@ -1428,12 +1284,4 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
       成员
     </span>
   );
-}
-
-function formatISODate(s: string): string {
-  try {
-    return format(new Date(s), "yyyy-MM-dd HH:mm");
-  } catch {
-    return s;
-  }
 }

@@ -140,6 +140,10 @@
     --appbar-h: 56px;
     --mobile-topbar-h: 56px;
     --mobile-tabbar-h: 56px;
+    --mobile-app-min-w: 320px;
+    --mobile-app-max-w: 430px;
+    --mobile-page-gutter: 16px;
+    --mobile-page-gutter-compact: 12px;
     --sidebar-rail-w: 64px;
     --sidebar-panel-w: 248px;
     --overlay-gap: 8px;
@@ -265,6 +269,12 @@
     --mobile-dialog-max-height: calc(var(--mobile-dialog-viewport-height) - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
     --mobile-dialog-sheet-max-height: min(88vh, var(--mobile-dialog-max-height));
     --mobile-tabbar-height: calc(var(--mobile-tabbar-h) + env(safe-area-inset-bottom, 0px));
+    --mobile-mini-player-h: 56px;
+    --mobile-toast-bottom-offset: calc(
+      var(--mobile-tabbar-height) + var(--mobile-mini-player-h) + var(--space-4)
+    );
+    --mobile-bottom-offset: var(--mobile-tabbar-height);
+    --mobile-content-bottom: calc(var(--mobile-bottom-offset) + var(--space-4));
     --project-mobile-cta-height: calc(84px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -446,6 +456,7 @@
     font-optical-sizing: auto;
     -webkit-overflow-scrolling: touch;
     position: relative;
+    min-width: var(--mobile-app-min-w);
   }
   #__next,
   [data-nextjs-root] {
@@ -857,11 +868,42 @@
     min-width: 0;
     overflow: hidden;
   }
+  [data-lumen-app-shell] {
+    position: relative;
+    z-index: var(--z-base);
+    display: flex;
+    min-width: var(--mobile-app-min-w);
+    min-height: 100svh;
+    width: 100%;
+    flex-direction: column;
+    isolation: isolate;
+    background: var(--bg-0);
+    color: var(--fg-0);
+  }
+  @supports (min-height: 100dvh) {
+    [data-lumen-app-shell] {
+      min-height: 100dvh;
+    }
+  }
   [data-app-scroll] {
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
     scroll-padding-block-end: var(--bottom-overlay-stack, 0px);
+  }
+  .mobile-app-frame {
+    width: 100%;
+    min-width: 0;
+    max-width: var(--mobile-app-max-w);
+    margin-inline: auto;
+  }
+  .mobile-page-gutter {
+    padding-inline:
+      max(var(--mobile-page-gutter), env(safe-area-inset-left, 0px))
+      max(var(--mobile-page-gutter), env(safe-area-inset-right, 0px));
+  }
+  .mobile-bottom-clearance {
+    padding-bottom: var(--mobile-content-bottom);
   }
 
   .mobile-dialog-shell {
@@ -1113,6 +1155,28 @@
       opacity: 1;
     }
   }
+  @media (max-width: 359.98px) {
+    :root {
+      --mobile-page-gutter: var(--mobile-page-gutter-compact);
+    }
+  }
+  @media (orientation: landscape) and (max-height: 520px) and (max-width: 932px) {
+    :root {
+      --mobile-topbar-h: 48px;
+      --mobile-tabbar-h: 48px;
+      --mobile-page-gutter: 12px;
+      --mobile-dialog-margin-top: max(0.5rem, env(safe-area-inset-top, 0px));
+      --mobile-dialog-bottom-gap: max(0.5rem, env(safe-area-inset-bottom, 0px));
+      --mobile-dialog-sheet-max-height: var(--mobile-dialog-max-height);
+    }
+    .mobile-app-frame {
+      max-width: none;
+    }
+    .mobile-dialog-shell {
+      padding-left: max(0.5rem, env(safe-area-inset-left, 0px));
+      padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
+    }
+  }
   @supports not (filter: blur(80px)) {
     .lumen-ambient { filter: none; background: var(--bg-0); opacity: 1; }
   }
@@ -1144,6 +1208,14 @@
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;
+  }
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+  [data-lumen-interactive="true"],
+  [data-lumen-card="true"] {
+    transform: none !important;
+    filter: none !important;
   }
 }
 

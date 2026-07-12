@@ -10,9 +10,11 @@
 
 import { Check, Search, X } from "lucide-react";
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { Spinner } from "@/components/ui/primitives/Spinner";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { usePosterStylesQuery } from "@/lib/queries";
 import {
   POSTER_STYLE_CATEGORY_LABEL,
@@ -45,8 +47,15 @@ export function PosterStyleSelector({
   selectedId,
   onSelect,
 }: PosterStyleSelectorProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [category, setCategory] = useState<PosterStyleCategoryFilter>("all");
   const [search, setSearch] = useState("");
+  useBodyScrollLock(open);
+  const onDialogKeyDown = useModalLayer({
+    open,
+    rootRef: dialogRef,
+    onClose,
+  });
 
   const query = usePosterStylesQuery(
     {
@@ -63,9 +72,12 @@ export function PosterStyleSelector({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="选择风格"
+      tabIndex={-1}
+      onKeyDown={onDialogKeyDown}
       className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -83,7 +95,7 @@ export function PosterStyleSelector({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:h-9 md:w-9"
           >
             <X className="h-4 w-4" />
           </button>
@@ -97,7 +109,7 @@ export function PosterStyleSelector({
                 value={search}
                 onChange={(event) => setSearch(event.target.value.slice(0, 60))}
                 placeholder="搜索风格标题 / 标签"
-                className="h-9 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[13px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                className="h-11 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-9 md:text-[13px]"
               />
             </label>
             <div className="scrollbar-none flex max-w-full gap-1 overflow-x-auto">
@@ -107,7 +119,7 @@ export function PosterStyleSelector({
                   type="button"
                   onClick={() => setCategory(cat)}
                   className={cn(
-                    "inline-flex min-h-8 shrink-0 cursor-pointer items-center px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                    "inline-flex min-h-11 shrink-0 cursor-pointer items-center px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-8",
                     category === cat
                       ? "border-b border-[var(--amber-400)] text-[var(--amber-300)]"
                       : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
@@ -138,7 +150,7 @@ export function PosterStyleSelector({
               </p>
             </div>
           ) : (
-            <ul className="grid grid-cols-2 gap-x-4 gap-y-6 md:grid-cols-3 xl:grid-cols-4">
+            <ul className="grid grid-cols-1 gap-x-4 gap-y-6 min-[390px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
               {items.map((style) => (
                 <StyleCard
                   key={style.id}

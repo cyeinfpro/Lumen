@@ -87,8 +87,8 @@ export function MobileToastViewport() {
       aria-atomic="true"
       className="pointer-events-none fixed inset-x-0 flex flex-col items-center gap-2 px-4"
       style={{
-        // 56px = 底部导航栏高度；56px = 迷你播放器高度（MiniPlayer）；16px = 间距
-        bottom: "calc(56px + 56px + 16px + env(safe-area-inset-bottom, 0px))",
+        // mobile-tabbar-height 已包含 safe-area；其余高度统一由 globals.css 管理。
+        bottom: "var(--mobile-toast-bottom-offset)",
         zIndex: "var(--z-toast, 100)" as unknown as number,
       }}
     >

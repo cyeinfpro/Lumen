@@ -247,7 +247,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group inline-flex min-h-9 cursor-pointer items-center gap-1.5 border-b py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
+        "group inline-flex min-h-11 cursor-pointer items-center gap-1.5 border-b py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors sm:min-h-9",
         active
           ? "border-[var(--border-amber)] text-[var(--amber-300)]"
           : "border-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)]",

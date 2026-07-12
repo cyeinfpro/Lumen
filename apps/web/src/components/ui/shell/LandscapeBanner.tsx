@@ -32,10 +32,10 @@ export function LandscapeBanner() {
   return (
     <div
       role="status"
-      className="safe-x-page sticky left-0 right-0 top-0 flex items-center gap-2 bg-[var(--bg-1)]/92 py-1.5 type-caption text-[var(--fg-1)] backdrop-blur-xl border-b border-[var(--border-subtle)]"
+      className="safe-x-page sticky left-0 right-0 top-0 flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/92 py-1.5 type-caption text-[var(--fg-1)] backdrop-blur-xl"
       style={{ zIndex: "var(--z-header, 10)" as unknown as number }}
     >
-      <span className="flex-1 truncate">竖屏更好用</span>
+      <span className="min-w-0 flex-1">横屏空间较窄，竖屏操作更顺手</span>
       <IconButton
         size="sm"
         aria-label="关闭提示"
@@ -47,7 +47,7 @@ export function LandscapeBanner() {
           }
           setShow(false);
         }}
-        className="-mr-1 rounded-full"
+        className="-mr-1 min-h-11 min-w-11 rounded-full"
       >
         <X className="w-3.5 h-3.5" />
       </IconButton>

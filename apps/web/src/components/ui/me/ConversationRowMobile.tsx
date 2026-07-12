@@ -60,6 +60,18 @@ function relativeTime(iso: string): string {
   }
 }
 
+function ConversationTypeIcon({
+  isImageConversation,
+}: {
+  isImageConversation: boolean;
+}) {
+  return isImageConversation ? (
+    <Camera className="w-[18px] h-[18px]" strokeWidth={1.8} />
+  ) : (
+    <MessageSquare className="w-[18px] h-[18px]" strokeWidth={1.8} />
+  );
+}
+
 export function ConversationRowMobile({
   conv,
   active,
@@ -98,8 +110,6 @@ export function ConversationRowMobile({
     if (!next || next === titleOf(conv)) return;
     onRename(next);
   };
-
-  const Icon = isImageConv ? Camera : MessageSquare;
 
   return (
     <>
@@ -164,13 +174,13 @@ export function ConversationRowMobile({
                   : "bg-[var(--bg-2)] text-[var(--fg-2)]",
               )}
             >
-              <Icon className="w-[18px] h-[18px]" strokeWidth={1.8} />
+              <ConversationTypeIcon isImageConversation={isImageConv} />
             </span>
 
             <span className="flex-1 min-w-0 flex flex-col gap-1">
               <span
                 className={cn(
-                  "truncate text-[15px] leading-tight",
+                  "line-clamp-2 break-words text-[15px] leading-snug",
                   active
                     ? "font-semibold text-[var(--fg-0)]"
                     : "font-medium text-[var(--fg-0)]",
@@ -253,6 +263,7 @@ export function ConversationRowMobile({
           </h3>
           <input
             autoFocus
+            name="conversation-title"
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onKeyDown={(e) => {
@@ -264,6 +275,8 @@ export function ConversationRowMobile({
               }
             }}
             placeholder="输入新标题"
+            autoComplete="off"
+            enterKeyHint="done"
             className={cn(
               "w-full h-11 px-3 rounded-[var(--radius-control)] text-[15px]",
               "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
@@ -271,7 +284,7 @@ export function ConversationRowMobile({
               "outline-none focus:border-[var(--amber-400)]/60",
             )}
           />
-          <div className="mt-4 flex gap-2">
+          <div className="mt-4 flex gap-2 pb-[max(0px,env(safe-area-inset-bottom,0px))]">
             <Button
               type="button"
               size="lg"

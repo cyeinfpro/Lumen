@@ -220,7 +220,7 @@ function HistoryLoadControl({
             variant="outline"
             loading={loading}
             onClick={onRetry}
-            className="h-7 shrink-0 px-2 text-xs"
+            className="min-h-11 shrink-0 px-3 text-xs"
           >
             重试
           </Button>
@@ -232,7 +232,7 @@ function HistoryLoadControl({
           loading={loading}
           onClick={onLoadMore}
           disabled={!hasMore && !loading}
-          className="h-7 text-xs text-[var(--fg-2)]"
+          className="min-h-11 text-xs text-[var(--fg-2)]"
         >
           {loading ? "正在加载" : "加载更早消息"}
         </Button>
@@ -491,13 +491,16 @@ function JumpToLatestButton({
   if (!visible) return null;
 
   return (
-    <div className="fixed left-1/2 bottom-[calc(var(--mobile-composer-bottom,54px)+var(--mobile-composer-height,48px)+12px)] z-30 -translate-x-1/2">
+    <div
+      className="fixed left-1/2 z-30 -translate-x-1/2"
+      style={{ bottom: "calc(var(--bottom-overlay-stack, 120px) + 4px)" }}
+    >
       <Button
         size="sm"
         variant="secondary"
         leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
         onClick={onClick}
-        className="h-8 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 text-xs shadow-lg backdrop-blur-xl"
+        className="min-h-11 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 text-xs shadow-[var(--shadow-2)] backdrop-blur-xl"
       >
         最新
       </Button>
@@ -570,9 +573,9 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
             type="button"
             onClick={copy}
             aria-label="复制"
-            className="mt-1 p-1.5 rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
+            className="mt-0.5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.96] active:bg-[var(--bg-2)] transition-[background-color,color,transform] motion-reduce:transition-none shrink-0"
           >
-            {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" /> : <Copy className="w-3.5 h-3.5" />}
+            {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
         </div>
       )}
@@ -593,6 +596,10 @@ interface AssistantTurnProps {
     assistantId: string,
     intent?: Exclude<Intent, "auto">,
   ) => void | Promise<void>;
+}
+
+function isChatLikeAssistantMessage(msg: AssistantMessage): boolean {
+  return msg.intent_resolved === "chat" || msg.intent_resolved === "vision_qa";
 }
 
 const AssistantTurn = memo(function AssistantTurn({
@@ -616,8 +623,7 @@ const AssistantTurn = memo(function AssistantTurn({
     .map((id) => generations[id])
     .filter((g): g is Generation => Boolean(g));
   const isStreaming = msg.status === "streaming";
-  const isChatLike =
-    msg.intent_resolved === "chat" || msg.intent_resolved === "vision_qa";
+  const isChatLike = isChatLikeAssistantMessage(msg);
   const isFailedText = msg.status === "failed" && isChatLike;
   const canCopy = Boolean(msg.text && msg.status !== "pending");
 
@@ -643,7 +649,7 @@ const AssistantTurn = memo(function AssistantTurn({
             {isStreaming && (
               <span
                 aria-hidden
-                className="inline-block w-[0.5ch] ml-0.5 animate-pulse text-[var(--amber-400)]"
+                className="ml-0.5 inline-block w-[0.5ch] animate-pulse text-[var(--amber-400)] motion-reduce:animate-none"
               >
                 ▍
               </span>
@@ -654,9 +660,9 @@ const AssistantTurn = memo(function AssistantTurn({
               type="button"
               onClick={copy}
               aria-label="复制"
-              className="mt-1 p-1.5 rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
+              className="mt-0.5 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-3)] transition-[background-color,color,transform] hover:text-[var(--fg-1)] active:scale-[0.96] active:bg-[var(--bg-2)] motion-reduce:transition-none"
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           )}
         </div>
@@ -668,9 +674,9 @@ const AssistantTurn = memo(function AssistantTurn({
           type="button"
           onClick={() => onRetryText(msg.id)}
           className={cn(
-            "self-start inline-flex items-center gap-1 px-3 h-7 rounded-full",
+            "self-start inline-flex min-h-11 items-center gap-1 px-3 rounded-full",
             "bg-[var(--bg-2)] border border-[var(--border)] text-[12px] text-[var(--fg-0)]",
-            "active:scale-[0.97] transition-transform",
+            "active:scale-[0.97] transition-transform motion-reduce:transition-none",
           )}
           aria-label="重试"
         >
@@ -686,10 +692,10 @@ const AssistantTurn = memo(function AssistantTurn({
             type="button"
             onClick={() => onRegenerate(msg.id, "text_to_image")}
             className={cn(
-              "inline-flex items-center gap-1 px-3 h-7 rounded-full",
+              "inline-flex min-h-11 items-center gap-1 px-3 rounded-full",
               "border border-[var(--border-subtle)] bg-[var(--bg-1)]",
               "text-[12px] text-[var(--fg-2)]",
-              "active:scale-[0.97] active:bg-[var(--bg-2)] transition-all",
+              "active:scale-[0.97] active:bg-[var(--bg-2)] transition-[background-color,transform] motion-reduce:transition-none",
             )}
           >
             <RotateCcw className="w-3 h-3" aria-hidden />
@@ -841,7 +847,7 @@ const FinalImage = memo(function FinalImage({
         {!loaded && (
           <span
             aria-hidden
-            className="absolute inset-0 bg-[var(--bg-2)] animate-pulse"
+            className="absolute inset-0 bg-[var(--bg-2)] animate-pulse motion-reduce:animate-none"
           />
         )}
         <ViewportImage
@@ -853,7 +859,7 @@ const FinalImage = memo(function FinalImage({
           fetchPriority="low"
           onLoad={() => setLoaded(true)}
           className={cn(
-            "w-full h-full transition-opacity duration-300",
+            "w-full h-full transition-opacity duration-300 motion-reduce:transition-none",
             isLongImage ? "object-contain" : "object-cover",
             loaded ? "opacity-100" : "opacity-0",
           )}
@@ -869,8 +875,8 @@ const FinalImage = memo(function FinalImage({
           type="button"
           onClick={handleCopy}
           className={cn(
-            "text-left text-[10px] tabular-nums text-[var(--fg-3)] truncate flex-1 min-w-0",
-            "hover:text-[var(--fg-1)] transition-colors active:opacity-70",
+            "flex min-h-11 min-w-0 flex-1 items-center text-left text-[10px] tabular-nums text-[var(--fg-3)]",
+            "truncate transition-colors hover:text-[var(--fg-1)] active:opacity-70 motion-reduce:transition-none",
           )}
           style={{ fontFamily: "var(--font-mono)" }}
           aria-label="复制 prompt"
@@ -882,10 +888,10 @@ const FinalImage = memo(function FinalImage({
           type="button"
           onClick={() => onEditImage(image.id)}
           className={cn(
-            "shrink-0 inline-flex items-center gap-1 h-6 px-2 rounded-full",
+            "shrink-0 inline-flex min-h-11 items-center gap-1 px-2 rounded-full",
             "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
             "text-[10px] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
-            "active:scale-[0.95] transition-all",
+            "active:scale-[0.95] transition-[background-color,color,transform] motion-reduce:transition-none",
           )}
           aria-label="用作参考图"
         >

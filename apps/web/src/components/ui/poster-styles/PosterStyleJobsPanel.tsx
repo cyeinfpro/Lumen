@@ -73,7 +73,7 @@ export function PosterStyleJobsPanel({ onOpenItem }: PosterStyleJobsPanelProps) 
               onClick={() => jobs.refetch()}
               disabled={jobs.isFetching}
               className={cn(
-                "inline-flex min-h-10 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
+                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
@@ -256,7 +256,7 @@ function JobCard({
           <button
             type="button"
             onClick={() => onOpenItem(job.saved_item_id!)}
-            className="inline-flex h-8 items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)]"
+            className="inline-flex min-h-11 items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] md:h-8 md:min-h-0"
           >
             查看入库
             <ArrowRight className="h-3 w-3" />
@@ -265,7 +265,7 @@ function JobCard({
       </header>
 
       {job.error_message ? (
-        <p className="max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]">
+        <p role="alert" className="max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]">
           {job.error_message}
         </p>
       ) : null}

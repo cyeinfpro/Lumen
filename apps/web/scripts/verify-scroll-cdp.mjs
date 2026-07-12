@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
-const HOST = "http://[::1]:9222";
+const HOST = process.env.CDP_HOST ?? "http://127.0.0.1:9222";
 const BASE = "http://localhost:3000";
+const CDP_TIMEOUT_MS = 15_000;
+const CDP_CLOSE_TIMEOUT_MS = 3_000;
 
 const pages = [
   "/",
@@ -35,19 +37,102 @@ async function json(url, init) {
 
 function send(ws, method, params = {}) {
   const id = ++send.id;
-  ws.send(JSON.stringify({ id, method, params }));
   return new Promise((resolve, reject) => {
-    const onMessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id !== id) return;
+    const cleanup = () => {
+      clearTimeout(timeout);
       ws.removeEventListener("message", onMessage);
-      if (msg.error) reject(new Error(`${method}: ${msg.error.message}`));
-      else resolve(msg.result);
+      ws.removeEventListener("close", onClose);
+      ws.removeEventListener("error", onError);
     };
+    const finish = (callback, value) => {
+      cleanup();
+      callback(value);
+    };
+    const onMessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (error) {
+        finish(reject, error);
+        return;
+      }
+      if (msg.id !== id) return;
+      if (msg.error) {
+        finish(reject, new Error(`${method}: ${msg.error.message}`));
+      } else {
+        finish(resolve, msg.result);
+      }
+    };
+    const onClose = () =>
+      finish(reject, new Error(`${method}: CDP socket closed`));
+    const onError = () =>
+      finish(reject, new Error(`${method}: CDP socket error`));
+    const timeout = setTimeout(
+      () => finish(reject, new Error(`${method}: timed out`)),
+      CDP_TIMEOUT_MS,
+    );
     ws.addEventListener("message", onMessage);
+    ws.addEventListener("close", onClose, { once: true });
+    ws.addEventListener("error", onError, { once: true });
+    try {
+      ws.send(JSON.stringify({ id, method, params }));
+    } catch (error) {
+      finish(reject, error);
+    }
   });
 }
 send.id = 0;
+
+async function waitForSocketOpen(ws) {
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("close", onClose);
+      ws.removeEventListener("error", onError);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("CDP socket closed before opening"));
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("CDP socket failed to open"));
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("CDP socket open timed out"));
+    }, CDP_TIMEOUT_MS);
+    ws.addEventListener("open", onOpen, { once: true });
+    ws.addEventListener("close", onClose, { once: true });
+    ws.addEventListener("error", onError, { once: true });
+  });
+}
+
+async function closeCdpSession(tab, ws) {
+  if (tab?.id) {
+    await fetch(`${HOST}/json/close/${encodeURIComponent(tab.id)}`, {
+      signal: AbortSignal.timeout(CDP_CLOSE_TIMEOUT_MS),
+    }).catch((error) => {
+      console.warn(`Failed to close CDP target ${tab.id}: ${error}`);
+    });
+  }
+  if (
+    ws &&
+    (ws.readyState === WebSocket.CONNECTING ||
+      ws.readyState === WebSocket.OPEN)
+  ) {
+    try {
+      ws.close();
+    } catch (error) {
+      console.warn(`Failed to close CDP socket: ${error}`);
+    }
+  }
+}
 
 async function waitForLoad(ws) {
   for (let i = 0; i < 60; i += 1) {
@@ -120,38 +205,40 @@ async function runCase(ws, viewport, path) {
 }
 
 async function main() {
-  const tab = await json(`${HOST}/json/new?${encodeURIComponent(`${BASE}/`)}`, {
-    method: "PUT",
-  });
-  const ws = new WebSocket(tab.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
-    ws.addEventListener("error", reject, { once: true });
-  });
-  await send(ws, "Page.enable");
-  await send(ws, "Runtime.enable");
-
-  const results = [];
-  for (const viewport of viewports) {
-    for (const path of pages) {
-      results.push(await runCase(ws, viewport, path));
-    }
-  }
-  ws.close();
-  await fetch(`${HOST}/json/close/${tab.id}`).catch(() => {});
-
-  let failed = false;
-  for (const result of results) {
-    const ok = result.changed || result.scrollableCount === 0;
-    if (!ok) failed = true;
-    console.log(
-      `${ok ? "✓" : "✗"} ${result.viewport} ${result.path} scrollables=${result.scrollableCount} changed=${result.changed} maxDelta=${result.maxDelta}`,
+  let tab;
+  let ws;
+  try {
+    tab = await json(
+      `${HOST}/json/new?${encodeURIComponent(`${BASE}/`)}`,
+      { method: "PUT" },
     );
+    ws = new WebSocket(tab.webSocketDebuggerUrl);
+    await waitForSocketOpen(ws);
+    await send(ws, "Page.enable");
+    await send(ws, "Runtime.enable");
+
+    const results = [];
+    for (const viewport of viewports) {
+      for (const path of pages) {
+        results.push(await runCase(ws, viewport, path));
+      }
+    }
+
+    let failed = false;
+    for (const result of results) {
+      const ok = result.changed || result.scrollableCount === 0;
+      if (!ok) failed = true;
+      console.log(
+        `${ok ? "✓" : "✗"} ${result.viewport} ${result.path} scrollables=${result.scrollableCount} changed=${result.changed} maxDelta=${result.maxDelta}`,
+      );
+    }
+    if (failed) throw new Error("scroll verification failed");
+  } finally {
+    await closeCdpSession(tab, ws);
   }
-  if (failed) process.exit(1);
 }
 
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
 });

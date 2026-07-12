@@ -2,28 +2,28 @@ export default function ShareLoading() {
   return (
     <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)] text-[var(--fg-0)]">
       <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
-        <div className="safe-x-page-wide mx-auto flex h-14 max-w-6xl items-center justify-between">
+        <div className="safe-x-page-wide mx-auto flex min-h-14 max-w-6xl items-center justify-between">
           <div className="h-6 w-28 animate-pulse rounded bg-white/5" />
-          <div className="h-9 w-28 animate-pulse rounded-full bg-white/5" />
+          <div className="h-11 w-28 animate-pulse rounded-full bg-white/5" />
         </div>
       </header>
-      <main className="safe-x-page-wide flex flex-1 flex-col items-center justify-start py-6 md:py-10">
-        <div className="mx-auto flex w-full max-w-[min(94vw,1320px)] flex-col gap-5 md:gap-7">
+      <main className="safe-x-page-wide flex flex-1 flex-col items-center justify-start py-4 min-[390px]:py-5 md:py-10">
+        <div className="mx-auto flex w-full max-w-[1320px] flex-col gap-4 md:gap-7">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
             <div className="space-y-2">
               <div className="h-7 w-32 animate-lumen-shimmer rounded-full bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
               <div className="h-4 w-64 max-w-full animate-lumen-shimmer rounded bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
             </div>
             <div className="flex flex-wrap gap-2 md:justify-end">
-              <div className="h-10 w-36 animate-lumen-shimmer rounded-[var(--radius-card)] border border-[var(--border)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
-              <div className="h-10 w-24 animate-lumen-shimmer rounded-[var(--radius-card)] border border-[var(--border)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
+              <div className="h-11 w-36 animate-lumen-shimmer rounded-[var(--radius-card)] border border-[var(--border)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
+              <div className="h-11 w-24 animate-lumen-shimmer rounded-[var(--radius-card)] border border-[var(--border)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
             </div>
           </div>
-          <div className="columns-2 gap-2 sm:columns-3 md:columns-4 md:gap-3 xl:columns-5">
+          <div className="columns-2 gap-1.5 min-[390px]:gap-2 sm:columns-3 md:columns-4 md:gap-3 xl:columns-5">
             {Array.from({ length: 14 }).map((_, index) => (
               <div
                 key={index}
-                className="mb-2 break-inside-avoid overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] md:mb-3"
+                className="mb-1.5 break-inside-avoid overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] min-[390px]:mb-2 md:mb-3"
               >
                 <div
                   className="animate-lumen-shimmer bg-[linear-gradient(110deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]"

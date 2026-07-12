@@ -13,6 +13,7 @@ import {
 import {
   memo,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -41,6 +42,15 @@ export interface GenerationTileProps {
 
 const LONG_PRESS_MS = 420;
 const TAP_FEEDBACK_MS = 180;
+const PRESS_MOVE_SLOP_PX = 10;
+
+function isTileActivationKey(key: string): boolean {
+  return key === "Enter" || key === " ";
+}
+
+function imageSourceFailed(sourceCount: number, sourceIndex: number): boolean {
+  return sourceCount === 0 || sourceIndex >= sourceCount;
+}
 
 function formatAge(iso: string): string {
   try {
@@ -152,6 +162,12 @@ function GenerationTileComponent({
   const [imageLoaded, setImageLoaded] = useState(false);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressStart = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const suppressNextClick = useRef(false);
   const longPressed = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
@@ -161,7 +177,7 @@ function GenerationTileComponent({
   const age = useMemo(() => formatAge(item.created_at), [item.created_at]);
   const imageSources = useMemo(() => imageSourcesFor(item), [item]);
   const imageSrc = imageSources[sourceIndex] ?? null;
-  const imageFailed = imageSources.length === 0 || sourceIndex >= imageSources.length;
+  const imageFailed = imageSourceFailed(imageSources.length, sourceIndex);
   const imageSrcSet = useMemo(() => imageSrcSetFor(item), [item]);
   const lightboxPreview = useMemo(
     () =>
@@ -183,10 +199,17 @@ function GenerationTileComponent({
   }, []);
 
   const onPointerDown = useCallback(
-    () => {
+    (event: ReactPointerEvent<HTMLDivElement>) => {
       if (selectionMode) return;
+      if (!event.isPrimary || event.button !== 0) return;
       prewarmImages(lightboxPrewarmSources, 2);
       longPressed.current = false;
+      suppressNextClick.current = false;
+      pressStart.current = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+      };
       if (pressTimer.current) clearTimeout(pressTimer.current);
       pressTimer.current = setTimeout(() => {
         longPressed.current = true;
@@ -211,9 +234,29 @@ function GenerationTileComponent({
       clearTimeout(pressTimer.current);
       pressTimer.current = null;
     }
+    pressStart.current = null;
   }, []);
+  const onPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const start = pressStart.current;
+      if (!start || start.pointerId !== event.pointerId) return;
+      if (
+        Math.hypot(event.clientX - start.x, event.clientY - start.y) <=
+        PRESS_MOVE_SLOP_PX
+      ) {
+        return;
+      }
+      suppressNextClick.current = true;
+      clearPress();
+    },
+    [clearPress],
+  );
 
   const onClick = useCallback(() => {
+    if (suppressNextClick.current) {
+      suppressNextClick.current = false;
+      return;
+    }
     if (longPressed.current) {
       longPressed.current = false;
       return;
@@ -241,7 +284,7 @@ function GenerationTileComponent({
   ]);
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Enter" && e.key !== " ") return;
+    if (!isTileActivationKey(e.key)) return;
     e.preventDefault();
     onClick();
   }, [onClick]);
@@ -291,6 +334,7 @@ function GenerationTileComponent({
   const onLocate = useCallback(() => {
     router.push(`/?scrollTo=${encodeURIComponent(item.message_id)}`);
   }, [router, item.message_id]);
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
 
   const w = Math.max(1, item.image.width || 1);
   const h = Math.max(1, item.image.height || 1);
@@ -317,6 +361,7 @@ function GenerationTileComponent({
           role="button"
           tabIndex={0}
           onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
           onPointerEnter={onPreviewIntent}
           onPointerUp={clearPress}
           onPointerLeave={clearPress}
@@ -370,7 +415,7 @@ function GenerationTileComponent({
                     setSourceIndex(0);
                     setImageLoaded(false);
                   }}
-                  className="mt-1 inline-flex h-7 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                  className="mt-1 inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] md:min-h-8"
                 >
                   <RotateCcw className="h-3 w-3" />
                   重试
@@ -386,7 +431,7 @@ function GenerationTileComponent({
             {selectionMode && (
               <span
                 className={cn(
-                  "absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border backdrop-blur-md transition-colors",
+                  "absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-md transition-colors md:h-8 md:w-8",
                   selected
                     ? "border-[rgba(242,169,58,0.55)] bg-[var(--amber-400)] text-black"
                     : "border-white/20 bg-black/45 text-white/80",
@@ -460,7 +505,7 @@ function GenerationTileComponent({
 
       <ActionSheet
         open={sheetOpen}
-        onClose={() => setSheetOpen(false)}
+        onClose={closeSheet}
         actions={[
           {
             key: "ref",
@@ -509,7 +554,7 @@ function TileAction({
       aria-label={label}
       title={label}
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className="pointer-events-auto inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none"
+      className="pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9"
     >
       {children}
     </button>

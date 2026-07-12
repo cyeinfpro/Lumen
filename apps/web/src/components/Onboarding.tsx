@@ -62,7 +62,7 @@ export function Onboarding({
 }) {
   return (
     <motion.div
-      className="relative flex min-h-[calc(100dvh-13rem)] w-full flex-col items-center justify-center px-3 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-6 text-center sm:px-4 md:pb-16 md:pt-10"
+      className="relative flex min-h-[calc(100dvh-13rem)] w-full flex-col items-center justify-start overflow-y-auto overscroll-contain px-3 pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-6 text-center sm:px-4 md:justify-center md:pb-16 md:pt-10"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: "easeOut" }}
@@ -146,7 +146,7 @@ export function Onboarding({
           aria-live="polite"
           className="absolute inset-0 flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-0)]/50 backdrop-blur-[2px]"
         >
-          <span className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/5 px-3 py-1.5 text-sm text-[var(--fg-1)]">
+          <span className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/88 px-3 py-1.5 text-sm text-[var(--fg-1)] shadow-[var(--shadow-2)]">
             <Sparkles className="h-4 w-4 animate-spin text-[var(--accent)]" />
             处理中…
           </span>

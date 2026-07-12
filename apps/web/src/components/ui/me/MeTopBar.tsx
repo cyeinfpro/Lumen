@@ -50,6 +50,7 @@ export function MeTopBar({
             <Search className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
             <input
               ref={inputRef}
+              name="conversation-search"
               value={query}
               onChange={(e) => onQueryChange(e.target.value)}
               onKeyDown={(e) => {
@@ -60,6 +61,8 @@ export function MeTopBar({
               }}
               placeholder="搜索会话"
               aria-label="搜索会话"
+              autoComplete="off"
+              enterKeyHint="search"
               className={cn(
                 "flex-1 bg-transparent text-[14px] text-[var(--fg-0)]",
                 "placeholder:text-[var(--fg-2)] outline-none",

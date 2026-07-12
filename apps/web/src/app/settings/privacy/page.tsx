@@ -64,7 +64,7 @@ export default function PrivacyPage() {
         initial={false}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2, ease: "easeOut" }}
-        className="space-y-8"
+        className="space-y-6 pb-4 sm:space-y-8"
       >
         <header className="hidden items-start justify-between gap-4 flex-wrap md:flex">
           <div>
@@ -111,7 +111,7 @@ function SectionHeader({
       >
         {title}
       </h2>
-      <div className="flex-1 h-px bg-white/8" />
+      <div className="h-px flex-1 bg-[var(--border-subtle)]" />
       {description && (
         <p className="type-caption text-[var(--fg-2)]">{description}</p>
       )}
@@ -165,7 +165,7 @@ function ExportSection() {
       <SectionHeader title="导出我的数据" />
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-start gap-3 flex-1 min-w-[200px]">
-          <div className="shrink-0 w-9 h-9 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] flex items-center justify-center text-[var(--fg-1)]">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
             <Download className="w-4 h-4" />
           </div>
           <div>
@@ -188,7 +188,8 @@ function ExportSection() {
                 <motion.p
                   initial={{ opacity: 0, y: -2 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="flex items-center gap-1.5 type-caption text-danger mt-2"
+                  role="alert"
+                  className="mt-2 flex items-center gap-1.5 type-caption text-danger"
                 >
                   <AlertCircle className="w-3.5 h-3.5" /> {error}
                 </motion.p>
@@ -278,7 +279,7 @@ function SessionsSection() {
             {copy.state.empty}
           </div>
         ) : (
-          <ul className="divide-y divide-white/5">
+          <ul className="divide-y divide-[var(--border-subtle)]">
             {items.map((s, i) => (
               <SessionRow
                 key={s.id}
@@ -295,7 +296,7 @@ function SessionsSection() {
         )}
       </div>
       {revokeError && (
-        <p className="flex items-center gap-1.5 type-body-sm text-[var(--danger-fg)]">
+        <p role="alert" className="flex items-center gap-1.5 type-body-sm text-[var(--danger-fg)]">
           <AlertCircle className="w-4 h-4" /> {revokeError}
         </p>
       )}
@@ -327,10 +328,10 @@ function SessionRow({
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, delay: Math.min(i * 0.03, 0.2) }}
-      className="px-5 py-4 flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4 hover:bg-white/[0.02] transition-colors"
+      className="flex flex-col gap-3 px-4 py-4 transition-colors hover:bg-[var(--bg-2)]/50 sm:px-5 md:flex-row md:items-start md:justify-between md:gap-4"
     >
       <div className="min-w-0 flex-1 flex items-start gap-3">
-        <div className="shrink-0 w-8 h-8 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] flex items-center justify-center text-[var(--fg-2)]">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]">
           <Monitor className="w-4 h-4" />
         </div>
         <div className="min-w-0">
@@ -456,7 +457,7 @@ function DangerSection({
       <SectionHeader title="危险区" tone="danger" />
       <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="shrink-0 w-9 h-9 rounded-[var(--radius-control)] bg-danger-soft border border-danger-border text-danger flex items-center justify-center">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-danger-border bg-danger-soft text-danger">
             <AlertTriangle className="w-4 h-4" />
           </div>
           <div>
@@ -490,7 +491,7 @@ function DangerSection({
             placeholder={email ?? (loading ? copy.state.loading : "未登录")}
             disabled={!email || del.isPending}
             autoComplete="off"
-            className="w-full h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-1)]/72 border border-[var(--border)] text-sm focus:outline-none focus:border-danger-border focus:ring-2 focus:ring-[var(--danger)]/20 placeholder:text-[var(--fg-2)] disabled:opacity-50 transition-colors"
+            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-danger-border focus:outline-none focus:ring-2 focus:ring-[var(--danger)]/20 disabled:opacity-50 md:h-9 md:text-sm"
           />
           {confirmEmail && !matches && (
             <p className="type-caption text-[var(--fg-2)] mt-1.5">
@@ -500,7 +501,7 @@ function DangerSection({
         </div>
 
         {error && (
-          <div className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)] flex items-start gap-2">
+          <div role="alert" className="flex items-start gap-2 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)]">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             {error}
           </div>

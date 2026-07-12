@@ -89,9 +89,15 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
             | undefined;
           const reduceMotion = Boolean(conditions?.reduceMotion);
           if (reduceMotion) {
+            const pageItems = collectMotionItems(page, PAGE_ITEM_SELECTOR, 18);
             gsap.set(page, {
               autoAlpha: 1,
               clearProps: "opacity,visibility",
+            });
+            gsap.set(pageItems, {
+              autoAlpha: 1,
+              y: 0,
+              clearProps: "transform,opacity,visibility",
             });
             return;
           }
@@ -150,7 +156,15 @@ export function GlobalGsapMotion({ children }: { children: ReactNode }) {
         const conditions = context.conditions as
           | { pointerFine?: boolean; reduceMotion?: boolean }
           | undefined;
-        if (!conditions?.pointerFine || conditions.reduceMotion) return;
+        if (conditions?.reduceMotion) {
+          gsap.killTweensOf(root.querySelectorAll(CARD_SELECTOR));
+          gsap.set(root.querySelectorAll(CARD_SELECTOR), {
+            y: 0,
+            clearProps: "transform",
+          });
+          return;
+        }
+        if (!conditions?.pointerFine) return;
 
         const onPointerOver = (event: PointerEvent) => {
           const el = closestMotionTarget(event, root);

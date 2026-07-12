@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useDeferredValue, useMemo, useState } from "react";
+import { use, useDeferredValue, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -16,6 +16,20 @@ import {
 
 import { ApiError, apiFetch } from "@/lib/apiClient";
 import { errorToText } from "@/lib/errors";
+
+function canSubmitResetPassword({
+  submitting,
+  token,
+  passwordTooShort,
+  passwordsMatch,
+}: {
+  submitting: boolean;
+  token: string;
+  passwordTooShort: boolean;
+  passwordsMatch: boolean;
+}): boolean {
+  return !submitting && token.length > 0 && !passwordTooShort && passwordsMatch;
+}
 
 export default function ResetPasswordConfirmPage({
   params,
@@ -33,6 +47,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submitGuardRef = useRef(false);
 
   const deferredPassword = useDeferredValue(password);
   const strength = useMemo(
@@ -41,8 +56,12 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   );
   const passwordTooShort = password.length < 8;
   const confirmMismatch = confirm.length > 0 && confirm !== password;
-  const canSubmit =
-    !submitting && token.length > 0 && !passwordTooShort && confirm === password;
+  const canSubmit = canSubmitResetPassword({
+    submitting,
+    token,
+    passwordTooShort,
+    passwordsMatch: confirm === password,
+  });
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -56,12 +75,16 @@ function ResetPasswordConfirm({ token }: { token: string }) {
       return;
     }
 
+    if (submitGuardRef.current) return;
+    submitGuardRef.current = true;
     setSubmitting(true);
     try {
       await apiFetch<{ ok: boolean }>("/auth/password/reset-confirm", {
         method: "POST",
         body: JSON.stringify({ token, new_password: password }),
       });
+      setPassword("");
+      setConfirm("");
       setDone(true);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -78,13 +101,14 @@ function ResetPasswordConfirm({ token }: { token: string }) {
         setError(errorToText(err));
       }
     } finally {
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
 
   return (
-    <main className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <section className="safe-x-page flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain py-8 md:items-center">
+    <main className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <section className="safe-x-page flex flex-1 items-start justify-center overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-12">
         <div className="w-full max-w-md space-y-6">
           <header className="space-y-2">
             <Link
@@ -118,6 +142,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               </div>
               <Link
                 href="/login"
+                replace
                 className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] sm:h-10"
               >
                 去登录 <ArrowRight className="h-4 w-4" />
@@ -129,20 +154,24 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                 <div className="relative">
                   <input
                     id="reset-password"
+                    name="password"
                     type={showPwd ? "text" : "password"}
                     required
+                    disabled={submitting}
                     minLength={8}
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder="至少 8 位"
                     autoComplete="new-password"
-                    className="h-10 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-11 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                    enterKeyHint="next"
+                    className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPwd((value) => !value)}
+                    disabled={submitting}
                     aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:h-8 md:w-8"
+                    className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
                   >
                     {showPwd ? (
                       <EyeOff className="h-4 w-4" />
@@ -171,15 +200,18 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               >
                 <input
                   id="reset-confirm"
+                  name="password-confirmation"
                   type={showPwd ? "text" : "password"}
                   required
+                  disabled={submitting}
                   minLength={8}
                   value={confirm}
                   onChange={(event) => setConfirm(event.target.value)}
                   placeholder="再输入一次"
                   autoComplete="new-password"
+                  enterKeyHint="done"
                   className={
-                    "h-10 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
+                    "h-11 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
                     (confirmMismatch
                       ? "border-danger-border focus:border-danger focus:ring-danger/20"
                       : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -210,7 +242,8 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               <button
                 type="submit"
                 disabled={!canSubmit}
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50 sm:h-10"
+                aria-busy={submitting}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
               >
                 {submitting ? (
                   <>

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -30,6 +30,7 @@ function ResetPasswordInner() {
   const [submitting, setSubmitting] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const submitGuardRef = useRef(false);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -46,6 +47,8 @@ function ResetPasswordInner() {
       return;
     }
 
+    if (submitGuardRef.current) return;
+    submitGuardRef.current = true;
     setSubmitting(true);
     try {
       await apiFetch<{ ok: boolean }>("/auth/password/reset-request", {
@@ -60,13 +63,14 @@ function ResetPasswordInner() {
         setError(errorToText(err));
       }
     } finally {
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
 
   return (
-    <main className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <section className="safe-x-page flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain py-8 md:items-center">
+    <main className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <section className="safe-x-page flex flex-1 items-start justify-center overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-12">
         <div className="w-full max-w-md space-y-6">
           <header className="space-y-2">
             <Link
@@ -90,13 +94,19 @@ function ResetPasswordInner() {
             <Field id="reset-email" label="邮箱" icon={<Mail className="h-3.5 w-3.5" />}>
               <input
                 id="reset-email"
+                name="email"
                 type="email"
                 required
+                disabled={submitting}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="you@example.com"
                 autoComplete="email"
-                className="h-10 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                enterKeyHint="send"
+                className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
               />
             </Field>
 
@@ -125,7 +135,8 @@ function ResetPasswordInner() {
             <button
               type="submit"
               disabled={submitting}
-              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50 sm:h-10"
+              aria-busy={submitting}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
             >
               {submitting ? (
                 <>

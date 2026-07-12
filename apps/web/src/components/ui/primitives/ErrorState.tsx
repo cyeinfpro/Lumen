@@ -39,7 +39,7 @@ export function ErrorState({
       ref={ref}
       role="alert"
       className={cn(
-        "flex flex-col items-center justify-center px-6 py-10 text-center",
+        "flex min-w-0 flex-col items-center justify-center px-6 py-10 text-center max-sm:px-4 max-sm:py-8",
         "rounded-[var(--radius-card)] border backdrop-blur-sm",
         isWarn
           ? "border-[var(--warning)]/25 bg-[var(--warning-soft)]"
@@ -62,7 +62,7 @@ export function ErrorState({
         {title}
       </h3>
       {description ? (
-        <p className="type-body-sm max-w-sm text-pretty text-[var(--fg-1)]">
+        <p className="type-body-sm max-w-sm text-pretty break-words text-[var(--fg-1)]">
           {description}
         </p>
       ) : null}
@@ -73,7 +73,7 @@ export function ErrorState({
       ) : null}
       {(onRetry || secondaryAction) && (
         // 移动端纵向堆叠避免按钮被挤压；桌面横排 wrap
-        <div className="mt-4 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-center sm:flex-wrap">
+        <div className="mt-4 flex w-full max-w-sm flex-col items-stretch gap-2 sm:w-auto sm:max-w-none sm:flex-row sm:flex-wrap sm:items-center sm:justify-center">
           {onRetry ? (
             <Button
               variant="primary"

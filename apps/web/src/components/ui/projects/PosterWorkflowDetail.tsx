@@ -107,12 +107,12 @@ function PosterConsole({
   }, []);
 
   return (
-    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[232px_minmax(0,1fr)] xl:grid-cols-[232px_minmax(0,1fr)_300px]">
+    <main className="mb-[var(--mobile-tabbar-height)] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[232px_minmax(0,1fr)] xl:grid-cols-[232px_minmax(0,1fr)_300px]">
       <aside className="hidden border-r border-[var(--border)] px-5 py-6 lg:block">
         <PosterStepRail workflow={workflow} />
       </aside>
 
-      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-4 pt-3 md:px-6 md:pb-8 md:pt-3 xl:px-6">
+      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-3 pt-3 min-[390px]:px-4 md:px-6 md:pb-8 md:pt-3 xl:px-6">
         <PosterDetailHeader
           workflow={workflow}
           refreshing={refreshing}
@@ -269,7 +269,7 @@ function PosterDetailHeader({
                 type="submit"
                 aria-label="保存项目名称"
                 disabled={patch.isPending}
-                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] disabled:opacity-50"
+                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] disabled:opacity-50 md:h-8 md:w-8"
               >
                 {patch.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -280,8 +280,11 @@ function PosterDetailHeader({
               <button
                 type="button"
                 aria-label="取消重命名"
-                onClick={() => setEditing(false)}
-                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                onClick={() => {
+                  setTitle(workflowTitle);
+                  setEditing(false);
+                }}
+                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-8 md:w-8"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -330,7 +333,7 @@ function PosterDetailHeader({
           type="button"
           onClick={onOpenDrawer}
           aria-label="查看项目约束 (⌘ .)"
-          className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] xl:hidden"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:min-h-8 xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
           Constraints
@@ -345,7 +348,7 @@ function PosterDetailHeader({
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
             }}
-            className="inline-flex h-8 w-8 cursor-pointer items-center justify-center border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:h-8 md:w-8"
           >
             <MoreHorizontal className="h-4 w-4" />
           </button>
@@ -382,11 +385,12 @@ function PosterDetailHeader({
                   <button
                     type="button"
                     onClick={() => {
+                      setTitle(workflowTitle);
                       setEditing(true);
                       setMenuOpen(false);
                     }}
                     role="menuitem"
-                    className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:min-h-9"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                     重命名
@@ -395,7 +399,7 @@ function PosterDetailHeader({
                     type="button"
                     onClick={() => setConfirmDelete(true)}
                     role="menuitem"
-                    className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
+                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     删除

@@ -21,7 +21,7 @@ interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "
 // 故移动端文字升到 16px；同时 min-h-11 兜底 44px 可点区域。
 const FIELD =
   "h-9 w-full rounded-[var(--radius-control)] px-3 text-sm " +
-  "max-sm:text-base max-sm:min-h-11 " +
+  "max-sm:min-h-11 max-sm:text-base max-sm:leading-6 " +
   "bg-[var(--bg-1)]/60 text-[var(--fg-0)] placeholder:text-[var(--fg-1)]/70 " +
   "border border-[var(--border)] " +
   "transition-[border-color,box-shadow,background-color] duration-150 " +
@@ -57,7 +57,7 @@ export function Input({
       {label ? (
         <label
           htmlFor={inputId}
-          className="text-xs font-medium text-[var(--fg-1)]"
+          className="type-caption font-medium text-[var(--fg-1)]"
         >
           {label}
         </label>

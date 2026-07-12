@@ -16,17 +16,22 @@ import {
   Settings2,
   Trash2,
   WandSparkles,
+  X,
 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import type {
   StoryboardAsset,
   StoryboardRun,
   StoryboardShot,
 } from "@/lib/apiClient";
+import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { toast } from "@/components/ui/primitives/Toast";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useSSE } from "@/lib/useSSE";
 import {
   qk,
@@ -88,6 +93,20 @@ const STAGES: Array<{
 
 const STORYBOARD_SEED_MIN = -1;
 const STORYBOARD_SEED_MAX = 4_294_967_295;
+
+function parseStoryboardStage(value: string | null): StoryboardStage | null {
+  return STAGES.some((stage) => stage.id === value)
+    ? (value as StoryboardStage)
+    : null;
+}
+
+function notifyStoryboardError(action: string) {
+  return (error: Error) => {
+    toast.error(`${action}失败`, {
+      description: error.message || "请稍后重试",
+    });
+  };
+}
 
 function parseStoryboardSeed(value: string): number | null {
   const trimmed = value.trim();
@@ -200,14 +219,45 @@ function defaultStage(run: StoryboardRun): StoryboardStage {
 
 export function StoryboardIndexPage() {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const search = searchParams.toString();
   const query = useStoryboardsQuery({ limit: 60 });
   const createMutation = useCreateStoryboardMutation({
     onSuccess: (run) => router.push(`/projects/storyboard/${run.id}`),
+    onError: notifyStoryboardError("创建分镜项目"),
   });
-  const [dialogOpen, setDialogOpen] = useState(false);
   const [title, setTitle] = useState("短视频分镜项目");
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("");
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const dialogOpen = searchParams.get("new") === "1";
+
+  const setDialogOpen = useCallback(
+    (open: boolean) => {
+      const next = new URLSearchParams(search);
+      if (open) next.set("new", "1");
+      else next.delete("new");
+      const queryString = next.toString();
+      router.replace(`${pathname}${queryString ? `?${queryString}` : ""}`, {
+        scroll: false,
+      });
+    },
+    [pathname, router, search],
+  );
+  const closeDialog = useCallback(() => {
+    if (createMutation.isPending) return;
+    setTitle("短视频分镜项目");
+    setIdea("");
+    setStyle("");
+    setDialogOpen(false);
+  }, [createMutation.isPending, setDialogOpen]);
+  useBodyScrollLock(dialogOpen);
+  const onDialogKeyDown = useModalLayer({
+    open: dialogOpen,
+    rootRef: dialogRef,
+    onClose: closeDialog,
+  });
 
   const submit = () => {
     if (!title.trim() || !idea.trim()) return;
@@ -228,7 +278,7 @@ export function StoryboardIndexPage() {
       <ProjectMobileTopBar title="分镜制作" subtitle="项目列表" />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-4">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-4">
         <div className="mx-auto grid w-full max-w-[1440px] gap-4">
           <div className="flex flex-wrap items-end justify-between gap-3 border-b border-[var(--border)] pb-4">
             <div className="min-w-0">
@@ -247,7 +297,7 @@ export function StoryboardIndexPage() {
             <button
               type="button"
               onClick={() => setDialogOpen(true)}
-              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition hover:shadow-[var(--shadow-amber)]"
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition hover:shadow-[var(--shadow-amber)] sm:min-h-10"
             >
               <Plus className="h-4 w-4" />
               新建项目
@@ -277,7 +327,7 @@ export function StoryboardIndexPage() {
                 <button
                   type="button"
                   onClick={() => setDialogOpen(true)}
-                  className="mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)]"
+                  className="mt-4 inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] sm:min-h-10"
                 >
                   <Plus className="h-4 w-4" />
                   新建项目
@@ -285,7 +335,7 @@ export function StoryboardIndexPage() {
               </div>
             </div>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 min-[390px]:grid-cols-2 md:grid-cols-2 xl:grid-cols-3">
               {(query.data?.items ?? []).map((item) => (
                 <Link
                   key={item.id}
@@ -331,21 +381,38 @@ export function StoryboardIndexPage() {
       <ProjectMobileTabBar />
 
       {dialogOpen ? (
-        <div className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--bg-0)]/70 backdrop-blur-sm sm:items-center sm:p-4">
-          <section className="mobile-dialog-panel w-full max-w-xl rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-panel)] sm:border-b">
+        <div
+          className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--bg-0)]/70 backdrop-blur-sm sm:items-center sm:p-4"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDialog();
+          }}
+        >
+          <section
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="storyboard-create-title"
+            tabIndex={-1}
+            onKeyDown={onDialogKeyDown}
+            className="mobile-dialog-panel w-full max-w-xl rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] focus-visible:outline-none sm:rounded-[var(--radius-panel)] sm:border-b"
+          >
             <div className="border-b border-[var(--border)] p-4">
-              <h2 className="text-base font-semibold">新建分镜项目</h2>
+              <h2 id="storyboard-create-title" className="text-base font-semibold">
+                新建分镜项目
+              </h2>
             </div>
             <div className="mobile-dialog-scroll grid gap-3 p-4">
               <LabeledInput label="项目名" value={title} onChange={setTitle} />
               <LabeledTextarea label="想法" value={idea} onChange={setIdea} rows={5} />
               <LabeledTextarea label="视觉风格" value={style} onChange={setStyle} rows={4} />
             </div>
-            <footer className="mobile-dialog-footer flex justify-end gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/72 p-3">
+            <footer className="mobile-dialog-footer grid grid-cols-1 gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/72 p-3 min-[390px]:flex min-[390px]:justify-end">
               <button
                 type="button"
-                onClick={() => setDialogOpen(false)}
-                className="min-h-10 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
+                onClick={closeDialog}
+                disabled={createMutation.isPending}
+                className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)] min-[390px]:min-h-10"
               >
                 取消
               </button>
@@ -353,7 +420,7 @@ export function StoryboardIndexPage() {
                 type="button"
                 onClick={submit}
                 disabled={!title.trim() || !idea.trim() || createMutation.isPending}
-                className="inline-flex min-h-10 items-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] disabled:opacity-60"
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] disabled:opacity-60 min-[390px]:min-h-10"
               >
                 {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                 创建
@@ -369,7 +436,12 @@ export function StoryboardIndexPage() {
 export function StoryboardDetailPage({ storyboardId }: { storyboardId: string }) {
   const query = useStoryboardQuery(storyboardId);
   const qc = useQueryClient();
-  const [selectedStage, setSelectedStage] = useState<StoryboardStage | null>(null);
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const search = searchParams.toString();
+  const requestedStage = parseStoryboardStage(searchParams.get("stage"));
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useSSE(
     [`storyboard:${storyboardId}`],
@@ -402,6 +474,16 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
   );
 
   const run = query.data;
+  const selectStage = useCallback(
+    (stage: StoryboardStage) => {
+      const current = query.data;
+      if (!current || !isStageUnlocked(current, stage)) return;
+      const next = new URLSearchParams(search);
+      next.set("stage", stage);
+      router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    },
+    [pathname, query.data, router, search],
+  );
 
   if (!run && query.isLoading) {
     return (
@@ -428,44 +510,92 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
     );
   }
 
-  const activeStage = selectedStage ?? defaultStage(run);
+  const activeStage =
+    requestedStage && isStageUnlocked(run, requestedStage)
+      ? requestedStage
+      : defaultStage(run);
 
   return (
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <OnlineBanner />
-      <ProjectMobileTopBar title={run.title} subtitle="分镜工作区" />
+      <ProjectMobileTopBar
+        title={run.title}
+        subtitle="分镜工作区"
+        right={
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="视频参数"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border)] text-[var(--fg-1)]"
+          >
+            <Settings2 className="h-4 w-4" />
+          </button>
+        }
+      />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 md:mb-0 md:grid-cols-[232px_minmax(0,1fr)_320px]">
-        <StageRail run={run} activeStage={activeStage} onSelect={setSelectedStage} />
-        <section className="min-h-0 overflow-y-auto border-x border-[var(--border)] px-4 py-3 md:px-5">
+      <main className="lumen-studio-bg mb-[var(--mobile-tabbar-height)] flex min-h-0 flex-1 flex-col md:mb-0 md:grid md:grid-cols-[232px_minmax(0,1fr)] lg:grid-cols-[232px_minmax(0,1fr)_320px]">
+        <StageRail run={run} activeStage={activeStage} onSelect={selectStage} />
+        <section className="min-h-0 flex-1 overflow-y-auto border-[var(--border)] px-3 py-3 min-[390px]:px-4 md:border-y-0 md:border-x md:px-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] pb-3">
             <div className="min-w-0">
               <Link href="/projects/storyboard" className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-2)] hover:text-[var(--fg-0)]">
                 <ArrowLeft className="h-3.5 w-3.5" />
                 分镜项目
               </Link>
-              <h1 className="mt-2 truncate text-xl font-semibold tracking-tight md:text-2xl">
+              <h1 className="mt-2 break-words text-xl font-semibold tracking-tight md:truncate md:text-2xl">
                 {run.title}
               </h1>
             </div>
-            {query.isFetching ? (
-              <span className="inline-flex items-center gap-2 text-xs text-[var(--fg-2)]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                同步中
-              </span>
-            ) : null}
+            <div className="flex items-center gap-2">
+              {query.isFetching ? (
+                <span className="inline-flex items-center gap-2 text-xs text-[var(--fg-2)]">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  同步中
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="hidden min-h-11 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-1)] md:inline-flex lg:hidden"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                视频参数
+              </button>
+            </div>
           </div>
 
-          {activeStage === "idea" ? <IdeaStage run={run} /> : null}
-          {activeStage === "script" ? <ScriptStage run={run} /> : null}
+          {activeStage === "idea" ? (
+            <IdeaStage
+              key={[run.id, run.title, run.idea, run.style].join(":")}
+              run={run}
+            />
+          ) : null}
+          {activeStage === "script" ? (
+            <ScriptStage
+              key={[run.id, run.script_revision, run.script_confirmed].join(":")}
+              run={run}
+            />
+          ) : null}
           {activeStage === "assets" ? <AssetsStage run={run} /> : null}
           {activeStage === "shots" ? <ShotsStage run={run} /> : null}
           {activeStage === "keyframes" ? <KeyframesStage run={run} /> : null}
           {activeStage === "videos" ? <VideosStage run={run} /> : null}
           {activeStage === "assembly" ? <AssemblyStage run={run} /> : null}
         </section>
-        <SettingsPanel run={run} />
+        <SettingsPanel
+          key={[
+            run.id,
+            run.model,
+            run.resolution,
+            run.aspect_ratio,
+            run.generate_audio,
+            run.seed ?? "",
+          ].join(":")}
+          run={run}
+          mobileOpen={settingsOpen}
+          onMobileClose={() => setSettingsOpen(false)}
+        />
       </main>
 
       <ProjectMobileTabBar />
@@ -483,8 +613,11 @@ function StageRail({
   onSelect: (stage: StoryboardStage) => void;
 }) {
   return (
-    <aside className="hidden min-h-0 overflow-y-auto p-3 md:block">
-      <div className="grid gap-2">
+    <aside
+      aria-label="分镜步骤"
+      className="scrollbar-none min-h-0 shrink-0 overflow-x-auto border-b border-[var(--border)] p-2 md:overflow-x-hidden md:overflow-y-auto md:border-b-0 md:p-3"
+    >
+      <div className="flex w-max gap-2 md:grid md:w-auto">
         {STAGES.map((stage, index) => {
           const meta = stageCompletion(run, stage.id);
           const unlocked = isStageUnlocked(run, stage.id);
@@ -493,13 +626,15 @@ function StageRail({
             <button
               key={stage.id}
               type="button"
-              onClick={() => unlocked && onSelect(stage.id)}
+              onClick={() => onSelect(stage.id)}
+              disabled={!unlocked}
+              aria-current={active ? "step" : undefined}
               className={cn(
-                "grid min-h-[76px] gap-1 rounded-[var(--radius-card)] border p-3 text-left transition",
+                "grid min-h-14 min-w-[116px] shrink-0 gap-1 rounded-[var(--radius-card)] border px-3 py-2 text-left transition md:min-h-[76px] md:min-w-0 md:p-3",
                 active
                   ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
                   : "border-[var(--border)] bg-[var(--bg-1)]/74 hover:bg-[var(--bg-2)]",
-                !unlocked && "cursor-not-allowed opacity-55",
+                !unlocked && "cursor-not-allowed opacity-55 hover:bg-[var(--bg-1)]/74",
               )}
             >
               <span className="flex items-center justify-between gap-2">
@@ -518,7 +653,9 @@ function StageRail({
                 </span>
               </span>
               <span className="text-sm font-semibold text-[var(--fg-0)]">{stage.label}</span>
-              <span className="line-clamp-1 text-xs text-[var(--fg-2)]">{stage.description}</span>
+              <span className="hidden line-clamp-1 text-xs text-[var(--fg-2)] md:block">
+                {stage.description}
+              </span>
             </button>
           );
         })}
@@ -527,59 +664,197 @@ function StageRail({
   );
 }
 
-function SettingsPanel({ run }: { run: StoryboardRun }) {
-  const patch = usePatchStoryboardMutation(run.id);
-  const [model, setModel] = useState(run.model);
-  const [resolution, setResolution] = useState(run.resolution);
-  const [aspectRatio, setAspectRatio] = useState(run.aspect_ratio);
-  const [generateAudio, setGenerateAudio] = useState(run.generate_audio);
-  const [seed, setSeed] = useState(run.seed == null ? "" : String(run.seed));
-  const parsedSeed = parseStoryboardSeed(seed);
-  const seedInvalid = Boolean(seed.trim()) && parsedSeed === null;
+interface StoryboardSettingsDraft {
+  model: string;
+  resolution: string;
+  aspectRatio: string;
+  generateAudio: boolean;
+  seed: string;
+}
+
+function settingsDraftFromRun(run: StoryboardRun): StoryboardSettingsDraft {
+  return {
+    model: run.model,
+    resolution: run.resolution,
+    aspectRatio: run.aspect_ratio,
+    generateAudio: run.generate_audio,
+    seed: run.seed == null ? "" : String(run.seed),
+  };
+}
+
+function SettingsPanel({
+  run,
+  mobileOpen,
+  onMobileClose,
+}: {
+  run: StoryboardRun;
+  mobileOpen: boolean;
+  onMobileClose: () => void;
+}) {
+  const [draft, setDraft] = useState(() => settingsDraftFromRun(run));
+  const dirty =
+    draft.model !== run.model ||
+    draft.resolution !== run.resolution ||
+    draft.aspectRatio !== run.aspect_ratio ||
+    draft.generateAudio !== run.generate_audio ||
+    draft.seed !== (run.seed == null ? "" : String(run.seed));
+  const patch = usePatchStoryboardMutation(run.id, {
+    onSuccess: (data) => {
+      setDraft(settingsDraftFromRun(data));
+      toast.success("视频参数已保存");
+    },
+    onError: notifyStoryboardError("保存视频参数"),
+  });
+  const parsedSeed = parseStoryboardSeed(draft.seed);
+  const seedInvalid = Boolean(draft.seed.trim()) && parsedSeed === null;
+  const saveDisabled =
+    patch.isPending ||
+    seedInvalid ||
+    !dirty ||
+    !draft.model.trim() ||
+    !draft.resolution.trim() ||
+    !draft.aspectRatio.trim();
+  const save = () =>
+    patch.mutate({
+      model: draft.model.trim(),
+      resolution: draft.resolution.trim(),
+      aspect_ratio: draft.aspectRatio.trim(),
+      generate_audio: draft.generateAudio,
+      seed: parsedSeed,
+    });
+  const fields = (
+    <StoryboardSettingsFields
+      draft={draft}
+      dirty={dirty}
+      seedInvalid={seedInvalid}
+      saving={patch.isPending}
+      saveDisabled={saveDisabled}
+      onChange={setDraft}
+      onReset={() => setDraft(settingsDraftFromRun(run))}
+      onSave={save}
+    />
+  );
 
   return (
-    <aside className="hidden min-h-0 overflow-y-auto p-3 lg:block">
-      <div className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
-        <div className="flex items-center gap-2">
-          <Settings2 className="h-4 w-4 text-[var(--accent)]" />
-          <h2 className="text-sm font-semibold">视频参数</h2>
+    <>
+      <aside className="hidden min-h-0 overflow-y-auto p-3 lg:block">
+        {fields}
+      </aside>
+      <BottomSheet
+        open={mobileOpen}
+        onClose={onMobileClose}
+        ariaLabel="视频参数"
+        snapPoints={["88%"]}
+      >
+        <header className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-5 py-3">
+          <div className="flex items-center gap-2">
+            <Settings2 className="h-4 w-4 text-[var(--accent)]" />
+            <h2 className="text-sm font-semibold">视频参数</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onMobileClose}
+            aria-label="关闭视频参数"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-3">
+          {fields}
         </div>
-        <LabeledInput label="模型" value={model} onChange={setModel} />
-        <LabeledInput label="分辨率" value={resolution} onChange={setResolution} />
-        <LabeledInput label="比例" value={aspectRatio} onChange={setAspectRatio} />
-        <LabeledInput label="Seed" value={seed} onChange={setSeed} />
-        {seedInvalid ? (
-          <p className="text-xs text-[var(--danger)]" role="alert">
-            Seed 需为 -1 到 4294967295 的整数
-          </p>
-        ) : null}
-        <label className="flex min-h-10 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
-          <span>生成音频</span>
-          <input
-            type="checkbox"
-            checked={generateAudio}
-            onChange={(event) => setGenerateAudio(event.target.checked)}
-          />
-        </label>
+      </BottomSheet>
+    </>
+  );
+}
+
+function StoryboardSettingsFields({
+  draft,
+  dirty,
+  seedInvalid,
+  saving,
+  saveDisabled,
+  onChange,
+  onReset,
+  onSave,
+}: {
+  draft: StoryboardSettingsDraft;
+  dirty: boolean;
+  seedInvalid: boolean;
+  saving: boolean;
+  saveDisabled: boolean;
+  onChange: Dispatch<SetStateAction<StoryboardSettingsDraft>>;
+  onReset: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+      <div className="hidden items-center gap-2 lg:flex">
+        <Settings2 className="h-4 w-4 text-[var(--accent)]" />
+        <h2 className="text-sm font-semibold">视频参数</h2>
+      </div>
+      <LabeledInput
+        label="模型"
+        value={draft.model}
+        onChange={(model) => onChange((current) => ({ ...current, model }))}
+      />
+      <LabeledInput
+        label="分辨率"
+        value={draft.resolution}
+        onChange={(resolution) =>
+          onChange((current) => ({ ...current, resolution }))
+        }
+      />
+      <LabeledInput
+        label="比例"
+        value={draft.aspectRatio}
+        onChange={(aspectRatio) =>
+          onChange((current) => ({ ...current, aspectRatio }))
+        }
+      />
+      <LabeledInput
+        label="Seed"
+        value={draft.seed}
+        onChange={(seed) => onChange((current) => ({ ...current, seed }))}
+      />
+      {seedInvalid ? (
+        <p className="text-xs text-[var(--danger)]" role="alert">
+          Seed 需为 -1 到 4294967295 的整数
+        </p>
+      ) : null}
+      <label className="flex min-h-11 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
+        <span>生成音频</span>
+        <input
+          type="checkbox"
+          checked={draft.generateAudio}
+          onChange={(event) =>
+            onChange((current) => ({
+              ...current,
+              generateAudio: event.target.checked,
+            }))
+          }
+        />
+      </label>
+      <div className="grid grid-cols-2 gap-2">
         <button
           type="button"
-          disabled={patch.isPending || seedInvalid}
-          onClick={() =>
-            patch.mutate({
-              model,
-              resolution,
-              aspect_ratio: aspectRatio,
-              generate_audio: generateAudio,
-              seed: parsedSeed,
-            })
-          }
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)] disabled:cursor-not-allowed disabled:opacity-55"
+          onClick={onReset}
+          disabled={!dirty || saving}
+          className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm text-[var(--fg-1)] disabled:opacity-50"
         >
-          {patch.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          取消修改
+        </button>
+        <button
+          type="button"
+          disabled={saveDisabled}
+          onClick={onSave}
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)] disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           保存参数
         </button>
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -714,14 +989,24 @@ function ShotsStage({ run }: { run: StoryboardRun }) {
         <button
           type="button"
           onClick={() => create.mutate({ title: `镜头 ${run.shots.length + 1}`, visual: "", duration_s: 5 })}
-          className="inline-flex min-h-10 w-fit items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-1)]"
+          className="inline-flex min-h-11 w-fit items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-1)] sm:min-h-10"
         >
           <Plus className="h-4 w-4" />
           手动添加镜头
         </button>
         <div className="grid gap-3">
           {run.shots.map((shot) => (
-            <ShotEditor key={shot.id} run={run} shot={shot} />
+            <ShotEditor
+              key={[
+                shot.id,
+                shot.title,
+                shot.visual,
+                shot.narration,
+                shot.asset_ids.join(","),
+              ].join(":")}
+              run={run}
+              shot={shot}
+            />
           ))}
         </div>
       </div>
@@ -760,7 +1045,7 @@ function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot })
           <label
             key={asset.id}
             className={cn(
-              "inline-flex min-h-8 items-center gap-2 rounded-full border px-3 text-xs",
+              "inline-flex min-h-11 items-center gap-2 rounded-full border px-3 text-xs sm:min-h-8",
               assetIds.includes(asset.id)
                 ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
                 : "border-[var(--border)] text-[var(--fg-1)]",
@@ -876,7 +1161,7 @@ function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot
       </div>
       <div className="flex gap-2">
         {shot.video?.url ? (
-          <a href={shot.video.url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs hover:bg-[var(--bg-2)]">
+          <a href={shot.video.url} target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs hover:bg-[var(--bg-2)] sm:min-h-9">
             <Play className="h-3.5 w-3.5" />
             预览
           </a>
@@ -910,7 +1195,7 @@ function AssemblyStage({ run }: { run: StoryboardRun }) {
           </div>
         )}
         {run.assembly?.video_url ? (
-          <a href={run.assembly.video_url} download className="inline-flex min-h-10 w-fit items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)]">
+          <a href={run.assembly.video_url} download className="inline-flex min-h-11 w-fit items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] sm:min-h-10">
             下载 mp4
           </a>
         ) : null}
@@ -942,7 +1227,7 @@ function StageShell({
           type="button"
           onClick={onAction}
           disabled={disabled || loading}
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] disabled:opacity-60"
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] disabled:opacity-60 sm:min-h-10"
         >
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {actionLabel}
@@ -968,7 +1253,7 @@ function LabeledInput({
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)]"
+        className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[16px] text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)] sm:min-h-10 md:text-base"
       />
     </label>
   );
@@ -992,7 +1277,7 @@ function LabeledTextarea({
         value={value}
         rows={rows}
         onChange={(event) => onChange(event.target.value)}
-        className="resize-y rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)]"
+        className="resize-y rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-[16px] text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)] md:text-base"
       />
     </label>
   );
@@ -1069,7 +1354,7 @@ function IconAction({
       type="button"
       onClick={onClick}
       disabled={disabled || loading}
-      className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-xs font-medium text-[var(--fg-0)] transition hover:bg-[var(--bg-2)] disabled:opacity-55"
+      className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-xs font-medium text-[var(--fg-0)] transition hover:bg-[var(--bg-2)] disabled:opacity-55 sm:min-h-9"
     >
       {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
       {label}

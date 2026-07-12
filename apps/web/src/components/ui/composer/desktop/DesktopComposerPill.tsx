@@ -1191,6 +1191,7 @@ function AdvancedComposerSettings({
         <p className="text-[13px] font-semibold text-[var(--fg-0)]">
           执行设置
         </p>
+        {/* @hit-area-ok: desktop-only popover; mobile uses MobileAdvancedSettings. */}
         <button
           type="button"
           onClick={onClose}

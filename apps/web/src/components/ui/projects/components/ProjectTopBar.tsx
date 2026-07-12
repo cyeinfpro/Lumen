@@ -50,7 +50,7 @@ export function ProjectMobileTopBar({
             <Link
               href={backHref}
               aria-label={backLabel}
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)]"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50"
             >
               <ArrowLeft className="h-[18px] w-[18px]" />
             </Link>

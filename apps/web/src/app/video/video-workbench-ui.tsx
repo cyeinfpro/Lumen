@@ -248,7 +248,7 @@ function SelectField({
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+        className="h-11 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-sm"
       >
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
@@ -343,7 +343,7 @@ export function VideoParameterPanel({
         </span>
       </div>
 
-      <div className="min-w-0 flex-1 space-y-4 p-3.5">
+      <div className="min-w-0 flex-1 space-y-4 p-3 sm:p-3.5">
         <section className="space-y-2.5">
           <div className="flex items-center justify-between gap-2">
             <p className="type-caption text-[var(--fg-2)]">模型</p>
@@ -361,7 +361,7 @@ export function VideoParameterPanel({
 
         <section className="space-y-2.5">
           <p className="type-caption text-[var(--fg-2)]">画面与时长</p>
-          <div className="grid min-w-0 grid-cols-2 gap-2">
+          <div className="grid min-w-0 grid-cols-1 gap-2 min-[360px]:grid-cols-2">
             <SelectField
               label="分辨率"
               value={resolution}
@@ -405,7 +405,7 @@ export function VideoParameterPanel({
         </label>
 
         <details className="group overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/48">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
             <span>高级设置</span>
             <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
           </summary>
@@ -417,7 +417,7 @@ export function VideoParameterPanel({
                 onChange={(event) => onSeedChange(event.target.value)}
                 inputMode="numeric"
                 placeholder="留空为随机"
-                className="h-10 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+                className="h-11 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-xs"
               />
             </label>
             <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">
@@ -427,7 +427,7 @@ export function VideoParameterPanel({
         </details>
       </div>
 
-      <div className="mt-auto shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/94 p-3.5">
+      <div className="mt-auto shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/94 p-3 sm:p-3.5">
         <div className="mb-3 grid grid-cols-2 gap-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3">
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">预计预扣</p>
@@ -481,7 +481,7 @@ export function VideoWorkbenchHeader({
   const serviceValue = loading ? "读取中" : enabled ? "在线" : "离线";
 
   return (
-    <section className="sticky top-0 z-30 -mx-1 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-0)]/92 px-1 pb-2.5 pt-1 backdrop-blur-xl">
+    <section className="sticky top-0 z-30 -mx-1 flex shrink-0 flex-col items-stretch gap-2 border-b border-[var(--border)] bg-[var(--bg-0)]/92 px-1 pb-2.5 pt-1 backdrop-blur-xl min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:gap-3">
       <div className="flex min-w-0 items-center gap-3">
         <span className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--shadow-1)] sm:flex">
           <Clapperboard className="h-5 w-5" />
@@ -513,7 +513,7 @@ export function VideoWorkbenchHeader({
           </p>
         </div>
       </div>
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-none">
+      <div className="grid min-w-0 grid-cols-2 gap-2 min-[390px]:flex min-[390px]:flex-1 min-[390px]:items-center min-[390px]:justify-end sm:flex-none">
         <div className="hidden items-center gap-1.5 lg:flex">
           <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/72 px-2.5 py-1.5 text-xs text-[var(--fg-1)]">
             <Film className="h-3.5 w-3.5 text-[var(--fg-2)]" />
@@ -528,7 +528,7 @@ export function VideoWorkbenchHeader({
           size="sm"
           onClick={onOpenParameters}
           leftIcon={<Settings2 className="h-4 w-4" />}
-          className="shrink-0"
+          className="min-h-11 shrink-0"
         >
           <span className="sm:hidden">参数</span>
           <span className="hidden sm:inline">参数 · {profile}</span>
@@ -538,7 +538,7 @@ export function VideoWorkbenchHeader({
           size="sm"
           onClick={onOpenTasks}
           leftIcon={<ListVideo className="h-4 w-4" />}
-          className="shrink-0"
+          className="min-h-11 shrink-0"
         >
           {activeCount > 0
             ? `${activeCount} 进行中`
@@ -968,7 +968,7 @@ export function ReferenceChip({
   return (
     <div
       className={cn(
-        "relative flex h-24 w-[min(82vw,19rem)] shrink-0 overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-1)] text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
+        "relative flex h-24 w-[min(82vw,19rem)] max-w-[calc(100vw-3rem)] shrink-0 overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-1)] text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
         active
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
           : "border-[var(--border)]",
@@ -1012,7 +1012,7 @@ export function ReferenceChip({
         type="button"
         aria-label="移除参考素材"
         onClick={onRemove}
-        className="absolute right-1.5 top-1.5 shrink-0 rounded-full bg-[var(--bg-1)]/85 p-0.5 text-[var(--fg-2)] shadow-[var(--shadow-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
+        className="absolute right-0 top-0 flex h-11 w-11 shrink-0 items-start justify-end rounded-bl-[var(--radius-control)] bg-[var(--bg-1)]/85 p-2 text-[var(--fg-2)] shadow-[var(--shadow-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
       >
         <XCircle className="h-3.5 w-3.5" />
       </button>
@@ -1131,7 +1131,7 @@ export function ReferenceMediaPreviewDialog({
         aria-modal="true"
         aria-labelledby={`reference-preview-${item._key}`}
         tabIndex={-1}
-        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-4xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(760px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
+        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-4xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(760px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b landscape:max-sm:rounded-[var(--radius-panel)] landscape:max-sm:border-b"
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
           <div className="min-w-0">
@@ -1151,14 +1151,14 @@ export function ReferenceMediaPreviewDialog({
           <Button
             variant="ghost"
             size="sm"
-            className="h-9 w-9 px-0"
+            className="h-11 w-11 shrink-0 px-0"
             onClick={onClose}
             aria-label="关闭参考素材预览"
           >
             <XCircle className="h-4 w-4" />
           </Button>
         </header>
-        <div className="min-h-0 flex-1 overflow-hidden bg-[var(--bg-0)] p-3 sm:p-5">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto bg-[var(--bg-0)] p-3 sm:p-5">
           <div className="flex h-full min-h-0 items-center justify-center overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] sm:min-h-[18rem]">
             {previewUrl && !failed ? (
               <img
@@ -1181,11 +1181,11 @@ export function ReferenceMediaPreviewDialog({
             )}
           </div>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center justify-between gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:px-5">
-          <span className="shrink-0 text-xs text-[var(--fg-2)]">
+        <footer className="mobile-dialog-footer flex shrink-0 flex-col items-stretch gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:px-5">
+          <span className="truncate text-xs text-[var(--fg-2)]">
             提交时映射为 {referencePromptToken(item)}
           </span>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="grid shrink-0 grid-cols-2 gap-2">
             <Button variant="outline" size="sm" onClick={onClose}>
               关闭
             </Button>

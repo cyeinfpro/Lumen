@@ -43,6 +43,22 @@ const BYOK_ERROR_TEXT: Record<string, string> = {
   invalid_verification_token: "验证已失效",
 };
 
+function getApiKeySaveError(
+  supplierId: string,
+  apiKey: string,
+): string | null {
+  if (!supplierId) return "无可绑定供应商";
+  if (!apiKey.trim()) return "Key 为空";
+  return null;
+}
+
+function shouldShowWalletAccount(
+  hasAccount: boolean,
+  isByok: boolean,
+): boolean {
+  return hasAccount && !isByok;
+}
+
 export default function ApiKeySettingsPage() {
   const qc = useQueryClient();
   const meQ = useQuery({ queryKey: ["me"], queryFn: getMe, retry: false });
@@ -120,12 +136,9 @@ export default function ApiKeySettingsPage() {
     e.preventDefault();
     setSaved(false);
     setError(null);
-    if (!selectedSupplierId) {
-      setError("无可绑定供应商");
-      return;
-    }
-    if (!apiKey.trim()) {
-      setError("Key 为空");
+    const validationError = getApiKeySaveError(selectedSupplierId, apiKey);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     saveMut.mutate();
@@ -143,7 +156,7 @@ export default function ApiKeySettingsPage() {
     setRevokeOpen(false);
   };
 
-  if (meQ.data && !isByok) {
+  if (shouldShowWalletAccount(Boolean(meQ.data), isByok)) {
     return (
       <SettingsShell title="API Key" subtitle="Wallet" maxWidth="max-w-3xl">
         <Card variant="subtle" padding="lg" className="space-y-3">
@@ -153,7 +166,7 @@ export default function ApiKeySettingsPage() {
           </p>
           <Link
             href="/me/wallet"
-            className="inline-flex min-h-9 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-white/4"
+            className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
           >
             查看钱包
           </Link>
@@ -164,7 +177,7 @@ export default function ApiKeySettingsPage() {
 
   return (
     <SettingsShell title="API Key" subtitle="BYOK" maxWidth="max-w-3xl">
-      <div className="space-y-7">
+      <div className="space-y-5 pb-4 sm:space-y-7">
         <header className="hidden items-start justify-between gap-4 md:flex">
           <div>
             <h1 className="type-page-title">API Key</h1>
@@ -179,10 +192,10 @@ export default function ApiKeySettingsPage() {
           </Link>
         </header>
 
-        <Card variant="subtle" padding="lg" className="space-y-4">
+        <Card variant="subtle" padding="lg" className="space-y-4 max-sm:p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
                 <KeyRound className="w-4 h-4" />
               </div>
               <div>
@@ -260,7 +273,7 @@ export default function ApiKeySettingsPage() {
 
         <form
           onSubmit={onSave}
-          className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-6 space-y-4"
+          className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4 sm:p-6"
         >
           <div className="flex items-center gap-2 type-overline">
             <RefreshCw className="w-3.5 h-3.5" />
@@ -288,7 +301,7 @@ export default function ApiKeySettingsPage() {
             value={selectedSupplierId}
             onChange={(e) => setSupplierId(e.target.value)}
             disabled={suppliersQ.isLoading || suppliers.length === 0 || saveMut.isPending}
-            className="w-full h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:border-[var(--accent)]/50"
+            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base focus:outline-none focus:border-[var(--accent)]/50 md:h-10 md:text-sm"
           >
             {suppliers.length === 0 ? (
               <option value="">无可用供应商</option>
@@ -306,7 +319,7 @@ export default function ApiKeySettingsPage() {
             onChange={(e) => setApiKey(e.target.value)}
             placeholder={selectedSupplier ? `${selectedSupplier.name} API Key` : "sk-..."}
             autoComplete="off"
-            className="w-full h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base md:text-sm focus:outline-none focus:border-[var(--accent)]/50"
+            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base focus:outline-none focus:border-[var(--accent)]/50 md:h-10 md:text-sm"
           />
           {error && (
             <div className="flex items-start gap-2 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)]">
@@ -320,18 +333,20 @@ export default function ApiKeySettingsPage() {
               {copy.state.saved}
             </div>
           )}
-          <Button
-            type="submit"
-            variant="primary"
-            size="md"
-            disabled={saveMut.isPending || suppliers.length === 0}
-            loading={saveMut.isPending}
-            leftIcon={!saveMut.isPending ? <KeyRound className="w-4 h-4" /> : undefined}
-            fullWidth
-            className="sm:w-auto"
-          >
-            验证并保存
-          </Button>
+          <div className="sticky bottom-0 -mx-4 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/95 px-4 pb-[max(0px,env(safe-area-inset-bottom))] pt-3 backdrop-blur-xl sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              disabled={saveMut.isPending || suppliers.length === 0}
+              loading={saveMut.isPending}
+              leftIcon={!saveMut.isPending ? <KeyRound className="w-4 h-4" /> : undefined}
+              fullWidth
+              className="sm:w-auto"
+            >
+              验证并保存
+            </Button>
+          </div>
         </form>
       </div>
 

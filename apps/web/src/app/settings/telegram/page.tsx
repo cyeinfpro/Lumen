@@ -38,7 +38,7 @@ export default function TelegramSettingsPage() {
 
   return (
     <SettingsShell title="Telegram" subtitle="BOT" maxWidth="max-w-3xl">
-      <div className="space-y-7">
+      <div className="space-y-5 pb-4 sm:space-y-7">
         <header className="hidden items-start justify-between gap-4 md:flex">
           <div>
             <h1 className="type-page-title">Telegram</h1>
@@ -53,9 +53,9 @@ export default function TelegramSettingsPage() {
           </Link>
         </header>
 
-        <Card variant="subtle" padding="lg" className="space-y-4">
+        <Card variant="subtle" padding="lg" className="space-y-4 max-sm:p-4">
           <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
               <MessageCircle className="h-4 w-4" />
             </div>
             <div className="min-w-0 flex-1">
@@ -86,11 +86,11 @@ export default function TelegramSettingsPage() {
         </Card>
 
         {linkCode && (
-          <Card variant="subtle" padding="lg" className="space-y-4">
+          <Card variant="subtle" padding="lg" className="space-y-4 max-sm:p-4">
             <div>
               <p className="type-overline text-[var(--fg-1)]">绑定码</p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <code className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 font-mono text-lg tracking-wider text-[var(--fg-0)]">
+              <div className="mt-2 grid gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <code className="min-h-11 min-w-0 overflow-x-auto rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2.5 font-mono text-lg tracking-wider text-[var(--fg-0)]">
                   {linkCode.code}
                 </code>
                 <Button
@@ -107,13 +107,13 @@ export default function TelegramSettingsPage() {
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="grid gap-2 sm:flex sm:flex-wrap">
               {linkCode.deep_link && (
                 <a
                   href={linkCode.deep_link}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-medium text-black"
+                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-medium text-black"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   打开 Telegram

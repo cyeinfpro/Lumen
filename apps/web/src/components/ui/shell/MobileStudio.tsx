@@ -37,16 +37,22 @@ export function MobileStudio() {
   // runtime_defaults 由 RuntimeDefaultsBootstrap（layout 级）统一同步到 store
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [composerMetrics, setComposerMetrics] = useState({
+  const [composerMetrics, setComposerMetrics] = useState<{
+    height: number;
+    bottom: number | null;
+  }>({
     height: 56,
-    bottom: 62,
+    bottom: null,
   });
+  const [topChromeRef, topChromeHeight] =
+    useElementBlockSize<HTMLDivElement>();
   const [taskIslandRef, taskIslandHeight] =
     useElementBlockSize<HTMLDivElement>();
   const handleComposerMetricsChange = useCallback(
     (next: { height: number; bottom: number }) => {
       setComposerMetrics((prev) =>
         Math.abs(prev.height - next.height) < 1 &&
+        prev.bottom !== null &&
         Math.abs(prev.bottom - next.bottom) < 1
           ? prev
           : next,
@@ -151,34 +157,41 @@ export function MobileStudio() {
   }, [currentConvId, generations, latestIsStreaming, scrollSignature, scrollTo]);
 
   const isEmpty = messages.length === 0;
-  const bottomStack =
-    composerMetrics.bottom +
-    composerMetrics.height +
-    taskIslandHeight +
-    (taskIslandHeight > 0 ? 20 : 12);
+  const overlayGap = taskIslandHeight > 0 ? 20 : 12;
+  const composerBottom =
+    composerMetrics.bottom === null
+      ? "calc(var(--mobile-tabbar-height) + 6px)"
+      : `${composerMetrics.bottom}px`;
+  const topChromeBlockSize =
+    topChromeHeight > 0
+      ? `${topChromeHeight}px`
+      : "calc(var(--mobile-topbar-h) + 52px + var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))";
 
   return (
     <div
       data-app-viewport
-      className="relative flex min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]"
+      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
       style={
         {
           "--mobile-composer-height": `${composerMetrics.height}px`,
-          "--mobile-composer-bottom": `${composerMetrics.bottom}px`,
+          "--mobile-composer-bottom": composerBottom,
           "--mobile-task-island-height": `${taskIslandHeight}px`,
-          "--bottom-overlay-stack": `${bottomStack}px`,
+          "--mobile-top-chrome-height": topChromeBlockSize,
+          "--bottom-overlay-stack": `calc(var(--mobile-composer-bottom) + var(--mobile-composer-height) + var(--mobile-task-island-height) + ${overlayGap}px)`,
         } as CSSProperties
       }
     >
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
-      <LandscapeBanner />
-      <MobileStudioTopBar />
+      <div ref={topChromeRef} className="shrink-0">
+        <LandscapeBanner />
+        <MobileStudioTopBar />
+      </div>
 
       <main
         ref={scrollRef}
         data-app-scroll
         data-testid="conversation-scroll"
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y"
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain touch-pan-y [scrollbar-gutter:stable]"
         style={{
           paddingBottom: "var(--bottom-overlay-stack)",
           scrollPaddingBottom: "var(--bottom-overlay-stack)",
@@ -222,7 +235,7 @@ export function MobileStudio() {
         <TaskIsland className="max-w-full shadow-[var(--shadow-2)]" />
       </div>
       <MobileComposerPill
-        onSubmit={() => sendMessage()}
+        onSubmit={sendMessage}
         onMetricsChange={handleComposerMetricsChange}
       />
       <MobileTabBar />

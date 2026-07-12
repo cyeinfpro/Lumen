@@ -53,6 +53,20 @@ function microMoney(value?: number | null): string {
   return ((value ?? 0) / 1_000_000).toFixed(2);
 }
 
+function hasLowBalance(
+  wallet: Awaited<ReturnType<typeof getMyWallet>> | undefined,
+): boolean {
+  if (!wallet?.balance || !wallet.low_balance_threshold) return false;
+  return wallet.balance.micro < wallet.low_balance_threshold.micro;
+}
+
+function isByokWalletAccount(
+  wallet: Awaited<ReturnType<typeof getMyWallet>> | undefined,
+  accountMode: AuthUser["account_mode"] | undefined,
+): boolean {
+  return wallet?.mode === "byok" || accountMode === "byok";
+}
+
 export default function WalletPage() {
   const qc = useQueryClient();
   const [code, setCode] = useState("");
@@ -99,10 +113,7 @@ export default function WalletPage() {
     () => redemptionsQ.data?.pages.flatMap((page) => page.items) ?? [],
     [redemptionsQ.data],
   );
-  const low = useMemo(() => {
-    if (!wallet?.balance || !wallet.low_balance_threshold) return false;
-    return wallet.balance.micro < wallet.low_balance_threshold.micro;
-  }, [wallet]);
+  const low = useMemo(() => hasLowBalance(wallet), [wallet]);
   const stats24h = useMemo(() => {
     const latest = Math.max(0, ...txItems.map((tx) => Date.parse(tx.created_at)));
     if (latest <= 0) return { topup: 0, spend: 0 };
@@ -135,7 +146,7 @@ export default function WalletPage() {
     },
   });
 
-  if (wallet?.mode === "byok" || meQuery.data?.account_mode === "byok") {
+  if (isByokWalletAccount(wallet, meQuery.data?.account_mode)) {
     return (
       <SettingsShell title="钱包" subtitle="BYOK" maxWidth="max-w-3xl">
         <Card variant="subtle" padding="lg" className="space-y-3">
@@ -212,9 +223,17 @@ export default function WalletPage() {
             </div>
             <div className="space-y-2">
               <input
+                id="wallet-redemption-code"
+                name="redemption-code"
                 value={code}
                 onChange={(e) => setCode(normalizeCode(e.target.value))}
                 placeholder="LMN-XXXX-XXXX-XXXX-XXXX"
+                inputMode="text"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="off"
+                enterKeyHint="done"
                 className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base tracking-[0.06em] outline-none focus:border-[var(--accent)]/50 sm:text-lg"
               />
               {message && (
@@ -324,14 +343,14 @@ export default function WalletPage() {
               刷新
             </Button>
           </div>
-          <div className="scrollbar-thin flex flex-wrap gap-2 border-b border-[var(--border-subtle)] px-4 py-3 md:flex-nowrap md:overflow-x-auto md:overscroll-x-contain">
+          <div className="scrollbar-thin flex gap-2 overflow-x-auto overscroll-x-contain border-b border-[var(--border-subtle)] px-4 py-3 [scrollbar-width:none]">
             {TX_KIND_FILTERS.map((item) => (
               <button
                 key={item.key}
                 type="button"
                 onClick={() => setTxKind(item.key)}
                 className={[
-                  "shrink-0 rounded-full border min-h-9 px-3 text-xs",
+                  "min-h-11 shrink-0 rounded-full border px-3 text-xs md:min-h-9",
                   txKind === item.key
                     ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                     : "border-[var(--border)] text-[var(--fg-2)]",
@@ -343,14 +362,14 @@ export default function WalletPage() {
           </div>
           <div className="divide-y divide-[var(--border-subtle)]">
             {txItems.map((tx) => (
-              <div key={tx.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3">
+              <div key={tx.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-4 py-3">
                 <div className="min-w-0">
                   <p className="truncate type-body-sm text-[var(--fg-0)]">{formatKind(tx.kind)}</p>
                   <p className="type-caption text-[var(--fg-2)]">
                     {new Date(tx.created_at).toLocaleString()}
                   </p>
                 </div>
-                <div className="text-right tabular-nums">
+                <div className="max-w-[46vw] break-words text-right tabular-nums md:max-w-none">
                   <p className={tx.amount.micro >= 0 ? "text-success" : "text-[var(--fg-0)]"}>
                     {tx.amount.micro >= 0 ? "+" : ""}¥{formatRmb(tx.amount.rmb)}
                   </p>
@@ -402,7 +421,7 @@ export default function WalletPage() {
           </div>
           <div className="divide-y divide-[var(--border-subtle)]">
             {redemptionItems.map((item) => (
-              <div key={item.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3">
+              <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-4 py-3">
                 <div className="min-w-0">
                   <p className="type-body-sm text-[var(--fg-0)]">兑换码充值</p>
                   <p className="type-caption text-[var(--fg-2)]">

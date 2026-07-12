@@ -12,7 +12,15 @@ const desktopNavSource = source("./DesktopTopNav.tsx");
 const desktopStudioSource = source("./DesktopStudio.tsx");
 const mobileStudioSource = source("./MobileStudio.tsx");
 const mobileTopBarSource = source("./MobileStudioTopBar.tsx");
+const mobileTabBarSource = source("./MobileTabBar.tsx");
+const mobileMeSource = source("./MobileMe.tsx");
+const mobileStreamSource = source("./MobileStream.tsx");
+const settingsShellSource = source("./SettingsShell.tsx");
+const mobileDrawerSource = source("./MobileConversationDrawer.tsx");
+const sidebarSource = source("../Sidebar.tsx");
+const mobileCanvasSource = source("../chat/mobile/MobileConversationCanvas.tsx");
 const mobileComposerSource = source("../composer/mobile/MobileComposerPill.tsx");
+const streamSearchSource = source("../stream/StreamSearchBar.tsx");
 const viewportSource = source("../../../hooks/useKeyboardInset.ts");
 const mediaQuerySource = source("../../../hooks/useMediaQuery.ts");
 const inputSource = source("../primitives/Input.tsx");
@@ -99,10 +107,11 @@ test("mobile bottom stack includes the measured task island", () => {
   match(mobileStudioSource, /useElementBlockSize<HTMLDivElement>/);
   match(
     mobileStudioSource,
-    /composerMetrics\.bottom \+\s*composerMetrics\.height \+\s*taskIslandHeight/,
+    /--bottom-overlay-stack/,
   );
   match(mobileStudioSource, /paddingBottom: "var\(--bottom-overlay-stack\)"/);
   match(mobileStudioSource, /data-testid="conversation-scroll"/);
+  match(mobileCanvasSource, /var\(--bottom-overlay-stack, 120px\)/);
 });
 
 test("mobile composer uses one visual viewport coordinate system", () => {
@@ -120,6 +129,43 @@ test("mobile top bar has one drawer entry and an explicit mode selector", () => 
   match(mobileTopBarSource, /aria-label="打开会话侧栏"/);
   match(mobileTopBarSource, /SegmentedControl<"chat" \| "image">/);
   doesNotMatch(mobileTopBarSource, /PanelLeft|mode === "image" \? "chat" : "image"/);
+});
+
+test("mobile tab bar height and reserved space share the responsive token", () => {
+  match(
+    mobileTabBarSource,
+    /h-\[var\(--mobile-tabbar-h\)\] min-h-\[var\(--mobile-tabbar-h\)\]/,
+  );
+  match(
+    mobileMeSource,
+    /paddingBottom: "calc\(var\(--mobile-tabbar-height\) \+ 12px\)"/,
+  );
+  match(
+    mobileStreamSource,
+    /paddingBottom: "var\(--mobile-tabbar-height\)"/,
+  );
+  match(
+    settingsShellSource,
+    /max-md:mb-\[var\(--mobile-tabbar-height\)\]/,
+  );
+  match(
+    mobileComposerSource,
+    /"calc\(var\(--mobile-tabbar-height\) \+ 6px\)"/,
+  );
+  doesNotMatch(mobileTabBarSource, /\bh-14\b|\bmin-h-14\b/);
+  doesNotMatch(mobileMeSource, /calc\(56px/);
+  doesNotMatch(mobileStreamSource, /calc\(56px|calc\(72px/);
+  doesNotMatch(settingsShellSource, /calc\(56px|calc\(112px/);
+});
+
+test("mobile navigation keeps current state and closes transient layers safely", () => {
+  doesNotMatch(mobileTabBarSource, /router\.replace\(tab\.route\)/);
+  match(mobileMeSource, /conversationId=\$\{encodeURIComponent\(conv\.id\)\}/);
+  match(streamSearchSource, /inputRef\.current\?\.blur\(\)/);
+  match(mobileDrawerSource, /isFetchNextPageError/);
+  match(mobileDrawerSource, /setCurrentConv\(previousConvId\)/);
+  match(desktopStudioSource, /onNavigate=\{closeSidebarDrawer\}/);
+  match(sidebarSource, /const ARCHIVED_ROW_HEIGHT = 56/);
 });
 
 test("global focus and light text contracts remain accessible", () => {

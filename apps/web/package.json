@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "1.2.52",
+  "version": "1.2.53",
   "private": true,
   "imports": {
     "#chat-message-adapters": "./src/store/chat/messageAdapters.ts",

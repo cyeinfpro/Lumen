@@ -176,7 +176,7 @@ export function PosterStyleBrowser({
           type="button"
           onClick={() => sync.mutate()}
           disabled={sync.isPending}
-          className="inline-flex h-8 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-default disabled:opacity-50"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-default disabled:opacity-50 md:h-8 md:min-h-0"
         >
           {sync.isPending ? <Spinner size={12} /> : <RefreshCw className="h-3 w-3" />}
           同步
@@ -242,7 +242,7 @@ export function PosterStyleBrowser({
 
         <main className="flex min-h-0 min-w-0 flex-col gap-3">
           {/* mobile: search + filter sheet */}
-          <div className="flex items-center gap-2 md:hidden">
+          <div className="sticky top-0 z-20 -mx-3 flex items-center gap-2 bg-[var(--bg-0)]/95 px-3 py-2 shadow-[var(--shadow-1)] backdrop-blur-xl md:hidden">
             <div className="relative flex-1 min-w-0">
               <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
               <input
@@ -298,7 +298,7 @@ export function PosterStyleBrowser({
                     type="button"
                     onClick={() => setQuery("")}
                     aria-label="清除搜索"
-                    className="absolute right-0 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                    className="absolute right-0 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-8 md:w-8"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -330,7 +330,7 @@ export function PosterStyleBrowser({
                       onClick={() =>
                         setSelectedIds(allVisibleSelected ? [] : deletableIds)
                       }
-                      className="inline-flex h-8 min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+                      className="inline-flex min-h-11 min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] md:h-8 md:min-h-0"
                     >
                       {allVisibleSelected ? (
                         <CheckSquare className="h-3.5 w-3.5 text-[var(--amber-300)]" />
@@ -346,7 +346,7 @@ export function PosterStyleBrowser({
                         <button
                           type="button"
                           onClick={() => setSelectedIds([])}
-                          className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                          className="inline-flex min-h-11 items-center px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-8 md:min-h-0"
                         >
                           取消
                         </button>
@@ -396,15 +396,50 @@ export function PosterStyleBrowser({
         </main>
       </div>
 
+      <PosterStyleBrowserOverlays
+        category={category}
+        detailItemId={detailItemId}
+        mobileFilterOpen={mobileFilterOpen}
+        source={source}
+        onCategoryChange={setCategory}
+        onCloseDetail={() => setDetailItemId(null)}
+        onCloseMobileFilter={() => setMobileFilterOpen(false)}
+        onSourceChange={setSource}
+      />
+    </div>
+  );
+}
+
+function PosterStyleBrowserOverlays({
+  category,
+  detailItemId,
+  mobileFilterOpen,
+  source,
+  onCategoryChange,
+  onCloseDetail,
+  onCloseMobileFilter,
+  onSourceChange,
+}: {
+  category: PosterStyleCategoryFilter;
+  detailItemId: string | null;
+  mobileFilterOpen: boolean;
+  source: PosterStyleSourceFilter;
+  onCategoryChange: (value: PosterStyleCategoryFilter) => void;
+  onCloseDetail: () => void;
+  onCloseMobileFilter: () => void;
+  onSourceChange: (value: PosterStyleSourceFilter) => void;
+}) {
+  return (
+    <>
       <AnimatePresence>
         {mobileFilterOpen ? (
           <MobileFilterSheet
             key="mobile-filter"
             category={category}
             source={source}
-            onCategoryChange={setCategory}
-            onSourceChange={setSource}
-            onClose={() => setMobileFilterOpen(false)}
+            onCategoryChange={onCategoryChange}
+            onSourceChange={onSourceChange}
+            onClose={onCloseMobileFilter}
           />
         ) : null}
       </AnimatePresence>
@@ -414,11 +449,11 @@ export function PosterStyleBrowser({
           <PosterStyleDetailDrawer
             key={detailItemId}
             itemId={detailItemId}
-            onClose={() => setDetailItemId(null)}
+            onClose={onCloseDetail}
           />
         ) : null}
       </AnimatePresence>
-    </div>
+    </>
   );
 }
 
@@ -455,7 +490,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-9 min-w-9 shrink-0 cursor-pointer items-center justify-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "group relative inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9 md:min-w-9",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -522,12 +557,14 @@ function PosterStyleCard({
 
   return (
     <article className="group relative">
+      {/* @ui-governance-allow media: selection control overlays the style thumbnail. */}
       <button
         type="button"
         onClick={onToggleSelected}
         aria-label={selected ? "取消选择" : "选择风格"}
         className={cn(
-          "absolute left-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border backdrop-blur transition-colors",
+          // @ui-governance-allow media
+          "absolute left-2 top-2 z-10 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur transition-colors md:h-8 md:w-8",
           selected
             ? "border-[var(--border-amber)] bg-[var(--accent)] text-[var(--bg-0)]"
             : "border-white/40 bg-black/35 text-white hover:bg-black/55",
@@ -605,38 +642,48 @@ function PosterStyleCard({
           </div>
         ) : null}
 
-        <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-          <button
-            type="button"
-            onClick={requestDelete}
-            disabled={deleting}
-            title={
-              confirmingDelete
-                ? "再次点击确认删除"
-                : isPreset
-                  ? "隐藏预设"
-                  : "删除条目"
-            }
-            aria-label={
-              confirmingDelete
-                ? "再次点击确认删除"
-                : isPreset
-                  ? "隐藏预设"
-                  : "删除条目"
-            }
-            className={cn(
-              "inline-flex h-7 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-              confirmingDelete
-                ? "text-[var(--danger)]"
-                : "text-[var(--fg-2)] hover:text-[var(--danger)]",
-            )}
-          >
-            {deleting ? <Spinner size={12} /> : <Trash2 className="h-3 w-3" />}
-            {confirmingDelete ? "确认" : isPreset ? "隐藏" : "删除"}
-          </button>
-        </div>
+        <PosterStyleCardDeleteAction
+          confirmingDelete={confirmingDelete}
+          deleting={deleting}
+          isPreset={isPreset}
+          onDelete={requestDelete}
+        />
       </div>
     </article>
+  );
+}
+
+function PosterStyleCardDeleteAction({
+  confirmingDelete,
+  deleting,
+  isPreset,
+  onDelete,
+}: {
+  confirmingDelete: boolean;
+  deleting: boolean;
+  isPreset: boolean;
+  onDelete: () => void;
+}) {
+  const label = confirmingDelete ? "再次点击确认删除" : isPreset ? "隐藏预设" : "删除条目";
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={deleting}
+        title={label}
+        aria-label={label}
+        className={cn(
+          "inline-flex min-h-11 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-7 md:min-h-0",
+          confirmingDelete
+            ? "text-[var(--danger)]"
+            : "text-[var(--fg-2)] hover:text-[var(--danger)]",
+        )}
+      >
+        {deleting ? <Spinner size={12} /> : <Trash2 className="h-3 w-3" />}
+        {confirmingDelete ? "确认" : isPreset ? "隐藏" : "删除"}
+      </button>
+    </div>
   );
 }
 
@@ -691,12 +738,12 @@ function MobileFilterSheet({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
-        <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-5 py-5">
+        <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-5 py-5">
           <div className="grid gap-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               类目

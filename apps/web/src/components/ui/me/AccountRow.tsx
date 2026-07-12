@@ -55,10 +55,10 @@ export function AccountRow({
         {icon}
       </span>
 
-      <span className="flex-1 min-w-0 flex items-center gap-2">
+      <span className="flex min-w-0 flex-1 items-center gap-2">
         <span
           className={cn(
-            "truncate text-[15px]",
+            "min-w-0 break-words text-[15px] leading-snug",
             destructive ? "text-[var(--danger)]" : "text-[var(--fg-0)]",
           )}
         >
@@ -72,7 +72,7 @@ export function AccountRow({
       </span>
 
       {description && (
-        <span className="text-[12px] text-[var(--fg-2)] mr-1 shrink-0">
+        <span className="mr-1 max-w-[42%] shrink-0 break-all text-right text-[12px] text-[var(--fg-2)]">
           {description}
         </span>
       )}
@@ -89,7 +89,7 @@ export function AccountRow({
   );
 
   const baseClass = cn(
-    "w-full min-h-[48px] flex items-center gap-3",
+    "flex min-h-[52px] w-full items-center gap-3 py-2",
     grouped ? "px-4" : "px-4",
     !last && "border-b border-[var(--border-subtle)]",
     "text-left active:bg-[var(--bg-2)] transition-colors",

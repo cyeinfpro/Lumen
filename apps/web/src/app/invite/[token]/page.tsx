@@ -54,8 +54,8 @@ export default function InvitePage({
   const showSkeleton = useDelayedFlag(q.isLoading, 180);
 
   return (
-    <div className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="safe-x-page flex min-h-0 flex-1 flex-col items-center justify-start overflow-y-auto overscroll-contain py-8 md:justify-center md:py-16">
+    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="safe-x-page flex flex-1 flex-col items-center justify-start overscroll-contain pb-6 pt-[max(2rem,env(safe-area-inset-top,0px))] md:justify-center md:py-16">
         <motion.div
           initial={false}
           animate={{ opacity: 1, y: 0 }}
@@ -78,7 +78,11 @@ export default function InvitePage({
           {q.isLoading ? (
             showSkeleton ? <SkeletonInvite /> : null
           ) : q.isError ? (
-            <ErrorView error={q.error} />
+            <ErrorView
+              error={q.error}
+              pending={q.isFetching}
+              onRetry={() => void q.refetch()}
+            />
           ) : q.data ? (
             q.data.valid ? (
               <SignupForm token={token} invite={q.data} />
@@ -89,7 +93,7 @@ export default function InvitePage({
         </motion.div>
       </main>
 
-      <footer className="px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom">
+      <footer className="px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center text-xs text-[var(--fg-2)]">
         <Link
           href="/login"
           className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors"
@@ -121,6 +125,26 @@ function SkeletonInvite() {
       <div className="h-40 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse mt-6" />
       <div className="h-44 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse" />
     </div>
+  );
+}
+
+function canSubmitInviteSignup({
+  submitting,
+  normalizedEmail,
+  passwordTooShort,
+  passwordsMatch,
+}: {
+  submitting: boolean;
+  normalizedEmail: string;
+  passwordTooShort: boolean;
+  passwordsMatch: boolean;
+}): boolean {
+  return (
+    !submitting &&
+    normalizedEmail.length > 0 &&
+    isValidEmailInput(normalizedEmail) &&
+    !passwordTooShort &&
+    passwordsMatch
   );
 }
 
@@ -160,12 +184,12 @@ function SignupForm({
   );
   const confirmMismatch = confirm.length > 0 && confirm !== password;
   const passwordTooShort = password.length < 8;
-  const canSubmit =
-    !submitting &&
-    normalizedEmail.length > 0 &&
-    isValidEmailInput(normalizedEmail) &&
-    !passwordTooShort &&
-    confirm === password;
+  const canSubmit = canSubmitInviteSignup({
+    submitting,
+    normalizedEmail,
+    passwordTooShort,
+    passwordsMatch: confirm === password,
+  });
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -194,24 +218,22 @@ function SignupForm({
     setSubmitting(true);
     try {
       await signup(trimmedEmail, password, token);
-      router.push("/");
+      router.replace("/");
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 409) {
           setError("该邮箱已注册，请直接登录");
         } else if (err.status === 403) {
-          setError(err.message || "邀请被拒绝（可能与登录邮箱不一致）");
+          setError("邀请被拒绝（可能与绑定邮箱不一致）");
         } else if (err.status === 410 || err.status === 404) {
           setError("邀请已失效或不存在");
         } else if (err.status === 422) {
-          setError(err.message || "提交内容不合法");
+          setError("提交内容不合法");
         } else {
-          setError(err.message || `注册失败 (HTTP ${err.status})`);
+          setError("注册失败，请稍后重试");
         }
-      } else if (err instanceof Error) {
-        setError(err.message || "注册失败");
       } else {
-        setError("注册失败");
+        setError("注册失败，请稍后重试");
       }
       submitGuardRef.current = false;
       setSubmitting(false);
@@ -253,8 +275,10 @@ function SignupForm({
         <Field id="invite-email" label="邮箱" icon={<Mail className="w-3.5 h-3.5" />}>
           <input
             id="invite-email"
+            name="email"
             type="email"
             required
+            disabled={submitting}
             readOnly={lockedEmail}
             value={email}
             onChange={(e) => {
@@ -263,8 +287,12 @@ function SignupForm({
             }}
             placeholder="you@example.com"
             autoComplete="email"
+            inputMode="email"
+            autoCapitalize="none"
+            autoCorrect="off"
+            enterKeyHint="next"
             className={
-              "w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors " +
+              "h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm " +
               (lockedEmail ? "opacity-70 cursor-not-allowed" : "")
             }
           />
@@ -283,20 +311,24 @@ function SignupForm({
           <div className="relative">
             <input
               id="invite-password"
+              name="password"
               type={showPwd ? "text" : "password"}
               required
+              disabled={submitting}
               minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="至少 8 位"
               autoComplete="new-password"
-              className="w-full h-10 pl-3 pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+              enterKeyHint="next"
+              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
             />
             <button
               type="button"
               onClick={() => setShowPwd((v) => !v)}
+              disabled={submitting}
               aria-label={showPwd ? "隐藏密码" : "显示密码"}
-              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-[var(--radius-card)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
+              className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
             >
               {showPwd ? (
                 <EyeOff className="w-4 h-4" />
@@ -325,15 +357,18 @@ function SignupForm({
         >
           <input
             id="invite-confirm"
+            name="password-confirmation"
             type={showPwd ? "text" : "password"}
             required
+            disabled={submitting}
             minLength={8}
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
             placeholder="再输入一次"
             autoComplete="new-password"
+            enterKeyHint="done"
             className={
-              "w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors " +
+              "h-11 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
               (confirmMismatch
                 ? "border-danger-border focus:border-danger focus:ring-danger/20"
                 : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -369,7 +404,8 @@ function SignupForm({
         <button
           type="submit"
           disabled={!canSubmit}
-          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:opacity-[var(--op-press)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-[filter,opacity,box-shadow] shadow-[var(--shadow-amber)]"
+          aria-busy={submitting}
+          className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
         >
           {submitting ? (
             <>
@@ -443,13 +479,13 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
       <div className="grid grid-cols-2 gap-2">
         <Link
           href="/login"
-          className="h-10 inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
+          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
         >
           去登录
         </Link>
         <Link
           href="/"
-          className="h-10 inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
+          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
         >
           返回首页
         </Link>
@@ -458,9 +494,16 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
   );
 }
 
-function ErrorView({ error }: { error: unknown }) {
+function ErrorView({
+  error,
+  pending,
+  onRetry,
+}: {
+  error: unknown;
+  pending: boolean;
+  onRetry: () => void;
+}) {
   const isNotFound = error instanceof ApiError && error.status === 404;
-  const message = error instanceof Error ? error.message : "未知错误";
   return (
     <div className="space-y-5">
       <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
@@ -472,16 +515,37 @@ function ErrorView({ error }: { error: unknown }) {
         </h1>
         {!isNotFound && (
           <p className="flex items-center justify-center gap-1.5 type-caption text-danger">
-            <AlertCircle className="w-3.5 h-3.5" /> {message}
+            <AlertCircle className="w-3.5 h-3.5" />
+            暂时无法加载邀请，请重试。
           </p>
         )}
       </div>
-      <Link
-        href="/"
-        className="h-10 w-full inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
-      >
-        返回首页
-      </Link>
+      <div className="grid grid-cols-2 gap-2">
+        {!isNotFound ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            disabled={pending}
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+          >
+            {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            {pending ? "重试中" : "重试"}
+          </button>
+        ) : (
+          <Link
+            href="/login"
+            className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+          >
+            去登录
+          </Link>
+        )}
+        <Link
+          href="/"
+          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+        >
+          返回首页
+        </Link>
+      </div>
     </div>
   );
 }

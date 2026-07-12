@@ -68,6 +68,25 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
+function isEmptyFirstRun({
+  settingsPending,
+  memoriesPending,
+  memoryCount,
+  onboardingSeen,
+}: {
+  settingsPending: boolean;
+  memoriesPending: boolean;
+  memoryCount: number;
+  onboardingSeen: number;
+}): boolean {
+  return (
+    !settingsPending &&
+    !memoriesPending &&
+    memoryCount === 0 &&
+    (onboardingSeen & 1) === 0
+  );
+}
+
 export default function MemorySettingsPage() {
   const qc = useQueryClient();
   const [selectedScope, setSelectedScope] = useState<string>("all");
@@ -142,11 +161,12 @@ export default function MemorySettingsPage() {
     });
   }, [memories, memorySearch, scopes]);
   const staging = stagingQ.data?.items ?? [];
-  const emptyFirstRun =
-    !settingsQ.isPending &&
-    !memoriesQ.isPending &&
-    memories.length === 0 &&
-    ((settingsQ.data?.onboarding_seen ?? 0) & 1) === 0;
+  const emptyFirstRun = isEmptyFirstRun({
+    settingsPending: settingsQ.isPending,
+    memoriesPending: memoriesQ.isPending,
+    memoryCount: memories.length,
+    onboardingSeen: settingsQ.data?.onboarding_seen ?? 0,
+  });
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -254,7 +274,7 @@ export default function MemorySettingsPage() {
 
   return (
     <SettingsShell title="记忆" subtitle="MEMORY" maxWidth="max-w-6xl">
-      <div className="space-y-6">
+      <div className="space-y-5 pb-4 sm:space-y-6">
         <header className="hidden items-start justify-between gap-4 md:flex">
           <div>
             <h1 className="type-page-title">记忆</h1>
@@ -284,7 +304,7 @@ export default function MemorySettingsPage() {
             </div>
             <Link
               href="/admin"
-              className="inline-flex h-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 type-caption font-medium text-warning transition-colors hover:bg-warning/20"
+              className="inline-flex min-h-11 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 type-caption font-medium text-warning transition-colors hover:bg-warning/20"
             >
               去管理员后台 →
             </Link>
@@ -353,7 +373,7 @@ export default function MemorySettingsPage() {
 
         <section className="grid min-w-0 gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-3">
-            <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3">
+            <div className="flex min-w-0 gap-1 overflow-x-auto rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-2 [scrollbar-width:none] lg:block lg:overflow-visible lg:p-3 [&::-webkit-scrollbar]:hidden">
               <button
                 type="button"
                 onClick={() => setSelectedScope("all")}
@@ -531,7 +551,7 @@ export default function MemorySettingsPage() {
               ) : filteredMemories.length === 0 ? (
                 <EmptyBlock text="当前作用域还没有记忆。" />
               ) : (
-                <div className="divide-y divide-white/5">
+                <div className="divide-y divide-[var(--border-subtle)]">
                   {filteredMemories.map((memory) => (
                     <MemoryRow
                       key={memory.id}
@@ -584,7 +604,7 @@ export default function MemorySettingsPage() {
               ) : staging.length === 0 ? (
                 <EmptyBlock text="暂无待确认候选。" />
               ) : (
-                <div className="divide-y divide-white/5">
+                <div className="divide-y divide-[var(--border-subtle)]">
                   {staging.map((item) => (
                     <div key={item.id} className="p-4">
                       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -615,7 +635,7 @@ export default function MemorySettingsPage() {
                               body: { scope_id: event.target.value },
                             })
                           }
-                          className="h-8 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-1)] outline-none"
+                          className="h-11 min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
                         >
                           {scopes.map((scope) => (
                             <option key={scope.id} value={scope.id}>
@@ -656,7 +676,7 @@ export default function MemorySettingsPage() {
                 ) : (timelineQ.data?.items.length ?? 0) === 0 ? (
                   <EmptyBlock text="还没有审计事件。" />
                 ) : (
-                  <div className="divide-y divide-white/5">
+                  <div className="divide-y divide-[var(--border-subtle)]">
                     {timelineQ.data?.items.map((event) => (
                       <div key={event.id} className="grid gap-1 p-4 sm:grid-cols-[100px_minmax(0,1fr)]">
                         <span className="type-caption text-[var(--fg-2)]">
@@ -685,7 +705,7 @@ export default function MemorySettingsPage() {
                   value={clearText}
                   onChange={(e) => setClearText(e.target.value)}
                   placeholder="清空"
-                  className="mt-3 h-10 w-full rounded-[var(--radius-control)] border border-danger-border bg-black/20 px-3 text-sm text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/30 focus:border-danger"
+                  className="mt-3 h-11 w-full rounded-[var(--radius-control)] border border-danger-border bg-[var(--bg-0)]/70 px-3 text-base text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/50 focus:border-danger sm:h-10 sm:text-sm"
                 />
                 <Button
                   variant="danger"
@@ -742,7 +762,7 @@ function CapabilityModal({ onClose }: { onClose: () => void }) {
           <Link
             href="/admin"
             onClick={onClose}
-            className="inline-flex h-10 items-center justify-center rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-black sm:h-9"
+            className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-black"
           >
             去管理员后台
           </Link>
@@ -817,7 +837,7 @@ function SettingToggle({
       >
         <span
           className={[
-            "inline-block h-4 w-4 rounded-full bg-black/80 transition-transform",
+            "inline-block h-4 w-4 rounded-full bg-[var(--accent-on)] transition-transform",
             checked ? "translate-x-4" : "translate-x-0.5",
           ].join(" ")}
         />
@@ -876,14 +896,14 @@ function ScopeButton({
           <button
             type="button"
             onClick={() => setEditing(true)}
-            className="h-8 rounded-[var(--radius-control)] px-1.5 text-[11px] text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+            className="min-h-11 min-w-11 rounded-[var(--radius-control)] px-2 text-[11px] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] lg:min-h-8 lg:min-w-8"
           >
             改
           </button>
           <button
             type="button"
             onClick={onDelete}
-            className="h-8 rounded-[var(--radius-control)] px-1.5 text-[11px] text-danger/70 hover:text-danger"
+            className="min-h-11 min-w-11 rounded-[var(--radius-control)] px-2 text-[11px] text-danger/70 hover:bg-danger-soft hover:text-danger lg:min-h-8 lg:min-w-8"
           >
             删
           </button>
@@ -895,7 +915,7 @@ function ScopeButton({
 
 function scopeButtonClass(active: boolean): string {
   return [
-    "flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors md:h-9 md:min-h-0",
+    "flex min-h-11 min-w-max flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors lg:h-9 lg:min-h-0 lg:min-w-0",
     active
       ? "bg-accent-soft text-accent"
       : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
@@ -955,7 +975,7 @@ function MemoryRow({
           <input
             value={editingValue}
             onChange={(e) => onEditValue(e.target.value)}
-            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
+            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 text-base text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10 sm:text-sm"
           />
           <div className="flex gap-2">
             <Button variant="primary" size="md" onClick={onSaveEdit}>
@@ -987,7 +1007,7 @@ function MemoryRow({
         <select
           value={memory.scope_id}
           onChange={(e) => onPatch({ scope_id: e.target.value })}
-          className="h-8 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-1)] outline-none"
+          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
         >
           {scopes.map((scope) => (
             <option key={scope.id} value={scope.id}>

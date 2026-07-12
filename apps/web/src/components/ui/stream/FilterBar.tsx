@@ -40,8 +40,8 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
           role="group"
           aria-label="筛选"
         >
-          <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 md:flex-nowrap">
-            <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-2)]">
+          <div className="flex min-w-max items-center gap-2 px-3 py-2 md:min-w-0 md:flex-wrap md:py-2.5">
+            <span className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-2)] md:min-h-8">
               <SlidersHorizontal className="h-3.5 w-3.5" />
               筛选
             </span>
@@ -64,7 +64,7 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
             })}
             <span
               aria-hidden
-              className="mx-1 inline-block h-5 w-px bg-[var(--border-subtle)]"
+              className="mx-1 inline-block h-6 w-px shrink-0 bg-[var(--border-subtle)]"
             />
             <Chip
               active={Boolean(filters.has_ref)}

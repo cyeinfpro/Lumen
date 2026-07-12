@@ -83,6 +83,16 @@ function parseSlash(text: string): {
   };
 }
 
+function normalizedRenderQuality(value: unknown): "low" | "medium" | "high" {
+  return value === "low" || value === "medium" || value === "high"
+    ? value
+    : "high";
+}
+
+function shouldShowPromptCount(text: string, promptTooLong: boolean): boolean {
+  return text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
+}
+
 export function MobileComposerPill({
   onSubmit,
   onMetricsChange,
@@ -114,8 +124,7 @@ export function MobileComposerPill({
   const quality = useChatStore((s) => s.composer.params.quality ?? "4k");
   const setQuality = useChatStore((s) => s.setQuality);
   const renderQuality = useChatStore((s) => {
-    const q = s.composer.params.render_quality;
-    return q === "low" || q === "medium" || q === "high" ? q : "high";
+    return normalizedRenderQuality(s.composer.params.render_quality);
   });
   const setRenderQuality = useChatStore((s) => s.setRenderQuality);
   const composerError = useChatStore((s) => s.composerError);
@@ -144,11 +153,13 @@ export function MobileComposerPill({
   const { haptic } = useHaptic();
   const visibleViewportHeight =
     viewportHeight > 0 ? `${viewportHeight}px` : "100dvh";
+  const topChromeHeight =
+    "var(--mobile-top-chrome-height, calc(var(--mobile-topbar-h) + 52px + var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px)))";
   const expandedMaxHeight = keyboardOffset
-    ? `calc(${visibleViewportHeight} - var(--mobile-topbar-h) - var(--system-banner-height, 0px) - env(safe-area-inset-top, 0px) - var(--overlay-gap) - var(--overlay-gap))`
-    : `calc(${visibleViewportHeight} - var(--mobile-topbar-h) - var(--mobile-tabbar-height) - var(--system-banner-height, 0px) - env(safe-area-inset-top, 0px) - var(--overlay-gap) - var(--overlay-gap))`;
+    ? `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--overlay-gap) - var(--overlay-gap))`
+    : `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--mobile-tabbar-height) - var(--overlay-gap) - var(--overlay-gap))`;
   const promptTooLong = isPromptTooLong(text);
-  const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
+  const shouldShowCount = shouldShowPromptCount(text, promptTooLong);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -658,13 +669,22 @@ export function MobileComposerPill({
 
   const openAspectSheet = useCallback(() => {
     textareaRef.current?.blur();
+    collapsedTextareaRef.current?.blur();
     setPanel("aspect");
   }, []);
 
   const openReasoningSheet = useCallback(() => {
     textareaRef.current?.blur();
+    collapsedTextareaRef.current?.blur();
     setPanel("reasoning");
   }, []);
+
+  const openAdvancedSheet = useCallback(() => {
+    textareaRef.current?.blur();
+    collapsedTextareaRef.current?.blur();
+    setPanel("advanced");
+  }, []);
+  const closePanel = useCallback(() => setPanel("none"), []);
 
   const isImageMode = mode === "image";
 
@@ -690,7 +710,7 @@ export function MobileComposerPill({
         style={{
           bottom: keyboardOffset
             ? `calc(${keyboardOffset}px + 8px)`
-            : "calc(var(--mobile-tabbar-height, 56px) + 6px)",
+            : "calc(var(--mobile-tabbar-height) + 6px)",
           maxHeight: expanded ? expandedMaxHeight : 56,
           zIndex: expanded
             ? ("var(--z-composer-expanded, 45)" as unknown as number)
@@ -796,7 +816,7 @@ export function MobileComposerPill({
               type="button"
               onPointerDown={(e: ReactPointerEvent) => e.preventDefault()}
               onClick={() => setExpanded(false)}
-              className="flex justify-center items-center pt-2.5 pb-1 cursor-pointer active:opacity-60"
+              className="flex min-h-11 w-full items-center justify-center py-2 cursor-pointer active:opacity-60"
               aria-label="收起输入框"
             >
               <div className="w-9 h-1 rounded-full bg-[var(--fg-3)]/40" />
@@ -878,7 +898,7 @@ export function MobileComposerPill({
                           "absolute top-0.5 left-0.5 h-4 px-1 rounded-[var(--radius-control)]",
                           "bg-[var(--bg-0)]/80 text-[8px] font-semibold text-[var(--amber-400)]",
                           "backdrop-blur-sm leading-none",
-                          "active:scale-[0.94] transition-transform",
+                          "active:scale-[0.94] transition-transform motion-reduce:transition-none",
                         )}
                         style={{ fontFamily: "var(--font-mono)" }}
                       >
@@ -896,7 +916,7 @@ export function MobileComposerPill({
                         onClick={() => removeAttachment(att.id)}
                         aria-label="移除参考图"
                         className={cn(
-                          "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
+                          "absolute top-0.5 right-0.5 min-w-5 min-h-5 p-1 rounded-full",
                           "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
                           "flex items-center justify-center",
                           "active:scale-[0.92] transition-transform",
@@ -1068,8 +1088,7 @@ export function MobileComposerPill({
               summary={executionSummary}
               compact
               onAdjust={() => {
-                textareaRef.current?.blur();
-                setPanel("advanced");
+                openAdvancedSheet();
               }}
             />
 
@@ -1160,7 +1179,7 @@ export function MobileComposerPill({
 
       <BottomSheet
         open={panel === "advanced"}
-        onClose={() => setPanel("none")}
+        onClose={closePanel}
         ariaLabel="执行设置"
         snapPoints={["80%"]}
       >
@@ -1192,13 +1211,13 @@ export function MobileComposerPill({
       {/* 宽高比 BottomSheet */}
       <BottomSheet
         open={panel === "aspect"}
-        onClose={() => setPanel("none")}
+        onClose={closePanel}
         ariaLabel="选择宽高比"
       >
         <AspectRatioPicker
           value={aspect}
           onChange={setAspectRatio}
-          onClose={() => setPanel("none")}
+          onClose={closePanel}
           variant="sheet"
         />
       </BottomSheet>
@@ -1206,7 +1225,7 @@ export function MobileComposerPill({
       {/* 推理强度 BottomSheet */}
       <BottomSheet
         open={panel === "reasoning"}
-        onClose={() => setPanel("none")}
+        onClose={closePanel}
         ariaLabel="选择推理强度"
       >
         <SheetList
@@ -1261,9 +1280,9 @@ function IconBtn({
       aria-label={label}
       title={label}
       className={cn(
-        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-[var(--radius-control)]",
+        "relative shrink-0 inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)]",
         "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
+        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)] motion-reduce:transition-none",
         "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         "disabled:opacity-40 disabled:cursor-not-allowed",
       )}
@@ -1294,8 +1313,8 @@ function SendButton({
       animate={burst ? { scale: [0.92, 1] } : { scale: 1 }}
       transition={{ duration: DURATION.normal, ease: EASE.shutter }}
       className={cn(
-        "shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-full",
-        "transition-[background-color,box-shadow,opacity] duration-200",
+        "shrink-0 inline-flex min-h-11 min-w-11 items-center justify-center rounded-full",
+        "transition-[background-color,box-shadow,opacity] duration-200 motion-reduce:transition-none",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/70",
         canSubmit
           ? [

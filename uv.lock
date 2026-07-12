@@ -910,7 +910,7 @@ wheels = [
 
 [[package]]
 name = "lumen"
-version = "1.2.52"
+version = "1.2.53"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -931,7 +931,7 @@ dev = [
 
 [[package]]
 name = "lumen-api"
-version = "1.2.52"
+version = "1.2.53"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "alembic" },
@@ -994,7 +994,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-core"
-version = "1.2.52"
+version = "1.2.53"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
@@ -1023,7 +1023,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-tgbot"
-version = "1.2.52"
+version = "1.2.53"
 source = { editable = "apps/tgbot" }
 dependencies = [
     { name = "aiogram" },
@@ -1048,7 +1048,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-worker"
-version = "1.2.52"
+version = "1.2.53"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "arq" },

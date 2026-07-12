@@ -146,7 +146,7 @@ export function ModelLibraryDialog({
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-center justify-center bg-black/60 p-5 backdrop-blur-md"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-center justify-center bg-black/60 backdrop-blur-md"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -156,14 +156,14 @@ export function ModelLibraryDialog({
         role="dialog"
         aria-modal="true"
         aria-label="模特库"
-        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
+        className="mobile-dialog-panel flex w-full max-w-6xl flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
       >
         <DialogHeader
           onOpenFullLibrary={openFullLibrary}
           onClose={onClose}
           hint={headerHint}
         />
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto">
           <ModelLibraryBrowser
             workflow={workflow}
             mode="dialog"
@@ -219,7 +219,7 @@ function DialogHeader({
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 max-sm:h-11 max-sm:w-11"
+          className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 sm:h-10 sm:w-10"
           aria-label="关闭模特库"
         >
           <X className="h-4 w-4" />

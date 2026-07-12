@@ -18,10 +18,7 @@ import {
   retryTask,
   type TaskItemResponse,
 } from "@/lib/apiClient";
-import {
-  errorCodeToFullText,
-  recommendedActionsForError,
-} from "@/lib/errors";
+import { errorCodeToFullText, recommendedActionsForError } from "@/lib/errors";
 import type { Generation, RecommendedErrorAction } from "@/lib/types";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
@@ -92,7 +89,8 @@ function taskStatusText(task: TaskItemResponse): string {
 }
 
 function taskTime(task: TaskItemResponse): string {
-  const raw = task.finished_at ?? task.started_at ?? task.created_at ?? task.date;
+  const raw =
+    task.finished_at ?? task.started_at ?? task.created_at ?? task.date;
   if (!raw) return "";
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return "";
@@ -117,6 +115,71 @@ function taskKindPath(task: TaskItemResponse): "generations" | "completions" {
   return task.kind === "generation" ? "generations" : "completions";
 }
 
+function TaskRecoveryActions({
+  actions,
+  retryable,
+  busy,
+  onRetry,
+}: {
+  actions: RecommendedErrorAction[];
+  retryable: boolean;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {actions.map((action) => {
+        if (action.kind === "retry" && retryable) {
+          return (
+            <button
+              key={action.id}
+              type="button"
+              disabled={busy}
+              onClick={onRetry}
+              className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] disabled:opacity-50"
+            >
+              {action.label}
+            </button>
+          );
+        }
+        if (action.kind === "link" && action.href) {
+          return (
+            <a
+              key={action.id}
+              href={action.href}
+              className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+            >
+              {action.label}
+            </a>
+          );
+        }
+        return (
+          <span
+            key={action.id}
+            className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-2)]"
+          >
+            {action.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function TaskHistoryThumb({ task }: { task: TaskItemResponse }) {
+  if (task.thumb_url) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={task.thumb_url} alt="" className="h-full w-full object-cover" />
+    );
+  }
+  return task.kind === "generation" ? (
+    <ImageIcon className="h-4 w-4 text-[var(--fg-2)]" />
+  ) : (
+    <MessageSquareText className="h-4 w-4 text-[var(--fg-2)]" />
+  );
+}
+
 export function TaskCenter({
   activeGenerations,
   localGenerations,
@@ -127,7 +190,8 @@ export function TaskCenter({
 }: TaskCenterProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
   const qc = useQueryClient();
-  const status = filter === "active" ? "active" : filter === "failed" ? "failed" : undefined;
+  const status =
+    filter === "active" ? "active" : filter === "failed" ? "failed" : undefined;
   const query = useQuery({
     queryKey: ["tasks", "recent", status ?? "all"],
     queryFn: ({ signal }) => listTasks({ status, limit: 80 }, { signal }),
@@ -171,7 +235,9 @@ export function TaskCenter({
   );
   const historyItems = serverItems.filter((item) => !activeIds.has(item.id));
   const visibleActive =
-    filter === "failed" ? [] : activeGenerations.slice(0, filter === "active" ? 12 : 5);
+    filter === "failed"
+      ? []
+      : activeGenerations.slice(0, filter === "active" ? 12 : 5);
   const visibleHistory = historyItems.slice(0, filter === "active" ? 20 : 40);
   const isEmpty =
     visibleActive.length === 0 &&
@@ -199,7 +265,9 @@ export function TaskCenter({
           onClick={() => void query.refetch()}
           aria-label="刷新任务"
         >
-          <RefreshCw className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin")} />
+          <RefreshCw
+            className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin")}
+          />
         </IconButton>
         <IconButton
           variant="ghost"
@@ -219,7 +287,7 @@ export function TaskCenter({
             type="button"
             onClick={() => setFilter(item.key)}
             className={cn(
-              "min-h-8 flex-1 rounded-[var(--radius-control)] px-2 text-xs transition",
+              "min-h-11 flex-1 rounded-[var(--radius-control)] px-2 text-xs transition",
               filter === item.key
                 ? "bg-[var(--accent-soft)] text-[var(--accent)]"
                 : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -242,7 +310,8 @@ export function TaskCenter({
         ))}
 
         {visibleHistory.map((task) => {
-          const local = task.kind === "generation" ? localGenerations[task.id] : undefined;
+          const local =
+            task.kind === "generation" ? localGenerations[task.id] : undefined;
           if (local) {
             return (
               <TaskItem
@@ -291,15 +360,21 @@ function TaskHistoryRow({
   onRetry: () => void;
   onCancel: () => void;
 }) {
-  const active = task.status === "queued" || task.status === "running" || task.status === "streaming";
+  const active =
+    task.status === "queued" ||
+    task.status === "running" ||
+    task.status === "streaming";
   const failed = task.status === "failed";
   const recoverable = failed || task.status === "canceled";
   const succeeded = task.status === "succeeded";
   const actions = actionList(task);
-  const title = task.title || task.prompt || (task.kind === "generation" ? "图像生成" : "文本回复");
+  const title =
+    task.title ||
+    task.prompt ||
+    (task.kind === "generation" ? "图像生成" : "文本回复");
   const errorText =
     failed && task.error_code
-      ? errorCodeToFullText(task.error_code) ?? task.error_message
+      ? (errorCodeToFullText(task.error_code) ?? task.error_message)
       : task.error_message;
 
   return (
@@ -313,25 +388,25 @@ function TaskHistoryRow({
     >
       <div className="flex gap-2">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)]">
-          {task.thumb_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={task.thumb_url} alt="" className="h-full w-full object-cover" />
-          ) : task.kind === "generation" ? (
-            <ImageIcon className="h-4 w-4 text-[var(--fg-2)]" />
-          ) : (
-            <MessageSquareText className="h-4 w-4 text-[var(--fg-2)]" />
-          )}
+          <TaskHistoryThumb task={task} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <p className="truncate text-[13px] font-medium text-[var(--fg-0)]">
               {title}
             </p>
-            {succeeded && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--ok)]" />}
-            {active && <Clock3 className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />}
+            {succeeded && (
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--ok)]" />
+            )}
+            {active && (
+              <Clock3 className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+            )}
           </div>
           <p
-            className={cn("mt-0.5 text-[11px]", failed ? "text-danger" : "text-[var(--fg-2)]")}
+            className={cn(
+              "mt-0.5 text-[11px]",
+              failed ? "text-danger" : "text-[var(--fg-2)]",
+            )}
             aria-live={failed ? "assertive" : "polite"}
             role={failed ? "alert" : "status"}
           >
@@ -347,7 +422,10 @@ function TaskHistoryRow({
             )}
           </p>
           {failed && errorText && (
-            <p className="mt-1 line-clamp-2 text-[11px] text-danger" role="alert">
+            <p
+              className="mt-1 line-clamp-2 text-[11px] text-danger"
+              role="alert"
+            >
               {errorText}
             </p>
           )}
@@ -359,7 +437,7 @@ function TaskHistoryRow({
               disabled={busy}
               onClick={onCancel}
               aria-label="取消任务"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -370,7 +448,7 @@ function TaskHistoryRow({
               disabled={busy}
               onClick={onRetry}
               aria-label="重试任务"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-[var(--accent)] hover:bg-[var(--accent-soft)] disabled:opacity-50"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--accent)] hover:bg-[var(--accent-soft)] disabled:opacity-50"
             >
               <RotateCw className="h-3.5 w-3.5" />
             </button>
@@ -378,42 +456,12 @@ function TaskHistoryRow({
         </div>
       </div>
       {recoverable && actions.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {actions.map((action) => {
-            if (action.kind === "retry" && task.retryable) {
-              return (
-                <button
-                  key={action.id}
-                  type="button"
-                  disabled={busy}
-                  onClick={onRetry}
-                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] disabled:opacity-50"
-                >
-                  {action.label}
-                </button>
-              );
-            }
-            if (action.kind === "link" && action.href) {
-              return (
-                <a
-                  key={action.id}
-                  href={action.href}
-                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
-                >
-                  {action.label}
-                </a>
-              );
-            }
-            return (
-              <span
-                key={action.id}
-                className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-2)]"
-              >
-                {action.label}
-              </span>
-            );
-          })}
-        </div>
+        <TaskRecoveryActions
+          actions={actions}
+          retryable={Boolean(task.retryable)}
+          busy={busy}
+          onRetry={onRetry}
+        />
       )}
     </div>
   );

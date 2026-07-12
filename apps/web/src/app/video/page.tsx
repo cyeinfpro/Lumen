@@ -39,7 +39,6 @@ import {
 import type { VideoRequestFence } from "@/lib/videoEventSnapshot";
 import type {
   VideoAction,
-  VideoCreateIn,
   VideoGenerationOut,
   VideoOptionsOut,
 } from "@/lib/types";
@@ -125,6 +124,18 @@ import {
   VideoTaskDrawer,
   prewarmVideoItem,
 } from "./video-task-ui";
+import {
+  billingModelForAction,
+  durationOptionsForModel,
+  durationOrPreferred,
+  estimateHoldMicro,
+  firstModelForAction,
+  parseSeed,
+  preferredDuration,
+  preferredResolution,
+  resolutionOptionsForModel,
+  toVideoResolution,
+} from "./video-options-model";
 
 const VIDEO_EVENTS = [
   "video.queued",
@@ -135,24 +146,10 @@ const VIDEO_EVENTS = [
   "video.failed",
   "video.canceled",
 ];
-const SMART_VIDEO_DURATION = -1;
-const SMART_VIDEO_HOLD_DURATION = 15;
-const VIDEO_DURATION_OPTIONS = [
-  SMART_VIDEO_DURATION,
-  ...Array.from({ length: 13 }, (_, index) => index + 3),
-];
-const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
-  "480p",
-  "720p",
-  "1080p",
-  "4k",
-]);
 const VIDEO_ACTIVE_POLL_MS = 2500;
 const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 const VIDEO_PROMPT_VARIANT_COUNT = 3;
 const VIDEO_HISTORY_PAGE_SIZE = 12;
-const VIDEO_SEED_MIN = -1;
-const VIDEO_SEED_MAX = 4_294_967_295;
 const VIDEO_PROMPT_VARIANT_TITLES = [
   "推荐镜头版",
   "动作节奏版",
@@ -178,202 +175,6 @@ const PROMPT_CHIPS = [
   "浅景深",
   "轻微运动模糊",
 ];
-
-function holdEstimateDurationS(durationS: number): number {
-  return durationS === SMART_VIDEO_DURATION ? SMART_VIDEO_HOLD_DURATION : durationS;
-}
-
-function toVideoResolution(value: string): VideoCreateIn["resolution"] {
-  return VIDEO_RESOLUTION_VALUES.has(value as VideoCreateIn["resolution"])
-    ? (value as VideoCreateIn["resolution"])
-    : "720p";
-}
-
-function parseSeed(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) &&
-    parsed >= VIDEO_SEED_MIN &&
-    parsed <= VIDEO_SEED_MAX
-    ? parsed
-    : null;
-}
-
-function firstModelForAction(options: VideoOptionsOut | undefined, action: VideoAction): string {
-  return options?.models.find((item) => item.actions.includes(action))?.model ?? "";
-}
-
-function resolutionOptionsForModel(
-  options: VideoOptionsOut | undefined,
-  model: string,
-): string[] {
-  const modelOptions = options?.models.find((item) => item.model === model);
-  if (modelOptions?.resolutions?.length) return modelOptions.resolutions;
-  return options?.resolutions?.length ? options.resolutions : ["480p", "720p", "1080p"];
-}
-
-function firstAvailableDurationOptions(
-  candidates: Array<number[] | undefined>,
-): number[] {
-  for (const candidate of candidates) {
-    if (candidate?.length) return candidate;
-  }
-  return VIDEO_DURATION_OPTIONS;
-}
-
-function durationOptionsForModel(
-  options: VideoOptionsOut | undefined,
-  model: string,
-  action: VideoAction,
-  resolution: string,
-): number[] {
-  const modelOptions = options?.models.find((item) => item.model === model);
-  const actionResolutionDurations =
-    modelOptions?.durations_by_action_resolution?.[action]?.[resolution];
-  const actionDurations = modelOptions?.durations_by_action?.[action];
-  return firstAvailableDurationOptions([
-    actionResolutionDurations,
-    actionDurations,
-    modelOptions?.durations_s,
-    options?.durations_s,
-  ]);
-}
-
-function billingModelForAction(
-  options: VideoOptionsOut | undefined,
-  model: string,
-  action: VideoAction,
-): string {
-  const modelOptions = options?.models.find((item) => item.model === model);
-  const actionBillingModel = modelOptions?.billing_models?.[action]?.trim();
-  if (actionBillingModel) return actionBillingModel;
-  const billingModel = modelOptions?.billing_model?.trim();
-  return billingModel || model;
-}
-
-function preferredResolution(options: string[]): string {
-  return options.includes("720p") ? "720p" : options[0] ?? "720p";
-}
-
-function preferredDuration(options: number[]): number {
-  return options.includes(5) ? 5 : options[0] ?? 5;
-}
-
-function durationOrPreferred(current: number, options: number[]): number {
-  return options.includes(current) ? current : preferredDuration(options);
-}
-
-type VideoPricingAction = VideoOptionsOut["pricing"][number]["action"];
-
-function estimateActionsFor(
-  action: VideoAction,
-  referenceHasVideo: boolean,
-): string[] {
-  if (action !== "reference") return [action];
-  return referenceHasVideo
-    ? ["reference_video"]
-    : ["reference_image", "reference", "i2v", "t2v"];
-}
-
-function pricingActionsFor(
-  action: VideoAction,
-  referenceHasVideo: boolean,
-): VideoPricingAction[] {
-  if (action !== "reference") return [action];
-  return referenceHasVideo
-    ? ["reference_video", "reference"]
-    : ["reference_image", "reference", "i2v"];
-}
-
-function findHoldEstimateTokens(
-  options: VideoOptionsOut | undefined,
-  modelCandidates: string[],
-  estimateActions: string[],
-  estimateKey: string,
-): unknown {
-  for (const modelCandidate of modelCandidates) {
-    const tokenMap = options?.hold_estimates?.[modelCandidate];
-    if (!tokenMap || typeof tokenMap !== "object") continue;
-    const tokenRecord = tokenMap as Record<string, unknown>;
-    for (const estimateAction of estimateActions) {
-      const actionMap = tokenRecord[estimateAction];
-      if (!actionMap || typeof actionMap !== "object") continue;
-      const tokens = (actionMap as Record<string, unknown>)[estimateKey];
-      if (tokens != null) return tokens;
-    }
-  }
-  return undefined;
-}
-
-function findVideoPrice(
-  options: VideoOptionsOut | undefined,
-  modelCandidates: string[],
-  priceActions: VideoPricingAction[],
-  resolution: string,
-): VideoOptionsOut["pricing"][number] | undefined {
-  for (const priceAction of priceActions) {
-    for (const modelCandidate of modelCandidates) {
-      const exact = options?.pricing.find(
-        (item) =>
-          item.model === modelCandidate &&
-          item.action === priceAction &&
-          item.resolution === resolution &&
-          item.enabled,
-      );
-      if (exact) return exact;
-      const generic = options?.pricing.find(
-        (item) =>
-          item.model === modelCandidate &&
-          item.action === priceAction &&
-          !item.resolution &&
-          item.enabled,
-      );
-      if (generic) return generic;
-    }
-  }
-  return undefined;
-}
-
-function estimateHoldMicro(
-  options: VideoOptionsOut | undefined,
-  {
-    model,
-    billingModel,
-    action,
-    resolution,
-    durationS,
-    referenceHasVideo,
-  }: {
-    model: string;
-    billingModel?: string;
-    action: VideoAction;
-    resolution: string;
-    durationS: number;
-    referenceHasVideo?: boolean;
-  },
-): { tokens: number; micro: number } | null {
-  const modelCandidates = Array.from(
-    new Set([billingModel, model].filter(Boolean) as string[]),
-  );
-  const estimateKey = `${resolution}:${holdEstimateDurationS(durationS)}`;
-  const tokensRaw = findHoldEstimateTokens(
-    options,
-    modelCandidates,
-    estimateActionsFor(action, Boolean(referenceHasVideo)),
-    estimateKey,
-  );
-  const tokens = Number(tokensRaw);
-  if (!Number.isFinite(tokens) || tokens <= 0) return null;
-  const price = findVideoPrice(
-    options,
-    modelCandidates,
-    pricingActionsFor(action, Boolean(referenceHasVideo)),
-    resolution,
-  );
-  if (!price) return null;
-  return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
-}
 
 function cleanReferencePreviewUrl(value: string | null | undefined): string | null {
   const clean = value?.trim();
@@ -698,6 +499,25 @@ function videoSubmitDisabledReason({
   );
 }
 
+function filteredVideoHistoryItems(
+  historyFilter: VideoHistoryFilter,
+  settledItems: VideoGenerationOut[],
+  succeededItems: VideoGenerationOut[],
+  failedItems: VideoGenerationOut[],
+): VideoGenerationOut[] {
+  if (historyFilter === "succeeded") return succeededItems;
+  if (historyFilter === "failed") return failedItems;
+  return settledItems;
+}
+
+function hasPromptEnhancementPanel(
+  isEnhancing: boolean,
+  preview: string,
+  candidates: PromptEnhanceCandidate[],
+): boolean {
+  return isEnhancing || Boolean(preview.trim()) || candidates.length > 0;
+}
+
 export default function VideoPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -761,10 +581,11 @@ export default function VideoPage() {
     useState("");
   const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
-  const promptEnhancePanelVisible =
-    isEnhancingPrompt ||
-    Boolean(promptEnhancePreview.trim()) ||
-    promptEnhanceCandidates.length > 0;
+  const promptEnhancePanelVisible = hasPromptEnhancementPanel(
+    isEnhancingPrompt,
+    promptEnhancePreview,
+    promptEnhanceCandidates,
+  );
   useBodyScrollLock(isTaskPanelOpen, {
     bodyOverscrollBehavior: "none",
     documentOverscrollBehavior: "none",
@@ -845,11 +666,16 @@ export default function VideoPage() {
     () => settledHistoryItems.filter(isFailedHistoryVideo),
     [settledHistoryItems],
   );
-  const filteredHistoryItems = useMemo(() => {
-    if (historyFilter === "succeeded") return succeededHistoryItems;
-    if (historyFilter === "failed") return failedHistoryItems;
-    return settledHistoryItems;
-  }, [failedHistoryItems, historyFilter, settledHistoryItems, succeededHistoryItems]);
+  const filteredHistoryItems = useMemo(
+    () =>
+      filteredVideoHistoryItems(
+        historyFilter,
+        settledHistoryItems,
+        succeededHistoryItems,
+        failedHistoryItems,
+      ),
+    [failedHistoryItems, historyFilter, settledHistoryItems, succeededHistoryItems],
+  );
   const channels = useMemo(
     () => activeItems.map((item) => `task:${item.id}`),
     [activeItems],
@@ -1920,7 +1746,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[calc(var(--mobile-tabbar-height)+1rem)] pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[max(1rem,env(safe-area-inset-bottom,0px))] pt-2 [scroll-padding-bottom:calc(var(--mobile-tabbar-height)+6rem)] md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4 md:[scroll-padding-bottom:1rem]">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1984,7 +1810,7 @@ export default function VideoPage() {
                 </div>
               </div>
 
-              <div className="space-y-3 p-3 pb-[calc(var(--mobile-tabbar-height)+2rem)] sm:p-4 sm:pb-[calc(var(--mobile-tabbar-height)+2rem)] md:pb-5 lg:pb-6">
+              <div className="space-y-3 p-3 sm:p-4 md:pb-5 lg:pb-6">
                 {action === "i2v" && (
                   <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/66">
                     <input
@@ -1998,7 +1824,7 @@ export default function VideoPage() {
                         event.target.value = "";
                       }}
                     />
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5">
+                    <div className="flex flex-col items-start gap-1.5 border-b border-[var(--border-subtle)] px-3 py-2.5 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between">
                       <div className="flex items-center gap-2">
                         <ImageIcon className="h-4 w-4 text-[var(--accent)]" />
                         <p className="text-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
@@ -2076,7 +1902,7 @@ export default function VideoPage() {
                       </div>
                     </div>
                     <div className="space-y-3 p-3">
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex min-w-0 flex-col items-stretch gap-2 min-[390px]:flex-row min-[390px]:items-center">
                         <Button
                           variant="outline"
                           size="sm"
@@ -2088,7 +1914,7 @@ export default function VideoPage() {
                           上传参考
                         </Button>
                         <p className="min-w-0 flex-1 text-xs leading-5 text-[var(--fg-2)]">
-                          点击素材可预览，点击文字可将 @图片1 / @视频1 插入描述。
+                          点击素材可预览，点击文字可插入引用。
                         </p>
                       </div>
                       <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
@@ -2116,7 +1942,7 @@ export default function VideoPage() {
                             type="button"
                             disabled={referenceUploadMut.isPending}
                             onClick={() => referenceFileRef.current?.click()}
-                            className="flex min-h-24 min-w-[240px] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+                            className="flex min-h-24 min-w-[min(240px,calc(100vw-3rem))] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
                           >
                             <Upload className="h-4 w-4" />
                             添加图片或视频参考
@@ -2125,15 +1951,15 @@ export default function VideoPage() {
                       </div>
                     </div>
                     <details className="group border-t border-[var(--border-subtle)]">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+                      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
                         <span className="inline-flex items-center gap-2">
                           <Tags className="h-3.5 w-3.5 text-[var(--fg-2)]" />
                           添加官方素材 ID
                         </span>
                         <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
                       </summary>
-                      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/56 p-3">
-                        <div className="inline-flex h-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-0.5">
+                      <div className="grid grid-cols-1 gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/56 p-3 min-[390px]:grid-cols-[auto_minmax(0,1fr)_auto] min-[390px]:items-center">
+                        <div className="inline-flex h-11 w-full shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-0.5 min-[390px]:w-auto">
                           {assetReferenceKindOptions.map((kind) => {
                             const active = selectedAssetReferenceKind === kind;
                             return (
@@ -2144,7 +1970,7 @@ export default function VideoPage() {
                                 disabled={referenceUploadMut.isPending}
                                 onClick={() => setAssetReferenceKind(kind)}
                                 className={cn(
-                                  "inline-flex min-w-12 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
+                                  "inline-flex min-w-12 flex-1 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
                                   active
                                     ? "bg-[var(--accent)] text-[var(--accent-on)]"
                                     : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -2155,7 +1981,7 @@ export default function VideoPage() {
                             );
                           })}
                         </div>
-                        <div className="relative min-w-[190px] flex-1">
+                        <div className="relative min-w-0 flex-1">
                           <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                           <input
                             value={assetUrlInput}
@@ -2172,7 +1998,7 @@ export default function VideoPage() {
                               }
                             }}
                             placeholder="asset://asset-..."
-                            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+                            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-xs"
                           />
                         </div>
                         <Button
@@ -2224,7 +2050,7 @@ export default function VideoPage() {
                     maxLength={10000}
                     placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
                     className={cn(
-                      "min-h-[240px] w-full resize-none overflow-y-hidden bg-transparent px-3 py-3 text-sm leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] sm:min-h-[320px] sm:px-4 sm:py-4 lg:min-h-[360px]",
+                      "min-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-3 py-3 text-base leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] sm:min-h-[320px] sm:px-4 sm:py-4 sm:text-sm lg:min-h-[360px] landscape:max-md:min-h-[150px]",
                       isEnhancingPrompt && "cursor-wait",
                     )}
                   />
@@ -2236,7 +2062,7 @@ export default function VideoPage() {
                           type="button"
                           disabled={isEnhancingPrompt || uploadsPending}
                           onClick={() => insertPromptText(chip)}
-                          className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
+                          className="min-h-11 shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50 sm:min-h-0 sm:py-1.5"
                         >
                           {chip}
                         </button>
@@ -2263,7 +2089,7 @@ export default function VideoPage() {
           </section>
 
           <VideoParameterPanel
-            className="scroll-mt-20 md:sticky md:top-[76px]"
+            className="scroll-mt-20 pb-[calc(var(--mobile-tabbar-height)+1rem)] md:sticky md:top-[76px] md:pb-0"
             selectedModel={selectedModel}
             modelOptions={modelOptionValues}
             durationS={effectiveDurationS}

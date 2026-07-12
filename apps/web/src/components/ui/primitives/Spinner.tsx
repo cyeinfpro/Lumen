@@ -23,6 +23,7 @@ export function Spinner({
       width={size}
       height={size}
       aria-hidden="true"
+      focusable="false"
       className={cn("animate-spin shrink-0", className)}
       {...props}
     />

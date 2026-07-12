@@ -50,24 +50,35 @@ export default function GlobalError({
   // 最小化 HTML/CSS（不依赖 primitives 组件，保证 root layout 场景下也能渲染）。
   return (
     <html lang="zh-CN">
+      <head>
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+      </head>
       <body
         style={{
           margin: 0,
-          padding: 0,
-          minHeight: "100dvh",
+          padding:
+            "max(1rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px)) max(1rem, env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px))",
+          minWidth: 320,
+          minHeight: "100svh",
+          boxSizing: "border-box",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          backgroundColor: "#0a0a0b",
-          color: "#e4e4e7",
+          backgroundColor: "var(--bg-0, #0a0a0b)",
+          color: "var(--fg-0, #e4e4e7)",
           fontFamily:
             'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         }}
       >
         <div
           style={{
+            width: "100%",
             maxWidth: 480,
-            padding: "2rem",
+            padding: "clamp(1rem, 5vw, 2rem)",
+            boxSizing: "border-box",
             textAlign: "center",
           }}
         >
@@ -76,7 +87,7 @@ export default function GlobalError({
               fontSize: "1.25rem",
               fontWeight: 600,
               marginBottom: "0.75rem",
-              color: "#fafafa",
+              color: "var(--fg-0, #fafafa)",
             }}
           >
             页面出错
@@ -84,7 +95,7 @@ export default function GlobalError({
           <p
             style={{
               fontSize: "0.875rem",
-              color: "#a1a1aa",
+              color: "var(--fg-1, #a1a1aa)",
               marginBottom: "1.25rem",
               lineHeight: 1.6,
             }}
@@ -95,13 +106,14 @@ export default function GlobalError({
             <pre
               style={{
                 fontSize: "0.75rem",
-                color: "#71717a",
+                color: "var(--fg-2, #71717a)",
                 marginBottom: "1.25rem",
                 padding: "0.75rem",
                 borderRadius: 8,
                 backgroundColor: "rgba(255,255,255,0.04)",
                 wordBreak: "break-all",
                 whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
                 textAlign: "left",
                 fontFamily:
                   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
@@ -110,13 +122,21 @@ export default function GlobalError({
               {detail}
             </pre>
           )}
-          <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: "0.75rem",
+              justifyContent: "center",
+              flexWrap: "wrap",
+            }}
+          >
             <button
               type="button"
               onClick={handleRetry}
               style={{
                 minHeight: 44,
-                minWidth: 44,
+                minWidth: 132,
+                flex: "1 1 132px",
                 padding: "0.5rem 1.25rem",
                 borderRadius: 8,
                 border: "1px solid rgba(242,169,58,0.3)",
@@ -133,7 +153,8 @@ export default function GlobalError({
               href="/"
               style={{
                 minHeight: 44,
-                minWidth: 44,
+                minWidth: 132,
+                flex: "1 1 132px",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",

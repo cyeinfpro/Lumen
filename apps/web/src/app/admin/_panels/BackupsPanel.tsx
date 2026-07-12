@@ -30,7 +30,11 @@ import {
 } from "@/lib/apiClient";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
-import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
+import {
+  EmptyBlock,
+  ErrorBlock,
+  ListSkeleton,
+} from "../_components/AdminFeedback";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;

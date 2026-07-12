@@ -106,11 +106,11 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-label={titleOf(conv)}
             title={titleOf(conv)}
             className={cn(
-              "w-full flex items-center gap-2.5 pl-2.5 pr-11 h-11 md:h-10 text-sm rounded-[var(--radius-control)] text-left transition-colors outline-none",
+              "flex min-h-11 w-full items-center gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2.5 pr-12 text-left text-sm leading-5 transition-colors outline-none md:min-h-10",
               "focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               active
                 ? "bg-[var(--accent)]/12 text-[var(--fg-0)] shadow-[inset_2px_0_0_var(--accent)]"
-                : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
+                : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
             )}
           >
             <MessageSquare
@@ -119,7 +119,9 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 active ? "text-[var(--accent)]" : "text-[var(--fg-2)]",
               )}
             />
-            <span className="truncate flex-1">{titleOf(conv)}</span>
+            <span className="min-w-0 flex-1 overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
+              {titleOf(conv)}
+            </span>
             {conv.archived && (
               <Archive className="w-3 h-3 shrink-0 text-[var(--fg-2)]" />
             )}
@@ -136,7 +138,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-haspopup="menu"
             aria-expanded={view !== "closed"}
             className={cn(
-              "absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 md:w-7 md:h-7 inline-flex items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 transition-all",
+              "absolute right-0.5 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] md:right-1 md:h-8 md:w-8",
               "focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               // 移动端常显（<md 触控设备没有 hover），桌面端 hover 才显
               view !== "closed"
@@ -227,7 +229,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 }}
                 onClick={(e) => e.stopPropagation()}
                 maxLength={120}
-                className="w-full h-8 px-2 text-sm bg-white/5 border border-[var(--border)] rounded-[var(--radius-control)] outline-none focus:border-[var(--accent)]/60 text-[var(--fg-0)] placeholder:text-[var(--fg-2)]"
+                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
                 placeholder="会话标题"
               />
               <div className="flex gap-1.5 mt-1.5 justify-end">
@@ -237,7 +239,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="px-2 h-7 text-xs rounded-[var(--radius-control)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
+                  className="h-8 rounded-[var(--radius-control)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
                 >
                   取消
                 </button>
@@ -274,7 +276,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded-[var(--radius-control)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
+                  className="inline-flex h-8 items-center gap-1 rounded-[var(--radius-control)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
                 >
                   <X className="w-3 h-3" />
                   取消
@@ -321,7 +323,7 @@ function MenuButton({
         "active:scale-[0.98]",
         danger
           ? "text-danger hover:bg-danger-soft hover:opacity-90"
-          : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)]",
+          : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
       <span className="shrink-0">{icon}</span>

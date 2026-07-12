@@ -17,7 +17,7 @@ interface ViewportImageProps extends Omit<React.ImgHTMLAttributes<HTMLImageEleme
   alt: string;
   unloadWhenHidden?: boolean;
   persistAfterVisible?: boolean;
-  /** 显式覆盖 rootMargin；不传则移动端 500px / 桌面端 1000px 自适应。 */
+  /** 显式覆盖 rootMargin；不传则移动端 250px / 桌面端 1000px 自适应。 */
   rootMargin?: string;
 }
 
@@ -90,7 +90,11 @@ export const ViewportImage = forwardRef<HTMLImageElement, ViewportImageProps>(
         data-src={src}
         loading="lazy"
         decoding="async"
-        className={cn(className, !activeSrc && "opacity-0")}
+        className={cn(
+          "h-auto max-w-full",
+          !activeSrc && "opacity-0",
+          className,
+        )}
         {...props}
       />
     );

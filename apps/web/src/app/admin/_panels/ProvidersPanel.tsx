@@ -50,7 +50,7 @@ import type {
 } from "@/lib/types";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
-import { EmptyBlock, ErrorBlock } from "../page";
+import { EmptyBlock, ErrorBlock } from "../_components/AdminFeedback";
 
 // ---------------------------------------------------------------------------
 // 常量

@@ -32,7 +32,12 @@ export function ScoreRing({
   const color = TIER(clamped);
 
   return (
-    <div className={className} style={{ width: size, height: size, position: "relative" }}>
+    <div
+      className={className}
+      role="img"
+      aria-label={`评分 ${Math.round(clamped)} 分`}
+      style={{ width: size, height: size, minWidth: size, minHeight: size, position: "relative" }}
+    >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden>
         <circle
           cx={size / 2}
