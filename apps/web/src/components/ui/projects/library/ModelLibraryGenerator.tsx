@@ -186,7 +186,7 @@ export function ModelLibraryGenerator({
               onClick={() => switchMode(value)}
               aria-pressed={mode === value}
               className={cn(
-                "group relative inline-flex min-h-8 flex-col items-start px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "group relative inline-flex min-h-11 flex-col items-start justify-center px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
                 mode === value
                   ? "text-[var(--fg-0)]"
                   : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
@@ -379,7 +379,7 @@ export function ModelLibraryGenerator({
               <button
                 type="button"
                 onClick={() => setAutoTag((prev) => !prev)}
-                className="group flex min-h-9 w-full items-center gap-3 border-b border-[var(--border)] pb-2 pt-0.5 text-left transition-colors hover:border-[var(--border-strong)]"
+                className="group flex min-h-11 w-full items-center gap-3 border-b border-[var(--border)] pb-2 pt-0.5 text-left transition-colors hover:border-[var(--border-strong)] md:min-h-9"
                 aria-pressed={autoTag}
               >
                 <span
@@ -404,60 +404,91 @@ export function ModelLibraryGenerator({
               </button>
             </Field>
 
-            <div className="hidden flex-col gap-2 md:col-span-2 md:flex xl:col-span-1 xl:min-w-[220px]">
-              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-                {mode === "reference_image"
-                  ? `${totalCount} 张（参考图模式）`
-                  : `${totalCount} 张（每个性别 ${count} 张）`}
-              </p>
-              <Button
-                variant="primary"
-                loading={generating}
-                disabled={submitDisabled}
-                onClick={submit}
-                leftIcon={<Sparkles className="h-4 w-4" />}
-                className="w-full"
-              >
-                开始生成
-              </Button>
-              {submitDisabled ? (
-                <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
-                  {referenceUploading ? "参考图上传中" : "请先上传参考图"}
-                </p>
-              ) : null}
-            </div>
+            <GenerationSubmitControls
+              className="hidden md:col-span-2 md:flex xl:col-span-1 xl:min-w-[220px]"
+              count={count}
+              generating={generating}
+              mobile={false}
+              mode={mode}
+              referenceUploading={referenceUploading}
+              submitDisabled={submitDisabled}
+              totalCount={totalCount}
+              onSubmit={submit}
+            />
           </div>
         </Section>
       </div>
 
-      {/* 提交条 */}
-      <div
-        className={cn(
-          "-mx-3 mt-1 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 md:hidden",
-        )}
-      >
-        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-          {mode === "reference_image"
-            ? `${totalCount} 张（参考图模式）`
-            : `${totalCount} 张（每个性别 ${count} 张）`}
-        </p>
-        <Button
-          variant="primary"
-          loading={generating}
-          disabled={submitDisabled}
-          onClick={submit}
-          leftIcon={<Sparkles className="h-4 w-4" />}
-          className="w-full md:w-auto"
-        >
-          开始生成
-        </Button>
-        {submitDisabled ? (
-          <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
-            {referenceUploading ? "参考图上传中" : "请先上传参考图"}
-          </p>
-        ) : null}
-      </div>
+      <GenerationSubmitControls
+        className="-mx-3 sticky bottom-0 z-20 mt-1 md:hidden"
+        count={count}
+        generating={generating}
+        mobile
+        mode={mode}
+        referenceUploading={referenceUploading}
+        submitDisabled={submitDisabled}
+        totalCount={totalCount}
+        onSubmit={submit}
+      />
     </section>
+  );
+}
+
+function GenerationSubmitControls({
+  className,
+  count,
+  generating,
+  mobile,
+  mode,
+  referenceUploading,
+  submitDisabled,
+  totalCount,
+  onSubmit,
+}: {
+  className?: string;
+  count: ApparelModelLibraryGenerateCount;
+  generating: boolean;
+  mobile: boolean;
+  mode: ApparelModelLibraryGenerateMode;
+  referenceUploading: boolean;
+  submitDisabled: boolean;
+  totalCount: number;
+  onSubmit: () => Promise<void>;
+}) {
+  const summary =
+    mode === "reference_image"
+      ? `${totalCount} 张（参考图模式）`
+      : `${totalCount} 张（每个性别 ${count} 张）`;
+  const disabledMessage = referenceUploading ? "参考图上传中" : "请先上传参考图";
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2",
+        className,
+        mobile
+          ? "border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 shadow-[var(--shadow-1)] backdrop-blur-xl"
+          : "",
+      )}
+    >
+      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        {summary}
+      </p>
+      <Button
+        variant="primary"
+        loading={generating}
+        disabled={submitDisabled}
+        onClick={onSubmit}
+        leftIcon={<Sparkles className="h-4 w-4" />}
+        className="w-full md:w-auto"
+      >
+        开始生成
+      </Button>
+      {submitDisabled ? (
+        <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
+          {disabledMessage}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -533,7 +564,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-8 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >

@@ -28,7 +28,11 @@ import { ApiError } from "@/lib/apiClient";
 import type { InviteLinkOut } from "@/lib/types";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
-import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
+import {
+  EmptyBlock,
+  ErrorBlock,
+  ListSkeleton,
+} from "../_components/AdminFeedback";
 
 type InviteStatus = "valid" | "used" | "revoked" | "expired";
 

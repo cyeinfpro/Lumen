@@ -30,7 +30,7 @@ import type {
   VideoProviderKind,
 } from "@/lib/types";
 import { Button, IconButton } from "@/components/ui/primitives";
-import { ErrorBlock } from "../page";
+import { ErrorBlock } from "../_components/AdminFeedback";
 
 type VideoAction = "t2v" | "i2v" | "reference";
 

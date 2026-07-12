@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -48,6 +48,31 @@ const BYOK_ERROR_TEXT: Record<string, string> = {
 // step 2 拿到 verification_* 错误码时需要清空 token 回退到 step 1。
 const VERIFICATION_RESET_RE = /verification/i;
 
+function getSignupValidationError({
+  verificationToken,
+  email,
+  password,
+  confirm,
+}: {
+  verificationToken: string;
+  email: string;
+  password: string;
+  confirm: string;
+}): string | null {
+  if (!verificationToken) return "API Key 未验证";
+  if (!isValidEmailInput(email)) return "邮箱格式不正确";
+  if (password.length < 8) return "密码至少 8 位";
+  if (password !== confirm) return "两次密码输入不一致";
+  return null;
+}
+
+function resolveSupplierId(
+  supplierId: string,
+  selectedSupplierId: string | undefined,
+): string {
+  return supplierId || selectedSupplierId || "";
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const suppliersQ = useQuery({
@@ -70,12 +95,14 @@ export default function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const verifyGuardRef = useRef(false);
+  const submitGuardRef = useRef(false);
 
   const selectedSupplier = useMemo(
     () => suppliers.find((supplier) => supplier.id === supplierId) ?? suppliers[0],
     [suppliers, supplierId],
   );
-  const activeSupplierId = supplierId || selectedSupplier?.id || "";
+  const activeSupplierId = resolveSupplierId(supplierId, selectedSupplier?.id);
 
   const onVerify = async () => {
     setError(null);
@@ -87,16 +114,20 @@ export default function SignupPage() {
       setError("API Key 未填");
       return;
     }
+    if (verifyGuardRef.current) return;
+    verifyGuardRef.current = true;
     setVerifying(true);
     try {
       const result = await verifyApiKey(activeSupplierId, apiKey.trim());
       setVerificationToken(result.verification_token);
       setKeyHint(result.key_hint);
+      setApiKey("");
     } catch (err) {
       setVerificationToken("");
       setKeyHint("");
       setError(byokErrorText(err));
     } finally {
+      verifyGuardRef.current = false;
       setVerifying(false);
     }
   };
@@ -104,27 +135,23 @@ export default function SignupPage() {
   const onCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!verificationToken) {
-      setError("API Key 未验证");
-      return;
-    }
     const trimmedEmail = normalizeEmailInput(email);
-    if (!isValidEmailInput(trimmedEmail)) {
-      setError("邮箱格式不正确");
+    const validationError = getSignupValidationError({
+      verificationToken,
+      email: trimmedEmail,
+      password,
+      confirm,
+    });
+    if (validationError) {
+      setError(validationError);
       return;
     }
-    if (password.length < 8) {
-      setError("密码至少 8 位");
-      return;
-    }
-    if (password !== confirm) {
-      setError("两次密码输入不一致");
-      return;
-    }
+    if (submitGuardRef.current) return;
+    submitGuardRef.current = true;
     setSubmitting(true);
     try {
       await signupByok(trimmedEmail, password, verificationToken);
-      router.push("/");
+      router.replace("/");
     } catch (err) {
       // step 2 token 过期 / 已用 / 不存在 → 清空 token 让用户回 step 1 重新验证
       const code = extractErrorCode(err);
@@ -132,10 +159,12 @@ export default function SignupPage() {
         setVerificationToken("");
         setKeyHint("");
         setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，请重新验证 API Key");
+        submitGuardRef.current = false;
         setSubmitting(false);
         return;
       }
       setError(byokErrorText(err));
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
@@ -143,8 +172,8 @@ export default function SignupPage() {
   const disabled = suppliersQ.isLoading || suppliers.length === 0;
 
   return (
-    <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="safe-x-page flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain py-8 md:items-center">
+    <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="safe-x-page flex flex-1 items-start justify-center overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-12">
         <div className="w-full max-w-md space-y-7">
           <header className="space-y-2">
             <Link
@@ -188,10 +217,12 @@ export default function SignupPage() {
             <label className="block space-y-1.5">
               <span className="text-xs text-[var(--fg-1)]">供应商</span>
               <select
+                id="signup-supplier"
+                name="supplier"
                 value={activeSupplierId}
                 disabled={disabled || verifying || Boolean(verificationToken)}
                 onChange={(e) => setSupplierId(e.target.value)}
-                className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
               >
                 {suppliers.length === 0 ? (
                   <option value="">暂无可用供应商</option>
@@ -209,13 +240,19 @@ export default function SignupPage() {
               <div className="relative">
                 <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
                 <input
+                  id="signup-api-key"
+                  name="api-key"
                   type="password"
                   value={apiKey}
                   disabled={verifying || Boolean(verificationToken)}
                   onChange={(e) => setApiKey(e.target.value)}
                   placeholder="sk-..."
                   autoComplete="off"
-                  className="w-full h-10 pl-10 pr-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="next"
+                  className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
                 />
               </div>
             </label>
@@ -223,7 +260,8 @@ export default function SignupPage() {
               type="button"
               onClick={onVerify}
               disabled={disabled || verifying || Boolean(verificationToken)}
-              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm disabled:opacity-50"
+              aria-busy={verifying}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm hover:bg-[var(--bg-2)] disabled:opacity-50"
             >
               {verifying ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -242,39 +280,55 @@ export default function SignupPage() {
               创建账号
             </div>
             <input
+              id="signup-email"
+              name="email"
               type="email"
+              disabled={submitting}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@example.com"
               autoComplete="email"
-              className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+              inputMode="email"
+              autoCapitalize="none"
+              autoCorrect="off"
+              enterKeyHint="next"
+              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
             />
             <div className="relative">
               <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
               <input
+                id="signup-password"
+                name="password"
                 type={showPassword ? "text" : "password"}
+                disabled={submitting}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="至少 8 位密码"
                 autoComplete="new-password"
-                className="w-full h-10 pl-10 pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                enterKeyHint="next"
+                className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-12 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword((value) => !value)}
-                className="absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 rounded-[var(--radius-card)] flex items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+                disabled={submitting}
+                className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
                 aria-label={showPassword ? "隐藏密码" : "显示密码"}
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
             <input
+              id="signup-confirm-password"
+              name="password-confirmation"
               type={showPassword ? "text" : "password"}
+              disabled={submitting}
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="确认密码"
               autoComplete="new-password"
-              className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+              enterKeyHint="done"
+              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
             />
 
             {error && (
@@ -291,7 +345,8 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={submitting || !verificationToken}
-              className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50"
+              aria-busy={submitting}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] text-sm font-medium text-[var(--accent-on)] disabled:opacity-50"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "创建账号"}
               {!submitting && <ArrowRight className="w-4 h-4" />}
@@ -318,7 +373,8 @@ function byokErrorText(err: unknown): string {
   const code = extractErrorCode(err);
   if (code && BYOK_ERROR_TEXT[code]) return BYOK_ERROR_TEXT[code];
   if (err instanceof ApiError) {
-    return err.message || `请求失败 (HTTP ${err.status})`;
+    if (err.status === 429) return "请求过于频繁，请稍后再试";
+    if (err.status === 422) return "提交内容不合法";
   }
-  return err instanceof Error ? err.message : "请求失败";
+  return "请求失败，请稍后重试";
 }

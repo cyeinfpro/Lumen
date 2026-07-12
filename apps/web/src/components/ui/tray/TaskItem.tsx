@@ -59,6 +59,26 @@ function taskProgressRatio(gen: Generation): number {
   return STAGE_RATIO[gen.stage] ?? 0.2;
 }
 
+function taskStatusText(gen: Generation): string {
+  if (gen.status === "failed") {
+    return (
+      gen.diagnostics?.safe_error_summary ?? gen.error_message ?? "生成失败"
+    );
+  }
+  if (gen.status === "canceled") return "已取消";
+  if (gen.status === "succeeded") return "已完成";
+  const substage = gen.substage ? SUBSTAGE_LABEL[gen.substage] : undefined;
+  if (gen.status === "queued") {
+    const queuePosition =
+      gen.queue_position != null && gen.queue_position > 0
+        ? ` · 第 ${gen.queue_position} 位`
+        : "";
+    return `${substage ?? "排队中"}${queuePosition}`;
+  }
+  const stage = substage ?? STAGE_LABEL[gen.stage];
+  return gen.attempt > 1 ? `${stage} (第${gen.attempt}次)` : stage;
+}
+
 export interface TaskItemProps {
   gen: Generation;
   onCancel?: (gen: Generation) => void;
@@ -80,42 +100,13 @@ export const TaskItem = memo(function TaskItem({
 
   const ratio = taskProgressRatio(gen);
 
-  // 状态文字
-  let statusText: string;
-  if (failed) {
-    statusText =
-      gen.diagnostics?.safe_error_summary ?? gen.error_message ?? "生成失败";
-  } else if (canceled) {
-    statusText = "已取消";
-  } else if (succeeded) {
-    statusText = "已完成";
-  } else if (queued) {
-    statusText =
-      gen.substage && SUBSTAGE_LABEL[gen.substage]
-        ? SUBSTAGE_LABEL[gen.substage]
-        : "排队中";
-    if (gen.queue_position != null && gen.queue_position > 0) {
-      statusText += ` · 第 ${gen.queue_position} 位`;
-    }
-  } else if (gen.attempt > 1 && running) {
-    statusText = `${
-      gen.substage && SUBSTAGE_LABEL[gen.substage]
-        ? SUBSTAGE_LABEL[gen.substage]
-        : STAGE_LABEL[gen.stage]
-    } (第${gen.attempt}次)`;
-  } else {
-    statusText =
-      gen.substage && SUBSTAGE_LABEL[gen.substage]
-        ? SUBSTAGE_LABEL[gen.substage]
-        : STAGE_LABEL[gen.stage];
-  }
-  const actions =
-    gen.recommended_actions?.length
-      ? gen.recommended_actions
-      : recommendedActionsForError(gen.error_code, {
-          retryable: gen.retryable,
-          status: gen.status,
-        });
+  const statusText = taskStatusText(gen);
+  const actions = gen.recommended_actions?.length
+    ? gen.recommended_actions
+    : recommendedActionsForError(gen.error_code, {
+        retryable: gen.retryable,
+        status: gen.status,
+      });
   const showRecoveryActions = (failed || canceled) && actions.length > 0;
 
   return (
@@ -138,7 +129,7 @@ export const TaskItem = memo(function TaskItem({
         disabled={!onView || !succeeded}
         aria-label={succeeded ? "查看结果" : "缩略图"}
         className={cn(
-          "relative h-10 w-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] sm:h-11 sm:w-11",
+          "relative h-11 w-11 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)]",
           "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
           succeeded && onView
             ? "cursor-pointer hover:opacity-90 active:scale-[0.92]"
@@ -237,7 +228,7 @@ export const TaskItem = memo(function TaskItem({
                   key={action.id}
                   type="button"
                   onClick={() => onRetry(gen)}
-                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                  className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
                 >
                   {action.label}
                 </button>
@@ -248,7 +239,7 @@ export const TaskItem = memo(function TaskItem({
                 <a
                   key={action.id}
                   href={action.href}
-                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                  className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
                 >
                   {action.label}
                 </a>

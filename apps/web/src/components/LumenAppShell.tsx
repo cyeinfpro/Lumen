@@ -58,7 +58,9 @@ export function LumenAppShell({ children, initialRuntimeDefaults }: Props) {
       <RuntimeDefaultsBootstrap defaults={initialRuntimeDefaults} />
       <SSEProvider>
         <ErrorBoundary>
-          <PageTransitions>{children}</PageTransitions>
+          <div data-lumen-app-shell>
+            <PageTransitions>{children}</PageTransitions>
+          </div>
         </ErrorBoundary>
       </SSEProvider>
 

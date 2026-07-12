@@ -2,7 +2,7 @@
 
 // Lumen 登录页。
 
-import { Suspense, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -43,6 +43,7 @@ function LoginInner() {
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submitGuardRef = useRef(false);
 
   // review §9 / #34: 仅当后端 /auth/api-suppliers 返回非空（即 BYOK 公开注册开启
   // 且至少有一个 public_signup_enabled 的供应商）才展示"直接注册"入口，避免
@@ -73,18 +74,18 @@ function LoginInner() {
       return;
     }
 
+    if (submitGuardRef.current) return;
+    submitGuardRef.current = true;
     setSubmitting(true);
     try {
       await login(trimmedEmail, password);
-      router.push(next);
+      router.replace(next);
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.status === 401 || err.status === 403) {
+        if (err.status === 401 || err.status === 403 || err.status === 404) {
           setError("邮箱或密码不正确");
-        } else if (err.status === 404) {
-          setError("账号不存在");
         } else if (err.status === 422) {
-          setError(err.message || "提交内容不合法");
+          setError("提交内容不合法");
         } else if (err.status === 429) {
           setError("尝试次数过多，请稍后再试");
         } else {
@@ -94,18 +95,19 @@ function LoginInner() {
       } else {
         setError(errorToText(err));
       }
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto overscroll-contain md:grid-cols-2">
         {/* —— 左：品牌区（仅桌面） —— */}
         <BrandPanel />
 
         {/* —— 右：登录表单 —— */}
-        <section className="safe-x-page flex min-h-full items-start justify-center py-8 md:items-center md:py-16">
+        <section className="safe-x-page flex min-h-full items-start justify-center pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-16">
           <motion.div
             initial={false}
             animate={{ opacity: 1, y: 0 }}
@@ -133,13 +135,19 @@ function LoginInner() {
                 <Field id="login-email" label="邮箱" icon={<Mail className="w-3.5 h-3.5" />}>
                   <input
                     id="login-email"
+                    name="email"
                     type="email"
                     required
+                    disabled={submitting}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@示例.com"
                     autoComplete="email"
-                    className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+                    inputMode="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    enterKeyHint="next"
+                    className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
                   />
                 </Field>
 
@@ -151,19 +159,23 @@ function LoginInner() {
                   <div className="relative">
                     <input
                       id="login-password"
+                      name="password"
                       type={showPwd ? "text" : "password"}
                       required
+                      disabled={submitting}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="输入密码"
                       autoComplete="current-password"
-                      className="w-full h-10 pl-3 pr-12 md:pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+                      enterKeyHint="go"
+                      className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:pr-11 md:text-sm"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPwd((v) => !v)}
+                      disabled={submitting}
                       aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-[var(--radius-card)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
+                      className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
                     >
                       {showPwd ? (
                         <EyeOff className="w-4 h-4" />
@@ -204,7 +216,8 @@ function LoginInner() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:opacity-[var(--op-press)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-[filter,opacity,box-shadow] shadow-[var(--shadow-amber)]"
+                  aria-busy={submitting}
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
                 >
                   {submitting ? (
                     <>
@@ -248,7 +261,7 @@ function LoginInner() {
         </section>
       </main>
 
-      <footer className="px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom">
+      <footer className="px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center text-xs text-[var(--fg-2)]">
         <Link href="/" className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors">
           返回首页
         </Link>
@@ -272,6 +285,7 @@ function safeNextPath(raw: string): string {
     if (parsed.origin !== base) return "/";
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "/";
     if (!parsed.pathname.startsWith("/")) return "/";
+    if (parsed.pathname === "/login") return "/";
     // 显式禁止 javascript: 等被某些浏览器宽松解析的边界
     if (/^javascript:/i.test(trimmed)) return "/";
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;

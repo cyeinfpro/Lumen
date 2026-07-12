@@ -7,7 +7,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 import { SPRING } from "@/lib/motion";
@@ -41,21 +41,33 @@ export function LightboxParamsPanel({
   onCopyPrompt,
 }: LightboxParamsPanelProps) {
   const reducedMotion = usePanelReducedMotion();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      panelRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
 
   return (
     <AnimatePresence>
       {open && item && (
         <motion.div
           key="lightbox-params-panel"
+          ref={panelRef}
           role="dialog"
           aria-modal="false"
           aria-label="图片参数"
+          tabIndex={-1}
           className={cn(
             "fixed inset-x-0 bottom-0 z-[var(--z-dialog,90)]",
-            "rounded-t-2xl bg-[var(--bg-1)]/96 backdrop-blur-2xl",
+            "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)]/96 backdrop-blur-2xl",
             "border-t border-[var(--border-subtle)]",
             "mobile-dialog-sheet mobile-dialog-scroll safe-x pb-[var(--mobile-dialog-footer-pad-bottom)]",
             "max-h-[min(70dvh,var(--mobile-dialog-max-height))] overflow-y-auto overscroll-contain",
+            "[@media(orientation:landscape)_and_(max-height:500px)]:max-h-[var(--mobile-dialog-max-height)]",
           )}
           initial={reducedMotion ? { opacity: 0 } : { y: "100%" }}
           animate={reducedMotion ? { opacity: 1 } : { y: 0 }}

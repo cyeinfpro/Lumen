@@ -21,12 +21,13 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { cn } from "@/lib/utils";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
@@ -151,7 +152,7 @@ export function ModelLibraryJobsPanel() {
               onClick={() => clearJobs.mutate()}
               disabled={clearJobs.isPending || (finished.length === 0 && !jobs.hasNextPage)}
               className={cn(
-                "inline-flex min-h-10 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
+                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
@@ -168,7 +169,7 @@ export function ModelLibraryJobsPanel() {
               onClick={() => jobs.refetch()}
               disabled={jobs.isFetching}
               className={cn(
-                "inline-flex min-h-10 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
+                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
@@ -224,7 +225,7 @@ export function ModelLibraryJobsPanel() {
               onClick={() => jobs.fetchNextPage()}
               disabled={jobs.isFetchingNextPage}
               className={cn(
-                "mx-auto inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60",
+                "mx-auto inline-flex min-h-11 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:h-9 md:min-h-0",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
@@ -428,7 +429,10 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
             {formatRelativeTime(job.updated_at ?? job.created_at)}
           </p>
           {job.error_message ? (
-            <p className="mt-2 max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]">
+            <p
+              role="alert"
+              className="mt-2 max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]"
+            >
               {job.error_message}
             </p>
           ) : null}
@@ -448,7 +452,7 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
               }}
               disabled={deleteJob.isPending}
               className={cn(
-                "inline-flex h-8 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                "inline-flex min-h-11 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-8 md:min-h-0",
                 confirmDelete
                   ? "text-[var(--danger)]"
                   : "text-[var(--fg-2)] hover:text-[var(--danger)]",
@@ -732,49 +736,14 @@ function JobThumb({
 
   return (
     <div className="group relative">
-      <button
-        type="button"
-        onClick={() => onOpenLightbox?.()}
-        aria-label="查看大图"
-        className={cn(
-          "relative block w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          compact ? "aspect-square" : "aspect-[3/4]",
-        )}
-      >
-        <Image
-          src={item.thumb_url || item.image_url}
-          alt="生成模特"
-          fill
-          unoptimized
-          sizes="(max-width: 768px) 50vw, 220px"
-          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
-        />
-        {/* N°NN 序号 */}
-        {typeof order === "number" ? (
-          <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
-            N°{String(order + 1).padStart(2, "0")}
-          </span>
-        ) : null}
-        {free ? (
-          <span className="absolute right-2 top-2 inline-flex rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
-            free
-          </span>
-        ) : null}
-        {saved ? (
-          <span
-            className={cn(
-              "absolute right-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur",
-              free ? "top-8" : "top-2",
-            )}
-          >
-            <Bookmark className="h-3 w-3" />
-            已入库
-          </span>
-        ) : null}
-        <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
-          <Maximize2 className="h-3.5 w-3.5" />
-        </span>
-      </button>
+      <JobThumbnailMedia
+        compact={compact}
+        free={free}
+        item={item}
+        order={order}
+        saved={saved}
+        onOpenLightbox={onOpenLightbox}
+      />
       {!compact ? (
         <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2">
           <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
@@ -787,7 +756,7 @@ function JobThumb({
               type="button"
               aria-label="收藏入库"
               onClick={() => setSaveOpen(true)}
-              className="inline-flex h-7 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em]"
+              className="inline-flex min-h-11 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em] md:h-7 md:min-h-0"
             >
               <Bookmark className="h-3 w-3" />
               入库
@@ -800,7 +769,7 @@ function JobThumb({
           type="button"
           aria-label="收藏入库"
           onClick={() => setSaveOpen(true)}
-          className="absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:opacity-0 md:group-hover:opacity-100"
+          className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
         >
           <Bookmark className="h-3.5 w-3.5" />
         </button>
@@ -816,6 +785,68 @@ function JobThumb({
   );
 }
 
+function JobThumbnailMedia({
+  compact,
+  free,
+  item,
+  order,
+  saved,
+  onOpenLightbox,
+}: {
+  compact: boolean;
+  free: boolean;
+  item: ApparelModelLibraryJobItem;
+  order?: number;
+  saved: boolean;
+  onOpenLightbox?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpenLightbox}
+      aria-label="查看大图"
+      className={cn(
+        "relative block w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        compact ? "aspect-square" : "aspect-[3/4]",
+      )}
+    >
+      <Image
+        src={item.thumb_url || item.image_url}
+        alt="生成模特"
+        fill
+        unoptimized
+        sizes="(max-width: 768px) 50vw, 220px"
+        className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
+      />
+      {typeof order === "number" ? (
+        <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+          N°{String(order + 1).padStart(2, "0")}
+        </span>
+      ) : null}
+      {free ? (
+        <span className="absolute right-2 top-2 inline-flex rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
+          free
+        </span>
+      ) : null}
+      {saved ? (
+        <span
+          className={cn(
+            "absolute right-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur",
+            free ? "top-8" : "top-2",
+          )}
+        >
+          <Bookmark className="h-3 w-3" />
+          已入库
+        </span>
+      ) : null}
+      {/* @ui-governance-allow media: zoom affordance overlays the generated image. */}
+      <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
+        <Maximize2 className="h-3.5 w-3.5" />
+      </span>
+    </button>
+  );
+}
+
 function SaveJobItemDialog({
   item,
   job,
@@ -825,6 +856,7 @@ function SaveJobItemDialog({
   job: ApparelModelLibraryJob;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const defaultAge: ModelLibraryItemAgeSegment = job.age_segment ?? "young_adult";
   const rawDefaultGender = item.gender || job.gender || "female";
   const defaultGender = rawDefaultGender === "male" ? "male" : "female";
@@ -856,17 +888,12 @@ function SaveJobItemDialog({
     },
   );
 
-  // ESC 关闭 + body lock
   useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  const onDialogKeyDown = useModalLayer({
+    open: true,
+    rootRef: dialogRef,
+    onClose,
+  });
 
   const submit = () => {
     const next = title.trim();
@@ -897,9 +924,12 @@ function SaveJobItemDialog({
       }}
     >
       <motion.div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="收藏入库"
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
         initial={{ opacity: 0, y: 24, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.98 }}
@@ -919,12 +949,12 @@ function SaveJobItemDialog({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-9 md:w-9"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
-        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5">
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto overscroll-contain px-5 py-5">
           <UnderlineLabeled label="名称">
             <input
               value={title}
@@ -1037,7 +1067,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-10 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >

@@ -59,10 +59,11 @@ export function MobileTabBar() {
     (tab: TabDef) => {
       haptic("light");
       if (isSameRoute(pathname, tab.route)) {
-        window.scrollTo({ top: 0, behavior: "smooth" });
-        if (typeof window !== "undefined" && window.location.search) {
-          router.replace(tab.route);
-        }
+        const scroller = document.querySelector<HTMLElement>(
+          "[data-app-viewport] [data-app-scroll], [data-lumen-app-shell] [data-app-scroll]",
+        );
+        if (scroller) scroller.scrollTo({ top: 0, behavior: "smooth" });
+        else window.scrollTo({ top: 0, behavior: "smooth" });
         return;
       }
       router.push(tab.route);
@@ -70,13 +71,16 @@ export function MobileTabBar() {
     [haptic, pathname, router],
   );
 
+  const navigationHidden = lightboxOpen || isKeyboardOpen;
+
   return (
     <nav
       aria-label="主导航"
-      aria-hidden={lightboxOpen || undefined}
-      inert={lightboxOpen ? true : undefined}
+      data-navigation-level="primary"
+      aria-hidden={navigationHidden || undefined}
+      inert={navigationHidden ? true : undefined}
       className={[
-        "fixed inset-x-0 bottom-0 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/96 safe-x",
+        "fixed inset-x-0 bottom-0 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/96 safe-x backdrop-blur-xl",
         "transition-[transform,opacity] duration-[var(--dur-normal)] ease-[var(--ease-shutter)]",
         lightboxOpen ? "opacity-0 pointer-events-none" : "opacity-100",
         isKeyboardOpen ? "translate-y-full pointer-events-none" : "translate-y-0",
@@ -86,7 +90,7 @@ export function MobileTabBar() {
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
-      <ul className="relative mx-auto flex h-14 max-w-[640px] items-stretch px-1">
+      <ul className="relative mx-auto flex h-[var(--mobile-tabbar-h)] min-h-[var(--mobile-tabbar-h)] max-w-[640px] items-stretch px-1">
         {tabs.map((tab, idx) => {
           const active = idx === activeIndex;
           const { Icon } = tab;
@@ -100,7 +104,7 @@ export function MobileTabBar() {
                 onPress={() => onTap(tab)}
                 aria-label={tab.label}
                 aria-current={active ? "page" : undefined}
-                className="relative h-full w-full flex-col gap-0.5 rounded-[var(--radius-control)]"
+                className="relative h-full min-h-11 w-full min-w-11 flex-col gap-0.5 rounded-[var(--radius-control)]"
               >
                 {active && (
                   <span

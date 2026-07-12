@@ -143,7 +143,7 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
           style={{ width: `${progress * 100}%` }}
         />
       </div>
-      <div className="scrollbar-none -mx-1 mt-3 flex gap-1 overflow-x-auto px-1">
+      <div className="scrollbar-none -mx-1 mt-3 flex snap-x snap-mandatory gap-1 overflow-x-auto px-1 pb-0.5">
         {STEPS.map((step, index) => {
           const isCurrent = workflow.current_step === step.key;
           const isPast = index < currentIndex;
@@ -152,7 +152,7 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
             <span
               key={step.key}
               className={cn(
-                "inline-flex min-h-9 shrink-0 items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
+                "inline-flex min-h-11 shrink-0 snap-start items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors md:min-h-9",
                 isCurrent
                   ? "text-[var(--amber-300)]"
                   : isPast

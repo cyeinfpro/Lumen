@@ -43,8 +43,8 @@ const ELEVATIONS: Record<Elevation, string> = {
 const PADDINGS: Record<Padding, string> = {
   none: "",
   sm: "p-3",
-  md: "p-4",
-  lg: "p-6",
+  md: "p-4 max-[359px]:p-3",
+  lg: "p-6 max-sm:p-4 max-[359px]:p-3",
 };
 
 export function Card({

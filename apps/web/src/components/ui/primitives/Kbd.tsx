@@ -16,11 +16,11 @@ export function Kbd({
     <kbd
       ref={ref}
       className={cn(
-        "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1",
-        "text-[11px] font-mono tracking-tight",
+        "inline-flex h-[18px] min-w-[18px] items-center justify-center px-1",
+        "font-mono text-[11px]",
         "bg-[var(--bg-2)] text-[var(--fg-0)]",
         "border border-[var(--border)]",
-        "rounded-[4px] shadow-[var(--shadow-2)]",
+        "rounded-[var(--radius-sm)] shadow-[var(--shadow-1)]",
         className,
       )}
       {...props}

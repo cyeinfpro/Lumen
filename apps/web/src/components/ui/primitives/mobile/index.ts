@@ -6,3 +6,4 @@ export type { ActionItem } from "./ActionSheet";
 export { pushMobileToast } from "./Toast";
 export { SwipeRow } from "./SwipeRow";
 export { PullToRefresh } from "./PullToRefresh";
+export { trapModalFocus, useModalLayer } from "./useModalLayer";

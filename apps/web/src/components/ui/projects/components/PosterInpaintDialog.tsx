@@ -14,6 +14,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { uploadImage } from "@/lib/apiClient";
 import type { BackendImageMeta } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
@@ -40,6 +42,7 @@ export function PosterInpaintDialog({
   busy = false,
   onSubmit,
 }: PosterInpaintDialogProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [brush, setBrush] = useState(BRUSH_DEFAULT);
@@ -49,6 +52,12 @@ export function PosterInpaintDialog({
   const [uploadingMask, setUploadingMask] = useState(false);
   const drawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
+  useBodyScrollLock(open);
+  const onDialogKeyDown = useModalLayer({
+    open,
+    rootRef: dialogRef,
+    onClose,
+  });
 
   // 派生 canvas 尺寸：限制内部分辨率 ≤ MAX_CANVAS_PX，保持图片宽高比。
   // React 19：不在 effect 里 setState，直接 useMemo 算。
@@ -272,25 +281,18 @@ export function PosterInpaintDialog({
     }
   };
 
-  // ESC 关闭
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   const submitBusy = busy || uploadingMask;
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="局部修复"
+      tabIndex={-1}
+      onKeyDown={onDialogKeyDown}
       className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !submitBusy) onClose();
@@ -309,7 +311,7 @@ export function PosterInpaintDialog({
             onClick={onClose}
             disabled={submitBusy}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50 md:h-9 md:w-9"
           >
             <X className="h-4 w-4" />
           </button>

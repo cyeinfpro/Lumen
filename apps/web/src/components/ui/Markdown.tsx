@@ -77,8 +77,13 @@ function CodeBlock({
   }, [children]);
 
   return (
-    <div className="relative group">
-      <pre {...rest}>{children}</pre>
+    <div className="group relative min-w-0 max-w-full">
+      <pre
+        {...rest}
+        className={cn("max-w-full overflow-x-auto", rest.className)}
+      >
+        {children}
+      </pre>
       <div
         className={cn(
           "absolute top-2 right-2 flex items-center gap-1.5 transition-opacity",
@@ -187,8 +192,15 @@ function buildComponents(): Components {
       );
     },
     table: ({ children, ...props }) => (
-      <div className="overflow-x-auto -mx-1 px-1">
-        <table {...props}>{children}</table>
+      <div
+        role="region"
+        aria-label="可横向滚动的表格"
+        tabIndex={0}
+        className="-mx-1 max-w-full overflow-x-auto px-1"
+      >
+        <table {...props} className={cn("min-w-max", props.className)}>
+          {children}
+        </table>
       </div>
     ),
     tr: ({ children, ...props }) => (
@@ -239,7 +251,7 @@ function MarkdownImpl({
             {...EXTERNAL_LINK_PROPS}
             href={url}
             aria-label={alt || "查看原图"}
-            className="inline-block cursor-zoom-in"
+            className="inline-block max-w-full cursor-zoom-in"
             onClick={handleOpen}
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -247,7 +259,7 @@ function MarkdownImpl({
               {...props}
               src={url}
               alt={alt ?? ""}
-              className="hover:opacity-90 transition-opacity"
+              className="h-auto max-w-full transition-opacity hover:opacity-90"
             />
           </a>
         );

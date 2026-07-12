@@ -4,6 +4,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -53,6 +54,25 @@ function filtersToQueryString(f: StreamFeedFilters): string {
 
 function hasAnyFilter(f: StreamFeedFilters): boolean {
   return Boolean(f.ratio || f.has_ref || f.fast);
+}
+
+function reportShareResult(
+  result: Awaited<ReturnType<typeof shareOrCopyLink>>,
+  onShared: () => void,
+) {
+  if (result === "failed") {
+    pushMobileToast("链接复制失败", "danger");
+  } else if (result !== "cancelled") {
+    pushMobileToast(
+      result === "shared" ? "已打开分享菜单" : "链接已复制",
+      "success",
+    );
+    onShared();
+  }
+}
+
+function hasActiveSelection(selectionMode: boolean, selectedCount: number): boolean {
+  return selectionMode || selectedCount > 0;
 }
 
 export function MobileStream() {
@@ -184,7 +204,10 @@ export function MobileStream() {
       .filter((imageId) => selectedIds.has(imageId));
   }, [filteredItems, selectedIds]);
 
-  const selectionActive = selectionMode || selectedImageIds.length > 0;
+  const selectionActive = hasActiveSelection(
+    selectionMode,
+    selectedImageIds.length,
+  );
   const toggleSelectedImage = useCallback((imageId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -207,12 +230,7 @@ export function MobileStream() {
         imageIds: selectedImageIds,
       });
       const result = await shareOrCopyLink(share.url, "Lumen 图片分享");
-      if (result === "failed") {
-        pushMobileToast("链接复制失败", "danger");
-      } else if (result !== "cancelled") {
-        pushMobileToast(result === "shared" ? "已打开分享菜单" : "链接已复制", "success");
-        clearSelection();
-      }
+      reportShareResult(result, clearSelection);
     } catch {
       pushMobileToast("分享链接生成失败", "danger");
     }
@@ -248,8 +266,20 @@ export function MobileStream() {
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.dataset.appScroll = "";
+    return () => {
+      delete scroller.dataset.appScroll;
+    };
+  }, []);
+
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div
+      data-app-viewport
+      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
+    >
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <StreamTopBar
         compact={compact}
@@ -262,9 +292,9 @@ export function MobileStream() {
       />
 
       <div
-        className="flex-1 min-h-0"
+        className="min-h-0 flex-1 overflow-hidden"
         style={{
-          paddingBottom: "calc(56px + env(safe-area-inset-bottom, 0px))",
+          paddingBottom: "var(--mobile-tabbar-height)",
         }}
       >
         <PullToRefresh
@@ -318,12 +348,14 @@ export function MobileStream() {
             )}
 
             {query.isError ? (
-              <StreamErrorState
-                message={query.error?.message}
-                onRetry={() => {
-                  void query.refetch();
-                }}
-              />
+              <div role="alert" aria-live="assertive">
+                <StreamErrorState
+                  message={query.error?.message}
+                  onRetry={() => {
+                    void query.refetch();
+                  }}
+                />
+              </div>
             ) : isLoading ? (
               <StreamLoadingState />
             ) : isEmptyAll ? (
@@ -363,7 +395,7 @@ export function MobileStream() {
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-3 opacity-0",
         )}
-        style={{ bottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}
+        style={{ bottom: "calc(var(--mobile-tabbar-height) + var(--space-4))" }}
       >
         <Pressable
           size="default"

@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  type RefObject,
   useCallback,
   useEffect,
   useMemo,
@@ -89,6 +90,50 @@ function titleOf(c: ConversationSummary): string {
   return c.title?.trim() || "New Canvas";
 }
 
+function trapDrawerFocus(
+  event: KeyboardEvent,
+  panel: HTMLElement | null,
+  onClose: () => void,
+) {
+  if (!panel) return;
+  const dialogs = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
+  ).filter((dialog) => dialog.isConnected);
+  if (dialogs.at(-1) !== panel) return;
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.getClientRects().length > 0);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !panel.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function isInitialConversationLoad(isLoading: boolean, count: number): boolean {
+  return isLoading && count === 0;
+}
+
 export interface MobileConversationDrawerProps {
   open: boolean;
   onClose: () => void;
@@ -101,6 +146,10 @@ export function MobileConversationDrawer({
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<TabKind>("active");
   const { haptic } = useHaptic();
+  const panelRef = useRef<HTMLElement | null>(null);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   const currentConvId = useChatStore((s) => s.currentConvId);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
@@ -158,14 +207,23 @@ export function MobileConversationDrawer({
     return g;
   }, [filtered]);
 
-  // ── Esc 关闭 ──
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const focusFrame = window.requestAnimationFrame(() =>
+      closeButtonRef.current?.focus(),
+    );
+    const onKey = (event: KeyboardEvent) =>
+      trapDrawerFocus(event, panelRef.current, onClose);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", onKey);
+      window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+    };
   }, [open, onClose]);
 
   // ── body scroll lock ──
@@ -173,37 +231,56 @@ export function MobileConversationDrawer({
 
   // ── infinite scroll sentinel ──
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = list;
+  const {
+    hasNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
+  } = list;
   useEffect(() => {
     if (!open) return;
     const el = sentinelRef.current;
+    const root = listScrollRef.current;
     if (!el) return;
     if (!hasNextPage) return;
+    if (isFetchNextPageError) return;
     const io = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting && !isFetchingNextPage) {
-            fetchNextPage();
+            void fetchNextPage();
           }
         }
       },
-      { rootMargin: "200px 0px" },
+      { root, rootMargin: "200px 0px" },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [open, fetchNextPage, hasNextPage, isFetchingNextPage]);
+  }, [
+    open,
+    fetchNextPage,
+    hasNextPage,
+    isFetchNextPageError,
+    isFetchingNextPage,
+  ]);
 
   const handleSelect = useCallback(
     async (conv: ConversationSummary) => {
       if (conv.id !== currentConvId) {
+        const previousConvId = currentConvId;
         setCurrentConv(conv.id);
         try {
           await loadHistoricalMessages(conv.id);
         } catch (err) {
+          if (useChatStore.getState().currentConvId === conv.id) {
+            setCurrentConv(previousConvId);
+          }
           logWarn("mobile_drawer.load_historical_messages_failed", {
             scope: "mobile-drawer",
             extra: { convId: conv.id, err: String(err) },
           });
+          pushMobileToast("会话加载失败，请重试", "danger");
+          return;
         }
       }
       haptic("light");
@@ -255,7 +332,10 @@ export function MobileConversationDrawer({
   );
 
   const hasResults = filtered.length > 0;
-  const isInitialLoading = list.isLoading && allConvs.length === 0;
+  const isInitialLoading = isInitialConversationLoad(
+    list.isLoading,
+    allConvs.length,
+  );
 
   if (typeof window === "undefined") return null;
 
@@ -278,7 +358,9 @@ export function MobileConversationDrawer({
 
           {/* drawer */}
           <motion.aside
+            ref={panelRef}
             key="conv-drawer-panel"
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label="会话列表"
@@ -287,14 +369,16 @@ export function MobileConversationDrawer({
             exit={{ x: "-100%" }}
             transition={{ type: "spring", stiffness: 380, damping: 34 }}
             className={cn(
-              "fixed top-0 left-0 bottom-0 z-[61] flex min-h-0 max-h-[100dvh] flex-col",
+              "fixed bottom-0 left-0 top-0 z-[61] flex min-h-0 max-h-[100dvh] flex-col",
               "w-[min(360px,92vw)] bg-[var(--bg-1)]",
               "border-r border-[var(--border-subtle)] shadow-[var(--shadow-3)]",
               "overflow-hidden",
+              "[@media(orientation:landscape)_and_(max-height:520px)]:w-[min(360px,55vw)]",
             )}
             style={{
               paddingTop: "env(safe-area-inset-top, 0px)",
               paddingBottom: "env(safe-area-inset-bottom, 0px)",
+              paddingLeft: "env(safe-area-inset-left, 0px)",
             }}
           >
             {/* Header */}
@@ -309,6 +393,7 @@ export function MobileConversationDrawer({
                 </span>
               </div>
               <Pressable
+                ref={closeButtonRef}
                 size="default"
                 minHit={true}
                 pressScale="tight"
@@ -316,7 +401,7 @@ export function MobileConversationDrawer({
                 onPress={onClose}
                 aria-label={copy.action.close}
                 className={cn(
-                  "rounded-full w-9 h-9 text-[var(--fg-1)]",
+                    "h-11 w-11 rounded-full text-[var(--fg-1)]",
                 )}
               >
                 <X className="w-[18px] h-[18px]" />
@@ -352,7 +437,7 @@ export function MobileConversationDrawer({
             <div className="shrink-0 px-4 pb-3">
               <div
                 className={cn(
-                  "flex items-center gap-2 h-10 px-3 rounded-full",
+                  "flex min-h-11 items-center gap-2 px-3 rounded-full",
                   "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
                   "focus-within:border-[var(--amber-400)]/50",
                   "transition-colors",
@@ -372,12 +457,12 @@ export function MobileConversationDrawer({
                 {query && (
                   <Pressable
                     size="inline"
-                    minHit={false}
+                    minHit
                     pressScale="tight"
                     haptic="light"
                     onPress={() => setQuery("")}
                     aria-label="清除搜索"
-                    className="inline-flex items-center justify-center w-6 h-6 -mr-1 rounded-full text-[var(--fg-2)]"
+                    className="-mr-2 inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--fg-2)]"
                   >
                     <X className="w-3 h-3" />
                   </Pressable>
@@ -407,7 +492,12 @@ export function MobileConversationDrawer({
             </div>
 
             {/* List */}
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+            <div
+              ref={listScrollRef}
+              data-app-scroll
+              aria-busy={isInitialLoading || isFetchingNextPage}
+              className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain touch-pan-y [scrollbar-gutter:stable]"
+            >
               {isInitialLoading && <ListSkeleton />}
 
               {!isInitialLoading && list.isError && (
@@ -415,11 +505,11 @@ export function MobileConversationDrawer({
                   加载失败
                   <Pressable
                     size="inline"
-                    minHit={false}
+                    minHit
                     pressScale="tight"
                     haptic="light"
                     onPress={() => list.refetch()}
-                    className="ml-2 underline"
+                    className="ml-1 min-h-11 px-2 underline"
                   >
                     {copy.action.retry}
                   </Pressable>
@@ -485,14 +575,13 @@ export function MobileConversationDrawer({
                   );
                 })}
 
-              {hasNextPage && (
-                <div
-                  ref={sentinelRef}
-                  className="flex items-center justify-center py-5"
-                >
-                  {isFetchingNextPage && <Spinner />}
-                </div>
-              )}
+              <DrawerPagination
+                sentinelRef={sentinelRef}
+                hasNextPage={Boolean(hasNextPage)}
+                hasError={isFetchNextPageError}
+                loading={isFetchingNextPage}
+                onLoadMore={() => void fetchNextPage()}
+              />
 
               <div className="h-3 shrink-0" />
             </div>
@@ -501,6 +590,47 @@ export function MobileConversationDrawer({
       )}
     </AnimatePresence>,
     document.body,
+  );
+}
+
+function DrawerPagination({
+  sentinelRef,
+  hasNextPage,
+  hasError,
+  loading,
+  onLoadMore,
+}: {
+  sentinelRef: RefObject<HTMLDivElement | null>;
+  hasNextPage: boolean;
+  hasError: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  if (!hasNextPage) return null;
+
+  return (
+    <div
+      ref={sentinelRef}
+      className="flex items-center justify-center py-5"
+    >
+      {hasError ? (
+        <div role="alert">
+          <Pressable
+            size="default"
+            minHit
+            pressScale="soft"
+            haptic="light"
+            onPress={onLoadMore}
+            disabled={loading}
+            className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-4 text-[12px] text-danger"
+          >
+            {loading ? "重试中" : "加载失败，点击重试"}
+          </Pressable>
+        </div>
+      ) : loading ? (
+        <Spinner />
+      ) : null}
+    </div>
   );
 }
 

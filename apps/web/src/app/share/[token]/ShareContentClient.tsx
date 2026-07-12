@@ -49,6 +49,19 @@ interface DownloadState {
   status: DownloadStatus;
 }
 
+function isDownloadInProgress(
+  downloadState: DownloadState | null,
+  imageId: string,
+): boolean {
+  return (
+    downloadState?.imageId === imageId && downloadState.status === "downloading"
+  );
+}
+
+function expirationLabel(expiresAt: string | null | undefined): string | null {
+  return expiresAt ? safeFormat(expiresAt, "yyyy-MM-dd HH:mm") : null;
+}
+
 export function ShareContentClient({ data }: { data: PublicShareOut }) {
   const images = useMemo(() => normalizeShareImages(data), [data]);
   const prompts = useMemo(() => sharePrompts(images), [images]);
@@ -62,9 +75,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   // 统一清理，避免 React 19 strict mode 在 setState-on-unmounted 时 warn。
   const transientTimersRef = useRef<Set<number>>(new Set());
   const createdLabel = safeDistanceToNow(data.created_at);
-  const expiresLabel = data.expires_at
-    ? safeFormat(data.expires_at, "yyyy-MM-dd HH:mm")
-    : null;
+  const expiresLabel = expirationLabel(data.expires_at);
   const activeImage =
     activeIndex === null
       ? null
@@ -141,7 +152,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
   const handleDownload = useCallback(
     async (image: PublicShareImageOut) => {
-      if (downloadState?.imageId === image.id && downloadState.status === "downloading") {
+      if (isDownloadInProgress(downloadState, image.id)) {
         return;
       }
 
@@ -216,14 +227,14 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   }, [images.length, showNotice]);
 
   return (
-    <div className="mx-auto flex w-full max-w-[min(94vw,1320px)] flex-col items-center gap-5 pb-4 md:gap-7">
+    <div className="mx-auto flex w-full max-w-[1320px] flex-col items-center gap-4 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
       <section className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div className="min-w-0 space-y-2">
           <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-xs text-[var(--fg-1)]">
             <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
             图片分享
           </p>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
               <Images className="h-3.5 w-3.5" />
               {images.length} 张图片
@@ -237,7 +248,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
         <div className="flex flex-wrap items-center gap-2 md:justify-end">
           {expiresLabel && (
-            <p className="inline-flex h-10 items-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)]">
+            <p className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)]">
               <Clock className="h-3.5 w-3.5" />
               <span>过期</span>
               <span className="font-mono tabular-nums text-[var(--fg-0)]">
@@ -250,7 +261,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             onClick={() => {
               void handleShareLink();
             }}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:opacity-[var(--op-press)]"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:opacity-[var(--op-press)]"
           >
             {linkShared ? (
               <Check className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
@@ -284,7 +295,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
           />
         </div>
       ) : (
-        <div className="w-full columns-2 gap-2 sm:columns-3 md:columns-4 md:gap-3 xl:columns-5">
+        <div className="w-full columns-2 gap-1.5 min-[390px]:gap-2 sm:columns-3 md:columns-4 md:gap-3 xl:columns-5">
           {images.map((image, index) => (
             <ShareImageTile
               key={image.id}
@@ -305,7 +316,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
       <div className="grid w-full max-w-4xl gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
         {data.show_prompt && prompts.length > 0 ? (
           <details className="group overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] backdrop-blur-sm transition-colors hover:border-[var(--border-strong)]">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
               <span className="inline-flex items-center gap-2">
                 <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
                 提示词
@@ -382,7 +393,7 @@ function ShareImageTile({
     <div
       className={cn(
         "share-tile-shell group relative overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-black text-left shadow-[var(--shadow-3)] transition-[border-color,box-shadow] duration-[var(--dur-normal)] hover:border-white/20 hover:shadow-[var(--shadow-amber)]",
-        single ? "max-w-full" : "mb-2 w-full break-inside-avoid md:mb-3",
+        single ? "max-w-full" : "mb-1.5 w-full break-inside-avoid min-[390px]:mb-2 md:mb-3",
       )}
     >
       <button
@@ -416,7 +427,7 @@ function ShareImageTile({
         type="button"
         onClick={() => onDownload(image)}
         disabled={downloading}
-        className="absolute right-2 top-2 z-10 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/90 backdrop-blur transition-[background-color,border-color,opacity] hover:bg-black/70 disabled:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100"
+        className="absolute right-1.5 top-1.5 z-10 inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/90 backdrop-blur transition-[background-color,border-color,opacity] hover:bg-black/70 disabled:opacity-60 min-[390px]:right-2 min-[390px]:top-2 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100"
         aria-label="下载原图"
       >
         {downloading ? (
@@ -426,7 +437,7 @@ function ShareImageTile({
         )}
       </button>
 
-      <span className="pointer-events-none absolute left-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 opacity-100 backdrop-blur sm:opacity-0 sm:group-hover:opacity-100">
+      <span className="pointer-events-none absolute left-1.5 top-1.5 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 opacity-100 backdrop-blur min-[390px]:left-2 min-[390px]:top-2 sm:opacity-0 sm:group-hover:opacity-100">
         <Maximize2 className="h-3.5 w-3.5" aria-hidden />
       </span>
     </div>
@@ -643,7 +654,7 @@ function ShareLightbox({
               type="button"
               onClick={() => onDownload(image)}
               disabled={downloading}
-              className="hidden h-10 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 disabled:opacity-55 sm:inline-flex"
+              className="hidden min-h-11 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 disabled:opacity-55 sm:inline-flex"
             >
               {downloading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -732,7 +743,7 @@ function ShareLightbox({
             type="button"
             onClick={() => onDownload(image)}
             disabled={downloading}
-            className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:h-11"
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-3 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:px-4"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -745,7 +756,7 @@ function ShareLightbox({
             href={image.image_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-white/15 bg-white/10 px-3 text-sm text-white transition-colors hover:bg-white/15 sm:h-11"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-white/15 bg-white/10 px-3 text-sm text-white transition-colors hover:bg-white/15"
           >
             <ExternalLink className="h-4 w-4" />
             原图
@@ -786,7 +797,7 @@ function ShareFilmstrip({
             type="button"
             onClick={() => onSelect(index)}
             className={cn(
-              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity]",
+              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]",
               index === activeIndex
                 ? "border-[var(--color-lumen-amber)] opacity-100"
                 : "border-white/15 opacity-[0.62] hover:opacity-90",

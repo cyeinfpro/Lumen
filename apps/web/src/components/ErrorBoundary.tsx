@@ -55,8 +55,8 @@ export class ErrorBoundary extends Component<Props, State> {
     const message =
       this.state.error instanceof Error ? this.state.error.message : "未知错误";
     return (
-      <div className="min-h-[100dvh] w-full flex-1 flex items-center justify-center bg-[var(--bg-0)] px-6">
-        <div className="max-w-md w-full">
+      <div className="safe-area flex min-h-[100dvh] w-full flex-1 items-center justify-center bg-[var(--bg-0)] px-4 py-6 sm:px-6">
+        <div className="w-full min-w-0 max-w-md">
           <ErrorState
             title="页面出了点问题"
             description="渲染过程中发生了错误。可以尝试重试当前视图，或刷新整个页面。"
@@ -64,24 +64,23 @@ export class ErrorBoundary extends Component<Props, State> {
             onRetry={this.handleReset}
             retryLabel="重试"
             secondaryAction={
-              <>
+              <div className="flex w-full min-w-0 flex-col gap-2 sm:w-auto sm:flex-row">
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={this.handleReload}
+                  className="min-h-11 w-full sm:w-auto"
                 >
                   刷新页面
                 </Button>
-                <Link href="/">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    leftIcon={<Home className="w-3.5 h-3.5" />}
-                  >
-                    返回首页
-                  </Button>
+                <Link
+                  href="/"
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 text-sm font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] sm:w-auto"
+                >
+                  <Home className="h-3.5 w-3.5" aria-hidden />
+                  返回首页
                 </Link>
-              </>
+              </div>
             }
           />
         </div>

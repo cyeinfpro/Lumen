@@ -26,9 +26,14 @@ const taskUiSource = readFileSync(
   new URL("./video-task-ui.tsx", import.meta.url),
   "utf8",
 );
+const optionsModelSource = readFileSync(
+  new URL("./video-options-model.ts", import.meta.url),
+  "utf8",
+);
 const source = [
   pageSource,
   referenceDomainSource,
+  optionsModelSource,
   readFileSync(new URL("./video-workbench-ui.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("./video-request-lifecycle.ts", import.meta.url), "utf8"),
   taskModelSource,
@@ -93,6 +98,25 @@ test("video task domain stays extracted from the route page", () => {
   match(taskUiSource, /export function VideoTaskDrawer\(/);
   match(taskUiSource, /export function VideoPreviewDialog\(/);
   match(taskModelSource, /export function isActiveVideo\(/);
+});
+
+test("video option and pricing domain stays extracted from the route page", () => {
+  ok(pageSource.split("\n").length <= 2397);
+  doesNotMatch(pageSource, /function durationOptionsForModel\(/);
+  doesNotMatch(pageSource, /function estimateHoldMicro\(/);
+  match(pageSource, /from "\.\/video-options-model"/);
+  match(optionsModelSource, /export function durationOptionsForModel\(/);
+  match(optionsModelSource, /export function estimateHoldMicro\(/);
+});
+
+test("video mobile surfaces preserve safe-area, scroll, and touch contracts", () => {
+  match(pageSource, /scroll-padding-bottom:calc\(var\(--mobile-tabbar-height\)\+6rem\)/);
+  match(pageSource, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
+  match(taskUiSource, /mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto/);
+  match(taskUiSource, /min-h-11 rounded-\[var\(--radius-control\)\]/);
+  match(taskUiSource, /\[&_button\]:min-h-11/);
+  match(source, /mobile-dialog-footer/);
+  match(source, /landscape:max-sm/);
 });
 
 test("video reference domain stays extracted from the route page", () => {
@@ -382,7 +406,7 @@ test("video prompt and parameter panel use one discoverable workspace scroll", (
   match(source, /target\.style\.height = "0px"/);
   match(source, /target\.style\.height = `\$\{target\.scrollHeight\}px`/);
   match(source, /resize-none overflow-y-hidden/);
-  match(source, /className="scroll-mt-20 md:sticky md:top-\[76px\]"/);
+  match(source, /className="scroll-mt-20 pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\] md:sticky md:top-\[76px\] md:pb-0"/);
   match(source, /id="video-generation-settings"/);
   match(source, /onOpenParameters=\{scrollParametersIntoView\}/);
   match(source, />视频生成参数</);
@@ -418,7 +442,7 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /focus\(\{ preventScroll: true \}\)/);
   match(source, /回到编辑/);
   match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
-  match(source, /pb-\[calc\(var\(--mobile-tabbar-height\)\+2rem\)\]/);
+  match(source, /scroll-padding-bottom:calc\(var\(--mobile-tabbar-height\)\+6rem\)/);
   match(source, /scroll-mt-4 md:scroll-mt-6/);
 });
 
@@ -504,7 +528,7 @@ test("video prompt enhancement respects Vibe Creating non-rewrite actions", () =
 test("video duration selector follows selected model action and resolution", () => {
   match(source, /durations_by_action_resolution\?\.\[action\]\?\.\[resolution\]/);
   match(source, /durations_by_action\?\.\[action\]/);
-  match(source, /function durationOrPreferred\(current: number, options: number\[\]\)/);
+  match(optionsModelSource, /export function durationOrPreferred\(/);
   match(source, /setResolution\(nextResolution\)/);
   match(source, /setDurationS\(\(prev\) =>\s*durationOrPreferred\(prev, nextDurations\),\s*\)/);
 });

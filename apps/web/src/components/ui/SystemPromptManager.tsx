@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   CheckCircle2,
@@ -29,6 +29,8 @@ import {
   useSystemPromptsQuery,
 } from "@/lib/queries";
 import { useChatStore } from "@/store/useChatStore";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { useModalLayer } from "./primitives/mobile/useModalLayer";
 
 interface SystemPromptManagerProps {
   compact?: boolean;
@@ -42,6 +44,95 @@ interface SystemPromptManagerProps {
 }
 
 const EMPTY_PROMPT = "";
+
+function SystemPromptTrigger({
+  compact,
+  activePrompt,
+  onOpen,
+}: {
+  compact: boolean;
+  activePrompt: SystemPrompt | null;
+  onOpen: () => void;
+}) {
+  return (
+    <Button
+      variant="secondary"
+      size={compact ? "sm" : "md"}
+      onClick={onOpen}
+      className="rounded-full"
+      aria-label="管理系统提示词"
+      title="系统提示词"
+      leftIcon={
+        <Settings2 className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
+      }
+    >
+      <span className={compact ? "hidden sm:inline" : "hidden md:inline"}>
+        {activePrompt ? activePrompt.name : "系统提示词"}
+      </span>
+    </Button>
+  );
+}
+
+function firstMessage(
+  ...messages: Array<string | null | undefined>
+): string | null {
+  return messages.find(Boolean) ?? null;
+}
+
+function PromptList({
+  prompts,
+  loading,
+  error,
+  selectedId,
+  defaultId,
+  currentPromptId,
+  onSelect,
+}: {
+  prompts: SystemPrompt[];
+  loading: boolean;
+  error: string | null;
+  selectedId: string | "new";
+  defaultId: string | null;
+  currentPromptId: string | null;
+  onSelect: (prompt: SystemPrompt) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-8 type-body-sm text-[var(--fg-2)]">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {copy.state.loading}
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <p className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
+        加载失败：{error}
+      </p>
+    );
+  }
+  if (prompts.length === 0) {
+    return (
+      <p className="px-3 py-8 text-center text-xs leading-relaxed text-[var(--fg-2)]">
+        还没有提示词。可以直接输入，或导入一份 Markdown。
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {prompts.map((prompt) => (
+        <PromptRow
+          key={prompt.id}
+          prompt={prompt}
+          active={selectedId === prompt.id}
+          isDefault={prompt.id === defaultId || prompt.is_default}
+          current={currentPromptId === prompt.id}
+          onClick={() => onSelect(prompt)}
+        />
+      ))}
+    </div>
+  );
+}
 
 export function SystemPromptManager({
   compact = false,
@@ -101,19 +192,11 @@ export function SystemPromptManager({
   return (
     <>
       {!hideTrigger && (
-        <Button
-          variant="secondary"
-          size={compact ? "sm" : "md"}
-          onClick={() => setOpen(true)}
-          className="rounded-full"
-          aria-label="管理系统提示词"
-          title="系统提示词"
-          leftIcon={<Settings2 className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />}
-        >
-          <span className={compact ? "hidden sm:inline" : "hidden md:inline"}>
-            {activePrompt ? activePrompt.name : "系统提示词"}
-          </span>
-        </Button>
+        <SystemPromptTrigger
+          compact={compact}
+          activePrompt={activePrompt}
+          onOpen={() => setOpen(true)}
+        />
       )}
       {dialogOpen && typeof document !== "undefined"
         ? createPortal(dialog, document.body)
@@ -158,6 +241,18 @@ function SystemPromptDialog({
   const [content, setContent] = useState(EMPTY_PROMPT);
   const [localError, setLocalError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  useBodyScrollLock(!embedded);
+  const closeDialog = useCallback(() => {
+    if (!embedded) onClose();
+  }, [embedded, onClose]);
+  const onDialogKeyDown = useModalLayer({
+    open: !embedded,
+    rootRef: dialogRef,
+    onClose: closeDialog,
+    initialFocusRef: nameInputRef,
+  });
 
   const selectedPrompt =
     selectedId === "new"
@@ -189,15 +284,6 @@ function SystemPromptDialog({
   });
   const setDefaultMutation = useSetDefaultSystemPromptMutation();
   const patchConversationMutation = usePatchConversationMutation();
-
-  useEffect(() => {
-    if (embedded) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [embedded, onClose]);
 
   const busy =
     createMutation.isPending ||
@@ -277,6 +363,12 @@ function SystemPromptDialog({
     }
     savePrompt(true);
   };
+  const selectPrompt = (prompt: SystemPrompt) => {
+    setSelectedId(prompt.id);
+    setName(prompt.name);
+    setContent(prompt.content);
+    setLocalError(null);
+  };
 
   const isDefault = selectedPrompt
     ? selectedPrompt.id === defaultId || selectedPrompt.is_default
@@ -284,6 +376,14 @@ function SystemPromptDialog({
   const isAppliedToCurrent =
     selectedPrompt &&
     currentConversation?.default_system_prompt_id === selectedPrompt.id;
+  const errorMessage = firstMessage(
+    localError,
+    createMutation.error?.message,
+    patchMutation.error?.message,
+    deleteMutation.error?.message,
+    setDefaultMutation.error?.message,
+    patchConversationMutation.error?.message,
+  );
 
   return (
     <div
@@ -295,7 +395,7 @@ function SystemPromptDialog({
     >
       {!embedded && (
         /* @backdrop-button: 全屏 dialog backdrop，需要 button role 让 a11y 拿到 click & focus 但样式不能走 Button primitive */
-<button
+        <button
           type="button"
           className="absolute inset-0 bg-black/60 backdrop-blur-sm"
           aria-label="关闭系统提示词管理"
@@ -310,9 +410,12 @@ function SystemPromptDialog({
         />
       )}
       <section
+        ref={dialogRef}
         role={embedded ? undefined : "dialog"}
         aria-modal={embedded ? undefined : true}
         aria-labelledby="system-prompt-title"
+        tabIndex={embedded ? undefined : -1}
+        onKeyDown={embedded ? undefined : onDialogKeyDown}
         className={cn(
           "mobile-dialog-panel relative grid w-full overflow-hidden",
           embedded
@@ -352,7 +455,7 @@ function SystemPromptDialog({
 
           <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-3 pb-3 scrollbar-thin">
             {/* @list-item-ok: PromptRow 风格的菜单项，特化的 active/inactive 边框 + 行高，不走 Button primitive */}
-<button
+            <button
               type="button"
               onClick={() => {
                 setSelectedId("new");
@@ -371,41 +474,17 @@ function SystemPromptDialog({
               新建提示词
             </button>
 
-            {loading ? (
-              <div className="flex items-center gap-2 px-3 py-8 type-body-sm text-[var(--fg-2)]">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {copy.state.loading}
-              </div>
-            ) : error ? (
-              <p className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
-                加载失败：{error}
-              </p>
-            ) : prompts.length === 0 ? (
-              <p className="px-3 py-8 text-center text-xs leading-relaxed text-[var(--fg-2)]">
-                还没有提示词。可以直接输入，或导入一份 Markdown。
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                {prompts.map((prompt) => (
-                  <PromptRow
-                    key={prompt.id}
-                    prompt={prompt}
-                    active={selectedId === prompt.id}
-                    isDefault={prompt.id === defaultId || prompt.is_default}
-                    current={
-                      currentConversation?.default_system_prompt_id ===
-                      prompt.id
-                    }
-                    onClick={() => {
-                      setSelectedId(prompt.id);
-                      setName(prompt.name);
-                      setContent(prompt.content);
-                      setLocalError(null);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
+            <PromptList
+              prompts={prompts}
+              loading={loading}
+              error={error}
+              selectedId={selectedId}
+              defaultId={defaultId}
+              currentPromptId={
+                currentConversation?.default_system_prompt_id ?? null
+              }
+              onSelect={selectPrompt}
+            />
           </div>
         </div>
 
@@ -433,6 +512,7 @@ function SystemPromptDialog({
               名称
             </label>
             <input
+              ref={nameInputRef}
               value={name}
               onChange={(event) => setName(event.target.value)}
               maxLength={120}
@@ -456,19 +536,9 @@ function SystemPromptDialog({
               placeholder="写入这个会话要遵守的角色、风格、限制和输出格式…"
             />
 
-            {(localError ||
-              createMutation.error ||
-              patchMutation.error ||
-              deleteMutation.error ||
-              setDefaultMutation.error ||
-              patchConversationMutation.error) && (
+            {errorMessage && (
               <p className="mt-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
-                {localError ||
-                  createMutation.error?.message ||
-                  patchMutation.error?.message ||
-                  deleteMutation.error?.message ||
-                  setDefaultMutation.error?.message ||
-                  patchConversationMutation.error?.message}
+                {errorMessage}
               </p>
             )}
 
@@ -551,10 +621,7 @@ function SystemPromptDialog({
                 aria-disabled={busy || undefined}
                 aria-busy={busy || undefined}
                 loading={busy}
-                className={cn(
-                  "rounded-full",
-                  busy && "pointer-events-none",
-                )}
+                className={cn("rounded-full", busy && "pointer-events-none")}
                 leftIcon={!busy ? <Save className="h-3.5 w-3.5" /> : undefined}
               >
                 {copy.action.save}
@@ -582,7 +649,7 @@ function PromptRow({
 }) {
   return (
     /* @list-item-ok: 多行 list-item 含 badge + 描述行，不适合 Button primitive 的 inline 排版 */
-<button
+    <button
       type="button"
       onClick={onClick}
       aria-current={active ? "true" : undefined}

@@ -6,7 +6,7 @@
 
 import { useEffect } from "react";
 import Link from "next/link";
-import { ErrorState, Button } from "@/components/ui/primitives";
+import { ErrorState } from "@/components/ui/primitives";
 import { Home } from "lucide-react";
 import { logError } from "@/lib/logger";
 
@@ -51,7 +51,7 @@ export default function GlobalError({
     (error.message || "未知错误") + (error.digest ? ` · ${error.digest}` : "");
 
   return (
-    <div className="min-h-[100dvh] w-full flex-1 flex items-center justify-center bg-[var(--bg-0)] px-4 sm:px-6 safe-area">
+    <div className="safe-area flex min-h-[100dvh] w-full flex-1 items-center justify-center bg-[var(--bg-0)] px-4 py-6 sm:px-6">
       <div className="w-full max-w-md">
         <ErrorState
           title="页面出错"
@@ -60,14 +60,12 @@ export default function GlobalError({
           onRetry={handleRetry}
           retryLabel="重试"
           secondaryAction={
-            <Link href="/">
-              <Button
-                variant="ghost"
-                size="sm"
-                leftIcon={<Home className="w-3.5 h-3.5" />}
-              >
-                返回首页
-              </Button>
+            <Link
+              href="/"
+              className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 text-sm font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] sm:w-auto"
+            >
+              <Home className="h-3.5 w-3.5" aria-hidden />
+              返回首页
             </Link>
           }
         />

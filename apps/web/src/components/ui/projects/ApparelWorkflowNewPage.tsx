@@ -73,7 +73,21 @@ interface PendingFile {
   error?: string;
   uploadedId?: string;
   controller?: AbortController;
-  xhr?: XMLHttpRequest;
+}
+
+type PendingFilesUpdater =
+  | PendingFile[]
+  | ((current: PendingFile[]) => PendingFile[]);
+
+function getUploadSummary(files: PendingFile[]) {
+  const fileCount = files.length;
+  return {
+    allDone: fileCount > 0 && files.every((file) => file.status === "done"),
+    anyUploading: files.some((file) => file.status === "uploading"),
+    totalProgress: fileCount
+      ? files.reduce((acc, file) => acc + file.progress, 0) / fileCount
+      : 0,
+  };
 }
 
 function uid() {
@@ -165,6 +179,15 @@ export function ApparelWorkflowNewPage() {
   const [submitting, setSubmitting] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const filesRef = useRef<PendingFile[]>([]);
+  const uploadTasksRef = useRef(new Map<string, Promise<string | null>>());
+  const submittingRef = useRef(false);
+  const updateFiles = useCallback((updater: PendingFilesUpdater) => {
+    const next =
+      typeof updater === "function" ? updater(filesRef.current) : updater;
+    filesRef.current = next;
+    setFiles(next);
+    return next;
+  }, []);
 
   const createMutation = useCreateApparelWorkflowMutation({
     onError: (err) =>
@@ -190,15 +213,16 @@ export function ApparelWorkflowNewPage() {
   }, [ageSegment, gender, appearanceDirection, styleDirection, extraPrompt]);
   const promptRemaining = PROMPT_MAX - composedPrompt.length;
 
-  // 释放 ObjectURL，避免内存泄漏
+  // 释放 ObjectURL 并终止尚未完成的上传，避免卸载后继续回写状态。
   useEffect(() => {
-    filesRef.current = files;
-  }, [files]);
-
-  useEffect(() => {
+    const uploadTasks = uploadTasksRef.current;
     return () => {
-      filesRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+      filesRef.current.forEach((item) => {
+        item.controller?.abort();
+        URL.revokeObjectURL(item.url);
+      });
       filesRef.current = [];
+      uploadTasks.clear();
     };
   }, []);
 
@@ -211,29 +235,33 @@ export function ApparelWorkflowNewPage() {
 
   const addFiles = (incoming: File[]) => {
     setError(null);
-    const slots = MAX_PRODUCT_IMAGES - files.length;
+    if (submittingRef.current || createMutation.isPending) return;
+    const current = filesRef.current;
+    const slots = MAX_PRODUCT_IMAGES - current.length;
     if (slots <= 0) {
       toast.warning(`最多 ${MAX_PRODUCT_IMAGES} 张`);
       return;
     }
-    const next: PendingFile[] = [];
-    for (const file of incoming.slice(0, slots)) {
+    const validFiles: File[] = [];
+    for (const file of incoming) {
       const reason = validateFile(file);
       if (reason) {
         toast.error(`${file.name}：${reason}`);
         continue;
       }
-      next.push({
+      validFiles.push(file);
+    }
+    const acceptedFiles = validFiles.slice(0, slots);
+    const next: PendingFile[] = acceptedFiles.map((file) => ({
         uid: uid(),
         file,
         url: URL.createObjectURL(file),
         progress: 0,
         status: "queued",
-      });
-    }
-    if (next.length) setFiles((prev) => [...prev, ...next]);
-    if (incoming.length > slots) {
-      toast.warning(`最多 ${MAX_PRODUCT_IMAGES} 张，超出 ${incoming.length - slots} 张已忽略`);
+      }));
+    if (next.length) updateFiles([...current, ...next]);
+    if (validFiles.length > slots) {
+      toast.warning(`最多 ${MAX_PRODUCT_IMAGES} 张，超出 ${validFiles.length - slots} 张已忽略`);
     }
   };
 
@@ -243,23 +271,23 @@ export function ApparelWorkflowNewPage() {
   };
 
   const removeFile = (uidToRemove: string) => {
-    setFiles((prev) => {
-      const target = prev.find((item) => item.uid === uidToRemove);
-      if (target) {
-        target.controller?.abort();
-        URL.revokeObjectURL(target.url);
-      }
-      return prev.filter((item) => item.uid !== uidToRemove);
-    });
+    const target = filesRef.current.find((item) => item.uid === uidToRemove);
+    if (target) {
+      target.controller?.abort();
+      URL.revokeObjectURL(target.url);
+    }
+    updateFiles((current) =>
+      current.filter((item) => item.uid !== uidToRemove),
+    );
   };
 
   const moveFile = (uidToMove: string, direction: -1 | 1) => {
-    setFiles((prev) => {
-      const idx = prev.findIndex((item) => item.uid === uidToMove);
-      if (idx < 0) return prev;
+    updateFiles((current) => {
+      const idx = current.findIndex((item) => item.uid === uidToMove);
+      if (idx < 0) return current;
       const next = idx + direction;
-      if (next < 0 || next >= prev.length) return prev;
-      const copy = [...prev];
+      if (next < 0 || next >= current.length) return current;
+      const copy = [...current];
       [copy[idx], copy[next]] = [copy[next], copy[idx]];
       return copy;
     });
@@ -272,61 +300,98 @@ export function ApparelWorkflowNewPage() {
     addFiles(list);
   };
 
-  const uploadOne = useCallback(async (target: PendingFile): Promise<string | null> => {
-    const controller = new AbortController();
-    setFiles((prev) =>
-      prev.map((item) =>
-        item.uid === target.uid
-          ? { ...item, status: "uploading", progress: 0, error: undefined, controller }
-          : item,
-      ),
-    );
-    try {
-      const result = await uploadWithProgress(
-        target.file,
-        (ratio) =>
-          setFiles((prev) =>
-            prev.map((item) =>
-              item.uid === target.uid ? { ...item, progress: ratio } : item,
-            ),
+  const uploadOne = useCallback(
+    (target: PendingFile): Promise<string | null> => {
+      const current = filesRef.current.find((item) => item.uid === target.uid);
+      if (!current) return Promise.resolve(null);
+      if (current.status === "done" && current.uploadedId) {
+        return Promise.resolve(current.uploadedId);
+      }
+      const existing = uploadTasksRef.current.get(target.uid);
+      if (existing) return existing;
+
+      const controller = new AbortController();
+      const task = (async () => {
+        updateFiles((items) =>
+          items.map((item) =>
+            item.uid === target.uid
+              ? {
+                  ...item,
+                  status: "uploading",
+                  progress: 0,
+                  error: undefined,
+                  controller,
+                }
+              : item,
           ),
-        controller.signal,
-      );
-      setFiles((prev) =>
-        prev.map((item) =>
-          item.uid === target.uid
-            ? { ...item, status: "done", progress: 1, uploadedId: result.id }
-            : item,
-        ),
-      );
-      return result.id;
-    } catch (err) {
-      const message =
-        err instanceof DOMException && err.name === "AbortError"
-          ? "已取消"
-          : err instanceof Error
-            ? err.message
-            : "上传失败";
-      setFiles((prev) =>
-        prev.map((item) =>
-          item.uid === target.uid
-            ? {
-                ...item,
-                status: err instanceof DOMException && err.name === "AbortError"
-                  ? "canceled"
-                  : "error",
-                error: message,
-              }
-            : item,
-        ),
-      );
-      return null;
-    }
-  }, []);
+        );
+        try {
+          const result = await uploadWithProgress(
+            current.file,
+            (ratio) =>
+              updateFiles((items) =>
+                items.map((item) =>
+                  item.uid === target.uid && item.controller === controller
+                    ? { ...item, progress: ratio }
+                    : item,
+                ),
+              ),
+            controller.signal,
+          );
+          updateFiles((items) =>
+            items.map((item) =>
+              item.uid === target.uid && item.controller === controller
+                ? {
+                    ...item,
+                    status: "done",
+                    progress: 1,
+                    uploadedId: result.id,
+                    controller: undefined,
+                  }
+                : item,
+            ),
+          );
+          return result.id;
+        } catch (err) {
+          const canceled =
+            err instanceof DOMException && err.name === "AbortError";
+          const message = canceled
+            ? "已取消"
+            : err instanceof Error
+              ? err.message
+              : "上传失败";
+          updateFiles((items) =>
+            items.map((item) =>
+              item.uid === target.uid && item.controller === controller
+                ? {
+                    ...item,
+                    status: canceled ? "canceled" : "error",
+                    error: message,
+                    controller: undefined,
+                  }
+                : item,
+            ),
+          );
+          return null;
+        }
+      })();
+
+      uploadTasksRef.current.set(target.uid, task);
+      void task.finally(() => {
+        if (uploadTasksRef.current.get(target.uid) === task) {
+          uploadTasksRef.current.delete(target.uid);
+        }
+      });
+      return task;
+    },
+    [updateFiles],
+  );
 
   const onCreate = async () => {
+    if (submittingRef.current || createMutation.isPending) return;
     setError(null);
-    if (!files.length) {
+    const snapshot = [...filesRef.current];
+    if (!snapshot.length) {
       setError(`请上传 1 到 ${MAX_PRODUCT_IMAGES} 张商品图`);
       return;
     }
@@ -334,23 +399,29 @@ export function ApparelWorkflowNewPage() {
       setError("基础参数过长，请精简补充说明");
       return;
     }
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       // 把所有未完成的并发上传起来，取每个文件的最终 id
       const results = await Promise.all(
-        files.map(async (file) =>
+        snapshot.map(async (file) =>
           file.status === "done" && file.uploadedId
             ? file.uploadedId
             : await uploadOne(file),
         ),
       );
       const ids = results.filter((id): id is string => Boolean(id));
-      if (ids.length !== files.length) {
+      if (ids.length !== snapshot.length) {
         toast.warning("部分图片未能上传，可重试单张或移除后重新创建");
-        setSubmitting(false);
         return;
       }
-      createMutation.mutate({
+      const currentOrder = filesRef.current.map((file) => file.uid).join(",");
+      const submittedOrder = snapshot.map((file) => file.uid).join(",");
+      if (currentOrder !== submittedOrder) {
+        toast.warning("图片列表已变化，请确认顺序后重新创建");
+        return;
+      }
+      await createMutation.mutateAsync({
         product_image_ids: ids,
         user_prompt: composedPrompt,
         quality_mode: "premium",
@@ -359,21 +430,20 @@ export function ApparelWorkflowNewPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建项目失败");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
-  const allDone = files.length > 0 && files.every((file) => file.status === "done");
-  const anyUploading = files.some((file) => file.status === "uploading");
-  const totalProgress = useMemo(() => {
-    if (!files.length) return 0;
-    return files.reduce((acc, file) => acc + file.progress, 0) / files.length;
-  }, [files]);
+  const { allDone, anyUploading, totalProgress } = useMemo(
+    () => getUploadSummary(files),
+    [files],
+  );
   const isBusy = submitting || createMutation.isPending;
   const ctaDisabled = !files.length || isBusy;
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -384,7 +454,7 @@ export function ApparelWorkflowNewPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-8 md:pt-3">
+      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-8 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1280px] gap-3">
           <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
             <div className="flex min-w-0 items-baseline gap-2.5">
@@ -439,8 +509,9 @@ export function ApparelWorkflowNewPage() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
+                  disabled={isBusy}
                   className={cn(
-                    "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 sm:min-h-[220px] md:min-h-[260px]",
+                    "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[220px] md:min-h-[260px]",
                     dragActive
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
                       : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
@@ -501,13 +572,14 @@ export function ApparelWorkflowNewPage() {
 
               {/* File preview grid: portrait cards */}
               {files.length > 0 ? (
-                <ul className="-mt-4 grid grid-cols-2 gap-x-4 gap-y-8 md:grid-cols-3 md:gap-x-6">
+                <ul className="-mt-4 grid grid-cols-1 gap-x-4 gap-y-8 min-[390px]:grid-cols-2 md:grid-cols-3 md:gap-x-6">
                   {files.map((item, index) => (
                     <FilePortrait
                       key={item.uid}
                       item={item}
                       index={index}
                       total={files.length}
+                      locked={isBusy}
                       onRetry={() => uploadOne(item)}
                       onCancel={() => item.controller?.abort()}
                       onMoveUp={() => moveFile(item.uid, -1)}
@@ -603,7 +675,10 @@ export function ApparelWorkflowNewPage() {
               </div>
 
               {error ? (
-                <div className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5">
+                <div
+                  role="alert"
+                  className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5"
+                >
                   <div className="flex items-start gap-3">
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
                     <div className="min-w-0">
@@ -669,13 +744,13 @@ export function ApparelWorkflowNewPage() {
       </main>
 
       {/* Mobile sticky CTA */}
-      <div className="fixed inset-x-0 bottom-[calc(56px+env(safe-area-inset-bottom,0px))] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-4 py-3 backdrop-blur md:hidden">
+      <div className="fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden">
         <button
           type="button"
           onClick={onCreate}
           disabled={ctaDisabled}
           className={cn(
-            "inline-flex w-full items-center justify-center gap-2 rounded-full px-6 py-3.5 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
+            "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
             ctaDisabled
               ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
               : "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]",
@@ -742,6 +817,7 @@ function FilePortrait({
   item,
   index,
   total,
+  locked,
   onRetry,
   onCancel,
   onMoveUp,
@@ -751,6 +827,7 @@ function FilePortrait({
   item: PendingFile;
   index: number;
   total: number;
+  locked: boolean;
   onRetry: () => void;
   onCancel: () => void;
   onMoveUp: () => void;
@@ -759,39 +836,14 @@ function FilePortrait({
 }) {
   const isMain = index === 0;
   const num = `N°${String(index + 1).padStart(2, "0")}`;
-  const statusTone =
-    item.status === "error"
-      ? "border-[var(--danger)]/40"
-      : item.status === "done"
-        ? "border-[var(--border)]"
-        : "border-[var(--border)]";
-
-  const statusLabel =
-    item.status === "uploading"
-      ? "上传中"
-      : item.status === "done"
-        ? "已就绪"
-        : item.status === "error"
-          ? "失败"
-          : item.status === "canceled"
-            ? "已取消"
-            : "排队中";
-
-  const statusToneText =
-    item.status === "error"
-      ? "text-[var(--danger)]"
-      : item.status === "done"
-        ? "text-[var(--success)]"
-        : item.status === "uploading"
-          ? "text-[var(--amber-300)]"
-          : "text-[var(--fg-2)]";
+  const presentation = pendingFilePresentation(item.status);
 
   return (
     <li className="group relative">
       <div
         className={cn(
           "relative aspect-[4/5] overflow-hidden border bg-[var(--bg-2)] transition-colors duration-[var(--dur-base)]",
-          statusTone,
+          presentation.borderClass,
         )}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -819,7 +871,10 @@ function FilePortrait({
 
         {/* error overlay */}
         {item.status === "error" ? (
-          <div className="absolute inset-x-0 bottom-0 bg-[var(--danger)]/90 px-3 py-2">
+          <div
+            role="alert"
+            className="absolute inset-x-0 bottom-0 bg-[var(--danger)]/90 px-3 py-2"
+          >
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-white/90">
               失败
             </p>
@@ -842,43 +897,23 @@ function FilePortrait({
         </div>
 
         {/* top-right controls */}
-        <div className="absolute right-2 top-2 flex flex-col gap-1.5 opacity-100 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 focus-within:opacity-100 md:opacity-0">
-          <div className="flex flex-col gap-1 rounded-full border border-white/15 bg-black/55 p-1 backdrop-blur">
-            <IconBtn
-              label="上移"
-              onClick={onMoveUp}
-              disabled={index === 0}
-            >
-              <ArrowUp className="h-3.5 w-3.5" />
-            </IconBtn>
-            <IconBtn
-              label="下移"
-              onClick={onMoveDown}
-              disabled={index === total - 1}
-            >
-              <ArrowDown className="h-3.5 w-3.5" />
-            </IconBtn>
-            {item.status === "error" ? (
-              <IconBtn label="重试" onClick={onRetry}>
-                <RotateCcw className="h-3.5 w-3.5" />
-              </IconBtn>
-            ) : null}
-            {item.status === "uploading" ? (
-              <IconBtn label="取消" onClick={onCancel}>
-                <X className="h-3.5 w-3.5" />
-              </IconBtn>
-            ) : null}
-            <IconBtn label="移除" onClick={onRemove} danger>
-              <Trash2 className="h-3.5 w-3.5" />
-            </IconBtn>
-          </div>
-        </div>
+        <FilePortraitControls
+          status={item.status}
+          index={index}
+          total={total}
+          locked={locked}
+          onRetry={onRetry}
+          onCancel={onCancel}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          onRemove={onRemove}
+        />
       </div>
 
       {/* meta row */}
       <div className="mt-3 flex min-w-0 items-baseline justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-        <span className={cn("truncate", statusToneText)} title={item.file.name}>
-          {statusLabel}
+        <span className={cn("truncate", presentation.textClass)} title={item.file.name}>
+          {presentation.label}
         </span>
         <span className="shrink-0 tabular-nums">{formatBytes(item.file.size)}</span>
       </div>
@@ -889,6 +924,91 @@ function FilePortrait({
         {item.file.name}
       </p>
     </li>
+  );
+}
+
+function pendingFilePresentation(status: PendingFile["status"]) {
+  switch (status) {
+    case "uploading":
+      return {
+        label: "上传中",
+        borderClass: "border-[var(--border)]",
+        textClass: "text-[var(--amber-300)]",
+      };
+    case "done":
+      return {
+        label: "已就绪",
+        borderClass: "border-[var(--border)]",
+        textClass: "text-[var(--success)]",
+      };
+    case "error":
+      return {
+        label: "失败",
+        borderClass: "border-[var(--danger)]/40",
+        textClass: "text-[var(--danger)]",
+      };
+    case "canceled":
+      return {
+        label: "已取消",
+        borderClass: "border-[var(--border)]",
+        textClass: "text-[var(--fg-2)]",
+      };
+    default:
+      return {
+        label: "排队中",
+        borderClass: "border-[var(--border)]",
+        textClass: "text-[var(--fg-2)]",
+      };
+  }
+}
+
+function FilePortraitControls({
+  status,
+  index,
+  total,
+  locked,
+  onRetry,
+  onCancel,
+  onMoveUp,
+  onMoveDown,
+  onRemove,
+}: {
+  status: PendingFile["status"];
+  index: number;
+  total: number;
+  locked: boolean;
+  onRetry: () => void;
+  onCancel: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="absolute inset-x-2 top-2 flex justify-end opacity-100 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 focus-within:opacity-100 md:inset-x-auto md:right-2 md:opacity-0">
+      <div className="flex gap-0.5 rounded-full border border-white/15 bg-black/55 p-0.5 backdrop-blur md:flex-col md:gap-1 md:p-1">
+        <IconBtn label="上移" onClick={onMoveUp} disabled={locked || index === 0}>
+          <ArrowUp className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn label="下移" onClick={onMoveDown} disabled={locked || index === total - 1}>
+          <ArrowDown className="h-3.5 w-3.5" />
+        </IconBtn>
+        {status === "error" ? (
+          <span aria-live="polite" className="contents">
+            <IconBtn label="重试" onClick={onRetry} disabled={locked}>
+              <RotateCcw className="h-3.5 w-3.5" />
+            </IconBtn>
+          </span>
+        ) : null}
+        {status === "uploading" ? (
+          <IconBtn label="取消" onClick={onCancel}>
+            <X className="h-3.5 w-3.5" />
+          </IconBtn>
+        ) : null}
+        <IconBtn label="移除" onClick={onRemove} disabled={locked} danger>
+          <Trash2 className="h-3.5 w-3.5" />
+        </IconBtn>
+      </div>
+    </div>
   );
 }
 
@@ -912,7 +1032,7 @@ function IconBtn({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        "inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-30",
+        "inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-30 md:h-8 md:w-8",
         danger
           ? "text-white/85 hover:bg-[var(--danger)]/70 hover:text-white"
           : "text-white/85 hover:bg-white/15 hover:text-white",

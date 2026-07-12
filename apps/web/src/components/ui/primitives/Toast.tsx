@@ -6,7 +6,7 @@
 
 import { useEffect } from "react";
 import { create } from "zustand";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   CheckCircle2,
   AlertCircle,
@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { IconButton } from "./IconButton";
 
 type ToastTone = "success" | "error" | "info" | "warning";
 
@@ -111,6 +112,7 @@ function ToneIcon({ tone }: { tone: ToastTone }) {
 
 function ToastRow({ item }: { item: ToastItem }) {
   const dismiss = useToastStore((s) => s.dismiss);
+  const reduceMotion = useReducedMotion();
   const tone = TONE_CLASSES[item.tone];
 
   // 自毁定时器（使用 effect）
@@ -119,10 +121,10 @@ function ToastRow({ item }: { item: ToastItem }) {
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 16, scale: 0.96 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 16, scale: 0.96 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, x: 24, scale: 0.96, transition: { duration: 0.18 } }}
-      transition={{ type: "spring", damping: 22, stiffness: 260 }}
+      exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 24, scale: 0.96 }}
+      transition={reduceMotion ? { duration: 0 } : { type: "spring", damping: 22, stiffness: 260 }}
       role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
       aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
       className={cn(
@@ -131,7 +133,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         "max-sm:w-full",
         "flex items-start gap-3 px-3 py-2.5 rounded-[var(--radius-panel)]",
         "bg-[var(--bg-1)]/95 backdrop-blur-xl border text-[var(--fg-0)]",
-        "shadow-lumen-pop",
+        "shadow-[var(--shadow-3)]",
         tone.border,
       )}
     >
@@ -164,17 +166,15 @@ function ToastRow({ item }: { item: ToastItem }) {
           </button>
         ) : null}
       </div>
-      <button
-        type="button"
+      <IconButton
+        variant="ghost"
+        size="sm"
         aria-label="关闭通知"
         onClick={() => dismiss(item.id)}
-        className={cn(
-          "shrink-0 w-6 h-6 rounded-[var(--radius-control)] inline-flex items-center justify-center",
-          "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] transition-colors",
-        )}
+        className="shrink-0 text-[var(--fg-1)] hover:text-[var(--fg-0)]"
       >
         <X className="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
+      </IconButton>
     </motion.div>
   );
 }
@@ -197,7 +197,7 @@ export function ToastViewport() {
         // 桌面：右下角
         "sm:bottom-4 sm:right-4 sm:items-end",
         // 移动端：底部居中，留左右 padding；safe-area 避免被 home indicator / composer 挡住
-        "max-sm:left-0 max-sm:right-0 max-sm:items-center max-sm:px-4",
+        "max-sm:left-0 max-sm:right-0 max-sm:items-center max-sm:px-[var(--mobile-page-gutter)]",
         "max-sm:bottom-[calc(var(--mobile-tabbar-height)+0.75rem)]",
         "pointer-events-none",
       )}

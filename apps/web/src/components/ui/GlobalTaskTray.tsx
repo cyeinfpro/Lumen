@@ -8,7 +8,7 @@
 //
 // 注意：本组件不维护任务生命周期；取消 / 重试只是发送 API 调用，store 的 SSE handler 会更新状态。
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ListChecks } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -21,6 +21,28 @@ import type { Generation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { SPRING } from "@/lib/motion";
 import { TaskCenter } from "./tray/TaskCenter";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { useModalLayer } from "./primitives/mobile/useModalLayer";
+
+function taskTrayRefetchInterval(minimized: boolean, hasActive: boolean) {
+  if (minimized) return false;
+  return hasActive ? 10_000 : 30_000;
+}
+
+function taskTrayBadge(activeCount: number, recentCount: number) {
+  if (activeCount > 0) {
+    return {
+      count: activeCount,
+      label: `进行中的任务：${activeCount}`,
+      active: true,
+    };
+  }
+  return {
+    count: Math.min(recentCount, 99),
+    label: `最近任务：${recentCount}`,
+    active: false,
+  };
+}
 
 export function GlobalTaskTray() {
   const taskTrayMinimized = useUiStore((s) => s.taskTray.minimized);
@@ -49,22 +71,12 @@ export function GlobalTaskTray() {
     queryFn: ({ signal }) => listTasks({ limit: 20 }, { signal }),
     enabled: Boolean(userId),
     staleTime: 10_000,
-    refetchInterval: taskTrayMinimized
-      ? false
-      : hasActive
-        ? 10_000
-        : 30_000,
+    refetchInterval: taskTrayRefetchInterval(taskTrayMinimized, hasActive),
   });
 
   const recentCount = recentTasks.data?.items.length ?? 0;
   const hasAnything = hasActive || recentCount > 0;
-  const badgeCount = hasActive ? activeCount : Math.min(recentCount, 99);
-  const badgeLabel = hasActive
-    ? `进行中的任务：${activeCount}`
-    : `最近任务：${recentCount}`;
-
-  // 完全无任务：整个 tray 隐藏（避免占位）
-  if (!hasAnything) return null;
+  const badge = taskTrayBadge(activeCount, recentCount);
 
   // —— 操作：取消 / 重试 ——
   const handleCancel = async (gen: Generation) => {
@@ -98,6 +110,20 @@ export function GlobalTaskTray() {
   };
 
   const expanded = !taskTrayMinimized;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeTray = useCallback(
+    () => setTaskTrayMinimized(true),
+    [setTaskTrayMinimized],
+  );
+  useBodyScrollLock(hasAnything && expanded);
+  const onPanelKeyDown = useModalLayer({
+    open: hasAnything && expanded,
+    rootRef: panelRef,
+    onClose: closeTray,
+  });
+
+  // 完全无任务：整个 tray 隐藏（避免占位）
+  if (!hasAnything) return null;
 
   return (
     <>
@@ -111,7 +137,7 @@ export function GlobalTaskTray() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            onClick={() => setTaskTrayMinimized(true)}
+            onClick={closeTray}
             aria-label="关闭任务面板"
             className="sm:hidden fixed inset-0 bg-black/40 backdrop-blur-[2px] z-[var(--z-tray)]"
           />
@@ -135,6 +161,7 @@ export function GlobalTaskTray() {
         <AnimatePresence mode="popLayout">
           {!taskTrayMinimized && (
             <motion.div
+              ref={panelRef}
               key="tray-panel"
               initial={{ opacity: 0, y: 24, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -143,12 +170,18 @@ export function GlobalTaskTray() {
               className={cn(
                 "pointer-events-auto mobile-dialog-sheet flex min-h-0 w-full flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-[var(--border)] bg-[var(--surface)] shadow-lumen-card backdrop-blur-xl sm:mb-3 sm:w-[23rem] sm:rounded-[var(--radius-sheet)]",
               )}
-              role="region"
+              role="dialog"
+              aria-modal="true"
               aria-label="任务中心"
+              tabIndex={-1}
+              onKeyDown={onPanelKeyDown}
             >
               {/* 把手（仅移动端） */}
-              <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden>
-                <span className="block w-10 h-1 rounded-full bg-white/20" />
+              <div
+                className="sm:hidden flex min-h-11 items-center justify-center"
+                aria-hidden
+              >
+                <span className="block h-1 w-10 rounded-full bg-[var(--fg-3)]/70" />
               </div>
               <TaskCenter
                 activeGenerations={active}
@@ -156,7 +189,7 @@ export function GlobalTaskTray() {
                 onCancelGeneration={handleCancel}
                 onRetryGeneration={handleRetry}
                 onViewGeneration={handleView}
-                onClose={() => setTaskTrayMinimized(true)}
+                onClose={closeTray}
               />
             </motion.div>
           )}
@@ -169,23 +202,23 @@ export function GlobalTaskTray() {
               exit={{ opacity: 0, y: 12, scale: 0.96 }}
               transition={SPRING.soft}
               onClick={() => setTaskTrayMinimized(false)}
-              aria-label={badgeLabel}
+              aria-label={badge.label}
               className={cn(
                 "pointer-events-auto relative inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--fg-0)] shadow-lumen-card backdrop-blur-xl transition",
                 "hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               )}
             >
               <ListChecks className="h-5 w-5" />
-              {badgeCount > 0 && (
+              {badge.count > 0 && (
                 <span
                   className={cn(
                     "absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-semibold",
-                    hasActive
+                    badge.active
                       ? "bg-[var(--accent)] text-[var(--accent-on)]"
                       : "bg-[var(--fg-2)] text-[var(--bg-0)]",
                   )}
                 >
-                  {badgeCount}
+                  {badge.count}
                 </span>
               )}
             </motion.button>

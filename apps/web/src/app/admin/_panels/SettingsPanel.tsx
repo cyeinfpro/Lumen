@@ -46,7 +46,7 @@ import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
-import { ErrorBlock } from "../page";
+import { ErrorBlock } from "../_components/AdminFeedback";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
 

@@ -23,7 +23,7 @@ export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLBut
 }
 
 const BASE =
-  "inline-flex items-center justify-center rounded-[var(--radius-control)] " +
+  "inline-flex items-center justify-center rounded-[var(--radius-control)] touch-manipulation " +
   "transition-[background-color,color,border-color,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +

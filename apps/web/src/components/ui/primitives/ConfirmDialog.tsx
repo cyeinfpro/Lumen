@@ -6,10 +6,11 @@
 // 不依赖 Radix；用 framer-motion 处理入出场。自带 body scroll lock。
 
 import { motion, AnimatePresence } from "framer-motion";
-import { useEffect, useRef } from "react";
+import { useCallback, useId, useRef } from "react";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import { Button } from "./Button";
+import { useModalLayer } from "./mobile/useModalLayer";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -38,66 +39,21 @@ export function ConfirmDialog({
   confirming = false,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const prevActiveRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   useBodyScrollLock(open);
-
-  useEffect(() => {
-    if (!open) return;
-    prevActiveRef.current = (document.activeElement as HTMLElement) ?? null;
-    // rAF 等一帧保证节点已挂载；preventScroll 避免页面跳动
-    const raf = requestAnimationFrame(() => {
-      dialogRef.current?.focus({ preventScroll: true });
-    });
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onOpenChange(false);
-        onCancel?.();
-        return;
-      }
-      // 焦点陷阱：Tab / Shift+Tab 在 dialog 内循环
-      if (e.key === "Tab") {
-        const dialog = dialogRef.current;
-        if (!dialog) return;
-        const focusables = dialog.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        );
-        if (focusables.length === 0) {
-          e.preventDefault();
-          dialog.focus();
-          return;
-        }
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-        const active = document.activeElement as HTMLElement | null;
-        if (e.shiftKey) {
-          if (active === first || !dialog.contains(active)) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else {
-          if (active === last) {
-            e.preventDefault();
-            first.focus();
-          }
-        }
-      }
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      cancelAnimationFrame(raf);
-      document.removeEventListener("keydown", handleKey);
-      prevActiveRef.current?.focus?.();
-    };
-  }, [open, onOpenChange, onCancel]);
+  const handleCancel = useCallback(() => {
+    onOpenChange(false);
+    onCancel?.();
+  }, [onCancel, onOpenChange]);
+  const onDialogKeyDown = useModalLayer({
+    open,
+    rootRef: dialogRef,
+    onClose: handleCancel,
+  });
 
   const handleConfirm = async () => {
     await onConfirm();
-  };
-
-  const handleCancel = () => {
-    onOpenChange(false);
-    onCancel?.();
   };
 
   return (
@@ -123,8 +79,10 @@ export function ConfirmDialog({
             ref={dialogRef}
             role="dialog"
             aria-modal="true"
-            aria-labelledby="confirm-dialog-title"
+            aria-labelledby={titleId}
+            aria-describedby={description ? descriptionId : undefined}
             tabIndex={-1}
+            onKeyDown={onDialogKeyDown}
             initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
@@ -143,7 +101,7 @@ export function ConfirmDialog({
           >
             <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto pr-0.5">
               <h2
-                id="confirm-dialog-title"
+                id={titleId}
                 className={cn(
                   "type-card-title text-balance",
                   tone === "danger" && "text-[var(--danger)]",
@@ -152,7 +110,7 @@ export function ConfirmDialog({
                 {title}
               </h2>
               {description ? (
-                <div className="type-body-sm mt-1.5 text-pretty text-[var(--fg-1)]">
+                <div id={descriptionId} className="type-body-sm mt-1.5 text-pretty text-[var(--fg-1)]">
                   {description}
                 </div>
               ) : null}
@@ -171,7 +129,7 @@ export function ConfirmDialog({
                 onClick={handleCancel}
                 disabled={confirming}
                 aria-disabled={confirming || undefined}
-                className="w-full sm:w-auto"
+                className="min-h-11 w-full sm:w-auto"
               >
                 {cancelText}
               </Button>
@@ -181,7 +139,7 @@ export function ConfirmDialog({
                 onClick={handleConfirm}
                 loading={confirming}
                 aria-disabled={confirming || undefined}
-                className="w-full sm:w-auto"
+                className="min-h-11 w-full sm:w-auto"
               >
                 {confirmText}
               </Button>

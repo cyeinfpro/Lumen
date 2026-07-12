@@ -23,6 +23,7 @@ import {
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
@@ -125,6 +126,82 @@ interface BrandImageState {
   size: number;
 }
 
+type BrandImageKind = "logo" | "product";
+type BrandImageSetter = Dispatch<SetStateAction<BrandImageState | null>>;
+
+function brandImageValidationError(file: File): string | null {
+  if (!ACCEPT.includes(file.type)) {
+    return `不支持的格式：${file.type || "未知"}`;
+  }
+  if (file.size > MAX_BRAND_IMAGE_BYTES) {
+    return `单张不能超过 ${formatBytes(MAX_BRAND_IMAGE_BYTES)}`;
+  }
+  return null;
+}
+
+function setBrandImageState(
+  kind: BrandImageKind,
+  value: BrandImageState | null,
+  setLogo: BrandImageSetter,
+  setProduct: BrandImageSetter,
+) {
+  if (kind === "logo") setLogo(value);
+  else setProduct(value);
+}
+
+function replaceBrandPreviewUrl(
+  kind: BrandImageKind,
+  localUrl: string,
+  urls: Record<BrandImageKind, string | null>,
+  setLogo: BrandImageSetter,
+  setProduct: BrandImageSetter,
+) {
+  if (urls[kind]) URL.revokeObjectURL(urls[kind]);
+  urls[kind] = localUrl;
+  setBrandImageState(kind, null, setLogo, setProduct);
+}
+
+function releaseBrandPreviewUrl(
+  kind: BrandImageKind,
+  localUrl: string,
+  urls: Record<BrandImageKind, string | null>,
+) {
+  if (urls[kind] !== localUrl) return;
+  URL.revokeObjectURL(localUrl);
+  urls[kind] = null;
+}
+
+function getPosterFormState({
+  aspects,
+  copy,
+  createPending,
+  style,
+  title,
+  uploadPending,
+}: {
+  aspects: string[];
+  copy: string;
+  createPending: boolean;
+  style: PosterStyleItem | null;
+  title: string;
+  uploadPending: boolean;
+}) {
+  const copyTrimmed = copy.trim();
+  const titleTrimmed = title.trim();
+  return {
+    copyTrimmed,
+    derivedTitle:
+      titleTrimmed ||
+      (copyTrimmed ? copyTrimmed.split(/\n/)[0]?.slice(0, 24) || "海报设计" : "海报设计"),
+    ctaDisabled:
+      !copyTrimmed ||
+      !style ||
+      !aspects.length ||
+      createPending ||
+      uploadPending,
+  };
+}
+
 export function PosterWorkflowNewPage() {
   const router = useRouter();
   const [copy, setCopy] = useState("");
@@ -141,15 +218,39 @@ export function PosterWorkflowNewPage() {
   const [primaryColor, setPrimaryColor] = useState<string>("");
   const [fontFamily, setFontFamily] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState<null | "logo" | "product">(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploading, setUploading] = useState<Record<BrandImageKind, boolean>>({
+    logo: false,
+    product: false,
+  });
+  const [uploadProgress, setUploadProgress] = useState<
+    Record<BrandImageKind, number>
+  >({
+    logo: 0,
+    product: 0,
+  });
 
-  const logoUrlRef = useRef<string | null>(null);
-  const productUrlRef = useRef<string | null>(null);
+  const brandUrlRef = useRef<Record<BrandImageKind, string | null>>({
+    logo: null,
+    product: null,
+  });
+  const uploadRequestRef = useRef<Record<BrandImageKind, number>>({
+    logo: 0,
+    product: 0,
+  });
+  const uploadControllerRef = useRef<
+    Record<BrandImageKind, AbortController | null>
+  >({
+    logo: null,
+    product: null,
+  });
   useEffect(() => {
+    const uploadControllers = uploadControllerRef.current;
+    const brandUrls = brandUrlRef.current;
     return () => {
-      if (logoUrlRef.current) URL.revokeObjectURL(logoUrlRef.current);
-      if (productUrlRef.current) URL.revokeObjectURL(productUrlRef.current);
+      uploadControllers.logo?.abort();
+      uploadControllers.product?.abort();
+      if (brandUrls.logo) URL.revokeObjectURL(brandUrls.logo);
+      if (brandUrls.product) URL.revokeObjectURL(brandUrls.product);
     };
   }, []);
 
@@ -164,7 +265,6 @@ export function PosterWorkflowNewPage() {
     },
   });
 
-  const copyTrimmed = copy.trim();
   const copyRemaining = COPY_MAX - copy.length;
   const titleRemaining = TITLE_MAX - title.length;
 
@@ -177,80 +277,94 @@ export function PosterWorkflowNewPage() {
   };
 
   const onPickBrandImage = useCallback(
-    async (kind: "logo" | "product", file: File) => {
-      if (!ACCEPT.includes(file.type)) {
-        toast.error(`不支持的格式：${file.type || "未知"}`);
+    async (kind: BrandImageKind, file: File) => {
+      const validationError = brandImageValidationError(file);
+      if (validationError) {
+        toast.error(validationError);
         return;
       }
-      if (file.size > MAX_BRAND_IMAGE_BYTES) {
-        toast.error(`单张不能超过 ${formatBytes(MAX_BRAND_IMAGE_BYTES)}`);
-        return;
-      }
-      const localUrl = URL.createObjectURL(file);
-      if (kind === "logo") {
-        if (logoUrlRef.current) URL.revokeObjectURL(logoUrlRef.current);
-        logoUrlRef.current = localUrl;
-      } else {
-        if (productUrlRef.current) URL.revokeObjectURL(productUrlRef.current);
-        productUrlRef.current = localUrl;
-      }
-      setUploading(kind);
-      setUploadProgress(0);
+
+      uploadControllerRef.current[kind]?.abort();
+      const requestId = uploadRequestRef.current[kind] + 1;
+      uploadRequestRef.current[kind] = requestId;
       const controller = new AbortController();
+      uploadControllerRef.current[kind] = controller;
+
+      const localUrl = URL.createObjectURL(file);
+      replaceBrandPreviewUrl(
+        kind,
+        localUrl,
+        brandUrlRef.current,
+        setLogo,
+        setProduct,
+      );
+      setUploading((current) => ({ ...current, [kind]: true }));
+      setUploadProgress((current) => ({ ...current, [kind]: 0 }));
+
       try {
         const out = await uploadWithProgress(
           file,
-          (ratio) => setUploadProgress(ratio),
+          (ratio) => {
+            if (uploadRequestRef.current[kind] !== requestId) return;
+            setUploadProgress((current) => ({
+              ...current,
+              [kind]: ratio,
+            }));
+          },
           controller.signal,
         );
+        if (uploadRequestRef.current[kind] !== requestId) return;
         const value: BrandImageState = {
           url: localUrl,
           id: out.id,
           filename: file.name,
           size: file.size,
         };
-        if (kind === "logo") setLogo(value);
-        else setProduct(value);
+        setBrandImageState(kind, value, setLogo, setProduct);
       } catch (err) {
-        toast.error("上传失败", {
-          description: err instanceof Error ? err.message : "请稍后重试",
-        });
+        if (uploadRequestRef.current[kind] !== requestId) return;
+        const canceled =
+          err instanceof DOMException && err.name === "AbortError";
+        if (!canceled) {
+          toast.error("上传失败", {
+            description: err instanceof Error ? err.message : "请稍后重试",
+          });
+        }
+        releaseBrandPreviewUrl(kind, localUrl, brandUrlRef.current);
       } finally {
-        setUploading(null);
-        setUploadProgress(0);
+        if (uploadRequestRef.current[kind] !== requestId) return;
+        uploadControllerRef.current[kind] = null;
+        setUploading((current) => ({ ...current, [kind]: false }));
+        setUploadProgress((current) => ({ ...current, [kind]: 0 }));
       }
     },
     [],
   );
 
-  const removeBrandImage = (kind: "logo" | "product") => {
-    if (kind === "logo") {
-      if (logoUrlRef.current) {
-        URL.revokeObjectURL(logoUrlRef.current);
-        logoUrlRef.current = null;
-      }
-      setLogo(null);
-    } else {
-      if (productUrlRef.current) {
-        URL.revokeObjectURL(productUrlRef.current);
-        productUrlRef.current = null;
-      }
-      setProduct(null);
-    }
+  const removeBrandImage = (kind: BrandImageKind) => {
+    uploadRequestRef.current[kind] += 1;
+    uploadControllerRef.current[kind]?.abort();
+    uploadControllerRef.current[kind] = null;
+    setUploading((current) => ({ ...current, [kind]: false }));
+    setUploadProgress((current) => ({ ...current, [kind]: 0 }));
+    const localUrl = brandUrlRef.current[kind];
+    if (localUrl) releaseBrandPreviewUrl(kind, localUrl, brandUrlRef.current);
+    setBrandImageState(kind, null, setLogo, setProduct);
   };
 
-  const derivedTitle = useMemo(() => {
-    if (title.trim()) return title.trim();
-    if (!copyTrimmed) return "海报设计";
-    return copyTrimmed.split(/\n/)[0]?.slice(0, 24) || "海报设计";
-  }, [title, copyTrimmed]);
-
-  const ctaDisabled =
-    !copyTrimmed ||
-    !style ||
-    !aspects.length ||
-    create.isPending ||
-    uploading !== null;
+  const uploadPending = uploading.logo || uploading.product;
+  const { copyTrimmed, derivedTitle, ctaDisabled } = useMemo(
+    () =>
+      getPosterFormState({
+        aspects,
+        copy,
+        createPending: create.isPending,
+        style,
+        title,
+        uploadPending,
+      }),
+    [aspects, copy, create.isPending, style, title, uploadPending],
+  );
 
   const onCreate = () => {
     setError(null);
@@ -282,7 +396,7 @@ export function PosterWorkflowNewPage() {
   };
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -293,7 +407,7 @@ export function PosterWorkflowNewPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-8 md:pt-3">
+      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-8 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1280px] gap-3">
           <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
             <div className="flex min-w-0 items-baseline gap-2.5">
@@ -330,7 +444,7 @@ export function PosterWorkflowNewPage() {
                 placeholder={
                   "例如：\n夏季新品·椰子香水\n清新调，海洋木质底；525 ml 经典瓶身\n限时五折 · 立即下单"
                 }
-                className="-mt-3 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[15px] leading-7 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                className="-mt-3 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-7 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
               />
 
               {/* Style */}
@@ -341,7 +455,7 @@ export function PosterWorkflowNewPage() {
                   <button
                     type="button"
                     onClick={() => setStyleOpen(true)}
-                    className="inline-flex min-h-9 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+                    className="inline-flex min-h-11 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:min-h-9"
                   >
                     <Palette className="h-3.5 w-3.5" />
                     {style ? "更换风格" : "从风格库选择"}
@@ -387,7 +501,7 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => toggleAspect(value)}
                       className={cn(
-                        "inline-flex min-h-9 cursor-pointer items-center rounded-full border px-3 text-[12px] transition-colors",
+                        "inline-flex min-h-11 cursor-pointer items-center rounded-full border px-3 text-[12px] transition-colors md:min-h-9",
                         active
                           ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                           : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
@@ -426,16 +540,16 @@ export function PosterWorkflowNewPage() {
                   <BrandImageSlot
                     label="Logo"
                     state={logo}
-                    uploading={uploading === "logo"}
-                    progress={uploadProgress}
+                    uploading={uploading.logo}
+                    progress={uploadProgress.logo}
                     onPick={(file) => onPickBrandImage("logo", file)}
                     onRemove={() => removeBrandImage("logo")}
                   />
                   <BrandImageSlot
                     label="产品图"
                     state={product}
-                    uploading={uploading === "product"}
-                    progress={uploadProgress}
+                    uploading={uploading.product}
+                    progress={uploadProgress.product}
                     onPick={(file) => onPickBrandImage("product", file)}
                     onRemove={() => removeBrandImage("product")}
                   />
@@ -451,7 +565,7 @@ export function PosterWorkflowNewPage() {
                         type="color"
                         value={primaryColor || "#ffd166"}
                         onChange={(event) => setPrimaryColor(event.target.value)}
-                        className="h-9 w-12 cursor-pointer border border-[var(--border)] bg-transparent"
+                        className="h-11 w-12 cursor-pointer border border-[var(--border)] bg-transparent md:h-9"
                       />
                       <input
                         value={primaryColor}
@@ -460,7 +574,7 @@ export function PosterWorkflowNewPage() {
                         }
                         maxLength={24}
                         placeholder="#FFD166 / amber"
-                        className="h-10 min-w-0 flex-1 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                        className="h-11 min-w-0 flex-1 border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
                       />
                     </div>
                   </label>
@@ -475,7 +589,7 @@ export function PosterWorkflowNewPage() {
                       }
                       maxLength={64}
                       placeholder="例如：思源黑体 / Inter"
-                      className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                      className="mt-2 h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
                     />
                   </label>
                 </div>
@@ -495,7 +609,7 @@ export function PosterWorkflowNewPage() {
                     }
                     maxLength={TITLE_MAX}
                     placeholder={derivedTitle}
-                    className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                    className="mt-2 h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
                   />
                   <CharCount remaining={titleRemaining} max={TITLE_MAX} />
                 </label>
@@ -508,7 +622,7 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("standard")}
                       className={cn(
-                        "inline-flex min-h-9 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                        "inline-flex min-h-11 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-9",
                         qualityMode === "standard"
                           ? "bg-[var(--amber-400)] text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -520,7 +634,7 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("premium")}
                       className={cn(
-                        "inline-flex min-h-9 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                        "inline-flex min-h-11 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-9",
                         qualityMode === "premium"
                           ? "bg-[var(--amber-400)] text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -533,7 +647,10 @@ export function PosterWorkflowNewPage() {
               </div>
 
               {error ? (
-                <div className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5">
+                <div
+                  role="alert"
+                  className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5"
+                >
                   <div className="flex items-start gap-3">
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
                     <div>
@@ -592,13 +709,13 @@ export function PosterWorkflowNewPage() {
         </div>
       </main>
 
-      <div className="fixed inset-x-0 bottom-[calc(56px+env(safe-area-inset-bottom,0px))] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-4 py-3 backdrop-blur md:hidden">
+      <div className="fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden">
         <button
           type="button"
           onClick={onCreate}
           disabled={ctaDisabled}
           className={cn(
-            "inline-flex w-full items-center justify-center gap-2 rounded-full px-6 py-3.5 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
+            "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
             ctaDisabled
               ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
               : "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]",
@@ -710,7 +827,7 @@ function StyleSummary({
         type="button"
         onClick={onClear}
         aria-label="清除选择"
-        className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+        className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-8 md:w-8"
       >
         <X className="h-4 w-4" />
       </button>
@@ -753,7 +870,7 @@ function BrandImageSlot({
             <button
               type="button"
               onClick={onRemove}
-              className="absolute right-2 top-2 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white/85 backdrop-blur hover:bg-[var(--danger)]/70 hover:text-white"
+              className="absolute right-2 top-2 inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white/85 backdrop-blur hover:bg-[var(--danger)]/70 hover:text-white md:h-7 md:w-7"
               aria-label="移除"
             >
               <Trash2 className="h-3.5 w-3.5" />

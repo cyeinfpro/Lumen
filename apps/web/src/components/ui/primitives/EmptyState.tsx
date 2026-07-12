@@ -26,7 +26,7 @@ export function EmptyState({
     <div
       ref={ref}
       className={cn(
-        "flex flex-col items-center justify-center px-6 py-10 text-center",
+        "flex min-w-0 flex-col items-center justify-center px-6 py-10 text-center max-sm:px-4 max-sm:py-8",
         "text-[var(--fg-0)]",
         className,
       )}
@@ -44,7 +44,7 @@ export function EmptyState({
         {title}
       </h3>
       {description ? (
-        <p className="type-body-sm max-w-sm text-pretty text-[var(--fg-1)]">
+        <p className="type-body-sm max-w-sm text-pretty break-words text-[var(--fg-1)]">
           {description}
         </p>
       ) : null}

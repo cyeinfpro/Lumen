@@ -89,6 +89,28 @@ const FEATURES = [
   },
 ] as const;
 
+function getFeatureCardNavigation(
+  feature: (typeof FEATURES)[number],
+  recentProject?: WorkflowRunListItem,
+) {
+  if ("secondaryHref" in feature && feature.secondaryHref) {
+    return {
+      href: feature.secondaryHref,
+      label: feature.secondaryLabel,
+    };
+  }
+  if (recentProject) {
+    return {
+      href: projectHref(recentProject),
+      label: "继续最近",
+    };
+  }
+  return {
+    href: "#recent-projects",
+    label: "查看最近",
+  };
+}
+
 export function ProjectFunctionHub() {
   const workflowsQuery = useWorkflowsQuery({ limit: 8 });
   const recentProjects = useMemo(
@@ -122,7 +144,7 @@ export function ProjectFunctionHub() {
       <ProjectMobileTopBar title="项目" subtitle="工作流 · 最近" />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-3">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1440px] gap-4">
           <header className="hidden min-w-0 gap-4 border-b border-[var(--border)] pb-4 md:grid lg:grid-cols-[minmax(0,1fr)_minmax(520px,0.76fr)] lg:items-end">
             <div className="min-w-0">
@@ -230,18 +252,8 @@ function FeatureCard({
   const recentStatus = recentProject
     ? STATUS_LABEL[recentProject.status] ?? recentProject.status
     : null;
-  const secondaryHref =
-    "secondaryHref" in feature && feature.secondaryHref
-      ? feature.secondaryHref
-      : recentProject
-        ? projectHref(recentProject)
-        : "#recent-projects";
-  const secondaryLabel =
-    "secondaryLabel" in feature && feature.secondaryLabel
-      ? feature.secondaryLabel
-      : recentProject
-        ? "继续最近"
-        : "查看最近";
+  const { href: secondaryHref, label: secondaryLabel } =
+    getFeatureCardNavigation(feature, recentProject);
 
   return (
     <article
@@ -336,7 +348,7 @@ function FeatureCard({
         {feature.available && "primaryHref" in feature ? (
           <Link
             href={feature.primaryHref}
-            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)]"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)] sm:min-h-10"
           >
             {feature.primaryLabel}
             <ArrowRight className="h-3.5 w-3.5" />
@@ -349,7 +361,7 @@ function FeatureCard({
         {feature.available ? (
           <Link
             href={secondaryHref}
-            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
           >
             {secondaryLabel}
           </Link>

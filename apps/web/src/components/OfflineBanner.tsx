@@ -41,12 +41,19 @@ export function OfflineBanner() {
   if (online === false) {
     return (
       <div
-        role="status"
+        role="alert"
         aria-live="assertive"
-        className="fixed inset-x-0 top-0 z-[var(--z-toast,100)] flex items-center justify-center gap-2 border-b border-danger-border bg-danger-soft px-4 py-2 type-body-sm text-[var(--danger-fg)] shadow-[var(--shadow-2)] backdrop-blur-md"
+        className="fixed inset-x-0 z-[var(--z-toast,100)] flex min-h-11 items-start justify-center gap-2 border-b border-danger-border bg-danger-soft px-4 py-2 type-body-sm text-[var(--danger-fg)] shadow-[var(--shadow-2)] backdrop-blur-md sm:items-center"
+        style={{
+          top: "var(--system-banner-height, 0px)",
+          paddingTop:
+            "max(0.5rem, calc(env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px)))",
+        }}
       >
-        <WifiOff className="h-4 w-4" aria-hidden />
-        <span>网络已断开，恢复后会自动重连。</span>
+        <WifiOff className="mt-0.5 h-4 w-4 shrink-0 sm:mt-0" aria-hidden />
+        <span className="max-w-2xl break-words">
+          网络已断开，恢复后会自动重连。
+        </span>
       </div>
     );
   }
@@ -57,10 +64,15 @@ export function OfflineBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="fixed inset-x-0 top-0 z-[var(--z-toast,100)] flex items-center justify-center gap-2 border-b border-warning-border bg-warning-soft px-4 py-2 type-body-sm text-[var(--warning-fg)] shadow-[var(--shadow-2)] backdrop-blur-md"
+      className="fixed inset-x-0 z-[var(--z-toast,100)] flex min-h-11 items-start justify-center gap-2 border-b border-warning-border bg-warning-soft px-4 py-2 type-body-sm text-[var(--warning-fg)] shadow-[var(--shadow-2)] backdrop-blur-md sm:items-center"
+      style={{
+        top: "var(--system-banner-height, 0px)",
+        paddingTop:
+          "max(0.5rem, calc(env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px)))",
+      }}
     >
-      <AlertTriangle className="h-4 w-4" aria-hidden />
-      <span>{pwaIssue}</span>
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 sm:mt-0" aria-hidden />
+      <span className="max-w-2xl break-words">{pwaIssue}</span>
     </div>
   );
 }

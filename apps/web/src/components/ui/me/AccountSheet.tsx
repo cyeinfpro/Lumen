@@ -55,14 +55,14 @@ export function AccountSheet({ open, onClose, user, loading }: AccountSheetProps
           </div>
           <div className="flex-1 min-w-0">
             {user?.name && (
-              <p className="text-[15px] font-semibold text-[var(--fg-0)] truncate leading-tight">
+              <p className="line-clamp-2 break-words text-[15px] font-semibold leading-tight text-[var(--fg-0)]">
                 {user.name}
               </p>
             )}
             {user?.email && (
-              <p className="flex items-center gap-1.5 text-[12px] text-[var(--fg-2)] truncate mt-0.5">
+              <p className="mt-0.5 flex min-w-0 items-start gap-1.5 text-[12px] text-[var(--fg-2)]">
                 <Mail className="w-3 h-3 shrink-0" />
-                {user.email}
+                <span className="min-w-0 break-all">{user.email}</span>
               </p>
             )}
             {loading && (
@@ -76,7 +76,7 @@ export function AccountSheet({ open, onClose, user, loading }: AccountSheetProps
       </div>
 
       {/* AccountCenter 复用：所有 link 在 router push 后路由变化会卸载 /me，sheet 随之关闭 */}
-      <div className="pt-1">
+      <div className="pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] pt-1">
         <AccountCenter />
       </div>
     </BottomSheet>

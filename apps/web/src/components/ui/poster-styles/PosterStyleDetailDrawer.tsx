@@ -28,7 +28,10 @@ import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
-import { POSTER_STYLE_CATEGORY_LABEL } from "@/lib/apiClient";
+import {
+  POSTER_STYLE_CATEGORY_LABEL,
+  type PosterStyleItem,
+} from "@/lib/apiClient";
 import {
   useDeletePosterStyleMutation,
   usePosterStyleQuery,
@@ -191,13 +194,13 @@ export function PosterStyleDetailDrawer({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+            className="inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-9 md:w-9"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
 
-        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5">
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto overscroll-contain px-5 py-5">
           {detail.isPending ? (
             <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
               <Spinner size={20} />
@@ -242,7 +245,7 @@ export function PosterStyleDetailDrawer({
                           onClick={() => setActiveSampleIndex(idx)}
                           aria-label={`查看样图 ${idx + 1}`}
                           className={cn(
-                            "relative aspect-square overflow-hidden rounded-[var(--radius-card)] border bg-[var(--bg-2)] transition-colors",
+                            "relative aspect-square min-h-11 min-w-11 overflow-hidden rounded-[var(--radius-card)] border bg-[var(--bg-2)] transition-colors",
                             active
                               ? "border-[var(--border-amber)]"
                               : "border-[var(--border)] hover:border-[var(--border-strong)]",
@@ -350,7 +353,7 @@ export function PosterStyleDetailDrawer({
                     <button
                       type="button"
                       onClick={handleCopyPrompt}
-                      className="inline-flex h-7 items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--amber-300)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                      className="inline-flex min-h-11 items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--amber-300)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:min-h-0"
                     >
                       {copied ? (
                         <Check className="h-3 w-3 text-[var(--success)]" />
@@ -370,54 +373,15 @@ export function PosterStyleDetailDrawer({
         </div>
 
         {item ? (
-          <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-4 min-[380px]:grid-cols-2 md:flex md:items-center md:justify-end">
-            <button
-              type="button"
-              onClick={() => autoTag.mutate()}
-              disabled={autoTag.isPending}
-              className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em]"
-            >
-              {autoTag.isPending ? (
-                <Spinner size={12} />
-              ) : (
-                <Sparkles className="h-3.5 w-3.5" />
-              )}
-              重新识别
-            </button>
-            {item.id.startsWith("user:") ? (
-              <Button
-                variant="outline"
-                onClick={() => setEditOpen(true)}
-                leftIcon={<Edit3 className="h-3.5 w-3.5" />}
-                className="w-full md:w-auto"
-              >
-                编辑
-              </Button>
-            ) : null}
-            <button
-              type="button"
-              onClick={requestDelete}
-              disabled={deleteItem.isPending}
-              className={cn(
-                "inline-flex h-9 min-w-0 items-center justify-center gap-1.5 border px-3 font-mono text-[11px] uppercase tracking-[0.12em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em]",
-                item.id.startsWith("user:") ? "min-[380px]:col-span-2 md:col-span-1" : "",
-                confirmingDelete
-                  ? "border-[var(--danger)] text-[var(--danger)]"
-                  : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--danger)]",
-              )}
-            >
-              {deleteItem.isPending ? (
-                <Spinner size={12} />
-              ) : (
-                <Trash2 className="h-3.5 w-3.5" />
-              )}
-              {confirmingDelete
-                ? "确认"
-                : item.source === "preset"
-                  ? "隐藏预设"
-                  : "删除"}
-            </button>
-          </footer>
+          <PosterStyleDetailActions
+            item={item}
+            autoTagPending={autoTag.isPending}
+            confirmingDelete={confirmingDelete}
+            deleting={deleteItem.isPending}
+            onAutoTag={() => autoTag.mutate()}
+            onDelete={requestDelete}
+            onEdit={() => setEditOpen(true)}
+          />
         ) : null}
       </motion.div>
 
@@ -428,6 +392,70 @@ export function PosterStyleDetailDrawer({
         />
       ) : null}
     </div>
+  );
+}
+
+function PosterStyleDetailActions({
+  item,
+  autoTagPending,
+  confirmingDelete,
+  deleting,
+  onAutoTag,
+  onDelete,
+  onEdit,
+}: {
+  item: PosterStyleItem;
+  autoTagPending: boolean;
+  confirmingDelete: boolean;
+  deleting: boolean;
+  onAutoTag: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+}) {
+  const isUserItem = item.id.startsWith("user:");
+  const deleteLabel = confirmingDelete
+    ? "确认"
+    : item.source === "preset"
+      ? "隐藏预设"
+      : "删除";
+
+  return (
+    <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-4 min-[380px]:grid-cols-2 md:flex md:items-center md:justify-end">
+      <button
+        type="button"
+        onClick={onAutoTag}
+        disabled={autoTagPending}
+        className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em] md:h-9 md:min-h-0"
+      >
+        {autoTagPending ? <Spinner size={12} /> : <Sparkles className="h-3.5 w-3.5" />}
+        重新识别
+      </button>
+      {isUserItem ? (
+        <Button
+          variant="outline"
+          onClick={onEdit}
+          leftIcon={<Edit3 className="h-3.5 w-3.5" />}
+          className="w-full md:w-auto"
+        >
+          编辑
+        </Button>
+      ) : null}
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={deleting}
+        className={cn(
+          "inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 border px-3 font-mono text-[11px] uppercase tracking-[0.12em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em] md:h-9 md:min-h-0",
+          isUserItem ? "min-[380px]:col-span-2 md:col-span-1" : "",
+          confirmingDelete
+            ? "border-[var(--danger)] text-[var(--danger)]"
+            : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--danger)]",
+        )}
+      >
+        {deleting ? <Spinner size={12} /> : <Trash2 className="h-3.5 w-3.5" />}
+        {deleteLabel}
+      </button>
+    </footer>
   );
 }
 

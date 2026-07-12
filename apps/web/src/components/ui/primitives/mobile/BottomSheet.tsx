@@ -11,22 +11,44 @@
 //   - 不在 render 阶段读 ref
 //   - effect 的 setState 走保护（比较后才 set），避免 loop
 
-import { AnimatePresence, motion, type PanInfo } from "framer-motion";
 import {
+  AnimatePresence,
+  motion,
+  type PanInfo,
+  useDragControls,
+  useIsPresent,
+  useReducedMotion,
+} from "framer-motion";
+import {
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useCallback,
   useEffect,
   useId,
-  useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { SPRING, DURATION, EASE } from "@/lib/motion";
+import { useModalLayer, usePortalReady } from "./useModalLayer";
 
 export type SnapPoint = "auto" | `${number}%` | number;
+const DEFAULT_SNAP_POINTS: SnapPoint[] = ["auto"];
+const INTERACTIVE_CONTENT_SELECTOR = [
+  "a[href]",
+  "button",
+  "input",
+  "textarea",
+  "select",
+  "summary",
+  "[contenteditable='true']",
+  "[role='button']",
+  "[role='slider']",
+  "[data-bottom-sheet-drag-ignore]",
+].join(",");
 
 export interface BottomSheetProps {
   open: boolean;
@@ -47,6 +69,8 @@ export interface BottomSheetProps {
   snapPoints?: SnapPoint[];
   /** 初始停靠点索引（默认 0，即最高位）。 */
   defaultSnapIndex?: number;
+  /** 关闭后是否恢复触发元素焦点，默认 true。 */
+  restoreFocus?: boolean;
 }
 
 // SPRING.sheet 已在 @/lib/motion 统一定义，此处直接引用
@@ -64,15 +88,6 @@ function resolveSnapHeight(p: SnapPoint, viewportH: number): number | null {
   return null;
 }
 
-const FOCUSABLE_SEL = [
-  "a[href]",
-  "button:not([disabled])",
-  "textarea:not([disabled])",
-  "input:not([disabled]):not([type=hidden])",
-  "select:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
-
 export function BottomSheet({
   open,
   onClose,
@@ -81,114 +96,147 @@ export function BottomSheet({
   dismissOnOverlay = true,
   dragCloseThreshold = 120,
   className = "",
-  snapPoints = ["auto"],
+  snapPoints = DEFAULT_SNAP_POINTS,
   defaultSnapIndex = 0,
+  restoreFocus = true,
 }: BottomSheetProps) {
+  const portalReady = usePortalReady();
+  if (!portalReady) return null;
+
+  return createPortal(
+    <AnimatePresence initial={false}>
+      {open ? (
+        <BottomSheetLayer
+          key="bottom-sheet-layer"
+          onClose={onClose}
+          ariaLabel={ariaLabel}
+          dismissOnOverlay={dismissOnOverlay}
+          dragCloseThreshold={dragCloseThreshold}
+          className={className}
+          snapPoints={snapPoints}
+          defaultSnapIndex={defaultSnapIndex}
+          restoreFocus={restoreFocus}
+        >
+          {children}
+        </BottomSheetLayer>
+      ) : null}
+    </AnimatePresence>,
+    document.body,
+  );
+}
+
+interface BottomSheetLayerProps {
+  onClose: () => void;
+  children: ReactNode;
+  ariaLabel?: string;
+  dismissOnOverlay: boolean;
+  dragCloseThreshold: number;
+  className: string;
+  snapPoints: SnapPoint[];
+  defaultSnapIndex: number;
+  restoreFocus: boolean;
+}
+
+function readVisualViewport() {
+  const viewport = window.visualViewport;
+  return {
+    height: Math.max(1, Math.round(viewport?.height ?? window.innerHeight)),
+    offsetTop: Math.max(0, Math.round(viewport?.offsetTop ?? 0)),
+  };
+}
+
+function BottomSheetLayer({
+  onClose,
+  children,
+  ariaLabel,
+  dismissOnOverlay,
+  dragCloseThreshold,
+  className,
+  snapPoints,
+  defaultSnapIndex,
+  restoreFocus,
+}: BottomSheetLayerProps) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
-  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const closingRef = useRef(false);
+  const bodyDragStartRef = useRef<{
+    pointerId: number;
+    startY: number;
+  } | null>(null);
+  const bodyDragControls = useDragControls();
+  const isPresent = useIsPresent();
+  const reduceMotion = useReducedMotion();
   const labelId = useId();
-  useBodyScrollLock(open);
-
-  const [viewportH, setViewportH] = useState<number>(
-    typeof window === "undefined" ? 800 : window.innerHeight,
+  const effectiveSnapPoints =
+    snapPoints.length > 0 ? snapPoints : DEFAULT_SNAP_POINTS;
+  const clampedInitial = Math.max(
+    0,
+    Math.min(defaultSnapIndex, effectiveSnapPoints.length - 1),
   );
+  const [snapIndex, setSnapIndex] = useState<number>(clampedInitial);
+  const [viewport, setViewport] = useState(readVisualViewport);
+
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const viewport = window.visualViewport;
-    const readHeight = () => viewport?.height ?? window.innerHeight;
-    const onResize = () => setViewportH(readHeight());
-    const raf = window.requestAnimationFrame(onResize);
-    window.addEventListener("resize", onResize);
-    viewport?.addEventListener("resize", onResize);
-    viewport?.addEventListener("scroll", onResize);
+    closingRef.current = !isPresent;
+  }, [isPresent]);
+
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    onClose();
+  }, [onClose]);
+
+  useBodyScrollLock(true);
+  const onSheetKeyDown = useModalLayer({
+    open: true,
+    rootRef: sheetRef,
+    onClose: requestClose,
+    restoreFocus,
+  });
+
+  useEffect(() => {
+    const visualViewport = window.visualViewport;
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const next = readVisualViewport();
+      setViewport((current) =>
+        current.height === next.height && current.offsetTop === next.offsetTop
+          ? current
+          : next,
+      );
+    };
+    const scheduleUpdate = () => {
+      if (raf !== 0) return;
+      raf = window.requestAnimationFrame(update);
+    };
+
+    scheduleUpdate();
+    window.addEventListener("resize", scheduleUpdate);
+    visualViewport?.addEventListener("resize", scheduleUpdate);
+    visualViewport?.addEventListener("scroll", scheduleUpdate);
     return () => {
-      window.cancelAnimationFrame(raf);
-      window.removeEventListener("resize", onResize);
-      viewport?.removeEventListener("resize", onResize);
-      viewport?.removeEventListener("scroll", onResize);
+      if (raf !== 0) window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", scheduleUpdate);
+      visualViewport?.removeEventListener("resize", scheduleUpdate);
+      visualViewport?.removeEventListener("scroll", scheduleUpdate);
     };
   }, []);
 
-  const clampedInitial = useMemo(
-    () => Math.max(0, Math.min(defaultSnapIndex, snapPoints.length - 1)),
-    [defaultSnapIndex, snapPoints.length],
-  );
-  const [snapIndex, setSnapIndex] = useState<number>(clampedInitial);
-
-  // open 变化时重置到初始 snap；放到下一帧，避免 React 19 的 effect 内同步 setState。
   useEffect(() => {
-    if (!open) return;
+    if (!isPresent) return;
     const raf = window.requestAnimationFrame(() => {
       setSnapIndex((current) => (
         current === clampedInitial ? current : clampedInitial
       ));
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [open, clampedInitial]);
+  }, [clampedInitial, isPresent]);
 
-  const currentHeightPx = useMemo(
-    () => resolveSnapHeight(snapPoints[snapIndex] ?? "auto", viewportH),
-    [snapPoints, snapIndex, viewportH],
+  const currentHeightPx = resolveSnapHeight(
+    effectiveSnapPoints[snapIndex] ?? "auto",
+    viewport.height,
   );
-
-  // 焦点管理 + Esc + body 滚动锁
-  useEffect(() => {
-    if (!open) return;
-    previouslyFocusedRef.current =
-      (document.activeElement as HTMLElement) ?? null;
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-
-    const t = window.setTimeout(() => {
-      // 聚焦第一个可聚焦元素；无则聚焦 sheet 本体
-      const el = sheetRef.current;
-      if (!el) return;
-      const first = el.querySelector<HTMLElement>(FOCUSABLE_SEL);
-      (first ?? el).focus();
-    }, 60);
-
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      window.clearTimeout(t);
-      previouslyFocusedRef.current?.focus?.();
-    };
-  }, [open, onClose]);
-
-  // focus trap：Tab / Shift+Tab 在 sheet 内循环
-  const onSheetKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Tab") return;
-    const root = sheetRef.current;
-    if (!root) return;
-    const nodes = Array.from(
-      root.querySelectorAll<HTMLElement>(FOCUSABLE_SEL),
-    ).filter((n) => !n.hasAttribute("data-focus-skip"));
-    if (nodes.length === 0) {
-      e.preventDefault();
-      root.focus();
-      return;
-    }
-    const first = nodes[0];
-    const last = nodes[nodes.length - 1];
-    const active = document.activeElement as HTMLElement | null;
-    if (e.shiftKey) {
-      if (active === first || !root.contains(active)) {
-        e.preventDefault();
-        last.focus();
-      }
-    } else {
-      if (active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-  }, []);
 
   // 拖拽结束：按方向切 snap 或关闭
   const handleDragEnd = useCallback(
@@ -198,13 +246,15 @@ export function BottomSheet({
       // 向下
       if (dy > 0) {
         // 先看是否已经在最低 snap 且超过关闭阈值
-        const atLowest = snapIndex >= snapPoints.length - 1;
+        const atLowest = snapIndex >= effectiveSnapPoints.length - 1;
         if (atLowest && (dy > dragCloseThreshold || v > 500)) {
-          onClose();
+          requestClose();
           return;
         }
         if (dy > 48 || v > 350) {
-          setSnapIndex((i) => Math.min(snapPoints.length - 1, i + 1));
+          setSnapIndex((i) =>
+            Math.min(effectiveSnapPoints.length - 1, i + 1),
+          );
           return;
         }
       }
@@ -217,122 +267,200 @@ export function BottomSheet({
       }
       // 其它 → 回弹（靠 animate 自动回到 0）
     },
-    [snapIndex, snapPoints.length, dragCloseThreshold, onClose],
+    [
+      dragCloseThreshold,
+      effectiveSnapPoints.length,
+      requestClose,
+      snapIndex,
+    ],
   );
 
-  // 决定 sheet 主体是否允许 drag（内部滚到顶才允许下拉关闭）
-  // 基于 pointer 事件开始时的 scrollTop 判断
-  const [bodyDragLocked, setBodyDragLocked] = useState(false);
-  const onContentPointerDown = useCallback(() => {
-    const sc = contentRef.current;
-    // 内部有滚动且还没滚到顶 → 锁住 body drag（避免与内滚冲突）
-    if (sc && sc.scrollTop > 0) setBodyDragLocked(true);
-    else setBodyDragLocked(false);
-  }, []);
-  const onContentPointerUp = useCallback(() => {
-    setBodyDragLocked(false);
+  // 内容区只在滚动到顶且手势明确向下时才接管拖拽，避免 pointerdown
+  // 后异步 setState 让 Framer Motion 抢走正常的向上滚动。
+  const onContentPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const content = contentRef.current;
+      const target = event.target;
+      if (
+        event.pointerType === "mouse" ||
+        !content ||
+        content.scrollTop > 0 ||
+        (target instanceof Element &&
+          target.closest(INTERACTIVE_CONTENT_SELECTOR))
+      ) {
+        bodyDragStartRef.current = null;
+        return;
+      }
+      bodyDragStartRef.current = {
+        pointerId: event.pointerId,
+        startY: event.clientY,
+      };
+    },
+    [],
+  );
+  const onContentPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const start = bodyDragStartRef.current;
+      const content = contentRef.current;
+      if (
+        !start ||
+        start.pointerId !== event.pointerId ||
+        !content ||
+        content.scrollTop > 0
+      ) {
+        return;
+      }
+      const distance = event.clientY - start.startY;
+      if (distance < -8) {
+        bodyDragStartRef.current = null;
+        return;
+      }
+      if (distance > 8) {
+        bodyDragStartRef.current = null;
+        bodyDragControls.start(event);
+      }
+    },
+    [bodyDragControls],
+  );
+  const clearBodyDragStart = useCallback(() => {
+    bodyDragStartRef.current = null;
   }, []);
 
-  if (typeof document === "undefined") return null;
+  const onHandleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSnapIndex((i) =>
+          Math.min(effectiveSnapPoints.length - 1, i + 1),
+        );
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSnapIndex((i) => Math.max(0, i - 1));
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (effectiveSnapPoints.length > 1) {
+          setSnapIndex((i) => (i + 1) % effectiveSnapPoints.length);
+        }
+      }
+    },
+    [effectiveSnapPoints.length],
+  );
 
-  return createPortal(
-    <AnimatePresence>
-      {open && (
+  return (
+    <motion.div
+      data-lumen-modal-layer
+      className="fixed inset-x-0 flex items-end justify-center mobile-dialog-shell"
+      style={{
+        zIndex: "var(--z-dialog, 90)" as unknown as number,
+        top: viewport.offsetTop,
+        bottom: "auto",
+        height: viewport.height,
+        "--mobile-dialog-viewport-height": `${viewport.height}px`,
+      } as CSSProperties}
+      initial="hidden"
+      animate="visible"
+      exit="hidden"
+      variants={{ hidden: {}, visible: {} }}
+    >
+      <motion.div
+        className="absolute inset-0 bg-[var(--surface-scrim)] backdrop-blur-sm mobile-perf-surface"
+        variants={{
+          hidden: { opacity: 0 },
+          visible: { opacity: 1 },
+        }}
+        transition={
+          reduceMotion
+            ? { duration: 0 }
+            : { duration: DURATION.normal, ease: EASE.develop }
+        }
+        onClick={() => dismissOnOverlay && requestClose()}
+        aria-hidden
+      />
+      <motion.div
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelId}
+        tabIndex={-1}
+        onKeyDown={onSheetKeyDown}
+        variants={
+          reduceMotion
+            ? {
+                hidden: { opacity: 0 },
+                visible: { opacity: 1 },
+              }
+            : {
+                hidden: { y: "100%", opacity: 0.6 },
+                visible: { y: 0, opacity: 1 },
+              }
+        }
+        transition={reduceMotion ? { duration: 0 } : SPRING.sheet}
+        style={
+          currentHeightPx != null
+            ? { height: currentHeightPx }
+            : undefined
+        }
+        className={[
+          "relative w-full max-w-[640px] mx-auto",
+          "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
+          "shadow-[var(--shadow-3)]",
+          "mobile-perf-surface",
+          "flex min-h-0 flex-col overflow-hidden",
+          currentHeightPx == null
+            ? "mobile-dialog-sheet"
+            : "max-h-[var(--mobile-dialog-max-height)]",
+          "safe-x",
+          "focus:outline-none",
+          className,
+        ].join(" ")}
+      >
         <motion.div
-          key="bs-root"
-          className="fixed inset-0 flex items-end justify-center mobile-dialog-shell"
-          style={{ zIndex: "var(--z-dialog, 90)" as unknown as number }}
-          initial="hidden"
-          animate="visible"
-          exit="hidden"
-          variants={{ hidden: {}, visible: {} }}
+          drag="y"
+          dragConstraints={{ top: 0, bottom: 0 }}
+          dragElastic={{ top: 0.1, bottom: 0.4 }}
+          onDragEnd={handleDragEnd}
+          onKeyDown={onHandleKeyDown}
+          className="flex min-h-11 shrink-0 items-center justify-center cursor-grab active:cursor-grabbing touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]/60"
+          role="slider"
+          tabIndex={0}
+          aria-label="调整面板高度"
+          aria-valuemin={1}
+          aria-valuemax={effectiveSnapPoints.length}
+          aria-valuenow={snapIndex + 1}
+          aria-valuetext={`第 ${snapIndex + 1} 档，共 ${effectiveSnapPoints.length} 档`}
+          data-autofocus-skip
         >
-          <motion.div
-            key="bs-overlay"
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm mobile-perf-surface"
-            variants={{
-              hidden: { opacity: 0 },
-              visible: { opacity: 1 },
-            }}
-            transition={{ duration: DURATION.normal, ease: EASE.develop }}
-            onClick={() => dismissOnOverlay && onClose()}
+          <span
             aria-hidden
+            className="block h-1 w-7 rounded-full bg-[var(--fg-3)]/80"
           />
-          <motion.div
-            key="bs-sheet"
-            ref={sheetRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label={ariaLabel ?? "底部面板"}
-            aria-labelledby={labelId}
-            tabIndex={-1}
-            onKeyDown={onSheetKeyDown}
-            variants={{
-              hidden: { y: "100%", opacity: 0.6 },
-              visible: { y: 0, opacity: 1 },
-            }}
-            transition={SPRING.sheet}
-            style={
-              currentHeightPx != null
-                ? { height: currentHeightPx }
-                : undefined
-            }
-            className={[
-              "relative w-full max-w-[640px] mx-auto",
-              "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
-              "shadow-[var(--shadow-3)]",
-              "mobile-perf-surface",
-              "flex min-h-0 flex-col overflow-hidden",
-              currentHeightPx == null ? "mobile-dialog-sheet" : "max-h-[var(--mobile-dialog-max-height)]",
-              "safe-x",
-              "focus:outline-none",
-              className,
-            ].join(" ")}
-          >
-            {/* 拖拽 handle：独立 drag 区 */}
-            <motion.div
-              drag="y"
-              dragConstraints={{ top: 0, bottom: 0 }}
-              dragElastic={{ top: 0.1, bottom: 0.4 }}
-              onDragEnd={handleDragEnd}
-              className="flex justify-center py-2 cursor-grab active:cursor-grabbing touch-none"
-              role="button"
-              tabIndex={0}
-              aria-label="调整高度"
-              data-focus-skip
-            >
-              <span
-                aria-hidden
-                className="block h-1 w-7 rounded-full bg-[var(--fg-3)]/80"
-              />
-            </motion.div>
-
-            {/* 内容区：整体也能下拉（仅在 scrollTop===0 时） */}
-            <motion.div
-              drag={bodyDragLocked ? false : "y"}
-              dragConstraints={{ top: 0, bottom: 0 }}
-              dragElastic={bodyDragLocked ? 0 : { top: 0, bottom: 0.4 }}
-              onDragEnd={handleDragEnd}
-              className="flex min-h-0 flex-1 flex-col overflow-hidden"
-            >
-              <div
-                ref={contentRef}
-                onPointerDown={onContentPointerDown}
-                onPointerUp={onContentPointerUp}
-                onPointerCancel={onContentPointerUp}
-                className="mobile-dialog-scroll flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
-                style={{ overscrollBehaviorY: "contain" }}
-              >
-                <span id={labelId} className="sr-only">
-                  {ariaLabel ?? "底部面板"}
-                </span>
-                {children}
-              </div>
-            </motion.div>
-          </motion.div>
         </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body,
+
+        <motion.div
+          drag="y"
+          dragControls={bodyDragControls}
+          dragListener={false}
+          dragConstraints={{ top: 0, bottom: 0 }}
+          dragElastic={{ top: 0, bottom: 0.4 }}
+          onDragEnd={handleDragEnd}
+          className="flex min-h-0 flex-1 touch-pan-y flex-col overflow-hidden"
+        >
+          <div
+            ref={contentRef}
+            onPointerDown={onContentPointerDown}
+            onPointerMove={onContentPointerMove}
+            onPointerUp={clearBodyDragStart}
+            onPointerCancel={clearBodyDragStart}
+            className="mobile-dialog-scroll flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
+            style={{ overscrollBehaviorY: "contain" }}
+          >
+            <span id={labelId} className="sr-only">
+              {ariaLabel ?? "底部面板"}
+            </span>
+            {children}
+          </div>
+        </motion.div>
+      </motion.div>
+    </motion.div>
   );
 }

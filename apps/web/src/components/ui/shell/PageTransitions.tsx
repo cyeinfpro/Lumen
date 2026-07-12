@@ -12,6 +12,7 @@ function isAnimatedRoute(pathname: string): boolean {
 export function PageTransitions({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const animated = isAnimatedRoute(pathname);
+  const navigationLevel = getActiveNavKey(pathname) ?? pathname;
 
   if (!animated) {
     return (
@@ -23,8 +24,9 @@ export function PageTransitions({ children }: { children: ReactNode }) {
 
   return (
     <div
-      key={pathname}
+      key={navigationLevel}
       data-lumen-motion-page
+      data-navigation-level={navigationLevel}
       className="flex-1 flex flex-col w-full min-h-0"
     >
       {children}

@@ -37,6 +37,10 @@ export interface StreamOverviewProps {
   onShareSelected?: () => void;
 }
 
+function hasStreamOverviewFilters(filters: StreamFeedFilters): boolean {
+  return Boolean(filters.ratio || filters.has_ref || filters.fast);
+}
+
 export function StreamOverview({
   total,
   loaded,
@@ -57,7 +61,7 @@ export function StreamOverview({
   onShareSelected,
 }: StreamOverviewProps) {
   const router = useRouter();
-  const hasFilter = Boolean(filters.ratio || filters.has_ref || filters.fast);
+  const hasFilter = hasStreamOverviewFilters(filters);
   const hasSearch = searchValue.trim().length > 0;
   const hasControls = hasFilter || hasSearch;
   const visibleLabel = hasControls ? `${visible}/${loaded}` : `${loaded}`;
@@ -65,9 +69,9 @@ export function StreamOverview({
   return (
     <section
       aria-label="图库概览"
-      className="border-b border-[var(--border-subtle)] px-3 py-3 md:px-0 md:py-4"
+      className="sticky top-0 z-20 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 px-3 py-2.5 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:py-4 md:backdrop-blur-none"
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
             <ImageIcon className="h-3.5 w-3.5 text-[var(--amber-300)]" />
@@ -84,14 +88,14 @@ export function StreamOverview({
           )}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
           {selectedCount > 0 ? (
             <>
               <button
                 type="button"
                 onClick={onShareSelected}
                 disabled={sharingSelected}
-                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.16)] px-2.5 sm:h-8 sm:min-h-0 text-[11px] font-medium text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.22)] disabled:opacity-60 focus-visible:outline-none"
+                className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.16)] px-3 text-[11px] font-medium text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.22)] disabled:opacity-60 focus-visible:outline-none md:h-8 md:min-h-0"
               >
                 <Share2 className="h-3 w-3" />
                 {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
@@ -100,7 +104,7 @@ export function StreamOverview({
                 type="button"
                 onClick={onClearSelection}
                 aria-label="取消选择"
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus-visible:outline-none"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:w-8 md:min-h-0 md:min-w-0"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -111,7 +115,7 @@ export function StreamOverview({
               onClick={onToggleSelectionMode}
               aria-pressed={selectionMode}
               className={cn(
-                "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 sm:h-8 sm:min-h-0 text-[11px] transition-colors focus-visible:outline-none",
+                "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors focus-visible:outline-none md:h-8 md:min-h-0",
                 selectionMode
                   ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.14)] text-[var(--amber-300)]"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -125,7 +129,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onClearFilters}
-              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 sm:h-8 sm:min-h-0 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
+              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:min-h-0"
             >
               <Eraser className="h-3 w-3" />
               清除
@@ -136,14 +140,14 @@ export function StreamOverview({
             onClick={onRefresh}
             disabled={refreshing}
             aria-label="刷新"
-            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] disabled:opacity-50 sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none md:h-8 md:w-8 md:min-h-0 md:min-w-0"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </button>
           <button
             type="button"
             onClick={() => router.push("/")}
-            className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-3 text-[12px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
+            className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-3 text-[12px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none md:h-8 md:min-h-0"
           >
             <WandSparkles className="h-3.5 w-3.5" />
             创作
@@ -154,7 +158,7 @@ export function StreamOverview({
       {hasControls && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
           {filters.ratio && (
-            <span className="inline-flex h-7 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+            <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
               {filters.ratio}
             </span>
           )}
@@ -162,7 +166,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onToggleReferenceFilter}
-              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
+              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
             >
               <ImageIcon className="h-3 w-3" />
               参考图
@@ -172,14 +176,14 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onToggleFastFilter}
-              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
+              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none md:min-h-8"
             >
               <Gauge className="h-3 w-3" />
               快速
             </button>
           )}
           {hasSearch && (
-            <span className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+            <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
               <Search className="h-3 w-3 shrink-0" />
               <span className="min-w-0 truncate">{searchValue.trim()}</span>
             </span>

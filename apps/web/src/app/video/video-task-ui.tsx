@@ -309,7 +309,7 @@ export function VideoTaskDrawer({
             aria-modal="true"
             aria-labelledby="video-task-panel-title"
             tabIndex={-1}
-            className="mobile-dialog-panel ml-auto flex h-full w-full max-w-[460px] flex-col overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)]"
+            className="mobile-dialog-panel ml-auto flex h-full w-full max-w-[460px] flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-panel)] sm:border-b landscape:max-sm:rounded-[var(--radius-panel)] landscape:max-sm:border-b"
             initial={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: reduceMotion ? 0 : 36, opacity: reduceMotion ? 1 : 0 }}
@@ -344,6 +344,7 @@ export function VideoTaskDrawer({
                 <IconButton
                   variant="ghost"
                   size="sm"
+                  className="h-11 w-11"
                   aria-label="刷新视频任务"
                   tooltip="刷新"
                   onClick={onRefresh}
@@ -354,6 +355,7 @@ export function VideoTaskDrawer({
                   autoFocus
                   variant="ghost"
                   size="sm"
+                  className="h-11 w-11"
                   aria-label="关闭视频任务"
                   tooltip="关闭"
                   onClick={onClose}
@@ -363,7 +365,7 @@ export function VideoTaskDrawer({
               </div>
             </header>
 
-            <div className="mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-3 sm:p-4">
+            <div className="mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-3 pb-[calc(var(--mobile-dialog-footer-pad-bottom)+0.75rem)] sm:p-4">
               <ActiveVideoTaskSection
                 items={activeItems}
                 retryDisabled={retryDisabled}
@@ -461,7 +463,7 @@ function VideoDownloadLink({
       rel={isTemporary ? "noopener noreferrer" : undefined}
       title={expiresTitle}
       className={cn(
-        "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
+        "inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:h-9",
         fullWidth && "w-full",
       )}
     >
@@ -718,7 +720,7 @@ export function VideoPreviewDialog({
         aria-modal="true"
         aria-labelledby={`video-preview-${item.id}`}
         tabIndex={-1}
-        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(900px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
+        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(900px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b landscape:max-sm:rounded-[var(--radius-panel)] landscape:max-sm:border-b"
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
           <div className="min-w-0">
@@ -743,19 +745,19 @@ export function VideoPreviewDialog({
           <Button
             variant="ghost"
             size="sm"
-            className="h-9 w-9 px-0"
+            className="h-11 w-11 shrink-0 px-0"
             onClick={onClose}
             aria-label="关闭视频播放"
           >
             <XCircle className="h-4 w-4" />
           </Button>
         </header>
-        <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
-          <div className="flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]">
-            <div className="min-h-0 flex-1 lg:h-full">
-              <PrimaryVideoPlayer item={item} className="h-full" />
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
+          <div className="flex min-h-full flex-col gap-3 lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]">
+            <div className="min-h-[180px] flex-1 landscape:max-sm:min-h-[140px] lg:h-full lg:min-h-0">
+              <PrimaryVideoPlayer item={item} className="h-full min-h-[180px] landscape:max-sm:min-h-[140px] lg:min-h-0" />
             </div>
-            <aside className="max-h-[34%] shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
+            <aside className="shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
               <p className="type-caption text-[var(--fg-2)]">提示词</p>
               <p className="mt-2 text-sm leading-6 text-[var(--fg-0)]">
                 {item.prompt}
@@ -779,7 +781,7 @@ export function VideoPreviewDialog({
             </aside>
           </div>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:flex-wrap sm:justify-between sm:overflow-visible sm:px-5">
+        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 [scrollbar-width:none] sm:flex-wrap sm:justify-between sm:overflow-visible sm:px-5">
           <VideoDownloadLink item={item} />
           <div className="flex shrink-0 flex-nowrap items-center gap-2 sm:flex-wrap">
             <Button
@@ -850,7 +852,7 @@ function HistoryFilterTabs({
             type="button"
             onClick={() => onChange(filter.value)}
             className={cn(
-              "min-h-8 rounded-[var(--radius-control)] px-2 text-xs transition-colors",
+              "min-h-11 rounded-[var(--radius-control)] px-2 text-xs transition-colors sm:min-h-8",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
               active
                 ? "bg-[var(--bg-2)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
@@ -926,7 +928,7 @@ function TaskRowActions({
   onPreview?: () => void;
 }) {
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex flex-wrap items-center gap-2 [&_button]:min-h-11 sm:[&_button]:min-h-9">
       {active && (
         <Button
           variant="outline"
@@ -970,7 +972,7 @@ function TaskRowActions({
           套用参数
         </Button>
       )}
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex items-center gap-1 [&_button]:h-11 [&_button]:w-11 sm:[&_button]:h-9 sm:[&_button]:w-9">
         <IconButton
           variant="ghost"
           size="sm"

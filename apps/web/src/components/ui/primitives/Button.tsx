@@ -20,11 +20,11 @@ export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 }
 
 const BASE =
-  "inline-flex items-center justify-center gap-1.5 font-medium rounded-[var(--radius-control)] " +
+  "inline-flex max-w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] font-medium " +
   "transition-[background-color,color,border-color,box-shadow,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "select-none text-center leading-tight active:opacity-[var(--op-press)]";
+  "select-none text-center leading-tight active:opacity-[var(--op-press)] touch-manipulation";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
@@ -57,7 +57,7 @@ const VARIANTS: Record<Variant, string> = {
 // 兜底 44×44 可点区域。globals.css 虽已对 (pointer:coarse) 注入 min-height/min-width，
 // 但显式 min-h 可避免在视觉层出现"矮按钮 + 外挂 padding"的错位。
 const SIZES: Record<Size, string> = {
-  sm: "h-9 px-3 text-xs max-sm:min-h-10 max-sm:px-3.5",
+  sm: "h-9 px-3 text-xs max-sm:min-h-11 max-sm:px-3.5",
   md: "h-9 px-4 text-sm max-sm:min-h-11 max-sm:text-[15px]",
   lg: "h-11 px-6 text-[15px] rounded-[var(--radius-card)] max-sm:min-h-12 max-sm:px-5",
 };

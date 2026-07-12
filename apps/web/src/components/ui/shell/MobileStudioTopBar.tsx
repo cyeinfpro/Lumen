@@ -9,7 +9,7 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { MobileTopBar } from "./MobileTopBar";
 import { MobileConversationDrawer } from "./MobileConversationDrawer";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
@@ -29,6 +29,7 @@ import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemor
 
 export function MobileStudioTopBar() {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
   const currentConvId = useChatStore((s) => s.currentConvId);
   const messages = useChatStore((s) => s.messages);
@@ -92,9 +93,9 @@ export function MobileStudioTopBar() {
               haptic="light"
               onPress={() => setDrawerOpen(true)}
               aria-label="打开会话侧栏"
-              className="-ml-1 flex h-10 min-w-0 max-w-full flex-1 items-center gap-1 rounded-[var(--radius-control)] px-2"
+              className="-ml-1 flex min-h-11 min-w-0 max-w-full flex-1 items-center gap-1 rounded-[var(--radius-control)] px-2"
             >
-              <span className="min-w-0 flex-1 truncate text-left text-[15px] font-medium text-[var(--fg-0)]">
+              <span className="min-w-0 flex-1 overflow-hidden text-ellipsis text-left text-[15px] font-medium leading-5 text-[var(--fg-0)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
@@ -108,11 +109,11 @@ export function MobileStudioTopBar() {
             onPress={handleNewConv}
             disabled={createMut.isPending}
             minHit
-            className="h-10 w-10 rounded-[var(--radius-control)] disabled:opacity-50"
+            className="h-11 w-11 rounded-[var(--radius-control)] disabled:opacity-50"
           />
         }
         below={
-          <div className="mobile-tool-scroller flex min-h-10 items-center gap-1.5 overflow-x-auto no-scrollbar">
+          <div className="mobile-tool-scroller flex min-h-11 items-center gap-1.5 overflow-x-auto overscroll-x-contain no-scrollbar">
             <SegmentedControl<"chat" | "image">
               value={mode}
               onChange={setMode}
@@ -172,7 +173,7 @@ export function MobileStudioTopBar() {
 
       <MobileConversationDrawer
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        onClose={closeDrawer}
       />
     </>
   );

@@ -33,6 +33,11 @@ import {
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import {
+  trapModalFocus,
+  useModalLayer,
+} from "@/components/ui/primitives/mobile/useModalLayer";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import {
   getActiveNavKey,
   getAppNavItems,
   isSameRoute,
@@ -165,6 +170,7 @@ export function CommandPalette() {
   const descriptionId = useId();
   const listboxId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -179,6 +185,7 @@ export function CommandPalette() {
   );
   // SSR safe：首屏视为桌面，挂载后由 matchMedia 修正。
   const [isDesktop, setIsDesktop] = useState(true);
+  useBodyScrollLock(open && isDesktop);
 
   const navCommands = useMemo(
     () =>
@@ -253,6 +260,13 @@ export function CommandPalette() {
       }, 0);
     }
   }, [resetPalette]);
+  useModalLayer({
+    open: open && isDesktop,
+    rootRef: dialogRef,
+    onClose: closePalette,
+    initialFocusRef: inputRef,
+    restoreFocus: false,
+  });
 
   const runCommand = useCallback(
     (item: Command) => {
@@ -311,6 +325,7 @@ export function CommandPalette() {
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (isDesktop) trapModalFocus(event, dialogRef.current);
     if (event.key === "Escape") {
       event.preventDefault();
       closePalette();
@@ -551,6 +566,7 @@ export function CommandPalette() {
       />
 
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingId}

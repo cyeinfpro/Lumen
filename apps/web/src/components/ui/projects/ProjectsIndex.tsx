@@ -119,14 +119,14 @@ export function ProjectsIndex() {
           <Link
             href="/projects/apparel-model-showcase/new"
             aria-label="新建项目"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-[var(--accent)] text-black active:scale-[0.96]"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-black active:scale-[0.96] md:h-9 md:w-9"
           >
             <Plus className="h-[18px] w-[18px]" />
           </Link>
         }
       />
       <ProjectTopBar />
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-3">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1440px] gap-3">
           <Hero counts={counts} />
           <ModelLibraryEntry />
@@ -436,7 +436,7 @@ function Toolbar({
             type="button"
             onClick={() => onKeywordChange("")}
             aria-label="清除搜索"
-            className="absolute right-0 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+            className="absolute right-0 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-8 md:w-8"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -448,7 +448,7 @@ function Toolbar({
 
 function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
   return (
-    <section className="grid grid-cols-2 gap-x-4 gap-y-7 md:gap-x-5 md:gap-y-9 lg:grid-cols-3 xl:grid-cols-4">
+    <section className="grid grid-cols-1 gap-x-4 gap-y-7 min-[390px]:grid-cols-2 md:gap-x-5 md:gap-y-9 lg:grid-cols-3 xl:grid-cols-4">
       {items.map((item, index) => (
         <ProjectCard key={item.id} item={item} order={index} />
       ))}
@@ -456,12 +456,19 @@ function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
   );
 }
 
+function projectStatusDotTone(status: WorkflowRunListItem["status"]) {
+  if (status === "running") {
+    return "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
+  }
+  if (status === "needs_review") return "bg-[var(--amber-300)]";
+  if (status === "completed") return "bg-[var(--success)]";
+  if (status === "failed") return "bg-[var(--danger)]";
+  return "bg-[var(--fg-3)]";
+}
+
 // Portrait 杂志卡：大图 + 下方元数据 + hover micro scale
 function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number }) {
   const running = item.status === "running";
-  const needsReview = item.status === "needs_review";
-  const completed = item.status === "completed";
-  const failed = item.status === "failed";
   const thumb = productThumbSrc(item);
   const reduceMotion = useReducedMotion();
   const isMobile = useIsMobile();
@@ -471,16 +478,27 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
   const [title, setTitle] = useState(item.title || "服饰模特图");
   const menuRef = useRef<HTMLDivElement | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    setConfirmingDelete(false);
+    setRenaming(false);
+  }, []);
+  const cancelRename = useCallback(() => {
+    setTitle(item.title || "服饰模特图");
+    setRenaming(false);
+  }, [item.title]);
   const patch = usePatchWorkflowMutation({
     onSuccess: () => {
       toast.success("项目已重命名");
-      setRenaming(false);
-      setMenuOpen(false);
+      closeMenu();
     },
     onError: (error) => toast.error(error.message || "重命名失败"),
   });
   const remove = useDeleteWorkflowMutation({
-    onSuccess: () => toast.success("项目已删除"),
+    onSuccess: () => {
+      toast.success("项目已删除");
+      closeMenu();
+    },
     onError: (error) => toast.error(error.message || "删除失败"),
   });
   const saveTitle = () => {
@@ -495,12 +513,6 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     }
     patch.mutate({ id: item.id, title: next });
   };
-
-  const closeMenu = useCallback(() => {
-    setMenuOpen(false);
-    setConfirmingDelete(false);
-    setRenaming(false);
-  }, []);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -530,15 +542,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     setTitle(item.title || "服饰模特图");
   };
 
-  const dotTone = running
-    ? "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
-    : needsReview
-      ? "bg-[var(--amber-300)]"
-      : completed
-        ? "bg-[var(--success)]"
-        : failed
-          ? "bg-[var(--danger)]"
-          : "bg-[var(--fg-3)]";
+  const dotTone = projectStatusDotTone(item.status);
 
   return (
     <motion.div
@@ -614,6 +618,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         </div>
       </Link>
 
+      {/* @ui-governance-allow media: action control sits on the project thumbnail. */}
       <button
         ref={actionButtonRef}
         type="button"
@@ -621,7 +626,10 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={openMenu}
-        className="absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-base)] hover:bg-black/50 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:bg-transparent md:text-white/80 md:opacity-0 md:group-hover:opacity-100 md:h-9 md:w-9"
+        className={cn(
+          // @ui-governance-allow media
+          "absolute right-1 top-1 inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-base)] hover:bg-black/50 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-9 md:w-9 md:bg-transparent md:text-white/80 md:opacity-0 md:group-hover:opacity-100",
+        )}
       >
         <MoreHorizontal className="h-4 w-4" />
       </button>
@@ -648,7 +656,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 className="h-9 border-b border-[var(--border)] bg-transparent px-1 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)]"
               />
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="ghost" size="sm" onClick={() => setRenaming(false)}>
+                <Button type="button" variant="ghost" size="sm" onClick={cancelRename}>
                   取消
                 </Button>
                 <Button type="submit" size="sm" disabled={patch.isPending}>
@@ -716,7 +724,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             confirmingDelete={confirmingDelete}
             onTitleChange={setTitle}
             onStartRename={() => setRenaming(true)}
-            onCancelRename={() => setRenaming(false)}
+            onCancelRename={cancelRename}
             onSaveRename={saveTitle}
             onStartDelete={() => setConfirmingDelete(true)}
             onCancelDelete={() => setConfirmingDelete(false)}

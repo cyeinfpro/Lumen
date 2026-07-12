@@ -97,6 +97,7 @@ export function DesktopStudio() {
     }
     setDrawerOpen((open) => !open);
   }, [isWideSidebar, toggleSidebar]);
+  const closeSidebarDrawer = useCallback(() => setDrawerOpen(false), []);
 
   useEffect(() => {
     const wide = window.matchMedia("(min-width: 1440px)");
@@ -319,11 +320,15 @@ export function DesktopStudio() {
 
       <DesktopSidebarDrawer
         open={drawerOpen && isWideSidebar !== true}
-        onClose={() => setDrawerOpen(false)}
+        onClose={closeSidebarDrawer}
         backgroundRef={workspaceRef}
         returnFocusRef={sidebarTriggerRef}
       >
-        <Sidebar embedded showBrand />
+        <Sidebar
+          embedded
+          showBrand
+          onNavigate={closeSidebarDrawer}
+        />
       </DesktopSidebarDrawer>
     </div>
   );

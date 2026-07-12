@@ -10,6 +10,9 @@ export default function Page({
   params: Promise<{ runId: string }>;
 }) {
   const { runId } = use(params);
-  return <StoryboardDetailPage storyboardId={runId} />;
+  return (
+    <div className="min-h-0 min-w-0 flex-1">
+      <StoryboardDetailPage storyboardId={runId} />
+    </div>
+  );
 }
-

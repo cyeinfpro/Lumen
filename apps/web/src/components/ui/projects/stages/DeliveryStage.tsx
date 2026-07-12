@@ -122,7 +122,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                   href={canDownload(image) || "#"}
                   download
                   rel="noopener"
-                  className="mt-2 inline-flex h-10 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]"
+                  className="mt-2 inline-flex h-11 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] md:h-10"
                 >
                   <Download className="h-3 w-3" />
                   Download

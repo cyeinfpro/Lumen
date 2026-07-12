@@ -6,6 +6,7 @@ export { IconButton } from "./IconButton";
 export { Input } from "./Input";
 export { Textarea } from "./Textarea";
 export { Spinner } from "./Spinner";
+export { Skeleton } from "./Skeleton";
 export { EmptyState } from "./EmptyState";
 export { ErrorState } from "./ErrorState";
 export { Kbd } from "./Kbd";

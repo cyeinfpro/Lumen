@@ -20,7 +20,7 @@ export function Skeleton({
       ref={ref}
       aria-hidden="true"
       className={cn(
-        "block rounded-[var(--radius-control)] bg-[var(--bg-2)]",
+        "block max-w-full rounded-[var(--radius-control)] bg-[var(--bg-2)]",
         !isStatic && "animate-shimmer",
         className,
       )}

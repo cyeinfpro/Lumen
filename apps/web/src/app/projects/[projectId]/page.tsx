@@ -4,7 +4,7 @@
 // - apparel_model_showcase → ApparelWorkflowDetail
 // - poster_design          → PosterWorkflowDetail
 
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { use, useEffect } from "react";
 
 import { ApparelWorkflowDetail, PosterWorkflowDetail } from "@/components/ui/projects";
@@ -17,19 +17,27 @@ export default function ProjectDetailPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = use(params);
-  return <ProjectDispatcher projectId={projectId} />;
+  return (
+    <div className="min-h-0 min-w-0 flex-1">
+      <ProjectDispatcher projectId={projectId} />
+    </div>
+  );
 }
 
 function ProjectDispatcher({ projectId }: { projectId: string }) {
   const query = useWorkflowQuery(projectId);
   const workflow = query.data;
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const search = searchParams.toString();
 
   useEffect(() => {
     if (workflow?.type === "storyboard") {
-      router.replace(`/projects/storyboard/${projectId}`);
+      router.replace(
+        `/projects/storyboard/${projectId}${search ? `?${search}` : ""}`,
+      );
     }
-  }, [projectId, router, workflow?.type]);
+  }, [projectId, router, search, workflow?.type]);
 
   if (!workflow && query.isLoading) {
     return (
@@ -52,6 +60,24 @@ function ProjectDispatcher({ projectId }: { projectId: string }) {
     return null;
   }
 
-  // 默认 / apparel_model_showcase 走原详情组件，保持现有行为不变
-  return <ApparelWorkflowDetail projectId={projectId} />;
+  if (workflow?.type === "apparel_model_showcase") {
+    return <ApparelWorkflowDetail projectId={projectId} />;
+  }
+
+  return (
+    <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)] p-6 text-center text-[var(--fg-0)]">
+      <div className="max-w-sm">
+        <p className="text-sm text-[var(--fg-1)]">
+          {query.isError ? "项目加载失败" : "暂不支持此项目类型"}
+        </p>
+        <button
+          type="button"
+          onClick={() => query.refetch()}
+          className="mt-3 min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm hover:bg-[var(--bg-1)]"
+        >
+          重试
+        </button>
+      </div>
+    </div>
+  );
 }

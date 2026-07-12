@@ -24,7 +24,7 @@ export function MobileStreamTopBar({
     <MobileTopBar
       left={
         compact ? (
-          <div className="min-w-0 flex items-baseline gap-2">
+          <div className="min-w-0 flex items-baseline gap-2 overflow-hidden">
             <span className="type-card-title shrink-0">
               素材
             </span>
@@ -35,7 +35,7 @@ export function MobileStreamTopBar({
             )}
           </div>
         ) : (
-          <div className="min-w-0">
+          <div className="min-w-0 overflow-hidden">
             <div className="type-page-title">
               素材
             </div>
@@ -82,7 +82,7 @@ function IconToggle({
       aria-label={label}
       aria-pressed={active}
       className={[
-        "rounded-full w-9 h-9",
+        "h-11 w-11 rounded-full",
         active
           ? "text-[var(--amber-400)] bg-[var(--accent-soft)]"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",

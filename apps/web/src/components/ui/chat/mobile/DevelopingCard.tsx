@@ -141,9 +141,9 @@ export function DevelopingCard({
             type="button"
             onClick={() => onRetry(gen.id)}
             className={cn(
-              "inline-flex items-center gap-1.5 px-4 h-9 rounded-full",
+              "inline-flex min-h-11 items-center gap-1.5 px-4 rounded-full",
               "bg-[var(--bg-2)] border border-[var(--border)] text-body-sm text-[var(--fg-0)]",
-              "active:opacity-[var(--op-press)] transition-opacity",
+              "active:opacity-[var(--op-press)] transition-opacity motion-reduce:transition-none",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
             )}
             aria-label="重试生成"
@@ -191,10 +191,10 @@ export function DevelopingCard({
               type="button"
               onClick={() => onCancel(gen.id)}
               className={cn(
-                "inline-flex items-center gap-1.5 px-3.5 h-8 rounded-full",
+                "inline-flex min-h-11 items-center gap-1.5 px-3.5 rounded-full",
                 "bg-[var(--bg-1)]/70 backdrop-blur-sm border border-[var(--border)]",
                 "text-[12px] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-                "active:opacity-[var(--op-press)] transition-[color,opacity]",
+                "active:opacity-[var(--op-press)] transition-[color,opacity] motion-reduce:transition-none",
               )}
               aria-label="取消生成"
             >

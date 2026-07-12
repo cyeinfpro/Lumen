@@ -34,7 +34,11 @@ import {
   type LightboxItem,
 } from "@/components/ui/lightbox/types";
 import { Button } from "@/components/ui/primitives";
-import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
+import {
+  EmptyBlock,
+  ErrorBlock,
+  ListSkeleton,
+} from "../_components/AdminFeedback";
 
 type EventKindFilter = "all" | "generation" | "completion";
 type TimeRangeFilter = "24h" | "7d" | "30d";

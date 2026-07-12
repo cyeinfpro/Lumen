@@ -107,7 +107,7 @@ export function LightboxDetailsContent({
                   type="button"
                   onClick={handleCopyPrompt}
                   className={cn(
-                    "inline-flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
+                    "inline-flex min-h-11 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
                     style.button,
                   )}
                   aria-live="polite"
@@ -150,7 +150,7 @@ export function LightboxDetailsContent({
                   }
                   aria-expanded={revisedOpen}
                   className={cn(
-                    "inline-flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-control)] px-2 text-left text-[12px] font-medium transition-colors",
+                    "inline-flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-control)] px-2 text-left text-[12px] font-medium transition-colors",
                     style.button,
                   )}
                 >
@@ -167,7 +167,7 @@ export function LightboxDetailsContent({
                   type="button"
                   onClick={handleCopyRevisedPrompt}
                   className={cn(
-                    "inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
+                    "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
                     style.button,
                   )}
                 >

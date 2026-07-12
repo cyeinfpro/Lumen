@@ -41,7 +41,7 @@ export function SearchBox({
   return (
     <div
       className={cn(
-        "relative flex h-10 items-center rounded-[var(--radius-control)] border border-transparent bg-[var(--bg-0)]/68 transition-colors md:h-9",
+        "relative flex min-h-11 items-center rounded-[var(--radius-control)] border border-transparent bg-[var(--bg-0)]/68 transition-colors md:min-h-10",
         "focus-within:border-[var(--border)] focus-within:bg-[var(--bg-0)]",
         className,
       )}
@@ -75,7 +75,7 @@ export function SearchBox({
             inputRef.current?.focus();
           }}
           aria-label="清除搜索"
-          className="absolute right-1 w-8 h-8 inline-flex items-center justify-center rounded text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
+          className="absolute right-0 inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:right-1 md:h-9 md:w-9"
         >
           <X className="w-4 h-4" />
         </button>

@@ -8,7 +8,7 @@ const InpaintModalImpl = dynamic(
     ssr: false,
     loading: () => (
       <div
-        className="fixed inset-0 z-[var(--z-dialog)] bg-black/60 grid place-items-center"
+        className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] bg-black/60 grid place-items-center"
         aria-busy="true"
         aria-label="加载中"
       >

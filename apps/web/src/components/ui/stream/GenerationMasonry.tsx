@@ -90,7 +90,7 @@ function GenerationMasonryComponent({
   highlightId,
 }: GenerationMasonryProps) {
   const columnCount = Math.max(1, Math.floor(columns));
-  const gap = columnCount > 2 ? 16 : 12;
+  const gap = columnCount > 2 ? 14 : 8;
   const orderedFeed = useMemo(
     () => feed.slice().sort(compareFeedOrder),
     [feed],
@@ -130,21 +130,36 @@ function GenerationMasonryComponent({
     }
     return map;
   }, [items]);
+  const groupedColumns = useMemo(() => {
+    const map = new Map<Bucket, MasonryEntry[][]>();
+    for (const bucket of BUCKET_ORDER) {
+      const bucketItems = grouped.get(bucket);
+      if (bucketItems?.length) {
+        map.set(
+          bucket,
+          distributeByEstimatedHeight(bucketItems, columnCount),
+        );
+      }
+    }
+    return map;
+  }, [columnCount, grouped]);
 
   return (
     <div
       id="stream-masonry"
-      className="pb-3"
-      style={{ scrollMarginTop: 72 }}
+      className="pb-[calc(env(safe-area-inset-bottom,0px)+1rem)]"
+      style={{
+        scrollMarginTop: "calc(var(--mobile-topbar-h) + var(--space-4))",
+      }}
       aria-live="polite"
     >
       {BUCKET_ORDER.map((b) => {
         const arr = grouped.get(b);
         if (!arr || arr.length === 0) return null;
-        const masonryColumns = distributeByEstimatedHeight(arr, columnCount);
+        const masonryColumns = groupedColumns.get(b) ?? [];
         return (
-          <section key={b} aria-label={BUCKET_LABEL[b]} className="pt-7 first:pt-4">
-            <div className="mb-3.5 flex items-center gap-3 px-3 md:px-0">
+          <section key={b} aria-label={BUCKET_LABEL[b]} className="pt-6 first:pt-3 md:pt-7 md:first:pt-4">
+            <div className="mb-2.5 flex items-center gap-2.5 px-3 md:mb-3.5 md:px-0">
               <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
                 {BUCKET_LABEL[b]}
               </span>
@@ -154,7 +169,7 @@ function GenerationMasonryComponent({
               <span className="h-px flex-1 bg-gradient-to-r from-[var(--border-subtle)] to-transparent" />
             </div>
             <div
-              className="grid px-3 md:px-0"
+              className="grid px-2 md:px-0"
               style={{
                 gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
                 gap,

@@ -256,7 +256,7 @@ export function PosterStyleGenerator({
               <button
                 type="button"
                 onClick={() => setAutoTag((prev) => !prev)}
-                className="group flex min-h-9 w-full items-center gap-3 border-b border-[var(--border)] pb-2 pt-0.5 text-left transition-colors hover:border-[var(--border-strong)]"
+                className="group flex min-h-11 w-full items-center gap-3 border-b border-[var(--border)] pb-2 pt-0.5 text-left transition-colors hover:border-[var(--border-strong)] md:min-h-9"
                 aria-pressed={autoTag}
               >
                 <span
@@ -299,7 +299,7 @@ export function PosterStyleGenerator({
       </div>
 
       {/* 提交条（mobile） */}
-      <div className="-mx-3 mt-1 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 md:hidden">
+      <div className="-mx-3 sticky bottom-0 z-20 mt-1 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 shadow-[var(--shadow-1)] backdrop-blur-xl md:hidden">
         <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
           {`将生成 ${count} 张样图`}
         </p>
@@ -392,7 +392,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-8 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >

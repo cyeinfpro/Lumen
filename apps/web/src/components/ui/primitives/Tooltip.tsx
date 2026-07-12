@@ -4,7 +4,7 @@
 // 不依赖 Radix；定位用 absolute + side 四方向。内容跟随 children 的 focus-visible 一并显示，
 // 便于键盘用户预览。
 
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState, useId } from "react";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +44,7 @@ export function Tooltip({
 }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const [isTouch, setIsTouch] = useState(false);
+  const reduceMotion = useReducedMotion();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const id = useId();
 
@@ -90,13 +91,13 @@ export function Tooltip({
           <motion.span
             key={id}
             role="tooltip"
-            initial={{ opacity: 0, x: offset.x, y: offset.y }}
+            initial={reduceMotion ? false : { opacity: 0, x: offset.x, y: offset.y }}
             animate={{ opacity: 1, x: 0, y: 0 }}
-            exit={{ opacity: 0, x: offset.x, y: offset.y }}
-            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: offset.x, y: offset.y }}
+            transition={{ duration: reduceMotion ? 0 : 0.14, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               "pointer-events-none absolute z-[60]",
-              "px-2 py-1 rounded-[var(--radius-control)] text-[11px] font-medium whitespace-nowrap",
+              "max-w-[min(20rem,calc(100vw-1rem))] whitespace-normal break-words px-2 py-1 text-center type-caption font-medium rounded-[var(--radius-control)]",
               "bg-[var(--bg-1)]/95 text-[var(--fg-0)] border border-[var(--border)]",
               "shadow-lumen-pop backdrop-blur-md",
               SIDE_POS[side],

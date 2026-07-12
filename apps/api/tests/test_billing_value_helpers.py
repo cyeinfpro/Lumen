@@ -157,18 +157,21 @@ def test_client_idempotency_key_rejects_invalid_headers(raw: bytes) -> None:
 
 
 def test_redemption_batch_hash_normalizes_expiry_timezone() -> None:
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).replace(
+        microsecond=0
+    )
     naive = AdminRedemptionCodeCreateIn(
         amount_rmb="10",
         count=2,
         max_redemptions=3,
-        expires_at=datetime(2026, 7, 12, 12),
+        expires_at=expires_at.replace(tzinfo=None),
         note="batch",
     )
     aware = AdminRedemptionCodeCreateIn(
         amount_rmb="10",
         count=2,
         max_redemptions=3,
-        expires_at=datetime(2026, 7, 12, 12, tzinfo=timezone.utc),
+        expires_at=expires_at,
         note="batch",
     )
 
