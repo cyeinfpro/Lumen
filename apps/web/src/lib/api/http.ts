@@ -103,6 +103,76 @@ export class ApiError extends Error {
   }
 }
 
+interface ParsedApiError {
+  code: string;
+  message: string;
+}
+
+function parseErrorObject(value: unknown): Partial<ParsedApiError> | null {
+  if (!value || typeof value !== "object" || !("error" in value)) return null;
+  const error = (value as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return null;
+  const record = error as { code?: unknown; message?: unknown };
+  return {
+    code: typeof record.code === "string" ? record.code : undefined,
+    message: typeof record.message === "string" ? record.message : undefined,
+  };
+}
+
+function parseValidationDetail(detail: unknown): string | null {
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  const first = detail[0];
+  if (!first || typeof first !== "object" || !("msg" in first)) return null;
+  const message = (first as { msg?: unknown }).msg;
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
+function parseDetailError(
+  detail: unknown,
+  fallback: ParsedApiError,
+): ParsedApiError {
+  if (typeof detail === "string" && detail.trim()) {
+    return { ...fallback, message: detail };
+  }
+  const nested = parseErrorObject(detail);
+  return {
+    code: nested?.code ?? fallback.code,
+    message:
+      nested?.message ?? parseValidationDetail(detail) ?? fallback.message,
+  };
+}
+
+function normalizeRequestTooLarge(
+  status: number,
+  error: ParsedApiError,
+): ParsedApiError {
+  return status === 413 && error.message === `HTTP ${status}`
+    ? { code: "request_too_large", message: "上传文件过大，请压缩后重试" }
+    : error;
+}
+
+function parseApiError(status: number, data: unknown): ParsedApiError {
+  const fallback = { code: "http_error", message: `HTTP ${status}` };
+  const direct = parseErrorObject(data);
+  if (direct) {
+    return {
+      code: direct.code ?? fallback.code,
+      message: direct.message ?? fallback.message,
+    };
+  }
+  if (data && typeof data === "object" && "detail" in data) {
+    return normalizeRequestTooLarge(
+      status,
+      parseDetailError((data as { detail?: unknown }).detail, fallback),
+    );
+  }
+  const error =
+    typeof data === "string" && data.trim()
+      ? { ...fallback, message: data.trim() }
+      : fallback;
+  return normalizeRequestTooLarge(status, error);
+}
+
 function networkRequestError(err: unknown): Error {
   if (err instanceof Error && err.name === "AbortError") return err;
   return new ApiError({
@@ -292,24 +362,10 @@ export async function apiFetch<T = unknown>(
     ? await res.json().catch(() => null)
     : await res.text().catch(() => null);
 
-  const codeFromPayload = (payload: unknown): string | undefined => {
-    if (
-      payload &&
-      typeof payload === "object" &&
-      "error" in payload &&
-      typeof (payload as { error: unknown }).error === "object" &&
-      (payload as { error: unknown }).error !== null
-    ) {
-      const e = (payload as { error: { code?: unknown } }).error;
-      return typeof e.code === "string" ? e.code : undefined;
-    }
-    return undefined;
-  };
-
   if (
     res.status === 403 &&
     WRITE_METHODS.has(method) &&
-    codeFromPayload(data) === CSRF_FAILED_CODE
+    parseApiError(res.status, data).code === CSRF_FAILED_CODE
   ) {
     const fresh = await refreshCsrfToken().catch(() => null);
     if (fresh) {
@@ -352,36 +408,7 @@ export async function apiFetch<T = unknown>(
   }
 
   if (!res.ok) {
-    let code = "http_error";
-    let message = `HTTP ${res.status}`;
-    if (
-      data &&
-      typeof data === "object" &&
-      data !== null &&
-      "error" in data &&
-      typeof (data as { error: unknown }).error === "object"
-    ) {
-      const e = (data as { error: { code?: string; message?: string } }).error;
-      if (e.code) code = e.code;
-      if (e.message) message = e.message;
-    } else if (data && typeof data === "object" && data !== null && "detail" in data) {
-      const detail = (data as { detail?: unknown }).detail;
-      if (typeof detail === "string" && detail.trim()) {
-        message = detail;
-      } else if (Array.isArray(detail) && detail.length > 0) {
-        const first = detail[0];
-        if (first && typeof first === "object" && "msg" in first) {
-          const msg = (first as { msg?: unknown }).msg;
-          if (typeof msg === "string" && msg.trim()) message = msg;
-        }
-      }
-    } else if (typeof data === "string" && data.trim()) {
-      message = data.trim();
-    }
-    if (res.status === 413 && message === `HTTP ${res.status}`) {
-      code = "request_too_large";
-      message = "上传文件过大，请压缩后重试";
-    }
+    const { code, message } = parseApiError(res.status, data);
     throw new ApiError({ code, message, status: res.status, payload: data });
   }
 

@@ -590,7 +590,7 @@ def test_billing_migrations_round_trip_postgres() -> None:
             _insert_wallet_fixture(connection)
             _replace_dirty_ledger(connection)
 
-        _run_alembic(database_url, "upgrade", "head")
+        _run_alembic(database_url, "upgrade", "0043_billing_consistency")
         _assert_head_state(schema_engine, expected_retry_count=5)
 
         _run_alembic(
@@ -615,7 +615,7 @@ def test_billing_migrations_round_trip_postgres() -> None:
             )
             _replace_dirty_ledger(connection)
 
-        _run_alembic(database_url, "upgrade", "head")
+        _run_alembic(database_url, "upgrade", "0043_billing_consistency")
         _assert_head_state(schema_engine, expected_retry_count=7)
     finally:
         if schema_engine is not None:

@@ -17,6 +17,7 @@ import { useUiStore } from "@/store/useUiStore";
 export type RuntimeDefaults = {
   fast?: boolean;
   upload_max_source_bytes?: number;
+  canvas_enabled?: boolean;
   nav_visibility?: NavVisibility;
 };
 
@@ -34,6 +35,9 @@ function pickRuntimeDefaults(
     value.upload_max_source_bytes > 0
   ) {
     next.upload_max_source_bytes = value.upload_max_source_bytes;
+  }
+  if (typeof value?.canvas_enabled === "boolean") {
+    next.canvas_enabled = value.canvas_enabled;
   }
   if (value?.nav_visibility && typeof value.nav_visibility === "object") {
     next.nav_visibility = normalizeNavVisibility(value.nav_visibility);
@@ -74,6 +78,7 @@ export function RuntimeDefaultsBootstrap({
   const isPublicAuthPath = isPublicPath(pathname);
   const defaultFast = defaults.fast;
   const defaultUploadMaxSourceBytes = defaults.upload_max_source_bytes;
+  const defaultCanvasEnabled = defaults.canvas_enabled;
   const defaultNavVisibility = defaults.nav_visibility;
 
   const initialDefaults = useMemo(
@@ -81,14 +86,21 @@ export function RuntimeDefaultsBootstrap({
       pickRuntimeDefaults({
         fast: defaultFast,
         upload_max_source_bytes: defaultUploadMaxSourceBytes,
+        canvas_enabled: defaultCanvasEnabled,
         nav_visibility: defaultNavVisibility,
       }),
-    [defaultFast, defaultUploadMaxSourceBytes, defaultNavVisibility],
+    [
+      defaultFast,
+      defaultUploadMaxSourceBytes,
+      defaultCanvasEnabled,
+      defaultNavVisibility,
+    ],
   );
 
   useLayoutEffect(() => {
     useChatStore.getState().applyRuntimeDefaults(initialDefaults);
     useUiStore.getState().setNavVisibility(initialDefaults.nav_visibility);
+    useUiStore.getState().setCanvasEnabled(initialDefaults.canvas_enabled === true);
   }, [initialDefaults]);
 
   const meQuery = useQuery<AuthUser>({
@@ -103,6 +115,7 @@ export function RuntimeDefaultsBootstrap({
   const serverRuntimeDefaults = meQuery.data?.runtime_defaults;
   const serverFast = serverRuntimeDefaults?.fast;
   const serverUploadMaxSourceBytes = serverRuntimeDefaults?.upload_max_source_bytes;
+  const serverCanvasEnabled = serverRuntimeDefaults?.canvas_enabled;
   const serverNavVisibility = serverRuntimeDefaults?.nav_visibility;
 
   const runtimeDefaults = useMemo(
@@ -110,9 +123,15 @@ export function RuntimeDefaultsBootstrap({
       pickRuntimeDefaults({
         fast: serverFast,
         upload_max_source_bytes: serverUploadMaxSourceBytes,
+        canvas_enabled: serverCanvasEnabled,
         nav_visibility: serverNavVisibility,
       }),
-    [serverFast, serverUploadMaxSourceBytes, serverNavVisibility],
+    [
+      serverFast,
+      serverUploadMaxSourceBytes,
+      serverCanvasEnabled,
+      serverNavVisibility,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -121,6 +140,7 @@ export function RuntimeDefaultsBootstrap({
     chatStore.setCurrentUser(meQuery.data.id);
     chatStore.applyRuntimeDefaults(runtimeDefaults);
     useUiStore.getState().setNavVisibility(runtimeDefaults.nav_visibility);
+    useUiStore.getState().setCanvasEnabled(runtimeDefaults.canvas_enabled === true);
   }, [meQuery.data, runtimeDefaults]);
 
   useLayoutEffect(() => {
@@ -144,6 +164,17 @@ export function RuntimeDefaultsBootstrap({
     if (!redirectTo || redirectTo === pathname) return;
     router.replace(redirectTo);
   }, [effectiveNavVisibility, isPublicAuthPath, pathname, router]);
+
+  useEffect(() => {
+    if (
+      !meQuery.data ||
+      runtimeDefaults.canvas_enabled === true ||
+      !pathname.startsWith("/projects/canvas")
+    ) {
+      return;
+    }
+    router.replace("/projects");
+  }, [meQuery.data, pathname, router, runtimeDefaults.canvas_enabled]);
 
   return null;
 }

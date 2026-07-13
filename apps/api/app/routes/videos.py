@@ -34,10 +34,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     EV_VIDEO_CANCELED,
-    EV_VIDEO_QUEUED,
     VideoGenerationStage,
     VideoGenerationStatus,
     task_channel,
@@ -92,16 +90,16 @@ from lumen_core.video_providers import (
     select_video_provider,
 )
 
-from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
+from ..canvas_services import asset_ref_service
+from ..canvas_services.task_guard import reject_canvas_retry
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
-from ..observability import task_publish_errors_total
 from ..public_urls import resolve_public_base_url
-from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ..sse_publish import publish_sse_event
+from ..services.video_publish import publish_video_queued
+from ..sse_publish import publish_sse_event  # noqa: F401 - test patch surface
 from ..video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VideoReferenceImageError,
@@ -2085,6 +2083,8 @@ async def _create_video_generation_record(
     input_image_snapshot: tuple[str | None, str | None, str | None] | None = None,
     reference_media_snapshot: list[dict[str, Any]] | None = None,
     workflow_metadata: dict[str, Any] | None = None,
+    defer_commit: bool = False,
+    deferred_publish_payload: dict[str, Any] | None = None,
 ) -> VideoGenerationOut:
     provider, estimates = await _require_video_create_ready(db, body)
     requires_public_media = _provider_requires_public_media(provider)
@@ -2307,11 +2307,21 @@ async def _create_video_generation_record(
         await db.flush()
         payload["outbox_id"] = str(outbox.id)
         outbox.payload = dict(payload)
-        await db.commit()
+        if deferred_publish_payload is not None:
+            deferred_publish_payload.update(payload)
+        if not defer_commit:
+            await db.commit()
     except billing_core.BillingError as exc:
-        await db.rollback()
+        if not defer_commit:
+            await db.rollback()
         raise _http(exc.code, exc.message, exc.status_code) from exc
     except IntegrityError as exc:
+        if defer_commit:
+            raise _http(
+                "idempotency_conflict",
+                "idempotency_key conflict",
+                409,
+            ) from exc
         await db.rollback()
         winner = (
             await db.execute(
@@ -2325,48 +2335,11 @@ async def _create_video_generation_record(
             _ensure_idempotent_replay_matches(winner, request_fingerprint)
             return await _generation_out(db, winner)
         raise _http("idempotency_conflict", "idempotency_key conflict", 409) from exc
-    await db.refresh(vg)
-    await invalidate_balance_cache(user.id)
-    await _publish_video_queued(payload)
+    if not defer_commit:
+        await db.refresh(vg)
+        await invalidate_balance_cache(user.id)
+        await publish_video_queued(payload)
     return await _generation_out(db, vg)
-
-
-async def _publish_video_queued(payload: dict[str, Any]) -> None:
-    try:
-        pool = await get_arq_pool()
-        await pool.enqueue_job(
-            "run_video_generation",
-            payload["task_id"],
-            _job_id=arq_job_id(
-                "video_generation",
-                payload["task_id"],
-                payload.get("outbox_id"),
-            ),
-        )
-        redis = get_redis()
-        await publish_sse_event(
-            redis,
-            user_id=payload["user_id"],
-            channel=task_channel(payload["task_id"]),
-            event_name=EV_VIDEO_QUEUED,
-            data={
-                "video_generation_id": payload["task_id"],
-                "kind": "video_generation",
-                "status": VideoGenerationStatus.QUEUED.value,
-                "stage": VideoGenerationStage.QUEUED.value,
-                "progress_pct": 0,
-                "submission_epoch": 0,
-                "video_id": None,
-                "error_code": None,
-            },
-        )
-    except Exception:
-        task_publish_errors_total.labels(kind="video_generation").inc()
-        logger.warning(
-            "best-effort video queued publish failed task_id=%s",
-            payload.get("task_id"),
-            exc_info=True,
-        )
 
 
 @router.post(
@@ -2613,6 +2586,7 @@ async def retry_video_generation(
     ).scalar_one_or_none()
     if row is None:
         raise _http("not_found", "video generation not found", 404)
+    reject_canvas_retry(row)
     if row.status not in {
         VideoGenerationStatus.FAILED.value,
         VideoGenerationStatus.CANCELED.value,
@@ -2726,6 +2700,7 @@ async def delete_video(
     ).scalar_one_or_none()
     if video is None:
         raise _http("not_found", "video not found", 404)
+    await asset_ref_service.ensure_asset_not_canvas_referenced(db, video_id=video.id)
     video.deleted_at = datetime.now(timezone.utc)
     await db.commit()
     return Response(status_code=204)

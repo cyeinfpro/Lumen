@@ -1,5 +1,4 @@
 "use client";
-
 // Lumen 管理面板：系统设置。
 // UI 目标：把工程 key 翻译成可理解的任务语言，同时保留 key 作为排错辅助信息。
 
@@ -38,15 +37,13 @@ import {
   useSystemSettingsQuery,
   useUpdateSystemSettingsMutation,
 } from "@/lib/queries";
-import {
-  ApiError,
-  getAdminContextHealth,
-} from "@/lib/apiClient";
+import { ApiError, getAdminContextHealth } from "@/lib/apiClient";
 import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { ErrorBlock } from "../_components/AdminFeedback";
+import { CANVAS_ENABLED_KEY, CANVAS_SETTING_META } from "./canvasSettingMeta";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
 
@@ -120,7 +117,7 @@ type SettingMeta = {
   recommended?: string;
   warning?: string;
   choices?: readonly SettingChoice[];
-  keywords?: string[];
+  keywords?: readonly string[];
 };
 
 type DependencyState = {
@@ -292,6 +289,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     recommended: "不希望用户浏览历史素材时可以关闭。",
     keywords: ["ui", "nav", "assets", "stream", "library", "资产", "图库", "入口"],
   },
+  [CANVAS_ENABLED_KEY]: CANVAS_SETTING_META,
   "image.engine": {
     group: "image",
     title: "生图引擎",

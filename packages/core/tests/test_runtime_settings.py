@@ -135,6 +135,17 @@ def test_ui_nav_visibility_settings_are_registered_and_validated():
             parse_value(spec, "2")
 
 
+def test_canvas_feature_setting_is_registered_and_defaults_closed() -> None:
+    spec = get_spec("canvas.enabled")
+    assert spec is not None
+    assert spec.parser is int
+    assert spec.env_fallback == "CANVAS_ENABLED"
+    assert parse_value(spec, "0") == 0
+    assert parse_value(spec, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(spec, "2")
+
+
 def test_billing_settings_are_registered_and_validated():
     enabled = get_spec("billing.enabled")
     rate = get_spec("billing.usd_to_rmb_rate")

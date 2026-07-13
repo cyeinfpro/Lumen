@@ -182,6 +182,7 @@ async def test_runtime_defaults_include_navigation_visibility(
         "ui.nav.video_visible": "0",
         "ui.nav.projects_visible": "1",
         "ui.nav.assets_visible": "0",
+        "canvas.enabled": "1",
     }
 
     async def fake_get_setting(_db, spec):
@@ -196,6 +197,7 @@ async def test_runtime_defaults_include_navigation_visibility(
     assert defaults.nav_visibility.video is False
     assert defaults.nav_visibility.projects is True
     assert defaults.nav_visibility.assets is False
+    assert defaults.canvas_enabled is True
 
 
 @pytest.mark.asyncio

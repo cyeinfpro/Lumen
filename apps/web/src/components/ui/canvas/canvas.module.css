@@ -1,0 +1,85 @@
+.viewport {
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--border) 48%, transparent) 1px, transparent 1px);
+  background-size: 20px 20px;
+  background-color: var(--surface-canvas);
+}
+
+.viewport :global(.react-flow__renderer) {
+  touch-action: none;
+}
+
+.viewport :global(.react-flow__edge-path) {
+  stroke: var(--border-strong);
+  stroke-width: 1.7;
+}
+
+.viewport :global(.react-flow__edge.selected .react-flow__edge-path) {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+}
+
+.viewport :global(.react-flow__connection-path) {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.viewport :global(.react-flow__selection),
+.viewport :global(.react-flow__nodesselection-rect) {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.viewport :global(.react-flow__attribution) {
+  display: none;
+}
+
+.handle {
+  width: 12px !important;
+  height: 12px !important;
+  border: 2px solid var(--bg-1) !important;
+  background: var(--fg-2) !important;
+}
+
+.handle[data-port-type="text"] {
+  background: var(--info) !important;
+}
+
+.handle[data-port-type="image"],
+.handle[data-port-type="mask"] {
+  background: var(--accent) !important;
+}
+
+.handle[data-port-type="video"] {
+  background: var(--success) !important;
+}
+
+.handleCompatible {
+  width: 18px !important;
+  height: 18px !important;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+@media (pointer: coarse) {
+  .handle {
+    width: 18px !important;
+    height: 18px !important;
+  }
+
+  .handle::after {
+    position: absolute;
+    inset: -13px;
+    content: "";
+  }
+
+  .handleCompatible {
+    width: 24px !important;
+    height: 24px !important;
+  }
+
+  .handleCompatible::after {
+    inset: -10px;
+  }
+}

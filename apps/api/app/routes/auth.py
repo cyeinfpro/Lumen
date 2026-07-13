@@ -83,6 +83,7 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
+_CANVAS_ENABLED_KEY = "canvas.enabled"
 _NAV_VISIBILITY_SETTING_KEYS = {
     "studio": "ui.nav.studio_visible",
     "video": "ui.nav.video_visible",
@@ -324,9 +325,14 @@ async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
             if raw in {"0", "1"}:
                 visible = raw == "1"
         nav_visibility[nav_key] = visible
+    canvas_enabled = False
+    canvas_spec = get_spec(_CANVAS_ENABLED_KEY)
+    if canvas_spec is not None:
+        canvas_enabled = await get_setting(db, canvas_spec) == "1"
     return RuntimeDefaultsOut(
         fast=fast_default,
         upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
+        canvas_enabled=canvas_enabled,
         nav_visibility=NavigationVisibilityOut(**nav_visibility),
     )
 

@@ -551,6 +551,7 @@ export type SystemSettingKey =
   | "ui.nav.video_visible"
   | "ui.nav.projects_visible"
   | "ui.nav.assets_visible"
+  | "canvas.enabled"
   | "upstream.pixel_budget"
   | "upstream.global_concurrency"
   | "upstream.default_model"

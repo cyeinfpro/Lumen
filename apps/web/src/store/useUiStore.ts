@@ -66,6 +66,8 @@ interface UiState {
   setSidebarSearch: (q: string) => void;
   navVisibility: Required<NavVisibility>;
   setNavVisibility: (visibility: NavVisibility | undefined | null) => void;
+  canvasEnabled: boolean;
+  setCanvasEnabled: (enabled: boolean) => void;
   lightbox: UiLightboxState;
   openLightbox: (id: string, src: string, alt: string, previewSrc?: string) => void;
   /**
@@ -103,6 +105,8 @@ export const useUiStore = create<UiState>((set) => ({
   navVisibility: DEFAULT_NAV_VISIBILITY,
   setNavVisibility: (visibility) =>
     set({ navVisibility: normalizeNavVisibility(visibility) }),
+  canvasEnabled: false,
+  setCanvasEnabled: (enabled) => set({ canvasEnabled: enabled }),
   lightbox: createClosedLightbox(),
   openLightbox: (id, src, alt, previewSrc) =>
     set({

@@ -76,6 +76,7 @@ from lumen_core.schemas import ImageOut
 
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
+from ..canvas_services import asset_ref_service
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
@@ -202,34 +203,42 @@ async def _image_referenced_by_visible_user_history(
         return True
 
     gen_inputs = (
-        await db.execute(
-            select(Generation.input_image_ids)
-            .join(Message, Message.id == Generation.message_id)
-            .join(Conversation, Conversation.id == Message.conversation_id)
-            .where(
-                Generation.user_id == user.id,
-                Conversation.user_id == user.id,
-                Conversation.deleted_at.is_(None),
-                Message.deleted_at.is_(None),
-                Message.created_at >= visible_after,
+        (
+            await db.execute(
+                select(Generation.input_image_ids)
+                .join(Message, Message.id == Generation.message_id)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Generation.user_id == user.id,
+                    Conversation.user_id == user.id,
+                    Conversation.deleted_at.is_(None),
+                    Message.deleted_at.is_(None),
+                    Message.created_at >= visible_after,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if any(img.id in (input_ids or []) for input_ids in gen_inputs):
         return True
 
     contents = (
-        await db.execute(
-            select(Message.content)
-            .join(Conversation, Conversation.id == Message.conversation_id)
-            .where(
-                Conversation.user_id == user.id,
-                Conversation.deleted_at.is_(None),
-                Message.deleted_at.is_(None),
-                Message.created_at >= visible_after,
+        (
+            await db.execute(
+                select(Message.content)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Conversation.user_id == user.id,
+                    Conversation.deleted_at.is_(None),
+                    Message.deleted_at.is_(None),
+                    Message.created_at >= visible_after,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return any(_content_references_image(content, img.id) for content in contents)
 
 
@@ -1473,6 +1482,7 @@ async def delete_image(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
+    await asset_ref_service.ensure_asset_not_canvas_referenced(db, image_id=img.id)
     img.deleted_at = datetime.now(timezone.utc)
     await write_audit(
         db,
