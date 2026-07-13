@@ -1,6 +1,6 @@
 "use client";
 
-// 移动 Composer：56px 核心输入层 + 执行摘要 + BottomSheet 高级设置。
+// 移动 Composer：56px 核心输入层 + 生图快捷参数 + BottomSheet 低频设置。
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -47,7 +47,6 @@ import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
 import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
-import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
@@ -57,6 +56,7 @@ import {
   MOBILE_REASONING_OPTIONS,
   MobileAdvancedSettings,
 } from "./MobileAdvancedSettings";
+import { MobileComposerExecutionControls } from "./MobileComposerExecutionControls";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -1084,12 +1084,23 @@ export function MobileComposerPill({
               />
             </div>
 
-            <ExecutionSummaryBar
+            <MobileComposerExecutionControls
+              mode={mode}
               summary={executionSummary}
-              compact
-              onAdjust={() => {
-                openAdvancedSheet();
-              }}
+              count={count}
+              onCountChange={setImageCount}
+              aspect={aspect}
+              onOpenAspect={openAspectSheet}
+              quality={quality}
+              onQualityChange={setQuality}
+              renderQuality={renderQuality}
+              onRenderQualityChange={setRenderQuality}
+              fast={fast}
+              onFastChange={setFast}
+              attachmentCount={attachments.length}
+              costLabel={costEstimate.label}
+              costWarning={costEstimate.warning}
+              onAdjust={openAdvancedSheet}
             />
 
             {/* 分隔线 */}

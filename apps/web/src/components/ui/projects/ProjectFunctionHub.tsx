@@ -13,6 +13,7 @@ import {
   Palette,
   Shirt,
   Sparkles,
+  Workflow,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
@@ -20,12 +21,30 @@ import { useMemo } from "react";
 import type { WorkflowRunListItem } from "@/lib/apiClient";
 import { useWorkflowsQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/store/useUiStore";
 import { OnlineBanner } from "./components/OnlineBanner";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { STATUS_LABEL } from "./types";
 import { formatRelativeTime } from "./utils";
 
 const FEATURES = [
+  {
+    title: "无限画布",
+    en: "自由工作流",
+    description: "自由连接提示词、素材、图片与视频节点，从任意结果继续分支。",
+    flow: "搭图 → 调参 → 运行节点 → 选择版本 → 交付",
+    input: "提示词 / 图片 / 视频",
+    output: "图片、视频与最终交付",
+    eta: "按节点运行",
+    primaryHref: "/projects/canvas/new",
+    primaryLabel: "新建画布",
+    secondaryHref: "/projects/canvas",
+    secondaryLabel: "查看画布",
+    icon: Workflow,
+    available: true,
+    badge: "自由",
+    featureFlag: "canvas",
+  },
   {
     title: "服饰模特图",
     en: "服饰工作流",
@@ -113,6 +132,17 @@ function getFeatureCardNavigation(
 
 export function ProjectFunctionHub() {
   const workflowsQuery = useWorkflowsQuery({ limit: 8 });
+  const canvasEnabled = useUiStore((state) => state.canvasEnabled);
+  const visibleFeatures = useMemo(
+    () =>
+      FEATURES.filter(
+        (feature) =>
+          !("featureFlag" in feature) ||
+          feature.featureFlag !== "canvas" ||
+          canvasEnabled,
+      ),
+    [canvasEnabled],
+  );
   const recentProjects = useMemo(
     () => workflowsQuery.data?.items ?? [],
     [workflowsQuery.data?.items],
@@ -162,8 +192,8 @@ export function ProjectFunctionHub() {
             <div className="grid gap-2 sm:grid-cols-4">
               <ProjectMetric
                 label="可用模板"
-                value={FEATURES.filter((feature) => feature.available).length}
-                detail={`${FEATURES.length} 个入口`}
+                value={visibleFeatures.filter((feature) => feature.available).length}
+                detail={`${visibleFeatures.length} 个入口`}
               />
               <ProjectMetric
                 label="进行中"
@@ -190,7 +220,7 @@ export function ProjectFunctionHub() {
               先继续最近项目，也可以从模板开启新的工作流。
             </p>
             <div className="mt-2 grid grid-cols-3 gap-2">
-              <MobileMetric label="模板" value={FEATURES.filter((feature) => feature.available).length} />
+              <MobileMetric label="模板" value={visibleFeatures.filter((feature) => feature.available).length} />
               <MobileMetric label="进行中" value={activeCount} />
               <MobileMetric label="产出" value={outputCount} />
             </div>
@@ -214,7 +244,7 @@ export function ProjectFunctionHub() {
               </p>
             </div>
             <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
-              {FEATURES.map((feature, index) => (
+              {visibleFeatures.map((feature, index) => (
                 <FeatureCard
                   key={feature.title}
                   feature={feature}

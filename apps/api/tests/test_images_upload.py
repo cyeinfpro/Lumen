@@ -12,6 +12,7 @@ import pytest
 from fastapi import Request
 from PIL import Image as PILImage
 
+from app.canvas_services import asset_ref_service
 from app.config import settings
 from app.routes import images
 from app.video_reference_images import VIDEO_REFERENCE_IMAGE_KIND
@@ -585,7 +586,15 @@ async def test_delete_image_writes_audit_log(monkeypatch: pytest.MonkeyPatch) ->
         db.add(AuditLog(**kwargs))
         await db.flush()
 
+    async def no_canvas_reference(_db, **_kwargs):
+        return None
+
     monkeypatch.setattr(images, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        asset_ref_service,
+        "ensure_asset_not_canvas_referenced",
+        no_canvas_reference,
+    )
     img = SimpleNamespace(
         id="img-1",
         source="uploaded",

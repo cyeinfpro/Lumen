@@ -96,6 +96,18 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         allowed_values=("0", "1"),
     ),
     SettingSpec(
+        key="canvas.enabled",
+        description=(
+            "是否开放无限画布。0=关闭入口并拒绝 /canvases API，1=开放。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="CANVAS_ENABLED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
         key="upstream.pixel_budget",
         description=(
             "默认像素预算（默认 1572864 ≈ 1.57M，仅用于 size_mode=auto 的预设推导）；"

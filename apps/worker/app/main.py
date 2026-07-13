@@ -27,6 +27,7 @@ from .provider_pool import probe_providers
 from .services import billing_cache
 from .tasks import auto_title as auto_title_tasks
 from .tasks import byok_retention as byok_retention_tasks
+from .tasks import canvas_execution_reconcile as canvas_reconcile_tasks
 from .tasks import completion as completion_tasks
 from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
@@ -95,17 +96,16 @@ class WorkerSettings:
         video_generation_tasks.run_video_poll,
         storyboard_assembly_tasks.run_storyboard_assembly,
         completion_tasks.run_completion,
+        canvas_reconcile_tasks.reconcile_canvas_execution,
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,
         context_summary_tasks.manual_compact_conversation,
         memory_tasks.memory_extract,
         memory_tasks.memory_reembed,
     ]
-
-    # 定时任务：每 2s publisher、每 60s reconciler、每 30s 统计刷入+条件探活、
-    # 每 5 分钟巡检默认标题（auto_title 兜底）、每小时第 5 分钟做一次上游 schema 探针
     cron_jobs = (
         outbox_tasks.cron_jobs
+        + canvas_reconcile_tasks.cron_jobs
         + video_generation_tasks.cron_jobs
         + [
             # run_at_startup=False：probe 内部对 provider 没强制 timeout，某个 provider TCP

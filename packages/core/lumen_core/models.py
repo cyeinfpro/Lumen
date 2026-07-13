@@ -2202,7 +2202,7 @@ class OutboxDeadLetter(Base):
         DateTime(timezone=True), nullable=True
     )
 
-
+from . import canvas_models as _canvas_models  # noqa: E402,F401
 __all__ = [
     "Base",
     "User",

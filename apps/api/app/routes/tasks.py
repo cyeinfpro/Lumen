@@ -38,6 +38,7 @@ from lumen_core.schemas import (
 
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
+from ..canvas_services.task_guard import reject_canvas_retry
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
@@ -927,6 +928,7 @@ async def retry_generation(
     ).scalar_one_or_none()
     if not gen:
         raise _http("not_found", "generation not found", 404)
+    reject_canvas_retry(gen)
     if gen.status not in (GenerationStatus.FAILED.value, GenerationStatus.CANCELED.value):
         raise _http("not_retryable", f"status is {gen.status}", 409)
 
@@ -1047,6 +1049,7 @@ async def retry_completion(
     ).scalar_one_or_none()
     if not comp:
         raise _http("not_found", "completion not found", 404)
+    reject_canvas_retry(comp)
     if comp.status not in (CompletionStatus.FAILED.value, CompletionStatus.CANCELED.value):
         raise _http("not_retryable", f"status is {comp.status}", 409)
 

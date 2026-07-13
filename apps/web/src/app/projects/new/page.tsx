@@ -1,12 +1,16 @@
+"use client";
+
 import {
   ArrowLeft,
   ArrowRight,
   Clapperboard,
   Image as ImageIcon,
   Shirt,
+  Workflow,
 } from "lucide-react";
 import Link from "next/link";
 
+import { useUiStore } from "@/store/useUiStore";
 import {
   ProjectMobileTabBar,
   ProjectMobileTopBar,
@@ -14,7 +18,16 @@ import {
 } from "@/components/ui/projects/components/ProjectTopBar";
 
 export default function NewProjectPage() {
+  const canvasEnabled = useUiStore((state) => state.canvasEnabled);
   const workflows = [
+    {
+      title: "无限画布",
+      description: "自由连接提示词、素材、图片生成、视频生成与交付。",
+      detail: "搭图 → 调参 → 运行 → 交付",
+      href: "/projects/canvas/new",
+      icon: Workflow,
+      featureFlag: "canvas",
+    },
     {
       title: "服饰模特图",
       description: "上传商品图，选择模特并生成可交付展示图。",
@@ -36,7 +49,12 @@ export default function NewProjectPage() {
       href: "/projects/storyboard?new=1",
       icon: Clapperboard,
     },
-  ];
+  ].filter(
+    (workflow) =>
+      !("featureFlag" in workflow) ||
+      workflow.featureFlag !== "canvas" ||
+      canvasEnabled,
+  );
 
   return (
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
@@ -62,7 +80,7 @@ export default function NewProjectPage() {
               先选择交付目标。进入工作流后再补充素材和生成参数。
             </p>
           </header>
-          <div className="grid gap-3 pt-4 md:grid-cols-3">
+          <div className="grid gap-3 pt-4 md:grid-cols-2 xl:grid-cols-4">
             {workflows.map((workflow, index) => {
               const Icon = workflow.icon;
               return (

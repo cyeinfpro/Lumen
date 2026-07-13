@@ -167,6 +167,10 @@ test("api fetch preserves native abort semantics", () => {
 
   match(http, /err instanceof Error && err\.name === "AbortError"/);
   match(http, /throw err;/);
+  match(
+    http,
+    /parseApiError\(res\.status, data\)\.code === CSRF_FAILED_CODE/,
+  );
 });
 
 test("chat reconciliation preserves terminal states and retry drafts", () => {
@@ -391,6 +395,27 @@ test("desktop image composer keeps high-frequency settings inline", () => {
   match(quickSettings, /ariaLabel="输出尺寸"/);
   match(quickSettings, /ariaLabel="生成质量"/);
   match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
+});
+
+test("mobile image composer exposes complete quick settings and advanced access", () => {
+  const mobile = source(
+    "src/components/ui/composer/mobile/MobileComposerPill.tsx",
+  );
+  const quickSettings = source(
+    "src/components/ui/composer/mobile/MobileComposerExecutionControls.tsx",
+  );
+
+  match(mobile, /<MobileComposerExecutionControls/);
+  match(quickSettings, /function MobileImageQuickSettingsBar/);
+  match(quickSettings, /ariaLabel="生成数量"/);
+  match(quickSettings, /COUNT_OPTIONS = \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\]/);
+  match(quickSettings, /aria-label=\{`宽高比 \$\{aspect\}`\}/);
+  match(quickSettings, /aria-haspopup="dialog"/);
+  match(quickSettings, /ariaLabel="输出尺寸"/);
+  match(quickSettings, /ariaLabel="生成质量"/);
+  match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
+  match(quickSettings, /aria-label="更多执行设置"/);
+  match(quickSettings, /onClick=\{onAdjust\}/);
 });
 
 test("desktop studio uses one compact control family and aligned content rails", () => {

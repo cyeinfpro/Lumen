@@ -36,6 +36,137 @@ def test_nav_feature_guard_maps_primary_api_paths() -> None:
         "ui.nav.studio_visible",
     )
     assert main._nav_feature_for_api_path("/me/sessions") is None
+    assert main._canvas_feature_for_api_path("/canvases") == (
+        "canvas",
+        "canvas.enabled",
+    )
+    assert main._canvas_feature_for_api_path("/canvases/canvas-1/runs") == (
+        "canvas",
+        "canvas.enabled",
+    )
+    assert main._canvas_feature_for_api_path("/workflows/run") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settings", "expected_status", "expected_feature"),
+    [
+        ({"ui.nav.projects_visible": "1"}, 404, b"canvas is disabled"),
+        (
+            {
+                "ui.nav.projects_visible": "1",
+                "canvas.enabled": "1",
+            },
+            200,
+            b"ok",
+        ),
+        (
+            {
+                "ui.nav.projects_visible": "0",
+                "canvas.enabled": "1",
+            },
+            404,
+            b"projects is disabled",
+        ),
+    ],
+)
+async def test_canvas_feature_guard_requires_both_project_and_canvas_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, str],
+    expected_status: int,
+    expected_feature: bytes,
+) -> None:
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def get_setting(_session, spec):
+        return settings.get(spec.key)
+
+    async def app(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    monkeypatch.setattr(main, "SessionLocal", SessionContext)
+    monkeypatch.setattr(main, "get_setting", get_setting)
+    wrapped = main._NavFeatureGuardMiddleware(app)
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await wrapped(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/canvases",
+            "headers": [],
+        },
+        receive,
+        send,
+    )
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert start["status"] == expected_status
+    assert expected_feature in body
+
+
+@pytest.mark.asyncio
+async def test_canvas_feature_guard_fails_closed_when_setting_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def get_setting(_session, _spec):
+        raise RuntimeError("settings unavailable")
+
+    downstream_called = False
+
+    async def app(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    monkeypatch.setattr(main, "SessionLocal", SessionContext)
+    monkeypatch.setattr(main, "get_setting", get_setting)
+    wrapped = main._NavFeatureGuardMiddleware(app)
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await wrapped(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/canvases",
+            "headers": [],
+        },
+        receive,
+        send,
+    )
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    assert start["status"] == 404
+    assert downstream_called is False
 
 
 @pytest.mark.asyncio

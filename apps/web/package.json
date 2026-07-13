@@ -1,8 +1,14 @@
 {
   "name": "web",
-  "version": "1.2.53",
+  "version": "1.2.54",
   "private": true,
   "imports": {
+    "#canvas-autosave": "./src/lib/canvas/autosave.ts",
+    "#canvas-graph": "./src/lib/canvas/graph.ts",
+    "#canvas-persistence": "./src/lib/canvas/persistence.ts",
+    "#canvas-registry": "./src/lib/canvas/registry.ts",
+    "#canvas-store": "./src/lib/canvas/store.ts",
+    "#canvas-types": "./src/lib/canvas/types.ts",
     "#chat-message-adapters": "./src/store/chat/messageAdapters.ts",
     "#chat-payload": "./src/store/chat/payload.ts"
   },
@@ -10,7 +16,7 @@
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3000",
-    "test": "node --test __tests__/chat-hardening.test.mjs __tests__/admin-lightbox-dead-code.test.mjs src/lib/apiClient.test.ts src/components/SSEProvider.test.ts src/lib/promptImageMentions.test.ts src/lib/videoEventSnapshot.test.ts src/store/chatGenerationEvents.test.ts src/store/chat/base64Eviction.test.ts src/store/chat/completionEvents.test.ts src/store/chat/completionStreamPatches.test.ts src/store/chat/imageParams.test.ts src/store/chat/imageUpload.test.ts src/store/chat/messageAdapters.test.ts src/store/chat/messageReconciliation.test.ts src/store/chat/payload.test.ts src/store/chat/requestGuards.test.ts src/components/ui/shell/DesktopAccountMenu.test.ts src/components/ui/shell/StudioLayoutContracts.test.ts src/app/healthz/route.test.ts src/app/video/page.test.ts",
+    "test": "node --test __tests__/chat-hardening.test.mjs __tests__/admin-lightbox-dead-code.test.mjs src/lib/apiClient.test.ts src/components/SSEProvider.test.ts src/lib/promptImageMentions.test.ts src/lib/videoEventSnapshot.test.ts src/lib/canvas/graph.test.ts src/lib/canvas/autosave.test.ts src/lib/canvas/store.test.ts src/store/chatGenerationEvents.test.ts src/store/chat/base64Eviction.test.ts src/store/chat/completionEvents.test.ts src/store/chat/completionStreamPatches.test.ts src/store/chat/imageParams.test.ts src/store/chat/imageUpload.test.ts src/store/chat/messageAdapters.test.ts src/store/chat/messageReconciliation.test.ts src/store/chat/payload.test.ts src/store/chat/requestGuards.test.ts src/components/ui/shell/DesktopAccountMenu.test.ts src/components/ui/shell/StudioLayoutContracts.test.ts src/app/healthz/route.test.ts src/app/video/page.test.ts",
     "lint": "npm run check:layout-contract && npm run check:ui-governance && npm run check:complexity && npm run lint:eslint",
     "lint:eslint": "eslint",
     "check:layout-contract": "node scripts/check-layout-contract.mjs",
@@ -30,6 +36,7 @@
     "@tanstack/react-query": "^5.59.0",
     "@tanstack/react-query-devtools": "^5.59.0",
     "@tanstack/react-virtual": "^3.13.24",
+    "@xyflow/react": "^12.11.2",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "framer-motion": "^12.38.0",

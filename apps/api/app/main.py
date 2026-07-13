@@ -223,6 +223,7 @@ _NAV_FEATURE_API_PREFIXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "/workflows",
             "/storyboards",
+            "/canvases",
         ),
     ),
     (
@@ -247,6 +248,24 @@ def _nav_feature_for_api_path(path: str) -> tuple[str, str] | None:
     return None
 
 
+def _canvas_feature_for_api_path(path: str) -> tuple[str, str] | None:
+    if _path_matches_prefix(path, "/canvases"):
+        return "canvas", "canvas.enabled"
+    return None
+
+
+def _feature_disabled_response(feature: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "error": {
+                "code": "feature_disabled",
+                "message": f"{feature} is disabled",
+            }
+        },
+    )
+
+
 class _NavFeatureGuardMiddleware:
     """Block direct API access when the matching user-facing page is hidden."""
 
@@ -257,34 +276,39 @@ class _NavFeatureGuardMiddleware:
         if scope["type"] != "http" or scope.get("method") == "OPTIONS":
             await self.app(scope, receive, send)
             return
-        matched = _nav_feature_for_api_path(scope.get("path", ""))
-        if matched is None:
+        path = scope.get("path", "")
+        matched = _nav_feature_for_api_path(path)
+        canvas_matched = _canvas_feature_for_api_path(path)
+        if matched is None and canvas_matched is None:
             await self.app(scope, receive, send)
             return
 
-        feature, setting_key = matched
-        spec = get_spec(setting_key)
-        if spec is None:
-            await self.app(scope, receive, send)
-            return
+        guards = tuple(
+            guard for guard in (matched, canvas_matched) if guard is not None
+        )
         try:
             async with SessionLocal() as session:
-                raw = await get_setting(session, spec)
+                for feature, setting_key in guards:
+                    spec = get_spec(setting_key)
+                    if spec is None:
+                        if feature == "canvas":
+                            response = _feature_disabled_response(feature)
+                            await response(scope, receive, send)
+                            return
+                        continue
+                    raw = await get_setting(session, spec)
+                    disabled = raw == "0" if feature != "canvas" else raw != "1"
+                    if disabled:
+                        response = _feature_disabled_response(feature)
+                        await response(scope, receive, send)
+                        return
         except Exception:  # noqa: BLE001
-            logger.warning("nav feature guard setting read failed", exc_info=True)
+            logger.warning("feature guard setting read failed", exc_info=True)
+            if canvas_matched is not None:
+                response = _feature_disabled_response("canvas")
+                await response(scope, receive, send)
+                return
             await self.app(scope, receive, send)
-            return
-        if raw == "0":
-            response = JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={
-                    "error": {
-                        "code": "feature_disabled",
-                        "message": f"{feature} is disabled",
-                    }
-                },
-            )
-            await response(scope, receive, send)
             return
         await self.app(scope, receive, send)
 
@@ -630,6 +654,7 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin_telegram as admin_telegram_router  # noqa: E402
     from .routes import admin_update as admin_update_router  # noqa: E402
     from .routes import auth, storyboards, workflows  # noqa: E402
+    from .routes import canvases as canvases_router  # noqa: E402
     from .routes import billing as billing_router  # noqa: E402
     from .routes import byok as byok_router  # noqa: E402
     from .routes import invites as invites_router  # noqa: E402
@@ -642,6 +667,7 @@ def _include_app_routers(target: FastAPI) -> None:
 
     target.include_router(auth.router, prefix="/auth", tags=["auth"])
     _include_core_routers(target)
+    target.include_router(canvases_router.router)
     target.include_router(workflows.router)
     target.include_router(storyboards.router)
     target.include_router(poster_styles_router.router)

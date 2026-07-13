@@ -84,6 +84,7 @@ function normalizeRuntimeDefaults(value: unknown): RuntimeDefaults {
   const raw = value as RuntimeDefaults;
   const next: RuntimeDefaults = {
     fast: typeof raw.fast === "boolean" ? raw.fast : true,
+    canvas_enabled: raw.canvas_enabled === true,
   };
   if (
     typeof raw.upload_max_source_bytes === "number" &&

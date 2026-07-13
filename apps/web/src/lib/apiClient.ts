@@ -106,6 +106,7 @@ export interface AuthUser {
   runtime_defaults?: {
     fast?: boolean;
     upload_max_source_bytes?: number;
+    canvas_enabled?: boolean;
     nav_visibility?: {
       studio?: boolean;
       video?: boolean;
@@ -114,7 +115,6 @@ export interface AuthUser {
     };
   };
 }
-
 export function login(email: string, password: string): Promise<AuthUser> {
   return apiFetch<AuthUser>("/auth/login", {
     method: "POST",
