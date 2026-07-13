@@ -6,9 +6,11 @@ import {
   CloudCheck,
   Loader2,
   Maximize2,
+  Minimize2,
   PanelRight,
   Play,
   Redo2,
+  Scan,
   Undo2,
 } from "lucide-react";
 import Link from "next/link";
@@ -26,6 +28,9 @@ export function CanvasTopBar({
   onFitView,
   onRunSelected,
   onOpenInspector,
+  onToggleFullscreen,
+  onRetrySave,
+  fullscreen,
   running,
 }: {
   title: string;
@@ -35,6 +40,9 @@ export function CanvasTopBar({
   onFitView: () => void;
   onRunSelected: () => void;
   onOpenInspector: () => void;
+  onToggleFullscreen: () => void;
+  onRetrySave: () => void;
+  fullscreen: boolean;
   running: boolean;
 }) {
   const historyLength = useCanvasStore((state) => state.history.length);
@@ -50,7 +58,7 @@ export function CanvasTopBar({
 
   return (
     <>
-      <header className="hidden h-[var(--appbar-h)] shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-3 md:flex">
+      <header className="hidden h-[var(--appbar-h)] shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-3 min-[1200px]:flex">
         <Link
           href="/projects/canvas"
           aria-label="返回画布列表"
@@ -64,7 +72,11 @@ export function CanvasTopBar({
           title={title}
           onRename={onRename}
         />
-        <SaveIndicator state={saveState} message={saveMessage} />
+        <SaveIndicator
+          state={saveState}
+          message={saveMessage}
+          onRetry={onRetrySave}
+        />
         <div className="ml-auto flex items-center gap-1">
           <IconButton
             aria-label="撤销"
@@ -83,7 +95,19 @@ export function CanvasTopBar({
             <Redo2 className="h-4 w-4" />
           </IconButton>
           <IconButton aria-label="适应视图" tooltip="适应视图" onClick={onFitView}>
-            <Maximize2 className="h-4 w-4" />
+            <Scan className="h-4 w-4" />
+          </IconButton>
+          <IconButton
+            aria-label={fullscreen ? "退出全屏" : "全屏画布"}
+            tooltip={fullscreen ? "退出全屏" : "全屏画布"}
+            aria-pressed={fullscreen}
+            onClick={onToggleFullscreen}
+          >
+            {fullscreen ? (
+              <Minimize2 className="h-4 w-4" />
+            ) : (
+              <Maximize2 className="h-4 w-4" />
+            )}
           </IconButton>
           <button
             type="button"
@@ -97,7 +121,16 @@ export function CanvasTopBar({
         </div>
       </header>
 
-      <header className="flex h-[var(--mobile-topbar-h)] shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-2 md:hidden">
+      <header
+        className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-[max(8px,env(safe-area-inset-left,0px))] min-[1200px]:hidden"
+        style={{
+          minHeight:
+            "calc(var(--mobile-topbar-h) + max(env(safe-area-inset-top, 0px), calc(var(--system-banner-height, 0px) + var(--offline-banner-height, 0px))))",
+          paddingTop:
+            "max(env(safe-area-inset-top, 0px), calc(var(--system-banner-height, 0px) + var(--offline-banner-height, 0px)))",
+          paddingRight: "max(8px, env(safe-area-inset-right, 0px))",
+        }}
+      >
         <Link
           href="/projects/canvas"
           aria-label="返回画布列表"
@@ -107,8 +140,24 @@ export function CanvasTopBar({
         </Link>
         <div className="min-w-0 flex-1">
           <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">{title}</p>
-          <SaveIndicator state={saveState} message={saveMessage} compact />
+          <SaveIndicator
+            state={saveState}
+            message={saveMessage}
+            onRetry={onRetrySave}
+            compact
+          />
         </div>
+        <IconButton
+          aria-label={fullscreen ? "退出全屏" : "全屏画布"}
+          aria-pressed={fullscreen}
+          onClick={onToggleFullscreen}
+        >
+          {fullscreen ? (
+            <Minimize2 className="h-4 w-4" />
+          ) : (
+            <Maximize2 className="h-4 w-4" />
+          )}
+        </IconButton>
         <IconButton
           aria-label="运行节点"
           variant="primary"
@@ -153,10 +202,12 @@ function CanvasTitleInput({
 function SaveIndicator({
   state,
   message,
+  onRetry,
   compact = false,
 }: {
   state: CanvasSaveState;
   message?: string | null;
+  onRetry?: () => void;
   compact?: boolean;
 }) {
   const content = (() => {
@@ -171,15 +222,26 @@ function SaveIndicator({
     }
     return { icon: <CloudCheck className="h-3.5 w-3.5" />, label: "已保存" };
   })();
-  return (
-    <span
-      title={message ?? content.label}
-      className={`inline-flex items-center gap-1.5 type-caption ${
+  const className = `inline-flex items-center gap-1.5 type-caption ${
         state === "conflict" || state === "error"
           ? "text-[var(--danger-fg)]"
           : "text-[var(--fg-2)]"
-      } ${compact ? "mt-0.5" : ""}`}
-    >
+      } ${compact ? "mt-0.5" : ""}`;
+  if (state === "error" && onRetry) {
+    return (
+      <button
+        type="button"
+        title={message ?? "保存失败，点击重试"}
+        onClick={onRetry}
+        className={className}
+      >
+        {content.icon}
+        重试保存
+      </button>
+    );
+  }
+  return (
+    <span title={message ?? content.label} className={className}>
       {content.icon}
       {content.label}
     </span>

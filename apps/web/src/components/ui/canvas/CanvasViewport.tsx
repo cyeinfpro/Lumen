@@ -9,13 +9,20 @@ import {
   type Edge,
   type NodeChange,
   type OnConnectStartParams,
+  type OnSelectionChangeParams,
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Cable, X } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { useIsMobile } from "@/hooks/useMediaQuery";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import {
+  blurActiveCanvasEditor,
+  canvasNodeZIndex,
+  splitCanvasNodePositionChanges,
+  updateCanvasTransientPositions,
+} from "@/lib/canvas/interaction";
 import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
 import {
   activeOutputsByNode,
@@ -24,9 +31,13 @@ import {
 } from "@/lib/canvas/runtime";
 import { validateCanvasConnection } from "@/lib/canvas/graph";
 import type {
+  CanvasDataType,
   CanvasDocument,
   CanvasGraph,
+  CanvasNodeDefinition,
+  CanvasNodeExecution,
   CanvasNodeType,
+  CanvasOutput,
   ConnectionDraft,
 } from "@/lib/canvas/types";
 import { toast } from "@/components/ui/primitives";
@@ -40,37 +51,109 @@ import styles from "./canvas.module.css";
 
 export interface CanvasViewportApi {
   fitView: () => void;
+  getViewportCenter: () => { x: number; y: number };
 }
 
 export function CanvasViewport({
   document,
   onRunNode,
   onReady,
+  onOpenInspector,
 }: {
   document: CanvasDocument;
   onRunNode: (nodeId: string) => void;
   onReady?: (api: CanvasViewportApi) => void;
+  onOpenInspector?: () => void;
 }) {
   const graph = useCanvasStore((state) => state.graph);
-  const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
+  const selectedNodeIds = useCanvasStore((state) => state.selectedNodeIds);
   const selectedEdgeId = useCanvasStore((state) => state.selectedEdgeId);
   const toolMode = useCanvasStore((state) => state.toolMode);
   const connectionDraft = useCanvasStore((state) => state.connectionDraft);
   const selectNode = useCanvasStore((state) => state.selectNode);
+  const selectNodes = useCanvasStore((state) => state.selectNodes);
   const selectEdge = useCanvasStore((state) => state.selectEdge);
-  const moveNode = useCanvasStore((state) => state.moveNode);
-  const removeNodes = useCanvasStore((state) => state.removeNodes);
+  const updateNodeConfig = useCanvasStore((state) => state.updateNodeConfig);
+  const updateNodeTitle = useCanvasStore((state) => state.updateNodeTitle);
+  const beginNodeEdit = useCanvasStore((state) => state.beginNodeEdit);
+  const endNodeEdit = useCanvasStore((state) => state.endNodeEdit);
+  const beginNodeConfigEdit = useCanvasStore(
+    (state) => state.beginNodeConfigEdit,
+  );
+  const endNodeConfigEdit = useCanvasStore((state) => state.endNodeConfigEdit);
+  const moveNodes = useCanvasStore((state) => state.moveNodes);
+  const removeElements = useCanvasStore((state) => state.removeElements);
   const addEdge = useCanvasStore((state) => state.addEdge);
-  const removeEdges = useCanvasStore((state) => state.removeEdges);
   const addNode = useCanvasStore((state) => state.addNode);
   const setConnectionDraft = useCanvasStore((state) => state.setConnectionDraft);
-  const isMobile = useIsMobile() === true;
+  const beginInteraction = useCanvasStore((state) => state.beginInteraction);
+  const endInteraction = useCanvasStore((state) => state.endInteraction);
+  const isCompact = useMediaQuery("(max-width: 1199px)") !== false;
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const interactionActiveRef = useRef(false);
+  const instanceRef =
+    useRef<ReactFlowInstance<CanvasFlowNode, Edge> | null>(null);
+  const editorFocusRequestRef = useRef(0);
   const [instance, setInstance] =
     useState<ReactFlowInstance<CanvasFlowNode, Edge> | null>(null);
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
   const [transientPositions, setTransientPositions] = useState<
     Record<string, { x: number; y: number }>
   >({});
+  const [measuredDimensions, setMeasuredDimensions] = useState<
+    Record<string, { width: number; height: number }>
+  >({});
+
+  const focusNodeEditor = useCallback(
+    (nodeId: string) => {
+      selectNode(nodeId);
+      beginNodeEdit(nodeId);
+      const requestId = editorFocusRequestRef.current + 1;
+      editorFocusRequestRef.current = requestId;
+      let remainingFrames = 90;
+      let settlingFrames = 8;
+      const zoomWhenReady = () => {
+        if (editorFocusRequestRef.current !== requestId) return;
+        const current = instanceRef.current;
+        const internalNode = current?.getInternalNode(nodeId);
+        if (
+          !current ||
+          !internalNode?.measured.width ||
+          !internalNode.measured.height
+        ) {
+          remainingFrames -= 1;
+          if (remainingFrames > 0) {
+            window.requestAnimationFrame(zoomWhenReady);
+          }
+          return;
+        }
+        if (settlingFrames > 0) {
+          settlingFrames -= 1;
+          window.requestAnimationFrame(zoomWhenReady);
+          return;
+        }
+        if (current.getZoom() >= 0.75) return;
+        const node = current.getNode(nodeId);
+        if (!node) return;
+        void current.fitView({
+          nodes: [node],
+          padding: 0.42,
+          minZoom: 0.9,
+          maxZoom: 1.08,
+          duration: 220,
+        });
+      };
+      zoomWhenReady();
+    },
+    [beginNodeEdit, selectNode],
+  );
+  const finishNodeEditor = useCallback(
+    (nodeId: string) => {
+      editorFocusRequestRef.current += 1;
+      endNodeEdit(nodeId);
+    },
+    [endNodeEdit],
+  );
 
   const executions = useMemo(
     () => latestExecutionsByNode(document.recent_executions),
@@ -89,60 +172,101 @@ export function CanvasViewport({
     () => listCompatibleTargets(graph, connectionDraft),
     [connectionDraft, graph],
   );
+  const startClickConnection = useCallback(
+    (nodeId: string, handleId: string, dataType: CanvasDataType) => {
+      if (!isCompact || toolMode !== "connect") return;
+      blurActiveCanvasEditor();
+      setTargetPickerOpen(false);
+      const sameSource =
+        connectionDraft?.sourceNodeId === nodeId &&
+        connectionDraft.sourceHandle === handleId;
+      setConnectionDraft(
+        sameSource
+          ? null
+          : {
+              sourceNodeId: nodeId,
+              sourceHandle: handleId,
+              dataType,
+            },
+      );
+    },
+    [connectionDraft, isCompact, setConnectionDraft, toolMode],
+  );
 
   const projectedNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      graph.nodes.map((node) => ({
-        id: node.id,
-        type: node.type,
-        position: node.position,
-        selected: node.id === selectedNodeId,
-        draggable: toolMode === "select",
-        connectable: !isMobile || toolMode === "connect",
-        zIndex: node.type === "frame" ? -1 : 1,
-        style: {
-          width: node.size?.width,
-          height: node.type === "frame" ? node.size?.height : undefined,
-        },
-        data: {
-          definition: node,
-          execution: executions.get(node.id) ?? null,
-          activeOutput: activeOutputs.get(node.id) ?? null,
-          deliveryOutputs:
-            node.type === "delivery"
-              ? deliveryOutputsForNode(
-                  graph,
-                  node.id,
-                  activeOutputs,
-                  document.recent_executions,
-                )
-              : [],
-          connectionType: connectionDraft?.dataType ?? null,
-          compatibleInputHandles: connectionDraft
-            ? CANVAS_NODE_SPECS[node.type].inputs
-                .filter((port) =>
-                  validateCanvasConnection(graph, {
-                    sourceNodeId: connectionDraft.sourceNodeId,
-                    sourceHandle: connectionDraft.sourceHandle,
-                    targetNodeId: node.id,
-                    targetHandle: port.id,
-                  }).valid,
-                )
-                .map((port) => port.id)
-            : [],
-          onRun: onRunNode,
-        },
-      })),
+    () => {
+      const connectable = !isCompact || toolMode === "connect";
+      const editingEnabled =
+        toolMode === "select" && connectionDraft === null;
+      return graph.nodes.map((node) => {
+        const dimensions = canvasFlowNodeDimensions(node);
+        return {
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          selected: selectedNodeIds.includes(node.id),
+          ariaLabel: `${CANVAS_NODE_SPECS[node.type].label}节点：${node.title}`,
+          draggable: toolMode === "select",
+          dragHandle: ".canvas-node-drag-handle",
+          connectable,
+          zIndex: canvasNodeZIndex(node.type),
+          initialWidth: dimensions.width,
+          initialHeight: dimensions.height,
+          measured: measuredDimensions[node.id],
+          style: {
+            width: dimensions.width,
+            height: dimensions.styleHeight,
+          },
+          data: {
+            definition: node,
+            execution: executions.get(node.id) ?? null,
+            activeOutput: activeOutputs.get(node.id) ?? null,
+            deliveryOutputs: canvasNodeDeliveryOutputs(
+              graph,
+              node,
+              activeOutputs,
+              document.recent_executions,
+            ),
+            connectionType: connectionDraft?.dataType ?? null,
+            compatibleInputHandles: compatibleInputHandlesForNode(
+              graph,
+              node,
+              connectionDraft,
+            ),
+            onRun: onRunNode,
+            onUpdateConfig: updateNodeConfig,
+            onUpdateTitle: updateNodeTitle,
+            onEditFocus: focusNodeEditor,
+            onEditBlur: finishNodeEditor,
+            onConfigEditStart: beginNodeConfigEdit,
+            onConfigEditEnd: endNodeConfigEdit,
+            onStartConnection:
+              isCompact && toolMode === "connect"
+                ? startClickConnection
+                : undefined,
+            editingEnabled,
+          },
+        };
+      });
+    },
     [
       activeOutputs,
+      beginNodeConfigEdit,
       connectionDraft,
       document.recent_executions,
+      endNodeConfigEdit,
       executions,
+      finishNodeEditor,
+      focusNodeEditor,
       graph,
-      isMobile,
+      isCompact,
+      measuredDimensions,
       onRunNode,
-      selectedNodeId,
+      selectedNodeIds,
+      startClickConnection,
       toolMode,
+      updateNodeConfig,
+      updateNodeTitle,
     ],
   );
 
@@ -174,33 +298,52 @@ export function CanvasViewport({
 
   const onNodesChange = useCallback(
     (changes: NodeChange<CanvasFlowNode>[]) => {
-      const removed = changes
-        .filter((change) => change.type === "remove")
-        .map((change) => change.id);
-      if (removed.length > 0) removeNodes(removed);
-      for (const change of changes) {
-        if (change.type === "select") {
-          if (change.selected) selectNode(change.id);
-          else if (selectedNodeId === change.id) selectNode(null);
-        }
+      const dimensionChanges = changes.filter(
+        (
+          change,
+        ): change is Extract<
+          NodeChange<CanvasFlowNode>,
+          { type: "dimensions" }
+        > => change.type === "dimensions" && Boolean(change.dimensions),
+      );
+      if (dimensionChanges.length > 0) {
+        setMeasuredDimensions((current) => {
+          let next = current;
+          for (const change of dimensionChanges) {
+            if (!change.dimensions) continue;
+            const previous = next[change.id];
+            if (
+              previous?.width === change.dimensions.width &&
+              previous.height === change.dimensions.height
+            ) {
+              continue;
+            }
+            if (next === current) next = { ...current };
+            next[change.id] = { ...change.dimensions };
+          }
+          return next;
+        });
       }
-      const positions = changes.filter(
+      const positionChanges = changes.filter(
         (
           change,
         ): change is Extract<NodeChange<CanvasFlowNode>, { type: "position" }> =>
           change.type === "position" && Boolean(change.position),
       );
-      if (positions.length > 0) {
+      const { transient, settled } =
+        splitCanvasNodePositionChanges(positionChanges);
+      if (transient.length > 0 || settled.length > 0) {
         setTransientPositions((current) => {
-          const next = { ...current };
-          for (const change of positions) {
-            if (change.position) next[change.id] = change.position;
-          }
-          return next;
+          return updateCanvasTransientPositions(
+            current,
+            transient,
+            settled.map((item) => item.nodeId),
+          );
         });
       }
+      if (settled.length > 0) moveNodes(settled);
     },
-    [removeNodes, selectNode, selectedNodeId],
+    [moveNodes],
   );
 
   const isValidConnection = useCallback(
@@ -248,6 +391,7 @@ export function CanvasViewport({
   const onConnectStart = useCallback(
     (_event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
       if (!params.nodeId || !params.handleId || params.handleType !== "source") return;
+      blurActiveCanvasEditor();
       const node = graph.nodes.find((item) => item.id === params.nodeId);
       const port = node
         ? CANVAS_NODE_SPECS[node.type].outputs.find(
@@ -263,6 +407,35 @@ export function CanvasViewport({
       });
     },
     [graph.nodes, setConnectionDraft],
+  );
+
+  const handleSelectionChange = useCallback(
+    ({
+      nodes,
+      edges,
+    }: OnSelectionChangeParams<CanvasFlowNode, Edge>) => {
+      if (edges.length > 0) {
+        selectEdge(edges.at(-1)?.id ?? null);
+        return;
+      }
+      selectNodes(nodes.map((node) => node.id));
+    },
+    [selectEdge, selectNodes],
+  );
+
+  const handleNodeClick = useCallback(
+    (event: React.MouseEvent, node: CanvasFlowNode) => {
+      if (event.shiftKey) {
+        selectNodes(
+          selectedNodeIds.includes(node.id)
+            ? selectedNodeIds.filter((nodeId) => nodeId !== node.id)
+            : [...selectedNodeIds, node.id],
+        );
+        return;
+      }
+      selectNodes([node.id]);
+    },
+    [selectNodes, selectedNodeIds],
   );
 
   const handleDrop = useCallback(
@@ -283,55 +456,115 @@ export function CanvasViewport({
 
   const handleInit = useCallback(
     (next: ReactFlowInstance<CanvasFlowNode, Edge>) => {
+      instanceRef.current = next;
       setInstance(next);
-      onReady?.({ fitView: () => void next.fitView({ padding: 0.18, duration: 240 }) });
+      onReady?.({
+        fitView: () =>
+          void next.fitView({ padding: 0.18, duration: 240 }),
+        getViewportCenter: () => {
+          const bounds = viewportRef.current?.getBoundingClientRect();
+          if (!bounds) return { x: 0, y: 0 };
+          return next.screenToFlowPosition({
+            x: bounds.left + bounds.width / 2,
+            y: bounds.top + bounds.height / 2,
+          });
+        },
+      });
     },
     [onReady],
   );
 
+  const startInteraction = useCallback(() => {
+    if (interactionActiveRef.current) return;
+    interactionActiveRef.current = true;
+    beginInteraction();
+  }, [beginInteraction]);
+
+  const finishInteraction = useCallback(
+    (nodes: CanvasFlowNode[] = []) => {
+      if (nodes.length > 0) {
+        const positions = nodes.map((node) => ({
+          nodeId: node.id,
+          position: node.position,
+        }));
+        setTransientPositions((current) =>
+          updateCanvasTransientPositions(
+            current,
+            [],
+            positions.map((item) => item.nodeId),
+          ),
+        );
+        moveNodes(positions);
+      }
+      if (!interactionActiveRef.current) return;
+      interactionActiveRef.current = false;
+      endInteraction();
+    },
+    [endInteraction, moveNodes],
+  );
+
+  useEffect(
+    () => () => {
+      editorFocusRequestRef.current += 1;
+      instanceRef.current = null;
+      if (interactionActiveRef.current) endInteraction();
+    },
+    [endInteraction],
+  );
+
+  useEffect(() => {
+    if (toolMode !== "select" || connectionDraft) {
+      editorFocusRequestRef.current += 1;
+    }
+  }, [connectionDraft, toolMode]);
+
   return (
     <div
+      ref={viewportRef}
       className={styles.viewport}
       onDrop={handleDrop}
+      onPointerCancel={() => {
+        setConnectionDraft(null);
+        finishInteraction();
+      }}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
       }}
     >
       <ReactFlow<CanvasFlowNode, Edge>
+        aria-label="无限画布编辑区"
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={canvasNodeTypes}
         onInit={handleInit}
         onNodesChange={onNodesChange}
-        onEdgesChange={(changes) => {
-          const removed = changes
-            .filter((change) => change.type === "remove")
-            .map((change) => change.id);
-          if (removed.length > 0) removeEdges(removed);
-          for (const change of changes) {
-            if (change.type === "select" && change.selected) selectEdge(change.id);
-          }
+        onSelectionChange={handleSelectionChange}
+        onNodeClick={handleNodeClick}
+        onEdgeClick={(_event, edge) => {
+          selectEdge(edge.id);
+          if (isCompact) onOpenInspector?.();
         }}
-        onNodeClick={(_event, node) => selectNode(node.id)}
-        onEdgeClick={(_event, edge) => selectEdge(edge.id)}
         onPaneClick={() => {
           selectNode(null);
           selectEdge(null);
           setConnectionDraft(null);
         }}
-        onNodeDragStop={(_event, node) => {
-          setTransientPositions((current) => {
-            const next = { ...current };
-            delete next[node.id];
-            return next;
-          });
-          moveNode(node.id, node.position);
+        onNodeDragStart={startInteraction}
+        onNodeDragStop={(_event, _node, nodes) => finishInteraction(nodes)}
+        onSelectionDragStart={startInteraction}
+        onSelectionDragStop={(_event, nodes) => finishInteraction(nodes)}
+        onBeforeDelete={async ({ nodes, edges }) => {
+          removeElements(
+            nodes.map((node) => node.id),
+            edges.map((edge) => edge.id),
+          );
+          return false;
         }}
         onConnect={onConnect}
         onConnectStart={onConnectStart}
         onConnectEnd={() => {
-          if (!isMobile || toolMode !== "connect") {
+          if (!isCompact || toolMode !== "connect") {
             window.setTimeout(() => setConnectionDraft(null), 0);
           }
         }}
@@ -340,16 +573,17 @@ export function CanvasViewport({
         maxZoom={2.4}
         fitView
         fitViewOptions={{ padding: 0.18 }}
+        elevateNodesOnSelect={false}
         deleteKeyCode={["Backspace", "Delete"]}
-        panOnDrag={isMobile ? toolMode === "hand" : [1, 2]}
+        panOnDrag={isCompact ? toolMode === "hand" : [1, 2]}
         nodesDraggable={toolMode === "select"}
-        nodesConnectable={!isMobile || toolMode === "connect"}
-        connectOnClick={isMobile && toolMode === "connect"}
-        selectionOnDrag={!isMobile && toolMode === "select"}
+        nodesConnectable={!isCompact || toolMode === "connect"}
+        connectOnClick={false}
+        selectionOnDrag={!isCompact && toolMode === "select"}
         selectionKeyCode="Shift"
         multiSelectionKeyCode="Shift"
         zoomOnPinch
-        zoomOnScroll={!isMobile}
+        zoomOnScroll={!isCompact}
         zoomOnDoubleClick={false}
         proOptions={{ hideAttribution: true }}
       >
@@ -363,7 +597,7 @@ export function CanvasViewport({
           />
         ) : null}
       </ReactFlow>
-      {isMobile && connectionDraft ? (
+      {isCompact && connectionDraft ? (
         <MobileConnectTargets
           open={targetPickerOpen}
           targets={compatibleTargets}
@@ -405,6 +639,49 @@ interface CompatibleTarget {
   handleLabel: string;
   x: number;
   y: number;
+}
+
+function canvasFlowNodeDimensions(node: CanvasNodeDefinition) {
+  const width = node.size?.width ?? CANVAS_NODE_SPECS[node.type].width;
+  const height = node.size?.height ?? (node.type === "frame" ? 220 : 180);
+  return {
+    width,
+    height,
+    styleHeight: node.type === "frame" ? height : undefined,
+  };
+}
+
+function canvasNodeDeliveryOutputs(
+  graph: CanvasGraph,
+  node: CanvasNodeDefinition,
+  activeOutputs: Map<string, CanvasOutput>,
+  recentExecutions: CanvasNodeExecution[],
+): CanvasOutput[] {
+  if (node.type !== "delivery") return [];
+  return deliveryOutputsForNode(
+    graph,
+    node.id,
+    activeOutputs,
+    recentExecutions,
+  );
+}
+
+function compatibleInputHandlesForNode(
+  graph: CanvasGraph,
+  node: CanvasNodeDefinition,
+  draft: ConnectionDraft | null,
+): string[] {
+  if (!draft) return [];
+  return CANVAS_NODE_SPECS[node.type].inputs
+    .filter((port) =>
+      validateCanvasConnection(graph, {
+        sourceNodeId: draft.sourceNodeId,
+        sourceHandle: draft.sourceHandle,
+        targetNodeId: node.id,
+        targetHandle: port.id,
+      }).valid,
+    )
+    .map((port) => port.id);
 }
 
 function listCompatibleTargets(
@@ -455,7 +732,7 @@ function MobileConnectTargets({
 }) {
   return (
     <>
-      <div className="absolute inset-x-3 top-3 z-20 flex items-center justify-center gap-2 md:hidden">
+      <div className="absolute inset-x-3 top-3 z-20 flex items-center justify-center gap-2">
         <button
           type="button"
           onClick={onOpen}

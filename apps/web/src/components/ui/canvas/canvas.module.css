@@ -36,6 +36,11 @@
   display: none;
 }
 
+.viewport :global(.react-flow__node:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
 .handle {
   width: 12px !important;
   height: 12px !important;

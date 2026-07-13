@@ -13,7 +13,6 @@ import { useMemo, useState } from "react";
 
 import { uploadImage } from "@/lib/apiClient";
 import { imageVariantUrl, videoPosterUrl } from "@/lib/apiClient";
-import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import type {
   CanvasDocument,
   CanvasNodeDefinition,
@@ -23,7 +22,7 @@ import type {
 } from "@/lib/canvas/types";
 import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
 import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
-import { Button, Input, Textarea, toast } from "@/components/ui/primitives";
+import { Button, Input, toast } from "@/components/ui/primitives";
 import { useCanvasStore } from "./CanvasStoreProvider";
 
 const SELECT_CLASS =
@@ -226,19 +225,8 @@ function NodeConfigEditor(props: NodeConfigEditorProps) {
   return <Editor {...props} />;
 }
 
-function TextNodeConfig({ node, patch }: NodeConfigEditorProps) {
-  const isPrompt = node.type === "prompt";
-  return (
-    <InspectorSection title={isPrompt ? "提示词" : "备注"}>
-      <Textarea
-        value={String(node.config.text ?? "")}
-        rows={isPrompt ? 8 : 5}
-        maxLength={isPrompt ? MAX_PROMPT_CHARS : 2000}
-        placeholder={isPrompt ? "描述要生成的画面" : "添加画布说明"}
-        onChange={(event) => patch({ text: event.currentTarget.value })}
-      />
-    </InspectorSection>
-  );
+function NoAdditionalConfig() {
+  return null;
 }
 
 function ImageAssetConfig({
@@ -401,8 +389,8 @@ const CONFIG_EDITORS: Record<
   CanvasNodeType,
   React.ComponentType<NodeConfigEditorProps>
 > = {
-  prompt: TextNodeConfig,
-  note: TextNodeConfig,
+  prompt: NoAdditionalConfig,
+  note: NoAdditionalConfig,
   image_asset: ImageAssetConfig,
   video_asset: VideoAssetConfig,
   image_generate: ImageGenerateConfig,
