@@ -639,9 +639,8 @@ def _normalize_edge_orders(edges: list[dict[str, Any]]) -> None:
         groups.setdefault(key, []).append(edge)
     for values in groups.values():
         values.sort(key=lambda item: (int(item.get("order") or 0), item["id"]))
-        if len(values) > 1:
-            for order, edge in enumerate(values):
-                edge["order"] = order
+        for order, edge in enumerate(values):
+            edge["order"] = order
 
 
 def _apply_add_frame(state: _MutationState, operation: AddFrameOperation) -> None:

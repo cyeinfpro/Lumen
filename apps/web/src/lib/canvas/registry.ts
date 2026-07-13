@@ -55,7 +55,7 @@ export const CANVAS_NODE_SPECS: Record<CanvasNodeType, CanvasNodeSpec> = {
     width: 248,
     inputs: [],
     outputs: [{ id: "image", label: "图片", dataType: "image" }],
-    defaultConfig: { image_id: "", display_name: "" },
+    defaultConfig: { image_id: "", display_name: "", crop: null },
   },
   video_asset: {
     type: "video_asset",
@@ -85,8 +85,12 @@ export const CANVAS_NODE_SPECS: Record<CanvasNodeType, CanvasNodeSpec> = {
     ],
     outputs: [{ id: "image", label: "图片", dataType: "image" }],
     defaultConfig: {
+      model: null,
       aspect_ratio: "1:1",
+      size: "1K",
       quality: "2k",
+      size_mode: "auto",
+      fixed_size: null,
       render_quality: "high",
       count: 1,
       fast: true,
@@ -149,6 +153,7 @@ export const CANVAS_NODE_SPECS: Record<CanvasNodeType, CanvasNodeSpec> = {
     inputs: [],
     outputs: [],
     defaultConfig: {
+      label: "新画框",
       collapsed: false,
       hidden_in_run: false,
       runnable_scope: true,
@@ -165,7 +170,10 @@ export const CANVAS_NODE_SPECS: Record<CanvasNodeType, CanvasNodeSpec> = {
       { id: "videos", label: "视频", dataType: "video", multiple: true },
     ],
     outputs: [],
-    defaultConfig: { thumbnail_source_node_id: null },
+    defaultConfig: {
+      set_as_thumbnail: true,
+      thumbnail_source_node_id: null,
+    },
   },
 };
 
@@ -196,6 +204,10 @@ export function createCanvasNode(
     size: overrides.size ?? { width: spec.width, height: type === "frame" ? 220 : 180 },
     parent_group_id: overrides.parent_group_id ?? null,
     config: { ...spec.defaultConfig, ...(overrides.config ?? {}) },
-    ui: { ...(overrides.ui ?? {}) },
+    ui: {
+      collapsed: false,
+      color_tag: null,
+      ...(overrides.ui ?? {}),
+    },
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, WifiOff } from "lucide-react";
 
 const PWA_STATUS_EVENT = "lumen:pwa-status";
@@ -15,6 +15,7 @@ export function OfflineBanner() {
   // 避免 SSR 默认 true 与客户端实际 offline 之间的 hydration 闪烁。
   const [online, setOnline] = useState<boolean | null>(null);
   const [pwaIssue, setPwaIssue] = useState<string | null>(null);
+  const bannerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
@@ -26,6 +27,35 @@ export function OfflineBanner() {
       window.removeEventListener("offline", update);
     };
   }, []);
+
+  const visible = online === false || Boolean(pwaIssue);
+  useEffect(() => {
+    if (!visible) {
+      document.documentElement.style.setProperty(
+        "--offline-banner-height",
+        "0px",
+      );
+      return;
+    }
+    const element = bannerRef.current;
+    if (!element) return;
+    const update = () => {
+      document.documentElement.style.setProperty(
+        "--offline-banner-height",
+        `${element.offsetHeight}px`,
+      );
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      document.documentElement.style.setProperty(
+        "--offline-banner-height",
+        "0px",
+      );
+    };
+  }, [visible]);
 
   useEffect(() => {
     const onPwaStatus = (event: Event) => {
@@ -41,6 +71,7 @@ export function OfflineBanner() {
   if (online === false) {
     return (
       <div
+        ref={bannerRef}
         role="alert"
         aria-live="assertive"
         className="fixed inset-x-0 z-[var(--z-toast,100)] flex min-h-11 items-start justify-center gap-2 border-b border-danger-border bg-danger-soft px-4 py-2 type-body-sm text-[var(--danger-fg)] shadow-[var(--shadow-2)] backdrop-blur-md sm:items-center"
@@ -62,6 +93,7 @@ export function OfflineBanner() {
 
   return (
     <div
+      ref={bannerRef}
       role="status"
       aria-live="polite"
       className="fixed inset-x-0 z-[var(--z-toast,100)] flex min-h-11 items-start justify-center gap-2 border-b border-warning-border bg-warning-soft px-4 py-2 type-body-sm text-[var(--warning-fg)] shadow-[var(--shadow-2)] backdrop-blur-md sm:items-center"

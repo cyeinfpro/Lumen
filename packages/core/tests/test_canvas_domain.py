@@ -253,6 +253,88 @@ def test_mutation_batch_only_validates_the_final_materialized_graph() -> None:
     assert [edge.id for edge in result.graph.edges] == ["b-to-a"]
 
 
+def test_remove_edges_normalizes_single_multi_input_before_add() -> None:
+    graph = CanvasGraph.model_validate(
+        {
+            "nodes": [
+                _node("source-a", "image_generate"),
+                _node("source-b", "image_generate"),
+                _node("source-c", "image_generate"),
+                _node("source-d", "image_generate"),
+                _node("target", "image_generate"),
+            ],
+            "edges": [
+                _edge(
+                    "reference-a",
+                    "source-a",
+                    "image",
+                    "target",
+                    "references",
+                    "image",
+                    order=0,
+                ),
+                _edge(
+                    "reference-b",
+                    "source-b",
+                    "image",
+                    "target",
+                    "references",
+                    "image",
+                    order=1,
+                ),
+                _edge(
+                    "reference-c",
+                    "source-c",
+                    "image",
+                    "target",
+                    "references",
+                    "image",
+                    order=2,
+                ),
+            ],
+        }
+    )
+
+    two_references = apply_canvas_mutation(
+        graph,
+        [{"op": "remove_edges", "edge_ids": ["reference-a"]}],
+    ).graph
+    assert [(edge.id, edge.order) for edge in two_references.edges] == [
+        ("reference-b", 0),
+        ("reference-c", 1),
+    ]
+
+    one_reference = apply_canvas_mutation(
+        two_references,
+        [{"op": "remove_edges", "edge_ids": ["reference-b"]}],
+    ).graph
+    assert [(edge.id, edge.order) for edge in one_reference.edges] == [
+        ("reference-c", 0)
+    ]
+
+    added = apply_canvas_mutation(
+        one_reference,
+        [
+            {
+                "op": "add_edge",
+                "edge": _edge(
+                    "reference-d",
+                    "source-d",
+                    "image",
+                    "target",
+                    "references",
+                    "image",
+                    order=1,
+                ),
+            }
+        ],
+    )
+    assert [(edge.id, edge.order) for edge in added.graph.edges] == [
+        ("reference-c", 0),
+        ("reference-d", 1),
+    ]
+
+
 def test_input_snapshot_match_ignores_layout_but_detects_input_changes() -> None:
     graph = _workflow_graph()
     snapshot = {

@@ -19,6 +19,10 @@ import {
   type CreateCanvasInput,
   type ListCanvasesOptions,
 } from "@/lib/api/canvases";
+import {
+  mergeCanvasDocumentByRevision,
+  mergeCanvasPatchResult,
+} from "@/lib/canvas/documentMerge";
 import type {
   CanvasDocument,
   CanvasNodeExecution,
@@ -40,9 +44,15 @@ export function useCanvasesQuery(options: ListCanvasesOptions = {}) {
 }
 
 export function useCanvasQuery(canvasId: string) {
+  const client = useQueryClient();
+  const queryKey = canvasQueryKeys.detail(canvasId);
   return useQuery({
-    queryKey: canvasQueryKeys.detail(canvasId),
-    queryFn: () => getCanvas(canvasId),
+    queryKey,
+    queryFn: async () =>
+      mergeCanvasDocumentByRevision(
+        client.getQueryData<CanvasDocument>(queryKey),
+        await getCanvas(canvasId),
+      ),
     enabled: Boolean(canvasId),
     refetchInterval(query) {
       const data = query.state.data;
@@ -80,8 +90,11 @@ export function usePatchCanvasMutation(canvasId: string) {
   return useMutation({
     mutationFn: (input: { title?: string; description?: string }) =>
       patchCanvas(canvasId, input),
-    onSuccess(data) {
-      client.setQueryData(canvasQueryKeys.detail(canvasId), data);
+    onSuccess(data, input) {
+      client.setQueryData<CanvasDocument>(
+        canvasQueryKeys.detail(canvasId),
+        (current) => mergeCanvasPatchResult(current, data, input),
+      );
       void client.invalidateQueries({ queryKey: canvasQueryKeys.all });
     },
   });
@@ -136,6 +149,16 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
         outputIndex,
         selectionRevision,
       ),
+    onSuccess(selection) {
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+        channel.postMessage({
+          type: "canvas.selection.changed",
+          revision: selection.revision,
+        });
+        channel.close();
+      }
+    },
     onSettled() {
       void client.invalidateQueries({ queryKey: canvasQueryKeys.detail(canvasId) });
     },
