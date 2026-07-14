@@ -7,6 +7,8 @@ function source(path: string) {
 }
 
 const workspaceSource = source("./CanvasWorkspace.tsx");
+const workspaceInteractionsSource = source("./CanvasWorkspaceInteractions.ts");
+const workspacePersistenceSource = source("./CanvasWorkspacePersistence.ts");
 const viewportSource = source("./CanvasViewport.tsx");
 const topBarSource = source("./CanvasTopBar.tsx");
 const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
@@ -20,9 +22,9 @@ const querySource = source("../../../lib/queries/canvases.ts");
 const manifestSource = source("../../../app/manifest.ts");
 
 test("canvas fullscreen is distinct from fit view and keeps portal overlays available", () => {
-  match(workspaceSource, /document\.documentElement/);
-  match(workspaceSource, /requestFullscreen/);
-  match(workspaceSource, /fullscreenchange/);
+  match(workspaceInteractionsSource, /document\.documentElement/);
+  match(workspaceInteractionsSource, /requestFullscreen/);
+  match(workspaceInteractionsSource, /fullscreenchange/);
   match(topBarSource, /aria-label=\{fullscreen \? "退出全屏" : "全屏画布"\}/);
   match(topBarSource, /<Scan className="h-4 w-4" \/>/);
 });
@@ -122,29 +124,35 @@ test("compact canvas keeps inspector explicit and exposes redo", () => {
 
 test("canvas output selections notify other tabs", () => {
   match(querySource, /canvas\.selection\.changed/);
-  match(workspaceSource, /payload\.type === "canvas\.selection\.changed"/);
+  match(
+    workspacePersistenceSource,
+    /payload\.type === "canvas\.selection\.changed"/,
+  );
 });
 
 test("canvas autosave retries exact batches and only publishes accepted acknowledgements", () => {
-  match(workspaceSource, /new RetryableAutosaveBatchReader/);
-  match(workspaceSource, /takeAutosaveOperations/);
-  match(workspaceSource, /mutation_id: batch\.payload\.mutationId/);
-  match(workspaceSource, /putCanvasSaveBatch/);
-  match(workspaceSource, /getCanvasSaveBatch/);
-  match(workspaceSource, /canvasSaveBatchMatchesPending/);
-  match(workspaceSource, /markSaving\(batch\.count\)/);
-  match(workspaceSource, /if \(!acknowledged\) return/);
+  match(workspacePersistenceSource, /new RetryableAutosaveBatchReader/);
+  match(workspacePersistenceSource, /takeAutosaveOperations/);
+  match(workspacePersistenceSource, /mutation_id: batch\.payload\.mutationId/);
+  match(workspacePersistenceSource, /putCanvasSaveBatch/);
+  match(workspacePersistenceSource, /getCanvasSaveBatch/);
+  match(workspacePersistenceSource, /canvasSaveBatchMatchesPending/);
+  match(workspacePersistenceSource, /markSaving\(batch\.count\)/);
+  match(workspacePersistenceSource, /if \(!acknowledged\) return/);
   match(workspaceSource, /current\.revision <= savedRevision/);
-  match(workspaceSource, /decideCanvasRemoteSync/);
-  match(workspaceSource, /onOnlineRestore\(\(\) => \{/);
-  match(workspaceSource, /blurActiveCanvasEditor/);
-  match(workspaceSource, /visibilitychange/);
-  match(workspaceSource, /state\.pendingOperations\.length === 0/);
-  match(workspaceSource, /CANVAS_CLIENT_LEASE_TTL_MS/);
-  match(workspaceSource, /CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS/);
-  match(workspaceSource, /event\.persisted/);
-  match(workspaceSource, /pageshow/);
-  match(workspaceSource, /listCanvasDrafts/);
+  match(workspacePersistenceSource, /decideCanvasRemoteSync/);
+  match(workspacePersistenceSource, /onOnlineRestore\(\(\) => \{/);
+  match(workspacePersistenceSource, /blurActiveCanvasEditor/);
+  match(workspacePersistenceSource, /visibilitychange/);
+  match(workspacePersistenceSource, /state\.pendingOperations\.length === 0/);
+  match(workspacePersistenceSource, /CANVAS_CLIENT_LEASE_TTL_MS/);
+  match(
+    workspacePersistenceSource,
+    /CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS/,
+  );
+  match(workspacePersistenceSource, /event\.persisted/);
+  match(workspacePersistenceSource, /pageshow/);
+  match(workspacePersistenceSource, /listCanvasDrafts/);
 });
 
 test("canvas workbench exposes mature creation, navigation, and clipboard workflows", () => {
