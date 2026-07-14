@@ -6,7 +6,7 @@ import { applyCanvasMutations } from "@/lib/api/canvases";
 import {
   RetryableAutosaveBatchReader,
   SerialAutosave,
-  takeAutosaveOperations,
+  takeAtomicAutosaveOperations,
   type AutosaveBatch,
 } from "@/lib/canvas/autosave";
 import { canvasGraphReadyToSave } from "@/lib/canvas/graph";
@@ -32,6 +32,10 @@ import {
 } from "@/lib/canvas/persistence";
 import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
+import {
+  cloneCanonicalCanvasGraph,
+  normalizePendingOperationGroupSizes,
+} from "@/lib/canvas/storeHelpers";
 import type {
   CanvasDocument,
   CanvasGraph,
@@ -102,6 +106,7 @@ export function useCanvasDraftPersistence({
                 base_revision: state.revision,
                 graph: state.graph,
                 operations: state.pendingOperations,
+                operation_group_sizes: state.pendingOperationGroupSizes,
                 updated_at: Date.now(),
               })
             : deleteCanvasDraft(canvasId, clientId);
@@ -127,18 +132,23 @@ export function useCanvasDraftPersistence({
     };
     let lastGraph = store.getState().graph;
     let lastPendingOperations = store.getState().pendingOperations;
+    let lastPendingOperationGroupSizes =
+      store.getState().pendingOperationGroupSizes;
     let lastRevision = store.getState().revision;
     const unsubscribe = store.subscribe((state) => {
       if (!ready) return;
       if (
         state.graph === lastGraph &&
         state.pendingOperations === lastPendingOperations &&
+        state.pendingOperationGroupSizes ===
+          lastPendingOperationGroupSizes &&
         state.revision === lastRevision
       ) {
         return;
       }
       lastGraph = state.graph;
       lastPendingOperations = state.pendingOperations;
+      lastPendingOperationGroupSizes = state.pendingOperationGroupSizes;
       lastRevision = state.revision;
       if (timer !== undefined) window.clearTimeout(timer);
       timer = window.setTimeout(persist, 180);
@@ -311,9 +321,13 @@ async function applyCanvasDraftRecovery({
   }
   recoveredSaveBatchRef.current = status.recoverableSaveBatch;
   store.setState({
-    graph: draft.graph,
+    graph: cloneCanonicalCanvasGraph(draft.graph),
     revision: draft.base_revision,
     pendingOperations: draft.operations,
+    pendingOperationGroupSizes: normalizePendingOperationGroupSizes(
+      draft.operations.length,
+      draft.operation_group_sizes,
+    ),
     history: [],
     future: [],
     saveState: status.saveState,
@@ -338,6 +352,7 @@ function persistCanvasEmergencySnapshot(
     base_revision: state.revision,
     graph: state.graph,
     operations: state.pendingOperations,
+    operation_group_sizes: state.pendingOperationGroupSizes,
     updated_at: Date.now(),
   });
 }
@@ -743,7 +758,17 @@ function readCanvasSaveBatch(
     state.markSaveError("画布规模超过当前保存上限，请拆分后重试。", false);
     return null;
   }
-  const operations = takeAutosaveOperations(state.pendingOperations);
+  const operations = takeAtomicAutosaveOperations(
+    state.pendingOperations,
+    state.pendingOperationGroupSizes,
+  );
+  if (operations.length === 0) {
+    state.markSaveError(
+      "单次画布操作超过保存上限，请撤销后缩小操作范围。",
+      false,
+    );
+    return null;
+  }
   return {
     count: operations.length,
     payload: {
@@ -865,6 +890,7 @@ function comparableGraph(graph: CanvasGraph): CanvasGraph {
       ui: {
         collapsed: node.ui?.collapsed === true,
         color_tag: node.ui?.color_tag ?? null,
+        preset_id: node.ui?.preset_id ?? null,
       },
     })),
     edges: graph.edges.map((edge) => ({

@@ -23,7 +23,7 @@ export function activeOutputsByNode(
     document.recent_executions.map((execution) => [execution.id, execution]),
   );
   for (const node of document.graph.nodes) {
-    if (node.type === "image_asset") {
+    if (node.type === "image_asset" || node.type === "mask_asset") {
       const imageId = stringValue(node.config.image_id);
       if (imageId) {
         map.set(node.id, {

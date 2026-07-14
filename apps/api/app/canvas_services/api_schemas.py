@@ -2,9 +2,37 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from lumen_core.canvas_schemas import MAX_CANVAS_GRAPH_BYTES
+
+
+MAX_CANVAS_MUTATION_JSON_BYTES = MAX_CANVAS_GRAPH_BYTES + 1024 * 1024
+MAX_CANVAS_MUTATION_JSON_DEPTH = 32
+
+
+def _json_depth_exceeds(value: Any, maximum: int) -> bool:
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    seen: set[int] = set()
+    while stack:
+        current, depth = stack.pop()
+        if depth > maximum:
+            return True
+        if isinstance(current, dict):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            stack.extend((item, depth + 1) for item in current)
+    return False
 
 
 def empty_graph() -> dict[str, Any]:
@@ -71,6 +99,28 @@ class CanvasMutationIn(BaseModel):
     client_id: str = Field(min_length=1, max_length=64)
     mutation_id: str = Field(min_length=1, max_length=96)
     operations: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+
+    @field_validator("operations")
+    @classmethod
+    def validate_operation_payloads(
+        cls,
+        value: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        try:
+            payload_bytes = len(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise ValueError("operations must contain valid JSON values") from exc
+        if payload_bytes > MAX_CANVAS_MUTATION_JSON_BYTES:
+            raise ValueError("operations exceed the Canvas mutation payload limit")
+        if _json_depth_exceeds(value, MAX_CANVAS_MUTATION_JSON_DEPTH):
+            raise ValueError("operations exceed the Canvas JSON nesting limit")
+        return value
 
 
 class CanvasVersionCreateIn(BaseModel):

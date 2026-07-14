@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import "../../store/chat/moduleResolution.test-helper.mjs";
 
 import type { CanvasGraph, CanvasNodeDefinition } from "./types";
 

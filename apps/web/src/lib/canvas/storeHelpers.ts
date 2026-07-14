@@ -3,7 +3,14 @@ import {
   cloneCanvasGraph,
   MAX_CANVAS_GRAPH_BYTES,
 } from "#canvas-graph";
-import { CANVAS_NODE_SPECS } from "#canvas-registry";
+import {
+  CANVAS_NODE_SPECS,
+  canvasNodeConfigIsValid,
+  canvasNodeUiIsValid,
+  isCanvasExecutableNodeType,
+  isCanvasVideoNodeType,
+  type CanvasVideoMode,
+} from "#canvas-registry";
 import type {
   CanvasDocumentSettings,
   CanvasEdgeDefinition,
@@ -96,13 +103,13 @@ function jsonValueEqual(left: unknown, right: unknown): boolean {
 
 export function cloneCanonicalCanvasGraph(graph: CanvasGraph): CanvasGraph {
   const cloned = cloneCanvasGraph(graph);
-  return {
+  return normalizeEdgeOrders({
     ...cloned,
     nodes: cloned.nodes.map((node) => ({
       ...node,
       size: canonicalCanvasSize(node.size, node.type),
     })),
-  };
+  });
 }
 
 export function createHistoryEntry(
@@ -262,12 +269,29 @@ export function validGraphForStoreCommit(graph: CanvasGraph): boolean {
     canvasGraphReadyToSave(graph) &&
     graph.nodes.every(
       (node) =>
+        canvasNodeConfigIsValid(node.type, node.config) &&
+        canvasNodeUiIsValid(node.ui) &&
         validCanvasPosition(node.position) &&
         validCanvasSize(canonicalCanvasSize(node.size, node.type)),
     ) &&
+    canvasEdgeOrdersAreSequential(graph) &&
     graph.edges.every((edge) =>
       validCanvasEdgeMetadata(edge, nodeTypesById.get(edge.source_node_id)),
     )
+  );
+}
+
+function canvasEdgeOrdersAreSequential(graph: CanvasGraph): boolean {
+  const groups = new Map<string, number[]>();
+  for (const edge of graph.edges) {
+    const key = `${edge.target_node_id}\0${edge.target_handle}`;
+    groups.set(key, [...(groups.get(key) ?? []), edge.order ?? -1]);
+  }
+  return [...groups.values()].every((orders) =>
+    orders
+      .slice()
+      .sort((left, right) => left - right)
+      .every((order, index) => order === index),
   );
 }
 
@@ -291,7 +315,8 @@ export function validCanvasEdgeMetadata(
   }
   return (
     edge.binding_mode === "pinned" &&
-    (sourceType === "image_generate" || sourceType === "video_generate") &&
+    sourceType !== undefined &&
+    isCanvasExecutableNodeType(sourceType) &&
     validPinnedBinding(
       edge.pinned_execution_id,
       edge.pinned_output_index,
@@ -466,6 +491,76 @@ export function coalescePendingOperations(
     return [...pending, incoming[0]];
   }
   return [...pending.slice(0, -1), incoming[0]];
+}
+
+export function normalizePendingOperationGroupSizes(
+  operationCount: number,
+  groupSizes: readonly number[] | undefined,
+): number[] {
+  if (
+    groupSizes &&
+    groupSizes.every((size) => Number.isSafeInteger(size) && size > 0) &&
+    groupSizes.reduce((total, size) => total + size, 0) === operationCount
+  ) {
+    return [...groupSizes];
+  }
+  return Array.from({ length: operationCount }, () => 1);
+}
+
+export function coalescePendingOperationGroups(
+  pending: CanvasOperation[],
+  groupSizes: readonly number[],
+  incoming: CanvasOperation[],
+  protectedPrefixCount = 0,
+): {
+  operations: CanvasOperation[];
+  groupSizes: number[];
+} {
+  const normalizedGroups = normalizePendingOperationGroupSizes(
+    pending.length,
+    groupSizes,
+  );
+  if (incoming.length === 0) {
+    return { operations: pending, groupSizes: normalizedGroups };
+  }
+  const operations = coalescePendingOperations(
+    pending,
+    incoming,
+    protectedPrefixCount,
+  );
+  return {
+    operations,
+    groupSizes:
+      operations.length === pending.length
+        ? normalizedGroups
+        : [...normalizedGroups, incoming.length],
+  };
+}
+
+export function consumePendingOperationGroups(
+  groupSizes: readonly number[],
+  operationCount: number,
+  consumedCount: number,
+): number[] {
+  const normalized = normalizePendingOperationGroupSizes(
+    operationCount,
+    groupSizes,
+  );
+  let remaining = Math.min(Math.max(0, consumedCount), operationCount);
+  const next: number[] = [];
+  for (const size of normalized) {
+    if (remaining >= size) {
+      remaining -= size;
+      continue;
+    }
+    if (remaining > 0) {
+      next.push(size - remaining);
+      remaining = 0;
+      continue;
+    }
+    next.push(size);
+  }
+  return next;
 }
 
 export function operationsBetween(
@@ -660,11 +755,49 @@ export function normalizeEdgeOrders(graph: CanvasGraph): CanvasGraph {
   };
 }
 
+export function reorderCanvasEdgeGroup(
+  edges: CanvasEdgeDefinition[],
+  edgeId: string,
+  requestedOrder: number,
+): CanvasEdgeDefinition[] {
+  const target = edges.find((edge) => edge.id === edgeId);
+  if (!target) return edges;
+  const siblings = edges
+    .filter(
+      (edge) =>
+        edge.target_node_id === target.target_node_id &&
+        edge.target_handle === target.target_handle,
+    )
+    .sort(
+      (left, right) =>
+        (left.order ?? 0) - (right.order ?? 0) ||
+        left.id.localeCompare(right.id),
+    );
+  const currentIndex = siblings.findIndex((edge) => edge.id === edgeId);
+  if (currentIndex < 0) return edges;
+  const [moved] = siblings.splice(currentIndex, 1);
+  const nextIndex = Math.min(
+    Math.max(requestedOrder, 0),
+    siblings.length,
+  );
+  siblings.splice(nextIndex, 0, moved);
+  const orderById = new Map(
+    siblings.map((edge, order) => [edge.id, order]),
+  );
+  return edges.map((edge) =>
+    orderById.has(edge.id)
+      ? { ...edge, order: orderById.get(edge.id) }
+      : edge,
+  );
+}
+
 export function incompatibleVideoEdgeIds(
   graph: CanvasGraph,
   nodeId: string,
-  mode: string,
+  mode: CanvasVideoMode,
 ): string[] {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node || !isCanvasVideoNodeType(node.type)) return [];
   const blocked =
     mode === "t2v"
       ? new Set(["first_frame", "reference_images", "reference_videos"])

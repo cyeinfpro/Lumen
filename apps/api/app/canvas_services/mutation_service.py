@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -19,6 +20,10 @@ from .asset_ref_service import sync_head_asset_refs
 from .core_adapter import apply_graph_operations, stable_hash
 from .document_service import get_owned_canvas
 from .errors import canvas_http, idempotency_conflict
+
+
+_MAX_CONFLICT_MUTATIONS = 100
+_MAX_CONFLICT_OPERATIONS_BYTES = 1024 * 1024
 
 
 async def _lock_mutation_key(
@@ -61,18 +66,25 @@ def _replay_response(
     *,
     body: CanvasMutationIn,
 ) -> dict[str, Any]:
-    existing_hash = stable_hash(
-        {
-            "base_revision": int(row.base_revision),
-            "operations": row.operations_jsonb,
-        }
-    )
-    request_hash = stable_hash(
-        {
-            "base_revision": body.base_revision,
-            "operations": body.operations,
-        }
-    )
+    try:
+        existing_hash = stable_hash(
+            {
+                "base_revision": int(row.base_revision),
+                "operations": row.operations_jsonb,
+            }
+        )
+        request_hash = stable_hash(
+            {
+                "base_revision": body.base_revision,
+                "operations": body.operations,
+            }
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise canvas_http(
+            "invalid_canvas_operation",
+            "stored Canvas mutation payload is invalid",
+            422,
+        ) from exc
     if existing_hash != request_hash:
         raise idempotency_conflict("mutation id was already used for another request")
     response = row.response_jsonb or {}
@@ -101,28 +113,48 @@ async def _revision_conflict_details(
                     CanvasMutation.result_revision <= canvas.revision,
                 )
                 .order_by(CanvasMutation.result_revision.asc())
+                .limit(_MAX_CONFLICT_MUTATIONS + 1)
             )
         )
         .scalars()
         .all()
     )
-    expected = list(range(client_revision + 1, int(canvas.revision) + 1))
+    revision_gap = int(canvas.revision) - client_revision
     actual = [int(row.result_revision) for row in rows]
     details: dict[str, Any] = {
         "base_revision": client_revision,
         "current_revision": int(canvas.revision),
         "updated_at": canvas.updated_at,
     }
-    if actual == expected:
-        details["remote_mutations"] = [
-            {
-                "base_revision": int(row.base_revision),
-                "result_revision": int(row.result_revision),
-                "operation_schema_version": int(row.operation_schema_version),
-                "operations": row.operations_jsonb,
-            }
-            for row in rows
-        ]
+    contiguous = (
+        0 < revision_gap <= _MAX_CONFLICT_MUTATIONS
+        and len(actual) == revision_gap
+        and all(
+            revision == client_revision + index
+            for index, revision in enumerate(actual, start=1)
+        )
+    )
+    remote_mutations = [
+        {
+            "base_revision": int(row.base_revision),
+            "result_revision": int(row.result_revision),
+            "operation_schema_version": int(row.operation_schema_version),
+            "operations": row.operations_jsonb,
+        }
+        for row in rows
+    ]
+    try:
+        remote_mutation_bytes = len(
+            json.dumps(
+                remote_mutations,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    except (RecursionError, TypeError, ValueError):
+        remote_mutation_bytes = _MAX_CONFLICT_OPERATIONS_BYTES + 1
+    if contiguous and remote_mutation_bytes <= _MAX_CONFLICT_OPERATIONS_BYTES:
+        details["remote_mutations"] = remote_mutations
         details["rebase_unavailable"] = False
     else:
         details["remote_mutations"] = []

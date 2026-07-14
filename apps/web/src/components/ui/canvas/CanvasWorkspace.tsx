@@ -6,10 +6,15 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { fetchVideoOptions } from "@/app/video/video-request-lifecycle";
 import { createCanvas } from "@/lib/api/canvases";
-import { validateCanvasNodeExecution } from "@/lib/canvas/graph";
+import {
+  canvasVideoCapabilityError,
+  validateCanvasNodeExecution,
+} from "@/lib/canvas/graph";
 import { blurActiveCanvasEditor } from "@/lib/canvas/interaction";
 import { type PersistedCanvasSaveBatch } from "@/lib/canvas/persistence";
+import { isCanvasVideoNodeType } from "@/lib/canvas/registry";
 import type { CanvasDocument, CanvasGraph } from "@/lib/canvas/types";
 import {
   canvasQueryKeys,
@@ -273,6 +278,33 @@ function CanvasWorkspaceInner({
           toast.error(validation.reason);
           return;
         }
+        const node = store
+          .getState()
+          .graph.nodes.find((candidate) => candidate.id === nodeId);
+        if (node && isCanvasVideoNodeType(node.type)) {
+          let options;
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 10_000);
+          try {
+            options = await fetchVideoOptions(controller.signal);
+          } catch (error) {
+            toast.error(
+              controller.signal.aborted
+                ? "视频能力加载超时，请重试"
+                : error instanceof Error
+                  ? error.message
+                  : "视频能力加载失败",
+            );
+            return;
+          } finally {
+            window.clearTimeout(timeout);
+          }
+          const capabilityError = canvasVideoCapabilityError(node, options);
+          if (capabilityError) {
+            toast.error(capabilityError);
+            return;
+          }
+        }
         await autosaveRef.current?.flush();
         const state = store.getState();
         if (
@@ -427,7 +459,7 @@ function CanvasWorkspaceInner({
         <DurabilityBanner message={durabilityWarning} />
       ) : null}
 
-      <div className="grid min-h-0 flex-1 min-[1200px]:grid-cols-[224px_minmax(0,1fr)_320px]">
+      <div className="grid min-h-0 flex-1 min-[1200px]:grid-cols-[248px_minmax(0,1fr)_352px]">
         <aside className="hidden min-h-0 border-r border-[var(--border)] bg-[var(--bg-1)] min-[1200px]:flex min-[1200px]:flex-col">
           <header className="border-b border-[var(--border)] px-3 py-3">
             <p className="type-page-kicker">节点工具</p>
@@ -521,7 +553,7 @@ function CanvasWorkspaceInner({
         open={isCompact && paletteOpen}
         onClose={() => setPaletteOpen(false)}
         ariaLabel="添加节点"
-        snapPoints={["72%"]}
+        snapPoints={["82%"]}
         className="mobile-dialog-sheet"
       >
         <div className="mobile-dialog-scroll h-full overflow-y-auto p-4">

@@ -5,12 +5,15 @@ import unicodedata
 import pytest
 
 from lumen_core.canvas import (
+    CanvasPromptTooLongError,
     CanvasPreconditionFailedError,
     apply_canvas_mutation,
     canonical_hash,
     canonical_json_dumps,
     canvas_input_snapshot_matches_graph,
+    merge_prompt_texts,
     propagate_stale,
+    resolve_canvas_text_node,
     stale_nodes_for_selection_change,
     topological_node_ids,
 )
@@ -110,6 +113,102 @@ def test_canonical_json_normalizes_keys_unicode_numbers_and_negative_zero() -> N
 
     with pytest.raises(ValueError, match="NaN"):
         canonical_hash({"bad": float("nan")})
+
+
+def test_prompt_merge_is_ordered_trimmed_and_deduplicated() -> None:
+    assert (
+        merge_prompt_texts(
+            [" first ", "second", "first"],
+            {
+                "separator": " | ",
+                "prefix": "[",
+                "suffix": "]",
+                "trim": True,
+                "dedupe": True,
+            },
+        )
+        == "[first | second]"
+    )
+    assert (
+        merge_prompt_texts(
+            [" first ", "second"],
+            {"separator": "", "trim": False},
+        )
+        == " first second"
+    )
+
+
+def test_prompt_merge_resolution_handles_maximum_depth_without_recursion() -> None:
+    nodes = {"prompt": _node("prompt", "prompt", {"text": "deep"})}
+    edges: list[dict] = []
+    source_id = "prompt"
+    for index in range(998):
+        node_id = f"merge-{index}"
+        nodes[node_id] = _node(node_id, "prompt_merge")
+        edges.append(
+            {
+                "id": f"edge-{index}",
+                "source_node_id": source_id,
+                "target_node_id": node_id,
+                "target_handle": "texts",
+                "order": 0,
+            }
+        )
+        source_id = node_id
+
+    assert resolve_canvas_text_node(nodes, edges, source_id) == "deep"
+
+
+def test_prompt_merge_resolution_bounds_exponential_expansion() -> None:
+    nodes = {"prompt": _node("prompt", "prompt", {"text": "x"})}
+    edges: list[dict] = []
+    source_id = "prompt"
+    for index in range(14):
+        node_id = f"merge-{index}"
+        nodes[node_id] = _node(
+            node_id,
+            "prompt_merge",
+            {"separator": "", "trim": False},
+        )
+        for branch in range(2):
+            edges.append(
+                {
+                    "id": f"edge-{index}-{branch}",
+                    "source_node_id": source_id,
+                    "target_node_id": node_id,
+                    "target_handle": "texts",
+                    "order": branch,
+                }
+            )
+        source_id = node_id
+
+    with pytest.raises(CanvasPromptTooLongError):
+        resolve_canvas_text_node(nodes, edges, source_id)
+
+
+def test_prompt_merge_resolution_rejects_cycles() -> None:
+    nodes = {
+        "merge-a": _node("merge-a", "prompt_merge"),
+        "merge-b": _node("merge-b", "prompt_merge"),
+    }
+    edges = [
+        {
+            "id": "edge-a-b",
+            "source_node_id": "merge-a",
+            "target_node_id": "merge-b",
+            "target_handle": "texts",
+            "order": 0,
+        },
+        {
+            "id": "edge-b-a",
+            "source_node_id": "merge-b",
+            "target_node_id": "merge-a",
+            "target_handle": "texts",
+            "order": 0,
+        },
+    ]
+
+    assert resolve_canvas_text_node(nodes, edges, "merge-a") is None
 
 
 def test_topology_and_stale_propagation_stop_at_pinned_edges() -> None:
@@ -401,4 +500,98 @@ def test_input_snapshot_match_ignores_layout_but_detects_input_changes() -> None
         node_id="video",
         input_snapshot=snapshot,
         selections={"image": ("another-execution", 0)},
+    )
+
+
+def test_input_snapshot_match_resolves_prompt_merge_inputs_and_config() -> None:
+    graph = CanvasGraph.model_validate(
+        {
+            "nodes": [
+                _node("prompt-a", "prompt", {"text": " first "}),
+                _node("prompt-b", "prompt", {"text": "second"}),
+                _node(
+                    "merge",
+                    "prompt_merge",
+                    {
+                        "separator": " | ",
+                        "prefix": "[",
+                        "suffix": "]",
+                        "trim": True,
+                        "dedupe": False,
+                    },
+                ),
+                _node("image", "image_generate"),
+            ],
+            "edges": [
+                _edge(
+                    "text-a",
+                    "prompt-a",
+                    "text",
+                    "merge",
+                    "texts",
+                    "text",
+                    order=0,
+                ),
+                _edge(
+                    "text-b",
+                    "prompt-b",
+                    "text",
+                    "merge",
+                    "texts",
+                    "text",
+                    order=1,
+                ),
+                _edge(
+                    "merged-prompt",
+                    "merge",
+                    "text",
+                    "image",
+                    "prompt",
+                    "text",
+                ),
+            ],
+        }
+    )
+    snapshot = {
+        "prompt": "[first | second]",
+        "bindings": [
+            {
+                "edge_id": "merged-prompt",
+                "source_node_id": "merge",
+                "target_handle": "prompt",
+                "role": None,
+                "order": 0,
+                "binding_mode": "follow_active",
+                "text": "[first | second]",
+            }
+        ],
+    }
+
+    assert canvas_input_snapshot_matches_graph(
+        graph,
+        node_id="image",
+        input_snapshot=snapshot,
+        selections={},
+    )
+    changed = apply_canvas_mutation(
+        graph,
+        [
+            {
+                "op": "update_node_config",
+                "node_id": "merge",
+                "config": {
+                    "separator": "\n",
+                    "prefix": "",
+                    "suffix": "",
+                    "trim": True,
+                    "dedupe": False,
+                },
+            }
+        ],
+    ).graph
+    assert not canvas_input_snapshot_matches_graph(
+        changed,
+        node_id="image",
+        input_snapshot=snapshot,
+        selections={},
     )

@@ -18,6 +18,8 @@ import {
 import Link from "next/link";
 import { useState } from "react";
 
+import { validateCanvasNodeExecution } from "@/lib/canvas/graph";
+import { isCanvasExecutableNodeType } from "@/lib/canvas/registry";
 import type { CanvasSaveState } from "@/lib/canvas/types";
 import { IconButton } from "@/components/ui/primitives";
 import { useCanvasStore } from "./CanvasStoreProvider";
@@ -58,9 +60,11 @@ export function CanvasTopBar({
   const undo = useCanvasStore((state) => state.undo);
   const redo = useCanvasStore((state) => state.redo);
   const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
-  const runnable =
-    selectedNode?.type === "image_generate" ||
-    selectedNode?.type === "video_generate";
+  const runnable = Boolean(
+    selectedNode &&
+      isCanvasExecutableNodeType(selectedNode.type) &&
+      validateCanvasNodeExecution(graph, selectedNode.id).valid,
+  );
 
   return (
     <>

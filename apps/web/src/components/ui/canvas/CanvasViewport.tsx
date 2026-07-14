@@ -25,10 +25,18 @@ import {
   updateCanvasTransientPositions,
 } from "@/lib/canvas/interaction";
 import {
+  resolveCanvasTextOutputs,
   validateCanvasConnections,
+  validateCanvasNodeExecution,
   type CanvasConnectionInput,
 } from "@/lib/canvas/graph";
-import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
+import {
+  CANVAS_NODE_SPECS,
+  findCanvasNodeCatalogItem,
+  findMatchingCanvasNodeCatalogItem,
+  isCanvasNodeType,
+  type CanvasNodeCreateOverrides,
+} from "@/lib/canvas/registry";
 import {
   activeOutputsByNode,
   latestExecutionsByNode,
@@ -352,6 +360,25 @@ export function CanvasViewport({
     () => buildConnectionCompatibility(graph, connectionDraft),
     [connectionDraft, graph],
   );
+  const inputCountsByNode = useMemo(() => {
+    const counts = new Map<string, Record<string, number>>();
+    for (const edge of graph.edges) {
+      const nodeCounts = counts.get(edge.target_node_id) ?? {};
+      nodeCounts[edge.target_handle] =
+        (nodeCounts[edge.target_handle] ?? 0) + 1;
+      counts.set(edge.target_node_id, nodeCounts);
+    }
+    return counts;
+  }, [graph.edges]);
+  const resolvedTextsByNode = useMemo(() => {
+    const values = new Map<string, string>();
+    const resolutions = resolveCanvasTextOutputs(graph);
+    for (const node of graph.nodes) {
+      if (node.type !== "prompt_merge") continue;
+      values.set(node.id, resolutions.get(node.id)?.value ?? "");
+    }
+    return values;
+  }, [graph]);
   const startClickConnection = useCallback(
     (nodeId: string, handleId: string, dataType: CanvasDataType) => {
       if (isCompact && toolMode !== "connect") return;
@@ -398,12 +425,13 @@ export function CanvasViewport({
     const editingEnabled = toolMode === "select" && connectionDraft === null;
     return graph.nodes.map((node) => {
       const dimensions = canvasFlowNodeDimensions(node);
+      const preset = findMatchingCanvasNodeCatalogItem(node);
       return {
         id: node.id,
         type: node.type,
         position: node.position,
         selected: selectedNodeIdSet.has(node.id),
-        ariaLabel: `${CANVAS_NODE_SPECS[node.type].label}节点：${node.title}`,
+        ariaLabel: `${preset?.label ?? CANVAS_NODE_SPECS[node.type].label}节点：${node.title}`,
         draggable: toolMode === "select",
         dragHandle: ".canvas-node-drag-handle",
         connectable,
@@ -425,6 +453,9 @@ export function CanvasViewport({
             activeOutputs,
             document.recent_executions,
           ),
+          resolvedText: resolvedTextsByNode.get(node.id),
+          inputCounts: inputCountsByNode.get(node.id) ?? {},
+          runDisabledReason: canvasRunDisabledReason(graph, node.id),
           connectionType: connectionDraft?.dataType ?? null,
           compatibleInputHandles:
             connectionCompatibility.handlesByNode.get(node.id) ?? [],
@@ -460,9 +491,11 @@ export function CanvasViewport({
     finishNodeEditor,
     focusNodeEditor,
     graph,
+    inputCountsByNode,
     isCompact,
     measuredDimensions,
     onRunNode,
+    resolvedTextsByNode,
     selectedNodeIdSet,
     startFrameResize,
     startClickConnection,
@@ -595,8 +628,12 @@ export function CanvasViewport({
   );
 
   const addNodeWithFeedback = useCallback(
-    (type: CanvasNodeType, position: CanvasPosition) => {
-      const nodeId = addNode(type, position);
+    (
+      type: CanvasNodeType,
+      position: CanvasPosition,
+      overrides?: CanvasNodeCreateOverrides,
+    ) => {
+      const nodeId = addNode(type, position, overrides);
       if (!nodeId) {
         toast.error("画布已达到节点或存储大小上限");
       }
@@ -682,10 +719,21 @@ export function CanvasViewport({
   const handleDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       event.preventDefault();
-      const type = event.dataTransfer.getData(
+      const catalogId = event.dataTransfer.getData(
         "application/lumen-canvas-node",
-      ) as CanvasNodeType;
-      if (!type || !(type in CANVAS_NODE_SPECS) || !instance) return;
+      );
+      const catalogItem = findCanvasNodeCatalogItem(catalogId);
+      const type = catalogItem?.type ?? (isCanvasNodeType(catalogId) ? catalogId : null);
+      if (!type || !instance) return;
+      const catalogOverrides = catalogItem
+        ? {
+            ...catalogItem.overrides,
+            ui: {
+              ...(catalogItem.overrides?.ui ?? {}),
+              preset_id: catalogItem.id,
+            },
+          }
+        : undefined;
       const position = instance.screenToFlowPosition(
         {
           x: event.clientX,
@@ -696,7 +744,11 @@ export function CanvasViewport({
           snapGrid,
         },
       );
-      addNodeWithFeedback(type, position);
+      addNodeWithFeedback(
+        type,
+        position,
+        catalogOverrides,
+      );
     },
     [addNodeWithFeedback, instance, snapGrid, snapToGrid],
   );
@@ -1211,6 +1263,14 @@ function canvasConnectionIsValid(
     binding_mode: "follow_active",
   };
   return validateCanvasConnections(graph, [candidate]).valid;
+}
+
+function canvasRunDisabledReason(
+  graph: CanvasGraph,
+  nodeId: string,
+): string | null {
+  const validation = validateCanvasNodeExecution(graph, nodeId);
+  return validation.valid ? null : validation.reason;
 }
 
 function canvasConnectionTargetDataType(

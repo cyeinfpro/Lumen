@@ -58,6 +58,34 @@ const TEMPLATES = [
     detail: "画框 → 关键帧 → 视频",
     icon: Boxes,
   },
+  {
+    key: "image_editing",
+    title: "图片精修",
+    description: "上传原图，通过提示词完成定向编辑。",
+    detail: "编辑指令 + 原图 → 图片编辑 → 交付",
+    icon: ImageIcon,
+  },
+  {
+    key: "inpaint",
+    title: "局部重绘",
+    description: "使用原图与遮罩精确重绘指定区域。",
+    detail: "重绘指令 + 原图 + 遮罩 → 局部重绘",
+    icon: LayoutGrid,
+  },
+  {
+    key: "reference_video",
+    title: "参考媒体视频",
+    description: "结合人物、风格图片和动作视频生成。",
+    detail: "提示词 + 参考图 + 参考视频 → 视频",
+    icon: Film,
+  },
+  {
+    key: "creative_campaign",
+    title: "营销创意流水线",
+    description: "从品牌信息生成商品主视觉与竖屏短片。",
+    detail: "多提示词 → 主视觉 → 动态短片 → 交付",
+    icon: PackageOpen,
+  },
 ] as const;
 
 export function CanvasNewPage() {

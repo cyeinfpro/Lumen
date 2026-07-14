@@ -33,7 +33,7 @@ def _asset_nodes(
         image_id = config.get("image_id")
         video_id = config.get("video_id")
         if (
-            node.get("type") == "image_asset"
+            node.get("type") in {"image_asset", "mask_asset"}
             and isinstance(image_id, str)
             and image_id.strip()
         ):
@@ -63,11 +63,14 @@ async def sync_head_asset_refs(
         owned_images = set(
             (
                 await db.execute(
-                    select(Image.id).where(
+                    select(Image.id)
+                    .where(
                         Image.id.in_(image_ids),
                         Image.user_id == user_id,
                         Image.deleted_at.is_(None),
                     )
+                    .order_by(Image.id)
+                    .with_for_update()
                 )
             )
             .scalars()
@@ -77,11 +80,14 @@ async def sync_head_asset_refs(
         owned_videos = set(
             (
                 await db.execute(
-                    select(Video.id).where(
+                    select(Video.id)
+                    .where(
                         Video.id.in_(video_ids),
                         Video.user_id == user_id,
                         Video.deleted_at.is_(None),
                     )
+                    .order_by(Video.id)
+                    .with_for_update()
                 )
             )
             .scalars()
@@ -143,12 +149,22 @@ async def ensure_asset_not_canvas_referenced(
 ) -> None:
     if image_id is not None:
         condition = CanvasAssetRef.image_id == image_id
-        owner_query = select(Image.owner_generation_id).where(Image.id == image_id)
+        asset = (
+            await db.execute(
+                select(Image).where(Image.id == image_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         task_owner_column = CanvasExecutionTask.generation_id
     else:
         condition = CanvasAssetRef.video_id == video_id
-        owner_query = select(Video.owner_generation_id).where(Video.id == video_id)
+        asset = (
+            await db.execute(
+                select(Video).where(Video.id == video_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         task_owner_column = CanvasExecutionTask.video_generation_id
+    if asset is None:
+        return
     reference = (
         await db.execute(select(CanvasAssetRef.id).where(condition).limit(1))
     ).scalar_one_or_none()
@@ -158,7 +174,7 @@ async def ensure_asset_not_canvas_referenced(
             "asset is retained by a Canvas document or execution",
             409,
         )
-    owner_generation_id = (await db.execute(owner_query)).scalar_one_or_none()
+    owner_generation_id = asset.owner_generation_id
     if owner_generation_id is None:
         return
     task_reference = (

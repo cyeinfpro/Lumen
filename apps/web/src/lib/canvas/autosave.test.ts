@@ -5,6 +5,7 @@ const {
   CANVAS_AUTOSAVE_OPERATION_LIMIT,
   RetryableAutosaveBatchReader,
   SerialAutosave,
+  takeAtomicAutosaveOperations,
   takeAutosaveOperations,
 } = await import("#canvas-autosave");
 
@@ -165,4 +166,23 @@ test("autosave operation batches stay within the API contract", () => {
     CANVAS_AUTOSAVE_OPERATION_LIMIT,
   );
   assert.deepEqual(takeAutosaveOperations(operations, 2), [0, 1]);
+});
+
+test("autosave never splits an atomic operation group", () => {
+  const operations = Array.from(
+    { length: CANVAS_AUTOSAVE_OPERATION_LIMIT + 1 },
+    (_, index) => index,
+  );
+
+  assert.equal(
+    takeAtomicAutosaveOperations(
+      operations,
+      [CANVAS_AUTOSAVE_OPERATION_LIMIT - 1, 2],
+    ).length,
+    CANVAS_AUTOSAVE_OPERATION_LIMIT - 1,
+  );
+  assert.deepEqual(
+    takeAtomicAutosaveOperations(operations, [operations.length]),
+    [],
+  );
 });

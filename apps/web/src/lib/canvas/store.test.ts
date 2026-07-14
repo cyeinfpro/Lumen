@@ -14,9 +14,11 @@ const {
 } = await import("#canvas-store");
 const {
   CANVAS_AUTOSAVE_OPERATION_LIMIT,
+  takeAtomicAutosaveOperations,
   takeAutosaveOperations,
 } = await import("#canvas-autosave");
 const { canvasDraftKey } = await import("#canvas-persistence");
+const { createCanvasNode } = await import("#canvas-registry");
 
 test("canvas store records commands and supports undo redo", () => {
   const store = createCanvasEditorStore(createDefaultCanvasGraph(), 3);
@@ -30,6 +32,39 @@ test("canvas store records commands and supports undo redo", () => {
   assert.equal(store.getState().graph.nodes.find((node) => node.id === nodeId)?.config.text, "");
   store.getState().redo();
   assert.equal(store.getState().graph.nodes.find((node) => node.id === nodeId)?.config.text, "review");
+});
+
+test("canvas store adds catalog-compatible node overrides without changing direct adds", () => {
+  const store = createCanvasEditorStore(createDefaultCanvasGraph(), 3);
+  const nodeId = store.getState().addNode("image_upscale", { x: 100, y: 200 }, {
+    title: "4K 高清重绘",
+    config: { quality: "4k", size: "4K", fast: false },
+    ui: { preset_id: "image_4k_redraw" },
+  });
+  const node = store.getState().graph.nodes.find((item) => item.id === nodeId);
+  assert.equal(node?.title, "4K 高清重绘");
+  assert.equal(node?.config.quality, "4k");
+  assert.equal(node?.config.size, "4K");
+  assert.equal(node?.ui.preset_id, "image_4k_redraw");
+  assert.equal(store.getState().pendingOperations.at(-1)?.op, "add_node");
+});
+
+test("fixed video node modes cannot be changed through config updates", () => {
+  const store = createCanvasEditorStore(createDefaultCanvasGraph(), 3);
+  const nodeId = store.getState().addNode("video_image_generate", {
+    x: 100,
+    y: 200,
+  });
+  const node = store.getState().graph.nodes.find((item) => item.id === nodeId);
+  assert.ok(node);
+  store.getState().updateNodeConfig(nodeId, {
+    ...node.config,
+    mode: "t2v",
+  });
+  assert.equal(
+    store.getState().graph.nodes.find((item) => item.id === nodeId)?.config.mode,
+    "i2v",
+  );
 });
 
 test("canvas drafts are scoped to both canvas and browser client", () => {
@@ -538,7 +573,7 @@ test("operationsBetween treats cloned nested config values as unchanged", () => 
   assert.deepEqual(operationsBetween(current, structuredClone(current)), []);
 });
 
-test("canvas store records V1 appearance, resize, edge, and settings operations", () => {
+test("canvas store records V1 appearance, resize, and settings operations", () => {
   const store = createCanvasEditorStore(createDefaultCanvasGraph(), 1);
 
   store.getState().updateNodeAppearance("prompt-1", {
@@ -546,9 +581,6 @@ test("canvas store records V1 appearance, resize, edge, and settings operations"
     ui: { collapsed: true, color_tag: "blue" },
   });
   store.getState().resizeNode("prompt-1", { width: 320, height: 220 });
-  store.getState().updateEdgeDetails("edge-prompt-image", {
-    order: 3,
-  });
   store.getState().updateDocumentSettings({
     snap_to_grid: true,
     grid_size: 24,
@@ -560,7 +592,7 @@ test("canvas store records V1 appearance, resize, edge, and settings operations"
       operation_schema_version: 1,
       node_id: "prompt-1",
       title: "新标题",
-      ui: { collapsed: true, color_tag: "blue" },
+      ui: { collapsed: true, color_tag: "blue", preset_id: null },
     },
     {
       op: "resize_node",
@@ -569,20 +601,86 @@ test("canvas store records V1 appearance, resize, edge, and settings operations"
       size: { width: 320, height: 220 },
     },
     {
-      op: "update_edge",
-      operation_schema_version: 1,
-      edge_id: "edge-prompt-image",
-      binding_mode: "follow_active",
-      pinned_execution_id: null,
-      pinned_output_index: null,
-      order: 3,
-    },
-    {
       op: "update_document_settings",
       operation_schema_version: 1,
       settings: { snap_to_grid: true, grid_size: 24 },
     },
   ]);
+});
+
+test("reordering a multi-input edge keeps orders sequential and undoable", () => {
+  const graph = createDefaultCanvasGraph();
+  const second = createCanvasNode("prompt", { x: 40, y: 340 }, {
+    id: "prompt-2",
+  });
+  const third = createCanvasNode("prompt", { x: 40, y: 540 }, {
+    id: "prompt-3",
+  });
+  const merge = createCanvasNode("prompt_merge", { x: 420, y: 320 }, {
+    id: "merge-1",
+  });
+  graph.nodes = [graph.nodes[0], second, third, merge];
+  graph.edges = [
+    {
+      id: "edge-first",
+      source_node_id: "prompt-1",
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+    {
+      id: "edge-second",
+      source_node_id: second.id,
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 1,
+    },
+    {
+      id: "edge-third",
+      source_node_id: third.id,
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 2,
+    },
+  ];
+  const store = createCanvasEditorStore(graph, 1);
+
+  store.getState().updateEdgeDetails("edge-third", { order: 1 });
+
+  assert.deepEqual(
+    store.getState().graph.edges.map((edge) => [edge.id, edge.order]),
+    [
+      ["edge-first", 0],
+      ["edge-second", 2],
+      ["edge-third", 1],
+    ],
+  );
+  assert.deepEqual(
+    store.getState().pendingOperations.map((operation) =>
+      operation.op === "update_edge"
+        ? [operation.edge_id, operation.order]
+        : null,
+    ),
+    [
+      ["edge-second", 2],
+      ["edge-third", 1],
+    ],
+  );
+
+  store.getState().undo();
+  assert.deepEqual(
+    store.getState().graph.edges.map((edge) => edge.order),
+    [0, 1, 2],
+  );
 });
 
 test("operationsBetween covers node metadata, size, edge role, and document settings", () => {
@@ -917,6 +1015,52 @@ test("subgraph commits refuse more than one autosave batch atomically", () => {
   assert.equal(
     boundaryStore.getState().pendingOperations.length,
     CANVAS_AUTOSAVE_OPERATION_LIMIT,
+  );
+});
+
+test("canonical hydration repairs missing single-edge order", () => {
+  const graph = createDefaultCanvasGraph();
+  graph.edges[0].order = null;
+  const store = createCanvasEditorStore(graph, 1);
+  assert.equal(store.getState().graph.edges[0]?.order, 0);
+});
+
+test("store records multi-operation commits as one autosave group", () => {
+  const store = createCanvasEditorStore(createDefaultCanvasGraph(), 1);
+  const nodeId = store.getState().addNode("note", { x: 0, y: 0 });
+  store.getState().resizeNode(
+    nodeId,
+    { width: 360, height: 240 },
+    { x: 80, y: 120 },
+  );
+  const state = store.getState();
+
+  assert.deepEqual(state.pendingOperationGroupSizes, [1, 2]);
+  assert.equal(
+    takeAtomicAutosaveOperations(
+      state.pendingOperations,
+      state.pendingOperationGroupSizes,
+      2,
+    ).length,
+    1,
+  );
+});
+
+test("large destructive edits are refused when they cannot be undone", () => {
+  const graph = graphWithExtraNodes(
+    createDefaultCanvasGraph(),
+    CANVAS_AUTOSAVE_OPERATION_LIMIT - 1,
+  );
+  const store = createCanvasEditorStore(graph, 1);
+  const nodeIds = store.getState().graph.nodes.map((node) => node.id);
+
+  store.getState().removeNodes(nodeIds);
+
+  assert.equal(store.getState().graph.nodes.length, nodeIds.length);
+  assert.equal(store.getState().pendingOperations.length, 0);
+  assert.equal(
+    store.getState().saveMessage,
+    "一次删除范围过大，请缩小选区后重试。",
   );
 });
 

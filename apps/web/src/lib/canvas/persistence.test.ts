@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import "../../store/chat/moduleResolution.test-helper.mjs";
 
 const {
   canvasSaveBatchMatchesPending,
@@ -12,7 +13,12 @@ const {
   putCanvasEmergencyDraft,
   SerialCanvasDraftWriter,
 } = await import("#canvas-persistence");
-const { createDefaultCanvasGraph } = await import("#canvas-graph");
+const { createDefaultCanvasGraph, createEmptyCanvasGraph } = await import(
+  "#canvas-graph"
+);
+const { createCanvasNode, isCanvasVideoNodeType } = await import(
+  "#canvas-registry"
+);
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -222,6 +228,43 @@ test("emergency drafts round trip synchronously and delete cleanly", () => {
   }
 });
 
+test("emergency recovery accepts legacy unbounded reference ports", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    const graph = createDefaultCanvasGraph();
+    for (let index = 0; index < 17; index += 1) {
+      const source = createCanvasNode("image_asset", { x: 0, y: index * 40 }, {
+        id: `legacy-reference-${index}`,
+        config: { image_id: `image-${index}` },
+      });
+      graph.nodes.push(source);
+      graph.edges.push({
+        id: `legacy-edge-${index}`,
+        source_node_id: source.id,
+        source_handle: "image",
+        target_node_id: "image-generate-1",
+        target_handle: "references",
+        data_type: "image",
+        binding_mode: "follow_active",
+        order: index,
+      });
+    }
+    const draft = {
+      ...emergencyDraft("legacy-cardinality"),
+      graph,
+    };
+
+    assert.equal(putCanvasEmergencyDraft(draft), true);
+    assert.deepEqual(
+      getCanvasEmergencyDraft("legacy-cardinality"),
+      draft,
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("emergency drafts isolate clients sharing the same canvas", () => {
   const storage = new MemoryStorage();
   const restore = installLocalStorage(storage);
@@ -273,6 +316,20 @@ test("emergency draft helpers reject corrupt, invalid, and oversized payloads", 
       putCanvasEmergencyDraft({
         ...emergencyDraft(),
         graph: { nodes: [] } as never,
+      }),
+      false,
+    );
+    assert.equal(
+      putCanvasEmergencyDraft({
+        ...emergencyDraft(),
+        operations: [
+          {
+            op: "update_document_settings",
+            operation_schema_version: 1,
+            settings: { snap_to_grid: true, grid_size: 16 },
+          },
+        ],
+        operation_group_sizes: [2],
       }),
       false,
     );
@@ -352,6 +409,60 @@ test("emergency drafts reject unknown nodes, invalid edges, and oversized graphs
     );
     oversizedGraph.graph.edges = [];
     assert.equal(putCanvasEmergencyDraft(oversizedGraph), false);
+  } finally {
+    restore();
+  }
+});
+
+test("emergency drafts accept pinned outputs from every executable node", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  const executableTypes = [
+    "image_generate",
+    "image_edit",
+    "image_inpaint",
+    "image_upscale",
+    "video_generate",
+    "video_text_generate",
+    "video_image_generate",
+    "video_reference_generate",
+  ] as const;
+  try {
+    for (const [index, type] of executableTypes.entries()) {
+      const source = createCanvasNode(type, { x: 40, y: 40 }, {
+        id: `source-${index}`,
+      });
+      const delivery = createCanvasNode("delivery", { x: 420, y: 40 }, {
+        id: `delivery-${index}`,
+      });
+      const video = isCanvasVideoNodeType(type);
+      const graph = {
+        ...createEmptyCanvasGraph(),
+        nodes: [source, delivery],
+        edges: [
+          {
+            id: `edge-${index}`,
+            source_node_id: source.id,
+            source_handle: video ? "video" : "image",
+            target_node_id: delivery.id,
+            target_handle: video ? "videos" : "images",
+            data_type: video ? "video" as const : "image" as const,
+            binding_mode: "pinned" as const,
+            pinned_execution_id: `execution-${index}`,
+            pinned_output_index: 0,
+            order: 0,
+          },
+        ],
+      };
+      assert.equal(
+        putCanvasEmergencyDraft({
+          ...emergencyDraft(`pinned-${type}`),
+          graph,
+        }),
+        true,
+        type,
+      );
+    }
   } finally {
     restore();
   }

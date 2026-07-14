@@ -15,6 +15,11 @@ import {
   normalizeCanvasGraph,
   validateCanvasConnections,
 } from "#canvas-graph";
+import {
+  canvasNodeConfigIsValid,
+  canvasNodeUiIsValid,
+  isCanvasNodeType,
+} from "#canvas-registry";
 
 export const DEFAULT_SUBGRAPH_OFFSET: CanvasPosition = { x: 32, y: 32 };
 export const CANVAS_CLIPBOARD_PREFIX = "lumen-canvas-subgraph:v1:";
@@ -96,7 +101,7 @@ export function parseCanvasSubgraph(value: string): CanvasSubgraph | null {
     const subgraph = {
       schema_version: 1,
       nodes: normalized.nodes,
-      edges: normalized.edges,
+      edges: normalizeClipboardEdgeOrders(normalized.edges),
     } satisfies CanvasSubgraph;
     assertValidCanvasSubgraph(subgraph);
     return subgraph;
@@ -124,10 +129,12 @@ export function copySubgraph(
         : null,
   }));
   const includedIds = new Set(nodes.map((node) => node.id));
-  const edges = graph.edges.filter(
-    (edge) =>
-      includedIds.has(edge.source_node_id) &&
-      includedIds.has(edge.target_node_id),
+  const edges = normalizeClipboardEdgeOrders(
+    graph.edges.filter(
+      (edge) =>
+        includedIds.has(edge.source_node_id) &&
+        includedIds.has(edge.target_node_id),
+    ),
   );
   return {
     schema_version: 1,
@@ -168,8 +175,8 @@ export function insertSubgraph(
   const nodes = subgraph.nodes.map((node) =>
     remapNode(node, nodeIdMap, targetGroupParents, translation),
   );
-  const edges = internalEdges.map((edge) =>
-    remapEdge(edge, nodeIdMap, edgeIdMap),
+  const edges = normalizeClipboardEdgeOrders(
+    internalEdges.map((edge) => remapEdge(edge, nodeIdMap, edgeIdMap)),
   );
   const nextGraph = {
     ...graph,
@@ -229,6 +236,9 @@ function assertValidCanvasSubgraph(
   if (new Set(edgeIds).size !== edgeIds.length) {
     throw new Error("Canvas subgraph contains duplicate edge IDs");
   }
+  if (!clipboardEdgeOrdersAreSequential(subgraph.edges)) {
+    throw new Error("Canvas subgraph contains non-sequential edge orders");
+  }
   assertValidParents(subgraph.nodes, externalGroupParents);
   const edgeValidation = validateCanvasConnections(
     {
@@ -255,6 +265,46 @@ function internalSubgraphEdges(
     (edge) =>
       nodeIds.has(edge.source_node_id) &&
       nodeIds.has(edge.target_node_id),
+  );
+}
+
+function normalizeClipboardEdgeOrders(
+  edges: CanvasEdgeDefinition[],
+): CanvasEdgeDefinition[] {
+  const groups = new Map<string, CanvasEdgeDefinition[]>();
+  for (const edge of edges) {
+    const key = `${edge.target_node_id}\0${edge.target_handle}`;
+    groups.set(key, [...(groups.get(key) ?? []), edge]);
+  }
+  const normalized = new Map<string, number>();
+  for (const group of groups.values()) {
+    group
+      .sort(
+        (left, right) =>
+          (left.order ?? 0) - (right.order ?? 0) ||
+          left.id.localeCompare(right.id),
+      )
+      .forEach((edge, order) => normalized.set(edge.id, order));
+  }
+  return edges.map((edge) => ({
+    ...structuredClone(edge),
+    order: normalized.get(edge.id) ?? 0,
+  }));
+}
+
+function clipboardEdgeOrdersAreSequential(
+  edges: CanvasEdgeDefinition[],
+): boolean {
+  const groups = new Map<string, number[]>();
+  for (const edge of edges) {
+    const key = `${edge.target_node_id}\0${edge.target_handle}`;
+    groups.set(key, [...(groups.get(key) ?? []), edge.order ?? -1]);
+  }
+  return [...groups.values()].every((orders) =>
+    orders
+      .slice()
+      .sort((left, right) => left - right)
+      .every((order, index) => order === index),
   );
 }
 
@@ -438,6 +488,10 @@ function frameParentEntries(
 }
 
 function assertValidClipboardNode(node: CanvasNodeDefinition): void {
+  const configBytes = canvasJsonByteLength(node.config);
+  if (!clipboardConfigSizeIsValid(configBytes)) {
+    throw new Error(`Canvas clipboard node ${node.id} config is too large`);
+  }
   if (!clipboardNodeShapeIsValid(node)) {
     throw new Error(`Canvas clipboard node ${node.id} is invalid`);
   }
@@ -448,20 +502,16 @@ function assertValidClipboardNode(node: CanvasNodeDefinition): void {
   if (!clipboardParentIdIsValid(node.parent_group_id)) {
     throw new Error(`Canvas clipboard node ${node.id} has invalid parent ID`);
   }
-  const configBytes = canvasJsonByteLength(node.config);
-  if (!clipboardConfigSizeIsValid(configBytes)) {
-    throw new Error(`Canvas clipboard node ${node.id} config is too large`);
-  }
 }
 
 function clipboardNodeShapeIsValid(node: CanvasNodeDefinition): boolean {
   return (
     ENTITY_ID_PATTERN.test(node.id) &&
+    isCanvasNodeType(node.type) &&
     node.schema_version === 1 &&
     typeof node.title === "string" &&
-    Boolean(node.config) &&
-    typeof node.config === "object" &&
-    !Array.isArray(node.config)
+    canvasNodeConfigIsValid(node.type, node.config) &&
+    canvasNodeUiIsValid(node.ui)
   );
 }
 

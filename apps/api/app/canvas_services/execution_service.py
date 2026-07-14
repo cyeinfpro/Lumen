@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any
+import logging
+from typing import Any, Awaitable
 
 from fastapi import Request
 from sqlalchemy import select
@@ -20,6 +22,11 @@ from lumen_core.canvas import (
     canvas_input_hash,
     canvas_node_definition_hash,
 )
+from lumen_core.canvas_schemas import (
+    EXECUTABLE_NODE_TYPES,
+    IMAGE_EXECUTABLE_NODE_TYPES,
+)
+from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 from lumen_core.models import User, VideoGeneration
 from lumen_core.schemas import (
     ImageParamsIn,
@@ -35,15 +42,16 @@ from ..services.task_submission import (
 )
 from ..routes.videos import video_options
 from .api_schemas import CanvasExecuteIn
-from .core_adapter import stable_hash
+from .core_adapter import stable_hash, validated_graph
 from .document_service import get_owned_canvas
 from .errors import canvas_http, idempotency_conflict
-from .graph_resolution import ResolvedNode, resolve_node
+from .graph_resolution import ResolvedNode, find_node, resolve_node
 from .run_event_service import append_run_event
 from .version_service import create_version
 
 
 _PROCESSOR_VERSION = "canvas-api-v1"
+_POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
 _ACTIVE_EXECUTION_STATUSES = (
     "pending",
     "ready",
@@ -52,30 +60,156 @@ _ACTIVE_EXECUTION_STATUSES = (
     "reconciling",
     "canceling",
 )
+logger = logging.getLogger(__name__)
+
+
+async def _await_post_commit_publish(
+    label: str,
+    awaitable: Awaitable[None],
+    *,
+    canvas_id: str,
+    execution_id: str,
+) -> None:
+    """Bound best-effort publishing after the durable task commit."""
+
+    try:
+        await asyncio.wait_for(
+            awaitable,
+            timeout=_POST_COMMIT_PUBLISH_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "canvas publish timeout label=%s canvas=%s execution=%s timeout_s=%.1f",
+            label,
+            canvas_id,
+            execution_id,
+            _POST_COMMIT_PUBLISH_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning(
+            "canvas publish failed label=%s canvas=%s execution=%s",
+            label,
+            canvas_id,
+            execution_id,
+            exc_info=True,
+        )
 
 
 def _image_params(config: dict[str, Any]) -> ImageParamsIn:
-    quality = str(config.get("quality") or "").lower()
-    size = str(config.get("size") or "").lower()
-    resolution = quality if quality in {"1k", "2k", "4k"} else size
-    render_quality = str(config.get("render_quality") or "").lower()
-    if render_quality not in {"auto", "low", "medium", "high"}:
-        render_quality = "medium" if quality == "standard" else "high"
-    return ImageParamsIn.model_validate(
-        {
-            "aspect_ratio": config.get("aspect_ratio") or "1:1",
-            "size_mode": config.get("size_mode") or "auto",
-            "fixed_size": config.get("fixed_size"),
-            "count": int(config.get("count") or 1),
-            "quality": resolution if resolution in {"1k", "2k", "4k"} else "1k",
-            "fast": config.get("fast"),
-            "render_quality": render_quality,
-            "output_format": config.get("output_format") or "webp",
-            "output_compression": config.get("output_compression"),
-            "background": config.get("background") or "auto",
-            "moderation": config.get("moderation") or "low",
-        }
-    )
+    try:
+        quality = str(config.get("quality") or "").lower()
+        size = str(config.get("size") or "").lower()
+        resolution = quality if quality in {"1k", "2k", "4k"} else size
+        render_quality = str(config.get("render_quality") or "").lower()
+        if render_quality not in {"auto", "low", "medium", "high"}:
+            render_quality = "medium" if quality == "standard" else "high"
+        return ImageParamsIn.model_validate(
+            {
+                "aspect_ratio": config.get("aspect_ratio") or "1:1",
+                "size_mode": config.get("size_mode") or "auto",
+                "fixed_size": config.get("fixed_size"),
+                "count": int(config.get("count") or 1),
+                "quality": (resolution if resolution in {"1k", "2k", "4k"} else "1k"),
+                "fast": config.get("fast"),
+                "render_quality": render_quality,
+                "output_format": config.get("output_format") or "webp",
+                "output_compression": config.get("output_compression"),
+                "background": config.get("background") or "auto",
+                "moderation": config.get("moderation") or "low",
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise canvas_http(
+            "canvas_image_config_invalid",
+            "Canvas image node configuration is invalid",
+            422,
+            reason=str(exc),
+        ) from exc
+
+
+def _require_single_image(
+    resolved: ResolvedNode,
+    *,
+    handle: str,
+    node_type: str,
+) -> dict[str, Any]:
+    values = resolved.images_by_handle.get(handle, [])
+    if len(values) != 1:
+        raise canvas_http(
+            "canvas_input_cardinality_invalid",
+            "Canvas image input requires exactly one asset",
+            422,
+            node_type=node_type,
+            target_handle=handle,
+            actual=len(values),
+        )
+    return values[0]
+
+
+def _image_task_inputs(
+    *,
+    node_type: str,
+    resolved: ResolvedNode,
+) -> tuple[list[str], str | None]:
+    attachment_ids: list[str]
+    mask_image_id: str | None
+    if node_type == "image_generate":
+        references = resolved.images_by_handle.get("references", [])
+        masks = resolved.images_by_handle.get("mask", [])
+        if len(masks) > 1:
+            raise canvas_http(
+                "canvas_mask_invalid",
+                "image generation accepts at most one mask",
+                422,
+            )
+        if masks and len(references) != 1:
+            raise canvas_http(
+                "canvas_mask_invalid",
+                "mask requires exactly one reference image",
+                422,
+            )
+        attachment_ids = [item["image_id"] for item in references]
+        mask_image_id = masks[0]["image_id"] if masks else None
+    else:
+        source = _require_single_image(
+            resolved,
+            handle="source",
+            node_type=node_type,
+        )
+        if node_type == "image_edit":
+            references = resolved.images_by_handle.get("references", [])
+            attachment_ids = [
+                source["image_id"],
+                *(item["image_id"] for item in references),
+            ]
+            mask_image_id = None
+        elif node_type == "image_inpaint":
+            mask = _require_single_image(
+                resolved,
+                handle="mask",
+                node_type=node_type,
+            )
+            attachment_ids = [source["image_id"]]
+            mask_image_id = mask["image_id"]
+        elif node_type == "image_upscale":
+            attachment_ids = [source["image_id"]]
+            mask_image_id = None
+        else:
+            raise canvas_http(
+                "canvas_node_not_executable",
+                "node type cannot be executed as an image task",
+                422,
+                node_type=node_type,
+            )
+    if len(attachment_ids) > MAX_MESSAGE_ATTACHMENTS:
+        raise canvas_http(
+            "canvas_input_cardinality_invalid",
+            "Canvas image task exceeds the attachment limit",
+            422,
+            maximum=MAX_MESSAGE_ATTACHMENTS,
+            actual=len(attachment_ids),
+        )
+    return attachment_ids, mask_image_id
 
 
 async def _video_body(
@@ -118,26 +252,36 @@ async def _video_body(
             VideoReferenceMediaIn(kind="video", video_id=item["video_id"])
             for item in reference_videos
         )
-    return VideoCreateIn.model_validate(
-        {
-            "action": action,
-            "model": model,
-            "prompt": resolved.prompt,
-            "input_image_id": (
-                first_frames[0]["image_id"]
-                if action == "i2v" and len(first_frames) == 1
-                else None
-            ),
-            "reference_media": reference_media,
-            "duration_s": int(config.get("duration_s") or config.get("duration") or 5),
-            "resolution": resolution,
-            "aspect_ratio": config.get("aspect_ratio") or "16:9",
-            "generate_audio": bool(config.get("generate_audio", False)),
-            "seed": config.get("seed"),
-            "watermark": bool(config.get("watermark", False)),
-            "idempotency_key": idempotency_key,
-        }
-    )
+    try:
+        return VideoCreateIn.model_validate(
+            {
+                "action": action,
+                "model": model,
+                "prompt": resolved.prompt,
+                "input_image_id": (
+                    first_frames[0]["image_id"]
+                    if action == "i2v" and len(first_frames) == 1
+                    else None
+                ),
+                "reference_media": reference_media,
+                "duration_s": int(
+                    config.get("duration_s") or config.get("duration") or 5
+                ),
+                "resolution": resolution,
+                "aspect_ratio": config.get("aspect_ratio") or "16:9",
+                "generate_audio": bool(config.get("generate_audio", False)),
+                "seed": config.get("seed"),
+                "watermark": bool(config.get("watermark", False)),
+                "idempotency_key": idempotency_key,
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise canvas_http(
+            "canvas_video_config_invalid",
+            "Canvas video node configuration is invalid",
+            422,
+            reason=str(exc),
+        ) from exc
 
 
 async def _selection_fence(
@@ -298,7 +442,15 @@ async def execute_node(
         )
     ).one_or_none()
     if active is not None:
-        return active
+        active_run, active_execution = active
+        raise canvas_http(
+            "canvas_execution_active",
+            "another execution for this Canvas node is still active",
+            409,
+            run_id=active_run.id,
+            execution_id=active_execution.id,
+            status=active_execution.status,
+        )
     if int(canvas.revision) != body.document_revision:
         raise canvas_http(
             "canvas_revision_conflict",
@@ -307,6 +459,16 @@ async def execute_node(
             document_revision=body.document_revision,
             current_revision=int(canvas.revision),
             updated_at=canvas.updated_at,
+        )
+    graph = validated_graph(canvas.graph_jsonb)
+    requested_node = find_node(graph, node_id)
+    node_type = str(requested_node.get("type") or "")
+    if node_type not in EXECUTABLE_NODE_TYPES:
+        raise canvas_http(
+            "canvas_node_not_executable",
+            "node type cannot be executed",
+            422,
+            node_type=node_type,
         )
     list(
         (
@@ -321,17 +483,9 @@ async def execute_node(
         db,
         user=user,
         canvas_id=canvas.id,
-        graph=canvas.graph_jsonb,
+        graph=graph,
         node_id=node_id,
     )
-    node_type = str(resolved.node.get("type") or "")
-    if node_type not in {"image_generate", "video_generate"}:
-        raise canvas_http(
-            "canvas_node_not_executable",
-            "node type cannot be executed",
-            422,
-            node_type=node_type,
-        )
     selection_base_revision = await _selection_fence(
         db,
         canvas_id=canvas.id,
@@ -434,28 +588,18 @@ async def execute_node(
         resolved=resolved,
     )
 
-    if node_type == "image_generate":
-        references = resolved.images_by_handle.get("references", [])
-        masks = resolved.images_by_handle.get("mask", [])
-        if len(masks) > 1:
-            raise canvas_http(
-                "canvas_mask_invalid",
-                "image generation accepts at most one mask",
-                422,
-            )
-        if masks and len(references) != 1:
-            raise canvas_http(
-                "canvas_mask_invalid",
-                "mask requires exactly one reference image",
-                422,
-            )
+    if node_type in IMAGE_EXECUTABLE_NODE_TYPES:
+        attachment_ids, mask_image_id = _image_task_inputs(
+            node_type=node_type,
+            resolved=resolved,
+        )
         submission = await create_canvas_image_task(
             db,
             user=user,
             canvas=canvas,
             prompt=resolved.prompt,
-            attachment_ids=[item["image_id"] for item in references],
-            mask_image_id=masks[0]["image_id"] if masks else None,
+            attachment_ids=attachment_ids,
+            mask_image_id=mask_image_id,
             image_params=_image_params(config),
             idempotency_key=submission_key,
             metadata=metadata,
@@ -482,10 +626,15 @@ async def execute_node(
                 )
             )
         await db.commit()
-        await publish_canvas_image_task(
-            db,
-            user_id=user.id,
-            submission=submission,
+        await _await_post_commit_publish(
+            "image",
+            publish_canvas_image_task(
+                db,
+                user_id=user.id,
+                submission=submission,
+            ),
+            canvas_id=canvas.id,
+            execution_id=execution.id,
         )
         return run, execution
 
@@ -530,5 +679,10 @@ async def execute_node(
         )
     )
     await db.commit()
-    await publish_canvas_video_task(submission=video_submission)
+    await _await_post_commit_publish(
+        "video",
+        publish_canvas_video_task(submission=video_submission),
+        canvas_id=canvas.id,
+        execution_id=execution.id,
+    )
     return run, execution
