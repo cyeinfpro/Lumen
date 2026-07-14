@@ -2,6 +2,7 @@
 
 import {
   Cable,
+  Command,
   Hand,
   MousePointer2,
   Plus,
@@ -28,9 +29,11 @@ const MODES: Array<{
 export function CanvasMobileToolbar({
   onAdd,
   onFitView,
+  onOpenCommandMenu,
 }: {
   onAdd: () => void;
   onFitView: () => void;
+  onOpenCommandMenu: () => void;
 }) {
   const toolMode = useCanvasStore((state) => state.toolMode);
   const setToolMode = useCanvasStore((state) => state.setToolMode);
@@ -39,63 +42,85 @@ export function CanvasMobileToolbar({
   const canUndo = useCanvasStore((state) => state.history.length > 0);
   const canRedo = useCanvasStore((state) => state.future.length > 0);
   return (
-    <div
-      className="absolute bottom-[max(8px,env(safe-area-inset-bottom))] z-20 flex min-h-14 items-center gap-1 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/96 p-1.5 shadow-[var(--shadow-3)] backdrop-blur-xl min-[1200px]:hidden"
+    <nav
+      aria-label="画布工具"
+      className="relative z-[var(--z-tabbar)] w-full shrink-0 overflow-x-auto overscroll-x-contain border-t border-[var(--border)] bg-[var(--surface-chrome)]/96 pt-1.5 shadow-[var(--shadow-1)] backdrop-blur-xl [scrollbar-width:none] min-[1200px]:hidden [&::-webkit-scrollbar]:hidden"
       style={{
-        left: "max(8px, env(safe-area-inset-left, 0px))",
-        right: "max(8px, env(safe-area-inset-right, 0px))",
+        paddingBottom: "max(6px, env(safe-area-inset-bottom, 0px))",
+        paddingLeft: "max(8px, env(safe-area-inset-left, 0px))",
+        paddingRight: "max(8px, env(safe-area-inset-right, 0px))",
       }}
     >
-      <div className="grid min-w-0 flex-1 grid-cols-3 rounded-[var(--radius-control)] bg-[var(--bg-0)] p-1">
-        {MODES.map(({ mode, label, icon: Icon }) => (
-          <button
-            key={mode}
-            type="button"
-            aria-pressed={toolMode === mode}
-            aria-label={label}
-            onClick={() => {
-              blurActiveCanvasEditor();
-              setToolMode(mode);
-            }}
-            className={cn(
-              "inline-flex min-h-11 min-w-0 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-control)] type-caption transition-colors",
-              toolMode === mode
-                ? "bg-[var(--bg-2)] text-[var(--accent)]"
-                : "text-[var(--fg-2)]",
-            )}
-          >
-            <Icon className="h-4 w-4" />
-            <span>{label}</span>
-          </button>
-        ))}
+      <div
+        role="toolbar"
+        className="flex min-w-max touch-pan-x items-center gap-1"
+      >
+        <div
+          role="group"
+          aria-label="画布模式"
+          className="grid w-[132px] shrink-0 grid-cols-3 rounded-[var(--radius-control)] bg-[var(--bg-0)] p-0.5"
+        >
+          {MODES.map(({ mode, label, icon: Icon }) => (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={toolMode === mode}
+              aria-label={label}
+              onClick={() => {
+                blurActiveCanvasEditor();
+                setToolMode(mode);
+              }}
+              data-lumen-interactive="true"
+              className={cn(
+                "inline-flex min-h-11 min-w-11 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-control)] type-caption",
+                "transition-[background-color,color,opacity] duration-[var(--dur-fast)] ease-[var(--ease-develop)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+                toolMode === mode
+                  ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : "text-[var(--fg-2)] active:bg-[var(--bg-2)]",
+              )}
+            >
+              <Icon className="h-4 w-4" />
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+        <ToolbarButton label="添加节点" onClick={onAdd}>
+          <Plus className="h-5 w-5" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="命令菜单"
+          onClick={() => {
+            blurActiveCanvasEditor();
+            onOpenCommandMenu();
+          }}
+        >
+          <Command className="h-5 w-5" />
+        </ToolbarButton>
+        <ToolbarButton label="适应视图" onClick={onFitView}>
+          <Scan className="h-5 w-5" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="撤销"
+          disabled={!canUndo}
+          onClick={() => {
+            blurActiveCanvasEditor();
+            undo();
+          }}
+        >
+          <Undo2 className="h-5 w-5" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="重做"
+          disabled={!canRedo}
+          onClick={() => {
+            blurActiveCanvasEditor();
+            redo();
+          }}
+        >
+          <Redo2 className="h-5 w-5" />
+        </ToolbarButton>
       </div>
-      <ToolbarButton label="添加节点" onClick={onAdd}>
-        <Plus className="h-5 w-5" />
-      </ToolbarButton>
-      <ToolbarButton label="适应视图" onClick={onFitView}>
-        <Scan className="h-5 w-5" />
-      </ToolbarButton>
-      <ToolbarButton
-        label="撤销"
-        disabled={!canUndo}
-        onClick={() => {
-          blurActiveCanvasEditor();
-          undo();
-        }}
-      >
-        <Undo2 className="h-5 w-5" />
-      </ToolbarButton>
-      <ToolbarButton
-        label="重做"
-        disabled={!canRedo}
-        onClick={() => {
-          blurActiveCanvasEditor();
-          redo();
-        }}
-      >
-        <Redo2 className="h-5 w-5" />
-      </ToolbarButton>
-    </div>
+    </nav>
   );
 }
 
@@ -117,7 +142,8 @@ function ToolbarButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] disabled:opacity-40"
+      data-lumen-interactive={disabled ? undefined : "true"}
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-[background-color,color,opacity] duration-[var(--dur-fast)] ease-[var(--ease-develop)] active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] disabled:pointer-events-none disabled:opacity-40"
     >
       {children}
     </button>

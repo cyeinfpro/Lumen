@@ -5,18 +5,22 @@ import {
   BackgroundVariant,
   MiniMap,
   ReactFlow,
+  type AriaLabelConfig,
   type Connection,
   type Edge,
   type NodeChange,
+  type OnConnectEnd,
   type OnConnectStartParams,
   type OnSelectionChangeParams,
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Cable, X } from "lucide-react";
+import { useReducedMotion } from "framer-motion";
+import { Cable, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { DURATION } from "@/lib/motion";
 import {
   blurActiveCanvasEditor,
   canvasNodeZIndex,
@@ -29,42 +33,113 @@ import {
   deliveryOutputsForNode,
   latestExecutionsByNode,
 } from "@/lib/canvas/runtime";
-import { validateCanvasConnection } from "@/lib/canvas/graph";
+import {
+  validateCanvasConnections,
+  type CanvasConnectionInput,
+} from "@/lib/canvas/graph";
 import type {
   CanvasDataType,
   CanvasDocument,
+  CanvasEdgeDefinition,
   CanvasGraph,
   CanvasNodeDefinition,
   CanvasNodeExecution,
   CanvasNodeType,
   CanvasOutput,
+  CanvasPosition,
+  CanvasSize,
+  CanvasToolMode,
   ConnectionDraft,
 } from "@/lib/canvas/types";
 import { toast } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { useCanvasStore } from "./CanvasStoreProvider";
-import {
-  canvasNodeTypes,
-  type CanvasFlowNode,
-} from "./nodes/CanvasNodes";
+import { CanvasViewportControls } from "./CanvasViewportControls";
+import { canvasNodeTypes, type CanvasFlowNode } from "./nodes/CanvasNodes";
 import styles from "./canvas.module.css";
 
 export interface CanvasViewportApi {
   fitView: () => void;
+  fitSelection: (nodeIds?: readonly string[]) => void;
+  focusNode: (nodeId: string) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  resetZoom: () => void;
+  toggleMiniMap: () => void;
+  getZoom: () => number;
   getViewportCenter: () => { x: number; y: number };
 }
+
+export interface CanvasViewportActionRequest {
+  position: { x: number; y: number };
+  clientPosition: { x: number; y: number };
+  trigger:
+    | "empty-state"
+    | "pane-double-click"
+    | "connection-drop"
+    | "pane-context-menu"
+    | "node-context-menu"
+    | "edge-context-menu";
+  connectionDraft: ConnectionDraft | null;
+  nodeId?: string;
+  edgeId?: string;
+}
+
+export interface CanvasViewportProps {
+  document: CanvasDocument;
+  onRunNode: (nodeId: string) => void;
+  onReady?: (api: CanvasViewportApi) => void;
+  onOpenInspector?: () => void;
+  onOpenQuickAdd?: (request: CanvasViewportActionRequest) => void;
+  onOpenContextMenu?: (request: CanvasViewportActionRequest) => void;
+}
+
+interface CanvasViewportPreferences {
+  isCompact: boolean;
+  reducedMotion: boolean;
+  selectedNodeIds: readonly string[];
+}
+
+interface CanvasNodeGeometry {
+  position: CanvasPosition;
+  size: CanvasSize;
+}
+
+interface ConnectionCompatibility {
+  handlesByNode: Map<string, string[]>;
+  targets: CompatibleTarget[];
+}
+
+const DESKTOP_MIN_ZOOM = 0.15;
+const COMPACT_MIN_ZOOM = 0.08;
+const MAX_ZOOM = 2.4;
+const VIEWPORT_ANIMATION_DURATION = Math.round(DURATION.panel * 1_000);
+const MINIMAP_NODE_THRESHOLD = 24;
+
+const CANVAS_ARIA_LABEL_CONFIG = {
+  "node.a11yDescription.default": "按回车键选择节点，使用方向键移动节点。",
+  "node.a11yDescription.keyboardDisabled": "这是画布中的一个节点。",
+  "node.a11yDescription.ariaLiveMessage": ({ direction, x, y }) =>
+    `节点已向${canvasDirectionLabel(direction)}移动，当前位置横坐标 ${Math.round(x)}，纵坐标 ${Math.round(y)}。`,
+  "edge.a11yDescription.default":
+    "按回车键选择连接，按退格键或删除键移除连接。",
+  "controls.ariaLabel": "画布视图控制",
+  "controls.zoomIn.ariaLabel": "放大画布",
+  "controls.zoomOut.ariaLabel": "缩小画布",
+  "controls.fitView.ariaLabel": "适应全部节点",
+  "controls.interactive.ariaLabel": "切换画布交互",
+  "minimap.ariaLabel": "画布缩略导航",
+  "handle.ariaLabel": "节点连接端口",
+} satisfies Partial<AriaLabelConfig>;
 
 export function CanvasViewport({
   document,
   onRunNode,
   onReady,
   onOpenInspector,
-}: {
-  document: CanvasDocument;
-  onRunNode: (nodeId: string) => void;
-  onReady?: (api: CanvasViewportApi) => void;
-  onOpenInspector?: () => void;
-}) {
+  onOpenQuickAdd,
+  onOpenContextMenu,
+}: CanvasViewportProps) {
   const graph = useCanvasStore((state) => state.graph);
   const selectedNodeIds = useCanvasStore((state) => state.selectedNodeIds);
   const selectedEdgeId = useCanvasStore((state) => state.selectedEdgeId);
@@ -85,24 +160,148 @@ export function CanvasViewport({
   const removeElements = useCanvasStore((state) => state.removeElements);
   const addEdge = useCanvasStore((state) => state.addEdge);
   const addNode = useCanvasStore((state) => state.addNode);
-  const setConnectionDraft = useCanvasStore((state) => state.setConnectionDraft);
+  const setConnectionDraft = useCanvasStore(
+    (state) => state.setConnectionDraft,
+  );
   const beginInteraction = useCanvasStore((state) => state.beginInteraction);
   const endInteraction = useCanvasStore((state) => state.endInteraction);
+  const resizeNode = useCanvasStore((state) => state.resizeNode);
+  const updateDocumentSettings = useCanvasStore(
+    (state) => state.updateDocumentSettings,
+  );
   const isCompact = useMediaQuery("(max-width: 1199px)") !== false;
+  const reducedMotion = Boolean(useReducedMotion());
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const interactionActiveRef = useRef(false);
-  const instanceRef =
-    useRef<ReactFlowInstance<CanvasFlowNode, Edge> | null>(null);
+  const cancelledConnectionRef = useRef(false);
+  const resizingNodeIdsRef = useRef(new Set<string>());
+  const connectionDraftRef = useRef(connectionDraft);
+  const instanceRef = useRef<ReactFlowInstance<CanvasFlowNode, Edge> | null>(
+    null,
+  );
   const editorFocusRequestRef = useRef(0);
-  const [instance, setInstance] =
-    useState<ReactFlowInstance<CanvasFlowNode, Edge> | null>(null);
+  const connectionDropPositionRef = useRef<{ x: number; y: number } | null>(
+    null,
+  );
+  const suppressPaneClickRef = useRef(false);
+  const suppressPaneClickTimerRef = useRef<number | null>(null);
+  const [instance, setInstance] = useState<ReactFlowInstance<
+    CanvasFlowNode,
+    Edge
+  > | null>(null);
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [miniMapVisible, setMiniMapVisible] = useState(
+    () =>
+      graph.nodes.length + Math.ceil(graph.edges.length / 2) >=
+      MINIMAP_NODE_THRESHOLD,
+  );
   const [transientPositions, setTransientPositions] = useState<
     Record<string, { x: number; y: number }>
   >({});
   const [measuredDimensions, setMeasuredDimensions] = useState<
     Record<string, { width: number; height: number }>
   >({});
+  const selectedNodeIdSet = useMemo(
+    () => new Set(selectedNodeIds),
+    [selectedNodeIds],
+  );
+  const snapToGrid = graph.settings.snap_to_grid;
+  const snapGrid = useMemo<[number, number]>(() => {
+    const gridSize = Math.max(1, Math.round(graph.settings.grid_size));
+    return [gridSize, gridSize];
+  }, [graph.settings.grid_size]);
+  const minimumZoom = canvasMinimumZoom(isCompact);
+  const showMiniMap = shouldShowMiniMap(
+    isCompact,
+    miniMapVisible,
+    graph.nodes.length,
+  );
+  const viewportPreferencesRef = useRef<CanvasViewportPreferences>({
+    isCompact,
+    reducedMotion,
+    selectedNodeIds,
+  });
+
+  useEffect(() => {
+    viewportPreferencesRef.current = {
+      isCompact,
+      reducedMotion,
+      selectedNodeIds,
+    };
+  }, [isCompact, reducedMotion, selectedNodeIds]);
+
+  useEffect(() => {
+    connectionDraftRef.current = connectionDraft;
+  }, [connectionDraft]);
+
+  const updateConnectionDraft = useCallback(
+    (draft: ConnectionDraft | null) => {
+      connectionDraftRef.current = draft;
+      setConnectionDraft(draft);
+    },
+    [setConnectionDraft],
+  );
+
+  const clearTransientNodeState = useCallback(
+    (nodeIds?: readonly string[]) => {
+      if (!nodeIds) {
+        setTransientPositions({});
+        setMeasuredDimensions({});
+        return;
+      }
+      setTransientPositions((current) =>
+        updateCanvasTransientPositions(current, [], nodeIds),
+      );
+      setMeasuredDimensions((current) =>
+        omitCanvasNodeMeasurements(current, nodeIds),
+      );
+    },
+    [],
+  );
+
+  const startInteraction = useCallback(() => {
+    if (interactionActiveRef.current) return;
+    interactionActiveRef.current = true;
+    beginInteraction();
+  }, [beginInteraction]);
+
+  const finishInteraction = useCallback(
+    (nodes: CanvasFlowNode[] = []) => {
+      if (nodes.length > 0) {
+        const positions = nodes.map((node) => ({
+          nodeId: node.id,
+          position: node.position,
+        }));
+        clearTransientNodeState(positions.map((item) => item.nodeId));
+        moveNodes(positions);
+      }
+      if (!interactionActiveRef.current) return;
+      interactionActiveRef.current = false;
+      endInteraction();
+    },
+    [clearTransientNodeState, endInteraction, moveNodes],
+  );
+
+  const startFrameResize = useCallback(
+    (nodeId: string) => {
+      resizingNodeIdsRef.current.add(nodeId);
+      startInteraction();
+    },
+    [startInteraction],
+  );
+
+  const commitFrameResize = useCallback(
+    (nodeId: string, geometry: CanvasNodeGeometry) => {
+      if (!cancelledConnectionRef.current) {
+        resizeNode(nodeId, geometry.size, geometry.position);
+      }
+      resizingNodeIdsRef.current.delete(nodeId);
+      clearTransientNodeState([nodeId]);
+      finishInteraction();
+    },
+    [clearTransientNodeState, finishInteraction, resizeNode],
+  );
 
   const focusNodeEditor = useCallback(
     (nodeId: string) => {
@@ -140,12 +339,12 @@ export function CanvasViewport({
           padding: 0.42,
           minZoom: 0.9,
           maxZoom: 1.08,
-          duration: 220,
+          duration: viewportAnimationDuration(reducedMotion),
         });
       };
       zoomWhenReady();
     },
-    [beginNodeEdit, selectNode],
+    [beginNodeEdit, reducedMotion, selectNode],
   );
   const finishNodeEditor = useCallback(
     (nodeId: string) => {
@@ -168,19 +367,20 @@ export function CanvasViewport({
       }),
     [document.recent_executions, document.selections, graph],
   );
-  const compatibleTargets = useMemo(
-    () => listCompatibleTargets(graph, connectionDraft),
+  const connectionCompatibility = useMemo(
+    () => buildConnectionCompatibility(graph, connectionDraft),
     [connectionDraft, graph],
   );
   const startClickConnection = useCallback(
     (nodeId: string, handleId: string, dataType: CanvasDataType) => {
-      if (!isCompact || toolMode !== "connect") return;
+      if (isCompact && toolMode !== "connect") return;
+      if (!isCompact && toolMode !== "select") return;
       blurActiveCanvasEditor();
       setTargetPickerOpen(false);
       const sameSource =
-        connectionDraft?.sourceNodeId === nodeId &&
-        connectionDraft.sourceHandle === handleId;
-      setConnectionDraft(
+        connectionDraftRef.current?.sourceNodeId === nodeId &&
+        connectionDraftRef.current.sourceHandle === handleId;
+      updateConnectionDraft(
         sameSource
           ? null
           : {
@@ -190,85 +390,105 @@ export function CanvasViewport({
             },
       );
     },
-    [connectionDraft, isCompact, setConnectionDraft, toolMode],
+    [isCompact, toolMode, updateConnectionDraft],
+  );
+  const completeClickConnection = useCallback(
+    (targetNodeId: string, targetHandle: string) => {
+      const draft = connectionDraftRef.current;
+      if (!draft) return;
+      const result = addEdge({
+        sourceNodeId: draft.sourceNodeId,
+        sourceHandle: draft.sourceHandle,
+        targetNodeId,
+        targetHandle,
+      });
+      if (!result.ok) toast.error(result.reason);
+      updateConnectionDraft(null);
+    },
+    [addEdge, updateConnectionDraft],
   );
 
-  const projectedNodes = useMemo<CanvasFlowNode[]>(
-    () => {
-      const connectable = !isCompact || toolMode === "connect";
-      const editingEnabled =
-        toolMode === "select" && connectionDraft === null;
-      return graph.nodes.map((node) => {
-        const dimensions = canvasFlowNodeDimensions(node);
-        return {
-          id: node.id,
-          type: node.type,
-          position: node.position,
-          selected: selectedNodeIds.includes(node.id),
-          ariaLabel: `${CANVAS_NODE_SPECS[node.type].label}节点：${node.title}`,
-          draggable: toolMode === "select",
-          dragHandle: ".canvas-node-drag-handle",
-          connectable,
-          zIndex: canvasNodeZIndex(node.type),
-          initialWidth: dimensions.width,
-          initialHeight: dimensions.height,
-          measured: measuredDimensions[node.id],
-          style: {
-            width: dimensions.width,
-            height: dimensions.styleHeight,
-          },
-          data: {
-            definition: node,
-            execution: executions.get(node.id) ?? null,
-            activeOutput: activeOutputs.get(node.id) ?? null,
-            deliveryOutputs: canvasNodeDeliveryOutputs(
-              graph,
-              node,
-              activeOutputs,
-              document.recent_executions,
-            ),
-            connectionType: connectionDraft?.dataType ?? null,
-            compatibleInputHandles: compatibleInputHandlesForNode(
-              graph,
-              node,
-              connectionDraft,
-            ),
-            onRun: onRunNode,
-            onUpdateConfig: updateNodeConfig,
-            onUpdateTitle: updateNodeTitle,
-            onEditFocus: focusNodeEditor,
-            onEditBlur: finishNodeEditor,
-            onConfigEditStart: beginNodeConfigEdit,
-            onConfigEditEnd: endNodeConfigEdit,
-            onStartConnection:
-              isCompact && toolMode === "connect"
-                ? startClickConnection
-                : undefined,
-            editingEnabled,
-          },
-        };
-      });
-    },
-    [
-      activeOutputs,
-      beginNodeConfigEdit,
-      connectionDraft,
-      document.recent_executions,
-      endNodeConfigEdit,
-      executions,
-      finishNodeEditor,
-      focusNodeEditor,
-      graph,
+  const projectedNodes = useMemo<CanvasFlowNode[]>(() => {
+    const connectable = !isCompact || toolMode === "connect";
+    const clickConnectionEnabled = canvasClickConnectionEnabled(
       isCompact,
-      measuredDimensions,
-      onRunNode,
-      selectedNodeIds,
-      startClickConnection,
       toolMode,
-      updateNodeConfig,
-      updateNodeTitle,
-    ],
-  );
+    );
+    const editingEnabled = toolMode === "select" && connectionDraft === null;
+    return graph.nodes.map((node) => {
+      const dimensions = canvasFlowNodeDimensions(node);
+      return {
+        id: node.id,
+        type: node.type,
+        position: node.position,
+        selected: selectedNodeIdSet.has(node.id),
+        ariaLabel: `${CANVAS_NODE_SPECS[node.type].label}节点：${node.title}`,
+        draggable: toolMode === "select",
+        dragHandle: ".canvas-node-drag-handle",
+        connectable,
+        zIndex: canvasNodeZIndex(node.type),
+        initialWidth: dimensions.width,
+        initialHeight: dimensions.height,
+        measured: measuredDimensions[node.id],
+        style: {
+          width: dimensions.width,
+          height: dimensions.styleHeight,
+        },
+        data: {
+          definition: node,
+          execution: executions.get(node.id) ?? null,
+          activeOutput: activeOutputs.get(node.id) ?? null,
+          deliveryOutputs: canvasNodeDeliveryOutputs(
+            graph,
+            node,
+            activeOutputs,
+            document.recent_executions,
+          ),
+          connectionType: connectionDraft?.dataType ?? null,
+          compatibleInputHandles:
+            connectionCompatibility.handlesByNode.get(node.id) ?? [],
+          onRun: onRunNode,
+          onUpdateConfig: updateNodeConfig,
+          onUpdateTitle: updateNodeTitle,
+          onResizeStart: startFrameResize,
+          onResizeEnd: commitFrameResize,
+          onEditFocus: focusNodeEditor,
+          onEditBlur: finishNodeEditor,
+          onConfigEditStart: beginNodeConfigEdit,
+          onConfigEditEnd: endNodeConfigEdit,
+          onStartConnection: clickConnectionEnabled
+            ? startClickConnection
+            : undefined,
+          onCompleteConnection: clickConnectionEnabled
+            ? completeClickConnection
+            : undefined,
+          editingEnabled,
+        },
+      };
+    });
+  }, [
+    activeOutputs,
+    beginNodeConfigEdit,
+    completeClickConnection,
+    commitFrameResize,
+    connectionDraft,
+    connectionCompatibility.handlesByNode,
+    document.recent_executions,
+    endNodeConfigEdit,
+    executions,
+    finishNodeEditor,
+    focusNodeEditor,
+    graph,
+    isCompact,
+    measuredDimensions,
+    onRunNode,
+    selectedNodeIdSet,
+    startFrameResize,
+    startClickConnection,
+    toolMode,
+    updateNodeConfig,
+    updateNodeTitle,
+  ]);
 
   const flowNodes = useMemo(
     () =>
@@ -281,6 +501,10 @@ export function CanvasViewport({
     [projectedNodes, transientPositions],
   );
 
+  const graphNodesById = useMemo(
+    () => new Map(graph.nodes.map((node) => [node.id, node])),
+    [graph.nodes],
+  );
   const flowEdges = useMemo<Edge[]>(
     () =>
       graph.edges.map((edge) => ({
@@ -291,9 +515,10 @@ export function CanvasViewport({
         targetHandle: edge.target_handle,
         selected: edge.id === selectedEdgeId,
         label: edge.role || undefined,
+        ariaLabel: canvasEdgeAriaLabel(graphNodesById, edge),
         type: "smoothstep",
       })),
-    [graph.edges, selectedEdgeId],
+    [graph.edges, graphNodesById, selectedEdgeId],
   );
 
   const onNodesChange = useCallback(
@@ -311,6 +536,10 @@ export function CanvasViewport({
           let next = current;
           for (const change of dimensionChanges) {
             if (!change.dimensions) continue;
+            if (change.resizing === false) {
+              next = omitCanvasNodeMeasurements(next, [change.id]);
+              continue;
+            }
             const previous = next[change.id];
             if (
               previous?.width === change.dimensions.width &&
@@ -327,16 +556,34 @@ export function CanvasViewport({
       const positionChanges = changes.filter(
         (
           change,
-        ): change is Extract<NodeChange<CanvasFlowNode>, { type: "position" }> =>
-          change.type === "position" && Boolean(change.position),
+        ): change is Extract<
+          NodeChange<CanvasFlowNode>,
+          { type: "position" }
+        > => change.type === "position" && Boolean(change.position),
+      );
+      const resizePositionChanges = positionChanges.filter((change) =>
+        resizingNodeIdsRef.current.has(change.id),
       );
       const { transient, settled } =
-        splitCanvasNodePositionChanges(positionChanges);
-      if (transient.length > 0 || settled.length > 0) {
+        splitCanvasNodePositionChanges(
+          positionChanges.filter(
+            (change) => !resizingNodeIdsRef.current.has(change.id),
+          ),
+        );
+      const resizeTransient = resizePositionChanges.flatMap((change) =>
+        change.position
+          ? [{ nodeId: change.id, position: change.position }]
+          : [],
+      );
+      if (
+        transient.length > 0 ||
+        resizeTransient.length > 0 ||
+        settled.length > 0
+      ) {
         setTransientPositions((current) => {
           return updateCanvasTransientPositions(
             current,
-            transient,
+            [...transient, ...resizeTransient],
             settled.map((item) => item.nodeId),
           );
         });
@@ -356,18 +603,30 @@ export function CanvasViewport({
       ) {
         return false;
       }
-      return validateCanvasConnection(graph, {
+      return canvasConnectionIsValid(graph, {
         sourceNodeId: connection.source,
         sourceHandle: connection.sourceHandle,
         targetNodeId: connection.target,
         targetHandle: connection.targetHandle,
-      }).valid;
+      });
     },
     [graph],
   );
 
+  const addNodeWithFeedback = useCallback(
+    (type: CanvasNodeType, position: CanvasPosition) => {
+      const nodeId = addNode(type, position);
+      if (!nodeId) {
+        toast.error("画布已达到节点或存储大小上限");
+      }
+      return nodeId;
+    },
+    [addNode],
+  );
+
   const onConnect = useCallback(
     (connection: Connection) => {
+      if (cancelledConnectionRef.current) return;
       if (
         !connection.source ||
         !connection.target ||
@@ -383,15 +642,18 @@ export function CanvasViewport({
         targetHandle: connection.targetHandle,
       });
       if (!result.ok) toast.error(result.reason);
-      setConnectionDraft(null);
+      updateConnectionDraft(null);
     },
-    [addEdge, setConnectionDraft],
+    [addEdge, updateConnectionDraft],
   );
 
   const onConnectStart = useCallback(
     (_event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
-      if (!params.nodeId || !params.handleId || params.handleType !== "source") return;
+      if (!params.nodeId || !params.handleId || params.handleType !== "source")
+        return;
+      cancelledConnectionRef.current = false;
       blurActiveCanvasEditor();
+      connectionDropPositionRef.current = null;
       const node = graph.nodes.find((item) => item.id === params.nodeId);
       const port = node
         ? CANVAS_NODE_SPECS[node.type].outputs.find(
@@ -399,21 +661,19 @@ export function CanvasViewport({
           )
         : null;
       if (!port) return;
+      startInteraction();
       setTargetPickerOpen(false);
-      setConnectionDraft({
+      updateConnectionDraft({
         sourceNodeId: params.nodeId,
         sourceHandle: params.handleId,
         dataType: port.dataType,
       });
     },
-    [graph.nodes, setConnectionDraft],
+    [graph.nodes, startInteraction, updateConnectionDraft],
   );
 
   const handleSelectionChange = useCallback(
-    ({
-      nodes,
-      edges,
-    }: OnSelectionChangeParams<CanvasFlowNode, Edge>) => {
+    ({ nodes, edges }: OnSelectionChangeParams<CanvasFlowNode, Edge>) => {
       if (edges.length > 0) {
         selectEdge(edges.at(-1)?.id ?? null);
         return;
@@ -427,7 +687,7 @@ export function CanvasViewport({
     (event: React.MouseEvent, node: CanvasFlowNode) => {
       if (event.shiftKey) {
         selectNodes(
-          selectedNodeIds.includes(node.id)
+          selectedNodeIdSet.has(node.id)
             ? selectedNodeIds.filter((nodeId) => nodeId !== node.id)
             : [...selectedNodeIds, node.id],
         );
@@ -435,7 +695,7 @@ export function CanvasViewport({
       }
       selectNodes([node.id]);
     },
-    [selectNodes, selectedNodeIds],
+    [selectNodes, selectedNodeIdSet, selectedNodeIds],
   );
 
   const handleDrop = useCallback(
@@ -445,24 +705,238 @@ export function CanvasViewport({
         "application/lumen-canvas-node",
       ) as CanvasNodeType;
       if (!type || !(type in CANVAS_NODE_SPECS) || !instance) return;
-      const position = instance.screenToFlowPosition({
-        x: event.clientX,
-        y: event.clientY,
-      });
-      addNode(type, position);
+      const position = instance.screenToFlowPosition(
+        {
+          x: event.clientX,
+          y: event.clientY,
+        },
+        {
+          snapToGrid,
+          snapGrid,
+        },
+      );
+      addNodeWithFeedback(type, position);
     },
-    [addNode, instance],
+    [addNodeWithFeedback, instance, snapGrid, snapToGrid],
   );
+
+  const createActionRequest = useCallback(
+    (
+      clientPosition: { x: number; y: number },
+      trigger: CanvasViewportActionRequest["trigger"],
+      draft: ConnectionDraft | null = connectionDraftRef.current,
+      target: Pick<CanvasViewportActionRequest, "nodeId" | "edgeId"> = {},
+    ): CanvasViewportActionRequest | null => {
+      const current = instanceRef.current;
+      if (!current) return null;
+      return {
+        position: current.screenToFlowPosition(clientPosition, {
+          snapToGrid,
+          snapGrid,
+        }),
+        clientPosition,
+        trigger,
+        connectionDraft: draft,
+        ...target,
+      };
+    },
+    [snapGrid, snapToGrid],
+  );
+
+  const openQuickAdd = useCallback(
+    (request: CanvasViewportActionRequest, fallbackToPrompt = false) => {
+      if (onOpenQuickAdd) {
+        onOpenQuickAdd(request);
+        return;
+      }
+      if (fallbackToPrompt) {
+        addNodeWithFeedback("prompt", request.position);
+      }
+    },
+    [addNodeWithFeedback, onOpenQuickAdd],
+  );
+
+  const handlePaneClick = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      selectNode(null);
+      selectEdge(null);
+      const suppressDraftReset = suppressPaneClickRef.current;
+      suppressPaneClickRef.current = false;
+      if (!suppressDraftReset) updateConnectionDraft(null);
+      if (event.detail !== 2) return;
+      const request = createActionRequest(
+        { x: event.clientX, y: event.clientY },
+        "pane-double-click",
+      );
+      if (request) openQuickAdd(request, true);
+    },
+    [
+      createActionRequest,
+      openQuickAdd,
+      selectEdge,
+      selectNode,
+      updateConnectionDraft,
+    ],
+  );
+
+  const handlePaneContextMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      if (!onOpenContextMenu) return;
+      event.preventDefault();
+      const request = createActionRequest(
+        { x: event.clientX, y: event.clientY },
+        "pane-context-menu",
+      );
+      if (request) onOpenContextMenu(request);
+    },
+    [createActionRequest, onOpenContextMenu],
+  );
+
+  const handleNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: CanvasFlowNode) => {
+      if (!onOpenContextMenu) return;
+      event.preventDefault();
+      selectNodes([node.id]);
+      const request = createActionRequest(
+        { x: event.clientX, y: event.clientY },
+        "node-context-menu",
+        connectionDraftRef.current,
+        { nodeId: node.id },
+      );
+      if (request) onOpenContextMenu(request);
+    },
+    [createActionRequest, onOpenContextMenu, selectNodes],
+  );
+
+  const handleEdgeContextMenu = useCallback(
+    (event: React.MouseEvent, edge: Edge) => {
+      if (!onOpenContextMenu) return;
+      event.preventDefault();
+      selectEdge(edge.id);
+      const request = createActionRequest(
+        { x: event.clientX, y: event.clientY },
+        "edge-context-menu",
+        connectionDraftRef.current,
+        { edgeId: edge.id },
+      );
+      if (request) onOpenContextMenu(request);
+    },
+    [createActionRequest, onOpenContextMenu, selectEdge],
+  );
+
+  const handleConnectEnd = useCallback<OnConnectEnd>(
+    (event, connectionState) => {
+      try {
+        if (cancelledConnectionRef.current) {
+          cancelledConnectionRef.current = false;
+          connectionDropPositionRef.current = null;
+          updateConnectionDraft(null);
+          return;
+        }
+        if (connectionState.isValid) {
+          connectionDropPositionRef.current = null;
+          return;
+        }
+        const draft = connectionDraftRef.current;
+        const clientPosition = pointerClientPosition(event);
+        if (draft && connectionState.toNode === null && clientPosition) {
+          const request = createActionRequest(
+            clientPosition,
+            "connection-drop",
+            draft,
+          );
+          if (request) {
+            connectionDropPositionRef.current = request.position;
+            suppressPaneClickRef.current = true;
+            if (suppressPaneClickTimerRef.current !== null) {
+              window.clearTimeout(suppressPaneClickTimerRef.current);
+            }
+            suppressPaneClickTimerRef.current = window.setTimeout(() => {
+              suppressPaneClickRef.current = false;
+              suppressPaneClickTimerRef.current = null;
+            }, 0);
+            onOpenQuickAdd?.(request);
+            return;
+          }
+        }
+        if (!isCompact || toolMode !== "connect") {
+          window.setTimeout(() => updateConnectionDraft(null), 0);
+        }
+      } finally {
+        finishInteraction();
+      }
+    },
+    [
+      createActionRequest,
+      finishInteraction,
+      isCompact,
+      onOpenQuickAdd,
+      toolMode,
+      updateConnectionDraft,
+    ],
+  );
+
+  const handleEmptyQuickAdd = useCallback(() => {
+    const bounds = flowViewportBounds(viewportRef.current);
+    if (!bounds) return;
+    const request = createActionRequest(
+      {
+        x: bounds.left + bounds.width / 2,
+        y: bounds.top + bounds.height / 2,
+      },
+      "empty-state",
+      null,
+    );
+    if (request) openQuickAdd(request, true);
+  }, [createActionRequest, openQuickAdd]);
 
   const handleInit = useCallback(
     (next: ReactFlowInstance<CanvasFlowNode, Edge>) => {
       instanceRef.current = next;
       setInstance(next);
       onReady?.({
-        fitView: () =>
-          void next.fitView({ padding: 0.18, duration: 240 }),
+        fitView: () => fitCanvasViewport(next, viewportPreferencesRef.current),
+        fitSelection: (nodeIds) => {
+          const ids = nodeIds ?? viewportPreferencesRef.current.selectedNodeIds;
+          const nodes = ids
+            .map((nodeId) => next.getNode(nodeId))
+            .filter((node): node is CanvasFlowNode => Boolean(node));
+          if (nodes.length === 0) return;
+          fitCanvasViewport(
+            next,
+            viewportPreferencesRef.current,
+            nodes,
+            0.26,
+            1.2,
+          );
+        },
+        focusNode: (nodeId) =>
+          focusCanvasNode(next, nodeId, viewportPreferencesRef.current),
+        zoomIn: () => {
+          void next.zoomIn({
+            duration: viewportAnimationDuration(
+              viewportPreferencesRef.current.reducedMotion,
+            ),
+          });
+        },
+        zoomOut: () => {
+          void next.zoomOut({
+            duration: viewportAnimationDuration(
+              viewportPreferencesRef.current.reducedMotion,
+            ),
+          });
+        },
+        resetZoom: () => {
+          void next.zoomTo(1, {
+            duration: viewportAnimationDuration(
+              viewportPreferencesRef.current.reducedMotion,
+            ),
+          });
+        },
+        toggleMiniMap: () => setMiniMapVisible((current) => !current),
+        getZoom: () => next.getZoom(),
         getViewportCenter: () => {
-          const bounds = viewportRef.current?.getBoundingClientRect();
+          const bounds = flowViewportBounds(viewportRef.current);
           if (!bounds) return { x: 0, y: 0 };
           return next.screenToFlowPosition({
             x: bounds.left + bounds.width / 2,
@@ -474,39 +948,33 @@ export function CanvasViewport({
     [onReady],
   );
 
-  const startInteraction = useCallback(() => {
-    if (interactionActiveRef.current) return;
-    interactionActiveRef.current = true;
-    beginInteraction();
-  }, [beginInteraction]);
+  const cancelDomainInteraction = useCallback(() => {
+    updateConnectionDraft(null);
+    setTargetPickerOpen(false);
+    resizingNodeIdsRef.current.clear();
+    clearTransientNodeState();
+    finishInteraction();
+  }, [clearTransientNodeState, finishInteraction, updateConnectionDraft]);
 
-  const finishInteraction = useCallback(
-    (nodes: CanvasFlowNode[] = []) => {
-      if (nodes.length > 0) {
-        const positions = nodes.map((node) => ({
-          nodeId: node.id,
-          position: node.position,
-        }));
-        setTransientPositions((current) =>
-          updateCanvasTransientPositions(
-            current,
-            [],
-            positions.map((item) => item.nodeId),
-          ),
-        );
-        moveNodes(positions);
-      }
-      if (!interactionActiveRef.current) return;
-      interactionActiveRef.current = false;
-      endInteraction();
+  const handleTouchCancel = useCallback(
+    (event: React.TouchEvent<HTMLDivElement>) => {
+      cancelledConnectionRef.current = true;
+      event.currentTarget.ownerDocument.dispatchEvent(
+        new Event("touchend", { bubbles: true, cancelable: true }),
+      );
+      cancelDomainInteraction();
     },
-    [endInteraction, moveNodes],
+    [cancelDomainInteraction],
   );
 
   useEffect(
     () => () => {
       editorFocusRequestRef.current += 1;
       instanceRef.current = null;
+      if (suppressPaneClickTimerRef.current !== null) {
+        window.clearTimeout(suppressPaneClickTimerRef.current);
+      }
+      resizingNodeIdsRef.current.clear();
       if (interactionActiveRef.current) endInteraction();
     },
     [endInteraction],
@@ -516,6 +984,7 @@ export function CanvasViewport({
     if (toolMode !== "select" || connectionDraft) {
       editorFocusRequestRef.current += 1;
     }
+    if (!connectionDraft) connectionDropPositionRef.current = null;
   }, [connectionDraft, toolMode]);
 
   return (
@@ -523,10 +992,17 @@ export function CanvasViewport({
       ref={viewportRef}
       className={styles.viewport}
       onDrop={handleDrop}
-      onPointerCancel={() => {
-        setConnectionDraft(null);
-        finishInteraction();
+      onPointerCancelCapture={() => {
+        cancelledConnectionRef.current = true;
       }}
+      onTouchCancelCapture={() => {
+        cancelledConnectionRef.current = true;
+      }}
+      onPointerCancel={(event) => {
+        if (event.pointerType === "touch") return;
+        cancelDomainInteraction();
+      }}
+      onTouchCancel={handleTouchCancel}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
@@ -541,20 +1017,26 @@ export function CanvasViewport({
         onNodesChange={onNodesChange}
         onSelectionChange={handleSelectionChange}
         onNodeClick={handleNodeClick}
+        onNodeContextMenu={handleNodeContextMenu}
         onEdgeClick={(_event, edge) => {
           selectEdge(edge.id);
           if (isCompact) onOpenInspector?.();
         }}
-        onPaneClick={() => {
-          selectNode(null);
-          selectEdge(null);
-          setConnectionDraft(null);
-        }}
+        onEdgeContextMenu={handleEdgeContextMenu}
+        onPaneClick={handlePaneClick}
+        onPaneContextMenu={handlePaneContextMenu}
         onNodeDragStart={startInteraction}
         onNodeDragStop={(_event, _node, nodes) => finishInteraction(nodes)}
         onSelectionDragStart={startInteraction}
         onSelectionDragStop={(_event, nodes) => finishInteraction(nodes)}
         onBeforeDelete={async ({ nodes, edges }) => {
+          if (
+            interactionActiveRef.current ||
+            resizingNodeIdsRef.current.size > 0 ||
+            connectionDraftRef.current
+          ) {
+            return false;
+          }
           removeElements(
             nodes.map((node) => node.id),
             edges.map((edge) => edge.id),
@@ -563,21 +1045,26 @@ export function CanvasViewport({
         }}
         onConnect={onConnect}
         onConnectStart={onConnectStart}
-        onConnectEnd={() => {
-          if (!isCompact || toolMode !== "connect") {
-            window.setTimeout(() => setConnectionDraft(null), 0);
-          }
+        onConnectEnd={handleConnectEnd}
+        onMove={(_event, viewport) => {
+          setZoom((current) =>
+            Math.abs(current - viewport.zoom) < 0.001
+              ? current
+              : viewport.zoom,
+          );
         }}
         isValidConnection={isValidConnection}
-        minZoom={0.15}
-        maxZoom={2.4}
-        fitView
-        fitViewOptions={{ padding: 0.18 }}
+        minZoom={minimumZoom}
+        maxZoom={MAX_ZOOM}
+        snapToGrid={snapToGrid}
+        snapGrid={snapGrid}
+        onlyRenderVisibleElements
         elevateNodesOnSelect={false}
         deleteKeyCode={["Backspace", "Delete"]}
-        panOnDrag={isCompact ? toolMode === "hand" : [1, 2]}
+        panOnDrag={canvasPanOnDrag(isCompact, toolMode)}
+        panActivationKeyCode="Space"
         nodesDraggable={toolMode === "select"}
-        nodesConnectable={!isCompact || toolMode === "connect"}
+        nodesConnectable={canvasNodesConnectable(isCompact, toolMode)}
         connectOnClick={false}
         selectionOnDrag={!isCompact && toolMode === "select"}
         selectionKeyCode="Shift"
@@ -585,11 +1072,20 @@ export function CanvasViewport({
         zoomOnPinch
         zoomOnScroll={!isCompact}
         zoomOnDoubleClick={false}
+        ariaLabelConfig={CANVAS_ARIA_LABEL_CONFIG}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border)" />
-        {graph.nodes.length >= 30 ? (
+        {snapToGrid ? (
+          <Background
+            variant={BackgroundVariant.Dots}
+            gap={canvasGridGap(snapGrid[0])}
+            size={1}
+            color="var(--border)"
+          />
+        ) : null}
+        {showMiniMap ? (
           <MiniMap
+            className={styles.miniMap}
             pannable
             zoomable
             nodeColor="var(--fg-2)"
@@ -597,24 +1093,61 @@ export function CanvasViewport({
           />
         ) : null}
       </ReactFlow>
+      {!isCompact && instance ? (
+        <CanvasViewportControls
+          zoom={zoom}
+          minZoom={minimumZoom}
+          maxZoom={MAX_ZOOM}
+          onZoomOut={() => {
+            void instance.zoomOut({
+              duration: viewportAnimationDuration(reducedMotion),
+            });
+          }}
+          onZoomIn={() => {
+            void instance.zoomIn({
+              duration: viewportAnimationDuration(reducedMotion),
+            });
+          }}
+          onResetZoom={() => {
+            void instance.zoomTo(1, {
+              duration: viewportAnimationDuration(reducedMotion),
+            });
+          }}
+          onFitView={() =>
+            fitCanvasViewport(instance, viewportPreferencesRef.current)
+          }
+          gridVisible={snapToGrid}
+          onGridVisibleChange={(visible) =>
+            updateDocumentSettings({ snap_to_grid: visible })
+          }
+          minimapVisible={miniMapVisible}
+          onMinimapVisibleChange={setMiniMapVisible}
+          className="absolute bottom-3 left-3 z-[var(--z-tabbar)]"
+        />
+      ) : null}
+      {graph.nodes.length === 0 ? (
+        <CanvasEmptyState onCreate={handleEmptyQuickAdd} />
+      ) : null}
       {isCompact && connectionDraft ? (
         <MobileConnectTargets
           open={targetPickerOpen}
-          targets={compatibleTargets}
+          targets={connectionCompatibility.targets}
           onOpen={() => setTargetPickerOpen(true)}
           onClose={() => setTargetPickerOpen(false)}
           onCancel={() => {
             setTargetPickerOpen(false);
-            setConnectionDraft(null);
+            updateConnectionDraft(null);
           }}
           onSelect={(target) => {
-            instance?.setCenter(target.x, target.y, {
+            void instance?.setCenter(target.x, target.y, {
               zoom: 1,
-              duration: 240,
+              duration: viewportAnimationDuration(reducedMotion),
             });
+            const draft = connectionDraftRef.current;
+            if (!draft) return;
             const result = addEdge({
-              sourceNodeId: connectionDraft.sourceNodeId,
-              sourceHandle: connectionDraft.sourceHandle,
+              sourceNodeId: draft.sourceNodeId,
+              sourceHandle: draft.sourceHandle,
               targetNodeId: target.nodeId,
               targetHandle: target.handleId,
             });
@@ -623,11 +1156,179 @@ export function CanvasViewport({
               return;
             }
             setTargetPickerOpen(false);
+            updateConnectionDraft(null);
           }}
         />
       ) : null}
     </div>
   );
+}
+
+function CanvasEmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className={styles.emptyState}>
+      <div className={styles.emptyStateContent}>
+        <span className={styles.emptyStateIcon} aria-hidden>
+          <Plus />
+        </span>
+        <p className={styles.emptyStateTitle}>开始构建画布</p>
+        <p className={styles.emptyStateCopy}>从一个节点开始。</p>
+        <button
+          type="button"
+          className={styles.emptyStateAction}
+          onClick={onCreate}
+        >
+          <Plus aria-hidden />
+          创建节点
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function viewportAnimationDuration(
+  reducedMotion: boolean,
+  duration = VIEWPORT_ANIMATION_DURATION,
+): number {
+  return reducedMotion ? 0 : duration;
+}
+
+function canvasMinimumZoom(isCompact: boolean): number {
+  return isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM;
+}
+
+function shouldShowMiniMap(
+  isCompact: boolean,
+  miniMapVisible: boolean,
+  nodeCount: number,
+): boolean {
+  return !isCompact && miniMapVisible && nodeCount > 0;
+}
+
+function canvasPanOnDrag(
+  isCompact: boolean,
+  toolMode: CanvasToolMode,
+): boolean | number[] {
+  return isCompact ? toolMode === "hand" : [1];
+}
+
+function canvasNodesConnectable(
+  isCompact: boolean,
+  toolMode: CanvasToolMode,
+): boolean {
+  return !isCompact || toolMode === "connect";
+}
+
+function canvasClickConnectionEnabled(
+  isCompact: boolean,
+  toolMode: CanvasToolMode,
+): boolean {
+  return isCompact ? toolMode === "connect" : toolMode === "select";
+}
+
+function canvasGridGap(gridSize: number): number {
+  return gridSize;
+}
+
+function fitCanvasViewport(
+  instance: ReactFlowInstance<CanvasFlowNode, Edge>,
+  preferences: CanvasViewportPreferences,
+  nodes = instance.getNodes(),
+  padding = 0.18,
+  maxZoom = 1.12,
+) {
+  if (nodes.length === 0) {
+    void instance.zoomTo(1, {
+      duration: viewportAnimationDuration(preferences.reducedMotion),
+    });
+    return;
+  }
+  void instance.fitView({
+    nodes,
+    padding,
+    minZoom: preferences.isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM,
+    maxZoom,
+    duration: viewportAnimationDuration(preferences.reducedMotion),
+  });
+}
+
+function focusCanvasNode(
+  instance: ReactFlowInstance<CanvasFlowNode, Edge>,
+  nodeId: string,
+  preferences: CanvasViewportPreferences,
+) {
+  const node = instance.getInternalNode(nodeId);
+  if (!node) return;
+  const dimensions = canvasFlowNodeDimensions(node.data.definition);
+  const width =
+    node.measured.width ?? node.width ?? node.initialWidth ?? dimensions.width;
+  const height =
+    node.measured.height ??
+    node.height ??
+    node.initialHeight ??
+    dimensions.height;
+  const minimumFocusZoom = preferences.isCompact ? 1 : 0.9;
+  void instance.setCenter(
+    node.internals.positionAbsolute.x + width / 2,
+    node.internals.positionAbsolute.y + height / 2,
+    {
+      zoom: Math.min(1.15, Math.max(instance.getZoom(), minimumFocusZoom)),
+      duration: viewportAnimationDuration(preferences.reducedMotion),
+    },
+  );
+}
+
+function flowViewportBounds(viewport: HTMLDivElement | null): DOMRect | null {
+  const flow = viewport?.querySelector<HTMLElement>(".react-flow");
+  return (
+    flow?.getBoundingClientRect() ?? viewport?.getBoundingClientRect() ?? null
+  );
+}
+
+function pointerClientPosition(
+  event: MouseEvent | TouchEvent,
+): { x: number; y: number } | null {
+  if ("changedTouches" in event) {
+    const touch = event.changedTouches[0] ?? event.touches[0];
+    return touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }
+  return { x: event.clientX, y: event.clientY };
+}
+
+function canvasDirectionLabel(direction: string): string {
+  return (
+    {
+      left: "左",
+      right: "右",
+      up: "上",
+      down: "下",
+    }[direction] ?? direction
+  );
+}
+
+function canvasEdgeAriaLabel(
+  nodesById: Map<string, CanvasNodeDefinition>,
+  edge: CanvasGraph["edges"][number],
+): string {
+  const sourceNode = nodesById.get(edge.source_node_id);
+  const targetNode = nodesById.get(edge.target_node_id);
+  const sourcePort = sourceNode
+    ? CANVAS_NODE_SPECS[sourceNode.type].outputs.find(
+        (port) => port.id === edge.source_handle,
+      )
+    : null;
+  const targetPort = targetNode
+    ? CANVAS_NODE_SPECS[targetNode.type].inputs.find(
+        (port) => port.id === edge.target_handle,
+      )
+    : null;
+  const sourceLabel = sourceNode
+    ? `${sourceNode.title}（${CANVAS_NODE_SPECS[sourceNode.type].label}）`
+    : "未知来源节点";
+  const targetLabel = targetNode
+    ? `${targetNode.title}（${CANVAS_NODE_SPECS[targetNode.type].label}）`
+    : "未知目标节点";
+  return `${sourceLabel}的输出端口“${sourcePort?.label ?? edge.source_handle}”连接到${targetLabel}的输入端口“${targetPort?.label ?? edge.target_handle}”`;
 }
 
 interface CompatibleTarget {
@@ -644,10 +1345,12 @@ interface CompatibleTarget {
 function canvasFlowNodeDimensions(node: CanvasNodeDefinition) {
   const width = node.size?.width ?? CANVAS_NODE_SPECS[node.type].width;
   const height = node.size?.height ?? (node.type === "frame" ? 220 : 180);
+  const collapsedFrameHeight =
+    node.type === "frame" && node.ui?.collapsed === true ? 44 : height;
   return {
     width,
-    height,
-    styleHeight: node.type === "frame" ? height : undefined,
+    height: collapsedFrameHeight,
+    styleHeight: node.type === "frame" ? collapsedFrameHeight : undefined,
   };
 }
 
@@ -666,53 +1369,101 @@ function canvasNodeDeliveryOutputs(
   );
 }
 
-function compatibleInputHandlesForNode(
+function buildConnectionCompatibility(
   graph: CanvasGraph,
-  node: CanvasNodeDefinition,
   draft: ConnectionDraft | null,
-): string[] {
-  if (!draft) return [];
-  return CANVAS_NODE_SPECS[node.type].inputs
-    .filter((port) =>
-      validateCanvasConnection(graph, {
-        sourceNodeId: draft.sourceNodeId,
-        sourceHandle: draft.sourceHandle,
-        targetNodeId: node.id,
-        targetHandle: port.id,
-      }).valid,
-    )
-    .map((port) => port.id);
+): ConnectionCompatibility {
+  const handlesByNode = new Map<string, string[]>();
+  const targets: CompatibleTarget[] = [];
+  if (!draft) return { handlesByNode, targets };
+  const candidateId = canvasConnectionCandidateId(graph);
+
+  for (const node of graph.nodes) {
+    const handles: string[] = [];
+    const dimensions = canvasFlowNodeDimensions(node);
+    for (const port of CANVAS_NODE_SPECS[node.type].inputs) {
+      const valid = canvasConnectionIsValid(
+        graph,
+        {
+          sourceNodeId: draft.sourceNodeId,
+          sourceHandle: draft.sourceHandle,
+          targetNodeId: node.id,
+          targetHandle: port.id,
+        },
+        port.dataType,
+        candidateId,
+      );
+      if (!valid) continue;
+      handles.push(port.id);
+      targets.push({
+        key: `${node.id}:${port.id}`,
+        nodeId: node.id,
+        nodeTitle: node.title,
+        nodeType: CANVAS_NODE_SPECS[node.type].label,
+        handleId: port.id,
+        handleLabel: port.label,
+        x: node.position.x + dimensions.width / 2,
+        y: node.position.y + dimensions.height / 2,
+      });
+    }
+    if (handles.length > 0) handlesByNode.set(node.id, handles);
+  }
+  return { handlesByNode, targets };
 }
 
-function listCompatibleTargets(
+function canvasConnectionIsValid(
   graph: CanvasGraph,
-  draft: ConnectionDraft | null,
-): CompatibleTarget[] {
-  if (!draft) return [];
-  return graph.nodes.flatMap((node) =>
-    CANVAS_NODE_SPECS[node.type].inputs.flatMap((port) => {
-      const valid = validateCanvasConnection(graph, {
-        sourceNodeId: draft.sourceNodeId,
-        sourceHandle: draft.sourceHandle,
-        targetNodeId: node.id,
-        targetHandle: port.id,
-      }).valid;
-      return valid
-        ? [
-            {
-              key: `${node.id}:${port.id}`,
-              nodeId: node.id,
-              nodeTitle: node.title,
-              nodeType: CANVAS_NODE_SPECS[node.type].label,
-              handleId: port.id,
-              handleLabel: port.label,
-              x: node.position.x,
-              y: node.position.y,
-            },
-          ]
-        : [];
-    }),
-  );
+  input: CanvasConnectionInput,
+  targetDataType?: CanvasDataType,
+  candidateId = canvasConnectionCandidateId(graph),
+): boolean {
+  const resolvedTargetDataType =
+    targetDataType ?? canvasConnectionTargetDataType(graph, input);
+  if (!resolvedTargetDataType) return false;
+
+  const candidate: CanvasEdgeDefinition = {
+    id: candidateId,
+    source_node_id: input.sourceNodeId,
+    source_handle: input.sourceHandle,
+    target_node_id: input.targetNodeId,
+    target_handle: input.targetHandle,
+    data_type: resolvedTargetDataType,
+    binding_mode: "follow_active",
+  };
+  return validateCanvasConnections(graph, [candidate]).valid;
+}
+
+function canvasConnectionTargetDataType(
+  graph: CanvasGraph,
+  input: CanvasConnectionInput,
+): CanvasDataType | null {
+  const targetNode = graph.nodes.find((node) => node.id === input.targetNodeId);
+  const targetPort = targetNode
+    ? CANVAS_NODE_SPECS[targetNode.type].inputs.find(
+        (port) => port.id === input.targetHandle,
+      )
+    : null;
+  return targetPort?.dataType ?? null;
+}
+
+function canvasConnectionCandidateId(graph: CanvasGraph): string {
+  let id = "__canvas_connection_candidate__";
+  const existingIds = new Set(graph.edges.map((edge) => edge.id));
+  while (existingIds.has(id)) id += "_";
+  return id;
+}
+
+function omitCanvasNodeMeasurements(
+  current: Record<string, { width: number; height: number }>,
+  nodeIds: readonly string[],
+) {
+  let next = current;
+  for (const nodeId of nodeIds) {
+    if (!(nodeId in next)) continue;
+    if (next === current) next = { ...current };
+    delete next[nodeId];
+  }
+  return next;
 }
 
 function MobileConnectTargets({
@@ -732,7 +1483,7 @@ function MobileConnectTargets({
 }) {
   return (
     <>
-      <div className="absolute inset-x-3 top-3 z-20 flex items-center justify-center gap-2">
+      <div className="absolute inset-x-3 top-3 z-[var(--z-tabbar)] flex items-center justify-center gap-2">
         <button
           type="button"
           onClick={onOpen}
@@ -759,8 +1510,21 @@ function MobileConnectTargets({
         className="mobile-dialog-sheet"
       >
         <div className="mobile-dialog-scroll h-full overflow-y-auto p-4">
-          <p className="type-page-kicker">连接目标</p>
-          <h2 className="type-card-title mt-1">选择兼容端口</h2>
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="type-page-kicker">连接目标</p>
+              <h2 className="type-card-title mt-1">选择兼容端口</h2>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭连接目标"
+              title="关闭"
+              onClick={onClose}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
           <div className="mt-4 grid gap-2">
             {targets.length > 0 ? (
               targets.map((target) => (

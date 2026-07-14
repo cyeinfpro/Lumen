@@ -9,6 +9,15 @@ export type CanvasNodeType =
   | "delivery";
 
 export type CanvasDataType = "text" | "image" | "video" | "mask";
+export type CanvasBindingMode = "follow_active" | "pinned";
+export type CanvasEdgeRole =
+  | "reference"
+  | "subject"
+  | "product"
+  | "style"
+  | "edit_target"
+  | "background"
+  | "other";
 export type CanvasToolMode = "hand" | "select" | "connect";
 export type CanvasSaveState = "idle" | "dirty" | "saving" | "saved" | "conflict" | "error";
 export type CanvasExecutionStatus =
@@ -27,6 +36,17 @@ export type CanvasExecutionStatus =
   | "reused";
 
 export type CanvasPosition = { x: number; y: number };
+export type CanvasSize = { width: number; height: number };
+
+export interface CanvasNodeUI {
+  collapsed?: boolean;
+  color_tag?: string | null;
+}
+
+export interface CanvasDocumentSettings {
+  snap_to_grid: boolean;
+  grid_size: number;
+}
 
 export interface CanvasNodeDefinition {
   id: string;
@@ -34,13 +54,10 @@ export interface CanvasNodeDefinition {
   schema_version: number;
   title: string;
   position: CanvasPosition;
-  size?: { width: number; height: number };
+  size?: CanvasSize | null;
   parent_group_id?: string | null;
   config: Record<string, unknown>;
-  ui: {
-    collapsed?: boolean;
-    color_tag?: string | null;
-  };
+  ui: CanvasNodeUI;
 }
 
 export interface CanvasEdgeDefinition {
@@ -50,22 +67,34 @@ export interface CanvasEdgeDefinition {
   target_node_id: string;
   target_handle: string;
   data_type: CanvasDataType;
-  binding_mode: "follow_active" | "pinned";
+  binding_mode: CanvasBindingMode;
   pinned_execution_id?: string | null;
   pinned_output_index?: number | null;
-  role?: string | null;
+  role?: CanvasEdgeRole | null;
   order?: number | null;
 }
+
+export type CanvasNodeAppearanceUpdate = Partial<
+  Pick<CanvasNodeDefinition, "title" | "parent_group_id" | "ui">
+>;
+
+export type CanvasEdgeDetailsUpdate = Partial<
+  Pick<
+    CanvasEdgeDefinition,
+    | "binding_mode"
+    | "pinned_execution_id"
+    | "pinned_output_index"
+    | "role"
+    | "order"
+  >
+>;
 
 export interface CanvasGraph {
   schema_version: 1;
   nodes: CanvasNodeDefinition[];
   edges: CanvasEdgeDefinition[];
   frames: unknown[];
-  settings: {
-    snap_to_grid: boolean;
-    grid_size: number;
-  };
+  settings: CanvasDocumentSettings;
 }
 
 export interface CanvasOutput {
@@ -165,12 +194,20 @@ export type CanvasOperation =
       op: "update_node_meta";
       operation_schema_version: 1;
       node_id: string;
-      title: string;
+      title?: string;
+      parent_group_id?: string | null;
+      ui?: CanvasNodeUI;
     }
   | {
       op: "move_nodes";
       operation_schema_version: 1;
       items: Array<{ node_id: string; x: number; y: number }>;
+    }
+  | {
+      op: "resize_node";
+      operation_schema_version: 1;
+      node_id: string;
+      size: CanvasSize;
     }
   | {
       op: "remove_nodes";
@@ -183,15 +220,21 @@ export type CanvasOperation =
       op: "update_edge";
       operation_schema_version: 1;
       edge_id: string;
-      binding_mode: "follow_active" | "pinned";
+      binding_mode?: CanvasBindingMode;
       pinned_execution_id?: string | null;
       pinned_output_index?: number | null;
+      role?: CanvasEdgeRole | null;
       order?: number | null;
     }
   | {
       op: "remove_edges";
       operation_schema_version: 1;
       edge_ids: string[];
+    }
+  | {
+      op: "update_document_settings";
+      operation_schema_version: 1;
+      settings: CanvasDocumentSettings;
     };
 
 export interface CanvasHistoryEntry {

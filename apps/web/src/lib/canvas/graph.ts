@@ -11,6 +11,12 @@ import type {
   CanvasNodeType,
 } from "#canvas-types";
 
+export const MAX_CANVAS_NODES = 1_000;
+export const MAX_CANVAS_EDGES = 3_000;
+export const MAX_CANVAS_GRAPH_BYTES = 5 * 1024 * 1024;
+export const MAX_CANVAS_NODE_CONFIG_BYTES = 64 * 1024;
+export const MAX_CANVAS_COORDINATE = 10_000_000;
+
 export interface CanvasConnectionInput {
   sourceNodeId: string;
   sourceHandle: string;
@@ -26,6 +32,10 @@ export type ConnectionValidation =
       targetType: CanvasDataType;
     }
   | { valid: false; reason: string };
+
+export type BulkConnectionValidation =
+  | { valid: true }
+  | { valid: false; edgeId: string; reason: string };
 
 export function createEmptyCanvasGraph(): CanvasGraph {
   return {
@@ -170,7 +180,34 @@ export function createCanvasTemplateGraph(template: string): CanvasGraph {
 }
 
 export function canvasGraphReadyToSave(graph: CanvasGraph): boolean {
-  return graph.nodes.length <= 1_000 && graph.edges.length <= 3_000;
+  if (
+    graph.nodes.length > MAX_CANVAS_NODES ||
+    graph.edges.length > MAX_CANVAS_EDGES
+  ) {
+    return false;
+  }
+  for (const node of graph.nodes) {
+    const configBytes = canvasJsonByteLength(node.config);
+    if (
+      configBytes === null ||
+      configBytes > MAX_CANVAS_NODE_CONFIG_BYTES
+    ) {
+      return false;
+    }
+  }
+  const graphBytes = canvasJsonByteLength(graph);
+  return graphBytes !== null && graphBytes <= MAX_CANVAS_GRAPH_BYTES;
+}
+
+export function canvasJsonByteLength(value: unknown): number | null {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined
+      ? null
+      : new TextEncoder().encode(serialized).byteLength;
+  } catch {
+    return null;
+  }
 }
 
 export function normalizeCanvasGraph(value: unknown): CanvasGraph {
@@ -206,8 +243,7 @@ function isCanvasNodeDefinition(value: unknown): value is CanvasNodeDefinition {
     node.type in CANVAS_NODE_SPECS &&
     typeof node.title === "string" &&
     Boolean(node.position) &&
-    typeof node.position?.x === "number" &&
-    typeof node.position?.y === "number" &&
+    canvasPositionIsValid(node.position) &&
     Boolean(node.config) &&
     typeof node.config === "object"
   );
@@ -264,6 +300,45 @@ export function validateCanvasConnection(
     sourceType: sourcePort.dataType,
     targetType: targetPort.dataType,
   };
+}
+
+export function validateCanvasConnections(
+  graph: CanvasGraph,
+  edges: readonly CanvasEdgeDefinition[],
+): BulkConnectionValidation {
+  const workingEdges = [...graph.edges];
+  const edgeIds = new Set(workingEdges.map((edge) => edge.id));
+  for (const edge of edges) {
+    if (edgeIds.has(edge.id)) {
+      return {
+        valid: false,
+        edgeId: edge.id,
+        reason: "连接 ID 重复",
+      };
+    }
+    const validation = validateCanvasConnection(
+      { ...graph, edges: workingEdges },
+      {
+        sourceNodeId: edge.source_node_id,
+        sourceHandle: edge.source_handle,
+        targetNodeId: edge.target_node_id,
+        targetHandle: edge.target_handle,
+      },
+    );
+    if (!validation.valid) {
+      return { valid: false, edgeId: edge.id, reason: validation.reason };
+    }
+    if (validation.dataType !== edge.data_type) {
+      return {
+        valid: false,
+        edgeId: edge.id,
+        reason: "连接数据类型不匹配",
+      };
+    }
+    edgeIds.add(edge.id);
+    workingEdges.push(edge);
+  }
+  return { valid: true };
 }
 
 export function validateCanvasNodeExecution(
@@ -494,4 +569,17 @@ export function removeCanvasNodes(
 
 export function cloneCanvasGraph(graph: CanvasGraph): CanvasGraph {
   return structuredClone(graph);
+}
+
+function canvasPositionIsValid(
+  position: { x?: unknown; y?: unknown } | null | undefined,
+): position is { x: number; y: number } {
+  return (
+    typeof position?.x === "number" &&
+    Number.isFinite(position.x) &&
+    Math.abs(position.x) <= MAX_CANVAS_COORDINATE &&
+    typeof position.y === "number" &&
+    Number.isFinite(position.y) &&
+    Math.abs(position.y) <= MAX_CANVAS_COORDINATE
+  );
 }

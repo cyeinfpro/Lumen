@@ -3,10 +3,125 @@ import test from "node:test";
 
 const {
   canvasSaveBatchMatchesPending,
+  deleteCanvasEmergencyDraft,
+  getCanvasDraft,
+  getCanvasEmergencyDraft,
+  getCanvasSaveBatch,
   isSuspiciousEmptyCanvasDraft,
+  listCanvasDrafts,
+  putCanvasEmergencyDraft,
   SerialCanvasDraftWriter,
 } = await import("#canvas-persistence");
 const { createDefaultCanvasGraph } = await import("#canvas-graph");
+
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>();
+  failWrites = false;
+
+  get length() {
+    return this.values.size;
+  }
+
+  clear() {
+    this.values.clear();
+  }
+
+  getItem(key: string) {
+    return this.values.get(key) ?? null;
+  }
+
+  key(index: number) {
+    return [...this.values.keys()][index] ?? null;
+  }
+
+  removeItem(key: string) {
+    this.values.delete(key);
+  }
+
+  setItem(key: string, value: string) {
+    if (this.failWrites) throw new Error("quota exceeded");
+    this.values.set(key, value);
+  }
+}
+
+function installLocalStorage(storage: Storage): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "localStorage", descriptor);
+    } else {
+      delete (globalThis as { localStorage?: Storage }).localStorage;
+    }
+  };
+}
+
+function installIndexedDb({
+  drafts = [],
+  saveBatch,
+}: {
+  drafts?: unknown[];
+  saveBatch?: unknown;
+}): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  const request = (result: unknown) => {
+    const value = { result } as IDBRequest;
+    queueMicrotask(() => value.onsuccess?.(new Event("success")));
+    return value;
+  };
+  const database = {
+    close() {},
+    transaction(storeName: string) {
+      return {
+        objectStore() {
+          return {
+            get() {
+              return request(
+                storeName === "drafts" ? drafts[0] : saveBatch,
+              );
+            },
+            index() {
+              return {
+                getAll() {
+                  return request(drafts);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: {
+      open() {
+        return request(database);
+      },
+    },
+  });
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "indexedDB", descriptor);
+    } else {
+      delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+    }
+  };
+}
+
+function emergencyDraft(canvasId = "canvas-1", clientId = "client-1") {
+  return {
+    canvas_id: canvasId,
+    client_id: clientId,
+    base_revision: 4,
+    graph: createDefaultCanvasGraph(),
+    operations: [],
+    updated_at: Date.now(),
+  };
+}
 
 test("empty local canvas drafts cannot replace a non-empty server graph", () => {
   const serverGraph = createDefaultCanvasGraph();
@@ -63,6 +178,226 @@ test("draft writes stay serial and rerun with the latest snapshot", async () => 
   await second;
 
   assert.deepEqual(writes, ["first", "latest"]);
+});
+
+test("draft writer reports failures and still runs a queued latest write", async () => {
+  const failure = new Error("IndexedDB failed");
+  const errors: unknown[] = [];
+  let attempts = 0;
+  let rejectFirst: ((error: Error) => void) | undefined;
+  const writer = new SerialCanvasDraftWriter(
+    async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        await new Promise<void>((_, reject) => {
+          rejectFirst = reject;
+        });
+      }
+    },
+    (error) => errors.push(error),
+  );
+
+  const first = writer.request();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const second = writer.request();
+  rejectFirst?.(failure);
+  await second;
+
+  assert.equal(first, second);
+  assert.equal(attempts, 2);
+  assert.deepEqual(errors, [failure]);
+});
+
+test("emergency drafts round trip synchronously and delete cleanly", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    const draft = emergencyDraft();
+    assert.equal(putCanvasEmergencyDraft(draft), true);
+    assert.deepEqual(getCanvasEmergencyDraft(draft.canvas_id), draft);
+    deleteCanvasEmergencyDraft(draft.canvas_id);
+    assert.equal(getCanvasEmergencyDraft(draft.canvas_id), null);
+  } finally {
+    restore();
+  }
+});
+
+test("emergency drafts isolate clients sharing the same canvas", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    const first = {
+      ...emergencyDraft("canvas-shared", "client-a"),
+      updated_at: 1,
+    };
+    const second = {
+      ...emergencyDraft("canvas-shared", "client-b"),
+      updated_at: 2,
+    };
+    assert.equal(putCanvasEmergencyDraft(first), true);
+    assert.equal(putCanvasEmergencyDraft(second), true);
+
+    assert.deepEqual(
+      getCanvasEmergencyDraft("canvas-shared", "client-a"),
+      first,
+    );
+    assert.deepEqual(
+      getCanvasEmergencyDraft("canvas-shared", "client-b"),
+      second,
+    );
+    assert.deepEqual(getCanvasEmergencyDraft("canvas-shared"), second);
+
+    deleteCanvasEmergencyDraft("canvas-shared", "client-a");
+    assert.deepEqual(
+      getCanvasEmergencyDraft("canvas-shared", "client-a"),
+      second,
+    );
+    assert.deepEqual(
+      getCanvasEmergencyDraft("canvas-shared", "client-b"),
+      second,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("emergency draft helpers reject corrupt, invalid, and oversized payloads", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    storage.setItem("lumen:canvas-emergency-drafts:v1", "{broken");
+    assert.equal(getCanvasEmergencyDraft("canvas-1"), null);
+    assert.doesNotThrow(() => deleteCanvasEmergencyDraft("canvas-1"));
+
+    assert.equal(
+      putCanvasEmergencyDraft({
+        ...emergencyDraft(),
+        graph: { nodes: [] } as never,
+      }),
+      false,
+    );
+    const oversized = emergencyDraft();
+    oversized.graph.nodes[0]!.config = { text: "x".repeat(600 * 1024) };
+    assert.equal(putCanvasEmergencyDraft(oversized), false);
+  } finally {
+    restore();
+  }
+});
+
+test("IndexedDB reads reject corrupt drafts and save batches", async () => {
+  const validDraft = {
+    ...emergencyDraft(),
+    key: "canvas-1:client-1",
+  };
+  const invalidDraft = structuredClone(validDraft);
+  invalidDraft.graph.nodes[0]!.type = "unknown" as never;
+  const invalidBatch = {
+    key: "canvas-1:client-1",
+    canvas_id: "canvas-1",
+    client_id: "client-1",
+    base_revision: 4,
+    mutation_id: "mutation-1",
+    operations: [{ op: "old_operation", operation_schema_version: 0 }],
+    updated_at: Date.now(),
+  };
+  const restore = installIndexedDb({
+    drafts: [invalidDraft, validDraft],
+    saveBatch: invalidBatch,
+  });
+  try {
+    assert.equal(await getCanvasDraft("canvas-1", "client-1"), null);
+    assert.deepEqual(await listCanvasDrafts("canvas-1"), [validDraft]);
+    assert.equal(await getCanvasSaveBatch("canvas-1", "client-1"), null);
+  } finally {
+    restore();
+  }
+});
+
+test("emergency drafts reject unknown nodes, invalid edges, and oversized graphs", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    const unknownNode = emergencyDraft("unknown-node");
+    unknownNode.graph.nodes[0]!.type = "unknown" as never;
+    storage.setItem(
+      "lumen:canvas-emergency-drafts:v1",
+      JSON.stringify({ version: 1, drafts: [unknownNode] }),
+    );
+    assert.equal(getCanvasEmergencyDraft("unknown-node"), null);
+    assert.equal(putCanvasEmergencyDraft(unknownNode), false);
+
+    const invalidEdge = emergencyDraft("invalid-edge");
+    invalidEdge.graph.edges[0]!.target_handle = "missing";
+    assert.equal(putCanvasEmergencyDraft(invalidEdge), false);
+
+    const invalidSize = emergencyDraft("invalid-size");
+    invalidSize.graph.nodes[0]!.size = { width: 20_000, height: 180 };
+    assert.equal(putCanvasEmergencyDraft(invalidSize), false);
+
+    const invalidPin = emergencyDraft("invalid-pin");
+    invalidPin.graph.edges[0]!.binding_mode = "pinned";
+    invalidPin.graph.edges[0]!.pinned_execution_id = "execution-1";
+    invalidPin.graph.edges[0]!.pinned_output_index = 0;
+    assert.equal(putCanvasEmergencyDraft(invalidPin), false);
+
+    const oversizedGraph = emergencyDraft("oversized-graph");
+    const template = oversizedGraph.graph.nodes[0]!;
+    oversizedGraph.graph.nodes = Array.from(
+      { length: 1_001 },
+      (_, index) => ({
+        ...structuredClone(template),
+        id: `node-${index}`,
+        position: { x: index, y: 0 },
+      }),
+    );
+    oversizedGraph.graph.edges = [];
+    assert.equal(putCanvasEmergencyDraft(oversizedGraph), false);
+  } finally {
+    restore();
+  }
+});
+
+test("emergency draft helpers stay bounded and never throw on storage faults", () => {
+  const storage = new MemoryStorage();
+  const restore = installLocalStorage(storage);
+  try {
+    for (let index = 0; index < 12; index += 1) {
+      assert.equal(
+        putCanvasEmergencyDraft({
+          ...emergencyDraft(`canvas-${index}`),
+          updated_at: index,
+        }),
+        true,
+      );
+    }
+    assert.equal(getCanvasEmergencyDraft("canvas-0"), null);
+    assert.equal(getCanvasEmergencyDraft("canvas-11")?.canvas_id, "canvas-11");
+
+    storage.failWrites = true;
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft("quota")), false);
+    assert.doesNotThrow(() => deleteCanvasEmergencyDraft("canvas-11"));
+  } finally {
+    restore();
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      throw new Error("storage access denied");
+    },
+  });
+  try {
+    assert.equal(getCanvasEmergencyDraft("canvas-1"), null);
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft()), false);
+    assert.doesNotThrow(() => deleteCanvasEmergencyDraft("canvas-1"));
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "localStorage", descriptor);
+    } else {
+      delete (globalThis as { localStorage?: Storage }).localStorage;
+    }
+  }
 });
 
 test("persisted save batches only replay against the exact pending prefix", () => {

@@ -2,14 +2,32 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 import {
   addCanvasNode,
+  canvasGraphReadyToSave,
   cloneCanvasGraph,
   createCanvasEdge,
+  MAX_CANVAS_GRAPH_BYTES,
   validateCanvasConnection,
   type CanvasConnectionInput,
 } from "#canvas-graph";
+import { CANVAS_AUTOSAVE_OPERATION_LIMIT } from "#canvas-autosave";
+import {
+  copySubgraph,
+  insertSubgraph as insertCanvasSubgraph,
+  type CanvasSubgraph,
+  type InsertSubgraphOptions,
+} from "./clipboard";
+import { CANVAS_NODE_SPECS } from "#canvas-registry";
 import type {
+  CanvasDocumentSettings,
+  CanvasEdgeDefinition,
+  CanvasEdgeDetailsUpdate,
+  CanvasEdgeRole,
   CanvasGraph,
   CanvasHistoryEntry,
+  CanvasNodeDefinition,
+  CanvasNodeAppearanceUpdate,
+  CanvasPosition,
+  CanvasSize,
   CanvasNodeType,
   CanvasOperation,
   CanvasSaveState,
@@ -18,14 +36,26 @@ import type {
 } from "#canvas-types";
 
 const HISTORY_LIMIT = 100;
+const CANVAS_COORDINATE_LIMIT = 10_000_000;
+export const CANVAS_HISTORY_GRAPH_BYTE_BUDGET = MAX_CANVAS_GRAPH_BYTES;
+const CANVAS_EDGE_ROLES = new Set<CanvasEdgeRole>([
+  "reference",
+  "subject",
+  "product",
+  "style",
+  "edit_target",
+  "background",
+  "other",
+]);
 
 export interface CanvasNodeMove {
   nodeId: string;
-  position: { x: number; y: number };
+  position: CanvasPosition;
 }
 
 type MergeableCanvasHistoryEntry = CanvasHistoryEntry & {
   mergeKey?: string;
+  graphBytes?: number;
 };
 
 export interface CanvasEditorState {
@@ -40,6 +70,7 @@ export interface CanvasEditorState {
   activeInteractionCount: number;
   pendingOperations: CanvasOperation[];
   inFlightOperationCount: number;
+  retryPrefixOperationCount: number;
   history: CanvasHistoryEntry[];
   future: CanvasHistoryEntry[];
   saveState: CanvasSaveState;
@@ -49,17 +80,41 @@ export interface CanvasEditorState {
   updateNodeConfig: (nodeId: string, config: Record<string, unknown>) => void;
   beginNodeConfigEdit: (nodeId: string) => void;
   endNodeConfigEdit: (nodeId: string) => void;
+  updateNodeAppearance: (
+    nodeId: string,
+    appearance: CanvasNodeAppearanceUpdate,
+  ) => void;
   updateNodeTitle: (nodeId: string, title: string) => void;
-  moveNode: (nodeId: string, position: { x: number; y: number }) => void;
+  resizeNode: (
+    nodeId: string,
+    size: CanvasSize,
+    position?: CanvasPosition,
+  ) => void;
+  moveNode: (nodeId: string, position: CanvasPosition) => void;
   moveNodes: (items: CanvasNodeMove[]) => void;
+  duplicateNodes: (
+    nodeIds: string[],
+    offset?: CanvasPosition,
+  ) => string[];
+  insertSubgraph: (
+    subgraph: CanvasSubgraph,
+    options?: InsertSubgraphOptions,
+  ) => string[];
   removeElements: (nodeIds: string[], edgeIds: string[]) => void;
   removeNodes: (nodeIds: string[]) => void;
   addEdge: (input: CanvasConnectionInput) => { ok: true } | { ok: false; reason: string };
+  updateEdgeDetails: (
+    edgeId: string,
+    details: CanvasEdgeDetailsUpdate,
+  ) => void;
   updateEdgeBinding: (
     edgeId: string,
     bindingMode: "follow_active" | "pinned",
     pinnedExecutionId?: string | null,
     pinnedOutputIndex?: number | null,
+  ) => void;
+  updateDocumentSettings: (
+    settings: Partial<CanvasDocumentSettings>,
   ) => void;
   removeEdges: (edgeIds: string[]) => void;
   selectNode: (nodeId: string | null) => void;
@@ -75,7 +130,7 @@ export interface CanvasEditorState {
   redo: () => void;
   markSaving: (count?: number) => void;
   acknowledgeOperations: (count: number, revision: number) => boolean;
-  markSaveError: (message: string) => void;
+  markSaveError: (message: string, retryable?: boolean) => void;
   markConflict: (message: string) => void;
   replaceFromRemote: (graph: CanvasGraph, revision: number) => void;
 }
@@ -102,14 +157,17 @@ export function createCanvasEditorStore(
         previous?.mergeKey === historyMergeKey;
       const history = mergesWithPrevious
         ? current.history
-        : [
-            ...current.history,
-            {
-              graph: cloneCanvasGraph(current.graph),
-              label,
-              mergeKey: historyMergeKey,
-            },
-          ].slice(-HISTORY_LIMIT);
+        : trimHistoryEntries(
+            [
+              ...current.history,
+              createHistoryEntry(
+                current.graph,
+                label,
+                historyMergeKey,
+              ),
+            ],
+            "newest",
+          );
       set({
         graph: nextGraph,
         history,
@@ -117,7 +175,7 @@ export function createCanvasEditorStore(
         pendingOperations: coalescePendingOperations(
           current.pendingOperations,
           operations,
-          current.inFlightOperationCount,
+          current.retryPrefixOperationCount,
         ),
         ...dirtySaveStatus(current),
       });
@@ -141,13 +199,202 @@ export function createCanvasEditorStore(
       });
     };
 
+    const updateNodeAppearance = (
+      nodeId: string,
+      appearance: CanvasNodeAppearanceUpdate,
+    ) => {
+      const current = get().graph;
+      const node = current.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      const nextNode = nodeWithAppearance(node, appearance);
+      const operation = nodeMetaOperation(node, nextNode);
+      if (!operation) return;
+      commit(
+        {
+          ...current,
+          nodes: current.nodes.map((item) =>
+            item.id === nodeId ? nextNode : item,
+          ),
+        },
+        "更新节点外观",
+        [operation],
+      );
+    };
+
+    const resizeNode = (
+      nodeId: string,
+      size: CanvasSize,
+      position?: CanvasPosition,
+    ) => {
+      if (
+        !validCanvasSize(size) ||
+        (position !== undefined && !validCanvasPosition(position))
+      ) {
+        return;
+      }
+      const current = get().graph;
+      const node = current.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      const sizeChanged = !canvasSizeEqual(node.size, size, node.type);
+      const positionChanged =
+        position !== undefined &&
+        (node.position.x !== position.x || node.position.y !== position.y);
+      if (!sizeChanged && !positionChanged) return;
+      const nextSize = { ...size };
+      const nextPosition = position ? { ...position } : node.position;
+      const operations: CanvasOperation[] = [];
+      if (positionChanged) {
+        operations.push({
+          op: "move_nodes",
+          operation_schema_version: 1,
+          items: [
+            {
+              node_id: nodeId,
+              x: nextPosition.x,
+              y: nextPosition.y,
+            },
+          ],
+        });
+      }
+      if (sizeChanged) {
+        operations.push({
+          op: "resize_node",
+          operation_schema_version: 1,
+          node_id: nodeId,
+          size: nextSize,
+        });
+      }
+      commit(
+        {
+          ...current,
+          nodes: current.nodes.map((item) =>
+            item.id === nodeId
+              ? {
+                  ...item,
+                  position: nextPosition,
+                  size: nextSize,
+                }
+              : item,
+          ),
+        },
+        positionChanged && sizeChanged ? "调整节点边界" : "调整节点尺寸",
+        operations,
+      );
+    };
+
+    const commitSubgraph = (
+      subgraph: CanvasSubgraph,
+      options: InsertSubgraphOptions,
+      label: string,
+    ): string[] => {
+      if (
+        subgraph.nodes.length + subgraph.edges.length >
+        CANVAS_AUTOSAVE_OPERATION_LIMIT
+      ) {
+        return [];
+      }
+      const current = get().graph;
+      const insertion = insertCanvasSubgraph(current, subgraph, options);
+      if (
+        insertion.nodes.length === 0 ||
+        insertion.nodes.length + insertion.edges.length >
+          CANVAS_AUTOSAVE_OPERATION_LIMIT ||
+        !validGraphForStoreCommit(insertion.graph)
+      ) {
+        return [];
+      }
+      commit(insertion.graph, label, [
+        ...insertion.nodes.map(
+          (node): CanvasOperation => ({
+            op: "add_node",
+            operation_schema_version: 1,
+            node,
+          }),
+        ),
+        ...insertion.edges.map(
+          (edge): CanvasOperation => ({
+            op: "add_edge",
+            operation_schema_version: 1,
+            edge,
+          }),
+        ),
+      ]);
+      const insertedNodeIds = insertion.nodes.map((node) => node.id);
+      set({
+        selectedNodeId: insertedNodeIds[0] ?? null,
+        selectedNodeIds: insertedNodeIds,
+        selectedEdgeId: null,
+      });
+      return insertedNodeIds;
+    };
+
+    const updateEdgeDetails = (
+      edgeId: string,
+      details: CanvasEdgeDetailsUpdate,
+    ) => {
+      const current = get().graph;
+      const edge = current.edges.find((item) => item.id === edgeId);
+      if (!edge) return;
+      const nextEdge = edgeWithDetails(edge, details);
+      if (
+        !nextEdge ||
+        !validCanvasEdgeMetadata(
+          nextEdge,
+          current.nodes.find((node) => node.id === nextEdge.source_node_id)
+            ?.type,
+        ) ||
+        canvasEdgeDetailsEqual(edge, nextEdge)
+      ) {
+        return;
+      }
+      commit(
+        {
+          ...current,
+          edges: current.edges.map((item) =>
+            item.id === edgeId ? nextEdge : item,
+          ),
+        },
+        "更新连接详情",
+        [edgeDetailsOperation(edge, nextEdge)],
+      );
+    };
+
+    const updateDocumentSettings = (
+      settings: Partial<CanvasDocumentSettings>,
+    ) => {
+      const current = get().graph;
+      const nextSettings = { ...current.settings, ...settings };
+      if (
+        !validDocumentSettings(nextSettings) ||
+        documentSettingsEqual(current.settings, nextSettings)
+      ) {
+        return;
+      }
+      commit(
+        { ...current, settings: nextSettings },
+        "更新画布设置",
+        [
+          {
+            op: "update_document_settings",
+            operation_schema_version: 1,
+            settings: nextSettings,
+          },
+        ],
+      );
+    };
+
     const moveNodes = (items: CanvasNodeMove[]) => {
       if (items.length === 0) return;
       const current = get().graph;
       const nodesById = new Map(current.nodes.map((node) => [node.id, node]));
       const positions = new Map<string, { x: number; y: number }>();
       for (const item of items) {
-        if (!nodesById.has(item.nodeId)) continue;
+        if (
+          !nodesById.has(item.nodeId) ||
+          !validCanvasPosition(item.position)
+        ) {
+          continue;
+        }
         positions.set(item.nodeId, {
           x: item.position.x,
           y: item.position.y,
@@ -265,11 +512,12 @@ export function createCanvasEditorStore(
           !removedNodeIds.has(current.editingNodeId)
             ? current.editingNodeId
             : null,
+        connectionDraft: null,
       });
     };
 
     return {
-      graph: cloneCanvasGraph(graph),
+      graph: cloneCanonicalCanvasGraph(graph),
       revision,
       selectedNodeId: null,
       selectedNodeIds: [],
@@ -280,13 +528,14 @@ export function createCanvasEditorStore(
       activeInteractionCount: 0,
       pendingOperations: [],
       inFlightOperationCount: 0,
+      retryPrefixOperationCount: 0,
       history: [],
       future: [],
       saveState: "idle",
       saveMessage: null,
       hydrate(nextGraph, nextRevision) {
         set({
-          graph: cloneCanvasGraph(nextGraph),
+          graph: cloneCanonicalCanvasGraph(nextGraph),
           revision: nextRevision,
           selectedNodeId: null,
           selectedNodeIds: [],
@@ -296,6 +545,7 @@ export function createCanvasEditorStore(
           activeInteractionCount: 0,
           pendingOperations: [],
           inFlightOperationCount: 0,
+          retryPrefixOperationCount: 0,
           history: [],
           future: [],
           saveState: "saved",
@@ -303,7 +553,9 @@ export function createCanvasEditorStore(
         });
       },
       addNode(type, position) {
+        if (!validCanvasPosition(position)) return "";
         const result = addCanvasNode(get().graph, type, position);
+        if (!validGraphForStoreCommit(result.graph)) return "";
         commit(result.graph, `添加${result.node.title}`, [
           { op: "add_node", operation_schema_version: 1, node: result.node },
         ]);
@@ -370,32 +622,31 @@ export function createCanvasEditorStore(
       endNodeConfigEdit(nodeId) {
         sealNodeConfigEdit(nodeId);
       },
+      updateNodeAppearance(nodeId, appearance) {
+        updateNodeAppearance(nodeId, appearance);
+      },
       updateNodeTitle(nodeId, title) {
-        const value = title.trim().slice(0, 80);
-        if (!value) return;
-        const current = get().graph;
-        const node = current.nodes.find((item) => item.id === nodeId);
-        if (!node || node.title === value) return;
-        const next = {
-          ...current,
-          nodes: current.nodes.map((item) =>
-            item.id === nodeId ? { ...item, title: value } : item,
-          ),
-        };
-        commit(next, "重命名节点", [
-          {
-            op: "update_node_meta",
-            operation_schema_version: 1,
-            node_id: nodeId,
-            title: value,
-          },
-        ]);
+        updateNodeAppearance(nodeId, { title });
+      },
+      resizeNode(nodeId, size, position) {
+        resizeNode(nodeId, size, position);
       },
       moveNode(nodeId, position) {
         moveNodes([{ nodeId, position }]);
       },
       moveNodes(items) {
         moveNodes(items);
+      },
+      duplicateNodes(nodeIds, offset) {
+        const subgraph = copySubgraph(get().graph, nodeIds);
+        return commitSubgraph(
+          subgraph,
+          offset ? { offset } : {},
+          "复制节点",
+        );
+      },
+      insertSubgraph(subgraph, options = {}) {
+        return commitSubgraph(subgraph, options, "粘贴节点");
       },
       removeElements(nodeIds, edgeIds) {
         removeElements(nodeIds, edgeIds);
@@ -409,7 +660,11 @@ export function createCanvasEditorStore(
         if (!validation.valid) return { ok: false, reason: validation.reason };
         const edge = createCanvasEdge(current, input);
         if (!edge) return { ok: false, reason: "连接无效" };
-        commit({ ...current, edges: [...current.edges, edge] }, "连接节点", [
+        const nextGraph = { ...current, edges: [...current.edges, edge] };
+        if (!validGraphForStoreCommit(nextGraph)) {
+          return { ok: false, reason: "画布已达到容量上限" };
+        }
+        commit(nextGraph, "连接节点", [
           { op: "add_edge", operation_schema_version: 1, edge },
         ]);
         set({
@@ -420,40 +675,25 @@ export function createCanvasEditorStore(
         });
         return { ok: true };
       },
+      updateEdgeDetails(edgeId, details) {
+        updateEdgeDetails(edgeId, details);
+      },
       updateEdgeBinding(
         edgeId,
         bindingMode,
         pinnedExecutionId = null,
         pinnedOutputIndex = null,
       ) {
-        const current = get().graph;
-        const edge = current.edges.find((item) => item.id === edgeId);
-        if (!edge) return;
-        const nextEdge = {
-          ...edge,
+        updateEdgeDetails(edgeId, {
           binding_mode: bindingMode,
           pinned_execution_id:
             bindingMode === "pinned" ? pinnedExecutionId : null,
           pinned_output_index:
             bindingMode === "pinned" ? pinnedOutputIndex : null,
-        };
-        if (
-          edge.binding_mode === nextEdge.binding_mode &&
-          edge.pinned_execution_id === nextEdge.pinned_execution_id &&
-          edge.pinned_output_index === nextEdge.pinned_output_index
-        ) {
-          return;
-        }
-        commit(
-          {
-            ...current,
-            edges: current.edges.map((item) =>
-              item.id === edgeId ? nextEdge : item,
-            ),
-          },
-          "更新输入绑定",
-          [edgeBindingOperation(nextEdge)],
-        );
+        });
+      },
+      updateDocumentSettings(settings) {
+        updateDocumentSettings(settings);
       },
       removeEdges(edgeIds) {
         removeElements([], edgeIds, "删除连接");
@@ -576,19 +816,29 @@ export function createCanvasEditorStore(
         const previous = current.history.at(-1);
         if (!previous) return;
         const operations = operationsBetween(current.graph, previous.graph);
+        if (
+          operations.length > CANVAS_AUTOSAVE_OPERATION_LIMIT ||
+          !validGraphForStoreCommit(previous.graph)
+        ) {
+          return;
+        }
         set({
           graph: cloneCanvasGraph(previous.graph),
           history: current.history.slice(0, -1),
-          future: [
-            { graph: cloneCanvasGraph(current.graph), label: previous.label },
-            ...current.future,
-          ].slice(0, HISTORY_LIMIT),
+          future: trimHistoryEntries(
+            [
+              createHistoryEntry(current.graph, previous.label),
+              ...current.future,
+            ],
+            "oldest",
+          ),
           pendingOperations: [...current.pendingOperations, ...operations],
           ...dirtySaveStatus(current),
           selectedNodeId: null,
           selectedNodeIds: [],
           selectedEdgeId: null,
           editingNodeId: null,
+          connectionDraft: null,
         });
       },
       redo() {
@@ -596,12 +846,21 @@ export function createCanvasEditorStore(
         const nextEntry = current.future[0];
         if (!nextEntry) return;
         const operations = operationsBetween(current.graph, nextEntry.graph);
+        if (
+          operations.length > CANVAS_AUTOSAVE_OPERATION_LIMIT ||
+          !validGraphForStoreCommit(nextEntry.graph)
+        ) {
+          return;
+        }
         set({
           graph: cloneCanvasGraph(nextEntry.graph),
-          history: [
-            ...current.history,
-            { graph: cloneCanvasGraph(current.graph), label: nextEntry.label },
-          ].slice(-HISTORY_LIMIT),
+          history: trimHistoryEntries(
+            [
+              ...current.history,
+              createHistoryEntry(current.graph, nextEntry.label),
+            ],
+            "newest",
+          ),
           future: current.future.slice(1),
           pendingOperations: [...current.pendingOperations, ...operations],
           ...dirtySaveStatus(current),
@@ -609,17 +868,20 @@ export function createCanvasEditorStore(
           selectedNodeIds: [],
           selectedEdgeId: null,
           editingNodeId: null,
+          connectionDraft: null,
         });
       },
       markSaving(count) {
         const current = get();
         if (current.saveState === "conflict") return;
         const pendingCount = current.pendingOperations.length;
+        const activeCount = Math.min(
+          Math.max(0, count ?? pendingCount),
+          pendingCount,
+        );
         set({
-          inFlightOperationCount: Math.min(
-            Math.max(0, count ?? pendingCount),
-            pendingCount,
-          ),
+          inFlightOperationCount: activeCount,
+          retryPrefixOperationCount: activeCount,
           saveState: "saving",
           saveMessage: null,
         });
@@ -635,17 +897,22 @@ export function createCanvasEditorStore(
         set({
           pendingOperations: pending,
           inFlightOperationCount: 0,
+          retryPrefixOperationCount: 0,
           revision: nextRevision,
           saveState: pending.length > 0 ? "dirty" : "saved",
           saveMessage: null,
         });
         return true;
       },
-      markSaveError(message) {
+      markSaveError(message, retryable = true) {
         set((current) =>
           current.saveState === "conflict"
             ? {}
             : {
+                inFlightOperationCount: 0,
+                retryPrefixOperationCount: retryable
+                  ? current.retryPrefixOperationCount
+                  : 0,
                 saveState: "error",
                 saveMessage: message,
               },
@@ -654,13 +921,14 @@ export function createCanvasEditorStore(
       markConflict(message) {
         set({
           inFlightOperationCount: 0,
+          retryPrefixOperationCount: 0,
           saveState: "conflict",
           saveMessage: message,
         });
       },
       replaceFromRemote(nextGraph, nextRevision) {
         set({
-          graph: cloneCanvasGraph(nextGraph),
+          graph: cloneCanonicalCanvasGraph(nextGraph),
           revision: nextRevision,
           selectedNodeId: null,
           selectedNodeIds: [],
@@ -672,6 +940,7 @@ export function createCanvasEditorStore(
           future: [],
           pendingOperations: [],
           inFlightOperationCount: 0,
+          retryPrefixOperationCount: 0,
           saveState: "saved",
           saveMessage: null,
         });
@@ -733,6 +1002,353 @@ function jsonValueEqual(left: unknown, right: unknown): boolean {
   );
 }
 
+function cloneCanonicalCanvasGraph(graph: CanvasGraph): CanvasGraph {
+  const cloned = cloneCanvasGraph(graph);
+  return {
+    ...cloned,
+    nodes: cloned.nodes.map((node) => ({
+      ...node,
+      size: canonicalCanvasSize(node.size, node.type),
+    })),
+  };
+}
+
+function createHistoryEntry(
+  graph: CanvasGraph,
+  label: string,
+  mergeKey?: string,
+): MergeableCanvasHistoryEntry {
+  const cloned = cloneCanvasGraph(graph);
+  return {
+    graph: cloned,
+    label,
+    mergeKey,
+    graphBytes: canvasGraphByteLength(cloned),
+  };
+}
+
+function trimHistoryEntries(
+  entries: CanvasHistoryEntry[],
+  keep: "newest" | "oldest",
+): CanvasHistoryEntry[] {
+  const candidates =
+    keep === "newest"
+      ? [...entries].reverse().slice(0, HISTORY_LIMIT)
+      : entries.slice(0, HISTORY_LIMIT);
+  const retained: CanvasHistoryEntry[] = [];
+  let retainedBytes = 0;
+  for (const entry of candidates) {
+    const mergeable = entry as MergeableCanvasHistoryEntry;
+    const entryBytes =
+      mergeable.graphBytes ?? canvasGraphByteLength(entry.graph);
+    if (
+      entryBytes > CANVAS_HISTORY_GRAPH_BYTE_BUDGET - retainedBytes
+    ) {
+      break;
+    }
+    const retainedEntry: MergeableCanvasHistoryEntry =
+      mergeable.graphBytes === entryBytes
+        ? mergeable
+        : { ...mergeable, graphBytes: entryBytes };
+    retained.push(retainedEntry);
+    retainedBytes += entryBytes;
+  }
+  return keep === "newest" ? retained.reverse() : retained;
+}
+
+function canvasGraphByteLength(graph: CanvasGraph): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(graph)).byteLength;
+  } catch {
+    return CANVAS_HISTORY_GRAPH_BYTE_BUDGET + 1;
+  }
+}
+
+function nodeWithAppearance(
+  node: CanvasNodeDefinition,
+  appearance: CanvasNodeAppearanceUpdate,
+): CanvasNodeDefinition {
+  const title =
+    hasOwn(appearance, "title") && typeof appearance.title === "string"
+      ? appearance.title.trim().slice(0, 255) || node.title
+      : node.title;
+  const parentGroupId =
+    hasOwn(appearance, "parent_group_id") &&
+    appearance.parent_group_id !== undefined
+      ? appearance.parent_group_id
+      : node.parent_group_id;
+  const ui =
+    appearance.ui === undefined
+      ? node.ui
+      : { ...node.ui, ...appearance.ui };
+  return {
+    ...node,
+    title,
+    parent_group_id: parentGroupId,
+    ui,
+  };
+}
+
+function nodeMetaOperation(
+  before: CanvasNodeDefinition,
+  after: CanvasNodeDefinition,
+): Extract<CanvasOperation, { op: "update_node_meta" }> | null {
+  const operation: Extract<CanvasOperation, { op: "update_node_meta" }> = {
+    op: "update_node_meta",
+    operation_schema_version: 1,
+    node_id: after.id,
+  };
+  let changed = false;
+  if (before.title !== after.title) {
+    operation.title = after.title;
+    changed = true;
+  }
+  if (
+    (before.parent_group_id ?? null) !== (after.parent_group_id ?? null)
+  ) {
+    operation.parent_group_id = after.parent_group_id ?? null;
+    changed = true;
+  }
+  if (!jsonValueEqual(before.ui, after.ui)) {
+    operation.ui = { ...after.ui };
+    changed = true;
+  }
+  return changed ? operation : null;
+}
+
+function canvasSizeEqual(
+  left: CanvasSize | null | undefined,
+  right: CanvasSize | null | undefined,
+  nodeType: CanvasNodeType,
+): boolean {
+  const canonicalLeft = canonicalCanvasSize(left, nodeType);
+  const canonicalRight = canonicalCanvasSize(right, nodeType);
+  return (
+    canonicalLeft.width === canonicalRight.width &&
+    canonicalLeft.height === canonicalRight.height
+  );
+}
+
+function canonicalCanvasSize(
+  size: CanvasSize | null | undefined,
+  nodeType: CanvasNodeType,
+): CanvasSize {
+  if (size) return { ...size };
+  return {
+    width: CANVAS_NODE_SPECS[nodeType].width,
+    height: nodeType === "frame" ? 220 : 180,
+  };
+}
+
+function validCanvasSize(size: CanvasSize): boolean {
+  return (
+    Number.isFinite(size.width) &&
+    Number.isFinite(size.height) &&
+    size.width >= 40 &&
+    size.width <= 10_000 &&
+    size.height >= 40 &&
+    size.height <= 10_000
+  );
+}
+
+function validCanvasPosition(position: CanvasPosition): boolean {
+  return (
+    Number.isFinite(position.x) &&
+    Number.isFinite(position.y) &&
+    position.x >= -CANVAS_COORDINATE_LIMIT &&
+    position.x <= CANVAS_COORDINATE_LIMIT &&
+    position.y >= -CANVAS_COORDINATE_LIMIT &&
+    position.y <= CANVAS_COORDINATE_LIMIT
+  );
+}
+
+function validGraphForStoreCommit(graph: CanvasGraph): boolean {
+  const nodeTypesById = new Map(
+    graph.nodes.map((node) => [node.id, node.type]),
+  );
+  return (
+    canvasGraphReadyToSave(graph) &&
+    graph.nodes.every(
+      (node) =>
+        validCanvasPosition(node.position) &&
+        validCanvasSize(canonicalCanvasSize(node.size, node.type)),
+    ) &&
+    graph.edges.every((edge) =>
+      validCanvasEdgeMetadata(edge, nodeTypesById.get(edge.source_node_id)),
+    )
+  );
+}
+
+function validCanvasEdgeMetadata(
+  edge: CanvasEdgeDefinition,
+  sourceType: CanvasNodeType | undefined,
+): boolean {
+  if (!validEdgeRole(edge.role) || !validEdgeOrder(edge.order)) return false;
+  if (
+    edge.role != null &&
+    edge.data_type !== "image" &&
+    edge.data_type !== "mask"
+  ) {
+    return false;
+  }
+  if (edge.binding_mode === "follow_active") {
+    return (
+      edge.pinned_execution_id == null &&
+      edge.pinned_output_index == null
+    );
+  }
+  return (
+    edge.binding_mode === "pinned" &&
+    (sourceType === "image_generate" || sourceType === "video_generate") &&
+    validPinnedBinding(
+      edge.pinned_execution_id,
+      edge.pinned_output_index,
+    )
+  );
+}
+
+function edgeWithDetails(
+  edge: CanvasEdgeDefinition,
+  details: CanvasEdgeDetailsUpdate,
+): CanvasEdgeDefinition | null {
+  const role = hasOwn(details, "role") ? details.role : edge.role;
+  if (!validEdgeRole(role)) return null;
+  const binding = resolveEdgeBinding(edge, details);
+  if (!binding) return null;
+  const order = hasOwn(details, "order") ? details.order : edge.order;
+  if (!validEdgeOrder(order)) return null;
+  return {
+    ...edge,
+    ...binding,
+    role,
+    order,
+  };
+}
+
+function resolveEdgeBinding(
+  edge: CanvasEdgeDefinition,
+  details: CanvasEdgeDetailsUpdate,
+): Pick<
+  CanvasEdgeDefinition,
+  "binding_mode" | "pinned_execution_id" | "pinned_output_index"
+> | null {
+  const bindingMode = hasOwn(details, "binding_mode")
+    ? details.binding_mode
+    : edge.binding_mode;
+  if (
+    bindingMode !== "follow_active" &&
+    bindingMode !== "pinned"
+  ) {
+    return null;
+  }
+  const pinnedExecutionId = hasOwn(details, "pinned_execution_id")
+    ? details.pinned_execution_id
+    : edge.pinned_execution_id;
+  const pinnedOutputIndex = hasOwn(details, "pinned_output_index")
+    ? details.pinned_output_index
+    : edge.pinned_output_index;
+  if (bindingMode === "follow_active") {
+    if (
+      (hasOwn(details, "pinned_execution_id") &&
+        pinnedExecutionId != null) ||
+      (hasOwn(details, "pinned_output_index") &&
+        pinnedOutputIndex != null)
+    ) {
+      return null;
+    }
+    return {
+      binding_mode: bindingMode,
+      pinned_execution_id: null,
+      pinned_output_index: null,
+    };
+  }
+  if (!validPinnedBinding(pinnedExecutionId, pinnedOutputIndex)) return null;
+  return {
+    binding_mode: bindingMode,
+    pinned_execution_id: pinnedExecutionId,
+    pinned_output_index: pinnedOutputIndex,
+  };
+}
+
+function validPinnedBinding(
+  executionId: string | null | undefined,
+  outputIndex: number | null | undefined,
+): executionId is string {
+  return (
+    typeof executionId === "string" &&
+    executionId.length > 0 &&
+    executionId.length <= 36 &&
+    Number.isSafeInteger(outputIndex) &&
+    (outputIndex ?? -1) >= 0
+  );
+}
+
+function validEdgeRole(
+  role: unknown,
+): role is CanvasEdgeRole | null | undefined {
+  return (
+    role == null ||
+    (typeof role === "string" &&
+      CANVAS_EDGE_ROLES.has(role as CanvasEdgeRole))
+  );
+}
+
+function validEdgeOrder(order: number | null | undefined): boolean {
+  return order == null || (Number.isSafeInteger(order) && order >= 0);
+}
+
+function canvasEdgeDetailsEqual(
+  left: CanvasEdgeDefinition,
+  right: CanvasEdgeDefinition,
+): boolean {
+  return (
+    left.binding_mode === right.binding_mode &&
+    (left.pinned_execution_id ?? null) ===
+      (right.pinned_execution_id ?? null) &&
+    (left.pinned_output_index ?? null) ===
+      (right.pinned_output_index ?? null) &&
+    (left.role ?? null) === (right.role ?? null) &&
+    (left.order ?? null) === (right.order ?? null)
+  );
+}
+
+function edgeDetailsOperation(
+  before: CanvasEdgeDefinition,
+  after: CanvasEdgeDefinition,
+): Extract<CanvasOperation, { op: "update_edge" }> {
+  const operation = edgeBindingOperation(after);
+  if ((before.role ?? null) !== (after.role ?? null)) {
+    operation.role = after.role ?? null;
+  }
+  if ((before.order ?? null) !== (after.order ?? null)) {
+    operation.order = after.order ?? null;
+  }
+  return operation;
+}
+
+function validDocumentSettings(settings: CanvasDocumentSettings): boolean {
+  return (
+    typeof settings.snap_to_grid === "boolean" &&
+    Number.isInteger(settings.grid_size) &&
+    settings.grid_size >= 1 &&
+    settings.grid_size <= 256
+  );
+}
+
+function documentSettingsEqual(
+  left: CanvasDocumentSettings,
+  right: CanvasDocumentSettings,
+): boolean {
+  return (
+    left.snap_to_grid === right.snap_to_grid &&
+    left.grid_size === right.grid_size
+  );
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function coalescePendingOperations(
   pending: CanvasOperation[],
   incoming: CanvasOperation[],
@@ -773,6 +1389,15 @@ export function operationsBetween(
     ...removedEntityOperations(current, nextEdgeIds, removedNodeIds),
     ...changedNodeOperations(currentNodes, next),
     ...changedEdgeOperations(currentEdges, next),
+    ...(documentSettingsEqual(current.settings, next.settings)
+      ? []
+      : [
+          {
+            op: "update_document_settings" as const,
+            operation_schema_version: 1 as const,
+            settings: { ...next.settings },
+          },
+        ]),
   ];
 }
 
@@ -831,14 +1456,8 @@ function changedNodeOperations(
       operations.push({ op: "add_node", operation_schema_version: 1, node });
       continue;
     }
-    if (before.title !== node.title) {
-      operations.push({
-        op: "update_node_meta",
-        operation_schema_version: 1,
-        node_id: node.id,
-        title: node.title,
-      });
-    }
+    const metaOperation = nodeMetaOperation(before, node);
+    if (metaOperation) operations.push(metaOperation);
     if (!canvasConfigEqual(before.config, node.config)) {
       operations.push({
         op: "update_node_config",
@@ -847,9 +1466,19 @@ function changedNodeOperations(
         config: node.config,
       });
     }
+    const nextSize = canonicalCanvasSize(node.size, node.type);
+    if (!canvasSizeEqual(before.size, node.size, node.type)) {
+      operations.push({
+        op: "resize_node",
+        operation_schema_version: 1,
+        node_id: node.id,
+        size: nextSize,
+      });
+    }
     if (
-      before.position.x !== node.position.x ||
-      before.position.y !== node.position.y
+      validCanvasPosition(node.position) &&
+      (before.position.x !== node.position.x ||
+        before.position.y !== node.position.y)
     ) {
       movedItems.push({
         node_id: node.id,
@@ -889,16 +1518,8 @@ function changedEdgeOperations(
     const before = currentEdges.get(edge.id);
     if (!before) {
       operations.push({ op: "add_edge", operation_schema_version: 1, edge });
-    } else if (
-      before.binding_mode !== edge.binding_mode ||
-      before.pinned_execution_id !== edge.pinned_execution_id ||
-      before.pinned_output_index !== edge.pinned_output_index ||
-      before.order !== edge.order
-    ) {
-      operations.push({
-        ...edgeBindingOperation(edge),
-        order: edge.order ?? null,
-      });
+    } else if (!canvasEdgeDetailsEqual(before, edge)) {
+      operations.push(edgeDetailsOperation(before, edge));
     }
   }
   return operations;
