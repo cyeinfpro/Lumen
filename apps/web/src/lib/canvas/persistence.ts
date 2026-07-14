@@ -4,6 +4,7 @@ import {
   normalizeCanvasGraph,
   validateCanvasConnections,
 } from "#canvas-graph";
+import { isCanvasExecutableNodeType } from "#canvas-registry";
 import type { CanvasGraph, CanvasOperation } from "./types";
 
 const DATABASE_NAME = "lumen-canvas";
@@ -33,6 +34,7 @@ export interface CanvasDraft {
   base_revision: number;
   graph: CanvasGraph;
   operations: CanvasOperation[];
+  operation_group_sizes?: number[];
   updated_at: number;
 }
 
@@ -460,6 +462,10 @@ function isCanvasEmergencyDraft(value: unknown): value is CanvasEmergencyDraft {
     isCanvasGraph(value.graph) &&
     Array.isArray(value.operations) &&
     value.operations.every(isCanvasOperation) &&
+    canvasOperationGroupSizesAreValid(
+      value.operation_group_sizes,
+      value.operations.length,
+    ) &&
     isFiniteNumber(value.updated_at) &&
     value.updated_at >= 0
   );
@@ -513,6 +519,7 @@ function isCanvasGraph(value: unknown): value is CanvasGraph {
     validateCanvasConnections(
       { ...value, edges: [] },
       value.edges,
+      { allowLegacyCardinality: true },
     ).valid
   );
 }
@@ -560,6 +567,20 @@ function isCanvasEdge(value: unknown): boolean {
 function isCanvasOperation(value: unknown): value is CanvasOperation {
   if (!isCanvasOperationRecord(value)) return false;
   return CANVAS_OPERATION_VALIDATORS[value.op]?.(value) === true;
+}
+
+function canvasOperationGroupSizesAreValid(
+  value: unknown,
+  operationCount: number,
+): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.every(
+        (size) => Number.isSafeInteger(size) && (size as number) > 0,
+      ) &&
+      value.reduce((total, size) => total + Number(size), 0) === operationCount)
+  );
 }
 
 type CanvasOperationRecord = Record<string, unknown> & { op: string };
@@ -655,7 +676,10 @@ function isCanvasNodeUi(value: unknown): boolean {
       typeof value.collapsed === "boolean") &&
     (value.color_tag == null ||
       (typeof value.color_tag === "string" &&
-        value.color_tag.length <= 32))
+        value.color_tag.length <= 32)) &&
+    (value.preset_id == null ||
+      (typeof value.preset_id === "string" &&
+        value.preset_id.length <= 128))
   );
 }
 
@@ -724,7 +748,8 @@ function canvasEdgeBindingIsValid(
     );
   }
   return (
-    (sourceType === "image_generate" || sourceType === "video_generate") &&
+    sourceType !== undefined &&
+    isCanvasExecutableNodeType(sourceType) &&
     typeof edge.pinned_execution_id === "string" &&
     edge.pinned_execution_id.length > 0 &&
     edge.pinned_execution_id.length <= 36 &&

@@ -18,7 +18,12 @@ import {
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import { imageVariantUrl, videoPosterUrl } from "@/lib/apiClient";
-import { CANVAS_NODE_SPECS, type CanvasPortSpec } from "@/lib/canvas/registry";
+import {
+  CANVAS_NODE_SPECS,
+  findMatchingCanvasNodeCatalogItem,
+  isCanvasExecutableNodeType,
+  type CanvasPortSpec,
+} from "@/lib/canvas/registry";
 import type {
   CanvasDataType,
   CanvasNodeDefinition,
@@ -37,6 +42,9 @@ export interface CanvasFlowNodeData extends Record<string, unknown> {
   execution?: CanvasNodeExecution | null;
   activeOutput?: CanvasOutput | null;
   deliveryOutputs?: CanvasOutput[];
+  resolvedText?: string;
+  inputCounts?: Record<string, number>;
+  runDisabledReason?: string | null;
   connectionType?: CanvasDataType | null;
   compatibleInputHandles?: string[];
   onRun?: (nodeId: string) => void;
@@ -75,10 +83,6 @@ const ACTIVE = new Set([
   "canceling",
 ]);
 const FAILED = new Set(["partial_failed", "failed", "blocked"]);
-const RUNNABLE_TYPES = new Set<CanvasNodeType>([
-  "image_generate",
-  "video_generate",
-]);
 const EXECUTION_STATUS_LABELS: Record<CanvasNodeExecution["status"], string> = {
   pending: "待处理",
   ready: "已就绪",
@@ -98,6 +102,8 @@ const EXECUTION_STATUS_LABELS: Record<CanvasNodeExecution["status"], string> = {
 function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
   const { definition, execution } = data;
   const spec = CANVAS_NODE_SPECS[definition.type];
+  const preset = findMatchingCanvasNodeCatalogItem(definition);
+  const displayLabel = preset?.label ?? spec.label;
   const Icon = spec.icon;
   const collapsed = definition.ui?.collapsed === true;
   const colorTag = nodeColorTag(definition);
@@ -114,7 +120,11 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
       )}
       style={{ width: definition.size?.width ?? spec.width }}
       aria-busy={running || undefined}
-      aria-label={canvasNodeAriaLabel(spec.label, definition.title, collapsed)}
+      aria-label={canvasNodeAriaLabel(
+        displayLabel,
+        definition.title,
+        collapsed,
+      )}
     >
       <NodeActivityBar failed={failed} running={running} />
       <NodePorts
@@ -150,7 +160,7 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
             data={data}
           />
           <p className="truncate type-mono-meta text-[var(--fg-3)]">
-            {spec.label}
+            {displayLabel}
           </p>
         </div>
         <NodeStatus execution={execution} />
@@ -182,7 +192,7 @@ function CanvasNodeBody({
       </div>
       <footer className="flex min-h-10 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3">
         <span className="type-caption truncate text-[var(--fg-2)]">
-          {nodeSummary(data.definition)}
+          {nodeSummary(data)}
         </span>
         <NodeFooterAction data={data} />
       </footer>
@@ -427,7 +437,7 @@ function NodeFooterAction({ data }: { data: CanvasFlowNodeData }) {
     execution?.status === "partial_failed" ||
     execution?.status === "failed" ||
     execution?.status === "blocked";
-  if (!RUNNABLE_TYPES.has(definition.type)) {
+  if (!isCanvasExecutableNodeType(definition.type)) {
     return (
       <PassiveNodeCompletion execution={execution} activeOutput={activeOutput} />
     );
@@ -459,13 +469,14 @@ function RunnableNodeAction({
   failed: boolean;
   running: boolean;
 }) {
-  const label = runnableNodeActionLabel(running, failed);
+  const disabledReason = data.runDisabledReason ?? null;
+  const label = runnableNodeActionLabel(running, failed, disabledReason);
   return (
     <button
       type="button"
       aria-label={label.aria}
       title={label.title}
-      disabled={running}
+      disabled={running || Boolean(disabledReason)}
       onClick={(event) => {
         event.stopPropagation();
         data.onRun?.(data.definition.id);
@@ -493,8 +504,18 @@ function RunnableNodeActionIcon({
   return <Play className="h-4 w-4" />;
 }
 
-function runnableNodeActionLabel(running: boolean, failed: boolean) {
+function runnableNodeActionLabel(
+  running: boolean,
+  failed: boolean,
+  disabledReason: string | null,
+) {
   if (running) return { aria: "节点运行中", title: "运行中" };
+  if (disabledReason) {
+    return {
+      aria: `节点不可运行：${disabledReason}`,
+      title: disabledReason,
+    };
+  }
   if (failed) return { aria: "重试节点", title: "重试" };
   return { aria: "运行节点", title: "运行" };
 }
@@ -504,6 +525,9 @@ function NodeContent({ data }: { data: CanvasFlowNodeData }) {
   if (definition.type === "prompt" || definition.type === "note") {
     return <TextNodeContent data={data} />;
   }
+  if (definition.type === "prompt_merge") {
+    return <PromptMergeNodeContent data={data} />;
+  }
   if (definition.type === "delivery") {
     return deliveryOutputs.length > 0 ? (
       <div className="grid grid-cols-3 gap-1 p-2">
@@ -511,6 +535,7 @@ function NodeContent({ data }: { data: CanvasFlowNodeData }) {
           <OutputPreview
             key={`${output.image_id ?? output.video_id}-${index}`}
             output={output}
+            alt={`交付${output.type === "image" ? "图片" : "视频"} ${index + 1}`}
           />
         ))}
       </div>
@@ -520,26 +545,127 @@ function NodeContent({ data }: { data: CanvasFlowNodeData }) {
       </div>
     );
   }
+  const spec = CANVAS_NODE_SPECS[definition.type];
   if (
-    definition.type === "image_asset" ||
-    definition.type === "video_asset" ||
-    definition.type === "image_generate" ||
-    definition.type === "video_generate"
+    spec.family === "asset" ||
+    spec.family === "image" ||
+    spec.family === "video"
   ) {
     return activeOutput ? (
-      <OutputPreview output={activeOutput} large />
+      <OutputPreview
+        output={activeOutput}
+        alt={`${definition.title}${activeOutput.type === "image" ? "图片" : "视频"}预览`}
+        crop={
+          definition.type === "image_asset" ||
+          definition.type === "mask_asset"
+            ? normalizedCanvasCrop(definition.config.crop)
+            : null
+        }
+        large
+      />
     ) : (
-      <div className="grid min-h-[112px] place-items-center bg-[var(--surface-media)] p-3 type-caption text-[var(--fg-2)]">
-        {definition.type.endsWith("_asset") ? "选择素材" : "暂无输出"}
-      </div>
+      <NodeInputOverview data={data} />
     );
   }
   return <div className="min-h-[96px]" />;
 }
 
+function PromptMergeNodeContent({ data }: { data: CanvasFlowNodeData }) {
+  const resolved = data.resolvedText ?? "";
+  const inputCount = data.inputCounts?.texts ?? 0;
+  return (
+    <div className="grid min-h-[112px] content-start gap-2 bg-[var(--bg-2)]/32 p-3">
+      <div className="flex items-center justify-between gap-3 type-caption">
+        <span className="text-[var(--fg-2)]">组合预览</span>
+        <span className="shrink-0 tabular-nums text-[var(--fg-1)]">
+          {inputCount} 路 · {resolved.length} 字
+        </span>
+      </div>
+      <p className="line-clamp-4 whitespace-pre-wrap type-body-sm leading-5 text-[var(--fg-1)]">
+        {resolved || "连接多个提示词后在此预览组合结果"}
+      </p>
+    </div>
+  );
+}
+
+function NodeInputOverview({ data }: { data: CanvasFlowNodeData }) {
+  const { definition } = data;
+  const spec = CANVAS_NODE_SPECS[definition.type];
+  const isAsset = spec.family === "asset";
+  if (isAsset) {
+    const selected =
+      definition.type === "video_asset"
+        ? Boolean(definition.config.video_id)
+        : Boolean(definition.config.image_id);
+    return (
+      <div className="grid min-h-[112px] place-items-center bg-[var(--surface-media)] p-3 text-center">
+        <div>
+          <p className="type-body-sm font-medium text-[var(--fg-1)]">
+            {selected ? "素材已就绪" : assetEmptyLabel(definition.type)}
+          </p>
+          <p className="mt-1 type-caption text-[var(--fg-3)]">
+            {selected ? "可连接到兼容的下游节点" : "在右侧检查器中上传或填写素材 ID"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="grid min-h-[112px] content-start gap-2 bg-[var(--surface-media)] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="type-caption font-medium text-[var(--fg-1)]">
+          输入状态
+        </span>
+        <span className="type-mono-meta text-[var(--fg-3)]">等待运行</span>
+      </div>
+      <div className="grid gap-1.5">
+        {spec.inputs.map((port) => {
+          const count = data.inputCounts?.[port.id] ?? 0;
+          const missing = port.required === true && count === 0;
+          return (
+            <div
+              key={port.id}
+              className="flex min-h-6 items-center justify-between gap-2"
+            >
+              <span className="min-w-0 truncate type-caption text-[var(--fg-2)]">
+                {port.label}
+                {port.required ? " *" : ""}
+              </span>
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 type-mono-meta tabular-nums",
+                  missing
+                    ? "text-[var(--danger-fg)]"
+                    : count > 0
+                      ? "text-[var(--success-fg)]"
+                      : "text-[var(--fg-3)]",
+                )}
+              >
+                {missing ? (
+                  <AlertCircle className="h-3 w-3" aria-hidden />
+                ) : count > 0 ? (
+                  <CheckCircle2 className="h-3 w-3" aria-hidden />
+                ) : null}
+                {count > 0 ? count : missing ? "缺失" : "可选"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function assetEmptyLabel(type: CanvasNodeType): string {
+  if (type === "video_asset") return "选择视频素材";
+  if (type === "mask_asset") return "选择遮罩素材";
+  return "选择图片素材";
+}
+
 function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
   const { definition } = data;
   const isPrompt = definition.type === "prompt";
+  const locked = isPrompt && definition.config.locked === true;
   const text = String(definition.config.text ?? "");
   const [draft, setDraft] = useState(text);
   const draftRef = useRef(text);
@@ -547,7 +673,7 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const timerRef = useRef<number | null>(null);
   const composingRef = useRef(false);
-  const editingDisabled = data.editingEnabled === false;
+  const editingDisabled = data.editingEnabled === false || locked;
   const placeholder = isPrompt ? "描述要生成的画面" : "添加画布说明";
 
   const flush = useCallback(() => {
@@ -607,7 +733,13 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
       readOnly={editingDisabled}
       tabIndex={editingDisabled ? -1 : undefined}
       maxLength={isPrompt ? MAX_PROMPT_CHARS : 2000}
-      aria-label={isPrompt ? "编辑提示词内容" : "编辑备注内容"}
+      aria-label={
+        locked
+          ? "提示词内容已锁定"
+          : isPrompt
+            ? "编辑提示词内容"
+            : "编辑备注内容"
+      }
       placeholder={placeholder}
       onFocus={(event) => {
         if (editingDisabled) {
@@ -670,45 +802,148 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
 
 function OutputPreview({
   output,
+  alt,
+  crop = null,
   large = false,
 }: {
   output: CanvasOutput;
+  alt: string;
+  crop?: NormalizedCanvasCrop | null;
   large?: boolean;
 }) {
   const src = outputPreviewSource(output);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const visibleSrc = src === failedSrc ? null : src;
   const width = outputDimension(output.width);
   const height = outputDimension(output.height);
+  const [naturalSize, setNaturalSize] = useState<{
+    src: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  const natural = matchingNaturalSize(visibleSrc, naturalSize);
+  const previewWidth = width ?? natural?.width;
+  const previewHeight = height ?? natural?.height;
+  const cropStyle = outputCropStyle(
+    output.type,
+    crop,
+    previewWidth,
+    previewHeight,
+  );
   return (
     <div
       className={cn(
         "relative w-full overflow-hidden bg-[var(--surface-media)]",
         large ? "min-h-[112px]" : "min-h-16",
       )}
-      style={{ aspectRatio: outputAspectRatio(output) }}
+      style={{
+        aspectRatio: outputAspectRatio(
+          output,
+          crop,
+          previewWidth,
+          previewHeight,
+        ),
+      }}
     >
-      {src ? (
-        // eslint-disable-next-line @next/next/no-img-element -- API-backed signed media and canvas thumbnails.
-        <img
-          src={src}
-          alt=""
-          width={width}
-          height={height}
-          loading="lazy"
-          decoding="async"
-          className="h-full w-full object-contain"
-          draggable={false}
-        />
-      ) : (
-        <div className="grid h-full min-h-16 place-items-center type-caption text-[var(--fg-3)]">
-          无预览
-        </div>
-      )}
-      {output.type === "video" ? (
-        <span className="absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-mono-meta text-[var(--media-control-fg)]">
-          VIDEO
-        </span>
-      ) : null}
+      <OutputPreviewMedia
+        src={visibleSrc}
+        alt={alt}
+        width={width}
+        height={height}
+        cropStyle={cropStyle}
+        onNaturalSize={setNaturalSize}
+        onError={() => {
+          if (visibleSrc) setFailedSrc(visibleSrc);
+        }}
+      />
+      <OutputTypeBadge type={output.type} />
     </div>
+  );
+}
+
+function matchingNaturalSize(
+  src: string | null,
+  naturalSize: { src: string; width: number; height: number } | null,
+) {
+  return src && naturalSize?.src === src ? naturalSize : null;
+}
+
+function outputCropStyle(
+  type: CanvasOutput["type"],
+  crop: NormalizedCanvasCrop | null,
+  width?: number,
+  height?: number,
+): React.CSSProperties | undefined {
+  if (!crop || type !== "image" || !width || !height) return undefined;
+  return {
+    height: `${100 / crop.height}%`,
+    left: `${(-crop.x / crop.width) * 100}%`,
+    maxWidth: "none",
+    position: "absolute",
+    top: `${(-crop.y / crop.height) * 100}%`,
+    width: `${100 / crop.width}%`,
+  };
+}
+
+function OutputPreviewMedia({
+  src,
+  alt,
+  width,
+  height,
+  cropStyle,
+  onNaturalSize,
+  onError,
+}: {
+  src: string | null;
+  alt: string;
+  width?: number;
+  height?: number;
+  cropStyle?: React.CSSProperties;
+  onNaturalSize: (
+    size: { src: string; width: number; height: number },
+  ) => void;
+  onError: () => void;
+}) {
+  if (!src) {
+    return (
+      <div className="grid h-full min-h-16 place-items-center type-caption text-[var(--fg-3)]">
+        无预览
+      </div>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- API-backed signed media and canvas thumbnails.
+    <img
+      src={src}
+      alt={alt}
+      width={width}
+      height={height}
+      loading="lazy"
+      decoding="async"
+      className={cn(!cropStyle && "h-full w-full object-contain")}
+      style={cropStyle}
+      onLoad={(event) => {
+        if (width && height) return;
+        const image = event.currentTarget;
+        if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+        onNaturalSize({
+          src,
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
+      }}
+      onError={onError}
+      draggable={false}
+    />
+  );
+}
+
+function OutputTypeBadge({ type }: { type: CanvasOutput["type"] }) {
+  if (type !== "video") return null;
+  return (
+    <span className="absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-mono-meta text-[var(--media-control-fg)]">
+      VIDEO
+    </span>
   );
 }
 
@@ -716,8 +951,8 @@ function outputPreviewSource(output: CanvasOutput): string | null {
   if (output.type === "video") {
     return (
       output.poster_url?.trim() ||
-      (output.video_id ? videoPosterUrl(output.video_id) : null) ||
       output.preview_url?.trim() ||
+      (output.video_id ? videoPosterUrl(output.video_id) : null) ||
       null
     );
   }
@@ -729,10 +964,19 @@ function outputPreviewSource(output: CanvasOutput): string | null {
   );
 }
 
-function outputAspectRatio(output: CanvasOutput): string {
-  const width = outputDimension(output.width);
-  const height = outputDimension(output.height);
-  if (width && height) return `${width} / ${height}`;
+function outputAspectRatio(
+  output: CanvasOutput,
+  crop?: NormalizedCanvasCrop | null,
+  resolvedWidth?: number,
+  resolvedHeight?: number,
+): string {
+  const width = resolvedWidth ?? outputDimension(output.width);
+  const height = resolvedHeight ?? outputDimension(output.height);
+  if (width && height) {
+    return crop && output.type === "image"
+      ? `${width * crop.width} / ${height * crop.height}`
+      : `${width} / ${height}`;
+  }
   return output.type === "video" ? "16 / 9" : "1 / 1";
 }
 
@@ -859,24 +1103,55 @@ function NodePorts({
 
 const NODE_SUMMARY: Record<
   CanvasNodeType,
-  (node: CanvasNodeDefinition) => string
+  (data: CanvasFlowNodeData) => string
 > = {
-  prompt: (node) => `${String(node.config.text ?? "").length} 字`,
-  note: (node) => `${String(node.config.text ?? "").length} 字`,
-  image_asset: (node) =>
-    String(node.config.display_name || node.config.image_id || "未选择"),
-  video_asset: (node) =>
-    String(node.config.display_name || node.config.video_id || "未选择"),
-  image_generate: (node) =>
-    `${String(node.config.aspect_ratio ?? "1:1")} · ${String(node.config.quality ?? "2k")} · ${Number(node.config.count ?? 1)} 张`,
-  video_generate: (node) =>
-    `${videoModeLabel(String(node.config.mode ?? "t2v"))} · ${Number(node.config.duration_s ?? 5)} 秒`,
-  delivery: () => "最终交付",
-  frame: (node) => node.title,
+  prompt: ({ definition }) =>
+    `${String(definition.config.text ?? "").length} 字${definition.config.locked === true ? " · 已锁定" : ""}`,
+  prompt_merge: ({ resolvedText, inputCounts }) =>
+    `${inputCounts?.texts ?? 0} 路 · ${(resolvedText ?? "").length} 字`,
+  note: ({ definition }) => {
+    const tags = Array.isArray(definition.config.tags)
+      ? definition.config.tags.length
+      : 0;
+    return `${String(definition.config.text ?? "").length} 字${tags ? ` · ${tags} 标签` : ""}`;
+  },
+  image_asset: ({ definition }) => assetSummary(definition),
+  mask_asset: ({ definition }) => assetSummary(definition),
+  video_asset: ({ definition }) => assetSummary(definition),
+  image_generate: ({ definition }) => imageSummary(definition),
+  image_edit: ({ definition }) => imageSummary(definition),
+  image_inpaint: ({ definition }) => imageSummary(definition),
+  image_upscale: ({ definition }) => imageSummary(definition),
+  video_generate: ({ definition }) => videoSummary(definition),
+  video_text_generate: ({ definition }) => videoSummary(definition),
+  video_image_generate: ({ definition }) => videoSummary(definition),
+  video_reference_generate: ({ definition }) => videoSummary(definition),
+  delivery: ({ deliveryOutputs }) =>
+    deliveryOutputs?.length ? `${deliveryOutputs.length} 个结果` : "最终交付",
+  frame: ({ definition }) =>
+    definition.config.hidden_in_run === true
+      ? "运行视图隐藏"
+      : definition.title,
 };
 
-function nodeSummary(node: CanvasNodeDefinition): string {
-  return NODE_SUMMARY[node.type](node);
+function nodeSummary(data: CanvasFlowNodeData): string {
+  return NODE_SUMMARY[data.definition.type](data);
+}
+
+function assetSummary(node: CanvasNodeDefinition): string {
+  if (node.type === "video_asset") {
+    return String(node.config.display_name || node.config.video_id || "未选择");
+  }
+  return String(node.config.display_name || node.config.image_id || "未选择");
+}
+
+function imageSummary(node: CanvasNodeDefinition): string {
+  return `${String(node.config.aspect_ratio ?? "1:1")} · ${String(node.config.quality ?? "2k").toUpperCase()} · ${Number(node.config.count ?? 1)} 张`;
+}
+
+function videoSummary(node: CanvasNodeDefinition): string {
+  const duration = Number(node.config.duration_s ?? 5);
+  return `${videoModeLabel(String(node.config.mode ?? "t2v"))} · ${duration === -1 ? "智能时长" : `${duration} 秒`} · ${String(node.config.resolution ?? "720p").toUpperCase()}`;
 }
 
 function videoModeLabel(mode: string): string {
@@ -903,15 +1178,51 @@ const NODE_COLOR_TAG_VALUES: Record<string, string> = {
   danger: "var(--danger)",
 };
 
+interface NormalizedCanvasCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function normalizedCanvasCrop(value: unknown): NormalizedCanvasCrop | null {
+  if (!value || typeof value !== "object") return null;
+  const crop = value as Record<string, unknown>;
+  const x = Number(crop.x);
+  const y = Number(crop.y);
+  const width = Number(crop.width);
+  const height = Number(crop.height);
+  if (
+    ![x, y, width, height].every(Number.isFinite) ||
+    x < 0 ||
+    y < 0 ||
+    width <= 0 ||
+    height <= 0 ||
+    x + width > 1 ||
+    y + height > 1
+  ) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
 const MemoCanvasNode = memo(CanvasNodeComponent);
 const MemoFrameNode = memo(FrameCanvasNode);
 
 export const canvasNodeTypes = {
   prompt: MemoCanvasNode,
+  prompt_merge: MemoCanvasNode,
   image_asset: MemoCanvasNode,
+  mask_asset: MemoCanvasNode,
   video_asset: MemoCanvasNode,
   image_generate: MemoCanvasNode,
+  image_edit: MemoCanvasNode,
+  image_inpaint: MemoCanvasNode,
+  image_upscale: MemoCanvasNode,
   video_generate: MemoCanvasNode,
+  video_text_generate: MemoCanvasNode,
+  video_image_generate: MemoCanvasNode,
+  video_reference_generate: MemoCanvasNode,
   note: MemoCanvasNode,
   frame: MemoFrameNode,
   delivery: MemoCanvasNode,

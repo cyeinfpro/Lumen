@@ -34,6 +34,7 @@ from lumen_core.models import Base, VideoGeneration
 from app import db as app_db
 from app import deps
 from app.canvas_services.api_schemas import (
+    MAX_CANVAS_MUTATION_JSON_BYTES,
     CanvasCreateIn,
     CanvasDuplicateIn,
     CanvasExecuteIn,
@@ -48,7 +49,10 @@ from app.canvas_services.document_service import (
     get_owned_canvas,
 )
 from app.canvas_services.execution_service import execute_node
-from app.canvas_services.mutation_service import apply_mutation
+from app.canvas_services.mutation_service import (
+    _revision_conflict_details,
+    apply_mutation,
+)
 from app.canvas_services.read_repair import repair_canvas_executions
 from app.canvas_services.run_serialization import (
     canvas_projections,
@@ -124,6 +128,71 @@ def _graph(prompt: str = "一张产品海报") -> dict:
 def test_canvas_names_reject_whitespace_only_values(schema, payload: dict) -> None:
     with pytest.raises(ValidationError):
         schema.model_validate(payload)
+
+
+def test_canvas_mutations_reject_deep_or_oversized_json() -> None:
+    nested: dict = {"value": "leaf"}
+    for _ in range(40):
+        nested = {"nested": nested}
+    common = {
+        "base_revision": 1,
+        "client_id": "tab-1",
+        "mutation_id": "mutation-1",
+    }
+    with pytest.raises(ValidationError, match="nesting limit"):
+        CanvasMutationIn.model_validate(
+            {**common, "operations": [{"op": "noop", "payload": nested}]}
+        )
+    with pytest.raises(ValidationError, match="payload limit"):
+        CanvasMutationIn.model_validate(
+            {
+                **common,
+                "operations": [
+                    {
+                        "op": "noop",
+                        "payload": "x" * MAX_CANVAS_MUTATION_JSON_BYTES,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_revision_conflict_falls_back_to_snapshot_for_large_gaps() -> None:
+    async with _session() as db:
+        canvas = await create_canvas(
+            db,
+            user_id="user-1",
+            body=CanvasCreateIn(title="冲突窗口", graph=_graph()),
+        )
+        rows = [
+            CanvasMutation(
+                canvas_id=canvas.id,
+                user_id="user-1",
+                client_id="tab-remote",
+                mutation_id=f"remote-{revision}",
+                operation_schema_version=1,
+                base_revision=revision - 1,
+                result_revision=revision,
+                operations_jsonb=[],
+                response_jsonb={},
+            )
+            for revision in range(2, 103)
+        ]
+        db.add_all(rows)
+        canvas.revision = 102
+        canvas.updated_at = datetime.now(timezone.utc)
+        await db.flush()
+
+        details = await _revision_conflict_details(
+            db,
+            canvas=canvas,
+            client_revision=1,
+        )
+
+    assert details["rebase_unavailable"] is True
+    assert details["remote_mutations"] == []
+    assert details["snapshot"]["revision"] == 102
 
 
 @asynccontextmanager

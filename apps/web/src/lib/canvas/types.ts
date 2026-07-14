@@ -1,9 +1,17 @@
 export type CanvasNodeType =
   | "prompt"
+  | "prompt_merge"
   | "image_asset"
+  | "mask_asset"
   | "video_asset"
   | "image_generate"
+  | "image_edit"
+  | "image_inpaint"
+  | "image_upscale"
   | "video_generate"
+  | "video_text_generate"
+  | "video_image_generate"
+  | "video_reference_generate"
   | "note"
   | "frame"
   | "delivery";
@@ -41,6 +49,7 @@ export type CanvasSize = { width: number; height: number };
 export interface CanvasNodeUI {
   collapsed?: boolean;
   color_tag?: string | null;
+  preset_id?: string | null;
 }
 
 export interface CanvasDocumentSettings {

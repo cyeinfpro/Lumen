@@ -17,13 +17,14 @@ from pydantic import (
     model_validator,
 )
 
-from .constants import MAX_PROMPT_CHARS
+from .constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
 
 
 GRAPH_SCHEMA_VERSION = 1
 OPERATION_SCHEMA_VERSION = 1
 MAX_CANVAS_NODES = 1_000
 MAX_CANVAS_EDGES = 3_000
+MAX_CANVAS_FRAMES = 1_000
 MAX_CANVAS_GRAPH_BYTES = 5 * 1024 * 1024
 MAX_CANVAS_NODE_CONFIG_BYTES = 64 * 1024
 MAX_CANVAS_GROUP_DEPTH = 4
@@ -36,14 +37,41 @@ CanvasDataType = Literal["text", "image", "video", "mask"]
 CanvasBindingMode = Literal["follow_active", "pinned"]
 CanvasNodeType = Literal[
     "prompt",
+    "prompt_merge",
     "image_asset",
+    "mask_asset",
     "video_asset",
     "image_generate",
+    "image_edit",
+    "image_inpaint",
+    "image_upscale",
     "video_generate",
+    "video_text_generate",
+    "video_image_generate",
+    "video_reference_generate",
     "note",
     "frame",
     "delivery",
 ]
+
+IMAGE_EXECUTABLE_NODE_TYPES = frozenset(
+    {
+        "image_generate",
+        "image_edit",
+        "image_inpaint",
+        "image_upscale",
+    }
+)
+VIDEO_EXECUTABLE_NODE_TYPES = frozenset(
+    {
+        "video_generate",
+        "video_text_generate",
+        "video_image_generate",
+        "video_reference_generate",
+    }
+)
+EXECUTABLE_NODE_TYPES = IMAGE_EXECUTABLE_NODE_TYPES | VIDEO_EXECUTABLE_NODE_TYPES
+GENERATED_OUTPUT_NODE_TYPES = EXECUTABLE_NODE_TYPES
 
 
 class _StrictModel(BaseModel):
@@ -90,11 +118,20 @@ class CanvasCrop(_StrictModel):
 class CanvasNodeUI(_StrictModel):
     collapsed: bool = False
     color_tag: str | None = Field(default=None, max_length=32)
+    preset_id: str | None = Field(default=None, max_length=128)
 
 
 class PromptNodeConfig(_StrictModel):
     text: str = Field(default="", max_length=MAX_PROMPT_CHARS)
     locked: bool = False
+
+
+class PromptMergeNodeConfig(_StrictModel):
+    separator: str = Field(default="\n\n", max_length=32)
+    prefix: str = Field(default="", max_length=2_000)
+    suffix: str = Field(default="", max_length=2_000)
+    trim: bool = True
+    dedupe: bool = False
 
 
 class ImageAssetNodeConfig(_StrictModel):
@@ -134,12 +171,31 @@ class ImageGenerateNodeConfig(_StrictModel):
 class VideoGenerateNodeConfig(_StrictModel):
     mode: Literal["t2v", "i2v", "reference"] = "t2v"
     model: str | None = Field(default=None, max_length=64)
-    duration_s: int = Field(default=5, ge=3, le=15)
+    duration_s: int = Field(default=5, ge=-1, le=15)
     resolution: str = Field(default="720p", min_length=1, max_length=16)
     aspect_ratio: str = Field(default="16:9", min_length=1, max_length=16)
     generate_audio: bool = True
     seed: int | None = None
     watermark: bool = False
+
+    @field_validator("duration_s")
+    @classmethod
+    def validate_duration(cls, value: int) -> int:
+        if value != -1 and value < 3:
+            raise ValueError("duration_s must be -1 or between 3 and 15")
+        return value
+
+
+class VideoTextGenerateNodeConfig(VideoGenerateNodeConfig):
+    mode: Literal["t2v"] = "t2v"
+
+
+class VideoImageGenerateNodeConfig(VideoGenerateNodeConfig):
+    mode: Literal["i2v"] = "i2v"
+
+
+class VideoReferenceGenerateNodeConfig(VideoGenerateNodeConfig):
+    mode: Literal["reference"] = "reference"
 
 
 class NoteNodeConfig(_StrictModel):
@@ -203,8 +259,18 @@ class PromptNode(CanvasNodeBase):
     config: PromptNodeConfig
 
 
+class PromptMergeNode(CanvasNodeBase):
+    type: Literal["prompt_merge"]
+    config: PromptMergeNodeConfig = Field(default_factory=PromptMergeNodeConfig)
+
+
 class ImageAssetNode(CanvasNodeBase):
     type: Literal["image_asset"]
+    config: ImageAssetNodeConfig
+
+
+class MaskAssetNode(CanvasNodeBase):
+    type: Literal["mask_asset"]
     config: ImageAssetNodeConfig
 
 
@@ -218,9 +284,64 @@ class ImageGenerateNode(CanvasNodeBase):
     config: ImageGenerateNodeConfig = Field(default_factory=ImageGenerateNodeConfig)
 
 
+class ImageEditNode(CanvasNodeBase):
+    type: Literal["image_edit"]
+    config: ImageGenerateNodeConfig = Field(default_factory=ImageGenerateNodeConfig)
+
+
+class ImageInpaintNode(CanvasNodeBase):
+    type: Literal["image_inpaint"]
+    config: ImageGenerateNodeConfig = Field(default_factory=ImageGenerateNodeConfig)
+
+
+class ImageUpscaleNode(CanvasNodeBase):
+    type: Literal["image_upscale"]
+    config: ImageGenerateNodeConfig = Field(
+        default_factory=lambda: ImageGenerateNodeConfig(
+            size="2K",
+            quality="2k",
+            fast=True,
+        )
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_upscale_defaults(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        config = dict(normalized.get("config") or {})
+        config.setdefault("size", "2K")
+        config.setdefault("quality", "2k")
+        config.setdefault("fast", True)
+        normalized["config"] = config
+        return normalized
+
+
 class VideoGenerateNode(CanvasNodeBase):
     type: Literal["video_generate"]
     config: VideoGenerateNodeConfig = Field(default_factory=VideoGenerateNodeConfig)
+
+
+class VideoTextGenerateNode(CanvasNodeBase):
+    type: Literal["video_text_generate"]
+    config: VideoTextGenerateNodeConfig = Field(
+        default_factory=VideoTextGenerateNodeConfig
+    )
+
+
+class VideoImageGenerateNode(CanvasNodeBase):
+    type: Literal["video_image_generate"]
+    config: VideoImageGenerateNodeConfig = Field(
+        default_factory=VideoImageGenerateNodeConfig
+    )
+
+
+class VideoReferenceGenerateNode(CanvasNodeBase):
+    type: Literal["video_reference_generate"]
+    config: VideoReferenceGenerateNodeConfig = Field(
+        default_factory=VideoReferenceGenerateNodeConfig
+    )
 
 
 class NoteNode(CanvasNodeBase):
@@ -240,10 +361,18 @@ class DeliveryNode(CanvasNodeBase):
 
 CanvasNodeDefinition = Annotated[
     PromptNode
+    | PromptMergeNode
     | ImageAssetNode
+    | MaskAssetNode
     | VideoAssetNode
     | ImageGenerateNode
+    | ImageEditNode
+    | ImageInpaintNode
+    | ImageUpscaleNode
     | VideoGenerateNode
+    | VideoTextGenerateNode
+    | VideoImageGenerateNode
+    | VideoReferenceGenerateNode
     | NoteNode
     | FrameNode
     | DeliveryNode,
@@ -334,18 +463,48 @@ class CanvasPortSpec:
 
 NODE_INPUT_PORTS: dict[str, dict[str, CanvasPortSpec]] = {
     "prompt": {},
+    "prompt_merge": {
+        "texts": CanvasPortSpec("text", None),
+    },
     "image_asset": {},
+    "mask_asset": {},
     "video_asset": {},
     "image_generate": {
         "prompt": CanvasPortSpec("text", 1, True),
         "references": CanvasPortSpec("image", None),
         "mask": CanvasPortSpec("mask", 1),
     },
+    "image_edit": {
+        "prompt": CanvasPortSpec("text", 1, True),
+        "source": CanvasPortSpec("image", 1, True),
+        "references": CanvasPortSpec("image", MAX_MESSAGE_ATTACHMENTS - 1),
+    },
+    "image_inpaint": {
+        "prompt": CanvasPortSpec("text", 1, True),
+        "source": CanvasPortSpec("image", 1, True),
+        "mask": CanvasPortSpec("mask", 1, True),
+    },
+    "image_upscale": {
+        "prompt": CanvasPortSpec("text", 1, True),
+        "source": CanvasPortSpec("image", 1, True),
+    },
     "video_generate": {
         "prompt": CanvasPortSpec("text", 1, True),
         "first_frame": CanvasPortSpec("image", 1),
         "reference_images": CanvasPortSpec("image", None),
         "reference_videos": CanvasPortSpec("video", None),
+    },
+    "video_text_generate": {
+        "prompt": CanvasPortSpec("text", 1, True),
+    },
+    "video_image_generate": {
+        "prompt": CanvasPortSpec("text", 1, True),
+        "first_frame": CanvasPortSpec("image", 1, True),
+    },
+    "video_reference_generate": {
+        "prompt": CanvasPortSpec("text", 1, True),
+        "reference_images": CanvasPortSpec("image", 9),
+        "reference_videos": CanvasPortSpec("video", 3),
     },
     "note": {},
     "frame": {},
@@ -357,10 +516,18 @@ NODE_INPUT_PORTS: dict[str, dict[str, CanvasPortSpec]] = {
 
 NODE_OUTPUT_PORTS: dict[str, dict[str, CanvasPortSpec]] = {
     "prompt": {"text": CanvasPortSpec("text", None)},
+    "prompt_merge": {"text": CanvasPortSpec("text", None)},
     "image_asset": {"image": CanvasPortSpec("image", None)},
+    "mask_asset": {"mask": CanvasPortSpec("mask", None)},
     "video_asset": {"video": CanvasPortSpec("video", None)},
     "image_generate": {"image": CanvasPortSpec("image", None)},
+    "image_edit": {"image": CanvasPortSpec("image", None)},
+    "image_inpaint": {"image": CanvasPortSpec("image", None)},
+    "image_upscale": {"image": CanvasPortSpec("image", None)},
     "video_generate": {"video": CanvasPortSpec("video", None)},
+    "video_text_generate": {"video": CanvasPortSpec("video", None)},
+    "video_image_generate": {"video": CanvasPortSpec("video", None)},
+    "video_reference_generate": {"video": CanvasPortSpec("video", None)},
     "note": {},
     "frame": {},
     "delivery": {},
@@ -463,13 +630,10 @@ def _validate_edge_contract(
         )
     source_matches = source_port.data_type == edge.data_type
     if edge.data_type == "mask":
-        source_matches = source_port.data_type == "image"
+        source_matches = source_port.data_type in {"image", "mask"}
     if not source_matches or target_port.data_type != edge.data_type:
         raise ValueError(f"edge {edge.id!r} has incompatible port types")
-    if edge.binding_mode == "pinned" and source.type not in {
-        "image_generate",
-        "video_generate",
-    }:
+    if edge.binding_mode == "pinned" and source.type not in GENERATED_OUTPUT_NODE_TYPES:
         raise ValueError("only generated outputs can use pinned bindings")
     if edge.role is not None and edge.data_type not in {"image", "mask"}:
         raise ValueError("roles are only valid for image or mask inputs")
@@ -576,7 +740,9 @@ class CanvasGraph(_StrictModel):
         default_factory=list, max_length=MAX_CANVAS_NODES
     )
     edges: list[CanvasEdge] = Field(default_factory=list, max_length=MAX_CANVAS_EDGES)
-    frames: list[CanvasFrame] = Field(default_factory=list)
+    frames: list[CanvasFrame] = Field(
+        default_factory=list, max_length=MAX_CANVAS_FRAMES
+    )
     settings: CanvasDocumentSettings = Field(default_factory=CanvasDocumentSettings)
 
     @model_validator(mode="after")
@@ -816,6 +982,9 @@ def validate_required_inputs(graph: CanvasGraph, node_id: str) -> list[str]:
     if node.type == "video_generate" and node.config.mode == "reference":
         if not connected & {"reference_images", "reference_videos"}:
             missing.append("reference_images|reference_videos")
+    if node.type == "video_reference_generate":
+        if not connected & {"reference_images", "reference_videos"}:
+            missing.append("reference_images|reference_videos")
     return missing
 
 
@@ -845,15 +1014,24 @@ __all__ = [
     "CanvasNodeType",
     "CanvasOperation",
     "CanvasPortSpec",
+    "EXECUTABLE_NODE_TYPES",
+    "GENERATED_OUTPUT_NODE_TYPES",
     "GRAPH_SCHEMA_VERSION",
     "ImageAssetNode",
+    "ImageEditNode",
     "ImageGenerateNode",
+    "ImageInpaintNode",
+    "ImageUpscaleNode",
+    "IMAGE_EXECUTABLE_NODE_TYPES",
     "MAX_CANVAS_EDGES",
+    "MAX_CANVAS_FRAMES",
     "MAX_CANVAS_GRAPH_BYTES",
     "MAX_CANVAS_NODES",
+    "MaskAssetNode",
     "MoveNodesOperation",
     "NODE_INPUT_PORTS",
     "NODE_OUTPUT_PORTS",
+    "PromptMergeNode",
     "PromptNode",
     "RemoveEdgesOperation",
     "RemoveFrameOperation",
@@ -866,6 +1044,10 @@ __all__ = [
     "UpdateNodeMetaOperation",
     "VideoAssetNode",
     "VideoGenerateNode",
+    "VideoImageGenerateNode",
+    "VideoReferenceGenerateNode",
+    "VideoTextGenerateNode",
+    "VIDEO_EXECUTABLE_NODE_TYPES",
     "ensure_finite_number",
     "validate_required_inputs",
 ]

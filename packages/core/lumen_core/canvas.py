@@ -38,6 +38,7 @@ from .canvas_schemas import (
     UpdateNodeConfigOperation,
     UpdateNodeMetaOperation,
 )
+from .constants import MAX_PROMPT_CHARS
 
 
 class CanvasMutationError(ValueError):
@@ -50,6 +51,10 @@ class CanvasEntityNotFoundError(CanvasMutationError):
 
 class CanvasPreconditionFailedError(CanvasMutationError):
     """A mutation precondition no longer matches the materialized graph."""
+
+
+class CanvasPromptTooLongError(ValueError):
+    """Resolved prompt text exceeded the supported execution budget."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +176,150 @@ def canvas_input_hash(input_snapshot: Mapping[str, Any]) -> str:
     return canonical_hash(input_snapshot)
 
 
+def merge_prompt_texts(
+    texts: Iterable[str],
+    config: BaseModel | Mapping[str, Any] | None = None,
+    *,
+    max_chars: int | None = MAX_PROMPT_CHARS,
+) -> str:
+    """Combine ordered text inputs using a prompt-merge node configuration."""
+
+    if isinstance(config, BaseModel):
+        raw_config: Mapping[str, Any] = config.model_dump(mode="python")
+    else:
+        raw_config = config or {}
+    separator = str(raw_config.get("separator", "\n\n"))
+    prefix = str(raw_config.get("prefix", ""))
+    suffix = str(raw_config.get("suffix", ""))
+    trim = bool(raw_config.get("trim", True))
+    dedupe = bool(raw_config.get("dedupe", False))
+    values: list[str] = []
+    seen: set[str] = set()
+    content_length = len(prefix) + len(suffix)
+    if max_chars is not None and content_length > max_chars:
+        raise CanvasPromptTooLongError(
+            f"resolved Canvas prompt exceeds {max_chars} characters"
+        )
+    for raw_text in texts:
+        text = str(raw_text)
+        if trim:
+            text = text.strip()
+        if not text or (dedupe and text in seen):
+            continue
+        next_length = content_length + len(text) + (len(separator) if values else 0)
+        if max_chars is not None and next_length > max_chars:
+            raise CanvasPromptTooLongError(
+                f"resolved Canvas prompt exceeds {max_chars} characters"
+            )
+        values.append(text)
+        seen.add(text)
+        content_length = next_length
+    return f"{prefix}{separator.join(values)}{suffix}"
+
+
+def _canvas_field(value: Any, field: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(field, default)
+    return getattr(value, field, default)
+
+
+def _incoming_text_edges(edges: Sequence[Any]) -> dict[str, list[Any]]:
+    incoming_by_node: dict[str, list[Any]] = {}
+    for edge in edges:
+        if _canvas_field(edge, "target_handle") != "texts":
+            continue
+        target_id = str(_canvas_field(edge, "target_node_id", "") or "")
+        incoming_by_node.setdefault(target_id, []).append(edge)
+    for incoming in incoming_by_node.values():
+        incoming.sort(
+            key=lambda edge: (
+                int(_canvas_field(edge, "order", 0) or 0),
+                str(_canvas_field(edge, "id", "") or ""),
+            )
+        )
+    return incoming_by_node
+
+
+def _resolved_non_merge_node(
+    node: Any,
+    *,
+    max_chars: int | None,
+) -> tuple[bool, str | None]:
+    node_type = _canvas_field(node, "type")
+    if node_type != "prompt":
+        return node_type != "prompt_merge", None
+    config = _canvas_field(node, "config", {})
+    text = str(_canvas_field(config, "text", "") or "")
+    if max_chars is not None and len(text) > max_chars:
+        raise CanvasPromptTooLongError(
+            f"resolved Canvas prompt exceeds {max_chars} characters"
+        )
+    return True, text
+
+
+def resolve_canvas_text_node(
+    nodes: Mapping[str, Any],
+    edges: Sequence[Any],
+    node_id: str,
+    *,
+    max_chars: int | None = MAX_PROMPT_CHARS,
+) -> str | None:
+    """Resolve prompt output with iterative, cycle-safe graph evaluation."""
+
+    incoming_by_node = _incoming_text_edges(edges)
+    resolved: dict[str, str | None] = {}
+    visiting: set[str] = set()
+    stack: list[tuple[str, bool]] = [(node_id, False)]
+    while stack:
+        current_id, expanded = stack.pop()
+        if current_id in resolved:
+            continue
+        node = nodes.get(current_id)
+        if node is None:
+            resolved[current_id] = None
+            continue
+        is_resolved, leaf_value = _resolved_non_merge_node(
+            node,
+            max_chars=max_chars,
+        )
+        if is_resolved:
+            resolved[current_id] = leaf_value
+            continue
+        config = _canvas_field(node, "config", {})
+
+        incoming = incoming_by_node.get(current_id, [])
+        source_ids = [
+            str(_canvas_field(edge, "source_node_id", "") or "") for edge in incoming
+        ]
+        if not expanded:
+            if current_id in visiting:
+                return None
+            visiting.add(current_id)
+            stack.append((current_id, True))
+            for source_id in reversed(source_ids):
+                if source_id in visiting:
+                    return None
+                if source_id not in resolved:
+                    stack.append((source_id, False))
+            continue
+
+        visiting.discard(current_id)
+        values: list[str] = []
+        unresolved = False
+        for source_id in source_ids:
+            value = resolved.get(source_id)
+            if value is None:
+                unresolved = True
+                break
+            values.append(value)
+        resolved[current_id] = (
+            None
+            if unresolved
+            else merge_prompt_texts(values, config, max_chars=max_chars)
+        )
+    return resolved.get(node_id)
+
+
 def _binding_identity_matches(edge: CanvasEdge, raw_binding: Mapping[str, Any]) -> bool:
     expected = {
         "edge_id": edge.id,
@@ -187,14 +336,22 @@ def _binding_source_matches(
     edge: CanvasEdge,
     raw_binding: Mapping[str, Any],
     source: Any,
+    node_by_id: Mapping[str, Any],
+    edges: Sequence[Any],
     selections: Mapping[str, tuple[str | None, int]],
 ) -> tuple[bool, str | None]:
-    if source.type == "prompt":
-        text = source.config.text.strip()
+    if source.type in {"prompt", "prompt_merge"}:
+        try:
+            resolved = resolve_canvas_text_node(node_by_id, edges, source.id)
+        except CanvasPromptTooLongError:
+            return False, None
+        if resolved is None:
+            return False, None
+        text = resolved.strip() if source.type == "prompt" else resolved
         return raw_binding.get("text") == text, text or None
 
     asset = raw_binding.get("asset")
-    if source.type == "image_asset":
+    if source.type in {"image_asset", "mask_asset"}:
         matches = (
             isinstance(asset, Mapping)
             and asset.get("image_id") == source.config.image_id
@@ -262,6 +419,8 @@ def canvas_input_snapshot_matches_graph(
             edge,
             raw_binding,
             source,
+            node_by_id,
+            parsed.edges,
             selections,
         )
         if not matches:
@@ -759,6 +918,7 @@ __all__ = [
     "CanvasMutationError",
     "CanvasMutationResult",
     "CanvasPreconditionFailedError",
+    "CanvasPromptTooLongError",
     "apply_canvas_mutation",
     "canonical_hash",
     "canonical_json_bytes",
@@ -769,7 +929,9 @@ __all__ = [
     "canvas_input_snapshot_matches_graph",
     "canvas_node_definition_hash",
     "canvas_selection_hash",
+    "merge_prompt_texts",
     "propagate_stale",
+    "resolve_canvas_text_node",
     "stale_nodes_for_selection_change",
     "topological_node_ids",
 ]

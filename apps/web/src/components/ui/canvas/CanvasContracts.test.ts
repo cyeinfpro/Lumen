@@ -17,6 +17,7 @@ const inspectorSource = source("./CanvasInspector.tsx");
 const workspaceToolsSource = source("./useCanvasWorkspaceTools.ts");
 const commandMenuSource = source("./CanvasCommandMenu.tsx");
 const viewportControlsSource = source("./CanvasViewportControls.tsx");
+const paletteSource = source("./CanvasNodePalette.tsx");
 const clipboardSource = source("../../../lib/canvas/clipboard.ts");
 const querySource = source("../../../lib/queries/canvases.ts");
 const manifestSource = source("../../../app/manifest.ts");
@@ -110,7 +111,8 @@ test("canvas text and titles edit directly inside deliberate drag handles", () =
   match(nodesSource, /MAX_PROMPT_CHARS/);
   match(viewportSource, /current\.getZoom\(\) >= 0\.75/);
   match(viewportSource, /minZoom: 0\.9/);
-  match(viewportSource, /ariaLabel: `\$\{CANVAS_NODE_SPECS/);
+  match(viewportSource, /findMatchingCanvasNodeCatalogItem\(node\)/);
+  match(viewportSource, /ariaLabel: `\$\{preset\?\.label \?\? CANVAS_NODE_SPECS/);
   match(viewportSource, /aria-label="无限画布编辑区"/);
   doesNotMatch(inspectorSource, /function TextNodeConfig/);
   doesNotMatch(inspectorSource, /<Textarea/);
@@ -120,6 +122,21 @@ test("compact canvas keeps inspector explicit and exposes redo", () => {
   match(workspaceSource, /open=\{isCompact && inspectorOpen\}/);
   doesNotMatch(workspaceSource, /inspectorOpen \|\| Boolean\(selectedNodeId\)/);
   match(mobileToolbarSource, /label="重做"/);
+});
+
+test("canvas run controls recognize every executable registry node", () => {
+  match(topBarSource, /isCanvasExecutableNodeType\(selectedNode\.type\)/);
+  match(topBarSource, /validateCanvasNodeExecution\(graph, selectedNode\.id\)/);
+  doesNotMatch(
+    topBarSource,
+    /selectedNode\?\.type === "image_generate"/,
+  );
+});
+
+test("multi-input connections expose explicit order controls", () => {
+  match(inspectorSource, /aria-label="输入上移"/);
+  match(inspectorSource, /aria-label="输入下移"/);
+  match(inspectorSource, /onUpdateDetails\(edge\.id, \{ order \}\)/);
 });
 
 test("canvas output selections notify other tabs", () => {
@@ -132,7 +149,8 @@ test("canvas output selections notify other tabs", () => {
 
 test("canvas autosave retries exact batches and only publishes accepted acknowledgements", () => {
   match(workspacePersistenceSource, /new RetryableAutosaveBatchReader/);
-  match(workspacePersistenceSource, /takeAutosaveOperations/);
+  match(workspacePersistenceSource, /takeAtomicAutosaveOperations/);
+  match(workspacePersistenceSource, /state\.pendingOperationGroupSizes/);
   match(workspacePersistenceSource, /mutation_id: batch\.payload\.mutationId/);
   match(workspacePersistenceSource, /putCanvasSaveBatch/);
   match(workspacePersistenceSource, /getCanvasSaveBatch/);
@@ -168,6 +186,18 @@ test("canvas workbench exposes mature creation, navigation, and clipboard workfl
   match(commandMenuSource, /ArrowDown/);
   match(viewportControlsSource, /当前缩放比例/);
   match(clipboardSource, /CANVAS_CLIPBOARD_PREFIX/);
+});
+
+test("canvas catalog creation persists presets and filters quick connections by real ports", () => {
+  match(paletteSource, /CANVAS_NODE_CATALOG/);
+  match(paletteSource, /role="tablist"/);
+  match(paletteSource, /min-h-11/);
+  match(paletteSource, /application\/lumen-canvas-node/);
+  match(viewportSource, /findCanvasNodeCatalogItem/);
+  match(viewportSource, /preset_id: catalogItem\.id/);
+  match(workspaceToolsSource, /catalogAcceptsConnection/);
+  match(workspaceToolsSource, /createCanvasNodeFromCatalog/);
+  match(workspaceToolsSource, /validateCanvasConnection\(candidateGraph/);
 });
 
 test("canvas viewport and media rendering stay scalable and accessible", () => {

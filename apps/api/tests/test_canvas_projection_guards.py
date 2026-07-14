@@ -339,9 +339,7 @@ async def test_auto_select_uses_locked_current_inputs_not_document_revision(
         )
         execution.definition_hash = canvas_node_definition_hash(graph["nodes"][1])
         execution.input_snapshot_jsonb = input_snapshot
-        execution.config_snapshot_jsonb = {
-            "_canvas": {"auto_select_on_success": True}
-        }
+        execution.config_snapshot_jsonb = {"_canvas": {"auto_select_on_success": True}}
         execution.selection_base_revision = 3
         selection = CanvasNodeSelection(
             canvas_id=canvas.id,
@@ -362,9 +360,7 @@ async def test_auto_select_uses_locked_current_inputs_not_document_revision(
         )
 
         assert changed is expected
-        assert selection.execution_id == (
-            execution.id if expected else None
-        )
+        assert selection.execution_id == (execution.id if expected else None)
         assert selection.revision == (4 if expected else 3)
 
 
@@ -533,6 +529,191 @@ async def test_execution_output_must_match_edge_and_target_handle_contract(
         assert excinfo.value.status_code == 422
         assert error["code"] == "canvas_input_type_mismatch"
         assert error["details"]["edge_id"] == "edge-output"
+
+
+@pytest.mark.asyncio
+async def test_video_reference_node_requires_reference_media_at_resolution() -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "prompt-1",
+                "type": "prompt",
+                "config": {"text": "Render a clip"},
+            },
+            {
+                "id": "target-1",
+                "type": "video_reference_generate",
+                "config": {"mode": "reference"},
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge-prompt",
+                "source_node_id": "prompt-1",
+                "source_handle": "text",
+                "target_node_id": "target-1",
+                "target_handle": "prompt",
+                "data_type": "text",
+                "binding_mode": "follow_active",
+            }
+        ],
+    }
+    async with _session() as db:
+        with pytest.raises(HTTPException) as excinfo:
+            await resolve_node(
+                db,
+                user=SimpleNamespace(id="user-1"),
+                canvas_id="canvas-resolution",
+                graph=graph,
+                node_id="target-1",
+            )
+
+    error = excinfo.value.detail["error"]
+    assert excinfo.value.status_code == 422
+    assert error["code"] == "canvas_input_unresolved"
+    assert error["details"]["target_handle"] == "reference_images|reference_videos"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mask_node_type", "mask_source_handle"),
+    [
+        ("image_asset", "image"),
+        ("mask_asset", "mask"),
+    ],
+)
+async def test_resolution_accepts_image_or_mask_assets_for_mask_inputs(
+    mask_node_type: str,
+    mask_source_handle: str,
+) -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "prompt-1",
+                "type": "prompt",
+                "config": {"text": "Repair the selected region"},
+            },
+            {
+                "id": "source-1",
+                "type": "image_asset",
+                "config": {"image_id": "source-image"},
+            },
+            {
+                "id": "mask-1",
+                "type": mask_node_type,
+                "config": {"image_id": "mask-image"},
+            },
+            {
+                "id": "target-1",
+                "type": "image_inpaint",
+                "config": {},
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge-prompt",
+                "source_node_id": "prompt-1",
+                "source_handle": "text",
+                "target_node_id": "target-1",
+                "target_handle": "prompt",
+                "data_type": "text",
+                "binding_mode": "follow_active",
+                "order": 0,
+            },
+            {
+                "id": "edge-source",
+                "source_node_id": "source-1",
+                "source_handle": "image",
+                "target_node_id": "target-1",
+                "target_handle": "source",
+                "data_type": "image",
+                "binding_mode": "follow_active",
+                "order": 0,
+            },
+            {
+                "id": "edge-mask",
+                "source_node_id": "mask-1",
+                "source_handle": mask_source_handle,
+                "target_node_id": "target-1",
+                "target_handle": "mask",
+                "data_type": "mask",
+                "binding_mode": "follow_active",
+                "order": 0,
+            },
+        ],
+    }
+    async with _session() as db:
+        db.add_all(
+            [
+                _image(image_id="source-image"),
+                _image(image_id="mask-image"),
+            ]
+        )
+        await db.commit()
+
+        resolved = await resolve_node(
+            db,
+            user=SimpleNamespace(id="user-1"),
+            canvas_id="canvas-resolution",
+            graph=graph,
+            node_id="target-1",
+        )
+
+    assert resolved.images_by_handle["source"][0]["image_id"] == "source-image"
+    assert resolved.images_by_handle["mask"][0]["image_id"] == "mask-image"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_handle", "target_handle", "edge_data_type"),
+    [
+        ("image", "mask", "mask"),
+        ("mask", "source", "image"),
+    ],
+)
+async def test_resolution_rejects_mask_asset_unknown_or_image_output_contracts(
+    source_handle: str,
+    target_handle: str,
+    edge_data_type: str,
+) -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "mask-1",
+                "type": "mask_asset",
+                "config": {"image_id": "mask-image"},
+            },
+            {
+                "id": "target-1",
+                "type": "image_inpaint" if target_handle == "mask" else "image_edit",
+                "config": {},
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge-mask",
+                "source_node_id": "mask-1",
+                "source_handle": source_handle,
+                "target_node_id": "target-1",
+                "target_handle": target_handle,
+                "data_type": edge_data_type,
+                "binding_mode": "follow_active",
+                "order": 0,
+            }
+        ],
+    }
+    async with _session() as db:
+        with pytest.raises(HTTPException) as excinfo:
+            await resolve_node(
+                db,
+                user=SimpleNamespace(id="user-1"),
+                canvas_id="canvas-resolution",
+                graph=graph,
+                node_id="target-1",
+            )
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "canvas_input_type_mismatch"
 
 
 @pytest.mark.asyncio

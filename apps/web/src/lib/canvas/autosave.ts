@@ -12,6 +12,25 @@ export function takeAutosaveOperations<T>(
   return operations.slice(0, Math.max(0, limit));
 }
 
+export function takeAtomicAutosaveOperations<T>(
+  operations: readonly T[],
+  groupSizes: readonly number[],
+  limit = CANVAS_AUTOSAVE_OPERATION_LIMIT,
+): T[] {
+  const maximum = Math.max(0, limit);
+  const normalizedGroups =
+    groupSizes.every((size) => Number.isSafeInteger(size) && size > 0) &&
+    groupSizes.reduce((total, size) => total + size, 0) === operations.length
+      ? groupSizes
+      : Array.from({ length: operations.length }, () => 1);
+  let count = 0;
+  for (const size of normalizedGroups) {
+    if (count + size > maximum) break;
+    count += size;
+  }
+  return operations.slice(0, count);
+}
+
 export interface SerialAutosaveOptions<T> {
   delayMs?: number;
   readBatch: () => AutosaveBatch<T> | null;

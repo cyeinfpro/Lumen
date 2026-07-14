@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ArrowDown,
+  ArrowUp,
   AlignHorizontalJustifyCenter,
   AlignHorizontalJustifyEnd,
   AlignHorizontalJustifyStart,
@@ -17,13 +19,24 @@ import {
   Play,
   Scan,
   Trash2,
-  Upload,
   Video,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { uploadImage } from "@/lib/apiClient";
-import { imageVariantUrl, videoPosterUrl } from "@/lib/apiClient";
+import {
+  fetchVideoOptions,
+  uploadReferenceVideo,
+} from "@/app/video/video-request-lifecycle";
+import {
+  imageVariantUrl,
+  uploadImage,
+  videoPosterUrl,
+} from "@/lib/apiClient";
+import {
+  canvasVideoCapabilityError,
+  validateCanvasNodeExecution,
+} from "@/lib/canvas/graph";
 import type {
   CanvasDocument,
   CanvasEdgeDefinition,
@@ -33,9 +46,15 @@ import type {
   CanvasNodeType,
   CanvasOutput,
 } from "@/lib/canvas/types";
-import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
+import {
+  CANVAS_NODE_SPECS,
+  findMatchingCanvasNodeCatalogItem,
+  isCanvasExecutableNodeType,
+} from "@/lib/canvas/registry";
+import type { CanvasEditorStore } from "@/lib/canvas/store";
 import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
 import { Button, Input, toast } from "@/components/ui/primitives";
+import { CanvasNodeConfigEditor } from "./CanvasNodeConfigEditor";
 import {
   useCanvasStore,
   useCanvasStoreApi,
@@ -117,81 +136,6 @@ const EDGE_ROLE_OPTIONS: readonly SelectOption[] = [
   { value: "other", label: "其他" },
 ];
 
-const IMAGE_ASPECT_OPTIONS: readonly SelectOption[] = [
-  { value: "1:1", label: "方形 1:1" },
-  { value: "4:5", label: "竖版 4:5" },
-  { value: "3:4", label: "竖版 3:4" },
-  { value: "2:3", label: "竖版 2:3" },
-  { value: "7:10", label: "竖版 7:10" },
-  { value: "9:16", label: "竖屏 9:16" },
-  { value: "3:2", label: "横版 3:2" },
-  { value: "4:3", label: "横版 4:3" },
-  { value: "10:7", label: "横版 10:7" },
-  { value: "16:9", label: "宽屏 16:9" },
-  { value: "21:9", label: "超宽 21:9" },
-  { value: "9:21", label: "超长竖屏 9:21" },
-];
-
-const IMAGE_QUALITY_OPTIONS: readonly SelectOption[] = [
-  { value: "1k", label: "1K" },
-  { value: "2k", label: "2K" },
-  { value: "4k", label: "4K" },
-  { value: "standard", label: "标准（兼容旧配置）" },
-  { value: "high", label: "高质量（兼容旧配置）" },
-];
-
-const RENDER_QUALITY_OPTIONS: readonly SelectOption[] = [
-  { value: "auto", label: "自动" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
-
-const SIZE_MODE_OPTIONS: readonly SelectOption[] = [
-  { value: "auto", label: "自动尺寸" },
-  { value: "fixed", label: "固定像素" },
-];
-
-const IMAGE_FORMAT_OPTIONS: readonly SelectOption[] = [
-  { value: "webp", label: "WebP（推荐）" },
-  { value: "jpeg", label: "JPEG（兼容性高）" },
-  { value: "png", label: "PNG（无损）" },
-];
-
-const IMAGE_BACKGROUND_OPTIONS: readonly SelectOption[] = [
-  { value: "auto", label: "自动" },
-  { value: "opaque", label: "不透明" },
-  { value: "transparent", label: "透明" },
-];
-
-const IMAGE_MODERATION_OPTIONS: readonly SelectOption[] = [
-  { value: "auto", label: "自动审核" },
-  { value: "low", label: "低强度审核" },
-];
-
-const VIDEO_MODE_OPTIONS: readonly SelectOption[] = [
-  { value: "t2v", label: "文生视频" },
-  { value: "i2v", label: "首帧生视频" },
-  { value: "reference", label: "参考媒体生成" },
-];
-
-const VIDEO_RESOLUTION_OPTIONS: readonly SelectOption[] = [
-  { value: "480p", label: "480P" },
-  { value: "720p", label: "720P" },
-  { value: "1080p", label: "1080P" },
-  { value: "4k", label: "4K" },
-];
-
-const VIDEO_ASPECT_OPTIONS: readonly SelectOption[] = [
-  { value: "adaptive", label: "自适应" },
-  { value: "16:9", label: "宽屏 16:9" },
-  { value: "21:9", label: "超宽 21:9" },
-  { value: "4:3", label: "横版 4:3" },
-  { value: "1:1", label: "方形 1:1" },
-  { value: "3:4", label: "竖版 3:4" },
-  { value: "9:16", label: "竖屏 9:16" },
-];
-
 const NODE_COLOR_OPTIONS = [
   { value: null, label: "无颜色", color: "var(--bg-3)" },
   { value: "accent", label: "琥珀色", color: "var(--accent)" },
@@ -210,33 +154,18 @@ export function CanvasInspector({
   onAutoLayoutSelection,
   onFitSelection,
 }: CanvasInspectorProps) {
-  const store = useCanvasStoreApi();
   const graph = useCanvasStore((state) => state.graph);
   const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
   const selectedNodeIds = useCanvasStore((state) => state.selectedNodeIds);
   const selectedEdgeId = useCanvasStore((state) => state.selectedEdgeId);
-  const updateNodeConfig = useCanvasStore((state) => state.updateNodeConfig);
-  const updateNodeTitle = useCanvasStore((state) => state.updateNodeTitle);
   const removeNodes = useCanvasStore((state) => state.removeNodes);
   const removeEdges = useCanvasStore((state) => state.removeEdges);
   const updateEdgeBinding = useCanvasStore(
     (state) => state.updateEdgeBinding,
   );
-  const updateNodeAppearance = useCanvasStore(
-    (state) => state.updateNodeAppearance,
-  );
   const updateEdgeDetails = useCanvasStore(
     (state) => state.updateEdgeDetails,
   );
-  const [uploading, setUploading] = useState(false);
-  const uploadSequenceRef = useRef(0);
-  const uploadRequestRef = useRef<{
-    id: number;
-    nodeId: string;
-    controller: AbortController;
-  } | null>(null);
-  const [pendingConfigChange, setPendingConfigChange] =
-    useState<PendingConfigChange | null>(null);
 
   const node = graph.nodes.find((item) => item.id === selectedNodeId) ?? null;
   const edge = graph.edges.find((item) => item.id === selectedEdgeId) ?? null;
@@ -244,31 +173,6 @@ export function CanvasInspector({
     const selected = new Set(selectedNodeIds);
     return graph.nodes.filter((item) => selected.has(item.id));
   }, [graph.nodes, selectedNodeIds]);
-  const executions = useMemo(
-    () =>
-      document.recent_executions.filter(
-        (execution) => execution.node_id === selectedNodeId,
-      ),
-    [document.recent_executions, selectedNodeId],
-  );
-
-  useEffect(() => {
-    const request = uploadRequestRef.current;
-    if (!request || request.nodeId === selectedNodeId) return;
-    uploadRequestRef.current = null;
-    request.controller.abort();
-    setUploading(false);
-  }, [selectedNodeId]);
-
-  useEffect(
-    () => () => {
-      const request = uploadRequestRef.current;
-      uploadRequestRef.current = null;
-      request?.controller.abort();
-    },
-    [],
-  );
-
   if (edge) {
     return (
       <CanvasEdgeInspector
@@ -310,6 +214,52 @@ export function CanvasInspector({
     );
   }
 
+  return (
+    <CanvasNodeInspector
+      key={node.id}
+      document={document}
+      node={node}
+      onRunNode={onRunNode}
+      runningNodeId={runningNodeId}
+    />
+  );
+}
+
+function CanvasNodeInspector({
+  document,
+  node,
+  onRunNode,
+  runningNodeId,
+}: {
+  document: CanvasDocument;
+  node: CanvasNodeDefinition;
+  onRunNode: (nodeId: string) => void;
+  runningNodeId?: string | null;
+}) {
+  const store = useCanvasStoreApi();
+  const graph = useCanvasStore((state) => state.graph);
+  const updateNodeConfig = useCanvasStore((state) => state.updateNodeConfig);
+  const updateNodeTitle = useCanvasStore((state) => state.updateNodeTitle);
+  const updateNodeAppearance = useCanvasStore(
+    (state) => state.updateNodeAppearance,
+  );
+  const removeNodes = useCanvasStore((state) => state.removeNodes);
+  const [pendingConfigChange, setPendingConfigChange] =
+    useState<PendingConfigChange | null>(null);
+  const assetUpload = useCanvasAssetUpload(store, node.id);
+  const executions = useMemo(
+    () =>
+      document.recent_executions.filter(
+        (execution) => execution.node_id === node.id,
+      ),
+    [document.recent_executions, node.id],
+  );
+  const videoOptionsQuery = useQuery({
+    queryKey: ["video-options"],
+    queryFn: ({ signal }) => fetchVideoOptions(signal),
+    enabled: CANVAS_NODE_SPECS[node.type].family === "video",
+    staleTime: 60_000,
+  });
   const patch = (next: Record<string, unknown>) => {
     const nextConfig = { ...node.config, ...next };
     const removedConnections = incompatibleVideoConnectionCount(
@@ -328,12 +278,29 @@ export function CanvasInspector({
     setPendingConfigChange(null);
     updateNodeConfig(node.id, nextConfig);
   };
-  const canRun = node.type === "image_generate" || node.type === "video_generate";
+  const canRun = isCanvasExecutableNodeType(node.type);
+  const preset = canvasNodePreset(node);
   const visiblePendingChange =
     pendingConfigChange?.nodeId === node.id ? pendingConfigChange : null;
+  const videoOptionsError = queryErrorMessage(
+    videoOptionsQuery.isError,
+    videoOptionsQuery.error,
+    "视频能力加载失败",
+  );
+  const runDisabledReason =
+    inspectorRunDisabledReason(graph, node) ??
+    inspectorVideoRunDisabledReason(
+      node,
+      videoOptionsQuery.data,
+      videoOptionsQuery.isLoading,
+      videoOptionsError,
+    );
 
   return (
-    <InspectorShell eyebrow={CANVAS_NODE_SPECS[node.type].label} title={node.title}>
+    <InspectorShell
+      eyebrow={preset?.label ?? CANVAS_NODE_SPECS[node.type].label}
+      title={node.title}
+    >
       <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto">
         <InspectorSection title="节点">
           <Input
@@ -368,49 +335,21 @@ export function CanvasInspector({
           />
         </InspectorSection>
 
-        <NodeConfigEditor
+        <CanvasNodeConfigEditor
           node={node}
+          graph={graph}
           patch={patch}
-          uploading={uploading}
-          onUpload={async (file) => {
-            uploadRequestRef.current?.controller.abort();
-            uploadSequenceRef.current += 1;
-            const request = {
-              id: uploadSequenceRef.current,
-              nodeId: node.id,
-              controller: new AbortController(),
-            };
-            uploadRequestRef.current = request;
-            setUploading(true);
-            try {
-              const image = await uploadImage(file, {
-                signal: request.controller.signal,
-              });
-              if (
-                uploadRequestRef.current?.id !== request.id ||
-                store.getState().selectedNodeId !== request.nodeId
-              ) {
-                return;
-              }
-              const currentNode = store
-                .getState()
-                .graph.nodes.find((item) => item.id === request.nodeId);
-              if (!currentNode) return;
-              updateNodeConfig(request.nodeId, {
-                ...currentNode.config,
-                image_id: image.id,
-                display_name: file.name,
-              });
-              toast.success("图片已上传");
-            } catch (error) {
-              if (request.controller.signal.aborted) return;
-              toast.error(error instanceof Error ? error.message : "上传失败");
-            } finally {
-              if (uploadRequestRef.current?.id === request.id) {
-                uploadRequestRef.current = null;
-                setUploading(false);
-              }
-            }
+          uploading={assetUpload.uploading}
+          onUploadImage={assetUpload.uploadImage}
+          onUploadVideo={assetUpload.uploadVideo}
+          videoOptions={videoOptionsQuery.data}
+          videoOptionsLoading={videoOptionsQuery.isLoading}
+          videoOptionsError={videoOptionsError}
+          videoOptionsRetrying={
+            videoOptionsQuery.isFetching && !videoOptionsQuery.isLoading
+          }
+          onRetryVideoOptions={() => {
+            void videoOptionsQuery.refetch();
           }}
         />
 
@@ -439,6 +378,14 @@ export function CanvasInspector({
       </div>
 
       <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 p-3">
+        {runDisabledReason ? (
+          <p
+            role="alert"
+            className="col-span-2 type-caption text-[var(--danger-fg)]"
+          >
+            {runDisabledReason}
+          </p>
+        ) : null}
         <Button
           variant="danger"
           leftIcon={<Trash2 className="h-4 w-4" />}
@@ -450,6 +397,7 @@ export function CanvasInspector({
           <Button
             variant="primary"
             loading={runningNodeId === node.id}
+            disabled={Boolean(runDisabledReason)}
             leftIcon={<Play className="h-4 w-4" />}
             onClick={() => onRunNode(node.id)}
           >
@@ -463,6 +411,159 @@ export function CanvasInspector({
       </footer>
     </InspectorShell>
   );
+}
+
+function inspectorRunDisabledReason(
+  graph: CanvasDocument["graph"],
+  node: CanvasNodeDefinition,
+): string | null {
+  if (!isCanvasExecutableNodeType(node.type)) return null;
+  const validation = validateCanvasNodeExecution(graph, node.id);
+  return validation.valid ? null : validation.reason;
+}
+
+function inspectorVideoRunDisabledReason(
+  node: CanvasNodeDefinition,
+  options: Awaited<ReturnType<typeof fetchVideoOptions>> | undefined,
+  loading: boolean,
+  error: string | null,
+): string | null {
+  if (CANVAS_NODE_SPECS[node.type].family !== "video") return null;
+  if (loading) return "正在加载视频能力";
+  if (error) return error;
+  if (!options) return "视频能力尚未加载";
+  return canvasVideoCapabilityError(node, options);
+}
+
+type CanvasAssetKind = "image" | "video";
+
+function useCanvasAssetUpload(
+  store: CanvasEditorStore,
+  selectedNodeId: string | null,
+) {
+  const [uploading, setUploading] = useState(false);
+  const sequenceRef = useRef(0);
+  const requestRef = useRef<{
+    id: number;
+    nodeId: string;
+    controller: AbortController;
+    assetField: "image_id" | "video_id";
+    initialAssetId: unknown;
+    initialDisplayName: unknown;
+  } | null>(null);
+
+  useEffect(() => {
+    const request = requestRef.current;
+    if (!request || request.nodeId === selectedNodeId) return;
+    requestRef.current = null;
+    request.controller.abort();
+    setUploading(false);
+  }, [selectedNodeId]);
+
+  useEffect(
+    () => () => {
+      const request = requestRef.current;
+      requestRef.current = null;
+      request?.controller.abort();
+    },
+    [],
+  );
+
+  const uploadAsset = async (file: File, kind: CanvasAssetKind) => {
+    requestRef.current?.controller.abort();
+    const initialNode = store
+      .getState()
+      .graph.nodes.find((item) => item.id === selectedNodeId);
+    if (!initialNode) return;
+    const assetField = canvasAssetIdField(kind);
+    sequenceRef.current += 1;
+    const request = {
+      id: sequenceRef.current,
+      nodeId: initialNode.id,
+      controller: new AbortController(),
+      assetField,
+      initialAssetId: initialNode.config[assetField],
+      initialDisplayName: initialNode.config.display_name,
+    };
+    requestRef.current = request;
+    setUploading(true);
+    try {
+      const asset = await uploadCanvasAsset(
+        file,
+        kind,
+        request.controller.signal,
+      );
+      const state = store.getState();
+      if (
+        requestRef.current?.id !== request.id ||
+        state.selectedNodeId !== request.nodeId
+      ) {
+        return;
+      }
+      const node = state.graph.nodes.find((item) => item.id === request.nodeId);
+      if (!node) return;
+      if (
+        !Object.is(
+          node.config[request.assetField],
+          request.initialAssetId,
+        ) ||
+        !Object.is(
+          node.config.display_name,
+          request.initialDisplayName,
+        )
+      ) {
+        toast.info("上传已完成，但节点内容已被修改，未自动覆盖。");
+        return;
+      }
+      state.updateNodeConfig(request.nodeId, {
+        ...node.config,
+        [request.assetField]: asset.id,
+        display_name: file.name,
+      });
+      toast.success(kind === "image" ? "图片已上传" : "视频已上传");
+    } catch (error) {
+      if (!request.controller.signal.aborted) {
+        toast.error(error instanceof Error ? error.message : "上传失败");
+      }
+    } finally {
+      if (requestRef.current?.id === request.id) {
+        requestRef.current = null;
+        setUploading(false);
+      }
+    }
+  };
+
+  return {
+    uploading,
+    uploadImage: (file: File) => uploadAsset(file, "image"),
+    uploadVideo: (file: File) => uploadAsset(file, "video"),
+  };
+}
+
+async function uploadCanvasAsset(
+  file: File,
+  kind: CanvasAssetKind,
+  signal: AbortSignal,
+) {
+  if (kind === "image") return uploadImage(file, { signal });
+  return uploadReferenceVideo(file, signal);
+}
+
+function canvasAssetIdField(kind: CanvasAssetKind): "image_id" | "video_id" {
+  return kind === "image" ? "image_id" : "video_id";
+}
+
+function queryErrorMessage(
+  isError: boolean,
+  error: unknown,
+  fallback: string,
+): string | null {
+  if (!isError) return null;
+  return error instanceof Error ? error.message : fallback;
+}
+
+function canvasNodePreset(node: CanvasNodeDefinition) {
+  return findMatchingCanvasNodeCatalogItem(node);
 }
 
 function CanvasEdgeInspector({
@@ -496,6 +597,25 @@ function CanvasEdgeInspector({
       selection.execution_id !== null,
   );
   const roleEditable = edge.data_type === "image" || edge.data_type === "mask";
+  const targetPort = target
+    ? CANVAS_NODE_SPECS[target.type].inputs.find(
+        (port) => port.id === edge.target_handle,
+      )
+    : undefined;
+  const orderedPeers = graph.edges
+    .filter(
+      (candidate) =>
+        candidate.target_node_id === edge.target_node_id &&
+        candidate.target_handle === edge.target_handle,
+    )
+    .sort(
+      (left, right) =>
+        (left.order ?? 0) - (right.order ?? 0) ||
+        left.id.localeCompare(right.id),
+    );
+  const inputOrder = orderedPeers.findIndex(
+    (candidate) => candidate.id === edge.id,
+  );
   return (
     <InspectorShell
       eyebrow="连接"
@@ -511,6 +631,13 @@ function CanvasEdgeInspector({
           label="目标端口"
           value={portLabel(target, "input", edge.target_handle)}
         />
+        {targetPort?.multiple && inputOrder >= 0 && orderedPeers.length > 1 ? (
+          <EdgeOrderControl
+            index={inputOrder}
+            total={orderedPeers.length}
+            onMove={(order) => onUpdateDetails(edge.id, { order })}
+          />
+        ) : null}
         {roleEditable ? (
           <SelectField
             label="参考角色"
@@ -569,6 +696,49 @@ function CanvasEdgeInspector({
         </Button>
       </div>
     </InspectorShell>
+  );
+}
+
+function EdgeOrderControl({
+  index,
+  total,
+  onMove,
+}: {
+  index: number;
+  total: number;
+  onMove: (order: number) => void;
+}) {
+  return (
+    <div className="flex min-h-9 items-center justify-between gap-3">
+      <span className="type-body-sm text-[var(--fg-2)]">输入顺序</span>
+      <div className="flex items-center gap-1">
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-9 px-0 max-sm:w-11"
+          aria-label="输入上移"
+          title="输入上移"
+          disabled={index === 0}
+          onClick={() => onMove(index - 1)}
+        >
+          <ArrowUp className="h-4 w-4" aria-hidden />
+        </Button>
+        <span className="min-w-12 text-center type-caption tabular-nums text-[var(--fg-1)]">
+          {index + 1} / {total}
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-9 px-0 max-sm:w-11"
+          aria-label="输入下移"
+          title="输入下移"
+          disabled={index === total - 1}
+          onClick={() => onMove(index + 1)}
+        >
+          <ArrowDown className="h-4 w-4" aria-hidden />
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -758,312 +928,6 @@ function BatchLayoutButton({
   );
 }
 
-interface NodeConfigEditorProps {
-  node: CanvasNodeDefinition;
-  patch: (next: Record<string, unknown>) => void;
-  uploading: boolean;
-  onUpload: (file: File) => Promise<void>;
-}
-
-function NodeConfigEditor(props: NodeConfigEditorProps) {
-  const Editor = CONFIG_EDITORS[props.node.type];
-  return <Editor {...props} />;
-}
-
-function NoAdditionalConfig() {
-  return null;
-}
-
-function ImageAssetConfig({
-  node,
-  patch,
-  uploading,
-  onUpload,
-}: NodeConfigEditorProps) {
-  return (
-    <InspectorSection title="图片素材">
-      <Input
-        label="图片 ID"
-        value={String(node.config.image_id ?? "")}
-        onChange={(event) => patch({ image_id: event.currentTarget.value })}
-      />
-      <label className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)]">
-        {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-        {uploading ? "上传中" : "上传图片"}
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          className="sr-only"
-          disabled={uploading}
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) void onUpload(file);
-          }}
-        />
-      </label>
-    </InspectorSection>
-  );
-}
-
-function VideoAssetConfig({ node, patch }: NodeConfigEditorProps) {
-  return (
-    <InspectorSection title="视频素材">
-      <Input
-        label="视频 ID"
-        value={String(node.config.video_id ?? "")}
-        onChange={(event) => patch({ video_id: event.currentTarget.value })}
-      />
-    </InspectorSection>
-  );
-}
-
-function ImageGenerateConfig({ node, patch }: NodeConfigEditorProps) {
-  const sizeMode = String(node.config.size_mode ?? "auto");
-  const outputFormat = String(node.config.output_format ?? "webp");
-  const compression =
-    typeof node.config.output_compression === "number"
-      ? node.config.output_compression
-      : null;
-  return (
-    <>
-      <InspectorSection title="生成参数">
-        <SelectField
-          label="比例"
-          value={String(node.config.aspect_ratio ?? "1:1")}
-          options={IMAGE_ASPECT_OPTIONS}
-          onChange={(value) => patch({ aspect_ratio: value })}
-        />
-        <SelectField
-          label="输出尺寸"
-          value={String(node.config.quality ?? "2k").toLowerCase()}
-          options={IMAGE_QUALITY_OPTIONS}
-          onChange={(value) => patch({ quality: value })}
-        />
-        <SelectField
-          label="尺寸模式"
-          value={sizeMode}
-          options={SIZE_MODE_OPTIONS}
-          onChange={(value) =>
-            patch({
-              size_mode: value,
-              fixed_size:
-                value === "fixed" ? node.config.fixed_size ?? "" : null,
-            })
-          }
-        />
-        {sizeMode === "fixed" ? (
-          <Input
-            label="固定尺寸"
-            value={String(node.config.fixed_size ?? "")}
-            placeholder="例如 1536x1024"
-            maxLength={32}
-            onChange={(event) =>
-              patch({ fixed_size: event.currentTarget.value || null })
-            }
-          />
-        ) : null}
-        <SelectField
-          label="渲染质量"
-          value={String(node.config.render_quality ?? "high")}
-          options={RENDER_QUALITY_OPTIONS}
-          onChange={(value) => patch({ render_quality: value })}
-        />
-        <RangeField
-          label="数量"
-          value={Number(node.config.count ?? 1)}
-          min={1}
-          max={10}
-          onChange={(value) => patch({ count: value })}
-        />
-        <ToggleField
-          label="快速模式"
-          checked={node.config.fast !== false}
-          onChange={(checked) => patch({ fast: checked })}
-        />
-      </InspectorSection>
-
-      <InspectorSection title="输出设置">
-        <SelectField
-          label="图片格式"
-          value={outputFormat}
-          options={IMAGE_FORMAT_OPTIONS}
-          onChange={(value) =>
-            patch({
-              output_format: value,
-              ...(value === "png" ? { output_compression: null } : {}),
-            })
-          }
-        />
-        <SelectField
-          label="背景"
-          value={String(node.config.background ?? "auto")}
-          options={IMAGE_BACKGROUND_OPTIONS}
-          onChange={(value) =>
-            patch(
-              value === "transparent"
-                ? {
-                    background: value,
-                    output_format: "png",
-                    output_compression: null,
-                  }
-                : { background: value },
-            )
-          }
-        />
-        {outputFormat === "png" ? (
-          <p className="type-caption text-[var(--fg-2)]">
-            PNG 使用无损输出，不提供压缩质量设置。
-          </p>
-        ) : (
-          <>
-            <ToggleField
-              label="自定义压缩"
-              checked={compression !== null}
-              onChange={(checked) =>
-                patch({ output_compression: checked ? 90 : null })
-              }
-            />
-            {compression !== null ? (
-              <RangeField
-                label="压缩质量"
-                value={compression}
-                min={0}
-                max={100}
-                suffix="%"
-                onChange={(value) => patch({ output_compression: value })}
-              />
-            ) : null}
-          </>
-        )}
-        <SelectField
-          label="内容审核"
-          value={String(node.config.moderation ?? "low")}
-          options={IMAGE_MODERATION_OPTIONS}
-          onChange={(value) => patch({ moderation: value })}
-        />
-      </InspectorSection>
-    </>
-  );
-}
-
-function VideoGenerateConfig({ node, patch }: NodeConfigEditorProps) {
-  return (
-    <InspectorSection title="生成参数">
-      <SelectField
-        label="模式"
-        value={String(node.config.mode ?? "t2v")}
-        options={VIDEO_MODE_OPTIONS}
-        onChange={(value) => patch({ mode: value })}
-      />
-      <Input
-        label="模型"
-        value={String(node.config.model ?? "")}
-        placeholder="使用系统默认"
-        onChange={(event) =>
-          patch({ model: event.currentTarget.value || null })
-        }
-      />
-      <RangeField
-        label="时长"
-        value={Number(node.config.duration_s ?? 5)}
-        min={3}
-        max={15}
-        suffix="秒"
-        onChange={(value) => patch({ duration_s: value })}
-      />
-      <SelectField
-        label="分辨率"
-        value={String(node.config.resolution ?? "720p")}
-        options={VIDEO_RESOLUTION_OPTIONS}
-        onChange={(value) => patch({ resolution: value })}
-      />
-      <SelectField
-        label="比例"
-        value={String(node.config.aspect_ratio ?? "16:9")}
-        options={VIDEO_ASPECT_OPTIONS}
-        onChange={(value) => patch({ aspect_ratio: value })}
-      />
-      <Input
-        label="种子"
-        type="number"
-        min={0}
-        max={4_294_967_295}
-        step={1}
-        value={
-          typeof node.config.seed === "number"
-            ? String(node.config.seed)
-            : ""
-        }
-        hint="留空时每次随机生成"
-        onChange={(event) => {
-          const raw = event.currentTarget.value;
-          if (!raw) {
-            patch({ seed: null });
-            return;
-          }
-          const seed = Number(raw);
-          if (
-            Number.isInteger(seed) &&
-            seed >= 0 &&
-            seed <= 4_294_967_295
-          ) {
-            patch({ seed });
-          }
-        }}
-      />
-      <ToggleField
-        label="生成音频"
-        checked={node.config.generate_audio === true}
-        onChange={(checked) => patch({ generate_audio: checked })}
-      />
-      <ToggleField
-        label="水印"
-        checked={node.config.watermark === true}
-        onChange={(checked) => patch({ watermark: checked })}
-      />
-    </InspectorSection>
-  );
-}
-
-function FrameConfig({ node, patch }: NodeConfigEditorProps) {
-  return (
-    <InspectorSection title="画框">
-      <p className="type-body-sm text-[var(--fg-2)]">
-        画框名称使用上方节点名称。
-      </p>
-      <ToggleField
-        label="运行视图隐藏"
-        checked={node.config.hidden_in_run === true}
-        onChange={(checked) => patch({ hidden_in_run: checked })}
-      />
-    </InspectorSection>
-  );
-}
-
-function DeliveryConfig() {
-  return (
-    <InspectorSection title="交付">
-      <p className="type-body-sm text-[var(--fg-2)]">
-        连接到此节点的图片与视频会作为最终交付展示。
-      </p>
-    </InspectorSection>
-  );
-}
-
-const CONFIG_EDITORS: Record<
-  CanvasNodeType,
-  React.ComponentType<NodeConfigEditorProps>
-> = {
-  prompt: NoAdditionalConfig,
-  note: NoAdditionalConfig,
-  image_asset: ImageAssetConfig,
-  video_asset: VideoAssetConfig,
-  image_generate: ImageGenerateConfig,
-  video_generate: VideoGenerateConfig,
-  frame: FrameConfig,
-  delivery: DeliveryConfig,
-};
-
 function ExecutionHistory({
   executions,
   document,
@@ -1099,6 +963,7 @@ function ExecutionHistory({
                 <HistoryOutput
                   key={`${execution.id}:${index}`}
                   output={output}
+                  index={index}
                   active={
                     current?.execution_id === execution.id &&
                     current.output_index === index
@@ -1132,39 +997,44 @@ function ExecutionHistory({
 
 function HistoryOutput({
   output,
+  index,
   active,
   loading,
   onSelect,
 }: {
   output: CanvasOutput;
+  index: number;
   active: boolean;
   loading: boolean;
   onSelect: () => void;
 }) {
   const Icon = output.type === "image" ? ImageIcon : Video;
   const src = historyOutputPreviewSource(output);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const visibleSrc = src === failedSrc ? null : src;
   return (
     <button
       type="button"
-      aria-label={active ? "当前输出" : "选择此输出"}
+      aria-label={`${active ? "当前" : "选择"}第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出`}
       aria-pressed={active}
       disabled={active || loading}
       onClick={onSelect}
       style={{ aspectRatio: historyOutputAspectRatio(output) }}
       className="relative min-h-11 w-full overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-media)] disabled:cursor-default"
     >
-      {src ? (
+      {visibleSrc ? (
         // eslint-disable-next-line @next/next/no-img-element -- API-backed execution output.
         <img
-          src={src}
-          alt=""
+          src={visibleSrc}
+          alt={`第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出预览`}
           loading="lazy"
           decoding="async"
           className="h-full w-full object-contain"
+          onError={() => setFailedSrc(visibleSrc)}
         />
       ) : (
         <span className="grid h-full place-items-center text-[var(--fg-2)]">
-          <Icon className="h-5 w-5" />
+          <Icon className="h-5 w-5" aria-hidden />
         </span>
       )}
       {active ? (
@@ -1173,7 +1043,7 @@ function HistoryOutput({
         </span>
       ) : loading ? (
         <span className="absolute inset-0 grid place-items-center bg-[var(--surface-scrim)] text-[var(--media-control-fg)]">
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
         </span>
       ) : null}
     </button>
@@ -1184,8 +1054,8 @@ function historyOutputPreviewSource(output: CanvasOutput): string | null {
   if (output.type === "video") {
     return (
       output.poster_url ??
-      (output.video_id ? videoPosterUrl(output.video_id) : null) ??
       output.preview_url ??
+      (output.video_id ? videoPosterUrl(output.video_id) : null) ??
       null
     );
   }
@@ -1362,42 +1232,6 @@ function SelectField({
           </option>
         ))}
       </select>
-    </label>
-  );
-}
-
-function RangeField({
-  label,
-  value,
-  min,
-  max,
-  suffix,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  suffix?: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="grid gap-2">
-      <span className="flex items-center justify-between type-caption font-medium text-[var(--fg-1)]">
-        {label}
-        <span className="font-mono text-[var(--fg-0)]">
-          {value}
-          {suffix}
-        </span>
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
-        className="h-11 w-full cursor-pointer accent-[var(--accent)]"
-      />
     </label>
   );
 }

@@ -16,20 +16,21 @@ import {
 } from "./clipboard";
 import {
   canvasConfigEqual,
-  canvasEdgeDetailsEqual,
   canvasSizeEqual,
   cloneCanonicalCanvasGraph,
-  coalescePendingOperations,
+  coalescePendingOperationGroups,
+  consumePendingOperationGroups,
   createHistoryEntry,
   dirtySaveStatus,
   documentSettingsEqual,
-  edgeDetailsOperation,
   edgeWithDetails,
   incompatibleVideoEdgeIds,
   nodeMetaOperation,
   nodeWithAppearance,
   normalizeEdgeOrders,
+  normalizePendingOperationGroupSizes,
   operationsBetween,
+  reorderCanvasEdgeGroup,
   sameIds,
   trimHistoryEntries,
   uniqueExistingIds,
@@ -40,6 +41,10 @@ import {
   validGraphForStoreCommit,
   type MergeableCanvasHistoryEntry,
 } from "./storeHelpers";
+import {
+  canvasFixedVideoMode,
+  type CanvasNodeCreateOverrides,
+} from "#canvas-registry";
 import type {
   CanvasDocumentSettings,
   CanvasEdgeDetailsUpdate,
@@ -76,6 +81,7 @@ export interface CanvasEditorState {
   connectionDraft: ConnectionDraft | null;
   activeInteractionCount: number;
   pendingOperations: CanvasOperation[];
+  pendingOperationGroupSizes: number[];
   inFlightOperationCount: number;
   retryPrefixOperationCount: number;
   history: CanvasHistoryEntry[];
@@ -83,7 +89,11 @@ export interface CanvasEditorState {
   saveState: CanvasSaveState;
   saveMessage: string | null;
   hydrate: (graph: CanvasGraph, revision: number) => void;
-  addNode: (type: CanvasNodeType, position: { x: number; y: number }) => string;
+  addNode: (
+    type: CanvasNodeType,
+    position: { x: number; y: number },
+    overrides?: CanvasNodeCreateOverrides,
+  ) => string;
   updateNodeConfig: (nodeId: string, config: Record<string, unknown>) => void;
   beginNodeConfigEdit: (nodeId: string) => void;
   endNodeConfigEdit: (nodeId: string) => void;
@@ -175,15 +185,18 @@ export function createCanvasEditorStore(
             ],
             "newest",
           );
+      const pending = coalescePendingOperationGroups(
+        current.pendingOperations,
+        current.pendingOperationGroupSizes,
+        operations,
+        current.retryPrefixOperationCount,
+      );
       set({
         graph: nextGraph,
         history,
         future: [],
-        pendingOperations: coalescePendingOperations(
-          current.pendingOperations,
-          operations,
-          current.retryPrefixOperationCount,
-        ),
+        pendingOperations: pending.operations,
+        pendingOperationGroupSizes: pending.groupSizes,
         ...dirtySaveStatus(current),
       });
     };
@@ -349,21 +362,29 @@ export function createCanvasEditorStore(
           nextEdge,
           current.nodes.find((node) => node.id === nextEdge.source_node_id)
             ?.type,
-        ) ||
-        canvasEdgeDetailsEqual(edge, nextEdge)
+        )
       ) {
         return;
       }
-      commit(
-        {
-          ...current,
-          edges: current.edges.map((item) =>
-            item.id === edgeId ? nextEdge : item,
-          ),
-        },
-        "更新连接详情",
-        [edgeDetailsOperation(edge, nextEdge)],
+      const updatedEdges = current.edges.map((item) =>
+        item.id === edgeId ? nextEdge : item,
       );
+      const nextGraph = {
+        ...current,
+        edges:
+          typeof details.order === "number"
+            ? reorderCanvasEdgeGroup(updatedEdges, edgeId, details.order)
+            : updatedEdges,
+      };
+      const operations = operationsBetween(current, nextGraph);
+      if (
+        operations.length === 0 ||
+        operations.length > CANVAS_AUTOSAVE_OPERATION_LIMIT ||
+        !validGraphForStoreCommit(nextGraph)
+      ) {
+        return;
+      }
+      commit(nextGraph, "更新连接详情", operations);
     };
 
     const updateDocumentSettings = (
@@ -485,19 +506,25 @@ export function createCanvasEditorStore(
           edge_ids: extraEdgeIds,
         });
       }
-      commit(
-        normalizeEdgeOrders({
-          ...current.graph,
-          nodes: current.graph.nodes.filter(
-            (node) => !removedNodeIds.has(node.id),
-          ),
-          edges: current.graph.edges.filter(
-            (edge) => !removedEdgeIds.has(edge.id),
-          ),
-        }),
-        label,
-        operations,
-      );
+      const nextGraph = normalizeEdgeOrders({
+        ...current.graph,
+        nodes: current.graph.nodes.filter(
+          (node) => !removedNodeIds.has(node.id),
+        ),
+        edges: current.graph.edges.filter(
+          (edge) => !removedEdgeIds.has(edge.id),
+        ),
+      });
+      if (
+        operationsBetween(nextGraph, current.graph).length >
+        CANVAS_AUTOSAVE_OPERATION_LIMIT
+      ) {
+        set({
+          saveMessage: "一次删除范围过大，请缩小选区后重试。",
+        });
+        return;
+      }
+      commit(nextGraph, label, operations);
 
       const selectedNodeIds = current.selectedNodeIds.filter(
         (nodeId) => !removedNodeIds.has(nodeId),
@@ -534,6 +561,7 @@ export function createCanvasEditorStore(
       connectionDraft: null,
       activeInteractionCount: 0,
       pendingOperations: [],
+      pendingOperationGroupSizes: [],
       inFlightOperationCount: 0,
       retryPrefixOperationCount: 0,
       history: [],
@@ -551,6 +579,7 @@ export function createCanvasEditorStore(
           connectionDraft: null,
           activeInteractionCount: 0,
           pendingOperations: [],
+          pendingOperationGroupSizes: [],
           inFlightOperationCount: 0,
           retryPrefixOperationCount: 0,
           history: [],
@@ -559,9 +588,9 @@ export function createCanvasEditorStore(
           saveMessage: null,
         });
       },
-      addNode(type, position) {
+      addNode(type, position, overrides) {
         if (!validCanvasPosition(position)) return "";
-        const result = addCanvasNode(get().graph, type, position);
+        const result = addCanvasNode(get().graph, type, position, overrides);
         if (!validGraphForStoreCommit(result.graph)) return "";
         commit(result.graph, `添加${result.node.title}`, [
           { op: "add_node", operation_schema_version: 1, node: result.node },
@@ -576,19 +605,25 @@ export function createCanvasEditorStore(
       updateNodeConfig(nodeId, config) {
         const current = get().graph;
         const node = current.nodes.find((item) => item.id === nodeId);
-        if (!node || canvasConfigEqual(node.config, config)) return;
-        const removedEdgeIds =
-          node.type === "video_generate"
-            ? incompatibleVideoEdgeIds(
-                current,
-                nodeId,
-                String(config.mode ?? "t2v"),
-              )
-            : [];
+        if (!node) return;
+        const fixedMode = canvasFixedVideoMode(node.type);
+        const nextConfig = fixedMode
+          ? { ...config, mode: fixedMode }
+          : { ...config };
+        if (canvasConfigEqual(node.config, nextConfig)) return;
+        const videoMode =
+          nextConfig.mode === "i2v" || nextConfig.mode === "reference"
+            ? nextConfig.mode
+            : "t2v";
+        const removedEdgeIds = incompatibleVideoEdgeIds(
+          current,
+          nodeId,
+          videoMode,
+        );
         const nextGraph = {
           ...current,
           nodes: current.nodes.map((item) =>
-            item.id === nodeId ? { ...item, config: { ...config } } : item,
+            item.id === nodeId ? { ...item, config: nextConfig } : item,
           ),
           edges: current.edges.filter(
             (edge) => !removedEdgeIds.includes(edge.id),
@@ -615,7 +650,7 @@ export function createCanvasEditorStore(
               op: "update_node_config",
               operation_schema_version: 1,
               node_id: nodeId,
-              config: { ...config },
+              config: nextConfig,
             },
           ],
           removedEdgeIds.length === 0
@@ -829,6 +864,10 @@ export function createCanvasEditorStore(
         ) {
           return;
         }
+        const pendingGroups = normalizePendingOperationGroupSizes(
+          current.pendingOperations.length,
+          current.pendingOperationGroupSizes,
+        );
         set({
           graph: cloneCanvasGraph(previous.graph),
           history: current.history.slice(0, -1),
@@ -840,6 +879,7 @@ export function createCanvasEditorStore(
             "oldest",
           ),
           pendingOperations: [...current.pendingOperations, ...operations],
+          pendingOperationGroupSizes: [...pendingGroups, operations.length],
           ...dirtySaveStatus(current),
           selectedNodeId: null,
           selectedNodeIds: [],
@@ -859,6 +899,10 @@ export function createCanvasEditorStore(
         ) {
           return;
         }
+        const pendingGroups = normalizePendingOperationGroupSizes(
+          current.pendingOperations.length,
+          current.pendingOperationGroupSizes,
+        );
         set({
           graph: cloneCanvasGraph(nextEntry.graph),
           history: trimHistoryEntries(
@@ -870,6 +914,7 @@ export function createCanvasEditorStore(
           ),
           future: current.future.slice(1),
           pendingOperations: [...current.pendingOperations, ...operations],
+          pendingOperationGroupSizes: [...pendingGroups, operations.length],
           ...dirtySaveStatus(current),
           selectedNodeId: null,
           selectedNodeIds: [],
@@ -903,6 +948,11 @@ export function createCanvasEditorStore(
         const pending = current.pendingOperations.slice(acknowledgedCount);
         set({
           pendingOperations: pending,
+          pendingOperationGroupSizes: consumePendingOperationGroups(
+            current.pendingOperationGroupSizes,
+            current.pendingOperations.length,
+            acknowledgedCount,
+          ),
           inFlightOperationCount: 0,
           retryPrefixOperationCount: 0,
           revision: nextRevision,
@@ -946,6 +996,7 @@ export function createCanvasEditorStore(
           history: [],
           future: [],
           pendingOperations: [],
+          pendingOperationGroupSizes: [],
           inFlightOperationCount: 0,
           retryPrefixOperationCount: 0,
           saveState: "saved",

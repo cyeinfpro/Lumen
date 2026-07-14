@@ -16,6 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def _reset_tiktoken_state(monkeypatch, cw):
+    thread = cw._TIKTOKEN_LOAD_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=1.0)
+        assert not thread.is_alive(), "stale tiktoken loader leaked across tests"
     monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
     monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", False)
     monkeypatch.setattr(cw, "_TIKTOKEN_LOAD_THREAD", None)

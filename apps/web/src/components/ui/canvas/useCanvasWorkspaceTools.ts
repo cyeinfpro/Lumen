@@ -28,10 +28,17 @@ import {
   type CanvasAlignment,
   type CanvasDistributionAxis,
 } from "@/lib/canvas/layout";
-import { validateCanvasConnection } from "@/lib/canvas/graph";
 import {
+  validateCanvasConnection,
+  validateCanvasNodeExecution,
+} from "@/lib/canvas/graph";
+import {
+  CANVAS_NODE_CATALOG,
   CANVAS_NODE_SPECS,
-  CANVAS_NODE_TYPES,
+  createCanvasNodeFromCatalog,
+  findCanvasNodeCatalogItem,
+  isCanvasExecutableNodeType,
+  isCanvasNodeType,
 } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
 import type {
@@ -95,8 +102,14 @@ export function useCanvasWorkspaceTools({
   const openShortcuts = useCallback(() => setShortcutsOpen(true), []);
 
   const addNode = useCallback(
-    (type: CanvasNodeType, position?: CanvasPosition) => {
+    (nodeReference: CanvasNodeType | string, position?: CanvasPosition) => {
       const state = store.getState();
+      const catalogItem = findCanvasNodeCatalogItem(nodeReference);
+      const type = catalogItem?.type ?? (isCanvasNodeType(nodeReference) ? nodeReference : null);
+      if (!type) {
+        toast.error("未找到要添加的节点");
+        return "";
+      }
       const spec = CANVAS_NODE_SPECS[type];
       const center =
         position ?? viewportApi?.getViewportCenter() ?? { x: 360, y: 260 };
@@ -112,7 +125,19 @@ export function useCanvasWorkspaceTools({
             type === "frame" ? 220 : 180,
             state.graph.nodes,
           );
-      const nodeId = state.addNode(type, resolvedPosition);
+      const nodeId = state.addNode(
+        type,
+        resolvedPosition,
+        catalogItem
+          ? {
+              ...catalogItem.overrides,
+              ui: {
+                ...(catalogItem.overrides?.ui ?? {}),
+                preset_id: catalogItem.id,
+              },
+            }
+          : undefined,
+      );
       if (!nodeId) {
         toast.error("画布已达到节点或存储大小上限");
         return "";
@@ -337,10 +362,10 @@ export function useCanvasWorkspaceTools({
 
   const handleCommandSelect = useCallback(
     (item: CanvasCommandMenuItem) => {
-      const addType = commandSuffix(item.id, "add");
+      const addCatalogId = commandSuffix(item.id, "add");
       const focusNodeId = commandSuffix(item.id, "focus");
-      if (addType) {
-        addNode(addType as CanvasNodeType, actionRequest?.position);
+      if (addCatalogId) {
+        addNode(addCatalogId, actionRequest?.position);
       } else if (focusNodeId) {
         store.getState().selectNode(focusNodeId);
         viewportApi?.focusNode(focusNodeId);
@@ -400,23 +425,26 @@ function buildCommandItems({
   const selectedNode = graph.nodes.find(
     (node) => node.id === selectedNodeIds[0],
   );
-  const selectedNodeRunnable =
-    selectedNode?.type === "image_generate" ||
-    selectedNode?.type === "video_generate";
-  const nodeItems = CANVAS_NODE_TYPES.filter((type) => {
-    if (!draftType) return true;
-    return CANVAS_NODE_SPECS[type].inputs.some(
-      (port) =>
-        port.dataType === draftType || port.accepts?.includes(draftType),
-    );
-  }).map((type) => {
-    const spec = CANVAS_NODE_SPECS[type];
+  const selectedNodeRunnable = Boolean(
+    selectedNode &&
+      isCanvasExecutableNodeType(selectedNode.type) &&
+      validateCanvasNodeExecution(graph, selectedNode.id).valid,
+  );
+  const nodeItems = CANVAS_NODE_CATALOG.filter((item) =>
+    !draftType ||
+    catalogAcceptsConnection(
+      graph,
+      item.id,
+      actionRequest?.connectionDraft ?? null,
+    ),
+  ).map((item) => {
+    const spec = CANVAS_NODE_SPECS[item.type];
     return {
-      id: `add:${type}`,
+      id: `add:${item.id}`,
       kind: "node" as const,
-      label: `添加${spec.label}`,
-      description: spec.description,
-      keywords: [type, ...spec.inputs.map((port) => port.label)],
+      label: `添加${item.label}`,
+      description: item.description,
+      keywords: [item.id, item.type, ...item.keywords, ...spec.inputs.map((port) => port.label)],
       icon: spec.icon,
     };
   });
@@ -564,6 +592,31 @@ function connectDraftToNewNode(
     toast.error("新节点没有可用的兼容输入端口");
   }
   store.getState().setConnectionDraft(null);
+}
+
+function catalogAcceptsConnection(
+  graph: CanvasGraph,
+  catalogId: string,
+  draft: CanvasViewportActionRequest["connectionDraft"],
+): boolean {
+  if (!draft) return true;
+  const item = findCanvasNodeCatalogItem(catalogId);
+  if (!item) return false;
+  const candidate = createCanvasNodeFromCatalog(item.id, { x: 0, y: 0 }, {
+    id: "__canvas_catalog_connection_candidate__",
+  });
+  const candidateGraph = {
+    ...graph,
+    nodes: [...graph.nodes, candidate],
+  };
+  return CANVAS_NODE_SPECS[candidate.type].inputs.some((port) =>
+    validateCanvasConnection(candidateGraph, {
+      sourceNodeId: draft.sourceNodeId,
+      sourceHandle: draft.sourceHandle,
+      targetNodeId: candidate.id,
+      targetHandle: port.id,
+    }).valid,
+  );
 }
 
 function deleteContextTarget(

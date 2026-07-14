@@ -21,6 +21,10 @@ from lumen_core.canvas import (
     canvas_input_snapshot_matches_graph,
     canvas_node_definition_hash,
 )
+from lumen_core.canvas_schemas import (
+    IMAGE_EXECUTABLE_NODE_TYPES,
+    VIDEO_EXECUTABLE_NODE_TYPES,
+)
 from lumen_core.constants import GenerationStatus, VideoGenerationStatus
 from lumen_core.models import Generation, Image, Video, VideoGeneration
 
@@ -68,7 +72,7 @@ async def _repair_missing_links(
     if not missing:
         return False
     recent_generations = []
-    if any(row.node_type == "image_generate" for row in missing.values()):
+    if any(row.node_type in IMAGE_EXECUTABLE_NODE_TYPES for row in missing.values()):
         recent_generations = (
             (
                 await db.execute(
@@ -82,7 +86,7 @@ async def _repair_missing_links(
             .all()
         )
     recent_videos = []
-    if any(row.node_type == "video_generate" for row in missing.values()):
+    if any(row.node_type in VIDEO_EXECUTABLE_NODE_TYPES for row in missing.values()):
         recent_videos = (
             (
                 await db.execute(
@@ -318,23 +322,22 @@ async def _auto_select(
         ).scalars()
     )
     selections = {
-        row.node_id: (row.execution_id, int(row.output_index))
-        for row in selection_rows
+        row.node_id: (row.execution_id, int(row.output_index)) for row in selection_rows
     }
-    if not canvas_input_snapshot_matches_graph(
-        graph,
-        node_id=execution.node_id,
-        input_snapshot=execution.input_snapshot_jsonb or {},
-        selections=selections,
-    ):
+    try:
+        snapshot_matches = canvas_input_snapshot_matches_graph(
+            graph,
+            node_id=execution.node_id,
+            input_snapshot=execution.input_snapshot_jsonb or {},
+            selections=selections,
+        )
+    except (RecursionError, TypeError, ValueError):
+        return False
+    if not snapshot_matches:
         return False
     expected_revision = int(execution.selection_base_revision or 0)
     selection = next(
-        (
-            row
-            for row in selection_rows
-            if row.node_id == execution.node_id
-        ),
+        (row for row in selection_rows if row.node_id == execution.node_id),
         None,
     )
     if (

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import "../../store/chat/moduleResolution.test-helper.mjs";
 
 const {
   MAX_CANVAS_GRAPH_BYTES,
@@ -51,6 +52,61 @@ test("copySubgraph excludes edges that leave the selected node set", () => {
   assert.deepEqual(subgraph.edges, []);
 });
 
+test("copySubgraph compacts retained multi-input edge orders", () => {
+  const graph = createDefaultCanvasGraph();
+  const promptTwo = createCanvasNode("prompt", { x: 40, y: 340 }, {
+    id: "prompt-2",
+  });
+  const promptThree = createCanvasNode("prompt", { x: 40, y: 540 }, {
+    id: "prompt-3",
+  });
+  const merge = createCanvasNode("prompt_merge", { x: 420, y: 320 }, {
+    id: "merge-1",
+  });
+  graph.nodes = [graph.nodes[0], promptTwo, promptThree, merge];
+  graph.edges = [
+    {
+      id: "edge-prompt-1",
+      source_node_id: "prompt-1",
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+    {
+      id: "edge-prompt-2",
+      source_node_id: promptTwo.id,
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 1,
+    },
+    {
+      id: "edge-prompt-3",
+      source_node_id: promptThree.id,
+      source_handle: "text",
+      target_node_id: merge.id,
+      target_handle: "texts",
+      data_type: "text",
+      binding_mode: "follow_active",
+      order: 2,
+    },
+  ];
+
+  const copied = copySubgraph(graph, ["prompt-1", "prompt-3", merge.id]);
+  assert.deepEqual(
+    copied.edges.map((edge) => [edge.id, edge.order]),
+    [
+      ["edge-prompt-1", 0],
+      ["edge-prompt-3", 1],
+    ],
+  );
+});
+
 test("canvas clipboard text round trips and rejects malformed graphs", () => {
   const graph = createDefaultCanvasGraph();
   const copied = copySubgraph(graph, graph.nodes.map((node) => node.id));
@@ -71,6 +127,44 @@ test("canvas clipboard text round trips and rejects malformed graphs", () => {
         schema_version: 1,
         nodes: [],
         edges: [{ id: "edge-orphan" }],
+      })}`,
+    ),
+    null,
+  );
+});
+
+test("clipboard normalizes legacy node UI and rejects invalid fixed video modes", () => {
+  const graph = createDefaultCanvasGraph();
+  const copied = copySubgraph(graph, ["prompt-1"]);
+  const legacy = structuredClone(copied) as unknown as {
+    schema_version: 1;
+    nodes: Array<Record<string, unknown>>;
+    edges: [];
+  };
+  delete legacy.nodes[0].ui;
+  const parsed = parseCanvasSubgraph(
+    `${CANVAS_CLIPBOARD_PREFIX}${JSON.stringify(legacy)}`,
+  );
+  assert.deepEqual(parsed?.nodes[0]?.ui, {
+    collapsed: false,
+    color_tag: null,
+    preset_id: null,
+  });
+
+  const invalidVideo = createCanvasNode(
+    "video_image_generate",
+    { x: 0, y: 0 },
+    {
+      id: "video-fixed",
+      config: { mode: "t2v" },
+    },
+  );
+  assert.equal(
+    parseCanvasSubgraph(
+      `${CANVAS_CLIPBOARD_PREFIX}${JSON.stringify({
+        schema_version: 1,
+        nodes: [invalidVideo],
+        edges: [],
       })}`,
     ),
     null,

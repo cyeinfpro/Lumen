@@ -118,6 +118,15 @@ test("asset nodes expose their configured media without a selection", () => {
           config: { video_id: "asset-video" },
           ui: {},
         },
+        {
+          id: "mask-asset-1",
+          type: "mask_asset",
+          schema_version: 1,
+          title: "遮罩素材",
+          position: { x: 0, y: 0 },
+          config: { image_id: "asset-mask" },
+          ui: {},
+        },
       ],
       edges: [],
       frames: [],
@@ -129,4 +138,5 @@ test("asset nodes expose their configured media without a selection", () => {
 
   assert.equal(outputs.get("image-asset-1")?.image_id, "asset-image");
   assert.equal(outputs.get("video-asset-1")?.video_id, "asset-video");
+  assert.equal(outputs.get("mask-asset-1")?.image_id, "asset-mask");
 });
