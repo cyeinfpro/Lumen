@@ -1,9 +1,9 @@
 .viewport {
+  position: relative;
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
-  background:
-    radial-gradient(circle at center, color-mix(in srgb, var(--border) 48%, transparent) 1px, transparent 1px);
-  background-size: 20px 20px;
+  overflow: hidden;
   background-color: var(--surface-canvas);
 }
 
@@ -39,6 +39,100 @@
 .viewport :global(.react-flow__node:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
+}
+
+.miniMap {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1) !important;
+  box-shadow: var(--shadow-2);
+}
+
+.emptyState {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.emptyStateContent {
+  display: flex;
+  max-width: 280px;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.emptyStateIcon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
+}
+
+.emptyStateIcon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.emptyStateTitle {
+  margin: 14px 0 0;
+  color: var(--fg-0);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.emptyStateCopy {
+  margin: 4px 0 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.emptyStateAction {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-1);
+  color: var(--fg-0);
+  box-shadow: var(--shadow-1);
+  pointer-events: auto;
+  transition:
+    border-color var(--dur-fast) var(--ease-develop),
+    background-color var(--dur-fast) var(--ease-develop),
+    color var(--dur-fast) var(--ease-develop);
+}
+
+.emptyStateAction:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-2);
+}
+
+.emptyStateAction:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.emptyStateAction svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
 }
 
 .handle {

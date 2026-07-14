@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const {
+  MAX_CANVAS_GRAPH_BYTES,
+  MAX_CANVAS_NODE_CONFIG_BYTES,
   canvasGraphReadyToSave,
   createCanvasEdge,
   createDefaultCanvasGraph,
+  validateCanvasConnections,
   validateCanvasNodeExecution,
   validateCanvasConnection,
 } = await import("#canvas-graph");
@@ -163,4 +166,103 @@ test("save readiness matches the server graph limits", () => {
     createCanvasNode("note", { x: 1_001, y: 0 }, { id: "overflow" }),
   );
   assert.equal(canvasGraphReadyToSave(graph), false);
+});
+
+test("save readiness enforces UTF-8 graph and per-node config byte limits", () => {
+  const graph = createDefaultCanvasGraph();
+  graph.nodes[0].config = {
+    text: "界".repeat(Math.ceil(MAX_CANVAS_NODE_CONFIG_BYTES / 3)),
+  };
+  assert.equal(canvasGraphReadyToSave(graph), false);
+
+  graph.nodes[0].config = { text: "" };
+  graph.frames = [{ payload: "x".repeat(MAX_CANVAS_GRAPH_BYTES) }];
+  assert.equal(canvasGraphReadyToSave(graph), false);
+});
+
+test("bulk connection validation applies duplicate and cycle checks sequentially", () => {
+  const graph = createDefaultCanvasGraph();
+  graph.edges = [];
+  const secondImage = createCanvasNode("image_generate", { x: 780, y: 120 }, {
+    id: "image-2",
+  });
+  graph.nodes.push(secondImage);
+
+  const valid = validateCanvasConnections(graph, [
+    {
+      id: "prompt-first",
+      source_node_id: "prompt-1",
+      source_handle: "text",
+      target_node_id: "image-generate-1",
+      target_handle: "prompt",
+      data_type: "text",
+      binding_mode: "follow_active",
+    },
+    {
+      id: "first-second",
+      source_node_id: "image-generate-1",
+      source_handle: "image",
+      target_node_id: "image-2",
+      target_handle: "references",
+      data_type: "image",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+  ]);
+  assert.deepEqual(valid, { valid: true });
+
+  const duplicateId = validateCanvasConnections(graph, [
+    {
+      id: "duplicate-edge",
+      source_node_id: "prompt-1",
+      source_handle: "text",
+      target_node_id: "image-generate-1",
+      target_handle: "prompt",
+      data_type: "text",
+      binding_mode: "follow_active",
+    },
+    {
+      id: "duplicate-edge",
+      source_node_id: "image-generate-1",
+      source_handle: "image",
+      target_node_id: "image-2",
+      target_handle: "references",
+      data_type: "image",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+  ]);
+  assert.deepEqual(duplicateId, {
+    valid: false,
+    edgeId: "duplicate-edge",
+    reason: "连接 ID 重复",
+  });
+
+  const cyclic = validateCanvasConnections(graph, [
+    {
+      id: "first-second",
+      source_node_id: "image-generate-1",
+      source_handle: "image",
+      target_node_id: "image-2",
+      target_handle: "references",
+      data_type: "image",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+    {
+      id: "second-first",
+      source_node_id: "image-2",
+      source_handle: "image",
+      target_node_id: "image-generate-1",
+      target_handle: "references",
+      data_type: "image",
+      binding_mode: "follow_active",
+      order: 0,
+    },
+  ]);
+  assert.deepEqual(cyclic, {
+    valid: false,
+    edgeId: "second-first",
+    reason: "连接会形成环",
+  });
 });

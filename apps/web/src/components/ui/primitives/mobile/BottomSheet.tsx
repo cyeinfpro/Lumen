@@ -162,6 +162,7 @@ function BottomSheetLayer({
   const bodyDragStartRef = useRef<{
     pointerId: number;
     startY: number;
+    scrollElement: HTMLElement;
   } | null>(null);
   const bodyDragControls = useDragControls();
   const isPresent = useIsPresent();
@@ -281,10 +282,12 @@ function BottomSheetLayer({
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const content = contentRef.current;
       const target = event.target;
+      const scrollElement = closestScrollableElement(target, content);
       if (
         event.pointerType === "mouse" ||
         !content ||
-        content.scrollTop > 0 ||
+        !scrollElement ||
+        scrollElement.scrollTop > 0 ||
         (target instanceof Element &&
           target.closest(INTERACTIVE_CONTENT_SELECTOR))
       ) {
@@ -294,6 +297,7 @@ function BottomSheetLayer({
       bodyDragStartRef.current = {
         pointerId: event.pointerId,
         startY: event.clientY,
+        scrollElement,
       };
     },
     [],
@@ -301,12 +305,11 @@ function BottomSheetLayer({
   const onContentPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const start = bodyDragStartRef.current;
-      const content = contentRef.current;
       if (
         !start ||
         start.pointerId !== event.pointerId ||
-        !content ||
-        content.scrollTop > 0
+        !start.scrollElement.isConnected ||
+        start.scrollElement.scrollTop > 0
       ) {
         return;
       }
@@ -463,4 +466,31 @@ function BottomSheetLayer({
       </motion.div>
     </motion.div>
   );
+}
+
+function closestScrollableElement(
+  target: EventTarget | null,
+  boundary: HTMLElement | null,
+): HTMLElement | null {
+  if (!boundary) return null;
+  let element: Element | null =
+    target instanceof Element ? target : boundary;
+  while (element && boundary.contains(element)) {
+    if (
+      element instanceof HTMLElement &&
+      element.scrollHeight > element.clientHeight
+    ) {
+      const overflowY = window.getComputedStyle(element).overflowY;
+      if (
+        overflowY === "auto" ||
+        overflowY === "scroll" ||
+        overflowY === "overlay"
+      ) {
+        return element;
+      }
+    }
+    if (element === boundary) break;
+    element = element.parentElement;
+  }
+  return boundary;
 }

@@ -40,6 +40,132 @@ test("canvas query results cannot replace a newer cached revision", () => {
   assert.equal(mergeCanvasDocumentByRevision(undefined, document(1)).revision, 1);
 });
 
+test("equal document revisions preserve newer execution projections", () => {
+  const current = document(4);
+  current.recent_executions = [
+    {
+      id: "execution-1",
+      node_id: "image-1",
+      node_type: "image_generate",
+      status: "succeeded",
+      outputs: [],
+      updated_at: "2026-07-13T00:00:10Z",
+    },
+  ];
+  const incoming = document(4, "fresh metadata");
+  incoming.recent_executions = [
+    {
+      ...current.recent_executions[0]!,
+      status: "running",
+      updated_at: "2026-07-13T00:00:05Z",
+    },
+  ];
+
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.equal(merged.title, "fresh metadata");
+  assert.equal(merged.recent_executions[0]?.status, "succeeded");
+  assert.equal(
+    merged.recent_executions[0],
+    current.recent_executions[0],
+  );
+});
+
+test("equal document revisions preserve newer run and selection projections", () => {
+  const current = document(4);
+  current.active_runs = [
+    {
+      id: "run-1",
+      status: "running",
+      last_event_seq: 8,
+      updated_at: "2026-07-13T00:00:08Z",
+    },
+  ];
+  current.selections = [
+    {
+      node_id: "image-1",
+      execution_id: "execution-new",
+      output_index: 1,
+      revision: 3,
+    },
+  ];
+  const incoming = document(4);
+  incoming.active_runs = [
+    {
+      id: "run-1",
+      status: "queued",
+      last_event_seq: 7,
+      updated_at: "2026-07-13T00:00:09Z",
+    },
+  ];
+  incoming.selections = [
+    {
+      node_id: "image-1",
+      execution_id: "execution-old",
+      output_index: 0,
+      revision: 2,
+    },
+  ];
+
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.equal(merged.active_runs[0]?.status, "running");
+  assert.equal(merged.selections[0]?.execution_id, "execution-new");
+});
+
+test("older equal-revision snapshots cannot delete newer active projections", () => {
+  const current = document(4);
+  current.active_runs = [
+    {
+      id: "run-1",
+      status: "running",
+      last_event_seq: 9,
+      updated_at: "2026-07-13T00:00:09Z",
+    },
+  ];
+  current.recent_executions = [
+    {
+      id: "execution-1",
+      node_id: "image-1",
+      node_type: "image_generate",
+      status: "running",
+      outputs: [],
+      updated_at: "2026-07-13T00:00:09Z",
+    },
+  ];
+  const incoming = document(4, "stale metadata");
+
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.equal(merged.title, "stale metadata");
+  assert.equal(merged.active_runs[0], current.active_runs[0]);
+  assert.equal(
+    merged.recent_executions[0],
+    current.recent_executions[0],
+  );
+});
+
+test("equal document revisions still accept newer projection records", () => {
+  const current = document(4);
+  current.active_runs = [
+    {
+      id: "run-1",
+      status: "queued",
+      last_event_seq: 2,
+      updated_at: "2026-07-13T00:00:02Z",
+    },
+  ];
+  const incoming = document(4);
+  incoming.active_runs = [
+    {
+      id: "run-1",
+      status: "succeeded",
+      last_event_seq: 3,
+      updated_at: "2026-07-13T00:00:03Z",
+    },
+  ];
+
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.equal(merged.active_runs[0], incoming.active_runs[0]);
+});
+
 test("stale metadata patch responses preserve graph revision while applying input", () => {
   const current = document(7, "旧标题");
   const merged = mergeCanvasPatchResult(

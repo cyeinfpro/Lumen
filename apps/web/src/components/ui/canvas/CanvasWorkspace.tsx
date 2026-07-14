@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -29,18 +30,19 @@ import {
   validateCanvasNodeExecution,
 } from "@/lib/canvas/graph";
 import { decideCanvasRemoteSync } from "@/lib/canvas/documentMerge";
+import { blurActiveCanvasEditor } from "@/lib/canvas/interaction";
 import {
-  blurActiveCanvasEditor,
-  centeredCanvasNodePosition,
-} from "@/lib/canvas/interaction";
-import {
+  canvasDraftKey,
   canvasSaveBatchMatchesPending,
   deleteCanvasDraft,
+  deleteCanvasEmergencyDraft,
   deleteCanvasSaveBatch,
   getCanvasDraft,
+  getCanvasEmergencyDraft,
   getCanvasSaveBatch,
   isSuspiciousEmptyCanvasDraft,
   listCanvasDrafts,
+  putCanvasEmergencyDraft,
   putCanvasSaveBatch,
   putCanvasDraft,
   SerialCanvasDraftWriter,
@@ -52,7 +54,6 @@ import type { CanvasEditorStore } from "@/lib/canvas/store";
 import type {
   CanvasDocument,
   CanvasGraph,
-  CanvasNodeType,
   CanvasOperation,
 } from "@/lib/canvas/types";
 import {
@@ -63,14 +64,24 @@ import {
 } from "@/lib/queries/canvases";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/utils";
-import { Button, ErrorState, Spinner, toast } from "@/components/ui/primitives";
+import {
+  Button,
+  ErrorState,
+  IconButton,
+  Spinner,
+  toast,
+} from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
+import { CanvasCommandMenu } from "./CanvasCommandMenu";
 import { CanvasInspector } from "./CanvasInspector";
 import { CanvasNodePalette } from "./CanvasNodePalette";
+import { CanvasSelectionToolbar } from "./CanvasSelectionToolbar";
+import { CanvasShortcutsDialog } from "./CanvasShortcutsDialog";
 import { CanvasStoreProvider, useCanvasStore, useCanvasStoreApi } from "./CanvasStoreProvider";
 import { CanvasTopBar } from "./CanvasTopBar";
 import type { CanvasViewportApi } from "./CanvasViewport";
 import { CanvasMobileToolbar } from "./mobile/CanvasMobileToolbar";
+import { useCanvasWorkspaceTools } from "./useCanvasWorkspaceTools";
 
 const CanvasViewport = dynamic(
   () => import("./CanvasViewport").then((module) => module.CanvasViewport),
@@ -89,7 +100,6 @@ interface SavePayload {
   clientId: string;
   mutationId: string;
   operations: CanvasOperation[];
-  graph: CanvasGraph;
 }
 
 const ACTIVE_EXECUTION_STATUSES = new Set([
@@ -100,6 +110,7 @@ const ACTIVE_EXECUTION_STATUSES = new Set([
   "reconciling",
   "canceling",
 ]);
+const AUTO_FIT_NODE_LIMIT = 200;
 
 export function CanvasWorkspace({ canvasId }: { canvasId: string }) {
   const query = useCanvasQuery(canvasId);
@@ -157,12 +168,22 @@ function CanvasWorkspaceInner({
   const inFlightOperationCount = useCanvasStore(
     (state) => state.inFlightOperationCount,
   );
+  const retryPrefixOperationCount = useCanvasStore(
+    (state) => state.retryPrefixOperationCount,
+  );
+  const activeInteractionCount = useCanvasStore(
+    (state) => state.activeInteractionCount,
+  );
   const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
-  const addNode = useCanvasStore((state) => state.addNode);
+  const selectedNodeIds = useCanvasStore((state) => state.selectedNodeIds);
+  const selectedEdgeId = useCanvasStore((state) => state.selectedEdgeId);
   const [title, setTitle] = useState(document.title);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [viewportApi, setViewportApi] = useState<CanvasViewportApi | null>(null);
+  const [durabilityWarning, setDurabilityWarning] = useState<string | null>(
+    null,
+  );
   const { fullscreen, toggleFullscreen, exitFullscreen } =
     useCanvasFullscreen();
   const [tabId] = useState(randomId);
@@ -170,6 +191,9 @@ function CanvasWorkspaceInner({
   const recoveredSaveBatchRef =
     useRef<PersistedCanvasSaveBatch | null>(null);
   const submittingNodeIdsRef = useRef(new Set<string>());
+  const confirmedTitleRef = useRef(document.title);
+  const titleMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const titleMutationIdRef = useRef(0);
   const patchCanvas = usePatchCanvasMutation(canvasId);
   const executeNode = useExecuteCanvasNodeMutation(canvasId);
   useCanvasClientLease(canvasId, clientId, tabId);
@@ -201,11 +225,13 @@ function CanvasWorkspaceInner({
     canvasId,
     clientId,
     document,
+    onDurabilityWarning: setDurabilityWarning,
     recoveredSaveBatchRef,
     store,
   });
   const notifySaved = useCanvasTabCoordination({
     canvasId,
+    clientId,
     tabId,
     store,
     onRefetch,
@@ -231,20 +257,17 @@ function CanvasWorkspaceInner({
     saveState,
     store,
     notifySaved,
+    onDurabilityWarning: setDurabilityWarning,
     onSaved: handleSaved,
   });
-  const handleEscape = useCallback(() => {
-    setInspectorOpen(false);
-    setPaletteOpen(false);
-    store.getState().setConnectionDraft(null);
-    void exitFullscreen();
-  }, [exitFullscreen, store]);
-  useCanvasKeyboardShortcuts(store, viewportApi, {
-    onEscape: handleEscape,
-  });
-
   useEffect(() => {
-    if (!viewportApi) return;
+    if (
+      !viewportApi ||
+      activeInteractionCount > 0 ||
+      graph.nodes.length > AUTO_FIT_NODE_LIMIT
+    ) {
+      return;
+    }
     let secondFrame = 0;
     const firstFrame = window.requestAnimationFrame(() => {
       secondFrame = window.requestAnimationFrame(() => viewportApi.fitView());
@@ -253,7 +276,13 @@ function CanvasWorkspaceInner({
       window.cancelAnimationFrame(firstFrame);
       if (secondFrame) window.cancelAnimationFrame(secondFrame);
     };
-  }, [fullscreen, isCompact, viewportApi]);
+  }, [
+    activeInteractionCount,
+    fullscreen,
+    graph.nodes.length,
+    isCompact,
+    viewportApi,
+  ]);
 
   const runNode = useCallback(
     async (nodeId: string) => {
@@ -299,23 +328,67 @@ function CanvasWorkspaceInner({
     if (nodeId) void runNode(nodeId);
   }, [runNode, store]);
 
+  const tools = useCanvasWorkspaceTools({
+    graph,
+    selectedNodeIds,
+    selectedEdgeId,
+    store,
+    viewportApi,
+    onRunSelected: runSelected,
+  });
+  const handleEscape = useCallback(() => {
+    setInspectorOpen(false);
+    setPaletteOpen(false);
+    tools.setCommandMenuOpen(false);
+    tools.setShortcutsOpen(false);
+    store.getState().setConnectionDraft(null);
+    void exitFullscreen();
+  }, [exitFullscreen, store, tools]);
+  useCanvasKeyboardShortcuts(store, viewportApi, {
+    onEscape: handleEscape,
+    onOpenCommandMenu: () => tools.openCommandMenu(null),
+    onOpenShortcuts: tools.openShortcuts,
+    onCopy: tools.copySelection,
+    onPaste: tools.pasteSelection,
+    onDuplicate: tools.duplicateSelection,
+    onAutoLayout: tools.autoLayoutSelection,
+    onFitSelection: tools.fitSelection,
+    onRunSelected: runSelected,
+    onToggleGrid: tools.toggleGrid,
+    onToggleMiniMap: () => viewportApi?.toggleMiniMap(),
+  });
+
   const addAtCenter = useCallback(
-    (type: CanvasNodeType) => {
-      const spec = CANVAS_NODE_SPECS[type];
-      const center = viewportApi?.getViewportCenter() ?? { x: 360, y: 260 };
-      const offset = (graph.nodes.length % 6) * 18;
-      addNode(
-        type,
-        centeredCanvasNodePosition({
-          center,
-          width: spec.width,
-          height: type === "frame" ? 220 : 180,
-          offset,
-        }),
-      );
+    (type: Parameters<typeof tools.addNode>[0]) => {
+      tools.addNode(type);
       setPaletteOpen(false);
     },
-    [addNode, graph.nodes.length, viewportApi],
+    [tools],
+  );
+  const renameCanvas = useCallback(
+    (nextTitle: string) => {
+      const mutationId = titleMutationIdRef.current + 1;
+      titleMutationIdRef.current = mutationId;
+      setTitle(nextTitle);
+
+      const saveTitle = async () => {
+        try {
+          const updated = await patchCanvas.mutateAsync({ title: nextTitle });
+          confirmedTitleRef.current = updated.title;
+          if (titleMutationIdRef.current === mutationId) {
+            setTitle(updated.title);
+          }
+        } catch (error) {
+          if (titleMutationIdRef.current === mutationId) {
+            setTitle(confirmedTitleRef.current);
+          }
+          toast.error(error instanceof Error ? error.message : "标题保存失败");
+        }
+      };
+      titleMutationQueueRef.current =
+        titleMutationQueueRef.current.then(saveTitle, saveTitle);
+    },
+    [patchCanvas],
   );
 
   return (
@@ -332,23 +405,18 @@ function CanvasWorkspaceInner({
         title={title}
         saveState={saveState}
         saveMessage={saveMessage}
-        onRename={(nextTitle) => {
-          setTitle(nextTitle);
-          patchCanvas.mutate(
-            { title: nextTitle },
-            {
-              onError: (error) => {
-                setTitle(document.title);
-                toast.error(error.message);
-              },
-            },
-          );
-        }}
+        onRename={renameCanvas}
         onFitView={() => viewportApi?.fitView()}
         onRunSelected={runSelected}
         onOpenInspector={() => setInspectorOpen(true)}
+        onOpenCommandMenu={() => tools.openCommandMenu(null)}
+        onOpenShortcuts={tools.openShortcuts}
         onToggleFullscreen={() => void toggleFullscreen()}
-        onRetrySave={() => void autosaveRef.current?.flush()}
+        onRetrySave={
+          saveState === "error" && retryPrefixOperationCount === 0
+            ? undefined
+            : () => void autosaveRef.current?.flush()
+        }
         fullscreen={fullscreen}
         running={Boolean(runningNodeId)}
       />
@@ -362,6 +430,8 @@ function CanvasWorkspaceInner({
               module.getCanvas(canvasId),
             );
             store.getState().replaceFromRemote(fresh.graph, fresh.revision);
+            confirmedTitleRef.current = fresh.title;
+            titleMutationIdRef.current += 1;
             setTitle(fresh.title);
           }}
           onKeepCopy={async () => {
@@ -379,6 +449,9 @@ function CanvasWorkspaceInner({
           }}
         />
       ) : null}
+      {durabilityWarning && pendingCount > 0 ? (
+        <DurabilityBanner message={durabilityWarning} />
+      ) : null}
 
       <div className="grid min-h-0 flex-1 min-[1200px]:grid-cols-[224px_minmax(0,1fr)_320px]">
         <aside className="hidden min-h-0 border-r border-[var(--border)] bg-[var(--bg-1)] min-[1200px]:flex min-[1200px]:flex-col">
@@ -391,16 +464,31 @@ function CanvasWorkspaceInner({
           </div>
         </aside>
 
-        <main className="relative min-h-0 min-w-0">
-          <CanvasViewport
-            document={mergedDocument}
-            onRunNode={runNode}
-            onReady={setViewportApi}
-            onOpenInspector={() => setInspectorOpen(true)}
-          />
+        <main className="flex min-h-0 min-w-0 flex-col">
+          <div className="relative min-h-0 flex-1">
+            <CanvasViewport
+              document={mergedDocument}
+              onRunNode={runNode}
+              onReady={setViewportApi}
+              onOpenInspector={() => setInspectorOpen(true)}
+              onOpenQuickAdd={tools.openQuickAdd}
+              onOpenContextMenu={tools.openContextMenu}
+            />
+            <CanvasSelectionToolbar
+              selectedCount={tools.selectedCount}
+              onCopy={() => void tools.copySelection()}
+              onAlign={tools.alignSelection}
+              onDistribute={tools.distributeSelection}
+              onAutoLayout={tools.autoLayoutSelection}
+              onFitSelection={tools.fitSelection}
+              onDelete={tools.deleteSelection}
+              className="absolute bottom-3 left-1/2 z-[var(--z-tabbar)] -translate-x-1/2 max-[1199px]:hidden"
+            />
+          </div>
           <CanvasMobileToolbar
             onAdd={() => setPaletteOpen(true)}
             onFitView={() => viewportApi?.fitView()}
+            onOpenCommandMenu={() => tools.openCommandMenu(null)}
           />
         </main>
 
@@ -409,6 +497,11 @@ function CanvasWorkspaceInner({
             document={mergedDocument}
             onRunNode={runNode}
             runningNodeId={runningNodeId}
+            onDuplicateSelection={tools.duplicateSelection}
+            onAlignSelection={tools.alignSelection}
+            onDistributeSelection={tools.distributeSelection}
+            onAutoLayoutSelection={tools.autoLayoutSelection}
+            onFitSelection={tools.fitSelection}
           />
         </aside>
       </div>
@@ -424,11 +517,28 @@ function CanvasWorkspaceInner({
         snapPoints={["88%"]}
         className="mobile-dialog-sheet"
       >
-        <div className="h-full min-h-0">
+        <div className="relative h-full min-h-0">
+          <IconButton
+            aria-label="关闭检查器"
+            size="lg"
+            onClick={() => {
+              setInspectorOpen(false);
+              store.getState().selectNode(null);
+              store.getState().selectEdge(null);
+            }}
+            className="absolute right-3 top-3 z-[var(--z-tabbar)]"
+          >
+            <X className="h-4 w-4" />
+          </IconButton>
           <CanvasInspector
             document={mergedDocument}
             onRunNode={runNode}
             runningNodeId={runningNodeId}
+            onDuplicateSelection={tools.duplicateSelection}
+            onAlignSelection={tools.alignSelection}
+            onDistributeSelection={tools.distributeSelection}
+            onAutoLayoutSelection={tools.autoLayoutSelection}
+            onFitSelection={tools.fitSelection}
           />
         </div>
       </BottomSheet>
@@ -441,11 +551,34 @@ function CanvasWorkspaceInner({
         className="mobile-dialog-sheet"
       >
         <div className="mobile-dialog-scroll h-full overflow-y-auto p-4">
-          <p className="type-page-kicker">节点工具</p>
-          <h2 className="type-section-title mt-1 mb-4">添加节点</h2>
+          <div className="mb-4 flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="type-page-kicker">节点工具</p>
+              <h2 className="type-section-title mt-1">添加节点</h2>
+            </div>
+            <IconButton
+              aria-label="关闭节点工具"
+              size="lg"
+              onClick={() => setPaletteOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </IconButton>
+          </div>
           <CanvasNodePalette onAdd={addAtCenter} compact />
         </div>
       </BottomSheet>
+
+      <CanvasCommandMenu
+        open={tools.commandMenuOpen}
+        items={tools.commandItems}
+        title={tools.commandMenuTitle}
+        onOpenChange={tools.setCommandMenuOpen}
+        onSelect={tools.handleCommandSelect}
+      />
+      <CanvasShortcutsDialog
+        open={tools.shortcutsOpen}
+        onOpenChange={tools.setShortcutsOpen}
+      />
     </div>
   );
 }
@@ -482,12 +615,14 @@ function useCanvasDraftPersistence({
   canvasId,
   clientId,
   document,
+  onDurabilityWarning,
   recoveredSaveBatchRef,
   store,
 }: {
   canvasId: string;
   clientId: string;
   document: CanvasDocument;
+  onDurabilityWarning: (message: string | null) => void;
   recoveredSaveBatchRef: MutableRefObject<PersistedCanvasSaveBatch | null>;
   store: CanvasEditorStore;
 }) {
@@ -498,32 +633,55 @@ function useCanvasDraftPersistence({
     let timer: number | undefined;
     let migratedDraftClientId: string | null = null;
 
-    const writer = new SerialCanvasDraftWriter(async () => {
-      const state = store.getState();
-      const action =
-        state.pendingOperations.length > 0
-          ? putCanvasDraft({
-              canvas_id: canvasId,
-              client_id: clientId,
-              base_revision: state.revision,
-              graph: state.graph,
-              operations: state.pendingOperations,
-              updated_at: Date.now(),
-            })
-          : deleteCanvasDraft(canvasId, clientId);
-      await action;
-      if (migratedDraftClientId && migratedDraftClientId !== clientId) {
-        await deleteCanvasDraft(canvasId, migratedDraftClientId).catch(
-          () => undefined,
+    const writer = new SerialCanvasDraftWriter(
+      async () => {
+        const state = store.getState();
+        const action =
+          state.pendingOperations.length > 0
+            ? putCanvasDraft({
+                canvas_id: canvasId,
+                client_id: clientId,
+                base_revision: state.revision,
+                graph: state.graph,
+                operations: state.pendingOperations,
+                updated_at: Date.now(),
+              })
+            : deleteCanvasDraft(canvasId, clientId);
+        await action;
+        deleteCanvasEmergencyDraft(canvasId, clientId);
+        onDurabilityWarning(null);
+        if (migratedDraftClientId && migratedDraftClientId !== clientId) {
+          await deleteCanvasDraft(canvasId, migratedDraftClientId).catch(
+            () => undefined,
+          );
+          deleteCanvasEmergencyDraft(canvasId, migratedDraftClientId);
+          migratedDraftClientId = null;
+        }
+      },
+      () => {
+        onDurabilityWarning(
+          "浏览器本地恢复存储不可用；请保持页面打开，系统仍会尝试云端保存。",
         );
-        migratedDraftClientId = null;
-      }
-    });
+      },
+    );
     const persist = () => {
       void writer.request();
     };
-    const unsubscribe = store.subscribe(() => {
+    let lastGraph = store.getState().graph;
+    let lastPendingOperations = store.getState().pendingOperations;
+    let lastRevision = store.getState().revision;
+    const unsubscribe = store.subscribe((state) => {
       if (!ready) return;
+      if (
+        state.graph === lastGraph &&
+        state.pendingOperations === lastPendingOperations &&
+        state.revision === lastRevision
+      ) {
+        return;
+      }
+      lastGraph = state.graph;
+      lastPendingOperations = state.pendingOperations;
+      lastRevision = state.revision;
       if (timer !== undefined) window.clearTimeout(timer);
       timer = window.setTimeout(persist, 180);
     });
@@ -554,12 +712,22 @@ function useCanvasDraftPersistence({
     const persistOnPageHide = () => {
       blurActiveCanvasEditor();
       if (!ready) return;
+      if (!persistCanvasEmergencySnapshot(canvasId, clientId, store)) {
+        onDurabilityWarning(
+          "页面关闭前无法写入紧急恢复副本；请等待云端保存完成。",
+        );
+      }
       persist();
     };
     const persistOnVisibilityChange = () => {
       if (window.document.visibilityState !== "hidden") return;
       blurActiveCanvasEditor();
       if (!ready) return;
+      if (!persistCanvasEmergencySnapshot(canvasId, clientId, store)) {
+        onDurabilityWarning(
+          "页面进入后台前无法写入紧急恢复副本；请等待云端保存完成。",
+        );
+      }
       persist();
     };
     window.addEventListener("pagehide", persistOnPageHide);
@@ -577,9 +745,18 @@ function useCanvasDraftPersistence({
         "visibilitychange",
         persistOnVisibilityChange,
       );
-      if (ready) persist();
+      if (ready) {
+        persistCanvasEmergencySnapshot(canvasId, clientId, store);
+        persist();
+      }
     };
-  }, [canvasId, clientId, recoveredSaveBatchRef, store]);
+  }, [
+    canvasId,
+    clientId,
+    onDurabilityWarning,
+    recoveredSaveBatchRef,
+    store,
+  ]);
 }
 
 interface LoadedCanvasDraftRecovery {
@@ -595,12 +772,27 @@ async function loadCanvasDraftRecovery(
   let draft = await getCanvasDraft(canvasId, clientId).catch(() => null);
   if (!draft) {
     const drafts = await listCanvasDrafts(canvasId).catch(() => []);
-    draft =
-      drafts.find(
-        (candidate) =>
-          candidate.client_id !== clientId &&
-          !canvasClientLeaseIsActive(canvasId, candidate.client_id),
-      ) ?? null;
+    for (const candidate of drafts) {
+      if (
+        candidate.client_id !== clientId &&
+        !(await canvasClientLeaseIsActive(canvasId, candidate.client_id))
+      ) {
+        draft = candidate;
+        break;
+      }
+    }
+  }
+  const emergency = getCanvasEmergencyDraft(canvasId, clientId);
+  if (
+    emergency &&
+    (emergency.client_id === clientId ||
+      !(await canvasClientLeaseIsActive(canvasId, emergency.client_id))) &&
+    (!draft || emergency.updated_at > draft.updated_at)
+  ) {
+    draft = {
+      ...emergency,
+      key: canvasDraftKey(canvasId, emergency.client_id),
+    };
   }
   const draftClientId = draft?.client_id ?? clientId;
   const persistedSaveBatch = await getCanvasSaveBatch(
@@ -627,6 +819,7 @@ async function applyCanvasDraftRecovery({
 }): Promise<string | null> {
   const { draft, draftClientId, persistedSaveBatch } = recovery;
   if (!draft || draft.operations.length === 0) {
+    deleteCanvasEmergencyDraft(canvasId, draftClientId);
     if (persistedSaveBatch) {
       await deleteCanvasSaveBatch(canvasId, draftClientId).catch(
         () => undefined,
@@ -680,6 +873,26 @@ async function applyCanvasDraftRecovery({
     saveMessage: status.saveMessage,
   });
   return draftClientId === clientId ? null : draftClientId;
+}
+
+function persistCanvasEmergencySnapshot(
+  canvasId: string,
+  clientId: string,
+  store: CanvasEditorStore,
+): boolean {
+  const state = store.getState();
+  if (state.pendingOperations.length === 0) {
+    deleteCanvasEmergencyDraft(canvasId, clientId);
+    return true;
+  }
+  return putCanvasEmergencyDraft({
+    canvas_id: canvasId,
+    client_id: clientId,
+    base_revision: state.revision,
+    graph: state.graph,
+    operations: state.pendingOperations,
+    updated_at: Date.now(),
+  });
 }
 
 function resolveCanvasDraftRecoveryStatus(
@@ -742,6 +955,7 @@ async function discardCanvasDraftRecovery(
   canvasId: string,
   clientId: string,
 ): Promise<void> {
+  deleteCanvasEmergencyDraft(canvasId, clientId);
   await Promise.all([
     deleteCanvasDraft(canvasId, clientId).catch(() => undefined),
     deleteCanvasSaveBatch(canvasId, clientId).catch(() => undefined),
@@ -750,11 +964,13 @@ async function discardCanvasDraftRecovery(
 
 function useCanvasTabCoordination({
   canvasId,
+  clientId,
   tabId,
   store,
   onRefetch,
 }: {
   canvasId: string;
+  clientId: string;
   tabId: string;
   store: CanvasEditorStore;
   onRefetch: () => Promise<unknown>;
@@ -767,7 +983,12 @@ function useCanvasTabCoordination({
   }, [onRefetch]);
   useEffect(() => {
     if (typeof BroadcastChannel === "undefined") return;
-    const channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+    let channel: BroadcastChannel;
+    try {
+      channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+    } catch {
+      return;
+    }
     channelRef.current = channel;
     const handleSavedRevision = (revision: number) => {
       const state = store.getState();
@@ -801,6 +1022,21 @@ function useCanvasTabCoordination({
       if (!isCanvasCoordinationBroadcast(payload)) {
         return;
       }
+      if (payload.type === "canvas.presence.ping") {
+        if (payload.targetClientId === clientId) {
+          try {
+            channel.postMessage({
+              type: "canvas.presence.pong",
+              requestId: payload.requestId,
+              clientId,
+            });
+          } catch {
+            // Lease timestamps remain available when presence replies are blocked.
+          }
+        }
+        return;
+      }
+      if (payload.type === "canvas.presence.pong") return;
       if (payload.type === "canvas.selection.changed") {
         void onRefetchRef.current();
         return;
@@ -822,14 +1058,18 @@ function useCanvasTabCoordination({
       channel.close();
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [canvasId, store, tabId]);
+  }, [canvasId, clientId, store, tabId]);
   return useCallback(
     (revision: number) => {
-      channelRef.current?.postMessage({
-        type: "canvas.saved",
-        clientId: tabId,
-        revision,
-      });
+      try {
+        channelRef.current?.postMessage({
+          type: "canvas.saved",
+          clientId: tabId,
+          revision,
+        });
+      } catch {
+        // Cross-tab notification is optional; query refetch remains authoritative.
+      }
     },
     [tabId],
   );
@@ -843,6 +1083,7 @@ function useCanvasAutosave({
   saveState,
   store,
   notifySaved,
+  onDurabilityWarning,
   onSaved,
 }: {
   canvasId: string;
@@ -852,10 +1093,27 @@ function useCanvasAutosave({
   saveState: string;
   store: CanvasEditorStore;
   notifySaved: (revision: number) => void;
+  onDurabilityWarning: (message: string | null) => void;
   onSaved: (graph: CanvasGraph, revision: number) => void;
 }): MutableRefObject<SerialAutosave<SavePayload> | null> {
   const autosaveRef = useRef<SerialAutosave<SavePayload> | null>(null);
   useEffect(() => {
+    let retryTimer: number | undefined;
+    let retryAttempt = 0;
+    const clearRetryTimer = () => {
+      if (retryTimer === undefined) return;
+      window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+    };
+    const scheduleRetry = () => {
+      clearRetryTimer();
+      const delay = Math.min(30_000, 1_000 * 2 ** retryAttempt);
+      retryAttempt = Math.min(retryAttempt + 1, 5);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        void autosave.flush();
+      }, delay);
+    };
     const retryableBatches = new RetryableAutosaveBatchReader(() =>
       readCanvasSaveBatch(
         store,
@@ -875,6 +1133,8 @@ function useCanvasAutosave({
           recoveredSaveBatchRef.current?.client_id ?? null;
         recoveredSaveBatchRef.current = null;
         retryableBatches.discard();
+        clearRetryTimer();
+        retryAttempt = 0;
         void deleteCanvasSaveBatch(canvasId, clientId).catch(() => undefined);
         if (recoveredClientId && recoveredClientId !== clientId) {
           void deleteCanvasSaveBatch(canvasId, recoveredClientId).catch(
@@ -895,14 +1155,20 @@ function useCanvasAutosave({
       sendBatch: async (batch) => {
         store.getState().markSaving(batch.count);
         try {
-          await putCanvasSaveBatch({
-            canvas_id: canvasId,
-            client_id: batch.payload.clientId,
-            base_revision: batch.payload.baseRevision,
-            mutation_id: batch.payload.mutationId,
-            operations: batch.payload.operations,
-            updated_at: Date.now(),
-          }).catch(() => undefined);
+          try {
+            await putCanvasSaveBatch({
+              canvas_id: canvasId,
+              client_id: batch.payload.clientId,
+              base_revision: batch.payload.baseRevision,
+              mutation_id: batch.payload.mutationId,
+              operations: batch.payload.operations,
+              updated_at: Date.now(),
+            });
+          } catch {
+            onDurabilityWarning(
+              "保存请求无法写入本地恢复存储；系统仍会继续尝试云端保存。",
+            );
+          }
           const result = await applyCanvasMutations(canvasId, {
             base_revision: batch.payload.baseRevision,
             client_id: batch.payload.clientId,
@@ -913,6 +1179,8 @@ function useCanvasAutosave({
             .getState()
             .acknowledgeOperations(batch.count, result.revision);
           retryableBatches.acknowledge(batch);
+          clearRetryTimer();
+          retryAttempt = 0;
           if (!acknowledged) return;
           if (
             recoveredSaveBatchRef.current?.mutation_id ===
@@ -928,13 +1196,25 @@ function useCanvasAutosave({
           );
           const savedState = store.getState();
           if (savedState.pendingOperations.length === 0) {
+            deleteCanvasEmergencyDraft(canvasId, batch.payload.clientId);
+            onDurabilityWarning(null);
             onSaved(savedState.graph, result.revision);
           }
           notifySaved(result.revision);
         } catch (error) {
-          handleCanvasSaveError(store, error);
-          if (store.getState().saveState === "conflict") {
+          const disposition = handleCanvasSaveError(store, error);
+          if (disposition !== "retryable") {
             retryableBatches.discard();
+            clearRetryTimer();
+            if (disposition === "blocked") {
+              recoveredSaveBatchRef.current = null;
+              void deleteCanvasSaveBatch(
+                canvasId,
+                batch.payload.clientId,
+              ).catch(() => undefined);
+            }
+          } else {
+            scheduleRetry();
           }
           throw error;
         }
@@ -949,7 +1229,11 @@ function useCanvasAutosave({
     const flushOnVisibilityChange = () => {
       if (document.visibilityState === "hidden") flush();
     };
-    const unsubscribeOnlineRestore = onOnlineRestore(flush);
+    const unsubscribeOnlineRestore = onOnlineRestore(() => {
+      clearRetryTimer();
+      retryAttempt = 0;
+      flush();
+    });
     const stopConnectivity = startConnectivity();
     const flushOnPageHide = () => flush();
     window.addEventListener("pagehide", flushOnPageHide);
@@ -966,6 +1250,7 @@ function useCanvasAutosave({
       unsubscribeOnlineRestore();
       stopConnectivity();
       unsubscribeStore();
+      clearRetryTimer();
       autosave.stop();
       autosaveRef.current = null;
     };
@@ -973,6 +1258,7 @@ function useCanvasAutosave({
     canvasId,
     clientId,
     notifySaved,
+    onDurabilityWarning,
     onSaved,
     recoveredSaveBatchRef,
     store,
@@ -1008,7 +1294,6 @@ function readCanvasSaveBatch(
         clientId: recoveredSaveBatch.client_id,
         mutationId: recoveredSaveBatch.mutation_id,
         operations: recoveredSaveBatch.operations.slice(),
-        graph: structuredClone(state.graph),
       },
     };
   }
@@ -1017,12 +1302,14 @@ function readCanvasSaveBatch(
   }
   if (
     state.pendingOperations.length === 0 ||
-    state.saveState === "conflict"
+    state.saveState === "conflict" ||
+    (state.saveState === "error" &&
+      state.retryPrefixOperationCount === 0)
   ) {
     return null;
   }
   if (!canvasGraphReadyToSave(state.graph)) {
-    state.markSaveError("画布规模超过当前保存上限，请拆分后重试。");
+    state.markSaveError("画布规模超过当前保存上限，请拆分后重试。", false);
     return null;
   }
   const operations = takeAutosaveOperations(state.pendingOperations);
@@ -1033,76 +1320,224 @@ function readCanvasSaveBatch(
       clientId,
       mutationId,
       operations,
-      graph: structuredClone(state.graph),
     },
   };
 }
 
-function handleCanvasSaveError(store: CanvasEditorStore, error: unknown) {
+type CanvasSaveErrorDisposition = "retryable" | "blocked" | "conflict";
+
+function handleCanvasSaveError(
+  store: CanvasEditorStore,
+  error: unknown,
+): CanvasSaveErrorDisposition {
   if (
     error instanceof ApiError &&
-    (error.status === 409 || error.code === "canvas_revision_conflict")
+    error.code === "canvas_revision_conflict"
   ) {
     store
       .getState()
       .markConflict("版本冲突：远端画布已更新。本地修改仍保留，但自动保存已暂停。");
-    return;
+    return "conflict";
+  }
+  if (error instanceof ApiError && canvasSaveErrorIsBlocked(error.status)) {
+    store.getState().markSaveError(
+      `${canvasBlockedSaveMessage(error)}。本地修改仍已保留，自动保存已暂停。`,
+      false,
+    );
+    return "blocked";
   }
   store
     .getState()
     .markSaveError(error instanceof Error ? error.message : "保存失败");
+  return "retryable";
+}
+
+function canvasSaveErrorIsBlocked(status: number): boolean {
+  return (
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 425 &&
+    status !== 429
+  );
+}
+
+function canvasBlockedSaveMessage(error: ApiError): string {
+  if (error.status === 401 || error.status === 403) {
+    return "当前会话无权保存此画布，请重新登录或检查访问权限";
+  }
+  if (error.status === 404) {
+    return "远端画布已不存在";
+  }
+  if (error.status === 413) {
+    return "画布保存批次超过服务器限制，请拆分画布后重试";
+  }
+  return `${error.message}。请修正画布内容或另存副本`;
 }
 
 function useCanvasKeyboardShortcuts(
   store: CanvasEditorStore,
   viewportApi: CanvasViewportApi | null,
-  {
-    onEscape,
-  }: {
-    onEscape: () => void;
-  },
+  actions: CanvasShortcutActions,
 ) {
+  const actionsRef = useRef(actions);
+  useEffect(() => {
+    actionsRef.current = actions;
+  }, [actions]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, [contenteditable='true']")) {
+      if (
+        target?.matches("input, textarea, select, [contenteditable='true']") ||
+        target?.closest("[role='dialog']")
+      ) {
         return;
       }
-      const modifier = event.metaKey || event.ctrlKey;
-      if (modifier && event.key.toLowerCase() === "z") {
-        event.preventDefault();
-        if (event.shiftKey) store.getState().redo();
-        else store.getState().undo();
-      }
-      if (modifier && event.key.toLowerCase() === "y") {
-        event.preventDefault();
-        store.getState().redo();
-      }
-      if (modifier && event.key === "0") {
-        event.preventDefault();
-        viewportApi?.fitView();
-      }
-      if (event.key === "Escape") {
-        onEscape();
-      }
+      const bindings = createCanvasShortcutBindings(
+        store,
+        viewportApi,
+        actionsRef.current,
+      );
+      const binding = bindings.find((item) => item.matches(event));
+      if (!binding) return;
+      event.preventDefault();
+      binding.run(event);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onEscape, store, viewportApi]);
+  }, [store, viewportApi]);
+}
+
+interface CanvasShortcutActions {
+  onEscape: () => void;
+  onOpenCommandMenu: () => void;
+  onOpenShortcuts: () => void;
+  onCopy: () => void | Promise<unknown>;
+  onPaste: () => void | Promise<unknown>;
+  onDuplicate: () => void;
+  onAutoLayout: () => void;
+  onFitSelection: () => void;
+  onRunSelected: () => void;
+  onToggleGrid: () => void;
+  onToggleMiniMap: () => void;
+}
+
+interface CanvasShortcutBinding {
+  matches: (event: KeyboardEvent) => boolean;
+  run: (event: KeyboardEvent) => void;
+}
+
+function createCanvasShortcutBindings(
+  store: CanvasEditorStore,
+  viewportApi: CanvasViewportApi | null,
+  actions: CanvasShortcutActions,
+): CanvasShortcutBinding[] {
+  return [
+    binding(modifiedShiftedKey("k"), actions.onOpenCommandMenu),
+    binding(modifiedKey("z"), (event) => {
+      if (event.shiftKey) store.getState().redo();
+      else store.getState().undo();
+    }),
+    binding(modifiedKey("y"), () => store.getState().redo()),
+    binding(modifiedKey("0"), () => viewportApi?.fitView()),
+    binding(modifiedKey("a"), () => {
+      const state = store.getState();
+      state.selectNodes(state.graph.nodes.map((node) => node.id));
+    }),
+    binding(modifiedKey("c"), () => void actions.onCopy()),
+    binding(modifiedKey("v"), () => void actions.onPaste()),
+    binding(modifiedKey("d"), actions.onDuplicate),
+    binding(
+      (event) => hasModifier(event) && event.key === "Enter",
+      actions.onRunSelected,
+    ),
+    binding(shiftedKey("2"), actions.onFitSelection),
+    binding(shiftedKey("a"), actions.onAutoLayout),
+    binding(
+      (event) => !hasModifier(event) && !event.shiftKey && event.key === "/",
+      actions.onOpenCommandMenu,
+    ),
+    binding((event) => event.key === "?", actions.onOpenShortcuts),
+    binding(plainKey("g"), actions.onToggleGrid),
+    binding(plainKey("m"), actions.onToggleMiniMap),
+    binding(
+      (event) => event.key === "+" || event.key === "=",
+      () => viewportApi?.zoomIn(),
+    ),
+    binding(plainKey("-"), () => viewportApi?.zoomOut()),
+    binding(plainKey("0"), () => viewportApi?.resetZoom()),
+    binding(plainKey("escape"), actions.onEscape),
+  ];
+}
+
+function binding(
+  matches: CanvasShortcutBinding["matches"],
+  run: CanvasShortcutBinding["run"],
+): CanvasShortcutBinding {
+  return { matches, run };
+}
+
+function modifiedKey(key: string) {
+  return (event: KeyboardEvent) =>
+    hasModifier(event) && event.key.toLowerCase() === key;
+}
+
+function shiftedKey(key: string) {
+  return (event: KeyboardEvent) =>
+    !hasModifier(event) && event.shiftKey && event.key.toLowerCase() === key;
+}
+
+function modifiedShiftedKey(key: string) {
+  return (event: KeyboardEvent) =>
+    hasModifier(event) && event.shiftKey && event.key.toLowerCase() === key;
+}
+
+function plainKey(key: string) {
+  return (event: KeyboardEvent) =>
+    !hasModifier(event) && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+function hasModifier(event: KeyboardEvent): boolean {
+  return event.metaKey || event.ctrlKey;
 }
 
 function isCanvasCoordinationBroadcast(
   value: unknown,
 ): value is
   | { type: "canvas.saved"; clientId: string; revision: number }
-  | { type: "canvas.selection.changed"; revision?: number } {
+  | { type: "canvas.selection.changed"; revision?: number }
+  | {
+      type: "canvas.presence.ping";
+      requestId: string;
+      targetClientId: string;
+    }
+  | {
+      type: "canvas.presence.pong";
+      requestId: string;
+      clientId: string;
+    } {
   if (!value || typeof value !== "object") return false;
   const payload = value as Record<string, unknown>;
   if (payload.type === "canvas.selection.changed") return true;
+  if (payload.type === "canvas.presence.ping") {
+    return (
+      typeof payload.requestId === "string" &&
+      typeof payload.targetClientId === "string"
+    );
+  }
+  if (payload.type === "canvas.presence.pong") {
+    return (
+      typeof payload.requestId === "string" &&
+      typeof payload.clientId === "string"
+    );
+  }
   return (
     payload.type === "canvas.saved" &&
     typeof payload.clientId === "string" &&
-    typeof payload.revision === "number"
+    typeof payload.revision === "number" &&
+    Number.isSafeInteger(payload.revision) &&
+    payload.revision >= 0
   );
 }
 
@@ -1248,10 +1683,15 @@ function ConflictBanner({
         size="sm"
         variant="secondary"
         loading={busy === "remote"}
+        disabled={busy !== null}
         onClick={async () => {
           setBusy("remote");
           try {
             await onAdoptRemote();
+          } catch (error) {
+            toast.error(
+              error instanceof Error ? error.message : "采用远端版本失败",
+            );
           } finally {
             setBusy(null);
           }
@@ -1263,6 +1703,7 @@ function ConflictBanner({
         size="sm"
         variant="outline"
         loading={busy === "copy"}
+        disabled={busy !== null}
         onClick={async () => {
           setBusy("copy");
           try {
@@ -1278,11 +1719,25 @@ function ConflictBanner({
   );
 }
 
-const CANVAS_CLIENT_LEASE_TTL_MS = 15_000;
+function DurabilityBanner({ message }: { message: string }) {
+  return (
+    <div
+      role="alert"
+      className="shrink-0 border-b border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 type-caption text-[var(--fg-1)]"
+    >
+      {message}
+    </div>
+  );
+}
+
+const CANVAS_CLIENT_LEASE_TTL_MS = 120_000;
+const CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS = 30 * 60_000;
+const CANVAS_PRESENCE_PROBE_TIMEOUT_MS = 600;
 
 interface CanvasClientLease {
   tabId: string;
   updatedAt: number;
+  state: "active" | "suspended";
 }
 
 function useCanvasClientLease(
@@ -1291,14 +1746,36 @@ function useCanvasClientLease(
   tabId: string,
 ) {
   useEffect(() => {
-    const refresh = () => writeCanvasClientLease(canvasId, clientId, tabId);
+    const refresh = () =>
+      writeCanvasClientLease(
+        canvasId,
+        clientId,
+        tabId,
+        document.visibilityState === "hidden" ? "suspended" : "active",
+      );
     const clear = () => clearCanvasClientLease(canvasId, clientId, tabId);
+    const handlePageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        writeCanvasClientLease(
+          canvasId,
+          clientId,
+          tabId,
+          "suspended",
+        );
+        return;
+      }
+      clear();
+    };
     refresh();
-    const heartbeat = window.setInterval(refresh, 5_000);
-    window.addEventListener("pagehide", clear);
+    const heartbeat = window.setInterval(refresh, 15_000);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", refresh);
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(heartbeat);
-      window.removeEventListener("pagehide", clear);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("pageshow", refresh);
+      document.removeEventListener("visibilitychange", refresh);
       clear();
     };
   }, [canvasId, clientId, tabId]);
@@ -1307,31 +1784,90 @@ function useCanvasClientLease(
 function browserClientId(canvasId: string, tabId: string): string {
   if (typeof window === "undefined") return `ssr-${canvasId}`;
   const key = `lumen:canvas-client:${canvasId}`;
-  const existing = window.sessionStorage.getItem(key);
+  let existing: string | null = null;
+  try {
+    existing = window.sessionStorage.getItem(key);
+  } catch {
+    return randomId();
+  }
   const lease = existing ? readCanvasClientLease(canvasId, existing) : null;
   const value =
     existing &&
     !(
       lease &&
       lease.tabId !== tabId &&
-      Date.now() - lease.updatedAt < CANVAS_CLIENT_LEASE_TTL_MS
+      canvasClientLeaseIsFresh(lease)
     )
       ? existing
       : randomId();
-  window.sessionStorage.setItem(key, value);
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    return value;
+  }
   writeCanvasClientLease(canvasId, value, tabId);
   return value;
 }
 
-function canvasClientLeaseIsActive(
+async function canvasClientLeaseIsActive(
   canvasId: string,
   clientId: string,
-): boolean {
+): Promise<boolean> {
   const lease = readCanvasClientLease(canvasId, clientId);
-  if (lease === undefined) return true;
-  return Boolean(
-    lease && Date.now() - lease.updatedAt < CANVAS_CLIENT_LEASE_TTL_MS,
-  );
+  if (lease && canvasClientLeaseIsFresh(lease)) {
+    return true;
+  }
+  const presence = await probeCanvasClientPresence(canvasId, clientId);
+  if (presence !== null) return presence;
+  return lease === undefined;
+}
+
+function probeCanvasClientPresence(
+  canvasId: string,
+  targetClientId: string,
+): Promise<boolean | null> {
+  if (typeof BroadcastChannel === "undefined") return Promise.resolve(null);
+  let channel: BroadcastChannel;
+  try {
+    channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+  } catch {
+    return Promise.resolve(null);
+  }
+  const requestId = randomId();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (active: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      channel.close();
+      resolve(active);
+    };
+    const timer = window.setTimeout(
+      () => finish(false),
+      CANVAS_PRESENCE_PROBE_TIMEOUT_MS,
+    );
+    channel.onmessage = (event: MessageEvent<unknown>) => {
+      const payload = event.data;
+      if (
+        isCanvasCoordinationBroadcast(payload) &&
+        payload.type === "canvas.presence.pong" &&
+        payload.requestId === requestId &&
+        payload.clientId === targetClientId
+      ) {
+        finish(true);
+      }
+    };
+    try {
+      channel.postMessage({
+        type: "canvas.presence.ping",
+        requestId,
+        targetClientId,
+      });
+    } catch {
+      finish(false);
+    }
+  });
 }
 
 function readCanvasClientLease(
@@ -1346,7 +1882,11 @@ function readCanvasClientLease(
     const value = JSON.parse(raw) as Partial<CanvasClientLease>;
     return typeof value.tabId === "string" &&
       typeof value.updatedAt === "number"
-      ? { tabId: value.tabId, updatedAt: value.updatedAt }
+      ? {
+          tabId: value.tabId,
+          updatedAt: value.updatedAt,
+          state: value.state === "suspended" ? "suspended" : "active",
+        }
       : null;
   } catch {
     return undefined;
@@ -1357,15 +1897,27 @@ function writeCanvasClientLease(
   canvasId: string,
   clientId: string,
   tabId: string,
+  state: CanvasClientLease["state"] = "active",
 ) {
   try {
     window.localStorage.setItem(
       canvasClientLeaseKey(canvasId, clientId),
-      JSON.stringify({ tabId, updatedAt: Date.now() }),
+      JSON.stringify({ tabId, updatedAt: Date.now(), state }),
     );
   } catch {
     // Draft persistence still works without cross-tab lease discovery.
   }
+}
+
+function canvasClientLeaseIsFresh(
+  lease: CanvasClientLease,
+  now = Date.now(),
+): boolean {
+  const ttl =
+    lease.state === "suspended"
+      ? CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS
+      : CANVAS_CLIENT_LEASE_TTL_MS;
+  return now - lease.updatedAt < ttl;
 }
 
 function clearCanvasClientLease(

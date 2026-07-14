@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   CloudAlert,
   CloudCheck,
+  Command,
+  Keyboard,
   Loader2,
   Maximize2,
   Minimize2,
@@ -28,6 +30,8 @@ export function CanvasTopBar({
   onFitView,
   onRunSelected,
   onOpenInspector,
+  onOpenCommandMenu,
+  onOpenShortcuts,
   onToggleFullscreen,
   onRetrySave,
   fullscreen,
@@ -40,8 +44,10 @@ export function CanvasTopBar({
   onFitView: () => void;
   onRunSelected: () => void;
   onOpenInspector: () => void;
+  onOpenCommandMenu: () => void;
+  onOpenShortcuts: () => void;
   onToggleFullscreen: () => void;
-  onRetrySave: () => void;
+  onRetrySave?: () => void;
   fullscreen: boolean;
   running: boolean;
 }) {
@@ -98,6 +104,20 @@ export function CanvasTopBar({
             <Scan className="h-4 w-4" />
           </IconButton>
           <IconButton
+            aria-label="打开命令菜单"
+            tooltip="命令菜单"
+            onClick={onOpenCommandMenu}
+          >
+            <Command className="h-4 w-4" />
+          </IconButton>
+          <IconButton
+            aria-label="查看快捷键"
+            tooltip="快捷键"
+            onClick={onOpenShortcuts}
+          >
+            <Keyboard className="h-4 w-4" />
+          </IconButton>
+          <IconButton
             aria-label={fullscreen ? "退出全屏" : "全屏画布"}
             tooltip={fullscreen ? "退出全屏" : "全屏画布"}
             aria-pressed={fullscreen}
@@ -115,7 +135,11 @@ export function CanvasTopBar({
             onClick={onRunSelected}
             className="ml-2 inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-medium text-[var(--accent-on)] transition-opacity hover:opacity-[var(--op-hover)] disabled:pointer-events-none disabled:opacity-40"
           >
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            {running ? (
+              <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
             运行节点
           </button>
         </div>
@@ -212,7 +236,12 @@ function SaveIndicator({
 }) {
   const content = (() => {
     if (state === "saving") {
-      return { icon: <Loader2 className="h-3.5 w-3.5 animate-spin" />, label: "保存中" };
+      return {
+        icon: (
+          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+        ),
+        label: "保存中",
+      };
     }
     if (state === "dirty") {
       return { icon: <Loader2 className="h-3.5 w-3.5" />, label: "待保存" };
@@ -223,25 +252,37 @@ function SaveIndicator({
     return { icon: <CloudCheck className="h-3.5 w-3.5" />, label: "已保存" };
   })();
   const className = `inline-flex items-center gap-1.5 type-caption ${
-        state === "conflict" || state === "error"
-          ? "text-[var(--danger-fg)]"
-          : "text-[var(--fg-2)]"
-      } ${compact ? "mt-0.5" : ""}`;
+    state === "conflict" || state === "error"
+      ? "text-[var(--danger-fg)]"
+      : "text-[var(--fg-2)]"
+  } ${compact ? "mt-0.5" : ""}`;
+  const announcement = message ? `${content.label}：${message}` : content.label;
   if (state === "error" && onRetry) {
     return (
-      <button
-        type="button"
-        title={message ?? "保存失败，点击重试"}
-        onClick={onRetry}
-        className={className}
-      >
-        {content.icon}
-        重试保存
-      </button>
+      <>
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {announcement}
+        </span>
+        <button
+          type="button"
+          title={message ?? "保存失败，点击重试"}
+          onClick={onRetry}
+          className={className}
+        >
+          {content.icon}
+          重试保存
+        </button>
+      </>
     );
   }
   return (
-    <span title={message ?? content.label} className={className}>
+    <span
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      title={message ?? content.label}
+      className={className}
+    >
       {content.icon}
       {content.label}
     </span>

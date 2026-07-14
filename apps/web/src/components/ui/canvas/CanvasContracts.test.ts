@@ -12,6 +12,10 @@ const topBarSource = source("./CanvasTopBar.tsx");
 const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
 const nodesSource = source("./nodes/CanvasNodes.tsx");
 const inspectorSource = source("./CanvasInspector.tsx");
+const workspaceToolsSource = source("./useCanvasWorkspaceTools.ts");
+const commandMenuSource = source("./CanvasCommandMenu.tsx");
+const viewportControlsSource = source("./CanvasViewportControls.tsx");
+const clipboardSource = source("../../../lib/canvas/clipboard.ts");
 const querySource = source("../../../lib/queries/canvases.ts");
 const manifestSource = source("../../../app/manifest.ts");
 
@@ -51,6 +55,40 @@ test("canvas movement, deletion, and frame layering use domain state", () => {
   match(nodesSource, /isConnectableStart=\{direction === "output"\}/);
   match(nodesSource, /isConnectableEnd=\{direction === "input"\}/);
   match(nodesSource, /overflow-visible/);
+});
+
+test("canvas interactions cleanly settle drafts, cancellation, deletion, and resize state", () => {
+  match(viewportSource, /connectionDraftRef/);
+  match(viewportSource, /updateConnectionDraft/);
+  match(viewportSource, /new Event\("touchend"/);
+  match(viewportSource, /onPointerCancelCapture/);
+  match(viewportSource, /onTouchCancelCapture/);
+  match(
+    viewportSource,
+    /if \(!cancelledConnectionRef\.current\) \{\s*resizeNode/,
+  );
+  match(
+    viewportSource,
+    /if \(cancelledConnectionRef\.current\) return;/,
+  );
+  match(viewportSource, /cancelDomainInteraction/);
+  match(
+    viewportSource,
+    /interactionActiveRef\.current \|\|\s*resizingNodeIdsRef\.current\.size > 0 \|\|\s*connectionDraftRef\.current/,
+  );
+  match(viewportSource, /change\.resizing === false/);
+  match(
+    viewportSource,
+    /resizeNode\(nodeId, geometry\.size, geometry\.position\)/,
+  );
+  match(viewportSource, /clearTransientNodeState\(\[nodeId\]\)/);
+  match(
+    viewportSource,
+    /onStartConnection: clickConnectionEnabled\s*\?\s*startClickConnection\s*:\s*undefined/,
+  );
+  match(nodesSource, /onResize=\{\(\) => data\.onResizeStart\?\.\(definition\.id\)\}/);
+  match(nodesSource, /x: Math\.round\(params\.x\)/);
+  match(nodesSource, /y: Math\.round\(params\.y\)/);
 });
 
 test("canvas text and titles edit directly inside deliberate drag handles", () => {
@@ -98,10 +136,63 @@ test("canvas autosave retries exact batches and only publishes accepted acknowle
   match(workspaceSource, /if \(!acknowledged\) return/);
   match(workspaceSource, /current\.revision <= savedRevision/);
   match(workspaceSource, /decideCanvasRemoteSync/);
-  match(workspaceSource, /onOnlineRestore\(flush\)/);
+  match(workspaceSource, /onOnlineRestore\(\(\) => \{/);
   match(workspaceSource, /blurActiveCanvasEditor/);
   match(workspaceSource, /visibilitychange/);
   match(workspaceSource, /state\.pendingOperations\.length === 0/);
   match(workspaceSource, /CANVAS_CLIENT_LEASE_TTL_MS/);
+  match(workspaceSource, /CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS/);
+  match(workspaceSource, /event\.persisted/);
+  match(workspaceSource, /pageshow/);
   match(workspaceSource, /listCanvasDrafts/);
+});
+
+test("canvas workbench exposes mature creation, navigation, and clipboard workflows", () => {
+  match(workspaceSource, /onOpenQuickAdd=\{tools\.openQuickAdd\}/);
+  match(workspaceSource, /onOpenContextMenu=\{tools\.openContextMenu\}/);
+  match(workspaceSource, /CanvasSelectionToolbar/);
+  match(workspaceSource, /CanvasShortcutsDialog/);
+  match(workspaceToolsSource, /serializeCanvasSubgraph/);
+  match(workspaceToolsSource, /parseCanvasSubgraph/);
+  match(workspaceToolsSource, /autoLayoutDag/);
+  match(workspaceToolsSource, /connectDraftToNewNode/);
+  match(commandMenuSource, /role="combobox"/);
+  match(commandMenuSource, /ArrowDown/);
+  match(viewportControlsSource, /当前缩放比例/);
+  match(clipboardSource, /CANVAS_CLIPBOARD_PREFIX/);
+});
+
+test("canvas viewport and media rendering stay scalable and accessible", () => {
+  match(viewportSource, /onlyRenderVisibleElements/);
+  match(viewportSource, /useReducedMotion/);
+  match(viewportSource, /COMPACT_MIN_ZOOM = 0\.08/);
+  match(viewportSource, /ariaLabelConfig=\{CANVAS_ARIA_LABEL_CONFIG\}/);
+  match(nodesSource, /imageVariantUrl\(output\.image_id, "thumb256"\)/);
+  match(nodesSource, /output\.poster_url\?\.trim\(\)/);
+  match(nodesSource, /loading="lazy"/);
+  match(nodesSource, /decoding="async"/);
+  match(nodesSource, /onCompleteConnection/);
+  match(nodesSource, /tabIndex=\{onStartConnection \? 0 : -1\}/);
+});
+
+test("canvas connection targets are precomputed once and mobile focus uses node centers", () => {
+  match(viewportSource, /buildConnectionCompatibility\(graph, connectionDraft\)/);
+  match(viewportSource, /validateCanvasConnections\(graph, \[candidate\]\)/);
+  match(viewportSource, /connectionCompatibility\.handlesByNode\.get\(node\.id\)/);
+  match(viewportSource, /targets=\{connectionCompatibility\.targets\}/);
+  match(viewportSource, /x: node\.position\.x \+ dimensions\.width \/ 2/);
+  match(viewportSource, /y: node\.position\.y \+ dimensions\.height \/ 2/);
+  doesNotMatch(viewportSource, /compatibleInputHandlesForNode/);
+  doesNotMatch(viewportSource, /listCompatibleTargets/);
+});
+
+test("mobile canvas toolbar owns layout space instead of covering the viewport", () => {
+  match(workspaceSource, /className="flex min-h-0 min-w-0 flex-col"/);
+  match(
+    mobileToolbarSource,
+    /className="relative z-\[var\(--z-tabbar\)\] w-full shrink-0/,
+  );
+  doesNotMatch(mobileToolbarSource, /\babsolute\b/);
+  doesNotMatch(mobileToolbarSource, /\bfixed\b/);
+  doesNotMatch(viewportSource, /canvas-mobile-viewport-inset/);
 });

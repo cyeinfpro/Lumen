@@ -151,12 +151,16 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
       ),
     onSuccess(selection) {
       if (typeof BroadcastChannel !== "undefined") {
-        const channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
-        channel.postMessage({
-          type: "canvas.selection.changed",
-          revision: selection.revision,
-        });
-        channel.close();
+        try {
+          const channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+          channel.postMessage({
+            type: "canvas.selection.changed",
+            revision: selection.revision,
+          });
+          channel.close();
+        } catch {
+          // Query invalidation below still refreshes this tab.
+        }
       }
     },
     onSettled() {

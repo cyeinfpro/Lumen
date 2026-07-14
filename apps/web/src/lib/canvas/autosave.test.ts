@@ -121,6 +121,39 @@ test("retryable batch reader preserves the exact failed batch until acknowledged
   assert.equal(reader.read()?.payload.mutationId, "second");
 });
 
+test("failed serial flush resets active state and retries the protected batch first", async () => {
+  const batches = [
+    { count: 1, payload: "protected" },
+    { count: 1, payload: "tail" },
+  ];
+  const reader = new RetryableAutosaveBatchReader(
+    () => batches.shift() ?? null,
+  );
+  const attempts: string[] = [];
+  let shouldFail = true;
+  const autosave = new SerialAutosave<string>({
+    readBatch: () => reader.read(),
+    sendBatch: async (batch) => {
+      attempts.push(batch.payload);
+      if (shouldFail) {
+        shouldFail = false;
+        throw new Error("network");
+      }
+      reader.acknowledge(batch);
+    },
+  });
+
+  await autosave.flush();
+  assert.deepEqual(attempts, ["protected"]);
+
+  await autosave.flush();
+  assert.deepEqual(attempts, ["protected", "protected"]);
+
+  await autosave.flush();
+  assert.deepEqual(attempts, ["protected", "protected", "tail"]);
+  autosave.stop();
+});
+
 test("autosave operation batches stay within the API contract", () => {
   const operations = Array.from(
     { length: CANVAS_AUTOSAVE_OPERATION_LIMIT + 27 },
