@@ -5,7 +5,6 @@ import {
   BackgroundVariant,
   MiniMap,
   ReactFlow,
-  type AriaLabelConfig,
   type Connection,
   type Edge,
   type NodeChange,
@@ -16,44 +15,60 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useReducedMotion } from "framer-motion";
-import { Cable, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { DURATION } from "@/lib/motion";
 import {
   blurActiveCanvasEditor,
   canvasNodeZIndex,
   splitCanvasNodePositionChanges,
   updateCanvasTransientPositions,
 } from "@/lib/canvas/interaction";
-import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
-import {
-  activeOutputsByNode,
-  deliveryOutputsForNode,
-  latestExecutionsByNode,
-} from "@/lib/canvas/runtime";
 import {
   validateCanvasConnections,
   type CanvasConnectionInput,
 } from "@/lib/canvas/graph";
+import { CANVAS_NODE_SPECS } from "@/lib/canvas/registry";
+import {
+  activeOutputsByNode,
+  latestExecutionsByNode,
+} from "@/lib/canvas/runtime";
 import type {
   CanvasDataType,
   CanvasDocument,
   CanvasEdgeDefinition,
   CanvasGraph,
-  CanvasNodeDefinition,
-  CanvasNodeExecution,
   CanvasNodeType,
-  CanvasOutput,
   CanvasPosition,
-  CanvasSize,
-  CanvasToolMode,
   ConnectionDraft,
 } from "@/lib/canvas/types";
 import { toast } from "@/components/ui/primitives";
-import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { useCanvasStore } from "./CanvasStoreProvider";
+import {
+  CANVAS_ARIA_LABEL_CONFIG,
+  CANVAS_MAX_ZOOM,
+  canvasClickConnectionEnabled,
+  canvasEdgeAriaLabel,
+  canvasFlowNodeDimensions,
+  canvasGridGap,
+  canvasNodeDeliveryOutputs,
+  canvasNodesConnectable,
+  canvasPanOnDrag,
+  fitCanvasViewport,
+  flowViewportBounds,
+  focusCanvasNode,
+  omitCanvasNodeMeasurements,
+  pointerClientPosition,
+  shouldShowMiniMap,
+  viewportAnimationDuration,
+  type CanvasNodeGeometry,
+  type CanvasViewportPreferences,
+  type ConnectionCompatibility,
+} from "./CanvasViewportModel";
+import {
+  CanvasEmptyState,
+  MobileConnectTargets,
+} from "./CanvasViewportOverlays";
 import { CanvasViewportControls } from "./CanvasViewportControls";
 import { canvasNodeTypes, type CanvasFlowNode } from "./nodes/CanvasNodes";
 import styles from "./canvas.module.css";
@@ -94,43 +109,9 @@ export interface CanvasViewportProps {
   onOpenContextMenu?: (request: CanvasViewportActionRequest) => void;
 }
 
-interface CanvasViewportPreferences {
-  isCompact: boolean;
-  reducedMotion: boolean;
-  selectedNodeIds: readonly string[];
-}
-
-interface CanvasNodeGeometry {
-  position: CanvasPosition;
-  size: CanvasSize;
-}
-
-interface ConnectionCompatibility {
-  handlesByNode: Map<string, string[]>;
-  targets: CompatibleTarget[];
-}
-
+const MINIMAP_NODE_THRESHOLD = 24;
 const DESKTOP_MIN_ZOOM = 0.15;
 const COMPACT_MIN_ZOOM = 0.08;
-const MAX_ZOOM = 2.4;
-const VIEWPORT_ANIMATION_DURATION = Math.round(DURATION.panel * 1_000);
-const MINIMAP_NODE_THRESHOLD = 24;
-
-const CANVAS_ARIA_LABEL_CONFIG = {
-  "node.a11yDescription.default": "按回车键选择节点，使用方向键移动节点。",
-  "node.a11yDescription.keyboardDisabled": "这是画布中的一个节点。",
-  "node.a11yDescription.ariaLiveMessage": ({ direction, x, y }) =>
-    `节点已向${canvasDirectionLabel(direction)}移动，当前位置横坐标 ${Math.round(x)}，纵坐标 ${Math.round(y)}。`,
-  "edge.a11yDescription.default":
-    "按回车键选择连接，按退格键或删除键移除连接。",
-  "controls.ariaLabel": "画布视图控制",
-  "controls.zoomIn.ariaLabel": "放大画布",
-  "controls.zoomOut.ariaLabel": "缩小画布",
-  "controls.fitView.ariaLabel": "适应全部节点",
-  "controls.interactive.ariaLabel": "切换画布交互",
-  "minimap.ariaLabel": "画布缩略导航",
-  "handle.ariaLabel": "节点连接端口",
-} satisfies Partial<AriaLabelConfig>;
 
 export function CanvasViewport({
   document,
@@ -1055,7 +1036,7 @@ export function CanvasViewport({
         }}
         isValidConnection={isValidConnection}
         minZoom={minimumZoom}
-        maxZoom={MAX_ZOOM}
+        maxZoom={CANVAS_MAX_ZOOM}
         snapToGrid={snapToGrid}
         snapGrid={snapGrid}
         onlyRenderVisibleElements
@@ -1097,7 +1078,7 @@ export function CanvasViewport({
         <CanvasViewportControls
           zoom={zoom}
           minZoom={minimumZoom}
-          maxZoom={MAX_ZOOM}
+          maxZoom={CANVAS_MAX_ZOOM}
           onZoomOut={() => {
             void instance.zoomOut({
               duration: viewportAnimationDuration(reducedMotion),
@@ -1164,209 +1145,8 @@ export function CanvasViewport({
   );
 }
 
-function CanvasEmptyState({ onCreate }: { onCreate: () => void }) {
-  return (
-    <div className={styles.emptyState}>
-      <div className={styles.emptyStateContent}>
-        <span className={styles.emptyStateIcon} aria-hidden>
-          <Plus />
-        </span>
-        <p className={styles.emptyStateTitle}>开始构建画布</p>
-        <p className={styles.emptyStateCopy}>从一个节点开始。</p>
-        <button
-          type="button"
-          className={styles.emptyStateAction}
-          onClick={onCreate}
-        >
-          <Plus aria-hidden />
-          创建节点
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function viewportAnimationDuration(
-  reducedMotion: boolean,
-  duration = VIEWPORT_ANIMATION_DURATION,
-): number {
-  return reducedMotion ? 0 : duration;
-}
-
 function canvasMinimumZoom(isCompact: boolean): number {
   return isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM;
-}
-
-function shouldShowMiniMap(
-  isCompact: boolean,
-  miniMapVisible: boolean,
-  nodeCount: number,
-): boolean {
-  return !isCompact && miniMapVisible && nodeCount > 0;
-}
-
-function canvasPanOnDrag(
-  isCompact: boolean,
-  toolMode: CanvasToolMode,
-): boolean | number[] {
-  return isCompact ? toolMode === "hand" : [1];
-}
-
-function canvasNodesConnectable(
-  isCompact: boolean,
-  toolMode: CanvasToolMode,
-): boolean {
-  return !isCompact || toolMode === "connect";
-}
-
-function canvasClickConnectionEnabled(
-  isCompact: boolean,
-  toolMode: CanvasToolMode,
-): boolean {
-  return isCompact ? toolMode === "connect" : toolMode === "select";
-}
-
-function canvasGridGap(gridSize: number): number {
-  return gridSize;
-}
-
-function fitCanvasViewport(
-  instance: ReactFlowInstance<CanvasFlowNode, Edge>,
-  preferences: CanvasViewportPreferences,
-  nodes = instance.getNodes(),
-  padding = 0.18,
-  maxZoom = 1.12,
-) {
-  if (nodes.length === 0) {
-    void instance.zoomTo(1, {
-      duration: viewportAnimationDuration(preferences.reducedMotion),
-    });
-    return;
-  }
-  void instance.fitView({
-    nodes,
-    padding,
-    minZoom: preferences.isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM,
-    maxZoom,
-    duration: viewportAnimationDuration(preferences.reducedMotion),
-  });
-}
-
-function focusCanvasNode(
-  instance: ReactFlowInstance<CanvasFlowNode, Edge>,
-  nodeId: string,
-  preferences: CanvasViewportPreferences,
-) {
-  const node = instance.getInternalNode(nodeId);
-  if (!node) return;
-  const dimensions = canvasFlowNodeDimensions(node.data.definition);
-  const width =
-    node.measured.width ?? node.width ?? node.initialWidth ?? dimensions.width;
-  const height =
-    node.measured.height ??
-    node.height ??
-    node.initialHeight ??
-    dimensions.height;
-  const minimumFocusZoom = preferences.isCompact ? 1 : 0.9;
-  void instance.setCenter(
-    node.internals.positionAbsolute.x + width / 2,
-    node.internals.positionAbsolute.y + height / 2,
-    {
-      zoom: Math.min(1.15, Math.max(instance.getZoom(), minimumFocusZoom)),
-      duration: viewportAnimationDuration(preferences.reducedMotion),
-    },
-  );
-}
-
-function flowViewportBounds(viewport: HTMLDivElement | null): DOMRect | null {
-  const flow = viewport?.querySelector<HTMLElement>(".react-flow");
-  return (
-    flow?.getBoundingClientRect() ?? viewport?.getBoundingClientRect() ?? null
-  );
-}
-
-function pointerClientPosition(
-  event: MouseEvent | TouchEvent,
-): { x: number; y: number } | null {
-  if ("changedTouches" in event) {
-    const touch = event.changedTouches[0] ?? event.touches[0];
-    return touch ? { x: touch.clientX, y: touch.clientY } : null;
-  }
-  return { x: event.clientX, y: event.clientY };
-}
-
-function canvasDirectionLabel(direction: string): string {
-  return (
-    {
-      left: "左",
-      right: "右",
-      up: "上",
-      down: "下",
-    }[direction] ?? direction
-  );
-}
-
-function canvasEdgeAriaLabel(
-  nodesById: Map<string, CanvasNodeDefinition>,
-  edge: CanvasGraph["edges"][number],
-): string {
-  const sourceNode = nodesById.get(edge.source_node_id);
-  const targetNode = nodesById.get(edge.target_node_id);
-  const sourcePort = sourceNode
-    ? CANVAS_NODE_SPECS[sourceNode.type].outputs.find(
-        (port) => port.id === edge.source_handle,
-      )
-    : null;
-  const targetPort = targetNode
-    ? CANVAS_NODE_SPECS[targetNode.type].inputs.find(
-        (port) => port.id === edge.target_handle,
-      )
-    : null;
-  const sourceLabel = sourceNode
-    ? `${sourceNode.title}（${CANVAS_NODE_SPECS[sourceNode.type].label}）`
-    : "未知来源节点";
-  const targetLabel = targetNode
-    ? `${targetNode.title}（${CANVAS_NODE_SPECS[targetNode.type].label}）`
-    : "未知目标节点";
-  return `${sourceLabel}的输出端口“${sourcePort?.label ?? edge.source_handle}”连接到${targetLabel}的输入端口“${targetPort?.label ?? edge.target_handle}”`;
-}
-
-interface CompatibleTarget {
-  key: string;
-  nodeId: string;
-  nodeTitle: string;
-  nodeType: string;
-  handleId: string;
-  handleLabel: string;
-  x: number;
-  y: number;
-}
-
-function canvasFlowNodeDimensions(node: CanvasNodeDefinition) {
-  const width = node.size?.width ?? CANVAS_NODE_SPECS[node.type].width;
-  const height = node.size?.height ?? (node.type === "frame" ? 220 : 180);
-  const collapsedFrameHeight =
-    node.type === "frame" && node.ui?.collapsed === true ? 44 : height;
-  return {
-    width,
-    height: collapsedFrameHeight,
-    styleHeight: node.type === "frame" ? collapsedFrameHeight : undefined,
-  };
-}
-
-function canvasNodeDeliveryOutputs(
-  graph: CanvasGraph,
-  node: CanvasNodeDefinition,
-  activeOutputs: Map<string, CanvasOutput>,
-  recentExecutions: CanvasNodeExecution[],
-): CanvasOutput[] {
-  if (node.type !== "delivery") return [];
-  return deliveryOutputsForNode(
-    graph,
-    node.id,
-    activeOutputs,
-    recentExecutions,
-  );
 }
 
 function buildConnectionCompatibility(
@@ -1374,7 +1154,7 @@ function buildConnectionCompatibility(
   draft: ConnectionDraft | null,
 ): ConnectionCompatibility {
   const handlesByNode = new Map<string, string[]>();
-  const targets: CompatibleTarget[] = [];
+  const targets: ConnectionCompatibility["targets"] = [];
   if (!draft) return { handlesByNode, targets };
   const candidateId = canvasConnectionCandidateId(graph);
 
@@ -1451,110 +1231,4 @@ function canvasConnectionCandidateId(graph: CanvasGraph): string {
   const existingIds = new Set(graph.edges.map((edge) => edge.id));
   while (existingIds.has(id)) id += "_";
   return id;
-}
-
-function omitCanvasNodeMeasurements(
-  current: Record<string, { width: number; height: number }>,
-  nodeIds: readonly string[],
-) {
-  let next = current;
-  for (const nodeId of nodeIds) {
-    if (!(nodeId in next)) continue;
-    if (next === current) next = { ...current };
-    delete next[nodeId];
-  }
-  return next;
-}
-
-function MobileConnectTargets({
-  open,
-  targets,
-  onOpen,
-  onClose,
-  onCancel,
-  onSelect,
-}: {
-  open: boolean;
-  targets: CompatibleTarget[];
-  onOpen: () => void;
-  onClose: () => void;
-  onCancel: () => void;
-  onSelect: (target: CompatibleTarget) => void;
-}) {
-  return (
-    <>
-      <div className="absolute inset-x-3 top-3 z-[var(--z-tabbar)] flex items-center justify-center gap-2">
-        <button
-          type="button"
-          onClick={onOpen}
-          className="inline-flex min-h-11 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/96 px-3 type-body-sm text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-xl"
-        >
-          <Cable className="h-4 w-4 text-[var(--accent)]" />
-          兼容目标 {targets.length}
-        </button>
-        <button
-          type="button"
-          aria-label="取消连接"
-          title="取消连接"
-          onClick={onCancel}
-          className="inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/96 text-[var(--fg-1)] shadow-[var(--shadow-2)] backdrop-blur-xl"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-      <BottomSheet
-        open={open}
-        onClose={onClose}
-        ariaLabel="兼容连接目标"
-        snapPoints={["62%"]}
-        className="mobile-dialog-sheet"
-      >
-        <div className="mobile-dialog-scroll h-full overflow-y-auto p-4">
-          <div className="flex items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="type-page-kicker">连接目标</p>
-              <h2 className="type-card-title mt-1">选择兼容端口</h2>
-            </div>
-            <button
-              type="button"
-              aria-label="关闭连接目标"
-              title="关闭"
-              onClick={onClose}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="mt-4 grid gap-2">
-            {targets.length > 0 ? (
-              targets.map((target) => (
-                <button
-                  key={target.key}
-                  type="button"
-                  onClick={() => onSelect(target)}
-                  className="flex min-h-12 w-full items-center justify-between gap-3 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-left transition-colors active:bg-[var(--bg-3)]"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate type-body-sm font-medium text-[var(--fg-0)]">
-                      {target.nodeTitle}
-                    </span>
-                    <span className="block truncate type-caption text-[var(--fg-2)]">
-                      {target.nodeType}
-                    </span>
-                  </span>
-                  <span className="shrink-0 type-caption text-[var(--accent)]">
-                    {target.handleLabel}
-                  </span>
-                </button>
-              ))
-            ) : (
-              <p className="py-8 text-center type-body-sm text-[var(--fg-2)]">
-                当前没有可连接的目标端口。
-              </p>
-            )}
-          </div>
-        </div>
-      </BottomSheet>
-    </>
-  );
 }
