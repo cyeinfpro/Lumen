@@ -609,6 +609,7 @@ export interface UploadedImage {
 
 export interface UploadImageOptions {
   signal?: AbortSignal;
+  purpose?: "inpaint_mask";
 }
 
 export function uploadImage(
@@ -617,6 +618,7 @@ export function uploadImage(
 ): Promise<UploadedImage> {
   const fd = new FormData();
   fd.append("file", file);
+  if (opts.purpose) fd.append("purpose", opts.purpose);
   return apiFetch<UploadedImage>("/images/upload", {
     method: "POST",
     signal: opts.signal,
@@ -671,9 +673,7 @@ export function videoBinaryUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/binary`;
 }
 
-export function videoDownloadUrl(videoId: string): string {
-  return `${videoBinaryUrl(videoId)}?download=1`;
-}
+export function videoDownloadUrl(videoId: string): string { return `${videoBinaryUrl(videoId)}?download=1`; }
 
 export function videoPosterUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/poster`;

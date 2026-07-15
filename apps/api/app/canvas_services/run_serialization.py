@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.canvas_models import (
+    CanvasExecutionTask,
     CanvasNodeExecution,
     CanvasNodeSelection,
     CanvasRun,
     CanvasRunEvent,
 )
+from lumen_core.models import VideoGeneration
 
 from .document_service import get_owned_canvas
 from .document_service import document_dict
@@ -43,7 +46,116 @@ def output_dict(output: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def execution_dict(row: CanvasNodeExecution) -> dict[str, Any]:
+def _elapsed_ms(row: Any) -> int | None:
+    started_at = (
+        getattr(row, "started_at", None)
+        or getattr(row, "submit_started_at", None)
+        or getattr(row, "created_at", None)
+    )
+    if not isinstance(started_at, datetime):
+        return None
+    finished_at = getattr(row, "finished_at", None)
+    if not isinstance(finished_at, datetime):
+        finished_at = datetime.now(timezone.utc)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    else:
+        started_at = started_at.astimezone(timezone.utc)
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    else:
+        finished_at = finished_at.astimezone(timezone.utc)
+    return max(0, int((finished_at - started_at).total_seconds() * 1000))
+
+
+def execution_task_dict(
+    task: CanvasExecutionTask,
+    owner: Any | None,
+) -> dict[str, Any]:
+    source = owner or task
+    progress_pct = getattr(source, "progress_pct", None)
+    if not isinstance(progress_pct, int):
+        progress_pct = None
+    return {
+        "id": task.id,
+        "kind": task.task_kind,
+        "status": getattr(source, "status", task.status),
+        "progress_stage": getattr(source, "progress_stage", task.status),
+        "progress_pct": progress_pct,
+        "generation_id": task.generation_id,
+        "completion_id": task.completion_id,
+        "video_generation_id": task.video_generation_id,
+        "model": getattr(source, "model", None),
+        "provider_name": getattr(source, "provider_name", None),
+        "provider_kind": getattr(source, "provider_kind", None),
+        "action": getattr(source, "action", None),
+        "duration_s": getattr(source, "duration_s", None),
+        "resolution": getattr(source, "resolution", None),
+        "aspect_ratio": getattr(source, "aspect_ratio", None),
+        "size_requested": getattr(source, "size_requested", None),
+        "generate_audio": getattr(source, "generate_audio", None),
+        "attempt": getattr(source, "attempt", None),
+        "elapsed_ms": _elapsed_ms(source),
+        "error_code": getattr(source, "error_code", None),
+        "error_message": getattr(source, "error_message", None),
+        "created_at": getattr(source, "created_at", task.created_at),
+        "updated_at": getattr(source, "updated_at", task.updated_at),
+        "started_at": getattr(source, "started_at", None),
+        "submit_started_at": getattr(source, "submit_started_at", None),
+        "submitted_at": getattr(source, "submitted_at", None),
+        "finished_at": getattr(source, "finished_at", None),
+    }
+
+
+async def execution_tasks_by_execution(
+    db: AsyncSession,
+    executions: list[CanvasNodeExecution],
+) -> dict[str, list[dict[str, Any]]]:
+    execution_ids = [row.id for row in executions]
+    if not execution_ids:
+        return {}
+    tasks = list(
+        (
+            await db.execute(
+                select(CanvasExecutionTask)
+                .where(CanvasExecutionTask.execution_id.in_(execution_ids))
+                .order_by(
+                    CanvasExecutionTask.execution_id.asc(),
+                    CanvasExecutionTask.ordinal.asc(),
+                )
+            )
+        ).scalars()
+    )
+    if not tasks:
+        return {}
+
+    video_generations: dict[str, VideoGeneration] = {}
+    video_generation_ids = [
+        row.video_generation_id for row in tasks if row.video_generation_id
+    ]
+    if video_generation_ids:
+        rows = (
+            await db.execute(
+                select(VideoGeneration).where(
+                    VideoGeneration.id.in_(video_generation_ids)
+                )
+            )
+        ).scalars()
+        video_generations = {row.id: row for row in rows}
+
+    details: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        owner = video_generations.get(task.video_generation_id or "")
+        details.setdefault(task.execution_id, []).append(
+            execution_task_dict(task, owner)
+        )
+    return details
+
+
+def execution_dict(
+    row: CanvasNodeExecution,
+    tasks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "id": row.id,
         "run_id": row.run_id,
@@ -63,6 +175,7 @@ def execution_dict(row: CanvasNodeExecution) -> dict[str, Any]:
         "updated_at": row.updated_at,
         "started_at": row.started_at,
         "finished_at": row.finished_at,
+        "tasks": tasks or [],
     }
 
 
@@ -107,9 +220,10 @@ async def serialize_submission(
 ) -> dict[str, Any]:
     await db.refresh(run)
     await db.refresh(execution)
+    tasks = await execution_tasks_by_execution(db, [execution])
     return {
         "run": run_dict(run),
-        "execution": execution_dict(execution),
+        "execution": execution_dict(execution, tasks.get(execution.id)),
     }
 
 
@@ -198,9 +312,12 @@ async def canvas_projections(
             )
         ).scalars()
     )
+    tasks = await execution_tasks_by_execution(db, executions)
     return {
         "selections": [selection_dict(row) for row in selections],
-        "recent_executions": [execution_dict(row) for row in executions],
+        "recent_executions": [
+            execution_dict(row, tasks.get(row.id)) for row in executions
+        ],
         "active_runs": [run_dict(row) for row in runs],
     }
 
@@ -272,9 +389,12 @@ async def get_run_detail(
             )
         ).scalars()
     )
+    tasks = await execution_tasks_by_execution(db, executions)
     return {
         **run_dict(run),
-        "executions": [execution_dict(row) for row in executions],
+        "executions": [
+            execution_dict(row, tasks.get(row.id)) for row in executions
+        ],
     }
 
 

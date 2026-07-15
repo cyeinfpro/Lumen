@@ -22,6 +22,13 @@ export function useCanvasKeyboardShortcuts(
       ) {
         return;
       }
+      if (
+        hasModifier(event) &&
+        event.key.toLowerCase() === "v" &&
+        target?.closest("[data-canvas-native-paste]")
+      ) {
+        return;
+      }
       const bindings = createCanvasShortcutBindings(
         store,
         viewportApi,

@@ -19,9 +19,12 @@ import {
   preferredDuration,
   preferredResolution,
   resolutionOptionsForModel,
+  videoModelsForAction,
+  videoUnavailableReasonMessage,
 } from "@/app/video/video-options-model";
 import { Button, Input, Textarea } from "@/components/ui/primitives";
 import {
+  canvasVideoReferenceCounts,
   resolveCanvasTextOutput,
   validateCanvasNodeExecution,
 } from "@/lib/canvas/graph";
@@ -367,7 +370,7 @@ function ImageAssetConfig({
           onCommit={(imageId) => patch({ image_id: imageId })}
         />
         <UploadField
-          accept="image/png,image/jpeg,image/webp"
+          accept={isMask ? "image/png" : "image/png,image/jpeg,image/webp"}
           busy={uploading}
           label={isMask ? "上传遮罩" : "上传图片"}
           onSelect={onUploadImage}
@@ -693,7 +696,12 @@ function buildVideoEditorModel(
   } = props;
   const action = (canvasVideoModeForNode(node) ?? "t2v") as VideoAction;
   const fixedMode = canvasFixedVideoMode(node.type);
-  const compatibleModels = compatibleVideoModels(videoOptions, action);
+  const referenceCounts = canvasVideoReferenceCounts(graph, node.id);
+  const compatibleModels = videoModelsForAction(
+    videoOptions,
+    action,
+    referenceCounts,
+  );
   const configuredModel = String(node.config.model ?? "");
   const configuredModelAvailable =
     !configuredModel ||
@@ -701,7 +709,7 @@ function buildVideoEditorModel(
   const effectiveModel =
     configuredModel && configuredModelAvailable
       ? configuredModel
-      : firstModelForAction(videoOptions, action);
+      : firstModelForAction(videoOptions, action, referenceCounts);
   const currentResolution = String(node.config.resolution ?? "720p");
   const availableResolutions = resolutionOptionsForModel(
     videoOptions,
@@ -737,11 +745,7 @@ function buildVideoEditorModel(
     currentAspectRatio: String(node.config.aspect_ratio ?? "16:9"),
     availableAspectRatios: videoAspectValues(videoOptions),
   });
-  const referenceHasVideo = graph.edges.some(
-    (edge) =>
-      edge.target_node_id === node.id &&
-      edge.target_handle === "reference_videos",
-  );
+  const referenceHasVideo = referenceCounts.video > 0;
   const billingModel = billingModelForAction(
     videoOptions,
     effectiveModel,
@@ -926,13 +930,6 @@ function VideoAdvancedParameters({
   );
 }
 
-function compatibleVideoModels(
-  options: VideoOptionsOut | undefined,
-  action: VideoAction,
-): VideoOptionsOut["models"] {
-  return options?.models.filter((item) => item.actions.includes(action)) ?? [];
-}
-
 function currentOrPreferredResolution(
   current: string,
   available: string[],
@@ -982,7 +979,7 @@ function videoCapabilityIssue(input: {
 }): string | null {
   if (!input.optionsLoaded) return null;
   if (!input.optionsEnabled) {
-    return input.unavailableReason?.trim() || "视频生成功能当前不可用";
+    return videoUnavailableReasonMessage(input.unavailableReason);
   }
   if (input.compatibleModelCount === 0) {
     return "当前模式没有可用的视频模型";
@@ -1072,7 +1069,7 @@ function videoModelPatch(
   options: VideoOptionsOut | undefined,
   model: VideoEditorModel,
 ): Record<string, unknown> {
-  const nextModel = value || firstModelForAction(options, model.action);
+  const nextModel = value || model.compatibleModels[0]?.model || "";
   const resolutions = resolutionOptionsForModel(options, nextModel);
   const resolution = currentOrPreferredResolution(
     model.currentResolution,

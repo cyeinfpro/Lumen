@@ -34,6 +34,15 @@ import {
   videoPosterUrl,
 } from "@/lib/apiClient";
 import {
+  canvasExecutionElapsedMs,
+  canvasExecutionPrimaryTask,
+  canvasExecutionProgressPercent,
+  canvasExecutionStageLabel,
+  canvasExecutionStatusLabel,
+  formatCanvasTaskElapsed,
+  isCanvasExecutionActive,
+} from "@/lib/canvas/executionPresentation";
+import {
   canvasVideoCapabilityError,
   validateCanvasNodeExecution,
 } from "@/lib/canvas/graph";
@@ -41,6 +50,7 @@ import type {
   CanvasDocument,
   CanvasEdgeDefinition,
   CanvasEdgeDetailsUpdate,
+  CanvasExecutionTaskDetail,
   CanvasNodeDefinition,
   CanvasNodeExecution,
   CanvasNodeType,
@@ -53,8 +63,10 @@ import {
 } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
 import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
+import { cn } from "@/lib/utils";
 import { Button, Input, toast } from "@/components/ui/primitives";
 import { CanvasNodeConfigEditor } from "./CanvasNodeConfigEditor";
+import { CanvasOutputDownloadButton } from "./CanvasOutputDownloadButton";
 import {
   useCanvasStore,
   useCanvasStoreApi,
@@ -104,25 +116,6 @@ const DATA_TYPE_LABELS: Record<CanvasEdgeDefinition["data_type"], string> = {
   image: "图片",
   video: "视频",
   mask: "遮罩",
-};
-
-const EXECUTION_STATUS_LABELS: Record<
-  CanvasNodeExecution["status"],
-  string
-> = {
-  pending: "待处理",
-  ready: "已就绪",
-  queued: "排队中",
-  running: "运行中",
-  reconciling: "同步结果中",
-  canceling: "正在取消",
-  succeeded: "已成功",
-  partial_failed: "部分失败",
-  failed: "已失败",
-  blocked: "已阻塞",
-  canceled: "已取消",
-  skipped: "已跳过",
-  reused: "已复用",
 };
 
 const EDGE_ROLE_OPTIONS: readonly SelectOption[] = [
@@ -290,6 +283,7 @@ function CanvasNodeInspector({
   const runDisabledReason =
     inspectorRunDisabledReason(graph, node) ??
     inspectorVideoRunDisabledReason(
+      graph,
       node,
       videoOptionsQuery.data,
       videoOptionsQuery.isLoading,
@@ -423,6 +417,7 @@ function inspectorRunDisabledReason(
 }
 
 function inspectorVideoRunDisabledReason(
+  graph: CanvasDocument["graph"],
   node: CanvasNodeDefinition,
   options: Awaited<ReturnType<typeof fetchVideoOptions>> | undefined,
   loading: boolean,
@@ -432,10 +427,10 @@ function inspectorVideoRunDisabledReason(
   if (loading) return "正在加载视频能力";
   if (error) return error;
   if (!options) return "视频能力尚未加载";
-  return canvasVideoCapabilityError(node, options);
+  return canvasVideoCapabilityError(node, options, graph);
 }
 
-type CanvasAssetKind = "image" | "video";
+type CanvasAssetKind = "image" | "mask" | "video";
 
 function useCanvasAssetUpload(
   store: CanvasEditorStore,
@@ -520,7 +515,7 @@ function useCanvasAssetUpload(
         [request.assetField]: asset.id,
         display_name: file.name,
       });
-      toast.success(kind === "image" ? "图片已上传" : "视频已上传");
+      toast.success(kind === "video" ? "视频已上传" : "图片已上传");
     } catch (error) {
       if (!request.controller.signal.aborted) {
         toast.error(error instanceof Error ? error.message : "上传失败");
@@ -535,7 +530,12 @@ function useCanvasAssetUpload(
 
   return {
     uploading,
-    uploadImage: (file: File) => uploadAsset(file, "image"),
+    uploadImage: (file: File) => {
+      const node = store
+        .getState()
+        .graph.nodes.find((item) => item.id === selectedNodeId);
+      return uploadAsset(file, node?.type === "mask_asset" ? "mask" : "image");
+    },
     uploadVideo: (file: File) => uploadAsset(file, "video"),
   };
 }
@@ -545,12 +545,17 @@ async function uploadCanvasAsset(
   kind: CanvasAssetKind,
   signal: AbortSignal,
 ) {
-  if (kind === "image") return uploadImage(file, { signal });
+  if (kind !== "video") {
+    return uploadImage(file, {
+      signal,
+      purpose: kind === "mask" ? "inpaint_mask" : undefined,
+    });
+  }
   return uploadReferenceVideo(file, signal);
 }
 
 function canvasAssetIdField(kind: CanvasAssetKind): "image_id" | "video_id" {
-  return kind === "image" ? "image_id" : "video_id";
+  return kind === "video" ? "video_id" : "image_id";
 }
 
 function queryErrorMessage(
@@ -947,52 +952,198 @@ function ExecutionHistory({
           <div key={execution.id} className="border-b border-[var(--border-subtle)] pb-3 last:border-0">
             <div className="flex items-center justify-between gap-2">
               <span className="type-caption font-medium text-[var(--fg-2)]">
-                {EXECUTION_STATUS_LABELS[execution.status]}
+                {canvasExecutionStatusLabel(execution.status)}
               </span>
               <span className="type-caption text-[var(--fg-3)]">
-                {execution.created_at ? new Date(execution.created_at).toLocaleString("zh-CN") : ""}
+                {execution.created_at
+                  ? new Date(execution.created_at).toLocaleString("zh-CN")
+                  : ""}
               </span>
             </div>
-            {execution.error_message ? (
+            <ExecutionTaskDetails execution={execution} />
+            {execution.error_message ||
+            canvasExecutionPrimaryTask(execution)?.error_message ? (
               <p role="alert" className="mt-2 type-caption text-[var(--danger-fg)]">
-                {execution.error_message}
+                {execution.error_message ??
+                  canvasExecutionPrimaryTask(execution)?.error_message}
               </p>
             ) : null}
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              {execution.outputs.map((output, index) => (
-                <HistoryOutput
-                  key={`${execution.id}:${index}`}
-                  output={output}
-                  index={index}
-                  active={
-                    current?.execution_id === execution.id &&
-                    current.output_index === index
-                  }
-                  loading={
-                    selectOutput.isPending &&
-                    selectOutput.variables?.executionId === execution.id &&
-                    selectOutput.variables.outputIndex === index
-                  }
-                  onSelect={() =>
-                    selectOutput.mutate(
-                      {
-                        executionId: execution.id,
-                        outputIndex: index,
-                        selectionRevision: current?.revision,
-                      },
-                      {
-                        onError: (error) => toast.error(error.message),
-                      },
-                    )
-                  }
-                />
-              ))}
-            </div>
+            {execution.outputs.length > 0 ? (
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {execution.outputs.map((output, index) => (
+                  <HistoryOutput
+                    key={`${execution.id}:${index}`}
+                    output={output}
+                    index={index}
+                    active={
+                      current?.execution_id === execution.id &&
+                      current.output_index === index
+                    }
+                    loading={
+                      selectOutput.isPending &&
+                      selectOutput.variables?.executionId === execution.id &&
+                      selectOutput.variables.outputIndex === index
+                    }
+                    onSelect={() =>
+                      selectOutput.mutate(
+                        {
+                          executionId: execution.id,
+                          outputIndex: index,
+                          selectionRevision: current?.revision,
+                        },
+                        {
+                          onError: (error) => toast.error(error.message),
+                        },
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
     </InspectorSection>
   );
+}
+
+function ExecutionTaskDetails({
+  execution,
+}: {
+  execution: CanvasNodeExecution;
+}) {
+  const task = canvasExecutionPrimaryTask(execution);
+  const active = isCanvasExecutionActive(execution);
+  const [detailsOpen, setDetailsOpen] = useState(active);
+  if (!task && !active) return null;
+  const progress = canvasExecutionProgressPercent(execution);
+  const stage = canvasExecutionStageLabel(execution);
+  const elapsed = formatCanvasTaskElapsed(canvasExecutionElapsedMs(execution));
+  const rows = task ? executionTaskRows(task, elapsed) : [];
+  return (
+    <div className="mt-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="type-caption font-medium text-[var(--fg-1)]">
+          {stage}
+        </span>
+        <span className="type-mono-meta tabular-nums text-[var(--fg-2)]">
+          {progress !== null
+            ? `${progress}%`
+            : elapsed
+              ? `已用 ${elapsed}`
+              : "进行中"}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label={`${stage}进度`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress ?? undefined}
+        className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-3)]"
+      >
+        <span
+          className={cn(
+            "block h-full rounded-full bg-[var(--accent)] transition-[width]",
+            progress === null && "w-1/3 animate-pulse motion-reduce:animate-none",
+          )}
+          style={progress === null ? undefined : { width: `${progress}%` }}
+        />
+      </div>
+      {rows.length > 0 ? (
+        <details
+          className="mt-2"
+          open={detailsOpen}
+          onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+        >
+          <summary className="cursor-pointer type-caption text-[var(--fg-2)]">
+            任务详情
+          </summary>
+          <dl className="mt-2 grid grid-cols-[68px_minmax(0,1fr)] gap-x-2 gap-y-1.5 type-caption">
+            {rows.map(([label, value]) => (
+              <div key={label} className="contents">
+                <dt className="text-[var(--fg-3)]">{label}</dt>
+                <dd className="min-w-0 break-words text-[var(--fg-1)]">
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function executionTaskRows(
+  task: CanvasExecutionTaskDetail,
+  elapsed: string | null,
+): Array<[string, string]> {
+  const taskId =
+    task.video_generation_id ??
+    task.generation_id ??
+    task.completion_id ??
+    task.id;
+  const provider = [task.provider_name, task.provider_kind]
+    .filter(Boolean)
+    .join(" · ");
+  const output = [
+    task.resolution,
+    task.duration_s != null ? `${task.duration_s} 秒` : null,
+    task.aspect_ratio,
+    task.size_requested,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const rows: Array<[string, string]> = [
+    ["任务 ID", taskId],
+    ["类型", canvasTaskKindLabel(task.kind)],
+    ["模型", task.model ?? ""],
+    ["供应商", provider],
+    ["模式", canvasTaskActionLabel(task.action)],
+    ["规格", output],
+    [
+      "音频",
+      task.generate_audio == null
+        ? ""
+        : task.generate_audio
+          ? "生成音频"
+          : "静音",
+    ],
+    ["尝试", task.attempt == null ? "" : String(task.attempt + 1)],
+    ["耗时", elapsed ?? ""],
+    ["更新时间", formatCanvasTaskTime(task.updated_at)],
+  ];
+  return rows.filter((row) => Boolean(row[1]));
+}
+
+function canvasTaskKindLabel(kind: string): string {
+  return (
+    {
+      generation: "图片生成",
+      completion: "文本处理",
+      video_generation: "视频生成",
+    }[kind] ?? kind
+  );
+}
+
+function canvasTaskActionLabel(action: string | null | undefined): string {
+  if (!action) return "";
+  return (
+    {
+      t2v: "文生视频",
+      i2v: "图生视频",
+      reference: "参考生成",
+      generate: "生成",
+      edit: "编辑",
+    }[action] ?? action
+  );
+}
+
+function formatCanvasTaskTime(value: string | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN");
 }
 
 function HistoryOutput({
@@ -1013,40 +1164,49 @@ function HistoryOutput({
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const visibleSrc = src === failedSrc ? null : src;
   return (
-    <button
-      type="button"
-      aria-label={`${active ? "当前" : "选择"}第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出`}
-      aria-pressed={active}
-      disabled={active || loading}
-      onClick={onSelect}
+    <div
       style={{ aspectRatio: historyOutputAspectRatio(output) }}
-      className="relative min-h-11 w-full overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-media)] disabled:cursor-default"
+      className="relative min-h-11 w-full overflow-hidden rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-media)]"
     >
-      {visibleSrc ? (
-        // eslint-disable-next-line @next/next/no-img-element -- API-backed execution output.
-        <img
-          src={visibleSrc}
-          alt={`第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出预览`}
-          loading="lazy"
-          decoding="async"
-          className="h-full w-full object-contain"
-          onError={() => setFailedSrc(visibleSrc)}
-        />
-      ) : (
-        <span className="grid h-full place-items-center text-[var(--fg-2)]">
-          <Icon className="h-5 w-5" aria-hidden />
-        </span>
-      )}
-      {active ? (
-        <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-[var(--success)] text-[var(--success-on)]">
-          <Check className="h-3 w-3" />
-        </span>
-      ) : loading ? (
-        <span className="absolute inset-0 grid place-items-center bg-[var(--surface-scrim)] text-[var(--media-control-fg)]">
-          <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-        </span>
-      ) : null}
-    </button>
+      <button
+        type="button"
+        aria-label={`${active ? "当前" : "选择"}第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出`}
+        aria-pressed={active}
+        disabled={active || loading}
+        onClick={onSelect}
+        className="absolute inset-0 h-full w-full disabled:cursor-default"
+      >
+        {visibleSrc ? (
+          // eslint-disable-next-line @next/next/no-img-element -- API-backed execution output.
+          <img
+            src={visibleSrc}
+            alt={`第 ${index + 1} 个${output.type === "image" ? "图片" : "视频"}输出预览`}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-contain"
+            onError={() => setFailedSrc(visibleSrc)}
+          />
+        ) : (
+          <span className="grid h-full place-items-center text-[var(--fg-2)]">
+            <Icon className="h-5 w-5" aria-hidden />
+          </span>
+        )}
+        {active ? (
+          <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-[var(--success)] text-[var(--success-on)]">
+            <Check className="h-3 w-3" />
+          </span>
+        ) : loading ? (
+          <span className="absolute inset-0 grid place-items-center bg-[var(--surface-scrim)] text-[var(--media-control-fg)]">
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+          </span>
+        ) : null}
+      </button>
+      <CanvasOutputDownloadButton
+        output={output}
+        title={`画布输出 ${index + 1}`}
+        className="absolute bottom-1 left-1 z-10"
+      />
+    </div>
   );
 }
 
@@ -1060,10 +1220,10 @@ function historyOutputPreviewSource(output: CanvasOutput): string | null {
     );
   }
   return (
-    output.preview_url ??
     (output.image_id
-      ? imageVariantUrl(output.image_id, "thumb256")
+      ? imageVariantUrl(output.image_id, "display2048")
       : null) ??
+    output.preview_url ??
     output.url ??
     null
   );

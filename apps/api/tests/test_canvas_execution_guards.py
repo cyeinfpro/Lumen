@@ -24,6 +24,7 @@ from lumen_core.canvas_models import (
     CanvasVersion,
 )
 from lumen_core.models import Base, Image, VideoGeneration
+from lumen_core.schemas import VideoModelOptionOut, VideoOptionsOut
 
 from app.canvas_services.api_schemas import CanvasCreateIn, CanvasExecuteIn
 from app.canvas_services.document_service import create_canvas
@@ -37,6 +38,7 @@ from app.canvas_services.execution_service import (
 from app.canvas_services.graph_resolution import ResolvedNode
 from app.services import task_submission
 from app.services.task_submission import CanvasImageSubmission
+from app.services.task_submission import _canvas_message_attachments
 
 
 def _graph() -> dict:
@@ -279,6 +281,7 @@ def _special_image_graph(node_type: str) -> dict:
                 "target_node_id": "target",
                 "target_handle": "references",
                 "data_type": "image",
+                "role": "product",
             }
         )
     if node_type == "image_inpaint":
@@ -396,6 +399,10 @@ async def test_special_image_nodes_use_existing_generation_pipeline(
     assert captured["prompt"] == "[Preserve subject | increase detail]"
     assert captured["attachment_ids"] == expected_attachments
     assert captured["mask_image_id"] == expected_mask
+    expected_roles = [{"image_id": "source-image", "role": "edit_target"}]
+    if node_type == "image_edit":
+        expected_roles.append({"image_id": "reference-image", "role": "product"})
+    assert captured["metadata"]["attachment_roles"] == expected_roles
     if node_type == "image_upscale":
         assert captured["image_params"].quality == "2k"
         assert captured["image_params"].fast is True
@@ -452,6 +459,78 @@ async def test_dedicated_video_nodes_build_fixed_mode_requests(
     assert body.duration_s == -1
     assert body.input_image_id == ("first-frame" if mode == "i2v" else None)
     assert len(body.reference_media) == (2 if mode == "reference" else 0)
+
+
+@pytest.mark.asyncio
+async def test_canvas_video_auto_model_skips_reference_image_only_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_options(*_args, **_kwargs) -> VideoOptionsOut:
+        return VideoOptionsOut(
+            enabled=True,
+            models=[
+                VideoModelOptionOut(
+                    model="image-only",
+                    actions=["reference"],
+                    resolutions=["720p"],
+                    durations_s=[5],
+                    reference_media_limits={"image": 9},
+                ),
+                VideoModelOptionOut(
+                    model="image-and-video",
+                    actions=["reference"],
+                    resolutions=["720p"],
+                    durations_s=[5],
+                    reference_media_limits={"image": 9, "video": 3},
+                ),
+            ],
+            durations_s=[5],
+            resolutions=["720p"],
+            aspect_ratios=["16:9"],
+            generate_audio=True,
+            pricing=[],
+            hold_estimates={},
+        )
+
+    monkeypatch.setitem(_video_body.__globals__, "video_options", fake_options)
+    body = await _video_body(
+        None,  # type: ignore[arg-type]
+        user=SimpleNamespace(id="user-1", account_mode="wallet"),
+        resolved=ResolvedNode(
+            node={
+                "type": "video_reference_generate",
+                "config": {
+                    "mode": "reference",
+                    "model": None,
+                    "duration_s": 5,
+                    "resolution": "720p",
+                    "aspect_ratio": "16:9",
+                },
+            },
+            prompt="Keep the subject consistent",
+            images_by_handle={},
+            videos_by_handle={"reference_videos": [{"video_id": "reference-video"}]},
+            snapshot={},
+        ),
+        idempotency_key="video-reference-auto-model",
+    )
+
+    assert body.model == "image-and-video"
+
+
+def test_canvas_message_attachments_preserve_structured_roles() -> None:
+    assert _canvas_message_attachments(
+        ["source-image", "product-image"],
+        {
+            "attachment_roles": [
+                {"image_id": "source-image", "role": "edit_target"},
+                {"image_id": "product-image", "role": "product"},
+            ]
+        },
+    ) == [
+        {"image_id": "source-image", "role": "edit_target"},
+        {"image_id": "product-image", "role": "product"},
+    ]
 
 
 def test_canvas_image_config_errors_are_structured_422() -> None:

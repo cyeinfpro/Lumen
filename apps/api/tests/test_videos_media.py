@@ -793,6 +793,7 @@ async def test_video_options_exposes_seedance_20_mini(
     assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
     assert options.models[0].durations_s == [-1, 4]
     assert options.models[0].resolutions == ["480p", "720p"]
+    assert options.models[0].reference_media_limits == {"image": 9, "video": 3}
 
 
 @pytest.mark.asyncio
@@ -870,6 +871,29 @@ async def test_video_options_exposes_happyhorse_reference_with_image_pricing_onl
     assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
     assert options.models[0].durations_s == [-1, 3]
     assert options.models[0].resolutions == ["720p"]
+    assert options.models[0].reference_media_limits == {"image": 9}
+
+
+@pytest.mark.asyncio
+async def test_video_options_disables_byok_without_loading_wallet_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("BYOK options must not load wallet video runtime")
+
+    monkeypatch.setattr(videos, "_video_enabled", unexpected)
+    monkeypatch.setattr(videos, "_video_hold_estimates", unexpected)
+    monkeypatch.setattr(videos, "_video_provider_state", unexpected)
+    monkeypatch.setattr(videos, "_video_price_options", unexpected)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1", account_mode="byok"),
+        object(),
+    )
+
+    assert options.enabled is False
+    assert options.models == []
+    assert options.unavailable_reason == "account_mode_forbidden"
 
 
 @pytest.mark.asyncio

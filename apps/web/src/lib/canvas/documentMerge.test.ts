@@ -70,6 +70,51 @@ test("equal document revisions preserve newer execution projections", () => {
   );
 });
 
+test("equal document revisions accept newer task progress projections", () => {
+  const current = document(4);
+  current.recent_executions = [
+    {
+      id: "execution-video",
+      node_id: "video-1",
+      node_type: "video_generate",
+      status: "running",
+      outputs: [],
+      updated_at: "2026-07-13T00:00:05Z",
+      tasks: [
+        {
+          id: "task-video",
+          kind: "video_generation",
+          status: "running",
+          progress_stage: "rendering",
+          progress_pct: 25,
+          updated_at: "2026-07-13T00:00:06Z",
+        },
+      ],
+    },
+  ];
+  const incoming = document(4);
+  incoming.recent_executions = [
+    {
+      ...current.recent_executions[0]!,
+      tasks: [
+        {
+          ...current.recent_executions[0]!.tasks![0]!,
+          progress_stage: "fetching",
+          progress_pct: 92,
+          updated_at: "2026-07-13T00:00:12Z",
+        },
+      ],
+    },
+  ];
+
+  const merged = mergeCanvasDocumentByRevision(current, incoming);
+  assert.equal(merged.recent_executions[0]?.tasks?.[0]?.progress_pct, 92);
+  assert.equal(
+    merged.recent_executions[0]?.tasks?.[0]?.progress_stage,
+    "fetching",
+  );
+});
+
 test("equal document revisions preserve newer run and selection projections", () => {
   const current = document(4);
   current.active_runs = [

@@ -120,6 +120,36 @@ export interface CanvasOutput {
   video_generation_id?: string | null;
 }
 
+export interface CanvasExecutionTaskDetail {
+  id: string;
+  kind: "generation" | "completion" | "video_generation" | string;
+  status: string;
+  progress_stage: string;
+  progress_pct?: number | null;
+  generation_id?: string | null;
+  completion_id?: string | null;
+  video_generation_id?: string | null;
+  model?: string | null;
+  provider_name?: string | null;
+  provider_kind?: string | null;
+  action?: string | null;
+  duration_s?: number | null;
+  resolution?: string | null;
+  aspect_ratio?: string | null;
+  size_requested?: string | null;
+  generate_audio?: boolean | null;
+  attempt?: number | null;
+  elapsed_ms?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  started_at?: string | null;
+  submit_started_at?: string | null;
+  submitted_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface CanvasNodeExecution {
   id: string;
   run_id?: string | null;
@@ -129,6 +159,7 @@ export interface CanvasNodeExecution {
   outputs: CanvasOutput[];
   error_code?: string | null;
   error_message?: string | null;
+  tasks?: CanvasExecutionTaskDetail[];
   created_at?: string | null;
   updated_at?: string | null;
   started_at?: string | null;

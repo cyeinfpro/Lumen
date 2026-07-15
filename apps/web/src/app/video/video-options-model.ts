@@ -2,6 +2,7 @@ import type {
   VideoAction,
   VideoCreateIn,
   VideoOptionsOut,
+  VideoReferenceMediaIn,
 } from "@/lib/types";
 
 export const SMART_VIDEO_DURATION = -1;
@@ -18,6 +19,20 @@ const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
 ]);
 const VIDEO_SEED_MIN = -1;
 const VIDEO_SEED_MAX = 4_294_967_295;
+
+export type VideoReferenceCounts = Record<
+  VideoReferenceMediaIn["kind"],
+  number
+>;
+
+export function videoUnavailableReasonMessage(
+  reason: string | null | undefined,
+): string {
+  if (reason === "account_mode_forbidden") {
+    return "BYOK 模式暂不支持视频生成";
+  }
+  return reason?.trim() || "视频生成功能当前不可用";
+}
 
 function holdEstimateDurationS(durationS: number): number {
   return durationS === SMART_VIDEO_DURATION
@@ -47,9 +62,47 @@ export function parseSeed(value: string): number | null {
 export function firstModelForAction(
   options: VideoOptionsOut | undefined,
   action: VideoAction,
+  referenceCounts?: VideoReferenceCounts,
 ): string {
   return (
-    options?.models.find((item) => item.actions.includes(action))?.model ?? ""
+    videoModelsForAction(options, action, referenceCounts)[0]?.model ?? ""
+  );
+}
+
+export function videoReferenceLimitError(
+  model: VideoOptionsOut["models"][number],
+  counts: VideoReferenceCounts,
+): string | null {
+  const labels = {
+    image: "参考图片",
+    video: "参考视频",
+    audio: "参考音频",
+  } as const;
+  for (const kind of ["image", "video", "audio"] as const) {
+    const count = counts[kind];
+    if (count <= 0) continue;
+    const limit = Number(model.reference_media_limits?.[kind] ?? 0);
+    if (limit <= 0) return `当前视频模型不支持${labels[kind]}`;
+    if (count > limit) {
+      return `当前视频模型最多支持 ${limit} 个${labels[kind]}`;
+    }
+  }
+  return null;
+}
+
+export function videoModelsForAction(
+  options: VideoOptionsOut | undefined,
+  action: VideoAction,
+  referenceCounts?: VideoReferenceCounts,
+): VideoOptionsOut["models"] {
+  return (
+    options?.models.filter(
+      (item) =>
+        item.actions.includes(action) &&
+        (!referenceCounts ||
+          action !== "reference" ||
+          videoReferenceLimitError(item, referenceCounts) === null),
+    ) ?? []
   );
 }
 

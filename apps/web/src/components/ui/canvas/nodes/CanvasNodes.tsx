@@ -12,12 +12,20 @@ import {
   CheckCircle2,
   GripVertical,
   Loader2,
+  Maximize2,
   Play,
+  PlayCircle,
   RotateCcw,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
-import { imageVariantUrl, videoPosterUrl } from "@/lib/apiClient";
+import type { LightboxItem } from "@/components/ui/lightbox/types";
+import {
+  imageBinaryUrl,
+  imageVariantUrl,
+  videoBinaryUrl,
+} from "@/lib/apiClient";
+import { canvasExecutionStatusLabel } from "@/lib/canvas/executionPresentation";
 import {
   CANVAS_NODE_SPECS,
   findMatchingCanvasNodeCatalogItem,
@@ -35,6 +43,11 @@ import type {
 } from "@/lib/canvas/types";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/store/useUiStore";
+import { CanvasOutputDownloadButton } from "../CanvasOutputDownloadButton";
+import { CanvasVideoPreviewDialog } from "../CanvasVideoPreviewDialog";
+import { CanvasImageAssetDropZone } from "./CanvasImageAssetDropZone";
+import { CanvasNodeExecutionProgress } from "./CanvasNodeExecutionProgress";
 import styles from "../canvas.module.css";
 
 export interface CanvasFlowNodeData extends Record<string, unknown> {
@@ -83,22 +96,6 @@ const ACTIVE = new Set([
   "canceling",
 ]);
 const FAILED = new Set(["partial_failed", "failed", "blocked"]);
-const EXECUTION_STATUS_LABELS: Record<CanvasNodeExecution["status"], string> = {
-  pending: "待处理",
-  ready: "已就绪",
-  queued: "排队中",
-  running: "运行中",
-  reconciling: "同步结果中",
-  canceling: "正在取消",
-  succeeded: "已成功",
-  partial_failed: "部分失败",
-  failed: "已失败",
-  blocked: "已阻塞",
-  canceled: "已取消",
-  skipped: "已跳过",
-  reused: "已复用",
-};
-
 function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
   const { definition, execution } = data;
   const spec = CANVAS_NODE_SPECS[definition.type];
@@ -190,6 +187,7 @@ function CanvasNodeBody({
       <div className="min-h-[96px]">
         <NodeContent data={data} />
       </div>
+      <CanvasNodeExecutionProgress execution={data.execution} />
       <footer className="flex min-h-10 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3">
         <span className="type-caption truncate text-[var(--fg-2)]">
           {nodeSummary(data)}
@@ -545,6 +543,25 @@ function NodeContent({ data }: { data: CanvasFlowNodeData }) {
       </div>
     );
   }
+  if (definition.type === "image_asset") {
+    return (
+      <CanvasImageAssetDropZone
+        nodeId={definition.id}
+        config={definition.config}
+        editingEnabled={data.editingEnabled !== false}
+        onUpdateConfig={data.onUpdateConfig}
+      >
+        {activeOutput ? (
+          <OutputPreview
+            output={activeOutput}
+            alt={`${definition.title}图片预览`}
+            crop={normalizedCanvasCrop(definition.config.crop)}
+            large
+          />
+        ) : null}
+      </CanvasImageAssetDropZone>
+    );
+  }
   const spec = CANVAS_NODE_SPECS[definition.type];
   if (
     spec.family === "asset" ||
@@ -556,7 +573,6 @@ function NodeContent({ data }: { data: CanvasFlowNodeData }) {
         output={activeOutput}
         alt={`${definition.title}${activeOutput.type === "image" ? "图片" : "视频"}预览`}
         crop={
-          definition.type === "image_asset" ||
           definition.type === "mask_asset"
             ? normalizedCanvasCrop(definition.config.crop)
             : null
@@ -811,9 +827,8 @@ function OutputPreview({
   crop?: NormalizedCanvasCrop | null;
   large?: boolean;
 }) {
-  const src = outputPreviewSource(output);
-  const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const visibleSrc = src === failedSrc ? null : src;
+  const media = useOutputPreviewMedia(output);
+  const [videoPreviewOpen, setVideoPreviewOpen] = useState(false);
   const width = outputDimension(output.width);
   const height = outputDimension(output.height);
   const [naturalSize, setNaturalSize] = useState<{
@@ -821,7 +836,7 @@ function OutputPreview({
     width: number;
     height: number;
   } | null>(null);
-  const natural = matchingNaturalSize(visibleSrc, naturalSize);
+  const natural = matchingNaturalSize(media.visibleSrc, naturalSize);
   const previewWidth = width ?? natural?.width;
   const previewHeight = height ?? natural?.height;
   const cropStyle = outputCropStyle(
@@ -831,34 +846,180 @@ function OutputPreview({
     previewHeight,
   );
   return (
-    <div
+    <>
+      <div
+        className={cn(
+          "relative w-full overflow-hidden bg-[var(--surface-media)]",
+          large ? "min-h-[112px]" : "min-h-16",
+        )}
+        style={{
+          aspectRatio: outputAspectRatio(
+            output,
+            crop,
+            previewWidth,
+            previewHeight,
+          ),
+        }}
+      >
+        <OutputPreviewButton
+          output={output}
+          alt={alt}
+          media={media}
+          width={width}
+          height={height}
+          cropStyle={cropStyle}
+          onNaturalSize={setNaturalSize}
+          onOpenVideo={() => setVideoPreviewOpen(true)}
+        />
+        <OutputTypeBadge type={output.type} />
+        <CanvasOutputDownloadButton
+          output={output}
+          title={alt}
+          className="absolute bottom-2 left-2 z-10"
+        />
+      </div>
+      {media.videoSrc ? (
+        <CanvasVideoPreviewDialog
+          key={media.videoSrc}
+          open={videoPreviewOpen}
+          output={output}
+          src={media.videoSrc}
+          poster={media.poster}
+          title={alt}
+          onClose={() => setVideoPreviewOpen(false)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+interface OutputPreviewMediaState {
+  visibleSrc: string | null;
+  videoSrc: string | null;
+  poster: string | null;
+  onError: () => void;
+}
+
+function useOutputPreviewMedia(output: CanvasOutput): OutputPreviewMediaState {
+  const imageSources =
+    output.type === "image" ? imagePreviewSources(output) : [];
+  const imageSourceKey = imageSources.join("\n");
+  const [imageSourceState, setImageSourceState] = useState({
+    key: imageSourceKey,
+    index: 0,
+  });
+  const imageSourceIndex =
+    imageSourceState.key === imageSourceKey ? imageSourceState.index : 0;
+  const videoSrc = output.type === "video" ? videoPlaybackSource(output) : null;
+  const poster = output.type === "video" ? videoPosterSource(output) : null;
+  const [failedVideoSrc, setFailedVideoSrc] = useState<string | null>(null);
+  const imageSrc = imageSources[imageSourceIndex] ?? null;
+  const visibleSrc =
+    output.type === "video"
+      ? videoSrc === failedVideoSrc
+        ? null
+        : videoSrc
+      : imageSrc;
+  const onError = () => {
+    if (!visibleSrc) return;
+    if (output.type === "video") {
+      setFailedVideoSrc(visibleSrc);
+      return;
+    }
+    setImageSourceState({
+      key: imageSourceKey,
+      index: imageSourceIndex + 1,
+    });
+  };
+  return { visibleSrc, videoSrc, poster, onError };
+}
+
+function OutputPreviewButton({
+  output,
+  alt,
+  media,
+  width,
+  height,
+  cropStyle,
+  onNaturalSize,
+  onOpenVideo,
+}: {
+  output: CanvasOutput;
+  alt: string;
+  media: OutputPreviewMediaState;
+  width?: number;
+  height?: number;
+  cropStyle?: React.CSSProperties;
+  onNaturalSize: (
+    size: { src: string; width: number; height: number },
+  ) => void;
+  onOpenVideo: () => void;
+}) {
+  const video = output.type === "video";
+  return (
+    <button
+      type="button"
+      aria-label={video ? `播放${alt}` : `放大查看${alt}`}
+      title={video ? "播放视频" : "查看大图"}
       className={cn(
-        "relative w-full overflow-hidden bg-[var(--surface-media)]",
-        large ? "min-h-[112px]" : "min-h-16",
+        "nodrag nopan nowheel group block h-full w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]",
+        video ? "cursor-pointer" : "cursor-zoom-in",
       )}
-      style={{
-        aspectRatio: outputAspectRatio(
-          output,
-          crop,
-          previewWidth,
-          previewHeight,
-        ),
+      onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        openCanvasOutputPreview(output, alt, media.videoSrc, onOpenVideo);
       }}
     >
       <OutputPreviewMedia
-        src={visibleSrc}
+        type={output.type}
+        src={media.visibleSrc}
+        poster={media.poster}
         alt={alt}
         width={width}
         height={height}
         cropStyle={cropStyle}
-        onNaturalSize={setNaturalSize}
-        onError={() => {
-          if (visibleSrc) setFailedSrc(visibleSrc);
-        }}
+        onNaturalSize={onNaturalSize}
+        onError={media.onError}
       />
-      <OutputTypeBadge type={output.type} />
-    </div>
+      <OutputPreviewAffordance type={output.type} />
+    </button>
   );
+}
+
+function OutputPreviewAffordance({ type }: { type: CanvasOutput["type"] }) {
+  if (type === "video") {
+    return (
+      <span
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 grid h-11 w-11 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)]"
+      >
+        <PlayCircle className="h-6 w-6" />
+      </span>
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)] opacity-0 shadow-[var(--shadow-2)] transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+    >
+      <Maximize2 className="h-4 w-4" />
+    </span>
+  );
+}
+
+function openCanvasOutputPreview(
+  output: CanvasOutput,
+  alt: string,
+  videoSrc: string | null,
+  onOpenVideo: () => void,
+) {
+  if (output.type !== "video") {
+    openCanvasImagePreview(output, alt);
+    return;
+  }
+  if (videoSrc) onOpenVideo();
 }
 
 function matchingNaturalSize(
@@ -886,7 +1047,9 @@ function outputCropStyle(
 }
 
 function OutputPreviewMedia({
+  type,
   src,
+  poster,
   alt,
   width,
   height,
@@ -894,7 +1057,9 @@ function OutputPreviewMedia({
   onNaturalSize,
   onError,
 }: {
+  type: CanvasOutput["type"];
   src: string | null;
+  poster?: string | null;
   alt: string;
   width?: number;
   height?: number;
@@ -909,6 +1074,36 @@ function OutputPreviewMedia({
       <div className="grid h-full min-h-16 place-items-center type-caption text-[var(--fg-3)]">
         无预览
       </div>
+    );
+  }
+  if (type === "video") {
+    return (
+      <video
+        src={src}
+        poster={poster || undefined}
+        muted
+        playsInline
+        preload={poster ? "metadata" : "auto"}
+        aria-label={alt}
+        className="pointer-events-none h-full w-full object-contain"
+        onLoadedMetadata={(event) => {
+          if (poster) return;
+          const video = event.currentTarget;
+          if (video.duration > 0 && video.currentTime === 0) {
+            video.currentTime = Math.min(0.05, video.duration / 10);
+          }
+        }}
+        onLoadedData={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth <= 0 || video.videoHeight <= 0) return;
+          onNaturalSize({
+            src,
+            width: video.videoWidth,
+            height: video.videoHeight,
+          });
+        }}
+        onError={onError}
+      />
     );
   }
   return (
@@ -941,27 +1136,94 @@ function OutputPreviewMedia({
 function OutputTypeBadge({ type }: { type: CanvasOutput["type"] }) {
   if (type !== "video") return null;
   return (
-    <span className="absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-mono-meta text-[var(--media-control-fg)]">
+    <span className="pointer-events-none absolute bottom-1 right-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-mono-meta text-[var(--media-control-fg)]">
       VIDEO
     </span>
   );
 }
 
-function outputPreviewSource(output: CanvasOutput): string | null {
-  if (output.type === "video") {
-    return (
-      output.poster_url?.trim() ||
-      output.preview_url?.trim() ||
-      (output.video_id ? videoPosterUrl(output.video_id) : null) ||
-      null
-    );
-  }
+function imagePreviewSources(output: CanvasOutput): string[] {
+  return uniqueMediaSources([
+    output.preview_url,
+    output.image_id
+      ? imageVariantUrl(output.image_id, "display2048")
+      : null,
+    output.url,
+    output.image_id ? imageBinaryUrl(output.image_id) : null,
+  ]);
+}
+
+function videoPlaybackSource(output: CanvasOutput): string | null {
   return (
-    (output.image_id ? imageVariantUrl(output.image_id, "thumb256") : null) ||
-    output.preview_url?.trim() ||
     output.url?.trim() ||
+    (output.video_id ? videoBinaryUrl(output.video_id) : null) ||
     null
   );
+}
+
+function videoPosterSource(output: CanvasOutput): string | null {
+  return output.poster_url?.trim() || output.preview_url?.trim() || null;
+}
+
+function uniqueMediaSources(
+  sources: Array<string | null | undefined>,
+): string[] {
+  return Array.from(
+    new Set(
+      sources
+        .map((source) => source?.trim() ?? "")
+        .filter((source) => source.length > 0),
+    ),
+  );
+}
+
+function openCanvasImagePreview(output: CanvasOutput, alt: string) {
+  const item = canvasImageLightboxItem(output, alt);
+  if (!item) return;
+  useUiStore.getState().openLightboxFromItems([item], item.id);
+}
+
+function canvasImageLightboxItem(
+  output: CanvasOutput,
+  alt: string,
+): LightboxItem | null {
+  const imageId = mediaText(output.image_id);
+  const originalUrl =
+    mediaText(output.url) || imageBinarySource(imageId);
+  if (!originalUrl) return null;
+  const id =
+    imageId ||
+    mediaText(output.generation_id) ||
+    `canvas-image-${originalUrl}`;
+  const item: LightboxItem = {
+    id,
+    url: originalUrl,
+    previewUrl:
+      mediaText(output.preview_url) ||
+      imageDisplaySource(imageId) ||
+      originalUrl,
+    thumbUrl: imageDisplaySource(imageId) || originalUrl,
+    prompt: mediaText(output.label) || alt,
+    width: outputDimension(output.width),
+    height: outputDimension(output.height),
+    generation_id: output.generation_id ?? null,
+    source: "canvas",
+    source_type: "canvas_output",
+  };
+  return item;
+}
+
+function mediaText(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  return text ? text : null;
+}
+
+function imageBinarySource(imageId: string | null): string | null {
+  return imageId ? imageBinaryUrl(imageId) : null;
+}
+
+function imageDisplaySource(imageId: string | null): string | null {
+  return imageId ? imageVariantUrl(imageId, "display2048") : null;
 }
 
 function outputAspectRatio(
@@ -988,7 +1250,7 @@ function outputDimension(value: number | null | undefined): number | undefined {
 
 function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
   if (!execution) return null;
-  const label = EXECUTION_STATUS_LABELS[execution.status];
+  const label = canvasExecutionStatusLabel(execution.status);
   if (ACTIVE.has(execution.status)) {
     return (
       <span role="status" title={label} className="inline-flex shrink-0">

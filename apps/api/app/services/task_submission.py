@@ -38,6 +38,47 @@ class CanvasVideoSubmission:
     publish_payload: dict[str, Any]
 
 
+_CANVAS_ATTACHMENT_ROLES = frozenset(
+    {
+        "reference",
+        "subject",
+        "product",
+        "style",
+        "edit_target",
+        "background",
+        "other",
+    }
+)
+
+
+def _canvas_message_attachments(
+    attachment_ids: list[str],
+    metadata: dict[str, Any],
+) -> list[dict[str, str]]:
+    raw_roles = metadata.get("attachment_roles")
+    role_by_image_id: dict[str, str] = {}
+    if isinstance(raw_roles, list):
+        for item in raw_roles:
+            if not isinstance(item, dict):
+                continue
+            image_id = item.get("image_id")
+            role = item.get("role")
+            if (
+                isinstance(image_id, str)
+                and image_id
+                and isinstance(role, str)
+                and role in _CANVAS_ATTACHMENT_ROLES
+            ):
+                role_by_image_id.setdefault(image_id, role)
+    return [
+        {
+            "image_id": image_id,
+            "role": role_by_image_id.get(image_id, "reference"),
+        }
+        for image_id in attachment_ids
+    ]
+
+
 async def get_or_create_canvas_conversation(
     db: AsyncSession,
     *,
@@ -104,10 +145,7 @@ async def create_canvas_image_task(
         role=Role.USER.value,
         content={
             "text": prompt,
-            "attachments": [
-                {"image_id": image_id, "role": "reference"}
-                for image_id in attachment_ids
-            ],
+            "attachments": _canvas_message_attachments(attachment_ids, metadata),
             **metadata,
         },
         intent=None,

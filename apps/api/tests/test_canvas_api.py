@@ -759,6 +759,117 @@ async def test_get_repair_links_video_by_execution_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_canvas_projection_includes_video_task_progress_details() -> None:
+    async with _session() as db:
+        canvas = await create_canvas(
+            db,
+            user_id="user-1",
+            body=CanvasCreateIn(title="视频进度", graph=_graph()),
+        )
+        version = await create_named_version(
+            db,
+            user_id="user-1",
+            canvas_id=canvas.id,
+            name="运行快照",
+        )
+        run = CanvasRun(
+            canvas_id=canvas.id,
+            version_id=version.id,
+            user_id="user-1",
+            kind="single",
+            status="running",
+            target_node_ids=["video-1"],
+            idempotency_key="video-progress-run",
+            request_fingerprint="r" * 64,
+        )
+        db.add(run)
+        await db.flush()
+        execution = CanvasNodeExecution(
+            canvas_id=canvas.id,
+            run_id=run.id,
+            user_id="user-1",
+            node_id="video-1",
+            node_type="video_generate",
+            node_schema_version=1,
+            sequence=0,
+            attempt=0,
+            attempt_epoch=0,
+            status="running",
+            definition_hash="d" * 64,
+            input_hash="i" * 64,
+            execution_fingerprint="e" * 64,
+            submission_idempotency_key="video-progress-execution",
+            request_fingerprint="r" * 64,
+            config_snapshot_jsonb={},
+            input_snapshot_jsonb={},
+            processor_version="test",
+            selection_base_revision=0,
+            started_at=datetime.now(timezone.utc) - timedelta(seconds=45),
+        )
+        db.add(execution)
+        await db.flush()
+        video = VideoGeneration(
+            user_id="user-1",
+            action="reference",
+            model="video-model-pro",
+            provider_name="primary-video",
+            provider_kind="volcano_newapi",
+            prompt="保持主体一致",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="16:9",
+            generate_audio=True,
+            upstream_request={"canvas_execution_id": execution.id},
+            status="running",
+            progress_stage="fetching",
+            progress_pct=92,
+            deadline_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            idempotency_key="video-progress-real",
+            request_fingerprint="v" * 64,
+            est_token_upper=0,
+            est_cost_micro=0,
+            started_at=datetime.now(timezone.utc) - timedelta(seconds=42),
+        )
+        db.add(video)
+        await db.flush()
+        db.add(
+            CanvasExecutionTask(
+                execution_id=execution.id,
+                ordinal=0,
+                task_kind="video_generation",
+                video_generation_id=video.id,
+                status="running",
+                idempotency_key="video-progress-task",
+                request_fingerprint="t" * 64,
+                billing_ref_type="video_generation",
+                billing_ref_id=video.id,
+            )
+        )
+        await db.commit()
+
+        projection = await canvas_projections(db, canvas_id=canvas.id)
+        projected = next(
+            item
+            for item in projection["recent_executions"]
+            if item["id"] == execution.id
+        )
+        task = projected["tasks"][0]
+
+        assert task["kind"] == "video_generation"
+        assert task["video_generation_id"] == video.id
+        assert task["status"] == "running"
+        assert task["progress_stage"] == "fetching"
+        assert task["progress_pct"] == 92
+        assert task["model"] == "video-model-pro"
+        assert task["provider_name"] == "primary-video"
+        assert task["provider_kind"] == "volcano_newapi"
+        assert task["action"] == "reference"
+        assert task["resolution"] == "720p"
+        assert task["duration_s"] == 5
+        assert task["elapsed_ms"] >= 40_000
+
+
+@pytest.mark.asyncio
 async def test_canvas_detail_includes_all_selected_executions_once() -> None:
     async with _session() as db:
         canvas = await create_canvas(

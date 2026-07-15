@@ -61,6 +61,17 @@ _ACTIVE_EXECUTION_STATUSES = (
     "canceling",
 )
 logger = logging.getLogger(__name__)
+_CANVAS_ATTACHMENT_ROLES = frozenset(
+    {
+        "reference",
+        "subject",
+        "product",
+        "style",
+        "edit_target",
+        "background",
+        "other",
+    }
+)
 
 
 async def _await_post_commit_publish(
@@ -212,6 +223,27 @@ def _image_task_inputs(
     return attachment_ids, mask_image_id
 
 
+def _video_reference_counts(resolved: ResolvedNode) -> dict[str, int]:
+    return {
+        "image": len(resolved.images_by_handle.get("reference_images", [])),
+        "video": len(resolved.videos_by_handle.get("reference_videos", [])),
+    }
+
+
+def _video_option_supports_reference_media(
+    option: Any,
+    *,
+    action: str,
+    counts: dict[str, int],
+) -> bool:
+    if action != "reference":
+        return True
+    limits = getattr(option, "reference_media_limits", None)
+    if not isinstance(limits, dict):
+        return False
+    return all(count <= int(limits.get(kind, 0) or 0) for kind, count in counts.items())
+
+
 async def _video_body(
     db: AsyncSession,
     *,
@@ -225,18 +257,26 @@ async def _video_body(
     model = str(config.get("model") or "")
     if not model:
         options = await video_options(user, db)
+        reference_counts = _video_reference_counts(resolved)
         compatible = [
             option
             for option in options.models
-            if action in option.actions and resolution in option.resolutions
+            if action in option.actions
+            and resolution in option.resolutions
+            and _video_option_supports_reference_media(
+                option,
+                action=action,
+                counts=reference_counts,
+            )
         ]
         if not compatible:
             raise canvas_http(
                 "canvas_video_model_unavailable",
-                "no video model supports the selected mode and resolution",
+                "no video model supports the selected mode, resolution, and reference media",
                 422,
                 action=action,
                 resolution=resolution,
+                reference_media=reference_counts,
             )
         model = compatible[0].model
     first_frames = resolved.images_by_handle.get("first_frame", [])
@@ -351,6 +391,15 @@ async def _idempotent_run(
     return run, execution
 
 
+def _canvas_attachment_role(handle: str, item: dict[str, Any]) -> str:
+    role = item.get("role")
+    if handle == "source" and role in {None, "reference"}:
+        return "edit_target"
+    if role in _CANVAS_ATTACHMENT_ROLES:
+        return str(role)
+    return "edit_target" if handle == "source" else "reference"
+
+
 def _execution_metadata(
     *,
     canvas_id: str,
@@ -359,12 +408,21 @@ def _execution_metadata(
     execution_id: str,
     resolved: ResolvedNode,
 ) -> dict[str, Any]:
+    handle_priority = {
+        "source": 0,
+        "first_frame": 0,
+        "references": 1,
+        "reference_images": 1,
+    }
     images = [
         {
             "image_id": item["image_id"],
-            "role": item.get("role") or handle,
+            "role": _canvas_attachment_role(handle, item),
         }
-        for handle, items in resolved.images_by_handle.items()
+        for handle, items in sorted(
+            resolved.images_by_handle.items(),
+            key=lambda pair: (handle_priority.get(pair[0], 2), pair[0]),
+        )
         for item in items
         if handle != "mask"
     ]
@@ -377,6 +435,7 @@ def _execution_metadata(
         "canvas_node_id": node_id,
         "canvas_execution_id": execution_id,
         "input_images": images,
+        "attachment_roles": [dict(item) for item in images],
         "primary_input_image_id": images[0]["image_id"] if images else None,
     }
 

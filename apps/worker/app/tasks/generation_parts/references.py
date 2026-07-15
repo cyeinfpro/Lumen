@@ -208,6 +208,15 @@ def binarize_mask_alpha(image: PILImage.Image) -> PILImage.Image:
     return out
 
 
+def _mask_has_repaint_area(image: PILImage.Image) -> bool:
+    try:
+        alpha = image.getchannel("A")
+        extrema = alpha.getextrema()
+    except Exception:  # noqa: BLE001
+        return False
+    return extrema is not None and extrema[0] < 255
+
+
 def resize_mask_to_reference(
     mask_bytes: bytes,
     reference_bytes: bytes,
@@ -230,14 +239,25 @@ def resize_mask_to_reference(
         ) from exc
     try:
         with PILImage.open(io.BytesIO(mask_bytes)) as mask_image:
+            bands = mask_image.getbands()
+            has_alpha = "A" in bands or "transparency" in mask_image.info
+            if not has_alpha:
+                raise upstream_error_factory(
+                    "mask image must include an alpha channel",
+                    error_code=bad_reference_image_code,
+                    status_code=400,
+                )
             same_size = mask_image.size == reference_size
-            legitimate_mode = mask_image.mode in ("RGBA", "L", "LA")
-            if same_size and legitimate_mode and alpha_is_binary(mask_image):
+            legitimate_mode = mask_image.mode in ("RGBA", "LA")
+            if (
+                same_size
+                and legitimate_mode
+                and alpha_is_binary(mask_image)
+                and _mask_has_repaint_area(mask_image)
+            ):
                 return mask_bytes
             normalized = (
-                mask_image
-                if mask_image.mode == "RGBA"
-                else mask_image.convert("RGBA")
+                mask_image if mask_image.mode == "RGBA" else mask_image.convert("RGBA")
             )
             if normalized.size != reference_size:
                 normalized = normalized.resize(
@@ -245,6 +265,12 @@ def resize_mask_to_reference(
                     resample=PILImage.Resampling.NEAREST,
                 )
             normalized = binarize_alpha(normalized)
+            if not _mask_has_repaint_area(normalized):
+                raise upstream_error_factory(
+                    "mask image does not mark any repaint area",
+                    error_code=bad_reference_image_code,
+                    status_code=400,
+                )
             out = io.BytesIO()
             normalized.save(out, format="PNG")
             return out.getvalue()

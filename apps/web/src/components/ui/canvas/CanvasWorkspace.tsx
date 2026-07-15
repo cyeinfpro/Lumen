@@ -299,7 +299,11 @@ function CanvasWorkspaceInner({
           } finally {
             window.clearTimeout(timeout);
           }
-          const capabilityError = canvasVideoCapabilityError(node, options);
+          const capabilityError = canvasVideoCapabilityError(
+            node,
+            options,
+            store.getState().graph,
+          );
           if (capabilityError) {
             toast.error(capabilityError);
             return;

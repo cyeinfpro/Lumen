@@ -6,6 +6,7 @@ from lumen_core.video_providers import (
     parse_video_provider_config_json,
     parse_video_provider_item,
     select_video_provider,
+    video_reference_media_limits,
 )
 
 
@@ -50,6 +51,18 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
         provider.upstream_model_for("seedance-2.0", "reference")
         == "doubao-seedance-2-0-ref"
     )
+
+
+def test_reference_media_limits_match_provider_adapters() -> None:
+    assert video_reference_media_limits("volcano") == {"image": 9, "video": 3}
+    assert video_reference_media_limits("volcano_newapi") == {
+        "image": 4,
+        "video": 3,
+        "audio": 1,
+    }
+    assert video_reference_media_limits("dashscope") == {"image": 9}
+    assert video_reference_media_limits("omni_flash") == {"image": 9}
+    assert video_reference_media_limits("veo") == {}
 
 
 def test_parse_volcano_provider_rewrites_byteplus_seedance_mini_alias() -> None:

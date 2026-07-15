@@ -2,6 +2,7 @@ import { apiFetch, apiFetchNoContent } from "./http";
 import { normalizeCanvasGraph } from "../canvas/graph";
 import type {
   CanvasDocument,
+  CanvasExecutionTaskDetail,
   CanvasGraph,
   CanvasListItem,
   CanvasListResponse,
@@ -240,9 +241,44 @@ function normalizeExecution(value: unknown): CanvasNodeExecution {
     }),
     error_code: text(raw.error_code),
     error_message: text(raw.error_message),
+    tasks: array(raw.tasks).map(normalizeExecutionTask),
     created_at: text(raw.created_at),
     updated_at: text(raw.updated_at),
     started_at: text(raw.started_at),
+    finished_at: text(raw.finished_at),
+  };
+}
+
+function normalizeExecutionTask(value: unknown): CanvasExecutionTaskDetail {
+  const raw = asRecord(value);
+  return {
+    id: text(raw.id) ?? "",
+    kind: text(raw.kind) ?? "generation",
+    status: text(raw.status) ?? "queued",
+    progress_stage: text(raw.progress_stage) ?? text(raw.status) ?? "queued",
+    progress_pct: optionalNumber(raw.progress_pct),
+    generation_id: text(raw.generation_id),
+    completion_id: text(raw.completion_id),
+    video_generation_id: text(raw.video_generation_id),
+    model: text(raw.model),
+    provider_name: text(raw.provider_name),
+    provider_kind: text(raw.provider_kind),
+    action: text(raw.action),
+    duration_s: optionalNumber(raw.duration_s),
+    resolution: text(raw.resolution),
+    aspect_ratio: text(raw.aspect_ratio),
+    size_requested: text(raw.size_requested),
+    generate_audio:
+      typeof raw.generate_audio === "boolean" ? raw.generate_audio : null,
+    attempt: optionalNumber(raw.attempt),
+    elapsed_ms: optionalNumber(raw.elapsed_ms),
+    error_code: text(raw.error_code),
+    error_message: text(raw.error_message),
+    created_at: text(raw.created_at),
+    updated_at: text(raw.updated_at),
+    started_at: text(raw.started_at),
+    submit_started_at: text(raw.submit_started_at),
+    submitted_at: text(raw.submitted_at),
     finished_at: text(raw.finished_at),
   };
 }
