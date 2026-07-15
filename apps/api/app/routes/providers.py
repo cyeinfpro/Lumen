@@ -62,6 +62,11 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from ._video_provider_update import (
+    VideoProviderUpdateError,
+    build_video_provider_update,
+    validate_video_provider_items,
+)
 
 router = APIRouter(prefix="/admin/providers", tags=["admin-providers"])
 
@@ -227,8 +232,7 @@ def _normalize_bool(raw: Any, *, default: bool = False) -> bool:
 
 def _normalize_purposes(raw: Any) -> list[ProviderPurpose]:
     return [
-        cast(ProviderPurpose, purpose)
-        for purpose in normalize_provider_purposes(raw)
+        cast(ProviderPurpose, purpose) for purpose in normalize_provider_purposes(raw)
     ]
 
 
@@ -453,11 +457,19 @@ def ensure_enabled_video_provider_proxies(
 
 
 def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
+    is_volcano = provider.kind == "volcano"
     return VideoProviderItemOut(
         name=provider.name,
         kind=provider.kind,
         base_url=provider.base_url,
         api_key_hint=_mask_key(provider.api_key),
+        access_key_id_hint=(_mask_key(provider.access_key_id) if is_volcano else None),
+        secret_access_key_hint=(
+            _mask_secret(provider.secret_access_key) if is_volcano else None
+        ),
+        project_name=provider.project_name if is_volcano else None,
+        region=provider.region if is_volcano else None,
+        asset_management_ready=provider.asset_management_ready,
         enabled=provider.enabled,
         priority=provider.priority,
         weight=provider.weight,
@@ -541,88 +553,25 @@ async def update_video_providers(
             422,
         )
 
-    seen_names: set[str] = set()
-    for video_input in body.items:
-        name = video_input.name.strip()
-        if not name:
-            raise _http("invalid_request", "视频供应商名称不能为空", 422)
-        if name in seen_names:
-            raise _http("invalid_request", f"视频供应商名称重复：{name}", 422)
-        seen_names.add(name)
+    try:
+        validate_video_provider_items(body.items)
+    except VideoProviderUpdateError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
 
     old_raw, _old_source = await _read_video_providers_raw(db)
     raw_shared, _shared_source = await _read_providers(db)
     old_items, old_video_proxies = _parse_video_raw_config(old_raw)
-    old_keys: dict[str, str] = {}
-    for old_item in old_items:
-        old_name = old_item.get("name")
-        old_api_key = old_item.get("api_key")
-        if (
-            isinstance(old_name, str)
-            and isinstance(old_api_key, str)
-            and old_api_key
-        ):
-            old_keys[old_name.strip()] = old_api_key
-
-    shared_proxy_names = {
-        proxy.get("name")
-        for proxy in _parse_config(raw_shared or "")[1]
-        if isinstance(proxy.get("name"), str)
-    }
-    old_video_proxy_by_name = {
-        proxy.get("name"): proxy
-        for proxy in old_video_proxies
-        if isinstance(proxy.get("name"), str)
-    }
-
-    rows: list[dict[str, Any]] = []
-    referenced_video_proxies: set[str] = set()
-    for video_input in body.items:
-        provider_name = video_input.name.strip()
-        api_key = video_input.api_key.strip() or old_keys.get(provider_name, "")
-        models = {
-            str(key).strip(): str(value).strip()
-            for key, value in video_input.models.items()
-            if str(key).strip() and str(value).strip()
-        }
-        proxy_name = (video_input.proxy or "").strip() or None
-        if proxy_name:
-            if (
-                proxy_name not in shared_proxy_names
-                and proxy_name not in old_video_proxy_by_name
-            ):
-                raise _http(
-                    "invalid_request",
-                    f"视频供应商「{provider_name}」引用了不存在的代理：{proxy_name}",
-                    422,
-                )
-            if proxy_name in old_video_proxy_by_name:
-                referenced_video_proxies.add(proxy_name)
-        row: dict[str, Any] = {
-            "name": provider_name,
-            "kind": video_input.kind,
-            "base_url": video_input.base_url.strip(),
-            "api_key": api_key,
-            "enabled": video_input.enabled,
-            "priority": video_input.priority,
-            "weight": max(1, video_input.weight),
-            "concurrency": max(1, min(32, int(video_input.concurrency or 1))),
-            "supports_idempotency": video_input.supports_idempotency,
-            "models": models,
-        }
-        if proxy_name:
-            row["proxy"] = proxy_name
-        rows.append(row)
-
-    kept_video_proxies = [
-        proxy
-        for name, proxy in old_video_proxy_by_name.items()
-        if name in referenced_video_proxies
-    ]
-    raw_json = json.dumps(
-        {"providers": rows, "proxies": kept_video_proxies},
-        ensure_ascii=False,
-    )
+    try:
+        payload = build_video_provider_update(
+            body.items,
+            old_items=old_items,
+            old_video_proxies=old_video_proxies,
+            shared_proxies=_parse_config(raw_shared or "")[1],
+        )
+    except VideoProviderUpdateError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+    rows = payload.rows
+    raw_json = payload.raw_json
     if rows and len(raw_json) > _VIDEO_PROVIDERS_MAX_LEN:
         raise _http(
             "invalid_request",
@@ -783,9 +732,7 @@ async def update_providers(
                 f"provider「{provider_name}」引用了不存在的代理：{provider_proxy}",
                 422,
             )
-        endpoint = _normalize_image_jobs_endpoint(
-            provider_input.image_jobs_endpoint
-        )
+        endpoint = _normalize_image_jobs_endpoint(provider_input.image_jobs_endpoint)
         row: dict[str, Any] = {
             "name": provider_name,
             "base_url": provider_input.base_url.strip(),
@@ -907,8 +854,7 @@ async def update_providers(
             )
         )
     proxies_out = [
-        _to_proxy_out(proxy_row, index)
-        for index, proxy_row in enumerate(proxy_arr)
+        _to_proxy_out(proxy_row, index) for index, proxy_row in enumerate(proxy_arr)
     ]
     return ProvidersOut(items=out, proxies=proxies_out, source="db")
 

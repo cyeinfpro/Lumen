@@ -22,10 +22,16 @@ jobs:
           from pathlib import Path
           nginx = Path("deploy/nginx.conf.example").read_text(encoding="utf-8")
           next_config = Path("apps/web/next.config.ts").read_text(encoding="utf-8")
-          if "client_max_body_size 60m;" not in nginx:
-              raise SystemExit("deploy/nginx.conf.example must keep client_max_body_size 60m")
-          if 'proxyClientMaxBodySize: "60mb"' not in next_config:
-              raise SystemExit("apps/web/next.config.ts must keep proxyClientMaxBodySize 60mb")
+          api_main = Path("apps/api/app/main.py").read_text(encoding="utf-8")
+          video_routes = Path("apps/api/app/routes/videos.py").read_text(encoding="utf-8")
+          if "client_max_body_size 80m;" not in nginx:
+              raise SystemExit("deploy/nginx.conf.example must keep client_max_body_size 80m")
+          if 'proxyClientMaxBodySize: "80mb"' not in next_config:
+              raise SystemExit("apps/web/next.config.ts must keep proxyClientMaxBodySize 80mb")
+          if "_MAX_REQUEST_BYTES = 66 * 1024 * 1024" not in api_main:
+              raise SystemExit("apps/api/app/main.py must keep the 66 MiB raw request limit")
+          if "_VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024" not in video_routes:
+              raise SystemExit("apps/api/app/routes/videos.py must keep the 64 MiB video upload limit")
           PY
       - name: Check release tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/v')

@@ -21,6 +21,19 @@ const posterStylesSource = readFileSync(
   new URL("./api/posterStyles.ts", import.meta.url),
   "utf8",
 );
+const posterWorkflowsSource = readFileSync(
+  new URL("./api/posterWorkflows.ts", import.meta.url),
+  "utf8",
+);
+const videoAssetsSource = readFileSync(
+  new URL("./api/videoAssets.ts", import.meta.url),
+  "utf8",
+);
+const typesSource = readFileSync(new URL("./types.ts", import.meta.url), "utf8");
+const videoAssetTypesSource = readFileSync(
+  new URL("./videoAssetTypes.ts", import.meta.url),
+  "utf8",
+);
 
 test("redeemCode sends an idempotency key generated from crypto.randomUUID with fallback", () => {
   match(source, /function createIdempotencyKey\(\): string/);
@@ -73,6 +86,18 @@ test("apiClient preserves task, storyboard, and workflow exports through focused
   match(workflowsSource, /export function completeWorkflowDelivery/);
 });
 
+test("apiClient preserves video asset and poster workflow ABI through focused modules", () => {
+  match(source, /from "\.\/api\/videoAssets";/);
+  match(source, /export \* from "\.\/api\/posterWorkflows";/);
+  match(videoAssetsSource, /export const DEFAULT_VIDEO_ASSET_QUOTAS/);
+  match(videoAssetsSource, /export function listVideoAssetGroups/);
+  match(videoAssetsSource, /export function retryVideoAssetOperation/);
+  match(posterWorkflowsSource, /export interface PosterDesignWorkflowCreateIn/);
+  match(posterWorkflowsSource, /export function createPosterDesignWorkflow/);
+  match(typesSource, /from "\.\/videoAssetTypes";/);
+  match(videoAssetTypesSource, /export interface VideoAssetOperationOut/);
+});
+
 test("focused storyboard and workflow requests reuse the shared HTTP helper", () => {
   match(storyboardsSource, /import \{ apiFetch \} from "\.\/http";/);
   match(workflowsSource, /import \{ apiFetch \} from "\.\/http";/);
@@ -88,9 +113,23 @@ test("focused storyboard and workflow requests reuse the shared HTTP helper", ()
   doesNotMatch(workflowsSource, /\bfetch\s*\(/);
 });
 
-test("apiClient facade stays below 3000 lines", () => {
-  const lineCount = source.trimEnd().split("\n").length;
-  ok(lineCount < 3000, `apiClient.ts is ${lineCount} lines`);
+test("API and type facades stay within architecture budgets", () => {
+  const lines = (value: string) => value.trimEnd().split("\n").length;
+
+  ok(lines(source) <= 2563, `apiClient.ts is ${lines(source)} lines`);
+  ok(lines(typesSource) <= 1500, `types.ts is ${lines(typesSource)} lines`);
+  ok(
+    lines(videoAssetsSource) <= 1500,
+    `videoAssets.ts is ${lines(videoAssetsSource)} lines`,
+  );
+  ok(
+    lines(posterWorkflowsSource) <= 1500,
+    `posterWorkflows.ts is ${lines(posterWorkflowsSource)} lines`,
+  );
+  ok(
+    lines(videoAssetTypesSource) <= 1500,
+    `videoAssetTypes.ts is ${lines(videoAssetTypesSource)} lines`,
+  );
 });
 
 test("apiClient and focused modules compile with the project TypeScript config", () => {
@@ -103,6 +142,9 @@ test("apiClient and focused modules compile with the project TypeScript config",
     "./api/tasks.ts",
     "./api/storyboards.ts",
     "./api/workflows.ts",
+    "./api/posterWorkflows.ts",
+    "./api/videoAssets.ts",
+    "./videoAssetTypes.ts",
   ].map((relativePath) =>
     fileURLToPath(new URL(relativePath, import.meta.url)),
   );

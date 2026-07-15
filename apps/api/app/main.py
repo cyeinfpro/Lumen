@@ -214,6 +214,7 @@ _NAV_FEATURE_API_PREFIXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "ui.nav.video_visible",
         (
             "/videos",
+            "/video-assets",
             "/prompts/video/enhance",
         ),
     ),
@@ -664,6 +665,7 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import providers as providers_router  # noqa: E402
     from .routes import system_settings as system_settings_router  # noqa: E402
     from .routes import telegram as telegram_router  # noqa: E402
+    from .routes import volcano_assets as volcano_assets_router  # noqa: E402
 
     target.include_router(auth.router, prefix="/auth", tags=["auth"])
     _include_core_routers(target)
@@ -677,6 +679,7 @@ def _include_app_routers(target: FastAPI) -> None:
     target.include_router(me_router.router)
     target.include_router(invites_router.router_authed)
     target.include_router(invites_router.router_public)
+    target.include_router(volcano_assets_router.router)
     target.include_router(providers_router.router)
     target.include_router(system_settings_router.router)
     target.include_router(telegram_router.router_me, tags=["telegram"])

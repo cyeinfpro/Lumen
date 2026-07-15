@@ -14,7 +14,14 @@ import type {
   BackendImageMeta,
   TaskStatus,
 } from "./api/tasks";
-import type { WorkflowRun } from "./api/workflows";
+import {
+  createVideoAsset as createVideoAssetRequest,
+  createVideoAssetGroup as createVideoAssetGroupRequest,
+  deleteVideoAsset as deleteVideoAssetRequest,
+  deleteVideoAssetGroup as deleteVideoAssetGroupRequest,
+  patchVideoAsset as patchVideoAssetRequest,
+  patchVideoAssetGroup as patchVideoAssetGroupRequest,
+} from "./api/videoAssets";
 import type {
   Intent,
   ImageParams,
@@ -68,6 +75,11 @@ import type {
   WalletTransactionOut,
   VideoCreateIn,
   VideoGenerationOut,
+  VideoAssetCreateIn,
+  VideoAssetGroupCreateIn,
+  VideoAssetGroupPatchIn,
+  VideoAssetOperationOut,
+  VideoAssetPatchIn,
   VideoPromptEnhanceIn,
   VideoProvidersOut,
   VideoProvidersUpdateIn,
@@ -79,6 +91,21 @@ export type { NoContent } from "./api/http";
 export * from "./api/tasks";
 export * from "./api/storyboards";
 export * from "./api/workflows";
+export * from "./api/posterWorkflows";
+export {
+  DEFAULT_VIDEO_ASSET_QUOTAS,
+  getVideoAsset,
+  getVideoAssetCapabilities,
+  getVideoAssetOperation,
+  getVideoAssetUsage,
+  listVideoAssetGroups,
+  listVideoAssets,
+  retryVideoAssetOperation,
+} from "./api/videoAssets";
+export type {
+  ListVideoAssetGroupsOptions,
+  ListVideoAssetsOptions,
+} from "./api/videoAssets";
 
 // —————————————————— 领域接口 ——————————————————
 
@@ -421,8 +448,7 @@ export interface CompactConversationFailed {
 // 组件读 result.summary.status 直接抛 TypeError → React error boundary 把
 // 整页打成"出了点问题"。下游消费方必须先看 compacted 再决定如何展示。
 export type CompactConversationResponse =
-  | CompactConversationCompacted
-  | CompactConversationSkipped;
+  CompactConversationCompacted | CompactConversationSkipped;
 
 export type CompactConversationApiResponse =
   | CompactConversationResponse
@@ -431,9 +457,7 @@ export type CompactConversationApiResponse =
 
 // 503 时 ApiError.payload 形如 { detail, reason }；这里给消费方一个稳定的常量集合便于分支。
 export type CompactUnavailableReason =
-  | "lock_busy"
-  | "circuit_open"
-  | "upstream_error";
+  "lock_busy" | "circuit_open" | "upstream_error";
 
 export function compactConversation(
   convId: string,
@@ -477,7 +501,8 @@ export function listMessages(
   if (opts.cursor) q.set("cursor", opts.cursor);
   if (opts.since) q.set("since", opts.since);
   if (opts.limit) q.set("limit", String(opts.limit));
-  if (opts.include && opts.include.length > 0) q.set("include", opts.include.join(","));
+  if (opts.include && opts.include.length > 0)
+    q.set("include", opts.include.join(","));
   const suffix = q.toString() ? `?${q.toString()}` : "";
   return apiFetch<MessageListResponse>(
     `/conversations/${convId}/messages${suffix}`,
@@ -609,7 +634,7 @@ export interface UploadedImage {
 
 export interface UploadImageOptions {
   signal?: AbortSignal;
-  purpose?: "inpaint_mask";
+  purpose?: "inpaint_mask" | "volcano_asset";
 }
 
 export function uploadImage(
@@ -666,17 +691,73 @@ export function retryVideoGeneration(id: string): Promise<VideoGenerationOut> {
 }
 
 export function deleteVideo(id: string): Promise<NoContent> {
-  return apiFetchNoContent(`/videos/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return apiFetchNoContent(`/videos/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function videoBinaryUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/binary`;
 }
 
-export function videoDownloadUrl(videoId: string): string { return `${videoBinaryUrl(videoId)}?download=1`; }
+export function videoDownloadUrl(videoId: string): string {
+  return `${videoBinaryUrl(videoId)}?download=1`;
+}
 
 export function videoPosterUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/poster`;
+}
+
+// —— 火山官方 Seedance 私域 AIGC 素材 ——
+
+export function createVideoAssetGroup(
+  model: string,
+  body: VideoAssetGroupCreateIn,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return createVideoAssetGroupRequest(model, body, opts);
+}
+
+export function patchVideoAssetGroup(
+  groupId: string,
+  model: string,
+  body: VideoAssetGroupPatchIn,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return patchVideoAssetGroupRequest(groupId, model, body, opts);
+}
+
+export function deleteVideoAssetGroup(
+  model: string,
+  groupId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return deleteVideoAssetGroupRequest(model, groupId, opts);
+}
+
+export function createVideoAsset(
+  model: string,
+  body: VideoAssetCreateIn,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return createVideoAssetRequest(model, body, opts);
+}
+
+export function patchVideoAsset(
+  assetId: string,
+  model: string,
+  body: VideoAssetPatchIn,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return patchVideoAssetRequest(assetId, model, body, opts);
+}
+
+export function deleteVideoAsset(
+  assetId: string,
+  model: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<VideoAssetOperationOut> {
+  return deleteVideoAssetRequest(assetId, model, opts);
 }
 
 // —— 任务 ——
@@ -765,7 +846,9 @@ export function cancelTask(
   id: string,
 ): Promise<TaskActionResponse> {
   // 后端：POST /generations/{id}/cancel 或 /completions/{id}/cancel（tasks.py:59/140）
-  return apiFetch<TaskActionResponse>(`/${kind}/${id}/cancel`, { method: "POST" });
+  return apiFetch<TaskActionResponse>(`/${kind}/${id}/cancel`, {
+    method: "POST",
+  });
 }
 
 export function retryTask(
@@ -773,7 +856,9 @@ export function retryTask(
   id: string,
 ): Promise<TaskActionResponse> {
   // 后端：POST /generations/{id}/retry 或 /completions/{id}/retry（tasks.py:85/169）
-  return apiFetch<TaskActionResponse>(`/${kind}/${id}/retry`, { method: "POST" });
+  return apiFetch<TaskActionResponse>(`/${kind}/${id}/retry`, {
+    method: "POST",
+  });
 }
 
 export interface TaskListOpts {
@@ -829,7 +914,10 @@ export function listMyActiveTasks(
 
 // —— SSE URL 构造（供 useSSE 使用） ——
 
-export function sseUrl(channels: string[], lastEventId?: string | null): string {
+export function sseUrl(
+  channels: string[],
+  lastEventId?: string | null,
+): string {
   const q = new URLSearchParams({ channels: [...channels].sort().join(",") });
   if (lastEventId) q.set("last_event_id", lastEventId);
   return `${API_BASE.replace(/\/$/, "")}/events?${q.toString()}`;
@@ -855,13 +943,10 @@ export function createSilentGeneration(
   convId: string,
   body: SilentGenerationIn,
 ): Promise<SilentGenerationOut> {
-  return apiFetch<SilentGenerationOut>(
-    `/conversations/${convId}/generations`,
-    {
-      method: "POST",
-      body: JSON.stringify(body),
-    },
-  );
+  return apiFetch<SilentGenerationOut>(`/conversations/${convId}/generations`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 // —— 提示词增强（streaming） ——
@@ -1264,10 +1349,11 @@ export function backupNow(): Promise<{
   timestamp?: string | null;
   stderr_tail?: string | null;
 }> {
-  return apiFetch<{ ok: boolean; timestamp?: string | null; stderr_tail?: string | null }>(
-    "/admin/backups/now",
-    { method: "POST", body: JSON.stringify({}) },
-  );
+  return apiFetch<{
+    ok: boolean;
+    timestamp?: string | null;
+    stderr_tail?: string | null;
+  }>("/admin/backups/now", { method: "POST", body: JSON.stringify({}) });
 }
 
 export function restoreBackup(
@@ -1597,7 +1683,8 @@ export function getProviders(): Promise<ProvidersOut> {
 }
 
 export async function updateProviders(
-  payload: ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] },
+  payload:
+    ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] },
 ): Promise<ProvidersOut> {
   const body = Array.isArray(payload)
     ? { items: payload, proxies: [] }
@@ -1621,9 +1708,7 @@ export function patchProviderEnabled(
   );
 }
 
-export function probeProviders(
-  names?: string[],
-): Promise<ProvidersProbeOut> {
+export function probeProviders(names?: string[]): Promise<ProvidersProbeOut> {
   return apiFetch<ProvidersProbeOut>(`${PROVIDERS_BASE}/probe`, {
     method: "POST",
     ...(names ? { body: JSON.stringify({ names }) } : {}),
@@ -1700,7 +1785,9 @@ export function listMyApiCredentials(): Promise<UserApiCredentialListOut> {
 }
 
 export function listBindableApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
-  return apiFetch<ApiSupplierTemplatePublicListOut>("/me/api-credentials/suppliers");
+  return apiFetch<ApiSupplierTemplatePublicListOut>(
+    "/me/api-credentials/suppliers",
+  );
 }
 
 export function putMyApiCredential(
@@ -1713,14 +1800,18 @@ export function putMyApiCredential(
   });
 }
 
-export function probeMyApiCredential(credential_id: string): Promise<UserApiCredentialOut> {
+export function probeMyApiCredential(
+  credential_id: string,
+): Promise<UserApiCredentialOut> {
   return apiFetch<UserApiCredentialOut>(
     `/me/api-credentials/${credential_id}/probe`,
     { method: "POST" },
   );
 }
 
-export function revokeMyApiCredential(credential_id: string): Promise<{ ok: boolean }> {
+export function revokeMyApiCredential(
+  credential_id: string,
+): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>(`/me/api-credentials/${credential_id}`, {
     method: "DELETE",
   });
@@ -1783,7 +1874,9 @@ export function getAdminBillingOverview(): Promise<AdminBillingOverviewOut> {
   return apiFetch<AdminBillingOverviewOut>("/admin/billing/overview");
 }
 
-export function bootstrapAdminBilling(body: AdminBillingBootstrapIn): Promise<AdminBillingOverviewOut> {
+export function bootstrapAdminBilling(
+  body: AdminBillingBootstrapIn,
+): Promise<AdminBillingOverviewOut> {
   return apiFetch<AdminBillingOverviewOut>("/admin/billing/bootstrap", {
     method: "POST",
     body: JSON.stringify(body),
@@ -1791,9 +1884,12 @@ export function bootstrapAdminBilling(body: AdminBillingBootstrapIn): Promise<Ad
 }
 
 export function rotateAdminRedemptionSecret(): Promise<AdminBillingOverviewOut> {
-  return apiFetch<AdminBillingOverviewOut>("/admin/billing/redemption_secret:rotate", {
-    method: "POST",
-  });
+  return apiFetch<AdminBillingOverviewOut>(
+    "/admin/billing/redemption_secret:rotate",
+    {
+      method: "POST",
+    },
+  );
 }
 
 export function runAdminWalletAudit(): Promise<AdminWalletAuditOut> {
@@ -1804,13 +1900,16 @@ export function listAdminOrphanHolds(
   opts: { min_age_minutes?: number; limit?: number } = {},
 ): Promise<AdminOrphanHoldOut[]> {
   const qs = new URLSearchParams();
-  if (opts.min_age_minutes != null) qs.set("min_age_minutes", String(opts.min_age_minutes));
+  if (opts.min_age_minutes != null)
+    qs.set("min_age_minutes", String(opts.min_age_minutes));
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<AdminOrphanHoldOut[]>(`/admin/billing/orphan_holds${suffix}`);
 }
 
-export function releaseAdminOrphanHold(txId: string): Promise<WalletTransactionOut> {
+export function releaseAdminOrphanHold(
+  txId: string,
+): Promise<WalletTransactionOut> {
   return apiFetch<WalletTransactionOut>(
     `/admin/billing/holds/${encodeURIComponent(txId)}:release`,
     { method: "POST" },
@@ -1819,7 +1918,10 @@ export function releaseAdminOrphanHold(txId: string): Promise<WalletTransactionO
 
 export function updateAdminPricing(
   items: PricingRuleUpsertIn[],
-  opts: { image_size_thresholds?: Record<string, number>; force?: boolean } = {},
+  opts: {
+    image_size_thresholds?: Record<string, number>;
+    force?: boolean;
+  } = {},
 ): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/pricing", {
     method: "PUT",
@@ -1827,27 +1929,34 @@ export function updateAdminPricing(
   });
 }
 
-export function bulkUpdateAdminPricing(body: AdminPricingBulkIn): Promise<PricingRulesOut> {
+export function bulkUpdateAdminPricing(
+  body: AdminPricingBulkIn,
+): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/billing/pricing/bulk", {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export function importOpenAiPricing(content: string, rate = 1): Promise<PricingRulesOut> {
+export function importOpenAiPricing(
+  content: string,
+  rate = 1,
+): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/pricing/import_openai", {
     method: "POST",
     body: JSON.stringify({ content, rate }),
   });
 }
 
-export function listAdminRedemptionCodes(opts: {
-  status?: "all" | "active" | "revoked" | "expired" | "exhausted";
-  batch_id?: string | null;
-  q?: string | null;
-  cursor?: string | null;
-  limit?: number;
-} = {}): Promise<AdminRedemptionCodeListOut> {
+export function listAdminRedemptionCodes(
+  opts: {
+    status?: "all" | "active" | "revoked" | "expired" | "exhausted";
+    batch_id?: string | null;
+    q?: string | null;
+    cursor?: string | null;
+    limit?: number;
+  } = {},
+): Promise<AdminRedemptionCodeListOut> {
   const qs = new URLSearchParams();
   if (opts.status) qs.set("status", opts.status);
   if (opts.batch_id) qs.set("batch_id", opts.batch_id);
@@ -1855,7 +1964,9 @@ export function listAdminRedemptionCodes(opts: {
   if (opts.cursor) qs.set("cursor", opts.cursor);
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
-  return apiFetch<AdminRedemptionCodeListOut>(`/admin/redemption_codes${suffix}`);
+  return apiFetch<AdminRedemptionCodeListOut>(
+    `/admin/redemption_codes${suffix}`,
+  );
 }
 
 export function createAdminRedemptionCodes(body: {
@@ -1880,28 +1991,40 @@ export function revokeAdminRedemptionCode(
   );
 }
 
-export function listAdminRedemptionCodeUsage(id: string): Promise<AdminRedemptionUsageListOut> {
+export function listAdminRedemptionCodeUsage(
+  id: string,
+): Promise<AdminRedemptionUsageListOut> {
   return apiFetch<AdminRedemptionUsageListOut>(
     `/admin/redemption_codes/${encodeURIComponent(id)}/usage`,
   );
 }
 
-export function revokeAdminRedemptionBatch(batchId: string): Promise<AdminRedemptionCodeListOut> {
+export function revokeAdminRedemptionBatch(
+  batchId: string,
+): Promise<AdminRedemptionCodeListOut> {
   return apiFetch<AdminRedemptionCodeListOut>(
     `/admin/redemption_codes/batches/${encodeURIComponent(batchId)}:revoke`,
     { method: "POST" },
   );
 }
 
-export function adminRedemptionBatchCsvUrl(batchId: string, token: string): string {
+export function adminRedemptionBatchCsvUrl(
+  batchId: string,
+  token: string,
+): string {
   return `${API_BASE}/admin/redemption_codes/batches/${encodeURIComponent(batchId)}.csv?download_token=${encodeURIComponent(token)}`;
 }
 
-export function adminRedemptionBatchTxtUrl(batchId: string, token: string): string {
+export function adminRedemptionBatchTxtUrl(
+  batchId: string,
+  token: string,
+): string {
   return `${API_BASE}/admin/redemption_codes/batches/${encodeURIComponent(batchId)}.txt?download_token=${encodeURIComponent(token)}`;
 }
 
-export function redownloadAdminRedemptionBatch(batchId: string): Promise<AdminRedemptionBatchRedownloadOut> {
+export function redownloadAdminRedemptionBatch(
+  batchId: string,
+): Promise<AdminRedemptionBatchRedownloadOut> {
   return apiFetch<AdminRedemptionBatchRedownloadOut>(
     `/admin/redemption_codes/batches/${encodeURIComponent(batchId)}/redownload`,
     { method: "POST" },
@@ -1922,8 +2045,12 @@ export function listAdminWallets(
   return apiFetch<AdminWalletListOut>(`/admin/wallets${suffix}`);
 }
 
-export function getAdminWalletDetail(userId: string): Promise<AdminWalletDetailOut> {
-  return apiFetch<AdminWalletDetailOut>(`/admin/wallets/${encodeURIComponent(userId)}`);
+export function getAdminWalletDetail(
+  userId: string,
+): Promise<AdminWalletDetailOut> {
+  return apiFetch<AdminWalletDetailOut>(
+    `/admin/wallets/${encodeURIComponent(userId)}`,
+  );
 }
 
 export function listAdminWalletTransactions(
@@ -2067,7 +2194,9 @@ export function getMemorySettings(): Promise<MemorySettingsOut> {
 }
 
 export function patchMemorySettings(
-  body: Partial<Pick<MemorySettingsOut, "paused" | "disabled" | "confirmation_enabled">>,
+  body: Partial<
+    Pick<MemorySettingsOut, "paused" | "disabled" | "confirmation_enabled">
+  >,
 ): Promise<MemorySettingsOut> {
   return apiFetch<MemorySettingsOut>("/me/memory-settings", {
     method: "PATCH",
@@ -2075,19 +2204,23 @@ export function patchMemorySettings(
   });
 }
 
-export function markMemoryOnboardingSeen(flag: number): Promise<MemorySettingsOut> {
+export function markMemoryOnboardingSeen(
+  flag: number,
+): Promise<MemorySettingsOut> {
   return apiFetch<MemorySettingsOut>("/me/onboarding-seen", {
     method: "PATCH",
     body: JSON.stringify({ flag }),
   });
 }
 
-export function listMemories(opts: {
-  type?: MemoryType;
-  pinned?: boolean;
-  disabled?: boolean;
-  scope_id?: string;
-} = {}): Promise<MemoryListOut> {
+export function listMemories(
+  opts: {
+    type?: MemoryType;
+    pinned?: boolean;
+    disabled?: boolean;
+    scope_id?: string;
+  } = {},
+): Promise<MemoryListOut> {
   const qs = new URLSearchParams();
   if (opts.type) qs.set("type", opts.type);
   if (opts.pinned != null) qs.set("pinned", String(opts.pinned));
@@ -2135,8 +2268,16 @@ export function clearMemories(): Promise<{ deleted: number }> {
   });
 }
 
-export function exportMemories(): Promise<{ items: Array<Pick<MemoryItemOut, "type" | "content" | "source_excerpt" | "created_at">> }> {
-  return apiFetch<{ items: Array<Pick<MemoryItemOut, "type" | "content" | "source_excerpt" | "created_at">> }>("/me/memories/export");
+export function exportMemories(): Promise<{
+  items: Array<
+    Pick<MemoryItemOut, "type" | "content" | "source_excerpt" | "created_at">
+  >;
+}> {
+  return apiFetch<{
+    items: Array<
+      Pick<MemoryItemOut, "type" | "content" | "source_excerpt" | "created_at">
+    >;
+  }>("/me/memories/export");
 }
 
 export function listMemoryStaging(): Promise<MemoryStagingListOut> {
@@ -2165,7 +2306,9 @@ export function rejectMemoryStaging(id: string): Promise<{ ok: boolean }> {
   });
 }
 
-export function listMemoryTimeline(cursor?: string): Promise<MemoryTimelineOut> {
+export function listMemoryTimeline(
+  cursor?: string,
+): Promise<MemoryTimelineOut> {
   const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
   return apiFetch<MemoryTimelineOut>(`/me/memories/timeline${suffix}`);
 }
@@ -2226,12 +2369,14 @@ export function patchConversationActiveScope(
   );
 }
 
-export function getConversationUsedMemories(
-  convId: string,
-): Promise<{ used_memory_ids: string[]; used_memory_summary: Array<{ id: string; type: string; content: string }> }> {
-  return apiFetch<{ used_memory_ids: string[]; used_memory_summary: Array<{ id: string; type: string; content: string }> }>(
-    `/conversations/${convId}/used-memories`,
-  );
+export function getConversationUsedMemories(convId: string): Promise<{
+  used_memory_ids: string[];
+  used_memory_summary: Array<{ id: string; type: string; content: string }>;
+}> {
+  return apiFetch<{
+    used_memory_ids: string[];
+    used_memory_summary: Array<{ id: string; type: string; content: string }>;
+  }>(`/conversations/${convId}/used-memories`);
 }
 
 // ——— Admin: 代理池（独立路由） ———
@@ -2249,7 +2394,10 @@ export async function updateAdminProxies(
   });
 }
 
-export function restartTelegramBot(): Promise<{ ok: boolean; receivers: number }> {
+export function restartTelegramBot(): Promise<{
+  ok: boolean;
+  receivers: number;
+}> {
   return apiFetch<{ ok: boolean; receivers: number }>(
     "/admin/telegram/restart",
     { method: "POST" },
@@ -2373,191 +2521,3 @@ export async function exportMyData(): Promise<Blob> {
 }
 
 export * from "./api/posterStyles";
-
-// ============================================================================
-// Poster Design Workflow（V1.1 海报工作流详情页）
-// 后端路由：apps/api/app/routes/workflows.py 中 POSTER_WORKFLOW_TYPE = "poster_design"
-// schemas：packages/core/lumen_core/schemas.py 的 PosterDesignWorkflow* / PosterMaster* / PosterRender* 类
-// 7 step：copy_input → style_selection → copy_analysis → master_generation
-//        → master_approval → multi_size_generation → delivery
-// ============================================================================
-
-export type PosterAspectRatio =
-  | "1:1"
-  | "9:16"
-  | "16:9"
-  | "3:4"
-  | "4:3"
-  | "2:3"
-  | "3:2"
-  | "4:5";
-export type PosterRevisionScope = "background" | "inpaint" | "style";
-
-export interface PosterBrandAssetsIn {
-  logo_image_id?: string | null;
-  product_image_id?: string | null;
-  primary_color?: string | null;
-  font_family?: string | null;
-}
-
-export interface PosterDesignWorkflowCreateIn {
-  conversation_id?: string | null;
-  copy_text: string;
-  style_id: string;
-  target_aspects?: PosterAspectRatio[];
-  brand_assets?: PosterBrandAssetsIn;
-  quality_mode?: "standard" | "premium";
-  title?: string | null;
-}
-
-export interface PosterDesignWorkflowCreateOut {
-  workflow_run_id: string;
-  status: string;
-  current_step: string;
-}
-
-export interface CopyAnalysisCorrections {
-  main_title?: string | null;
-  subtitle?: string | null;
-  selling_points?: string[] | null;
-  cta?: string | null;
-  price?: string | null;
-  tone?: string | null;
-  info_density?: "high" | "medium" | "low" | string | null;
-  // 兜底：用户额外字段；后端 corrections 是 Dict[str, Any]
-  [key: string]: unknown;
-}
-
-export interface CopyAnalysisApproveIn {
-  corrections: CopyAnalysisCorrections;
-}
-
-export interface PosterMastersCreateIn {
-  candidate_count?: number;
-  size_mode?: "auto" | "fixed";
-  size?: string | null;
-}
-
-export interface PosterMasterApproveIn {
-  adjustments?: string;
-}
-
-export interface PosterRendersCreateIn {
-  aspects: PosterAspectRatio[];
-  use_master_as_reference?: boolean;
-  quality_mode?: "standard" | "premium";
-}
-
-export interface PosterReviseIn {
-  scope: PosterRevisionScope;
-  instruction: string;
-  mask_image_id?: string | null;
-}
-
-export interface PosterInpaintIn {
-  instruction: string;
-  mask_image_id: string;
-}
-
-// 创建海报工作流
-export function createPosterDesignWorkflow(
-  body: PosterDesignWorkflowCreateIn,
-): Promise<PosterDesignWorkflowCreateOut> {
-  return apiFetch<PosterDesignWorkflowCreateOut>("/workflows/poster-design", {
-    method: "POST",
-    body: JSON.stringify({
-      target_aspects: ["1:1", "9:16", "16:9", "3:4"],
-      quality_mode: "premium",
-      ...body,
-    }),
-  });
-}
-
-// 文案分析确认
-export function approveCopyAnalysis(
-  workflowId: string,
-  body: CopyAnalysisApproveIn = { corrections: {} },
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
-    `/workflows/${workflowId}/steps/copy-analysis/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({ corrections: body.corrections ?? {} }),
-    },
-  );
-}
-
-// 生成母版候选
-export function createPosterMasters(
-  workflowId: string,
-  body: PosterMastersCreateIn = {},
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/masters`, {
-    method: "POST",
-    body: JSON.stringify({
-      candidate_count: 4,
-      size_mode: "fixed",
-      ...body,
-    }),
-  });
-}
-
-// 选定母版
-export function approvePosterMaster(
-  workflowId: string,
-  masterId: string,
-  body: PosterMasterApproveIn = {},
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
-    `/workflows/${workflowId}/masters/${masterId}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({ adjustments: "", ...body }),
-    },
-  );
-}
-
-// 生成多尺寸成品
-export function createPosterRenders(
-  workflowId: string,
-  body: PosterRendersCreateIn,
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/renders`, {
-    method: "POST",
-    body: JSON.stringify({
-      use_master_as_reference: true,
-      quality_mode: "premium",
-      ...body,
-    }),
-  });
-}
-
-// 单张返修（背景重生/风格调整/inpaint）
-export function revisePosterRender(
-  workflowId: string,
-  renderId: string,
-  body: PosterReviseIn,
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
-    `/workflows/${workflowId}/renders/${renderId}/revise`,
-    {
-      method: "POST",
-      body: JSON.stringify(body),
-    },
-  );
-}
-
-// 局部 inpaint（mask 必填）
-export function inpaintPosterRender(
-  workflowId: string,
-  renderId: string,
-  body: PosterInpaintIn,
-): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
-    `/workflows/${workflowId}/renders/${renderId}/inpaint`,
-    {
-      method: "POST",
-      body: JSON.stringify(body),
-    },
-  );
-}

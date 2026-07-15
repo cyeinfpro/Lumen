@@ -1,5 +1,6 @@
 import type {
   VideoAction,
+  VideoModelOptionOut,
   VideoReferenceMediaIn,
 } from "../../lib/types";
 
@@ -11,6 +12,17 @@ type LabeledReference = ReferenceIdentity & { label: string };
 type ReferencePayloadSource = VideoReferenceMediaIn & {
   label: string;
   ref_id: string;
+};
+export type VolcanoAssetReferenceCandidate = {
+  id: string;
+  name: string;
+  asset_type: "Image" | "Video";
+  url?: string | null;
+};
+type DraftReference = ReferencePayloadSource & {
+  _key: string;
+  display: string;
+  previewUrl?: string | null;
 };
 
 const REFERENCE_REF_ID_RE = /^ref:(image|video|audio):([1-9][0-9]{0,2})$/;
@@ -53,6 +65,57 @@ export function normalizeAssetUrl(value: string): string {
     : "";
 }
 
+export function assetIdFromReferenceUrl(
+  value: string | null | undefined,
+): string | null {
+  const normalized = normalizeAssetUrl(value ?? "");
+  return normalized ? normalized.slice("asset://".length) : null;
+}
+
+export function appendVolcanoAssetReferences(
+  refs: readonly DraftReference[],
+  assets: readonly VolcanoAssetReferenceCandidate[],
+  limits: ReferenceLimits,
+  keyFactory: () => string,
+): { references: DraftReference[]; added: number } {
+  let references = [...refs];
+  let added = 0;
+  for (const asset of assets) {
+    const kind: ReferenceKind =
+      asset.asset_type === "Image" ? "image" : "video";
+    const url = normalizeAssetUrl(asset.id);
+    const assetId = assetIdFromReferenceUrl(url);
+    if (
+      !url ||
+      !assetId ||
+      references.some(
+        (item) => assetIdFromReferenceUrl(item.url) === assetId,
+      ) ||
+      references.filter((item) => item.kind === kind).length >= limits[kind]
+    ) {
+      continue;
+    }
+    const identity = nextReferenceIdentity(kind, references);
+    references = [
+      ...references,
+      {
+        _key: keyFactory(),
+        kind,
+        url,
+        label: identity.label,
+        ref_id: identity.refId,
+        display: asset.name || url,
+        previewUrl:
+          asset.url && !/^asset:\/\//i.test(asset.url)
+            ? asset.url.trim() || null
+            : null,
+      },
+    ];
+    added += 1;
+  }
+  return { references, added };
+}
+
 export function isNewApiVideoModel(model: string): boolean {
   const value = model.trim().toLowerCase().replace(/[_.]/g, "-");
   return value === "video-ds-2-0" || value.startsWith("video-ds-2-0-");
@@ -62,6 +125,37 @@ export function referenceLimitsForModel(model: string): ReferenceLimits {
   return isNewApiVideoModel(model)
     ? NEWAPI_REFERENCE_LIMITS
     : DEFAULT_REFERENCE_LIMITS;
+}
+
+export function referenceLimitsForModelOption(
+  option: VideoModelOptionOut | null | undefined,
+  model: string,
+): ReferenceLimits {
+  const fallback = referenceLimitsForModel(model);
+  const limits = option?.reference_media_limits;
+  const undeclaredKindLimit = limits ? 0 : undefined;
+  return {
+    image: normalizeReferenceLimit(
+      limits?.image,
+      undeclaredKindLimit ?? fallback.image,
+    ),
+    video: normalizeReferenceLimit(
+      limits?.video,
+      undeclaredKindLimit ?? fallback.video,
+    ),
+    audio: normalizeReferenceLimit(
+      limits?.audio,
+      undeclaredKindLimit ?? fallback.audio,
+    ),
+  };
+}
+
+function normalizeReferenceLimit(
+  value: number | null | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
 
 export function referenceRefId(kind: ReferenceKind, index: number): string {
@@ -174,10 +268,7 @@ export function referenceDisplayAliases(item: LabeledReference): string[] {
   ];
 }
 
-function referenceRoleAliases(
-  kind: ReferenceKind,
-  index: number,
-): string[] {
+function referenceRoleAliases(kind: ReferenceKind, index: number): string[] {
   if (kind === "video") {
     return [
       `视频素材 ${index}`,
@@ -314,7 +405,14 @@ export function normalizePromptReferenceMentions(
     if (next.includes(token)) continue;
     const phrases =
       kind === "image"
-        ? ["这张参考图", "这个参考图", "这张图片", "这个图片", "这张图", "这个图"]
+        ? [
+            "这张参考图",
+            "这个参考图",
+            "这张图片",
+            "这个图片",
+            "这张图",
+            "这个图",
+          ]
         : [
             "这段参考视频",
             "这个参考视频",
@@ -384,6 +482,93 @@ export function promptContainsReferenceMention(
   );
 }
 
+function explicitReferenceAliases(item: LabeledReference): string[] {
+  const label = item.label.trim();
+  return [
+    referencePromptToken(item),
+    ...referenceDisplayAliases(item),
+    ...(label ? [`[${label}]`] : []),
+  ];
+}
+
+export function removeReferencesAndReindexPrompt<T extends LabeledReference>(
+  text: string,
+  refs: readonly T[],
+  shouldRemove: (item: T) => boolean,
+): { prompt: string; references: T[] } {
+  let nextPrompt = text;
+
+  const entries = refs.map((item, index) => {
+    let placeholder = `__LUMEN_REFERENCE_${index + 1}__`;
+    while (nextPrompt.includes(placeholder)) placeholder += "_";
+    const aliases = new Set(explicitReferenceAliases(item));
+    for (const alias of Array.from(aliases).sort(
+      (left, right) => right.length - left.length,
+    )) {
+      nextPrompt = nextPrompt.replace(
+        new RegExp(escapeRegExp(alias), "g"),
+        placeholder,
+      );
+    }
+    return {
+      item,
+      placeholder,
+      removed: shouldRemove(item),
+    };
+  });
+
+  const kindIndexes: ReferenceLimits = { image: 0, video: 0, audio: 0 };
+  const nextReferences = entries
+    .filter((entry) => !entry.removed)
+    .map((entry) => entry.item)
+    .map((item) => {
+      kindIndexes[item.kind] += 1;
+      const oldIndex = referenceRefIndex(item.ref_id, item.kind);
+      const nextIndex = kindIndexes[item.kind];
+      return {
+        ...item,
+        ref_id: referenceRefId(item.kind, nextIndex),
+        label:
+          oldIndex && item.label === referenceLabel(item.kind, oldIndex)
+            ? referenceLabel(item.kind, nextIndex)
+            : item.label,
+      };
+    });
+
+  let retainedIndex = 0;
+  for (const entry of entries) {
+    const replacement = entry.removed
+      ? ""
+      : referenceDisplayToken(nextReferences[retainedIndex]);
+    if (!entry.removed) retainedIndex += 1;
+    nextPrompt = nextPrompt.replace(
+      new RegExp(escapeRegExp(entry.placeholder), "g"),
+      replacement,
+    );
+  }
+
+  return {
+    prompt: nextPrompt
+      .replace(/[ \t]+([，。；：！？,.!?;:])/g, "$1")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim(),
+    references: nextReferences,
+  };
+}
+
+export function removeReferenceAndReindexPrompt<T extends LabeledReference>(
+  text: string,
+  refs: readonly T[],
+  removed: LabeledReference,
+): { prompt: string; references: T[] } {
+  const removedToken = referencePromptToken(removed);
+  return removeReferencesAndReindexPrompt(
+    text,
+    refs,
+    (item) => referencePromptToken(item) === removedToken,
+  );
+}
+
 function preservePromptReferenceTokens(
   promptText: string,
   sourceText: string,
@@ -392,7 +577,9 @@ function preservePromptReferenceTokens(
   if (!promptText.trim() || refs.length === 0) return promptText;
   const missingTokens = refs
     .map((item) => referencePromptToken(item))
-    .filter((token) => sourceText.includes(token) && !promptText.includes(token));
+    .filter(
+      (token) => sourceText.includes(token) && !promptText.includes(token),
+    );
   if (missingTokens.length === 0) return promptText;
   const trimmed = promptText.trimEnd();
   const suffix = `保持参考锚点 ${missingTokens.join("、")} 对应的素材约束。`;
@@ -424,8 +611,8 @@ function referenceMediaPayload(
   }
   return {
     kind: item.kind,
-    image_id: item.kind === "image" ? item.image_id ?? null : null,
-    video_id: item.kind === "video" ? item.video_id ?? null : null,
+    image_id: item.kind === "image" ? (item.image_id ?? null) : null,
+    video_id: item.kind === "video" ? (item.video_id ?? null) : null,
     label: item.label,
     ref_id: item.ref_id,
   };
@@ -452,5 +639,7 @@ export function promptForVideoAction(
 export function referencePayloadForVideoAction<
   T extends ReferencePayloadSource,
 >(action: VideoAction, references: T[]): VideoReferenceMediaIn[] {
-  return referencesForVideoAction(action, references).map(referenceMediaPayload);
+  return referencesForVideoAction(action, references).map(
+    referenceMediaPayload,
+  );
 }

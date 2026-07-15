@@ -12,7 +12,7 @@
 - chat_tools: chat tool status normalization
 """
 
-__version__ = "1.2.60"
+__version__ = "1.2.61"
 
 from . import (  # noqa: F401
     canvas,
@@ -33,4 +33,5 @@ from . import (  # noqa: F401
     utils,
     video_billing,
     video_providers,
+    volcano_assets,
 )

@@ -25,10 +25,7 @@ import {
 
 import { Button, IconButton, toast } from "@/components/ui/primitives";
 import { formatRmb } from "@/lib/money";
-import type {
-  VideoAction,
-  VideoReferenceMediaIn,
-} from "@/lib/types";
+import type { VideoAction, VideoReferenceMediaIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export type ReferenceDraft = VideoReferenceMediaIn & {
@@ -72,9 +69,7 @@ function openVideoDialogs(): HTMLElement[] {
   ).filter((dialog) => dialog.isConnected);
 }
 
-export function isTopmostVideoDialog(
-  dialog: HTMLElement | null,
-): boolean {
+export function isTopmostVideoDialog(dialog: HTMLElement | null): boolean {
   if (!dialog?.isConnected) return false;
   const dialogs = openVideoDialogs();
   return dialogs[dialogs.length - 1] === dialog;
@@ -160,17 +155,17 @@ export function cleanPromptEnhanceText(value: string): string {
 export function shouldAutoApplyPromptEnhanceCandidate(
   candidate: PromptEnhanceCandidate,
 ): boolean {
-  return !(
-    candidate.action === "ask_first" ||
-    candidate.action === "keep_original" ||
-    candidate.action === "optional_vc"
+  return (
+    candidate.action === "direct_pass" || candidate.action === "light_refine"
   );
 }
 
 export function canApplyPromptEnhanceCandidate(
   candidate: PromptEnhanceCandidate,
 ): boolean {
-  return candidate.action !== "ask_first" && candidate.action !== "keep_original";
+  return (
+    candidate.action !== "ask_first" && candidate.action !== "keep_original"
+  );
 }
 
 function promptEnhanceCandidateButtonText(
@@ -182,7 +177,9 @@ function promptEnhanceCandidateButtonText(
   return "应用此版本";
 }
 
-function cleanReferencePreviewUrl(value: string | null | undefined): string | null {
+function cleanReferencePreviewUrl(
+  value: string | null | undefined,
+): string | null {
   const clean = value?.trim();
   if (!clean || /^asset:\/\//i.test(clean)) return null;
   return clean;
@@ -244,7 +241,9 @@ function SelectField({
 }) {
   return (
     <label className="block min-w-0 space-y-1.5">
-      {label && <span className="type-caption text-[var(--fg-2)]">{label}</span>}
+      {label && (
+        <span className="type-caption text-[var(--fg-2)]">{label}</span>
+      )}
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -323,7 +322,9 @@ export function VideoParameterPanel({
             <Settings2 className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-[var(--fg-0)]">视频生成参数</p>
+            <p className="text-sm font-semibold text-[var(--fg-0)]">
+              视频生成参数
+            </p>
             <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
               {selectedModel || "未选择模型"}
             </p>
@@ -742,11 +743,7 @@ function PromptEnhanceCandidateCard({
         <span>{candidate.prompt.length.toLocaleString()} 字</span>
         <span
           className={
-            selected
-              ? "text-success"
-              : previewing
-                ? "text-[var(--accent)]"
-                : ""
+            selected ? "text-success" : previewing ? "text-[var(--accent)]" : ""
           }
         >
           {selected ? "已应用" : previewing ? "正在预览" : "查看方案"}

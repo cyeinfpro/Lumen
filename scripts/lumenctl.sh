@@ -1290,7 +1290,7 @@ EOF
   add_header Referer-Policy "strict-origin-when-cross-origin" always;
   limit_req_status 429;
 
-  client_max_body_size 60m;
+  client_max_body_size 80m;
   client_body_buffer_size 1m;
   gzip off;
 
@@ -1302,8 +1302,8 @@ EOF
   proxy_set_header X-Forwarded-Proto \$scheme;
   proxy_set_header X-Forwarded-Host \$host;
   proxy_connect_timeout 30s;
-  proxy_send_timeout 600s;
-  proxy_read_timeout 600s;
+  proxy_send_timeout 3600s;
+  proxy_read_timeout 1800s;
 
   location /events {
     limit_req zone=${zone_events} burst=10 nodelay;
@@ -1311,7 +1311,9 @@ EOF
     proxy_buffering off;
     proxy_cache off;
     proxy_request_buffering off;
-    proxy_read_timeout 600s;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 3600s;
+    proxy_read_timeout 1800s;
     add_header X-Accel-Buffering no always;
     chunked_transfer_encoding on;
   }
@@ -1322,11 +1324,16 @@ EOF
     proxy_buffering off;
     proxy_cache off;
     proxy_request_buffering off;
-    proxy_read_timeout 600s;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 3600s;
+    proxy_read_timeout 1800s;
   }
 
   location / {
     proxy_pass http://${upstream_name};
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 3600s;
+    proxy_read_timeout 1800s;
     proxy_buffering on;
   }
 }

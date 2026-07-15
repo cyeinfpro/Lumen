@@ -15,6 +15,7 @@ from PIL import Image as PILImage
 from app.canvas_services import asset_ref_service
 from app.config import settings
 from app.routes import images
+from app.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
 from app.video_reference_images import VIDEO_REFERENCE_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
 
@@ -283,9 +284,7 @@ async def test_upload_rolls_back_original_and_normalized_ref_on_commit_failure(
 
     assert db.rolled_back is True
     assert not (tmp_path / "u" / "user-1" / "uploads" / "img-upload.png").exists()
-    assert not (
-        tmp_path / "u" / "user-1" / "uploads" / "img-upload.ref.webp"
-    ).exists()
+    assert not (tmp_path / "u" / "user-1" / "uploads" / "img-upload.ref.webp").exists()
 
 
 def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
@@ -303,7 +302,9 @@ def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
     assert excinfo.value.detail["error"]["code"] == "invalid_path"
 
 
-def test_storage_path_keeps_final_symlink_visible_to_binary_open(tmp_path: Path) -> None:
+def test_storage_path_keeps_final_symlink_visible_to_binary_open(
+    tmp_path: Path,
+) -> None:
     if not hasattr(os, "O_NOFOLLOW"):
         pytest.skip("platform does not support O_NOFOLLOW")
     old = settings.storage_root
@@ -378,6 +379,76 @@ def test_prepare_upload_image_rejects_long_side_over_limit() -> None:
 
     assert getattr(excinfo.value, "status_code", None) == 413
     assert excinfo.value.detail["error"]["code"] == "too_large"
+
+
+def test_prepare_upload_image_allows_large_dimensions_for_volcano_asset() -> None:
+    original = _png_bytes("RGB", (5000, 100), (10, 20, 30))
+
+    (
+        prepared,
+        mime,
+        width,
+        height,
+        _metadata,
+        normalized_ref,
+        _normalized_ref_meta,
+    ) = images._prepare_upload_image(
+        original,
+        "volcano-asset.png",
+        allow_large_dimensions=True,
+    )
+
+    assert prepared == original
+    assert mime == "image/png"
+    assert (width, height) == (5000, 100)
+    assert normalized_ref
+    assert images._upload_allows_large_dimensions("volcano_asset") is True
+    assert images._upload_allows_large_dimensions("reference") is False
+
+
+def test_volcano_asset_upload_still_enforces_absolute_long_side_limit() -> None:
+    with pytest.raises(Exception) as excinfo:
+        images._enforce_pixel_limit(
+            (images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE + 1, 1),
+            max_long_side=images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE,
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 413
+
+
+@pytest.mark.asyncio
+async def test_upload_image_passes_volcano_asset_dimension_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopAfterPrepare(RuntimeError):
+        pass
+
+    captured: dict[str, Any] = {}
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def fake_prepare(
+        _data: bytes,
+        _filename: str | None,
+        **kwargs: Any,
+    ) -> Any:
+        captured.update(kwargs)
+        raise StopAfterPrepare
+
+    monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
+    monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
+    monkeypatch.setattr(images, "_prepare_upload_image", fake_prepare)
+
+    with pytest.raises(StopAfterPrepare):
+        await images.upload_image(
+            SimpleNamespace(id="user-1"),
+            object(),  # type: ignore[arg-type]
+            file=_UploadFile(b"image"),  # type: ignore[arg-type]
+            purpose="volcano_asset",
+        )
+
+    assert captured["allow_large_dimensions"] is True
 
 
 def test_prepare_upload_image_normalizes_mpo_to_jpeg(
@@ -578,6 +649,68 @@ async def test_reference_image_binary_serves_video_reference_variant(
     assert response.headers["content-type"].startswith("image/jpeg")
     assert response.headers["content-length"] == str(len(b"jpeg-bytes"))
     assert response.headers["etag"] == f'"image-1-{VIDEO_REFERENCE_IMAGE_KIND}"'
+
+
+@pytest.mark.asyncio
+async def test_reference_image_binary_serves_volcano_asset_variant(
+    tmp_path: Path,
+) -> None:
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    ref_key = "u/user-1/uploads/image-1.volcano_asset_img_v1.jpg"
+    ref_path = tmp_path / ref_key
+    ref_path.parent.mkdir(parents=True)
+    ref_path.write_bytes(b"volcano-jpeg")
+
+    img = SimpleNamespace(
+        id="image-1",
+        metadata_jsonb={"video_reference_access_token": "x" * 16},
+        storage_key="u/user-1/uploads/image-1.png",
+        mime="image/png",
+        sha256="orig-sha",
+        deleted_at=None,
+        updated_at=datetime.now(timezone.utc),
+    )
+    variant = SimpleNamespace(
+        image_id=img.id,
+        kind=VOLCANO_ASSET_IMAGE_KIND,
+        storage_key=ref_key,
+    )
+
+    class SequenceDb:
+        def __init__(self) -> None:
+            self.results = iter((img, variant))
+
+        async def execute(self, _stmt):
+            return _ScalarResult(next(self.results))
+
+    try:
+        response = await images.reference_image_binary(
+            "image-1",
+            _request("GET"),
+            SequenceDb(),  # type: ignore[arg-type]
+            token="x" * 16,
+            variant=VOLCANO_ASSET_IMAGE_KIND,
+        )
+        named = await images.reference_image_binary_named(
+            "image-1",
+            "lumen-asset-image-1.jpg",
+            _request("GET"),
+            SequenceDb(),  # type: ignore[arg-type]
+            token="x" * 16,
+            variant=VOLCANO_ASSET_IMAGE_KIND,
+        )
+    finally:
+        settings.storage_root = old
+
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.headers["content-length"] == str(len(b"volcano-jpeg"))
+    assert response.headers["etag"] == f'"image-1-{VOLCANO_ASSET_IMAGE_KIND}"'
+    assert response.headers["content-disposition"] == (
+        'inline; filename="lumen-asset-image-1.jpg"'
+    )
+    assert named.status_code == 200
+    assert named.headers["content-type"].startswith("image/jpeg")
 
 
 @pytest.mark.asyncio

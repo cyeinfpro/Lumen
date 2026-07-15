@@ -2018,14 +2018,24 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     _green_upstream="${LUMEN_GREEN_UPSTREAM:-127.0.0.1:${_green_port}}"
     _shift_script="${CURRENT_LINK}/scripts/lumen-shift-traffic.sh"
 
-    emit_start start_green
-    if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml up --pull missing -d --wait --force-recreate api-green \
-        && lumen_wait_for_http_ok "http://127.0.0.1:${_green_port}/healthz" 60; then
-        emit_info start_green port "${_green_port}"
-        emit_done start_green 0
+    emit_start start_target_worker
+    if compose_up_service "${CURRENT_LINK}" worker; then
+        emit_done start_target_worker 0
     else
         _restart_ok=0
-        emit_fail start_green 1
+        emit_fail start_target_worker 1
+    fi
+
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start start_green
+        if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml up --pull missing -d --wait --force-recreate api-green \
+            && lumen_wait_for_http_ok "http://127.0.0.1:${_green_port}/healthz" 60; then
+            emit_info start_green port "${_green_port}"
+            emit_done start_green 0
+        else
+            _restart_ok=0
+            emit_fail start_green 1
+        fi
     fi
 
     if [ "${_restart_ok}" = "1" ]; then
@@ -2064,7 +2074,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     fi
     if [ "${_restart_ok}" = "1" ]; then
         emit_start start_blue
-        for _svc in worker web api; do
+        for _svc in web api; do
             if ! compose_up_service "${CURRENT_LINK}" "${_svc}"; then
                 _restart_ok=0
                 break
@@ -2102,13 +2112,40 @@ else
         fi
     done
 fi
+
+blue_green_restore_blue_traffic() {
+    local blue_health_url="http://127.0.0.1:${_blue_port:-8000}/healthz"
+    if ! lumen_wait_for_http_ok \
+            "${blue_health_url}" \
+            "${LUMEN_BLUE_GREEN_ROLLBACK_HEALTH_TIMEOUT:-60}"; then
+        log_error "[restart_services] blue API 尚未恢复健康，保留 green 承载流量。"
+        return 1
+    fi
+    if ! lumen_run_as_root env \
+            LUMEN_BLUE_UPSTREAM="${_blue_upstream:-127.0.0.1:8000}" \
+            LUMEN_GREEN_UPSTREAM="${_green_upstream:-127.0.0.1:18001}" \
+            bash "${_shift_script}" blue 100; then
+        log_error "[restart_services] 切回 blue 100% 失败，保留 green 承载流量。"
+        return 1
+    fi
+}
+
+blue_green_stop_green() {
+    lumen_compose_in "${CURRENT_LINK}" \
+        -f docker-compose.yml \
+        -f docker-compose.bluegreen.yml \
+        stop api-green >/dev/null 2>&1 \
+        || log_warn "[restart_services] green 停止失败，已保留供人工检查。"
+}
+
 if [ "${_restart_ok}" = "1" ]; then
     :
 else
     if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -n "${_shift_script:-}" ]; then
-        log_warn "[restart_services] 蓝绿路径失败，best-effort 切回 blue 100% 并停止 green。"
-        lumen_run_as_root env LUMEN_BLUE_UPSTREAM="${_blue_upstream:-127.0.0.1:8000}" LUMEN_GREEN_UPSTREAM="${_green_upstream:-127.0.0.1:18001}" bash "${_shift_script}" blue 100 >/dev/null 2>&1 || true
-        lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml stop api-green >/dev/null 2>&1 || true
+        log_warn "[restart_services] 蓝绿路径失败，仅在 blue 健康且流量切回成功后停止 green。"
+        if blue_green_restore_blue_traffic; then
+            blue_green_stop_green
+        fi
     fi
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
     emit_warn restart_services "starting_auto_rollback"
@@ -2155,6 +2192,15 @@ else
                     done
                 else
                     _rollback_started=0
+                fi
+                if [ "${_rollback_started}" = "1" ] \
+                        && [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] \
+                        && [ -n "${_shift_script:-}" ]; then
+                    if blue_green_restore_blue_traffic; then
+                        blue_green_stop_green
+                    else
+                        _rollback_started=0
+                    fi
                 fi
                 if [ "${_rollback_started}" = "1" ]; then
                     UPDATE_RELEASE_SWITCHED=0

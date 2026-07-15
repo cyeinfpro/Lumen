@@ -6,9 +6,11 @@ APIs are asynchronous task APIs, not OpenAI-compatible responses endpoints.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass, replace
-from typing import Any
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from .providers import (
@@ -29,8 +31,15 @@ VIDEO_PROVIDER_KINDS = (
     "fake",
 )
 VIDEO_ACTIONS = ("t2v", "i2v", "reference")
+DEFAULT_VOLCANO_PROJECT_NAME = "default"
+DEFAULT_VOLCANO_REGION = "cn-beijing"
+SEEDANCE_20_MIN_DURATION_S = 4
+SEEDANCE_20_MAX_DURATION_S = 15
+SEEDANCE_20_SMART_DURATION_S = -1
+SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
+SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
 VIDEO_REFERENCE_MEDIA_LIMITS: dict[str, dict[str, int]] = {
-    "volcano": {"image": 9, "video": 3},
+    "volcano": {"image": 9, "video": 3, "audio": 3},
     "volcano_third_party": {"image": 9, "video": 3},
     "volcano_newapi": {"image": 4, "video": 3, "audio": 1},
     "dashscope": {"image": 9},
@@ -40,6 +49,37 @@ VIDEO_REFERENCE_MEDIA_LIMITS: dict[str, dict[str, int]] = {
 _VOLCANO_DOMESTIC_MODEL_ALIASES = {
     "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
 }
+Seedance20Variant = Literal["standard", "fast", "mini"]
+_VOLCANO_REGION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SEEDANCE_20_VARIANT_PATTERNS: tuple[
+    tuple[Seedance20Variant, re.Pattern[str]],
+    ...,
+] = (
+    (
+        "fast",
+        re.compile(
+            r"(?<![a-z0-9-])"
+            r"(?:(?:(?:doubao|dreamina)-)?seedance-2-0-fast|video-ds-2-0-fast)"
+            r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
+        ),
+    ),
+    (
+        "mini",
+        re.compile(
+            r"(?<![a-z0-9-])"
+            r"(?:(?:(?:doubao|dreamina)-)?seedance-2-0-mini|video-ds-2-0-mini)"
+            r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
+        ),
+    ),
+    (
+        "standard",
+        re.compile(
+            r"(?<![a-z0-9-])"
+            r"(?:(?:(?:doubao|dreamina)-)?seedance-2-0|video-ds-2-0)"
+            r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +87,7 @@ class VideoProviderDefinition:
     name: str
     kind: str
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     enabled: bool = True
     priority: int = 0
     weight: int = 1
@@ -56,6 +96,10 @@ class VideoProviderDefinition:
     models: dict[str, str] | None = None
     proxy_name: str | None = None
     proxy: ProviderProxyDefinition | None = None
+    access_key_id: str = field(default="", repr=False)
+    secret_access_key: str = field(default="", repr=False)
+    project_name: str = DEFAULT_VOLCANO_PROJECT_NAME
+    region: str = DEFAULT_VOLCANO_REGION
 
     def upstream_model_for(self, model: str, action: str) -> str | None:
         mapping = self.models or {}
@@ -67,6 +111,55 @@ class VideoProviderDefinition:
             and action in VIDEO_ACTIONS
             and self.upstream_model_for(model, action) is not None
         )
+
+    @property
+    def asset_management_ready(self) -> bool:
+        return (
+            self.kind == "volcano"
+            and bool(self.access_key_id)
+            and bool(self.secret_access_key)
+        )
+
+
+def video_provider_binding_fingerprint(
+    provider: VideoProviderDefinition,
+) -> str:
+    proxy = provider.proxy
+    binding = {
+        "name": provider.name,
+        "kind": provider.kind,
+        "base_url": provider.base_url,
+        "api_key": provider.api_key,
+        "access_key_id": provider.access_key_id,
+        "secret_access_key": provider.secret_access_key,
+        "project_name": provider.project_name,
+        "region": provider.region,
+        "supports_idempotency": provider.supports_idempotency,
+        "models": provider.models or {},
+        "proxy_name": provider.proxy_name,
+        "proxy": (
+            {
+                "name": proxy.name,
+                "protocol": proxy.protocol,
+                "host": proxy.host,
+                "port": proxy.port,
+                "username": proxy.username,
+                "password": proxy.password,
+                "private_key_path": proxy.private_key_path,
+                "enabled": proxy.enabled,
+            }
+            if proxy is not None
+            else None
+        ),
+    }
+    canonical = json.dumps(
+        binding,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"lumen-video-provider-binding-v1\0" + canonical).hexdigest()
 
 
 def _parse_int(raw: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -90,6 +183,25 @@ def _parse_priority(raw: Any) -> int:
         return int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("priority must be an integer") from exc
+
+
+def _parse_optional_string(
+    raw: Any,
+    *,
+    field: str,
+    default: str = "",
+    maximum: int | None = None,
+) -> str:
+    if raw is None or raw == "":
+        return default
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} must be a string")
+    value = raw.strip()
+    if not value:
+        return default
+    if maximum is not None and len(value) > maximum:
+        raise ValueError(f"{field} must not exceed {maximum} characters")
+    return value
 
 
 def _normalize_base_url(raw: Any, *, field: str) -> str:
@@ -138,6 +250,42 @@ def _normalize_volcano_models(models: dict[str, str], *, kind: str) -> dict[str,
     }
 
 
+def seedance_20_variant(*identifiers: str | None) -> Seedance20Variant | None:
+    normalized = [
+        re.sub(
+            r"-+", "-", identifier.strip().lower().replace("_", "-").replace(".", "-")
+        )
+        for identifier in identifiers
+        if isinstance(identifier, str) and identifier.strip()
+    ]
+    for variant, pattern in _SEEDANCE_20_VARIANT_PATTERNS:
+        if any(pattern.search(value) is not None for value in normalized):
+            return variant
+    return None
+
+
+def seedance_20_allowed_resolutions(
+    *identifiers: str | None,
+) -> tuple[str, ...] | None:
+    variant = seedance_20_variant(*identifiers)
+    if variant is None:
+        return None
+    if variant in {"fast", "mini"}:
+        return SEEDANCE_20_FAST_RESOLUTIONS
+    return SEEDANCE_20_STANDARD_RESOLUTIONS
+
+
+def seedance_20_duration_is_valid(
+    duration_s: int,
+    *identifiers: str | None,
+) -> bool:
+    if seedance_20_variant(*identifiers) is None:
+        return True
+    return duration_s == SEEDANCE_20_SMART_DURATION_S or (
+        SEEDANCE_20_MIN_DURATION_S <= duration_s <= SEEDANCE_20_MAX_DURATION_S
+    )
+
+
 def parse_video_provider_item(
     item: dict[str, Any],
     *,
@@ -162,6 +310,37 @@ def parse_video_provider_item(
     api_key = api_key.strip()
     if enabled and kind != "fake" and not api_key:
         raise ValueError(f"provider {name}: api_key is required")
+    access_key_id = ""
+    secret_access_key = ""
+    project_name = DEFAULT_VOLCANO_PROJECT_NAME
+    region = DEFAULT_VOLCANO_REGION
+    if kind == "volcano":
+        access_key_id = _parse_optional_string(
+            item.get("access_key_id"),
+            field=f"provider {name}.access_key_id",
+            maximum=256,
+        )
+        secret_access_key = _parse_optional_string(
+            item.get("secret_access_key"),
+            field=f"provider {name}.secret_access_key",
+            maximum=256,
+        )
+        project_name = _parse_optional_string(
+            item.get("project_name"),
+            field=f"provider {name}.project_name",
+            default=DEFAULT_VOLCANO_PROJECT_NAME,
+            maximum=128,
+        )
+        region = _parse_optional_string(
+            item.get("region"),
+            field=f"provider {name}.region",
+            default=DEFAULT_VOLCANO_REGION,
+            maximum=64,
+        )
+        if not _VOLCANO_REGION_RE.fullmatch(region):
+            raise ValueError(
+                f"provider {name}.region must use lowercase letters, digits, and hyphens"
+            )
     proxy_name = item.get("proxy", item.get("proxy_name"))
     models = _normalize_volcano_models(
         _parse_models(item.get("models"), provider_name=name),
@@ -174,6 +353,10 @@ def parse_video_provider_item(
             item.get("base_url"), field=f"provider {name}.base_url"
         ),
         api_key=api_key,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        project_name=project_name,
+        region=region,
         enabled=enabled,
         priority=_parse_priority(item.get("priority", 0)),
         weight=_parse_weight(item.get("weight", 1)),
@@ -270,11 +453,7 @@ def parse_video_provider_config_json(
         attached_proxy: ProviderProxyDefinition | None = None
         if provider.proxy_name:
             attached_proxy = proxy_by_name.get(provider.proxy_name)
-            if (
-                attached_proxy is None
-                and provider.enabled
-                and not allow_missing_proxy
-            ):
+            if attached_proxy is None and provider.enabled and not allow_missing_proxy:
                 errors.append(
                     f"provider {provider.name}: proxy {provider.proxy_name} not found"
                 )
@@ -329,6 +508,13 @@ def video_reference_media_limits(provider_kind: str) -> dict[str, int]:
 
 
 __all__ = [
+    "DEFAULT_VOLCANO_PROJECT_NAME",
+    "DEFAULT_VOLCANO_REGION",
+    "SEEDANCE_20_FAST_RESOLUTIONS",
+    "SEEDANCE_20_MAX_DURATION_S",
+    "SEEDANCE_20_MIN_DURATION_S",
+    "SEEDANCE_20_SMART_DURATION_S",
+    "SEEDANCE_20_STANDARD_RESOLUTIONS",
     "VIDEO_ACTIONS",
     "VIDEO_PROVIDER_KINDS",
     "VIDEO_REFERENCE_MEDIA_LIMITS",
@@ -336,7 +522,11 @@ __all__ = [
     "ordered_video_providers",
     "parse_video_provider_config_json",
     "parse_video_provider_item",
+    "seedance_20_allowed_resolutions",
+    "seedance_20_duration_is_valid",
+    "seedance_20_variant",
     "select_video_provider",
     "validate_video_providers",
+    "video_provider_binding_fingerprint",
     "video_reference_media_limits",
 ]

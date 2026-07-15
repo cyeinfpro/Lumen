@@ -8,13 +8,12 @@ import hashlib
 import os
 import tempfile
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
-
 from lumen_core.providers import socks_proxy_url
 from lumen_core.url_security import (
     PublicHttpTarget,
@@ -22,7 +21,10 @@ from lumen_core.url_security import (
     resolve_public_http_target,
 )
 from lumen_core.video_billing import VIDEO_BILLING_TOKENS_PER_SECOND
-from lumen_core.video_providers import VideoProviderDefinition
+from lumen_core.video_providers import (
+    VideoProviderDefinition,
+    seedance_20_duration_is_valid,
+)
 
 from .config import settings
 from .video_artifacts import (
@@ -31,7 +33,22 @@ from .video_artifacts import (
     detect_video_media,
     downloaded_video_from_bytes,
 )
-
+from .video_upstream_content import (
+    _clean_reference_label as _clean_reference_label,
+)
+from .video_upstream_content import (
+    _prompt_with_official_reference_names as _prompt_with_official_reference_names,
+)
+from .video_upstream_content import (
+    _prompt_with_reference_order,
+    build_seedance_content,
+)
+from .video_upstream_content import (
+    _reference_anchor_token as _reference_anchor_token,
+)
+from .video_upstream_content import (
+    _reference_order_aliases as _reference_order_aliases,
+)
 
 VideoProviderStatus = Literal[
     "queued",
@@ -130,6 +147,17 @@ class VideoProviderAdapter(Protocol):
     async def cancel(self, provider_task_id: str) -> CancelResult | None: ...
 
 
+def _provider_task_path_segment(provider_task_id: str) -> str:
+    value = provider_task_id.strip()
+    if not value:
+        raise VideoUpstreamError(
+            "video provider task id is empty",
+            error_code="bad_response",
+            status_code=502,
+        )
+    return quote(value, safe="")
+
+
 def _nested_get(payload: dict[str, Any], *paths: tuple[str, ...]) -> Any:
     for path in paths:
         cur: Any = payload
@@ -166,6 +194,8 @@ def _status(raw: Any) -> VideoProviderStatus:
         "running": "running",
         "processing": "running",
         "in_progress": "running",
+        "waiting": "running",
+        "waiting_for_capacity": "running",
         "succeeded": "succeeded",
         "success": "succeeded",
         "completed": "succeeded",
@@ -861,259 +891,22 @@ def _require_http_url(raw: str | None, *, field: str) -> str:
     return value
 
 
-def _clean_reference_label(raw: str | None) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = " ".join(raw.split())
-    if not value:
-        return None
-    return value[:80]
-
-
-def _reference_anchor_token(kind: str, index: int, ref_id: str | None = None) -> str:
-    clean = (ref_id or "").strip().lower()
-    parts = clean.split(":")
-    if (
-        len(parts) == 3
-        and parts[0] == "ref"
-        and parts[1] == kind
-        and parts[2].isdigit()
-        and int(parts[2]) > 0
-    ):
-        return f"[{clean}]"
-    return f"[ref:{kind}:{index}]"
-
-
-def _reference_order_aliases(
-    *,
-    kind: Literal["image", "video", "audio"],
-    index: int,
-    label: str | None,
-    official: str,
-    localized: str,
-    anchor: str,
-) -> list[str]:
-    aliases: list[str] = []
-    zh_digits = {
-        1: "一",
-        2: "二",
-        3: "三",
-        4: "四",
-        5: "五",
-        6: "六",
-        7: "七",
-        8: "八",
-        9: "九",
-    }
-    noun = "图片" if kind == "image" else "音频" if kind == "audio" else "视频"
-    short_noun = "图" if kind == "image" else noun
-    for alias in (
-        anchor,
-        anchor.strip("[]"),
-        _clean_reference_label(label),
-        localized,
-        f"[{localized}]",
-        f"{noun}{index}",
-        f"{short_noun}{index}",
-        f"视频素材{index}" if kind == "video" else None,
-        f"视频素材 {index}" if kind == "video" else None,
-        f"参考视频{index}" if kind == "video" else None,
-        f"参考视频 {index}" if kind == "video" else None,
-        f"音频素材{index}" if kind == "audio" else None,
-        f"音频素材 {index}" if kind == "audio" else None,
-        f"参考音频{index}" if kind == "audio" else None,
-        f"参考音频 {index}" if kind == "audio" else None,
-        f"动作参考{index}" if kind == "video" else None,
-        f"动作参考 {index}" if kind == "video" else None,
-        f"运动参考{index}" if kind == "video" else None,
-        f"运动参考 {index}" if kind == "video" else None,
-        f"第{index}张{noun}" if kind == "image" else f"第{index}个{noun}",
-        f"第{index}张{short_noun}" if kind == "image" else f"第{index}段{noun}",
-        f"第{index}段素材" if kind == "video" else None,
-        f"第{index}个视频素材" if kind == "video" else None,
-        f"第{index}段音频素材" if kind == "audio" else None,
-        f"第{index}个音频素材" if kind == "audio" else None,
-        f"第{zh_digits[index]}张{noun}"
-        if index in zh_digits and kind == "image"
-        else None,
-        f"第{zh_digits[index]}张{short_noun}"
-        if index in zh_digits and kind == "image"
-        else None,
-        f"第{zh_digits[index]}个{noun}"
-        if index in zh_digits and kind == "video"
-        else None,
-        f"第{zh_digits[index]}段{noun}"
-        if index in zh_digits and kind == "video"
-        else None,
-        f"第{zh_digits[index]}段素材"
-        if index in zh_digits and kind == "video"
-        else None,
-        f"第{zh_digits[index]}个视频素材"
-        if index in zh_digits and kind == "video"
-        else None,
-        f"第{zh_digits[index]}个{noun}"
-        if index in zh_digits and kind == "audio"
-        else None,
-        f"第{zh_digits[index]}段{noun}"
-        if index in zh_digits and kind == "audio"
-        else None,
-        f"第{zh_digits[index]}段音频素材"
-        if index in zh_digits and kind == "audio"
-        else None,
-        f"第{zh_digits[index]}个音频素材"
-        if index in zh_digits and kind == "audio"
-        else None,
-    ):
-        if alias and alias not in aliases and alias != official:
-            aliases.append(alias)
-    return aliases
-
-
-def _prompt_with_reference_order(req: VideoSubmitRequest) -> str:
-    if req.action != "reference" or not req.reference_media:
-        return req.prompt
-
-    lines: list[str] = []
-    image_index = 0
-    video_index = 0
-    audio_index = 0
-    for item in req.reference_media:
-        if item.kind == "image":
-            image_index += 1
-            official = f"Image {image_index}"
-            localized = f"图片 {image_index}"
-            description = f"reference image #{image_index}"
-            anchor = _reference_anchor_token("image", image_index, item.ref_id)
-            index = image_index
-        elif item.kind == "video":
-            video_index += 1
-            official = f"Video {video_index}"
-            localized = f"视频 {video_index}"
-            description = f"reference video #{video_index}"
-            anchor = _reference_anchor_token("video", video_index, item.ref_id)
-            index = video_index
-        elif item.kind == "audio":
-            audio_index += 1
-            official = f"Audio {audio_index}"
-            localized = f"音频 {audio_index}"
-            description = f"reference audio #{audio_index}"
-            anchor = _reference_anchor_token("audio", audio_index, item.ref_id)
-            index = audio_index
-        else:
-            continue
-
-        aliases = _reference_order_aliases(
-            kind=item.kind,
-            index=index,
-            label=item.label,
-            official=official,
-            localized=localized,
-            anchor=anchor,
-        )
-        alias_text = f"; user-prompt aliases: {', '.join(aliases)}" if aliases else ""
-        lines.append(
-            f"- {official}: {description} in the content array; stable anchor: "
-            f"{anchor}{alias_text}."
-        )
-
-    if not lines:
-        return req.prompt
-
-    return (
-        "Reference asset contract for this video request. Interpret the user's "
-        "asset mentions by the stable anchors and official type + number below. "
-        "If the user prompt includes an anchor such as [ref:image:1], bind that "
-        "instruction only to the matching reference asset:\n"
-        + "\n".join(lines)
-        + "\n\nUser prompt:\n"
-        + req.prompt
-    )
-
-
 def _seedance_content(
     req: VideoSubmitRequest,
     *,
     allow_input_image_url: bool = False,
     include_reference_order_prompt: bool = False,
+    use_official_reference_names: bool = False,
 ) -> list[dict[str, Any]]:
-    prompt = (
-        _prompt_with_reference_order(req)
-        if include_reference_order_prompt
-        else req.prompt
+    return build_seedance_content(
+        req,
+        allow_input_image_url=allow_input_image_url,
+        include_reference_order_prompt=include_reference_order_prompt,
+        use_official_reference_names=use_official_reference_names,
+        image_data_url=_image_data_url,
+        inline_image_max_bytes=_SEEDANCE_INLINE_IMAGE_MAX_BYTES,
+        error_factory=VideoUpstreamError,
     )
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    if req.action == "i2v":
-        image_url = req.input_image_url if allow_input_image_url else None
-        if not image_url:
-            if not req.input_image_bytes:
-                raise VideoUpstreamError(
-                    "missing input image bytes",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            if len(req.input_image_bytes) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
-                raise VideoUpstreamError(
-                    "input image is too large for inline video submission",
-                    error_code="invalid_input",
-                    status_code=413,
-                )
-            image_url = _image_data_url(req.input_image_bytes, req.input_image_mime)
-        content.append(
-            {
-                "type": "image_url",
-                "role": "first_frame",
-                "image_url": {"url": image_url},
-            }
-        )
-    if req.action == "reference":
-        image_refs = [item for item in req.reference_media if item.kind == "image"]
-        video_refs = [item for item in req.reference_media if item.kind == "video"]
-        if not image_refs and not video_refs:
-            raise VideoUpstreamError(
-                "reference generation requires reference image or video",
-                error_code="invalid_input",
-                status_code=422,
-            )
-        if len(image_refs) > 9 or len(video_refs) > 3:
-            raise VideoUpstreamError(
-                "too many reference media items",
-                error_code="invalid_input",
-                status_code=422,
-            )
-        for item in req.reference_media:
-            if item.kind == "image":
-                url = item.url
-                if not url:
-                    if not item.data:
-                        raise VideoUpstreamError(
-                            "missing reference image data",
-                            error_code="invalid_input",
-                            status_code=422,
-                        )
-                    url = _image_data_url(item.data, item.mime)
-                content.append(
-                    {
-                        "type": "image_url",
-                        "role": "reference_image",
-                        "image_url": {"url": url},
-                    }
-                )
-            elif item.kind == "video":
-                url = item.url
-                if not url:
-                    raise VideoUpstreamError(
-                        "reference video requires a public URL or asset ID",
-                        error_code="invalid_input",
-                        status_code=422,
-                    )
-                content.append(
-                    {
-                        "type": "video_url",
-                        "role": "reference_video",
-                        "video_url": {"url": url},
-                    }
-                )
-    return content
 
 
 class VolcanoSeedanceAdapter:
@@ -1145,9 +938,22 @@ class VolcanoSeedanceAdapter:
         return httpx.AsyncClient(**kwargs)
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        if not seedance_20_duration_is_valid(
+            req.duration_s,
+            req.model,
+            req.upstream_model,
+        ):
+            raise VideoUpstreamError(
+                "Seedance 2.0 duration must be -1 or between 4 and 15 seconds",
+                error_code="invalid_input",
+                status_code=422,
+            )
         body: dict[str, Any] = {
             "model": req.upstream_model,
-            "content": _seedance_content(req, include_reference_order_prompt=True),
+            "content": _seedance_content(
+                req,
+                use_official_reference_names=True,
+            ),
             "ratio": req.aspect_ratio,
             "resolution": req.resolution,
             "duration": req.duration_s,
@@ -1179,10 +985,9 @@ class VolcanoSeedanceAdapter:
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
 
     async def poll(self, provider_task_id: str) -> PollResult:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
-            response = await client.get(
-                f"/contents/generations/tasks/{provider_task_id}"
-            )
+            response = await client.get(f"/contents/generations/tasks/{task_segment}")
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("poll", response.status_code, raw)
@@ -1212,9 +1017,10 @@ class VolcanoSeedanceAdapter:
         return await _downloaded_video_bytes(await self.download_result(video_url))
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
             response = await client.delete(
-                f"/contents/generations/tasks/{provider_task_id}"
+                f"/contents/generations/tasks/{task_segment}"
             )
         raw = _response_json(response)
         if response.status_code in {404, 410}:
@@ -1279,10 +1085,9 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
 
     async def poll(self, provider_task_id: str) -> PollResult:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
-            response = await client.get(
-                self._path(f"video/generations/{provider_task_id}")
-            )
+            response = await client.get(self._path(f"video/generations/{task_segment}"))
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("poll", response.status_code, raw)
@@ -1317,9 +1122,10 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         )
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
             response = await client.delete(
-                self._path(f"video/generations/{provider_task_id}")
+                self._path(f"video/generations/{task_segment}")
             )
         raw = _response_json(response)
         if response.status_code in {404, 410}:
@@ -1344,9 +1150,10 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         return f"v1/{suffix}"
 
     def _content_url(self, provider_task_id: str) -> str:
+        task_segment = _provider_task_path_segment(provider_task_id)
         return urljoin(
             f"{self._client_base_url().rstrip('/')}/",
-            self._path(f"videos/{provider_task_id}/content"),
+            self._path(f"videos/{task_segment}/content"),
         )
 
     def _media_url(self, item: VideoReferenceMedia, *, field: str) -> str:
@@ -1451,8 +1258,9 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
 
     async def poll(self, provider_task_id: str) -> PollResult:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
-            response = await client.get(self._path(f"videos/{provider_task_id}"))
+            response = await client.get(self._path(f"videos/{task_segment}"))
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("poll", response.status_code, raw)
@@ -1799,10 +1607,9 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             )
 
     async def poll(self, provider_task_id: str) -> PollResult:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
-            response = await client.get(
-                self._path(f"video/generations/{provider_task_id}")
-            )
+            response = await client.get(self._path(f"video/generations/{task_segment}"))
         raw = _response_json(response)
         if response.status_code >= 400:
             exc = _http_error("poll", response.status_code, raw)
@@ -1982,8 +1789,9 @@ class DashScopeHappyHorseAdapter:
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
 
     async def poll(self, provider_task_id: str) -> PollResult:
+        task_segment = _provider_task_path_segment(provider_task_id)
         async with self._client() as client:
-            response = await client.get(f"/api/v1/tasks/{provider_task_id}")
+            response = await client.get(f"/api/v1/tasks/{task_segment}")
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("poll", response.status_code, raw)

@@ -153,10 +153,11 @@ Recommended nginx shape: proxy the whole site to Web on `127.0.0.1:3000`; Next.j
 
 Important nginx invariants:
 
-- `client_max_body_size 60m`
+- `client_max_body_size 80m`
 - `proxy_buffering off` for SSE
 - `proxy_request_buffering off` for large uploads
-- `proxy_read_timeout 600s` or higher for long generation tasks
+- `proxy_send_timeout 3600s` for long uploads and generation requests
+- `proxy_read_timeout 1800s` for long generation tasks
 - `gzip off` for SSE frames
 
 Use the helper:
@@ -311,7 +312,7 @@ Production refuses to start if the DB is not at Alembic head.
 
 **Upload 413**
 
-Check all three layers: nginx `client_max_body_size 60m`, Next.js `proxyClientMaxBodySize: "60mb"`, API upload/body limits.
+Check all three layers: nginx `client_max_body_size 80m`, Next.js `proxyClientMaxBodySize: "80mb"`, API upload/body limits.
 
 **Mixed content or frontend network errors**
 

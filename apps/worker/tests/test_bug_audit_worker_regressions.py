@@ -504,8 +504,7 @@ def test_video_postprocess_returns_processed_and_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     video_bytes = (
-        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
-        b"\x00\x00\x00\x08mdat"
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08mdat"
     )
     monkeypatch.setattr(video_artifacts.shutil, "which", lambda _name: None)
 
@@ -769,6 +768,83 @@ async def test_video_provider_slot_reacquire_refreshes_same_task(
 
 
 @pytest.mark.asyncio
+async def test_video_provider_exclusive_slot_blocks_mixed_4k_and_standard_work() -> (
+    None
+):
+    class SlotRedis:
+        def __init__(self) -> None:
+            self.zsets: dict[str, dict[str, float]] = {}
+
+        async def set(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+        async def zremrangebyscore(
+            self,
+            key: str,
+            _start: float,
+            cutoff: float,
+        ) -> None:
+            self.zsets[key] = {
+                member: score
+                for member, score in self.zsets.get(key, {}).items()
+                if score > cutoff
+            }
+
+        async def zscore(self, key: str, member: str) -> float | None:
+            return self.zsets.get(key, {}).get(member)
+
+        async def zcard(self, key: str) -> int:
+            return len(self.zsets.get(key, {}))
+
+        async def zadd(self, key: str, mapping: dict[str, float]) -> None:
+            self.zsets.setdefault(key, {}).update(mapping)
+
+        async def zrem(self, key: str, member: str) -> None:
+            self.zsets.setdefault(key, {}).pop(member, None)
+
+        async def expire(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def eval(self, *_args: Any) -> int:
+            return 1
+
+    redis = SlotRedis()
+
+    assert await video_generation._acquire_provider_slot(  # noqa: SLF001
+        redis,
+        "volcano-main",
+        concurrency=4,
+        task_id="standard-1",
+    )
+    assert not await video_generation._acquire_provider_slot(  # noqa: SLF001
+        redis,
+        "volcano-main",
+        concurrency=1,
+        task_id="4k-1",
+        exclusive=True,
+    )
+
+    await video_generation._release_provider_slot(  # noqa: SLF001
+        redis,
+        "volcano-main",
+        "standard-1",
+    )
+    assert await video_generation._acquire_provider_slot(  # noqa: SLF001
+        redis,
+        "volcano-main",
+        concurrency=1,
+        task_id="4k-1",
+        exclusive=True,
+    )
+    assert not await video_generation._acquire_provider_slot(  # noqa: SLF001
+        redis,
+        "volcano-main",
+        concurrency=4,
+        task_id="standard-2",
+    )
+
+
+@pytest.mark.asyncio
 async def test_video_submit_cache_preserves_provider_metadata() -> None:
     class Redis:
         def __init__(self) -> None:
@@ -993,6 +1069,83 @@ async def test_video_poll_window_exhaustion_continues_running_provider_task(
 
 
 @pytest.mark.asyncio
+async def test_video_succeeded_without_result_url_retries_before_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def scalar_one_or_none(self) -> Any:
+            return row
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+        async def commit(self) -> None:
+            return None
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    now = datetime(2026, 7, 15, 10, 0, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        status="running",
+        progress_stage="rendering",
+        progress_pct=90,
+        poll_count=1,
+        submitted_at=now - timedelta(minutes=1),
+        upstream_response={},
+        next_poll_at=None,
+        error_code=None,
+        error_message=None,
+        diagnostics={},
+    )
+    enqueued: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_publish(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_enqueue(_redis: Any, task_id: str, **kwargs: Any) -> None:
+        enqueued.append((task_id, kwargs))
+
+    async def fail_terminal(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("a transient missing result URL must keep polling")
+
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(video_generation, "_now", lambda: now)
+    monkeypatch.setattr(video_generation, "_publish", fake_publish)
+    monkeypatch.setattr(video_generation, "_enqueue_poll", fake_enqueue)
+    monkeypatch.setattr(video_generation, "_finish_terminal_failure", fail_terminal)
+
+    await video_generation._apply_poll_result(  # noqa: SLF001
+        object(),
+        "video-1",
+        video_generation.PollResult(
+            status="succeeded",
+            progress=100,
+            upstream_billable=True,
+            raw={"id": "provider-task-1", "status": "succeeded"},
+        ),
+    )
+
+    assert row.status == "running"
+    assert row.progress_pct == 95
+    assert row.diagnostics["missing_result_url_attempts"] == 1
+    assert row.diagnostics["missing_result_url_retrying"] is True
+    assert row.upstream_response["warning"] == "succeeded_without_video_url"
+    assert enqueued == [
+        (
+            "video-1",
+            {"defer_s": video_generation._POLL_INTERVAL_S},  # noqa: SLF001
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_video_provider_tracking_timeout_expires_without_upstream_charge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1141,7 +1294,10 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
         provider_name: str,
         concurrency: int,
         task_id: str,
+        *,
+        exclusive: bool = False,
     ) -> bool:
+        assert exclusive is False
         acquired_slots.append((provider_name, concurrency, task_id))
         return True
 
@@ -1173,6 +1329,37 @@ async def test_run_video_generation_uses_cached_submit_result_without_resubmitti
     assert acquired_slots == []
     assert enqueued == ["video-1"]
     assert released and released[0][0] == "video-1"
+
+
+def test_volcano_4k_submit_concurrency_is_clamped_to_one() -> None:
+    provider = SimpleNamespace(kind="volcano", concurrency=10)
+    generation = SimpleNamespace(resolution="4K")
+
+    assert (
+        video_generation._provider_submit_concurrency(provider, generation)  # noqa: SLF001
+        == 1
+    )
+    assert video_generation._provider_submit_is_exclusive(  # noqa: SLF001
+        provider,
+        generation,
+    )
+
+
+def test_non_4k_and_non_official_submit_concurrency_keep_configuration() -> None:
+    assert (
+        video_generation._provider_submit_concurrency(  # noqa: SLF001
+            SimpleNamespace(kind="volcano", concurrency=10),
+            SimpleNamespace(resolution="720p"),
+        )
+        == 10
+    )
+    assert (
+        video_generation._provider_submit_concurrency(  # noqa: SLF001
+            SimpleNamespace(kind="volcano_newapi", concurrency=8),
+            SimpleNamespace(resolution="4k"),
+        )
+        == 8
+    )
 
 
 @pytest.mark.asyncio

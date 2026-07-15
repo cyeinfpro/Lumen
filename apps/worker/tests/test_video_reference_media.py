@@ -23,6 +23,7 @@ from app.video_upstream import (
     _duration_usage_total_tokens,
     _fetch_video_url_bytes,
     _http_error,
+    _provider_task_path_segment,
     _usage_total_tokens,
     adapter_for_provider,
 )
@@ -30,6 +31,20 @@ from lumen_core.video_providers import VideoProviderDefinition
 
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
+
+
+def test_provider_task_path_segment_encodes_reserved_characters() -> None:
+    assert (
+        _provider_task_path_segment(" task/part?attempt=1#result ")
+        == "task%2Fpart%3Fattempt%3D1%23result"
+    )
+
+
+def test_provider_status_maps_known_waiting_and_unknown_terminal_values() -> None:
+    assert video_upstream_module._status("waiting_for_capacity") == "running"
+    assert video_upstream_module._status("new_unrecognized_terminal") == "failed"
+    assert video_upstream_module._status("failed") == "failed"
+    assert video_upstream_module._status("expired") == "expired"
 
 
 @pytest.mark.asyncio
@@ -332,16 +347,9 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
     assert len(client.body["safety_identifier"]) == 64
     assert "fps" not in client.body
     prompt_text = client.body["content"][0]["text"]
-    assert "Reference asset contract" in prompt_text
-    assert "stable anchor: [ref:image:1]" in prompt_text
-    assert "stable anchor: [ref:video:1]" in prompt_text
-    assert "Image 1" in prompt_text
-    assert "Video 1" in prompt_text
-    assert "[图片 1]" in prompt_text
-    assert "[视频 1]" in prompt_text
-    assert "视频素材1" in prompt_text
-    assert "动作参考1" in prompt_text
-    assert "第1段素材" in prompt_text
+    assert "Reference asset contract" not in prompt_text
+    assert "[ref:image:1]" not in prompt_text
+    assert "[ref:video:1]" not in prompt_text
     assert "参考 [图片 1]，运动参考 [视频 1]" in prompt_text
     assert client.body["content"][1]["role"] == "reference_image"
     assert client.body["content"][1]["image_url"]["url"].startswith(
@@ -439,6 +447,59 @@ async def test_seedance_submit_forwards_video_asset_reference_url() -> None:
         "role": "reference_video",
         "video_url": {"url": "asset://asset-20260708222515-xggv2"},
     }
+
+
+@pytest.mark.asyncio
+async def test_seedance_submit_supports_three_reference_audios_with_visual_media() -> (
+    None
+):
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "dreamina-seedance-2-0-260128"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.0",
+            upstream_model="dreamina-seedance-2-0-260128",
+            prompt="让 [ref:image:1] 配合 [ref:audio:3]",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://asset-image-1",
+                    ref_id="ref:image:1",
+                ),
+                *[
+                    VideoReferenceMedia(
+                        kind="audio",
+                        url=f"asset://asset-audio-{index}",
+                        ref_id=f"ref:audio:{index}",
+                    )
+                    for index in range(1, 4)
+                ],
+            ],
+        )
+    )
+
+    assert client.body["content"][0]["text"] == "让 图片1 配合 音频3"
+    assert [item["role"] for item in client.body["content"][1:]] == [
+        "reference_image",
+        "reference_audio",
+        "reference_audio",
+        "reference_audio",
+    ]
 
 
 @pytest.mark.asyncio
@@ -890,7 +951,9 @@ async def test_volcano_newapi_submit_requires_reference_media_urls() -> None:
     )
     adapter = VolcanoNewApiVideoAdapter(provider)
 
-    with pytest.raises(VideoUpstreamError, match="reference image requires a public URL"):
+    with pytest.raises(
+        VideoUpstreamError, match="reference image requires a public URL"
+    ):
         await adapter.submit(
             VideoSubmitRequest(
                 task_id="video-gen-1",
@@ -2050,3 +2113,64 @@ async def test_seedance_submit_forwards_smart_duration() -> None:
     )
 
     assert client.body["duration"] == -1
+
+
+@pytest.mark.asyncio
+async def test_seedance_submit_rejects_three_second_duration() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "dreamina-seedance-2-0-260128"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="must be -1 or between 4 and 15"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="t2v",
+                model="seedance-2.0",
+                upstream_model="dreamina-seedance-2-0-260128",
+                prompt="a cat",
+                duration_s=3,
+                resolution="720p",
+                aspect_ratio="adaptive",
+                generate_audio=True,
+                watermark=False,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_official_seedance_model_allows_three_second_duration() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-1.5-pro:t2v": "doubao-seedance-1-5-pro-250528"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="t2v",
+            model="seedance-1.5-pro",
+            upstream_model="doubao-seedance-1-5-pro-250528",
+            prompt="a cat",
+            duration_s=3,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            generate_audio=True,
+            watermark=False,
+        )
+    )
+
+    assert client.body["duration"] == 3

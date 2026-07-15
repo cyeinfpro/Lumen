@@ -186,8 +186,9 @@ bash scripts/lumenctl.sh nginx-optimize
 **关键不变量（修改前必读 `nginx.conf.example` 顶部注释）**：
 - `proxy_buffering off` —— SSE 必需
 - `proxy_request_buffering off` —— 大图上传不要先缓存到磁盘
-- `client_max_body_size 60m` —— 与前端上传上限对齐
-- `proxy_read_timeout 600s` —— 4K 图像 timeout 分层的反代层
+- `client_max_body_size 80m` —— 覆盖 64 MiB 素材视频及 multipart 开销
+- `proxy_send_timeout 3600s` —— 4K 长任务最外层写入超时
+- `proxy_read_timeout 1800s` —— 与 arq job timeout 对齐，不能降回 600s
 - `gzip off` —— SSE 帧不能压缩
 
 > `sites-enabled/` 是 `include sites-available/*` 而非 `*.conf`，备份文件别留在 `sites-enabled/` 下，否则会被加载导致 nginx -t 失败。

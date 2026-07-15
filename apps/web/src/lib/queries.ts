@@ -682,7 +682,6 @@ export function useUpdateProvidersMutation(
     },
   });
 }
-
 export function useVideoProvidersQuery(
   options?: Omit<UseQueryOptions<VideoProvidersOut>, "queryKey" | "queryFn">,
 ) {
@@ -704,6 +703,7 @@ export function useUpdateVideoProvidersMutation(
     mutationFn: (payload) => updateVideoProviders(payload),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.videoProviders(), data);
       qc.invalidateQueries({ queryKey: qk.videoProviders() });
       qc.invalidateQueries({ queryKey: qk.systemSettings() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
