@@ -67,7 +67,7 @@ from lumen_core.schemas import (
     VideoTemporaryDownloadOut,
     normalize_asset_reference_url,
 )
-from lumen_core.url_security import is_private_host
+from lumen_core.url_security import is_private_host, resolve_public_http_target
 from lumen_core.video_billing import (
     SMART_VIDEO_DURATION_S,
     SUPPORTED_VIDEO_DURATIONS_S,
@@ -78,8 +78,6 @@ from lumen_core.video_billing import (
     VideoBillingError,
     estimate_video_cost,
     expand_video_duration_estimates,
-    is_seedance_20_fast_identifier,
-    is_seedance_20_mini_identifier,
     split_video_resolution_pricing_variant,
     video_billing_model,
     video_pricing_variant,
@@ -87,7 +85,13 @@ from lumen_core.video_billing import (
 from lumen_core.video_providers import (
     VIDEO_ACTIONS,
     parse_video_provider_config_json,
+    seedance_20_allowed_resolutions,
+    seedance_20_variant,
     select_video_provider,
+)
+from lumen_core.volcano_assets import (
+    volcano_asset_reference_url,
+    volcano_asset_safe_filename,
 )
 
 from ..billing_cache_state import invalidate_balance_cache
@@ -100,6 +104,12 @@ from ..public_urls import resolve_public_base_url
 from ..runtime_settings import get_setting
 from ..services.video_publish import publish_video_queued
 from ..sse_publish import publish_sse_event  # noqa: F401 - test patch surface
+from ..volcano_asset_media import (
+    VOLCANO_ASSET_IMAGE_KIND,
+    VOLCANO_ASSET_VIDEO_KIND,
+    VOLCANO_ASSET_VIDEO_MIME,
+    volcano_asset_video_variant_metadata,
+)
 from ..video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VideoReferenceImageError,
@@ -113,6 +123,7 @@ from ..video_reference_videos import (
     video_reference_variant_metadata,
 )
 from ..video_options import reference_media_limits_for_model
+from ._video_reference_media import build_reference_media_snapshots
 
 
 router = APIRouter()
@@ -123,8 +134,6 @@ _DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p", "4k"]
 _VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
 }
-_SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
-_SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
 _VOLCANO_NEWAPI_RESOLUTIONS = ("720p",)
 _HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
 _OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
@@ -428,6 +437,13 @@ def _reference_video_public_url(
     variant: str | None = None,
 ) -> str:
     token = _ensure_reference_video_access_token(video)
+    if variant == VOLCANO_ASSET_VIDEO_KIND:
+        return volcano_asset_reference_url(
+            public_base_url,
+            resource_id=video.id,
+            asset_type="Video",
+            token=token,
+        )
     query_args = {"token": token}
     if variant:
         query_args["variant"] = variant
@@ -455,6 +471,13 @@ def _reference_image_public_url(
     variant: str | None = None,
 ) -> str:
     token = _ensure_reference_image_access_token(image)
+    if variant == VOLCANO_ASSET_IMAGE_KIND:
+        return volcano_asset_reference_url(
+            public_base_url,
+            resource_id=image.id,
+            asset_type="Image",
+            token=token,
+        )
     query_args = {"token": token}
     if variant:
         query_args["variant"] = variant
@@ -628,10 +651,24 @@ def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | N
     )
 
 
-def _reference_snapshot_ref_id(kind: str, index: int, raw: Any) -> str:
+def _reference_snapshot_ref_id(
+    kind: str,
+    index: int,
+    raw: Any,
+    *,
+    strict: bool = True,
+) -> str:
     default = f"ref:{kind}:{index}"
-    if not isinstance(raw, str):
+    if raw is None or isinstance(raw, str) and not raw.strip():
         return default
+    if not isinstance(raw, str):
+        if not strict:
+            return default
+        raise _http(
+            "invalid_reference_ref_id",
+            "reference media ref_id is invalid",
+            409,
+        )
     value = raw.strip().lower()
     parts = value.split(":")
     if (
@@ -639,10 +676,16 @@ def _reference_snapshot_ref_id(kind: str, index: int, raw: Any) -> str:
         and parts[0] == "ref"
         and parts[1] == kind
         and parts[2].isdigit()
-        and int(parts[2]) > 0
+        and 1 <= int(parts[2]) <= 999
     ):
         return value
-    return default
+    if not strict:
+        return default
+    raise _http(
+        "invalid_reference_ref_id",
+        "reference media ref_id is invalid",
+        409,
+    )
 
 
 def _is_internal_reference_url(raw_url: str | None) -> bool:
@@ -1024,6 +1067,8 @@ def _duration_options_for_model(
         return list(_OMNI_FLASH_DURATIONS)
     available = set(available_durations or _DEFAULT_VIDEO_DURATIONS)
     positive_durations = sorted(item for item in available if item > 0)
+    if _is_seedance_20_model(model, upstream_model):
+        positive_durations = [item for item in positive_durations if item >= 4]
     return [SMART_VIDEO_DURATION_S, *positive_durations]
 
 
@@ -1142,25 +1187,19 @@ def _ordered_video_resolutions(values: Iterable[str]) -> list[str]:
 
 
 def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
-    return is_seedance_20_fast_identifier(*identifiers)
+    return seedance_20_variant(*identifiers) == "fast"
 
 
 def _is_seedance_20_mini_model(*identifiers: str | None) -> bool:
-    return is_seedance_20_mini_identifier(*identifiers)
+    return seedance_20_variant(*identifiers) == "mini"
 
 
 def _is_seedance_20_standard_model(*identifiers: str | None) -> bool:
-    if _is_seedance_20_fast_model(*identifiers) or _is_seedance_20_mini_model(
-        *identifiers
-    ):
-        return False
-    for identifier in identifiers:
-        if not isinstance(identifier, str):
-            continue
-        value = identifier.strip().lower().replace("_", "-").replace(".", "-")
-        if "seedance-2-0" in value or "video-ds-2-0" in value:
-            return True
-    return False
+    return seedance_20_variant(*identifiers) == "standard"
+
+
+def _is_seedance_20_model(*identifiers: str | None) -> bool:
+    return seedance_20_variant(*identifiers) is not None
 
 
 def _is_happyhorse_model(*identifiers: str | None) -> bool:
@@ -1200,13 +1239,9 @@ def _video_resolution_options_for_model(
     if _is_omni_flash_model(model, upstream_model):
         allowed = set(_OMNI_FLASH_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
-    if _is_seedance_20_fast_model(model, upstream_model) or _is_seedance_20_mini_model(
-        model, upstream_model
-    ):
-        allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
-        return [resolution for resolution in available if resolution in allowed]
-    if _is_seedance_20_standard_model(model, upstream_model):
-        allowed = set(_SEEDANCE_20_STANDARD_RESOLUTIONS)
+    seedance_resolutions = seedance_20_allowed_resolutions(model, upstream_model)
+    if seedance_resolutions is not None:
+        allowed = set(seedance_resolutions)
         return [resolution for resolution in available if resolution in allowed]
     return [resolution for resolution in available if resolution != "4k"]
 
@@ -1802,11 +1837,6 @@ def _validate_reference_url(raw_url: str) -> str:
         return asset_url
     value = raw_url.strip()
     parts = urlsplit(value)
-    if parts.scheme.lower() == "asset":
-        asset_id = (parts.netloc or parts.path.strip("/")).strip()
-        if not asset_id:
-            raise _http("invalid_reference_url", "asset reference is empty", 422)
-        return f"asset://{asset_id.lower()}"
     if parts.scheme.lower() != "https" or not parts.hostname:
         raise _http(
             "invalid_reference_url",
@@ -1819,6 +1849,14 @@ def _validate_reference_url(raw_url: str) -> str:
             "reference URL must not include credentials",
             422,
         )
+    try:
+        parts.port
+    except ValueError as exc:
+        raise _http(
+            "invalid_reference_url",
+            "reference URL port is invalid",
+            422,
+        ) from exc
     if is_private_host(parts.hostname):
         raise _http(
             "invalid_reference_url",
@@ -1826,6 +1864,25 @@ def _validate_reference_url(raw_url: str) -> str:
             422,
         )
     return value
+
+
+async def _resolve_reference_url(raw_url: str) -> str:
+    value = _validate_reference_url(raw_url)
+    if normalize_asset_reference_url(value) is not None:
+        return value
+    try:
+        target = await resolve_public_http_target(
+            value,
+            allow_http=False,
+            strip_trailing_slash=False,
+        )
+    except ValueError as exc:
+        raise _http(
+            "invalid_reference_url",
+            "reference URL host is not allowed",
+            422,
+        ) from exc
+    return target.url
 
 
 async def _reference_media_snapshots(
@@ -1837,193 +1894,19 @@ async def _reference_media_snapshots(
     reference_public_base_url: str | None = None,
     required_public_media: bool = False,
 ) -> list[dict[str, Any]]:
-    if fallback_snapshots is not None:
-        resolved_snapshots = [dict(item) for item in fallback_snapshots]
-        image_index = 0
-        video_index = 0
-        audio_index = 0
-        for snapshot in resolved_snapshots:
-            if snapshot.get("kind") == "image":
-                image_index += 1
-                snapshot["ref_id"] = _reference_snapshot_ref_id(
-                    "image", image_index, snapshot.get("ref_id")
-                )
-                if (
-                    not isinstance(snapshot.get("label"), str)
-                    or not snapshot["label"].strip()
-                ):
-                    snapshot["label"] = f"Image {image_index}"
-            elif snapshot.get("kind") == "video":
-                video_index += 1
-                snapshot["ref_id"] = _reference_snapshot_ref_id(
-                    "video", video_index, snapshot.get("ref_id")
-                )
-                if (
-                    not isinstance(snapshot.get("label"), str)
-                    or not snapshot["label"].strip()
-                ):
-                    snapshot["label"] = f"Video {video_index}"
-            elif snapshot.get("kind") == "audio":
-                audio_index += 1
-                snapshot["ref_id"] = _reference_snapshot_ref_id(
-                    "audio", audio_index, snapshot.get("ref_id")
-                )
-                if (
-                    not isinstance(snapshot.get("label"), str)
-                    or not snapshot["label"].strip()
-                ):
-                    snapshot["label"] = f"Audio {audio_index}"
-        if reference_public_base_url is not None:
-            for snapshot in resolved_snapshots:
-                if snapshot.get("kind") == "image" and isinstance(
-                    snapshot.get("image_id"), str
-                ):
-                    image = (
-                        await db.execute(
-                            select(Image).where(
-                                Image.id == snapshot["image_id"],
-                                Image.user_id == user_id,
-                                Image.deleted_at.is_(None),
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if image is not None:
-                        url, meta = await _reference_image_upstream_public_url(
-                            db,
-                            image,
-                            reference_public_base_url,
-                            required=required_public_media,
-                        )
-                        snapshot["url"] = url
-                        snapshot.update(meta)
-                if snapshot.get("kind") == "video" and isinstance(
-                    snapshot.get("video_id"), str
-                ):
-                    video = (
-                        await db.execute(
-                            select(Video).where(
-                                Video.id == snapshot["video_id"],
-                                Video.user_id == user_id,
-                                Video.deleted_at.is_(None),
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if video is not None:
-                        url, meta = await _reference_video_upstream_public_url(
-                            db,
-                            video,
-                            reference_public_base_url,
-                        )
-                        snapshot["url"] = url
-                        snapshot.update(meta)
-        return resolved_snapshots
-    snapshots: list[dict[str, Any]] = []
-    image_index = 0
-    video_index = 0
-    audio_index = 0
-    for item in items:
-        if item.kind == "image":
-            image_index += 1
-            default_label = f"Image {image_index}"
-            default_ref_id = f"ref:image:{image_index}"
-        elif item.kind == "video":
-            video_index += 1
-            default_label = f"Video {video_index}"
-            default_ref_id = f"ref:video:{video_index}"
-        else:
-            audio_index += 1
-            default_label = f"Audio {audio_index}"
-            default_ref_id = f"ref:audio:{audio_index}"
-        label = (item.label or "").strip() or default_label
-        ref_id = (item.ref_id or "").strip() or default_ref_id
-        if item.url:
-            snapshots.append(
-                {
-                    "kind": item.kind,
-                    "url": _validate_reference_url(item.url),
-                    "label": label,
-                    "ref_id": ref_id,
-                    "source": "url",
-                }
-            )
-            continue
-        if item.kind == "image" and item.image_id:
-            image = (
-                await db.execute(
-                    select(Image).where(
-                        Image.id == item.image_id,
-                        Image.user_id == user_id,
-                        Image.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            if image is None:
-                raise _http(
-                    "reference_image_not_found", "reference image not found", 404
-                )
-            url = None
-            upstream_meta: dict[str, Any] = {}
-            if reference_public_base_url is not None:
-                url, upstream_meta = await _reference_image_upstream_public_url(
-                    db,
-                    image,
-                    reference_public_base_url,
-                    required=required_public_media,
-                )
-            snapshots.append(
-                {
-                    "kind": "image",
-                    "image_id": image.id,
-                    "label": label,
-                    "ref_id": ref_id,
-                    "storage_key": image.storage_key,
-                    "sha256": image.sha256,
-                    "mime": image.mime,
-                    "url": url,
-                    "source": "image",
-                    **upstream_meta,
-                }
-            )
-            continue
-        if item.kind == "video" and item.video_id:
-            video = (
-                await db.execute(
-                    select(Video).where(
-                        Video.id == item.video_id,
-                        Video.user_id == user_id,
-                        Video.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            if video is None:
-                raise _http(
-                    "reference_video_not_found", "reference video not found", 404
-                )
-            snapshots.append(
-                {
-                    "kind": "video",
-                    "video_id": video.id,
-                    "label": label,
-                    "ref_id": ref_id,
-                    "storage_key": video.storage_key,
-                    "sha256": video.sha256,
-                    "mime": video.mime,
-                    "source": "video",
-                }
-            )
-            if reference_public_base_url is not None:
-                url, upstream_meta = await _reference_video_upstream_public_url(
-                    db,
-                    video,
-                    reference_public_base_url,
-                )
-                snapshots[-1]["url"] = url
-                snapshots[-1].update(upstream_meta)
-            else:
-                snapshots[-1]["url"] = None
-            continue
-        raise _http("invalid_reference_media", "reference media is invalid", 422)
-    return snapshots
+    return await build_reference_media_snapshots(
+        db,
+        user_id=user_id,
+        items=items,
+        fallback_snapshots=fallback_snapshots,
+        reference_public_base_url=reference_public_base_url,
+        required_public_media=required_public_media,
+        reference_id=_reference_snapshot_ref_id,
+        resolve_url=_resolve_reference_url,
+        image_public_url=_reference_image_upstream_public_url,
+        video_public_url=_reference_video_upstream_public_url,
+        http_error=_http,
+    )
 
 
 def _validate_provider_reference_media(
@@ -2050,19 +1933,6 @@ def _validate_provider_reference_media(
             "Omni Flash unified video create supports image references only",
             422,
         )
-    if provider_kind != "volcano_newapi" and any(
-        item.get("kind") == "audio"
-        for item in reference_snapshots
-        if isinstance(item, dict)
-    ):
-        raise _http(
-            "unsupported_reference_media",
-            "reference audio is only available for Volcano New API",
-            422,
-        )
-    if provider_kind != "volcano_newapi":
-        return
-
     image_count = sum(
         1
         for item in reference_snapshots
@@ -2078,22 +1948,43 @@ def _validate_provider_reference_media(
         for item in reference_snapshots
         if isinstance(item, dict) and item.get("kind") == "audio"
     )
-    if image_count > 4:
+    if provider_kind not in {"volcano", "volcano_newapi"} and audio_count:
+        raise _http(
+            "unsupported_reference_media",
+            "reference audio is only available for Volcano Seedance providers",
+            422,
+        )
+    if provider_kind not in {"volcano", "volcano_newapi"}:
+        return
+
+    image_limit = 9 if provider_kind == "volcano" else 4
+    audio_limit = 3 if provider_kind == "volcano" else 1
+    provider_label = (
+        "Volcano Seedance" if provider_kind == "volcano" else "Volcano New API"
+    )
+    if image_count > image_limit:
         raise _http(
             "too_many_reference_images",
-            "Volcano New API supports at most 4 reference images",
+            f"{provider_label} supports at most {image_limit} reference images",
             422,
         )
     if video_count > 3:
         raise _http(
             "too_many_reference_videos",
-            "Volcano New API supports at most 3 reference videos",
+            f"{provider_label} supports at most 3 reference videos",
             422,
         )
-    if audio_count > 1:
+    if audio_count > audio_limit:
         raise _http(
             "too_many_reference_audios",
-            "Volcano New API supports at most 1 reference audio",
+            f"{provider_label} supports at most {audio_limit} reference audio"
+            + (" references" if audio_limit != 1 else ""),
+            422,
+        )
+    if audio_count and not (image_count or video_count):
+        raise _http(
+            "reference_audio_requires_visual",
+            "reference audio must be combined with an image or video",
             422,
         )
 
@@ -2845,6 +2736,7 @@ def _media_response(
     last_modified: datetime | None,
     immutable: bool,
     download_filename: str | None = None,
+    inline_filename: str | None = None,
 ) -> Response:
     quoted_etag = _quote_etag(etag)
     headers = {
@@ -2858,6 +2750,8 @@ def _media_response(
     }
     if download_filename:
         headers["Content-Disposition"] = f'attachment; filename="{download_filename}"'
+    elif inline_filename:
+        headers["Content-Disposition"] = f'inline; filename="{inline_filename}"'
     if last_modified is not None:
         headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
     if _etag_matches(request.headers.get("if-none-match"), quoted_etag):
@@ -2934,18 +2828,28 @@ async def reference_video_binary(
     ):
         raise _http("not_found", "video not found", 404)
     if variant:
-        if variant != VIDEO_REFERENCE_VIDEO_KIND:
+        if variant == VIDEO_REFERENCE_VIDEO_KIND:
+            variant_meta = video_reference_variant_metadata(video)
+            media_type = VIDEO_REFERENCE_VIDEO_MIME
+        elif variant == VOLCANO_ASSET_VIDEO_KIND:
+            variant_meta = volcano_asset_video_variant_metadata(video)
+            media_type = VOLCANO_ASSET_VIDEO_MIME
+        else:
             raise _http("not_found", "video not found", 404)
-        variant_meta = video_reference_variant_metadata(video)
         if variant_meta is None:
             raise _http("not_found", "video not found", 404)
         return _media_response(
             request,
             _fs_path(str(variant_meta["storage_key"])),
-            media_type=VIDEO_REFERENCE_VIDEO_MIME,
+            media_type=media_type,
             etag=str(variant_meta["sha256"]),
             last_modified=video.updated_at,
             immutable=True,
+            inline_filename=(
+                volcano_asset_safe_filename(video.id, asset_type="Video")
+                if variant == VOLCANO_ASSET_VIDEO_KIND
+                else None
+            ),
         )
     return _media_response(
         request,
@@ -2954,6 +2858,27 @@ async def reference_video_binary(
         etag=video.etag or video.sha256,
         last_modified=video.updated_at,
         immutable=True,
+    )
+
+
+@router.get("/reference/{video_id}/binary/{filename}")
+async def reference_video_binary_named(
+    video_id: str,
+    filename: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: str = Query(min_length=16, max_length=256),
+    variant: str | None = Query(default=None, max_length=80),
+) -> Response:
+    expected = volcano_asset_safe_filename(video_id, asset_type="Video")
+    if filename != expected or variant != VOLCANO_ASSET_VIDEO_KIND:
+        raise _http("not_found", "video not found", 404)
+    return await reference_video_binary(
+        video_id,
+        request,
+        db,
+        token=token,
+        variant=variant,
     )
 
 

@@ -36,9 +36,7 @@ ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
 def lib_source_text() -> str:
-    return "\n".join(
-        path.read_text(encoding="utf-8") for path in (LIB, *LIB_MODULES)
-    )
+    return "\n".join(path.read_text(encoding="utf-8") for path in (LIB, *LIB_MODULES))
 
 
 def script_env() -> dict[str, str]:
@@ -245,7 +243,9 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
 
     assert "result=ok" in module_update.stdout
     changed_line = next(
-        line for line in module_update.stdout.splitlines() if line.startswith("changed=")
+        line
+        for line in module_update.stdout.splitlines()
+        if line.startswith("changed=")
     )
     assert "lib/runtime.sh" in changed_line
     assert "lib.sh" in changed_line
@@ -291,7 +291,9 @@ def test_self_update_validation_is_file_type_specific(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     bad_shell.write_text("#!/usr/bin/env bash\nif then\n", encoding="utf-8")
-    bad_python.write_text("#!/usr/bin/env python3\nif True print('bad')\n", encoding="utf-8")
+    bad_python.write_text(
+        "#!/usr/bin/env python3\nif True print('bad')\n", encoding="utf-8"
+    )
     unknown.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
 
     assert_bash_ok(
@@ -367,10 +369,7 @@ def test_image_job_install_copies_all_python_runtime_modules() -> None:
         "request_bodies.py",
         "runtime_config.py",
     ):
-        assert (
-            f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"'
-            in text
-        )
+        assert f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"' in text
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
@@ -396,7 +395,7 @@ def test_release_bootstrap_updates_only_current_scripts(tmp_path: Path) -> None:
     (remote / "apps" / "api").mkdir(parents=True)
     exec_log = tmp_path / "exec.log"
     (remote / "scripts" / "install.sh").write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"${TEST_EXEC_LOG:?}\"\n",
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" > "${TEST_EXEC_LOG:?}"\n',
         encoding="utf-8",
     )
     (remote / "scripts" / "lib.sh").write_text(
@@ -494,7 +493,7 @@ def test_restore_success_path_drops_postgres_rollback_database() -> None:
     text = RESTORE.read_text(encoding="utf-8")
 
     promoted_idx = text.index('if ! pg_rename_database "$PG_TEMP_DB" "$PG_DB"; then')
-    promote_success_idx = text.index('PG_SWAP_IN_PROGRESS=0', promoted_idx)
+    promote_success_idx = text.index("PG_SWAP_IN_PROGRESS=0", promoted_idx)
     discard_idx = text.index("if ! pg_discard_rollback_after_success; then")
     drop_idx = text.index('pg_drop_database_if_exists "$rollback_db"')
     clear_idx = text.index('PG_ROLLBACK_DB=""', drop_idx)
@@ -604,8 +603,8 @@ exit 0
     log = docker_log.read_text(encoding="utf-8")
     assert result.returncode == 7, result.stderr + result.stdout
     assert "pg_restore --list" in log
-    assert "CREATE DATABASE \"lumen_restore_20260529010203_" in log
-    assert "DROP DATABASE IF EXISTS \"lumen_restore_20260529010203_" in log
+    assert 'CREATE DATABASE "lumen_restore_20260529010203_' in log
+    assert 'DROP DATABASE IF EXISTS "lumen_restore_20260529010203_' in log
     assert "pg_restore -U lumen -d lumen_restore_20260529010203_" in log
     assert "stop lumen-api lumen-worker" not in log
     assert 'DROP DATABASE IF EXISTS "lumen";' not in log
@@ -650,7 +649,7 @@ def test_install_failure_cleanup_array_length_is_bash_safe() -> None:
 
 def test_install_pull_failure_fallback_to_main_requires_opt_in() -> None:
     text = INSTALL.read_text(encoding="utf-8")
-    assert 'LUMEN_INSTALL_FALLBACK_MAIN:-0' in text
+    assert "LUMEN_INSTALL_FALLBACK_MAIN:-0" in text
     assert "回退到 main 后重试一次" in text
     assert 'env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"' in text
     assert "fallback main 后仍失败" in text
@@ -951,7 +950,9 @@ def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
     assert "for k in DATABASE_URL REDIS_URL SESSION_SECRET; do" in text
     assert 'lumen_env_value BYOK_API_KEY_MASTER_SECRET "${SHARED_ENV}"' in text
     assert 'emit_info preflight byok_secret "dev_fallback_backfilled"' in text
-    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" BYOK_API_KEY_MASTER_SECRET' in text
+    assert (
+        'lumen_set_env_value_in_file "${SHARED_ENV}" BYOK_API_KEY_MASTER_SECRET' in text
+    )
     assert 'lumen_env_value IMAGE_PROXY_SECRET "${SHARED_ENV}"' in text
     assert 'lumen_set_env_value_in_file "${SHARED_ENV}" IMAGE_PROXY_SECRET' in text
     assert 'emit_info preflight image_proxy_secret "generated"' in text
@@ -963,16 +964,17 @@ def test_image_proxy_secret_templates_match_prod_requirement() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert 'IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:?Set IMAGE_PROXY_SECRET in .env}"' in compose
+    assert (
+        'IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:?Set IMAGE_PROXY_SECRET in .env}"'
+        in compose
+    )
     assert 'IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"' not in compose
     assert "IMAGE_PROXY_SECRET=" in env_example
     assert "# 生成命令：openssl rand -hex 32" in env_example
     assert "| `IMAGE_PROXY_SECRET` | 必填 |" in readme
 
 
-def test_web_port_defaults_to_loopback_and_public_bind_is_explicit_opt_in() -> (
-    None
-):
+def test_web_port_defaults_to_loopback_and_public_bind_is_explicit_opt_in() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     public_dns_compose = (ROOT / "docker-compose.public-dns.yml").read_text(
         encoding="utf-8"
@@ -1103,12 +1105,12 @@ def test_backup_script_records_service_marker_and_queues_retrigger() -> None:
     assert "ERROR: redis $label missing" in text
 
 
-def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> None:
+def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> (
+    None
+):
     install = INSTALL.read_text(encoding="utf-8")
     update = UPDATE.read_text(encoding="utf-8")
-    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(
-        encoding="utf-8"
-    )
+    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
 
     for text in (install, update, migrate):
         assert "s#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g" in text
@@ -1172,14 +1174,15 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 def test_fresh_install_provisions_storage_control_plane_for_container_gid() -> None:
     install = INSTALL.read_text(encoding="utf-8")
     update = UPDATE.read_text(encoding="utf-8")
-    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(
-        encoding="utf-8"
-    )
+    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
     lumenctl = LUMENCTL.read_text(encoding="utf-8")
 
     assert "install_storage_control_plane" in install
-    assert 'LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount' in install
-    assert "systemctl enable --now lumen-storage-apply.path lumen-storage-test.path" in install
+    assert "LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount" in install
+    assert (
+        "systemctl enable --now lumen-storage-apply.path lumen-storage-test.path"
+        in install
+    )
     assert 'storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"' in install
     assert "install -d -m 0770 -o root -g" in install
 
@@ -1198,9 +1201,9 @@ def test_fresh_install_provisions_storage_control_plane_for_container_gid() -> N
 
 
 def test_storage_apply_restarts_all_backup_mount_path_watchers() -> None:
-    unit = (
-        ROOT / "deploy/systemd/lumen-storage-apply.service"
-    ).read_text(encoding="utf-8")
+    unit = (ROOT / "deploy/systemd/lumen-storage-apply.service").read_text(
+        encoding="utf-8"
+    )
 
     for watcher in (
         "lumen-update.path",
@@ -1293,7 +1296,7 @@ def test_update_preserves_web_bind_and_proxy_env() -> None:
     assert "sync_repo_to_release" in update
     assert "git archive" in update
     assert "target_tag_fallback" in update
-    assert 'LUMEN_UPDATE_FALLBACK_MAIN:-0' in update
+    assert "LUMEN_UPDATE_FALLBACK_MAIN:-0" in update
     assert "stable 通道不会自动回退 main" in update
     assert "fallback main 后 docker compose pull 仍失败" in update
     assert 'if lumen_configure_proxy_env "${SHARED_ENV}"' in update
@@ -1513,9 +1516,7 @@ exit 0
     assert "shared/.env 已按更新前快照原字节恢复" in result.stderr
 
 
-def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() -> (
-    None
-):
+def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() -> None:
     update = UPDATE.read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
 
@@ -1530,9 +1531,7 @@ def test_release_manifest_python_prerequisite_is_consistent() -> None:
     lib = LIB.read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
     update = UPDATE.read_text(encoding="utf-8")
-    guard = (ROOT / "scripts" / "release_manifest_guard.py").read_text(
-        encoding="utf-8"
-    )
+    guard = (ROOT / "scripts" / "release_manifest_guard.py").read_text(encoding="utf-8")
 
     assert "lumen_require_python_min_version()" in lib
     assert "lumen_require_python_min_version python3 3 8" in install
@@ -1878,8 +1877,8 @@ def _prepare_lumenctl_rollback_layout(
 def test_lumenctl_rollback_failure_restores_env_links_and_releases_lock(
     tmp_path: Path,
 ) -> None:
-    deploy_root, env_bytes, current_id, previous_id = (
-        _prepare_lumenctl_rollback_layout(tmp_path)
+    deploy_root, env_bytes, current_id, previous_id = _prepare_lumenctl_rollback_layout(
+        tmp_path
     )
     result = assert_bash_ok(
         f"""
@@ -1939,24 +1938,21 @@ def test_lumenctl_rollback_success_updates_tag_version_and_previous(
 
     assert "rollback 目标版本：1.2.43" in result.stdout
     env_file = deploy_root / "shared" / ".env"
-    assert (
-        subprocess.run(
-            [
-                "bash",
-                "-lc",
-                f". {shlex.quote(str(LIB))}; "
-                f"lumen_env_value LUMEN_IMAGE_TAG {shlex.quote(str(env_file))}; "
-                "printf '\\n'; "
-                f"lumen_env_value LUMEN_VERSION {shlex.quote(str(env_file))}",
-            ],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            env=script_env(),
-            check=True,
-        ).stdout.splitlines()
-        == ["v1.2.43", "1.2.43"]
-    )
+    assert subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f". {shlex.quote(str(LIB))}; "
+            f"lumen_env_value LUMEN_IMAGE_TAG {shlex.quote(str(env_file))}; "
+            "printf '\\n'; "
+            f"lumen_env_value LUMEN_VERSION {shlex.quote(str(env_file))}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=script_env(),
+        check=True,
+    ).stdout.splitlines() == ["v1.2.43", "1.2.43"]
     assert os.readlink(deploy_root / "current") == f"releases/{previous_id}"
     assert os.readlink(deploy_root / "previous") == f"releases/{current_id}"
 
@@ -2108,14 +2104,14 @@ def test_update_script_defaults_to_fast_update_path() -> None:
     text = UPDATE.read_text(encoding="utf-8")
     code = _strip_shell_comments(text)
 
-    assert 'LUMEN_UPDATE_MODE:-fast' in code
-    assert 'LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0' in code
-    assert 'LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0' in code
+    assert "LUMEN_UPDATE_MODE:-fast" in code
+    assert "LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0" in code
+    assert "LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0" in code
     assert '! lumen_image_tag_is_rolling "${TARGET_TAG}"' in code
-    assert 'skipped_by_fast_mode' in text
-    assert 'reuse_healthy' in code
-    assert 'recreated_for_release_bind_mount' in code
-    assert '--no-deps' in code
+    assert "skipped_by_fast_mode" in text
+    assert "reuse_healthy" in code
+    assert "recreated_for_release_bind_mount" in code
+    assert "--no-deps" in code
     assert 'image_prune "skipped_by_fast_mode"' not in code
     assert 'cleanup_images_default="48"' in code
 
@@ -2980,7 +2976,72 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
         "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
     )
     assert "add_header X-Content-Type-Options" in config
-    assert "client_max_body_size 60m;" in config
+    assert "client_max_body_size 80m;" in config
+    assert config.count("proxy_send_timeout 3600s;") == 4
+    assert config.count("proxy_read_timeout 1800s;") == 4
+
+
+def test_ci_upload_body_size_guard_tracks_80mb_limit() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert 'if "client_max_body_size 80m;" not in nginx:' in workflow
+    assert "if 'proxyClientMaxBodySize: \"80mb\"' not in next_config:" in workflow
+    assert "client_max_body_size 60m" not in workflow
+    assert 'proxyClientMaxBodySize: "60mb"' not in workflow
+    assert '"_MAX_REQUEST_BYTES = 66 * 1024 * 1024" not in api_main' in workflow
+    assert (
+        '"_VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024" not in video_routes'
+    ) in workflow
+
+
+def test_update_blue_green_starts_target_worker_before_green_api_traffic() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+
+    blue_green_start = text.index(
+        'if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] '
+        '&& [ -f "${CURRENT_LINK}/docker-compose.bluegreen.yml" ]; then'
+    )
+    start_green = text.index("emit_start start_green", blue_green_start)
+    start_green_api = text.index(
+        "up --pull missing -d --wait --force-recreate api-green",
+        start_green,
+    )
+    shift_traffic = text.index("emit_start shift_traffic_50", start_green_api)
+    start_target_worker = text.index(
+        'compose_up_service "${CURRENT_LINK}" worker',
+        blue_green_start,
+    )
+
+    assert start_target_worker < start_green_api < shift_traffic
+
+
+def test_update_blue_green_failure_keeps_green_until_blue_is_healthy() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+    failure_start = text.index('if [ "${_restart_ok}" = "1" ]; then')
+    rollback_start = text.index("ROLLBACK_OK=0", failure_start)
+    rollback_success = text.index(
+        'if [ "${_rollback_started}" = "1" ]; then',
+        rollback_start,
+    )
+
+    failure_block = text[failure_start:rollback_start]
+    failure_recovery = failure_block[
+        failure_block.index('log_warn "[restart_services] 蓝绿路径失败') :
+    ]
+    rollback_block = text[rollback_start:rollback_success]
+    assert "blue_green_restore_blue_traffic()" in failure_block
+    assert "lumen_wait_for_http_ok" in failure_block
+    assert failure_recovery.index("blue_green_restore_blue_traffic; then") < (
+        failure_recovery.index("blue_green_stop_green")
+    )
+    assert "blue_green_restore_blue_traffic; then" in rollback_block
+    assert rollback_block.index("blue_green_restore_blue_traffic; then") < (
+        rollback_block.index("blue_green_stop_green")
+    )
+    assert (
+        'bash "${_shift_script}" blue 100 >/dev/null 2>&1 || true'
+        not in failure_recovery
+    )
 
 
 def test_nginx_example_security_headers_are_not_duplicated() -> None:

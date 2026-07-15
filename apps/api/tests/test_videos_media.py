@@ -15,6 +15,7 @@ from lumen_core.schemas import VideoCreateIn, VideoPriceOptionOut, VideoReferenc
 from lumen_core.video_providers import VideoProviderDefinition
 
 from app.routes import events, videos
+from app.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
 from app.video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VideoReferenceImageError,
@@ -267,6 +268,78 @@ async def test_reference_video_binary_serves_upstream_variant(
     assert response.headers["content-length"] == "7"
     assert response.headers["etag"] == '"variant-sha"'
     assert await _body(response) == b"variant"
+
+
+@pytest.mark.asyncio
+async def test_reference_video_binary_serves_volcano_asset_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = tmp_path / "u/user-1/vref/video-1/original.mov"
+    variant = tmp_path / "u/user-1/vref/video-1/video-1.volcano.mp4"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+    variant.write_bytes(b"volcano-variant")
+    token = "token-1234567890"
+    video = SimpleNamespace(
+        id="video-1",
+        storage_key="u/user-1/vref/video-1/original.mov",
+        mime="video/quicktime",
+        etag="orig-etag",
+        sha256="orig-sha",
+        updated_at=datetime.now(timezone.utc),
+        deleted_at=None,
+        metadata_jsonb={
+            "reference_access_token": token,
+            "reference_access_token_expires_at": (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat(),
+            "volcano_asset_video_variant": {
+                "kind": VOLCANO_ASSET_VIDEO_KIND,
+                "storage_key": "u/user-1/vref/video-1/video-1.volcano.mp4",
+                "sha256": hashlib.sha256(b"volcano-variant").hexdigest(),
+            },
+        },
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return video
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    monkeypatch.setattr(videos.settings, "storage_root", str(tmp_path))
+
+    response = await videos.reference_video_binary(  # noqa: SLF001
+        "video-1",
+        _request(),
+        Db(),  # type: ignore[arg-type]
+        token=token,
+        variant=VOLCANO_ASSET_VIDEO_KIND,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-length"] == str(len(b"volcano-variant"))
+    assert response.headers["etag"] == (
+        f'"{hashlib.sha256(b"volcano-variant").hexdigest()}"'
+    )
+    assert response.headers["content-disposition"] == (
+        'inline; filename="lumen-asset-video-1.mp4"'
+    )
+    assert await _body(response) == b"volcano-variant"
+
+    named = await videos.reference_video_binary_named(  # noqa: SLF001
+        "video-1",
+        "lumen-asset-video-1.mp4",
+        _request(),
+        Db(),  # type: ignore[arg-type]
+        token=token,
+        variant=VOLCANO_ASSET_VIDEO_KIND,
+    )
+    assert named.status_code == 200
+    assert named.headers["content-type"].startswith("video/mp4")
 
 
 @pytest.mark.asyncio
@@ -793,7 +866,11 @@ async def test_video_options_exposes_seedance_20_mini(
     assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
     assert options.models[0].durations_s == [-1, 4]
     assert options.models[0].resolutions == ["480p", "720p"]
-    assert options.models[0].reference_media_limits == {"image": 9, "video": 3}
+    assert options.models[0].reference_media_limits == {
+        "image": 9,
+        "video": 3,
+        "audio": 3,
+    }
 
 
 @pytest.mark.asyncio
@@ -1098,7 +1175,7 @@ async def test_video_options_exposes_omni_flash_reference_with_image_pricing_onl
 async def test_video_create_rejects_seedance_20_fast_1080p(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = VideoCreateIn(
+    body = VideoCreateIn.model_construct(
         action="t2v",
         model="seedance-2.0-fast",
         prompt="make a clip",
@@ -1150,7 +1227,7 @@ async def test_video_create_rejects_seedance_20_fast_1080p(
 async def test_video_create_rejects_seedance_20_mini_1080p(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = VideoCreateIn(
+    body = VideoCreateIn.model_construct(
         action="t2v",
         model="seedance-2.0-mini",
         prompt="make a clip",
@@ -1206,7 +1283,7 @@ async def test_video_create_rejects_seedance_20_mini_1080p(
 async def test_video_create_rejects_seedance_reference_duration_leaked_from_other_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = VideoCreateIn(
+    body = VideoCreateIn.model_construct(
         action="reference",
         model="seedance-2.0",
         prompt="animate these references",
@@ -1528,15 +1605,33 @@ def test_volcano_newapi_reference_media_limits_match_newapi_contract() -> None:
         assert excinfo.value.detail["error"]["code"] == code
 
 
-def test_reference_audio_requires_volcano_newapi_provider() -> None:
+def test_volcano_reference_audio_requires_visual_and_allows_three() -> None:
+    videos._validate_provider_reference_media(  # noqa: SLF001
+        "volcano",
+        [
+            {"kind": "image"},
+            *({"kind": "audio"} for _idx in range(3)),
+        ],
+    )
+
     with pytest.raises(HTTPException) as excinfo:
         videos._validate_provider_reference_media(  # noqa: SLF001
             "volcano",
             [{"kind": "audio"}],
         )
-
     assert excinfo.value.status_code == 422
-    assert excinfo.value.detail["error"]["code"] == "unsupported_reference_media"
+    assert excinfo.value.detail["error"]["code"] == "reference_audio_requires_visual"
+
+    with pytest.raises(HTTPException) as excinfo:
+        videos._validate_provider_reference_media(  # noqa: SLF001
+            "volcano",
+            [
+                {"kind": "video"},
+                *({"kind": "audio"} for _idx in range(4)),
+            ],
+        )
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "too_many_reference_audios"
 
 
 @pytest.mark.asyncio
@@ -1717,10 +1812,17 @@ def test_public_video_diagnostics_redacts_raw_error_messages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_default_labels_are_per_kind() -> None:
+async def test_reference_media_snapshots_default_labels_are_per_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class Db:
         async def execute(self, _statement):
             raise AssertionError("url reference should not query db")
+
+    async def resolve(url: str, **_kwargs: Any) -> Any:
+        return SimpleNamespace(url=url)
+
+    monkeypatch.setattr(videos, "resolve_public_http_target", resolve)
 
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
@@ -1742,6 +1844,42 @@ async def test_reference_media_snapshots_default_labels_are_per_kind() -> None:
         ("image", "ref:image:1"),
         ("audio", "ref:audio:1"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_reference_url_rejects_private_dns_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("base_url resolves to a private address")
+
+    monkeypatch.setattr(videos, "resolve_public_http_target", reject)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await videos._resolve_reference_url(  # noqa: SLF001
+            "https://127.0.0.1.nip.io/private.mp4"
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["error"]["code"] == "invalid_reference_url"
+
+
+@pytest.mark.asyncio
+async def test_legacy_snapshot_invalid_ref_id_falls_back_to_stable_default() -> None:
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[],
+        fallback_snapshots=[
+            {
+                "kind": "audio",
+                "url": "asset://asset-1",
+                "ref_id": "legacy-invalid-ref",
+            }
+        ],
+    )
+
+    assert snapshots[0]["ref_id"] == "ref:audio:1"
 
 
 def test_reference_upload_ext_only_accepts_official_seedance_video_formats() -> None:
@@ -2026,7 +2164,7 @@ async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
                 "image_id": "image-1",
                 "url": "https://old.example/api/images/reference/image-1/binary?token=old",
                 "label": "",
-                "ref_id": "ref:video:2",
+                "ref_id": "",
             }
         ],
         reference_public_base_url="https://lumen.example",

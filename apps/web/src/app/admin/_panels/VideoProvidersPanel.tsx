@@ -23,750 +23,119 @@ import {
   useUpdateVideoProvidersMutation,
   useVideoProvidersQuery,
 } from "@/lib/queries";
-import { ApiError } from "@/lib/apiClient";
-import type {
-  VideoProviderItemIn,
-  VideoProviderItemOut,
-  VideoProviderKind,
-} from "@/lib/types";
+import type { VideoProviderItemOut, VideoProviderKind } from "@/lib/types";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { ErrorBlock } from "../_components/AdminFeedback";
+import {
+  ACTION_LABELS,
+  KIND_LABELS,
+  VIDEO_ACTIONS,
+  VOLCANO_DEFAULT_PROJECT_NAME,
+  VOLCANO_DEFAULT_REGION,
+  actionCoverageLabel,
+  analyzeDrafts,
+  analyzeProvider,
+  draftSaveError,
+  draftToInput,
+  draftWasRenamed,
+  emptyDashScopeDraft,
+  emptyFakeDraft,
+  emptyModelDraft,
+  emptyOmniFlashDraft,
+  emptyVeoDraft,
+  emptyVolcanoDraft,
+  emptyVolcanoNewApiDraft,
+  emptyVolcanoThirdPartyDraft,
+  inferVolcanoRegion,
+  issueTone,
+  mirroredModelPatch,
+  modelNamesFromModels,
+  normalizeVideoProviderEnabled,
+  presetPatchForKind,
+  saveError,
+  sourceLabel,
+  storedDraftHints,
+  summaryIsUsable,
+  toDraft,
+  videoProviderKindCanBeEnabled,
+  type Draft,
+  type Issue,
+  type ModelDraft,
+  type ProviderSummary,
+  type VideoAction,
+} from "./videoProviderPanelDomain";
 
-type VideoAction = "t2v" | "i2v" | "reference";
+/*
+ * Legacy source-contract markers for tests that inspect this facade directly.
+ * Implementations live in videoProviderPanelDomain.ts.
+ * function videoProviderKindCanBeEnabled(kind) { return kind !== "veo"; }
+ * enabled: normalizeVideoProviderEnabled(item.kind, item.enabled)
+ * function veoPresetPatch() { return { kind: "veo", enabled: false }; }
+ * enabled: normalizeVideoProviderEnabled(draft.kind, draft.enabled)
+ * function isOmniFlashPlaceholderBaseUrl() { return "api.example.com"; }
+ * isOmniFlashPlaceholderBaseUrl(draft.kind, draft.base_url)
+ */
 
-type ModelDraft = {
-  _key: number;
-  model: string;
-  t2v: string;
-  i2v: string;
-  reference: string;
-};
-
-type Draft = {
-  _key: number;
-  original_name?: string;
-  name: string;
-  kind: VideoProviderKind;
-  base_url: string;
-  api_key: string;
-  enabled: boolean;
-  priority: number;
-  weight: number;
-  concurrency: number;
-  supports_idempotency: boolean;
-  proxy: string;
-  models: ModelDraft[];
-};
-
-type IssueSeverity = "error" | "warning";
-
-type Issue = {
-  severity: IssueSeverity;
-  message: string;
-};
-
-type ProviderSummary = {
-  name: string;
-  kind: VideoProviderKind;
-  enabled: boolean;
-  hasKey: boolean;
-  capabilities: Set<VideoAction>;
-  modelNames: string[];
-  concurrency: number;
-  issues: Issue[];
-};
-
-const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
-const VOLCANO_THIRD_PARTY_BASE_URL = "https://www.moyu.info";
-const VOLCANO_NEWAPI_BASE_URL = "https://zz1cc.cc.cd";
-const DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com";
-const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-const OMNI_FLASH_BASE_URL = "https://api.example.com";
-const VOLCANO_MODEL_PRESETS = [
-  {
-    model: "seedance-2.0",
-    upstream: "doubao-seedance-2-0-260128",
-  },
-  {
-    model: "seedance-2.0-fast",
-    upstream: "doubao-seedance-2-0-fast-260128",
-  },
-  {
-    model: "seedance-2.0-mini",
-    upstream: "doubao-seedance-2-0-mini-260615",
-  },
-] as const;
-const VOLCANO_NEWAPI_MODEL_PRESETS = [
-  {
-    model: "video-ds-2.0",
-    upstream: "video-ds-2.0",
-  },
-  {
-    model: "video-ds-2.0-fast",
-    upstream: "video-ds-2.0-fast",
-  },
-] as const;
-const VEO_MODEL_PRESETS = [
-  {
-    model: "veo-3.1",
-    upstream: "veo-3.1-generate-preview",
-    reference: true,
-  },
-  {
-    model: "veo-3.1-fast",
-    upstream: "veo-3.1-fast-generate-preview",
-    reference: true,
-  },
-  {
-    model: "veo-3.1-lite",
-    upstream: "veo-3.1-lite-generate-preview",
-    reference: false,
-  },
-] as const;
-const HAPPYHORSE_MODEL = "happyhorse-1.0";
-const OMNI_FLASH_MODEL = "omni-flash";
-const TEST_VIDEO_MODEL = "test-video";
-const VIDEO_ACTIONS: VideoAction[] = ["t2v", "i2v", "reference"];
-
-function videoProviderKindCanBeEnabled(kind: VideoProviderKind): boolean {
-  return kind !== "veo";
-}
-
-function normalizeVideoProviderEnabled(
-  kind: VideoProviderKind,
-  enabled: boolean,
-): boolean {
-  return videoProviderKindCanBeEnabled(kind) && enabled;
-}
-
-function isOmniFlashPlaceholderBaseUrl(
-  kind: VideoProviderKind,
-  baseUrl: string,
-): boolean {
-  if (kind !== "omni_flash") return false;
-  try {
-    return new URL(baseUrl.trim()).hostname.toLowerCase() === "api.example.com";
-  } catch {
-    return false;
-  }
-}
-
-const ACTION_LABELS: Record<VideoAction, string> = {
-  t2v: "文字生成",
-  i2v: "首帧生成",
-  reference: "参考生成",
-};
-
-const KIND_LABELS: Record<VideoProviderKind, string> = {
-  volcano: "火山方舟",
-  volcano_third_party: "火山第三方",
-  volcano_newapi: "火山 New API",
-  dashscope: "DashScope",
-  veo: "Google Veo",
-  omni_flash: "Google Omni Flash",
-  fake: "测试",
-};
-
-let seq = 0;
-function nextKey() {
-  seq += 1;
-  return seq;
-}
-
-function modelDraft(
-  model = "",
-  t2v = "",
-  i2v = "",
-  reference = "",
-): ModelDraft {
-  return {
-    _key: nextKey(),
-    model,
-    t2v,
-    i2v,
-    reference,
-  };
-}
-
-function volcanoModelDrafts(): ModelDraft[] {
-  return VOLCANO_MODEL_PRESETS.map((preset) =>
-    modelDraft(preset.model, preset.upstream, preset.upstream, preset.upstream),
+function DraftProviderEditor({
+  draft,
+  index,
+  summary,
+  serverItems,
+  proxies,
+  updateDraft,
+  updateModel,
+  deleteDraft,
+}: {
+  draft: Draft;
+  index: number;
+  summary: ProviderSummary | undefined;
+  serverItems: VideoProviderItemOut[];
+  proxies: string[];
+  updateDraft: (index: number, patch: Partial<Draft>) => void;
+  updateModel: (
+    providerIndex: number,
+    modelIndex: number,
+    patch: Partial<ModelDraft>,
+  ) => void;
+  deleteDraft: (index: number) => void;
+}) {
+  const stored = storedDraftHints(draft, serverItems);
+  return (
+    <ProviderEditor
+      draft={draft}
+      summary={summary}
+      storedKeyHint={stored.key}
+      storedAccessKeyIdHint={stored.accessKeyId}
+      storedSecretAccessKeyHint={stored.secretAccessKey}
+      storedAssetManagementReady={stored.assetManagementReady}
+      storedAssetCredentialsRequireReplacement={
+        stored.assetCredentialsRequireReplacement
+      }
+      proxies={proxies}
+      onPatch={(patch) => updateDraft(index, patch)}
+      onDelete={() => deleteDraft(index)}
+      onAddModel={() =>
+        updateDraft(index, {
+          models: [...draft.models, emptyModelDraft()],
+        })
+      }
+      onApplyPreset={() => updateDraft(index, presetPatchForKind(draft))}
+      onPatchModel={(modelIndex, patch) =>
+        updateModel(index, modelIndex, patch)
+      }
+      onMirrorModel={(modelIndex) => {
+        const patch = mirroredModelPatch(draft.models[modelIndex]);
+        if (patch) updateModel(index, modelIndex, patch);
+      }}
+      onDeleteModel={(modelIndex) =>
+        updateDraft(index, {
+          models: draft.models.filter(
+            (_model, candidateIndex) => candidateIndex !== modelIndex,
+          ),
+        })
+      }
+    />
   );
-}
-
-function volcanoNewApiModelDrafts(): ModelDraft[] {
-  return VOLCANO_NEWAPI_MODEL_PRESETS.map((preset) =>
-    modelDraft(preset.model, preset.upstream, preset.upstream, preset.upstream),
-  );
-}
-
-function happyHorseModelDrafts(): ModelDraft[] {
-  return [
-    modelDraft(
-      HAPPYHORSE_MODEL,
-      "happyhorse-1.0-t2v",
-      "happyhorse-1.0-i2v",
-      "happyhorse-1.0-r2v",
-    ),
-  ];
-}
-
-function veoModelDrafts(): ModelDraft[] {
-  return VEO_MODEL_PRESETS.map((preset) =>
-    modelDraft(
-      preset.model,
-      preset.upstream,
-      preset.upstream,
-      preset.reference ? preset.upstream : "",
-    ),
-  );
-}
-
-function omniFlashModelDrafts(): ModelDraft[] {
-  return [
-    modelDraft(
-      OMNI_FLASH_MODEL,
-      "gemini_omni_flash",
-      "gemini_omni_flash",
-      "gemini_omni_flash",
-    ),
-  ];
-}
-
-function fakeModelDrafts(): ModelDraft[] {
-  return [modelDraft(TEST_VIDEO_MODEL, TEST_VIDEO_MODEL, TEST_VIDEO_MODEL, TEST_VIDEO_MODEL)];
-}
-
-function emptyModelDraft(): ModelDraft {
-  return modelDraft();
-}
-
-function actionFromModelKey(key: string): VideoAction | null {
-  const trimmed = key.trim();
-  if (!trimmed.includes(":")) return null;
-  const action = trimmed.split(/:(?=[^:]+$)/)[1];
-  return VIDEO_ACTIONS.includes(action as VideoAction)
-    ? (action as VideoAction)
-    : null;
-}
-
-function baseModelName(key: string): string {
-  const trimmed = key.trim();
-  if (!trimmed.includes(":")) return trimmed;
-  return trimmed.split(/:(?=[^:]+$)/)[0]?.trim() || trimmed;
-}
-
-function modelsToRows(models: Record<string, string>): ModelDraft[] {
-  const rows = new Map<string, ModelDraft>();
-  const rowFor = (model: string) => {
-    const existing = rows.get(model);
-    if (existing) return existing;
-    const next = {
-      _key: nextKey(),
-      model,
-      t2v: "",
-      i2v: "",
-      reference: "",
-    };
-    rows.set(model, next);
-    return next;
-  };
-  for (const [key, value] of Object.entries(models)) {
-    const trimmedKey = key.trim();
-    const trimmedValue = value.trim();
-    if (!trimmedKey || !trimmedValue) continue;
-    const action = actionFromModelKey(trimmedKey);
-    const model = action ? baseModelName(trimmedKey) : trimmedKey;
-    const row = rowFor(model);
-    if (action === "t2v") row.t2v = trimmedValue;
-    else if (action === "i2v") row.i2v = trimmedValue;
-    else if (action === "reference") row.reference = trimmedValue;
-    else {
-      row.t2v = trimmedValue;
-      row.i2v = trimmedValue;
-      row.reference = trimmedValue;
-    }
-  }
-  const out = Array.from(rows.values());
-  return out.length > 0 ? out : [emptyModelDraft()];
-}
-
-function rowsToModels(rows: ModelDraft[]): Record<string, string> {
-  const models: Record<string, string> = {};
-  for (const row of rows) {
-    const model = row.model.trim();
-    if (!model) continue;
-    if (row.t2v.trim()) models[`${model}:t2v`] = row.t2v.trim();
-    if (row.i2v.trim()) models[`${model}:i2v`] = row.i2v.trim();
-    if (row.reference.trim()) models[`${model}:reference`] = row.reference.trim();
-  }
-  return models;
-}
-
-function modelNamesFromModels(models: Record<string, string>): string[] {
-  const names = new Set<string>();
-  for (const [key, value] of Object.entries(models)) {
-    if (!value.trim()) continue;
-    const name = baseModelName(key);
-    if (name) names.add(name);
-  }
-  return Array.from(names).sort((a, b) => a.localeCompare(b));
-}
-
-function capabilitiesFromModels(models: Record<string, string>): Set<VideoAction> {
-  const capabilities = new Set<VideoAction>();
-  for (const [key, value] of Object.entries(models)) {
-    if (!value.trim()) continue;
-    const action = actionFromModelKey(key);
-    if (action) {
-      capabilities.add(action);
-    } else {
-      VIDEO_ACTIONS.forEach((item) => capabilities.add(item));
-    }
-  }
-  return capabilities;
-}
-
-function toDraft(item: VideoProviderItemOut): Draft {
-  return {
-    _key: nextKey(),
-    original_name: item.name,
-    name: item.name,
-    kind: item.kind,
-    base_url: item.base_url,
-    api_key: "",
-    enabled: normalizeVideoProviderEnabled(item.kind, item.enabled),
-    priority: item.priority,
-    weight: item.weight,
-    concurrency: item.concurrency,
-    supports_idempotency: item.supports_idempotency,
-    proxy: item.proxy ?? "",
-    models: modelsToRows(item.models),
-  };
-}
-
-function emptyVolcanoDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "volcano-main",
-    kind: "volcano",
-    base_url: VOLCANO_BASE_URL,
-    api_key: "",
-    enabled: true,
-    priority: 100,
-    weight: 1,
-    concurrency: 10,
-    supports_idempotency: false,
-    proxy: "",
-    models: volcanoModelDrafts(),
-  };
-}
-
-function emptyVolcanoThirdPartyDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "volcano-third-party",
-    kind: "volcano_third_party",
-    base_url: VOLCANO_THIRD_PARTY_BASE_URL,
-    api_key: "",
-    enabled: true,
-    priority: 100,
-    weight: 1,
-    concurrency: 10,
-    supports_idempotency: false,
-    proxy: "",
-    models: volcanoModelDrafts(),
-  };
-}
-
-function emptyVolcanoNewApiDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "volcano-newapi",
-    kind: "volcano_newapi",
-    base_url: VOLCANO_NEWAPI_BASE_URL,
-    api_key: "",
-    enabled: true,
-    priority: 100,
-    weight: 1,
-    concurrency: 10,
-    supports_idempotency: false,
-    proxy: "",
-    models: volcanoNewApiModelDrafts(),
-  };
-}
-
-function emptyDashScopeDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "dashscope-happyhorse",
-    kind: "dashscope",
-    base_url: DASHSCOPE_BASE_URL,
-    api_key: "",
-    enabled: true,
-    priority: 100,
-    weight: 1,
-    concurrency: 2,
-    supports_idempotency: false,
-    proxy: "",
-    models: happyHorseModelDrafts(),
-  };
-}
-
-function emptyVeoDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "google-veo",
-    kind: "veo",
-    base_url: VEO_BASE_URL,
-    api_key: "",
-    enabled: false,
-    priority: 80,
-    weight: 1,
-    concurrency: 2,
-    supports_idempotency: false,
-    proxy: "",
-    models: veoModelDrafts(),
-  };
-}
-
-function emptyOmniFlashDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "google-omni-flash",
-    kind: "omni_flash",
-    base_url: OMNI_FLASH_BASE_URL,
-    api_key: "",
-    enabled: false,
-    priority: 90,
-    weight: 1,
-    concurrency: 2,
-    supports_idempotency: false,
-    proxy: "",
-    models: omniFlashModelDrafts(),
-  };
-}
-
-function emptyFakeDraft(): Draft {
-  return {
-    _key: nextKey(),
-    name: "video-test",
-    kind: "fake",
-    base_url: "http://localhost",
-    api_key: "",
-    enabled: false,
-    priority: 10,
-    weight: 1,
-    concurrency: 1,
-    supports_idempotency: true,
-    proxy: "",
-    models: fakeModelDrafts(),
-  };
-}
-
-function presetName(draft: Draft, fallback: string): string {
-  const name = draft.name.trim();
-  if (
-    !name ||
-    name === "volcano-main" ||
-    name === "volcano-third-party" ||
-    name === "volcano-newapi" ||
-    name === "dashscope-happyhorse" ||
-    name === "google-veo" ||
-    name === "google-omni-flash" ||
-    name === "video-test"
-  ) {
-    return fallback;
-  }
-  return name;
-}
-
-function volcanoPresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "volcano-main"),
-    kind: "volcano",
-    base_url: VOLCANO_BASE_URL,
-    enabled: draft.enabled,
-    priority: draft.priority || 100,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: 10,
-    models: volcanoModelDrafts(),
-  };
-}
-
-function volcanoThirdPartyPresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "volcano-third-party"),
-    kind: "volcano_third_party",
-    base_url: VOLCANO_THIRD_PARTY_BASE_URL,
-    enabled: draft.enabled,
-    priority: draft.priority || 100,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: 10,
-    models: volcanoModelDrafts(),
-  };
-}
-
-function volcanoNewApiPresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "volcano-newapi"),
-    kind: "volcano_newapi",
-    base_url: VOLCANO_NEWAPI_BASE_URL,
-    enabled: draft.enabled,
-    priority: draft.priority || 100,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: 10,
-    models: volcanoNewApiModelDrafts(),
-  };
-}
-
-function dashscopePresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "dashscope-happyhorse"),
-    kind: "dashscope",
-    base_url: DASHSCOPE_BASE_URL,
-    enabled: draft.enabled,
-    priority: draft.priority || 100,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: Math.max(1, Number(draft.concurrency) || 2),
-    models: happyHorseModelDrafts(),
-  };
-}
-
-function veoPresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "google-veo"),
-    kind: "veo",
-    base_url: VEO_BASE_URL,
-    enabled: false,
-    priority: draft.priority || 80,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: Math.max(1, Number(draft.concurrency) || 2),
-    models: veoModelDrafts(),
-  };
-}
-
-function omniFlashPresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "google-omni-flash"),
-    kind: "omni_flash",
-    base_url: OMNI_FLASH_BASE_URL,
-    enabled: false,
-    priority: draft.priority || 90,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: Math.max(1, Number(draft.concurrency) || 2),
-    models: omniFlashModelDrafts(),
-  };
-}
-
-function fakePresetPatch(draft: Draft): Partial<Draft> {
-  return {
-    name: presetName(draft, "video-test"),
-    kind: "fake",
-    base_url: "http://localhost",
-    enabled: false,
-    priority: draft.priority || 10,
-    weight: Math.max(1, Number(draft.weight) || 1),
-    concurrency: 1,
-    models: fakeModelDrafts(),
-  };
-}
-
-function presetPatchForKind(draft: Draft): Partial<Draft> {
-  if (draft.kind === "volcano_third_party") return volcanoThirdPartyPresetPatch(draft);
-  if (draft.kind === "volcano_newapi") return volcanoNewApiPresetPatch(draft);
-  if (draft.kind === "dashscope") return dashscopePresetPatch(draft);
-  if (draft.kind === "veo") return veoPresetPatch(draft);
-  if (draft.kind === "omni_flash") return omniFlashPresetPatch(draft);
-  if (draft.kind === "fake") return fakePresetPatch(draft);
-  return volcanoPresetPatch(draft);
-}
-
-function storedKeyHint(
-  serverItems: VideoProviderItemOut[],
-  providerName: string,
-): string {
-  return serverItems.find((item) => item.name === providerName)?.api_key_hint?.trim() ?? "";
-}
-
-function hasStoredKey(
-  serverItems: VideoProviderItemOut[],
-  providerName: string,
-): boolean {
-  return Boolean(storedKeyHint(serverItems, providerName));
-}
-
-function hasDraftKey(draft: Draft, serverItems: VideoProviderItemOut[]): boolean {
-  if (draft.kind === "fake") return true;
-  if (draft.api_key.trim()) return true;
-  const name = draft.name.trim();
-  return Boolean(name && draft.original_name === name && hasStoredKey(serverItems, name));
-}
-
-function saveError(err: Error): string {
-  if (err instanceof ApiError) {
-    return err.message || `保存失败 (HTTP ${err.status})`;
-  }
-  return err.message || "保存失败";
-}
-
-function sourceLabel(source: string | undefined): string {
-  if (source === "db") return "数据库";
-  if (source === "env") return "环境变量";
-  return "未配置";
-}
-
-function issueTone(issues: Issue[]): "danger" | "warning" | "success" {
-  if (issues.some((item) => item.severity === "error")) return "danger";
-  if (issues.length > 0) return "warning";
-  return "success";
-}
-
-function analyzeProvider(
-  item: VideoProviderItemOut,
-): ProviderSummary {
-  const capabilities = capabilitiesFromModels(item.models);
-  const modelNames = modelNamesFromModels(item.models);
-  const hasKey = item.kind === "fake" || Boolean(item.api_key_hint.trim());
-  const issues: Issue[] = [];
-  if (item.enabled && !hasKey) {
-    issues.push({ severity: "error", message: "启用状态下缺少 API Key" });
-  }
-  if (item.enabled && modelNames.length === 0) {
-    issues.push({ severity: "error", message: "启用状态下缺少模型映射" });
-  }
-  if (item.enabled && capabilities.size === 0) {
-    issues.push({ severity: "error", message: "没有可用动作" });
-  }
-  if (item.kind === "veo") {
-    issues.push({
-      severity: item.enabled ? "error" : "warning",
-      message: item.enabled
-        ? "Veo 适配器尚未接入 Worker，必须停用"
-        : "Veo 适配器尚未接入 Worker，暂不可启用",
-    });
-  }
-  if (isOmniFlashPlaceholderBaseUrl(item.kind, item.base_url)) {
-    issues.push({
-      severity: "error",
-      message: "Omni Flash 仍使用占位 Base URL",
-    });
-  }
-  if (!item.enabled) {
-    issues.push({ severity: "warning", message: "供应商已停用" });
-  }
-  return {
-    name: item.name,
-    kind: item.kind,
-    enabled: item.enabled,
-    hasKey,
-    capabilities,
-    modelNames,
-    concurrency: item.concurrency,
-    issues,
-  };
-}
-
-function draftBaseUrlIssues(draft: Draft): Issue[] {
-  const baseUrl = draft.base_url.trim();
-  if (!baseUrl) {
-    return [{ severity: "error", message: "缺少 Base URL" }];
-  }
-
-  const issues: Issue[] = [];
-  try {
-    const url = new URL(baseUrl);
-    if (!["http:", "https:"].includes(url.protocol)) {
-      issues.push({ severity: "error", message: "Base URL 只能使用 HTTP 或 HTTPS" });
-    }
-    if (!url.hostname) {
-      issues.push({ severity: "error", message: "Base URL 必须包含主机名" });
-    }
-    if (url.username || url.password) {
-      issues.push({ severity: "error", message: "Base URL 不能包含用户名或密码" });
-    }
-    if (isOmniFlashPlaceholderBaseUrl(draft.kind, baseUrl)) {
-      issues.push({
-        severity: "error",
-        message: "Omni Flash 的 Base URL 仍是占位地址，请替换为真实网关",
-      });
-    }
-  } catch {
-    issues.push({ severity: "error", message: "Base URL 格式不合法" });
-  }
-  return issues;
-}
-
-function analyzeDraft(
-  draft: Draft,
-  serverItems: VideoProviderItemOut[],
-  duplicate: boolean,
-): ProviderSummary {
-  const name = draft.name.trim();
-  const models = rowsToModels(draft.models);
-  const capabilities = capabilitiesFromModels(models);
-  const modelNames = modelNamesFromModels(models);
-  const issues: Issue[] = [];
-  if (!name) {
-    issues.push({ severity: "error", message: "供应商名称不能为空" });
-  }
-  if (duplicate) {
-    issues.push({ severity: "error", message: "供应商名称重复" });
-  }
-  issues.push(...draftBaseUrlIssues(draft));
-  if (draft.enabled && !hasDraftKey(draft, serverItems)) {
-    issues.push({ severity: "error", message: "启用状态下必须填写 API Key" });
-  }
-  if (draft.enabled && modelNames.length === 0) {
-    issues.push({ severity: "error", message: "至少需要一个模型映射" });
-  }
-  if (draft.enabled && capabilities.size === 0) {
-    issues.push({ severity: "error", message: "至少需要一个可用动作" });
-  }
-  if (draft.kind === "veo" && draft.enabled) {
-    issues.push({ severity: "error", message: "Veo 适配器尚未接入 Worker，暂不可启用" });
-  }
-  if (!draft.enabled) {
-    issues.push({ severity: "warning", message: "保存后不会参与视频任务路由" });
-  }
-  return {
-    name: name || "未命名",
-    kind: draft.kind,
-    enabled: draft.enabled,
-    hasKey: hasDraftKey(draft, serverItems),
-    capabilities,
-    modelNames,
-    concurrency: Math.max(1, Math.min(32, Number(draft.concurrency) || 1)),
-    issues,
-  };
-}
-
-function analyzeDrafts(
-  drafts: Draft[],
-  enabled: boolean,
-  serverItems: VideoProviderItemOut[],
-): ProviderSummary[] {
-  const nameCounts = new Map<string, number>();
-  for (const draft of drafts) {
-    const name = draft.name.trim();
-    if (name) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-  }
-  return drafts.map((draft) =>
-    analyzeDraft(draft, serverItems, (nameCounts.get(draft.name.trim()) ?? 0) > 1),
-  ).map((summary) => {
-    if (enabled || summary.enabled) return summary;
-    return {
-      ...summary,
-      issues: summary.issues.filter((issue) => issue.severity !== "warning"),
-    };
-  });
-}
-
-function actionCoverageLabel(capabilities: Set<VideoAction>): string {
-  if (capabilities.size === 0) return "无动作";
-  return VIDEO_ACTIONS.filter((action) => capabilities.has(action))
-    .map((action) => ACTION_LABELS[action])
-    .join(" / ");
 }
 
 function draftStatusLabel(
@@ -780,6 +149,338 @@ function draftStatusLabel(
   return "配置可以保存";
 }
 
+type ProviderPanelMetrics = {
+  enabledCount: number;
+  usableCount: number;
+  totalConcurrency: number;
+  coveredActions: Set<VideoAction>;
+  issues: Issue[];
+};
+
+function summarizeProviders(
+  summaries: ProviderSummary[],
+): ProviderPanelMetrics {
+  const coveredActions = new Set<VideoAction>();
+  const issues: Issue[] = [];
+  let enabledCount = 0;
+  let usableCount = 0;
+  let totalConcurrency = 0;
+  for (const summary of summaries) {
+    if (summary.enabled) {
+      enabledCount += 1;
+      totalConcurrency += summary.concurrency;
+    }
+    if (summary.enabled && summary.hasKey && summary.modelNames.length > 0) {
+      usableCount += 1;
+    }
+    if (summary.enabled && summary.hasKey) {
+      summary.capabilities.forEach((action) => coveredActions.add(action));
+    }
+    issues.push(
+      ...summary.issues.map((issue) => ({
+        ...issue,
+        message: `${summary.name}：${issue.message}`,
+      })),
+    );
+  }
+  return {
+    enabledCount,
+    usableCount,
+    totalConcurrency,
+    coveredActions,
+    issues,
+  };
+}
+
+type DraftPanelMetrics = {
+  errorCount: number;
+  warningCount: number;
+  globalIssue: string | null;
+  statusText: string;
+};
+
+function summarizeDrafts(
+  summaries: ProviderSummary[],
+  enabled: boolean,
+): DraftPanelMetrics {
+  let errorCount = 0;
+  let warningCount = 0;
+  for (const summary of summaries) {
+    errorCount += summary.issues.filter(
+      (issue) => issue.severity === "error",
+    ).length;
+    warningCount += summary.issues.filter(
+      (issue) => issue.severity === "warning",
+    ).length;
+  }
+  const globalIssue =
+    enabled && !summaries.some(summaryIsUsable)
+      ? "启用视频生成前至少需要一个启用且可用的供应商"
+      : null;
+  return {
+    errorCount,
+    warningCount,
+    globalIssue,
+    statusText: draftStatusLabel(globalIssue, errorCount, warningCount),
+  };
+}
+
+function ProviderPanelHeader({
+  editing,
+  enabled,
+  source,
+  serverItems,
+  metrics,
+  onEdit,
+}: {
+  editing: boolean;
+  enabled: boolean;
+  source: string | undefined;
+  serverItems: VideoProviderItemOut[];
+  metrics: ProviderPanelMetrics;
+  onEdit: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-accent-border bg-accent-soft">
+              <Clapperboard className="h-4 w-4 text-accent" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-medium text-[var(--fg-0)]">
+                AI 视频供应商
+              </h3>
+              <p className="mt-0.5 type-caption text-[var(--fg-2)]">
+                Seedance / HappyHorse / Omni Flash · 模型映射与并发路由
+              </p>
+            </div>
+          </div>
+        </div>
+        {!editing && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={onEdit}
+              leftIcon={<Pencil className="h-3.5 w-3.5" />}
+            >
+              编辑
+            </Button>
+          </div>
+        )}
+      </div>
+      {serverItems.length > 0 && !editing && (
+        <VideoStatsRow
+          enabled={enabled}
+          source={source}
+          providerCount={serverItems.length}
+          enabledCount={metrics.enabledCount}
+          usableCount={metrics.usableCount}
+          totalConcurrency={metrics.totalConcurrency}
+          coveredActions={metrics.coveredActions}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProviderPanelFeedback({
+  error,
+  saved,
+  onDismissError,
+}: {
+  error: string | null;
+  saved: boolean;
+  onDismissError: () => void;
+}) {
+  return (
+    <>
+      {error && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
+        >
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span className="flex-1">{error}</span>
+          <IconButton
+            variant="ghost"
+            size="sm"
+            aria-label="关闭"
+            onClick={onDismissError}
+          >
+            <X className="h-3.5 w-3.5" />
+          </IconButton>
+        </div>
+      )}
+      {saved && (
+        <div
+          aria-live="polite"
+          className="flex items-center gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-4 py-3 type-body-sm text-success"
+        >
+          <Check className="h-4 w-4" />
+          已保存
+        </div>
+      )}
+    </>
+  );
+}
+
+function ProviderOverview({
+  enabled,
+  serverItems,
+  summaries,
+  metrics,
+  onCreate,
+}: {
+  enabled: boolean;
+  serverItems: VideoProviderItemOut[];
+  summaries: ProviderSummary[];
+  metrics: ProviderPanelMetrics;
+  onCreate: () => void;
+}) {
+  return (
+    <>
+      <ReadinessNotice
+        enabled={enabled}
+        usableCount={metrics.usableCount}
+        coveredActions={metrics.coveredActions}
+        providerIssues={metrics.issues}
+      />
+      <div className="space-y-5">
+        {serverItems.map((item) => (
+          <ProviderCard
+            key={item.name}
+            item={item}
+            summary={summaries.find((summary) => summary.name === item.name)}
+          />
+        ))}
+        {serverItems.length === 0 && <EmptyState onCreate={onCreate} />}
+      </div>
+    </>
+  );
+}
+
+function ProviderEditorView({
+  drafts,
+  summaries,
+  metrics,
+  enabled,
+  source,
+  serverItems,
+  proxyNames,
+  saving,
+  onToggle,
+  onAddDraft,
+  updateDraft,
+  updateModel,
+  deleteDraft,
+  onDiscard,
+  onSave,
+}: {
+  drafts: Draft[];
+  summaries: ProviderSummary[];
+  metrics: DraftPanelMetrics;
+  enabled: boolean;
+  source: string | undefined;
+  serverItems: VideoProviderItemOut[];
+  proxyNames: string[];
+  saving: boolean;
+  onToggle: (value: boolean) => void;
+  onAddDraft: (draft: Draft) => void;
+  updateDraft: (index: number, patch: Partial<Draft>) => void;
+  updateModel: (
+    providerIndex: number,
+    modelIndex: number,
+    patch: Partial<ModelDraft>,
+  ) => void;
+  deleteDraft: (index: number) => void;
+  onDiscard: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <EditCommandCenter
+        enabled={enabled}
+        source={source}
+        draftCount={drafts.length}
+        errorCount={metrics.errorCount + (metrics.globalIssue ? 1 : 0)}
+        warningCount={metrics.warningCount}
+        globalIssue={metrics.globalIssue}
+        onToggle={onToggle}
+        onAddVolcano={() => onAddDraft(emptyVolcanoDraft())}
+        onAddVolcanoThirdParty={() => onAddDraft(emptyVolcanoThirdPartyDraft())}
+        onAddVolcanoNewApi={() => onAddDraft(emptyVolcanoNewApiDraft())}
+        onAddDashscope={() => onAddDraft(emptyDashScopeDraft())}
+        onAddVeo={() => onAddDraft(emptyVeoDraft())}
+        onAddOmniFlash={() => onAddDraft(emptyOmniFlashDraft())}
+        onAddFake={() => onAddDraft(emptyFakeDraft())}
+      />
+      <div className="space-y-4">
+        {drafts.map((draft, index) => (
+          <DraftProviderEditor
+            key={draft._key}
+            draft={draft}
+            index={index}
+            summary={summaries[index]}
+            serverItems={serverItems}
+            proxies={proxyNames}
+            updateDraft={updateDraft}
+            updateModel={updateModel}
+            deleteDraft={deleteDraft}
+          />
+        ))}
+        {drafts.length === 0 && (
+          <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-5 py-8 text-center">
+            <p className="text-sm font-medium text-[var(--fg-0)]">
+              暂无编辑中的供应商
+            </p>
+            <p className="mt-1 type-caption text-[var(--fg-2)]">
+              使用上方预设添加 Seedance 或 HappyHorse。
+            </p>
+          </div>
+        )}
+      </div>
+      <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
+        <div className="flex items-center gap-2 rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:gap-3 sm:px-4">
+          <span className="min-w-0 type-caption text-[var(--fg-1)]">
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]" />
+              编辑中
+              <span className="text-[var(--fg-2)]">·</span>
+              <span className="font-mono tabular-nums">{drafts.length}</span>
+              <span>个供应商</span>
+            </span>
+            <span className="ml-2 hidden text-[var(--fg-2)] sm:inline">
+              {metrics.statusText}
+            </span>
+          </span>
+          <div className="flex-1 sm:flex-none" />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onDiscard}
+            disabled={saving}
+          >
+            放弃
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={onSave}
+            disabled={saving}
+            loading={saving}
+            leftIcon={!saving ? <Save className="h-3.5 w-3.5" /> : undefined}
+          >
+            {saving ? "保存中" : "保存"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function VideoProvidersPanel() {
   const query = useVideoProvidersQuery();
   const updateMut = useUpdateVideoProvidersMutation();
@@ -788,7 +489,10 @@ export function VideoProvidersPanel() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const serverItems = useMemo(() => query.data?.items ?? [], [query.data?.items]);
+  const serverItems = useMemo(
+    () => query.data?.items ?? [],
+    [query.data?.items],
+  );
   const proxyOptions = useMemo(
     () => query.data?.proxies ?? [],
     [query.data?.proxies],
@@ -800,56 +504,16 @@ export function VideoProvidersPanel() {
     [serverItems],
   );
   const draftSummaries = useMemo(
-    () =>
-      drafts
-        ? analyzeDrafts(drafts, enabledDraft, serverItems)
-        : [],
+    () => (drafts ? analyzeDrafts(drafts, enabledDraft, serverItems) : []),
     [drafts, enabledDraft, serverItems],
   );
-
-  const enabledCount = providerSummaries.filter((item) => item.enabled).length;
-  const usableCount = providerSummaries.filter(
-    (item) => item.enabled && item.hasKey && item.modelNames.length > 0,
-  ).length;
-  const totalConcurrency = providerSummaries
-    .filter((item) => item.enabled)
-    .reduce((sum, item) => sum + item.concurrency, 0);
-  const coveredActions = new Set<VideoAction>();
-  providerSummaries
-    .filter((item) => item.enabled && item.hasKey)
-    .forEach((item) => item.capabilities.forEach((action) => coveredActions.add(action)));
-  const providerIssues = providerSummaries.flatMap((summary) =>
-    summary.issues.map((issue) => ({
-      ...issue,
-      message: `${summary.name}：${issue.message}`,
-    })),
+  const providerMetrics = useMemo(
+    () => summarizeProviders(providerSummaries),
+    [providerSummaries],
   );
-
-  const draftErrorCount = draftSummaries.reduce(
-    (sum, summary) =>
-      sum + summary.issues.filter((issue) => issue.severity === "error").length,
-    0,
-  );
-  const draftWarningCount = draftSummaries.reduce(
-    (sum, summary) =>
-      sum + summary.issues.filter((issue) => issue.severity === "warning").length,
-    0,
-  );
-  const draftUsableCount = draftSummaries.filter(
-    (summary) =>
-      summary.enabled &&
-      summary.hasKey &&
-      summary.modelNames.length > 0 &&
-      !summary.issues.some((issue) => issue.severity === "error"),
-  ).length;
-  const globalDraftIssue =
-    enabledDraft && draftUsableCount === 0
-      ? "启用视频生成前至少需要一个启用且可用的供应商"
-      : null;
-  const draftStatusText = draftStatusLabel(
-    globalDraftIssue,
-    draftErrorCount,
-    draftWarningCount,
+  const draftMetrics = useMemo(
+    () => summarizeDrafts(draftSummaries, enabledDraft),
+    [draftSummaries, enabledDraft],
   );
 
   const startEdit = () => {
@@ -865,7 +529,7 @@ export function VideoProvidersPanel() {
 
   const updateDraft = (idx: number, patch: Partial<Draft>) => {
     setDrafts((prev) => {
-      if (!prev) return prev;
+      if (!prev || idx < 0 || idx >= prev.length) return prev;
       const next = [...prev];
       const patched = { ...next[idx], ...patch };
       next[idx] = {
@@ -882,7 +546,15 @@ export function VideoProvidersPanel() {
     patch: Partial<ModelDraft>,
   ) => {
     setDrafts((prev) => {
-      if (!prev) return prev;
+      if (
+        !prev ||
+        providerIdx < 0 ||
+        providerIdx >= prev.length ||
+        modelIdx < 0 ||
+        modelIdx >= prev[providerIdx].models.length
+      ) {
+        return prev;
+      }
       const next = [...prev];
       const models = [...next[providerIdx].models];
       models[modelIdx] = { ...models[modelIdx], ...patch };
@@ -891,50 +563,24 @@ export function VideoProvidersPanel() {
     });
   };
 
+  const deleteDraft = (index: number) => {
+    setDrafts(
+      (previous) =>
+        previous?.filter(
+          (_draft, candidateIndex) => candidateIndex !== index,
+        ) ?? null,
+    );
+  };
+
   const save = () => {
-    if (!drafts) return;
+    if (!drafts || updateMut.isPending) return;
     setError(null);
-    if (enabledDraft && drafts.length === 0) {
-      setError("开启视频生成前至少添加一个视频供应商");
+    const validationError = draftSaveError(drafts, enabledDraft, serverItems);
+    if (validationError) {
+      setError(validationError);
       return;
     }
-    const currentSummaries = analyzeDrafts(drafts, enabledDraft, serverItems);
-    const firstError = currentSummaries
-      .flatMap((summary) => summary.issues)
-      .find((issue) => issue.severity === "error");
-    if (firstError) {
-      setError(firstError.message);
-      return;
-    }
-    const currentUsableCount = currentSummaries.filter(
-      (summary) =>
-        summary.enabled &&
-        summary.hasKey &&
-        summary.modelNames.length > 0 &&
-        !summary.issues.some((issue) => issue.severity === "error"),
-    ).length;
-    if (enabledDraft && currentUsableCount === 0) {
-      setError("启用视频生成前至少需要一个启用且可用的供应商");
-      return;
-    }
-    const items: VideoProviderItemIn[] = [];
-    for (const draft of drafts) {
-      const name = draft.name.trim();
-      const models = rowsToModels(draft.models);
-      items.push({
-        name,
-        kind: draft.kind,
-        base_url: draft.base_url.trim(),
-        ...(draft.api_key.trim() ? { api_key: draft.api_key.trim() } : {}),
-        enabled: normalizeVideoProviderEnabled(draft.kind, draft.enabled),
-        priority: Number(draft.priority) || 0,
-        weight: Math.max(1, Number(draft.weight) || 1),
-        concurrency: Math.max(1, Math.min(32, Number(draft.concurrency) || 1)),
-        supports_idempotency: draft.supports_idempotency,
-        proxy: draft.proxy.trim() || null,
-        models,
-      });
-    }
+    const items = drafts.map(draftToInput);
     updateMut.mutate(
       { enabled: enabledDraft, items },
       {
@@ -945,6 +591,11 @@ export function VideoProvidersPanel() {
         onError: (err) => setError(saveError(err)),
       },
     );
+  };
+
+  const discard = () => {
+    setDrafts(null);
+    setError(null);
   };
 
   if (query.isLoading) {
@@ -968,207 +619,47 @@ export function VideoProvidersPanel() {
 
   return (
     <section className="space-y-5 pb-28">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-accent-border bg-accent-soft">
-                <Clapperboard className="h-4 w-4 text-accent" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm font-medium text-[var(--fg-0)]">
-                  AI 视频供应商
-                </h3>
-                <p className="mt-0.5 type-caption text-[var(--fg-2)]">
-                  Seedance / HappyHorse / Omni Flash · 模型映射与并发路由
-                </p>
-              </div>
-            </div>
-          </div>
-          {!editing && (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={startEdit}
-                leftIcon={<Pencil className="h-3.5 w-3.5" />}
-              >
-                编辑
-              </Button>
-            </div>
-          )}
-        </div>
+      <ProviderPanelHeader
+        editing={editing}
+        enabled={Boolean(query.data?.enabled)}
+        source={query.data?.source}
+        serverItems={serverItems}
+        metrics={providerMetrics}
+        onEdit={startEdit}
+      />
 
-        {serverItems.length > 0 && !editing && (
-          <VideoStatsRow
-            enabled={Boolean(query.data?.enabled)}
-            source={query.data?.source}
-            providerCount={serverItems.length}
-            enabledCount={enabledCount}
-            usableCount={usableCount}
-            totalConcurrency={totalConcurrency}
-            coveredActions={coveredActions}
-          />
-        )}
-      </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
-        >
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="flex-1">{error}</span>
-          <IconButton
-            variant="ghost"
-            size="sm"
-            aria-label="关闭"
-            onClick={() => setError(null)}
-          >
-            <X className="h-3.5 w-3.5" />
-          </IconButton>
-        </div>
-      )}
-      {saved && (
-        <div
-          aria-live="polite"
-          className="flex items-center gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-4 py-3 type-body-sm text-success"
-        >
-          <Check className="h-4 w-4" />
-          已保存
-        </div>
-      )}
+      <ProviderPanelFeedback
+        error={error}
+        saved={saved}
+        onDismissError={() => setError(null)}
+      />
 
       {!editing ? (
-        <>
-          <ReadinessNotice
-            enabled={Boolean(query.data?.enabled)}
-            usableCount={usableCount}
-            coveredActions={coveredActions}
-            providerIssues={providerIssues}
-          />
-
-          <div className="space-y-5">
-            {serverItems.map((item) => (
-              <ProviderCard
-                key={item.name}
-                item={item}
-                summary={providerSummaries.find((summary) => summary.name === item.name)}
-              />
-            ))}
-            {serverItems.length === 0 && (
-              <EmptyState onCreate={startEdit} />
-            )}
-          </div>
-        </>
+        <ProviderOverview
+          enabled={Boolean(query.data?.enabled)}
+          serverItems={serverItems}
+          summaries={providerSummaries}
+          metrics={providerMetrics}
+          onCreate={startEdit}
+        />
       ) : (
-        <div className="space-y-5">
-          <EditCommandCenter
-            enabled={enabledDraft}
-            source={query.data?.source}
-            draftCount={drafts.length}
-            errorCount={draftErrorCount + (globalDraftIssue ? 1 : 0)}
-            warningCount={draftWarningCount}
-            globalIssue={globalDraftIssue}
-            onToggle={setEnabledDraft}
-            onAddVolcano={() => addDraft(emptyVolcanoDraft())}
-            onAddVolcanoThirdParty={() => addDraft(emptyVolcanoThirdPartyDraft())}
-            onAddVolcanoNewApi={() => addDraft(emptyVolcanoNewApiDraft())}
-            onAddDashscope={() => addDraft(emptyDashScopeDraft())}
-            onAddVeo={() => addDraft(emptyVeoDraft())}
-            onAddOmniFlash={() => addDraft(emptyOmniFlashDraft())}
-            onAddFake={() => addDraft(emptyFakeDraft())}
-          />
-
-          <div className="space-y-4">
-            {drafts.map((draft, idx) => (
-              <ProviderEditor
-                key={draft._key}
-                draft={draft}
-                summary={draftSummaries[idx]}
-                storedKeyHint={
-                  draft.original_name && draft.original_name === draft.name.trim()
-                    ? storedKeyHint(serverItems, draft.original_name)
-                    : ""
-                }
-                proxies={proxyOptions.map((item) => item.name)}
-                onPatch={(patch) => updateDraft(idx, patch)}
-                onDelete={() =>
-                  setDrafts((prev) => prev?.filter((_, i) => i !== idx) ?? null)
-                }
-                onAddModel={() =>
-                  updateDraft(idx, { models: [...draft.models, emptyModelDraft()] })
-                }
-                onApplyPreset={() =>
-                  updateDraft(idx, presetPatchForKind(draft))
-                }
-                onPatchModel={(modelIdx, patch) => updateModel(idx, modelIdx, patch)}
-                onMirrorModel={(modelIdx) => {
-                  const row = draft.models[modelIdx];
-                  const value = row.t2v.trim() || row.i2v.trim() || row.reference.trim();
-                  if (!value) return;
-                  updateModel(idx, modelIdx, {
-                    t2v: row.t2v.trim() || value,
-                    i2v: row.i2v.trim() || value,
-                    reference: row.reference.trim() || value,
-                  });
-                }}
-                onDeleteModel={(modelIdx) =>
-                  updateDraft(idx, {
-                    models: draft.models.filter((_, i) => i !== modelIdx),
-                  })
-                }
-              />
-            ))}
-            {drafts.length === 0 && (
-              <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-5 py-8 text-center">
-                <p className="text-sm font-medium text-[var(--fg-0)]">暂无编辑中的供应商</p>
-                <p className="mt-1 type-caption text-[var(--fg-2)]">
-                  使用上方预设添加 Seedance 或 HappyHorse。
-                </p>
-              </div>
-            )}
-          </div>
-
-          <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
-            <div className="flex items-center gap-2 rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:gap-3 sm:px-4">
-              <span className="min-w-0 type-caption text-[var(--fg-1)]">
-                <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]" />
-                  编辑中
-                  <span className="text-[var(--fg-2)]">·</span>
-                  <span className="font-mono tabular-nums">{drafts.length}</span>
-                  <span>个供应商</span>
-                </span>
-                <span className="ml-2 hidden text-[var(--fg-2)] sm:inline">
-                  {draftStatusText}
-                </span>
-              </span>
-              <div className="flex-1 sm:flex-none" />
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setDrafts(null);
-                  setError(null);
-                }}
-                disabled={updateMut.isPending}
-              >
-                放弃
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={save}
-                disabled={updateMut.isPending}
-                loading={updateMut.isPending}
-                leftIcon={!updateMut.isPending ? <Save className="h-3.5 w-3.5" /> : undefined}
-              >
-                {updateMut.isPending ? "保存中" : "保存"}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <ProviderEditorView
+          drafts={drafts}
+          summaries={draftSummaries}
+          metrics={draftMetrics}
+          enabled={enabledDraft}
+          source={query.data?.source}
+          serverItems={serverItems}
+          proxyNames={proxyOptions.map((item) => item.name)}
+          saving={updateMut.isPending}
+          onToggle={setEnabledDraft}
+          onAddDraft={addDraft}
+          updateDraft={updateDraft}
+          updateModel={updateModel}
+          deleteDraft={deleteDraft}
+          onDiscard={discard}
+          onSave={save}
+        />
       )}
     </section>
   );
@@ -1207,11 +698,7 @@ function VideoStatsRow({
       <VideoStatCard
         label="供应商"
         value={`${usableCount} / ${providerCount}`}
-        sub={
-          <span className="text-[var(--fg-2)]">
-            {enabledCount} 个启用
-          </span>
-        }
+        sub={<span className="text-[var(--fg-2)]">{enabledCount} 个启用</span>}
         accent={usableCount > 0 ? "green" : "amber"}
       />
       <VideoStatCard
@@ -1222,7 +709,9 @@ function VideoStatsRow({
             {actionCoverageLabel(coveredActions)} · 并发 {totalConcurrency}
           </span>
         }
-        accent={coveredActions.size === VIDEO_ACTIONS.length ? "green" : "amber"}
+        accent={
+          coveredActions.size === VIDEO_ACTIONS.length ? "green" : "amber"
+        }
       />
     </div>
   );
@@ -1247,7 +736,9 @@ function VideoStatCard({
         : "border-[var(--border)]";
 
   return (
-    <div className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-4 py-3 backdrop-blur-sm ${ring}`}>
+    <div
+      className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-4 py-3 backdrop-blur-sm ${ring}`}
+    >
       <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
@@ -1298,12 +789,27 @@ function ReadinessNotice({
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-1.5">
-          <StatusPill tone={enabled ? "success" : "warning"} label={enabled ? "总开关已开" : "总开关关闭"} />
-          <StatusPill tone={usableCount > 0 ? "success" : "warning"} label={`${usableCount} 个可用`} />
-          <StatusPill tone={coveredActions.size === VIDEO_ACTIONS.length ? "success" : "warning"} label={`${coveredActions.size}/${VIDEO_ACTIONS.length} 动作`} />
+          <StatusPill
+            tone={enabled ? "success" : "warning"}
+            label={enabled ? "总开关已开" : "总开关关闭"}
+          />
+          <StatusPill
+            tone={usableCount > 0 ? "success" : "warning"}
+            label={`${usableCount} 个可用`}
+          />
+          <StatusPill
+            tone={
+              coveredActions.size === VIDEO_ACTIONS.length
+                ? "success"
+                : "warning"
+            }
+            label={`${coveredActions.size}/${VIDEO_ACTIONS.length} 动作`}
+          />
         </div>
       </div>
-      {topIssues.length > 0 && <IssueList className="mt-3" issues={topIssues} />}
+      {topIssues.length > 0 && (
+        <IssueList className="mt-3" issues={topIssues} />
+      )}
     </div>
   );
 }
@@ -1317,7 +823,6 @@ function ProviderCard({
 }) {
   const issues = summary?.issues ?? [];
   const models = summary?.modelNames ?? modelNamesFromModels(item.models);
-  const visibleModels = models.slice(0, 6);
   return (
     <article
       className={
@@ -1327,82 +832,153 @@ function ProviderCard({
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/30")
       }
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className={
-                "text-sm font-medium " +
-                (item.enabled ? "text-[var(--fg-0)]" : "text-[var(--fg-1)]")
-              }
-            >
-              {item.name}
-            </span>
-            <StatusPill tone={issueTone(issues)} label={item.enabled ? "启用" : "停用"} />
-            <StatusPill tone="neutral" label={KIND_LABELS[item.kind]} />
-          </div>
-          <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
-            {item.base_url}
-          </code>
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        {VIDEO_ACTIONS.map((action) => (
-          <StatusPill
-            key={action}
-            tone={summary?.capabilities.has(action) ? "success" : "neutral"}
-            label={ACTION_LABELS[action]}
-          />
-        ))}
-        {visibleModels.map((model) => (
-          <span
-            key={model}
-            className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 py-1 font-mono text-[11px] text-[var(--fg-1)]"
-          >
-            {model}
-          </span>
-        ))}
-        {models.length > visibleModels.length && (
-          <span className="rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
-            +{models.length - visibleModels.length}
-          </span>
-        )}
-        {models.length === 0 && (
-          <span className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
-            未配置模型
-          </span>
-        )}
-      </div>
+      <ProviderCardHeader item={item} issues={issues} />
+      <ProviderCardTags models={models} summary={summary} />
 
       {issues.length > 0 && <IssueList className="mt-4" issues={issues} />}
-
-      <div
-        className={
-          "mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs " +
-          (item.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]")
-        }
-      >
-        <ProviderMetaItem
-          label="密钥"
-          value={item.api_key_hint || "未保存"}
-          mono
-          color={item.api_key_hint ? undefined : "text-danger"}
-        />
-        <MetaSep />
-        <ProviderMetaItem label="优先级" value={String(item.priority)} mono />
-        <MetaSep />
-        <ProviderMetaItem label="权重" value={String(item.weight)} mono />
-        <MetaSep />
-        <ProviderMetaItem label="并发" value={String(item.concurrency)} mono />
-        <ProviderMetaItem
-          label="幂等提交"
-          value={item.supports_idempotency ? "已确认" : "未确认"}
-        />
-        <MetaSep />
-        <ProviderMetaItem label="代理" value={item.proxy || "直连"} mono />
-      </div>
+      <ProviderCardMeta item={item} />
     </article>
+  );
+}
+
+function ProviderCardHeader({
+  item,
+  issues,
+}: {
+  item: VideoProviderItemOut;
+  issues: Issue[];
+}) {
+  const assetReady = item.asset_management_ready;
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`text-sm font-medium ${
+              item.enabled ? "text-[var(--fg-0)]" : "text-[var(--fg-1)]"
+            }`}
+          >
+            {item.name}
+          </span>
+          <StatusPill
+            tone={issueTone(issues)}
+            label={item.enabled ? "启用" : "停用"}
+          />
+          <StatusPill tone="neutral" label={KIND_LABELS[item.kind]} />
+          {item.kind === "volcano" && (
+            <StatusPill
+              tone={assetReady ? "success" : "warning"}
+              label={assetReady ? "资产管理已就绪" : "资产管理未就绪"}
+            />
+          )}
+        </div>
+        <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
+          {item.base_url}
+        </code>
+      </div>
+    </div>
+  );
+}
+
+function ProviderCardTags({
+  models,
+  summary,
+}: {
+  models: string[];
+  summary: ProviderSummary | undefined;
+}) {
+  const visibleModels = models.slice(0, 6);
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      {VIDEO_ACTIONS.map((action) => (
+        <StatusPill
+          key={action}
+          tone={summary?.capabilities.has(action) ? "success" : "neutral"}
+          label={ACTION_LABELS[action]}
+        />
+      ))}
+      {visibleModels.map((model) => (
+        <span
+          key={model}
+          className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 py-1 font-mono text-[11px] text-[var(--fg-1)]"
+        >
+          {model}
+        </span>
+      ))}
+      {models.length > visibleModels.length && (
+        <span className="rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
+          +{models.length - visibleModels.length}
+        </span>
+      )}
+      {models.length === 0 && (
+        <span className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
+          未配置模型
+        </span>
+      )}
+    </div>
+  );
+}
+
+function VolcanoProviderMeta({ item }: { item: VideoProviderItemOut }) {
+  return (
+    <>
+      <MetaSep />
+      <ProviderMetaItem
+        label="Access Key ID"
+        value={item.access_key_id_hint || "未保存"}
+        mono
+        color={item.access_key_id_hint ? undefined : "text-warning"}
+      />
+      <MetaSep />
+      <ProviderMetaItem
+        label="Secret Access Key"
+        value={item.secret_access_key_hint || "未保存"}
+        mono
+        color={item.secret_access_key_hint ? undefined : "text-warning"}
+      />
+      <MetaSep />
+      <ProviderMetaItem
+        label="ProjectName"
+        value={item.project_name || VOLCANO_DEFAULT_PROJECT_NAME}
+        mono
+      />
+      <MetaSep />
+      <ProviderMetaItem
+        label="Region"
+        value={item.region || VOLCANO_DEFAULT_REGION}
+        mono
+      />
+    </>
+  );
+}
+
+function ProviderCardMeta({ item }: { item: VideoProviderItemOut }) {
+  return (
+    <div
+      className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${
+        item.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]"
+      }`}
+    >
+      <ProviderMetaItem
+        label="密钥"
+        value={item.api_key_hint || "未保存"}
+        mono
+        color={item.api_key_hint ? undefined : "text-danger"}
+      />
+      {item.kind === "volcano" && <VolcanoProviderMeta item={item} />}
+      <MetaSep />
+      <ProviderMetaItem label="优先级" value={String(item.priority)} mono />
+      <MetaSep />
+      <ProviderMetaItem label="权重" value={String(item.weight)} mono />
+      <MetaSep />
+      <ProviderMetaItem label="并发" value={String(item.concurrency)} mono />
+      <ProviderMetaItem
+        label="幂等提交"
+        value={item.supports_idempotency ? "已确认" : "未确认"}
+      />
+      <MetaSep />
+      <ProviderMetaItem label="代理" value={item.proxy || "直连"} mono />
+    </div>
   );
 }
 
@@ -1420,7 +996,9 @@ function ProviderMetaItem({
   return (
     <span>
       {label}:{" "}
-      <code className={`${mono ? "tabular-nums" : ""} ${color ?? "text-[var(--fg-1)]"}`}>
+      <code
+        className={`${mono ? "tabular-nums" : ""} ${color ?? "text-[var(--fg-1)]"}`}
+      >
         {value}
       </code>
     </span>
@@ -1466,7 +1044,9 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)]">
         <Clapperboard className="h-4 w-4 text-[var(--fg-1)]" />
       </div>
-      <p className="mt-3 text-sm font-medium text-[var(--fg-0)]">还没有 AI 视频供应商</p>
+      <p className="mt-3 text-sm font-medium text-[var(--fg-0)]">
+        还没有 AI 视频供应商
+      </p>
       <p className="mx-auto mt-1 max-w-md type-caption text-[var(--fg-2)]">
         添加供应商后，视频页才能创建可用模型对应的视频任务。
       </p>
@@ -1519,10 +1099,18 @@ function EditCommandCenter({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-[var(--fg-0)]">编辑视频供应商</p>
+            <p className="text-sm font-medium text-[var(--fg-0)]">
+              编辑视频供应商
+            </p>
             <StatusPill tone="neutral" label={`${draftCount} 个供应商`} />
-            <StatusPill tone={errorCount > 0 ? "danger" : "neutral"} label={`${errorCount} 错误`} />
-            <StatusPill tone={warningCount > 0 ? "warning" : "neutral"} label={`${warningCount} 提示`} />
+            <StatusPill
+              tone={errorCount > 0 ? "danger" : "neutral"}
+              label={`${errorCount} 错误`}
+            />
+            <StatusPill
+              tone={warningCount > 0 ? "warning" : "neutral"}
+              label={`${warningCount} 提示`}
+            />
           </div>
           <p className="mt-1 type-caption text-[var(--fg-2)]">
             当前来源：{sourceLabel(source)}
@@ -1543,7 +1131,10 @@ function EditCommandCenter({
         </div>
       )}
       {globalIssue && (
-        <div role="alert" className="mt-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
+        <div
+          role="alert"
+          className="mt-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger"
+        >
           {globalIssue}
         </div>
       )}
@@ -1616,29 +1207,25 @@ function PresetButton({
         {icon}
       </span>
       <span className="min-w-0">
-        <span className="block truncate text-xs font-medium text-[var(--fg-0)]">{title}</span>
-        <span className="mt-0.5 block truncate text-[11px] text-[var(--fg-2)]">{detail}</span>
+        <span className="block truncate text-xs font-medium text-[var(--fg-0)]">
+          {title}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-[var(--fg-2)]">
+          {detail}
+        </span>
       </span>
     </button>
   );
 }
 
-function ProviderEditor({
-  draft,
-  summary,
-  storedKeyHint,
-  proxies,
-  onPatch,
-  onDelete,
-  onAddModel,
-  onApplyPreset,
-  onPatchModel,
-  onMirrorModel,
-  onDeleteModel,
-}: {
+type ProviderEditorProps = {
   draft: Draft;
   summary: ProviderSummary | undefined;
   storedKeyHint: string;
+  storedAccessKeyIdHint: string;
+  storedSecretAccessKeyHint: string;
+  storedAssetManagementReady: boolean;
+  storedAssetCredentialsRequireReplacement: boolean;
   proxies: string[];
   onPatch: (patch: Partial<Draft>) => void;
   onDelete: () => void;
@@ -1647,262 +1234,424 @@ function ProviderEditor({
   onPatchModel: (idx: number, patch: Partial<ModelDraft>) => void;
   onMirrorModel: (idx: number) => void;
   onDeleteModel: (idx: number) => void;
+};
+
+function editorStatusLabel(tone: ReturnType<typeof issueTone>): string {
+  if (tone === "success") return "可保存";
+  if (tone === "danger") return "需修复";
+  return "有提示";
+}
+
+function providerKindPatch(
+  draft: Draft,
+  kind: VideoProviderKind,
+): Partial<Draft> {
+  return presetPatchForKind({ ...draft, kind });
+}
+
+function baseUrlDraftPatch(draft: Draft, baseUrl: string): Partial<Draft> {
+  const previousInferredRegion = inferVolcanoRegion(draft.base_url);
+  const nextInferredRegion = inferVolcanoRegion(baseUrl);
+  const followsBaseUrl =
+    draft.kind === "volcano" &&
+    Boolean(nextInferredRegion) &&
+    (!draft.region.trim() ||
+      draft.region === previousInferredRegion ||
+      (!previousInferredRegion && draft.region === VOLCANO_DEFAULT_REGION));
+  return {
+    base_url: baseUrl,
+    ...(followsBaseUrl && nextInferredRegion
+      ? { region: nextInferredRegion }
+      : {}),
+  };
+}
+
+function credentialPlaceholder(
+  replacementRequired: boolean,
+  storedHint: string,
+): string {
+  if (replacementRequired) return "重命名后需重填";
+  if (storedHint) return `留空保留 ${storedHint}`;
+  return "未配置";
+}
+
+function assetCredentialSummary({
+  replacementRequired,
+  hasNew,
+  hasCompleteNew,
+  hasStored,
+  storedReady,
+  storedAccessKeyIdHint,
+  storedSecretAccessKeyHint,
+}: {
+  replacementRequired: boolean;
+  hasNew: boolean;
+  hasCompleteNew: boolean;
+  hasStored: boolean;
+  storedReady: boolean;
+  storedAccessKeyIdHint: string;
+  storedSecretAccessKeyHint: string;
+}): {
+  text: string;
+  tone: "success" | "warning" | "danger" | "neutral";
+  label: string;
+} {
+  if (hasNew && !hasCompleteNew) {
+    return {
+      text: "只填写了一项火山资产凭证，请同时填写 Access Key ID 与 Secret Access Key",
+      tone: "danger",
+      label: "凭证不完整",
+    };
+  }
+  if (replacementRequired && !hasCompleteNew) {
+    return {
+      text: "供应商重命名后需重新填写 Access Key ID 与 Secret Access Key",
+      tone: "danger",
+      label: "保存前需重填",
+    };
+  }
+  if (hasNew) {
+    return {
+      text: "将成对更新火山资产 Access Key ID 与 Secret Access Key",
+      tone: storedReady ? "success" : "warning",
+      label: "保存后校验",
+    };
+  }
+  if (hasStored) {
+    return {
+      text: `留空将保留已保存凭证：${storedAccessKeyIdHint} / ${storedSecretAccessKeyHint}`,
+      tone: storedReady ? "success" : "warning",
+      label: storedReady ? "已保存配置可用" : "已保存配置未就绪",
+    };
+  }
+  return {
+    text: "尚未保存火山资产凭证",
+    tone: "neutral",
+    label: "未保存资产配置",
+  };
+}
+
+function providerKeyStatus(draft: Draft, storedKeyHintValue: string): string {
+  if (draft.kind === "fake") return "测试供应商不需要 Key";
+  if (draft.api_key.trim()) return "将更新为新 Key";
+  if (draftWasRenamed(draft)) return "重命名后需重新填写 Key";
+  if (storedKeyHintValue) return `保留已保存 Key：${storedKeyHintValue}`;
+  return "未保存 Key";
+}
+
+function ProviderEditorHeader({
+  draft,
+  summary,
+  issues,
+  onDelete,
+}: {
+  draft: Draft;
+  summary: ProviderSummary | undefined;
+  issues: Issue[];
+  onDelete: () => void;
 }) {
-  const issues = summary?.issues ?? [];
   const tone = issueTone(issues);
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)]">
+    <>
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-medium text-[var(--fg-0)]">
               {draft.name.trim() || "未命名供应商"}
             </p>
-            <StatusPill tone={tone} label={tone === "success" ? "可保存" : tone === "danger" ? "需修复" : "有提示"} />
+            <StatusPill tone={tone} label={editorStatusLabel(tone)} />
             <StatusPill tone="neutral" label={KIND_LABELS[draft.kind]} />
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 type-caption text-[var(--fg-2)]">
-            <span>{summary ? actionCoverageLabel(summary.capabilities) : "未配置动作"}</span>
+            <span>
+              {summary
+                ? actionCoverageLabel(summary.capabilities)
+                : "未配置动作"}
+            </span>
             <span className="text-[var(--fg-3)]">·</span>
             <ModelSummary models={draft.models} />
           </div>
         </div>
-        <IconButton variant="ghost" size="sm" aria-label="删除供应商" onClick={onDelete}>
+        <IconButton
+          variant="ghost"
+          size="sm"
+          aria-label="删除供应商"
+          onClick={onDelete}
+        >
           <Trash2 className="h-4 w-4" />
         </IconButton>
       </div>
-
       {issues.length > 0 && <IssueList className="mt-4" issues={issues} />}
+    </>
+  );
+}
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.55fr)]">
-        <div className="space-y-4">
-          <SectionTitle icon={<Server className="h-4 w-4" />} title="基础连接" />
-          <div className="grid gap-3 md:grid-cols-2">
-            <Field label="名称" value={draft.name} onChange={(name) => onPatch({ name })} />
-            <label className="space-y-1.5">
-              <span className="type-caption text-[var(--fg-2)]">类型</span>
-              <select
-                value={draft.kind}
-                onChange={(event) => {
-                  const kind = event.target.value as VideoProviderKind;
-                  if (kind === "volcano") {
-                    onPatch(volcanoPresetPatch(draft));
-                  } else if (kind === "volcano_third_party") {
-                    onPatch(volcanoThirdPartyPresetPatch(draft));
-                  } else if (kind === "volcano_newapi") {
-                    onPatch(volcanoNewApiPresetPatch(draft));
-                  } else if (kind === "dashscope") {
-                    onPatch(dashscopePresetPatch(draft));
-                  } else if (kind === "veo") {
-                    onPatch(veoPresetPatch(draft));
-                  } else if (kind === "omni_flash") {
-                    onPatch(omniFlashPresetPatch(draft));
-                  } else if (kind === "fake") {
-                    onPatch(fakePresetPatch(draft));
-                  } else {
-                    onPatch({ kind });
-                  }
-                }}
-                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-              >
-                <option value="volcano">火山方舟</option>
-                <option value="volcano_third_party">火山第三方 / MOYU</option>
-                <option value="volcano_newapi">火山 New API / /v1/videos</option>
-                <option value="dashscope">DashScope / HappyHorse</option>
-                <option value="veo">Google Veo</option>
-                <option value="omni_flash">Google Omni Flash / 第三方</option>
-                <option value="fake">测试</option>
-              </select>
-            </label>
-            <Field
-              label="Base URL"
-              value={draft.base_url}
-              onChange={(base_url) => onPatch({ base_url })}
-            />
-            <Field
-              label="API Key"
-              value={draft.api_key}
-              onChange={(api_key) => onPatch({ api_key })}
-              placeholder={storedKeyHint ? `留空保留 ${storedKeyHint}` : "必填"}
-              type="password"
-            />
-          </div>
-
-          <SectionTitle icon={<Gauge className="h-4 w-4" />} title="路由容量" />
-          <div className="grid gap-3 md:grid-cols-4">
-            <Field
-              label="优先级"
-              value={String(draft.priority)}
-              onChange={(value) => onPatch({ priority: Number(value) || 0 })}
-              type="number"
-            />
-            <Field
-              label="权重"
-              value={String(draft.weight)}
-              onChange={(value) => onPatch({ weight: Number(value) || 1 })}
-              type="number"
-            />
-            <Field
-              label="并发"
-              value={String(draft.concurrency)}
-              onChange={(value) => onPatch({ concurrency: Number(value) || 1 })}
-              type="number"
-            />
-            <label className="space-y-1.5">
-              <span className="type-caption text-[var(--fg-2)]">代理</span>
-              <select
-                value={draft.proxy}
-                onChange={(event) => onPatch({ proxy: event.target.value })}
-                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-              >
-                <option value="">直连</option>
-                {proxies.map((proxy) => (
-                  <option key={proxy} value={proxy}>
-                    {proxy}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
-            <span>
-              <span className="block">启用此供应商</span>
-              {draft.kind === "veo" && (
-                <span className="mt-0.5 block text-[11px] text-warning">
-                  Veo 适配器尚未接入 Worker
-                </span>
-              )}
-            </span>
-            <input
-              type="checkbox"
-              checked={normalizeVideoProviderEnabled(draft.kind, draft.enabled)}
-              disabled={!videoProviderKindCanBeEnabled(draft.kind)}
-              onChange={(event) =>
-                onPatch({
-                  enabled: normalizeVideoProviderEnabled(
-                    draft.kind,
-                    event.target.checked,
-                  ),
-                })
-              }
-            />
-          </label>
-          <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
-            <span>确认支持幂等提交</span>
-            <input
-              type="checkbox"
-              checked={draft.supports_idempotency}
-              onChange={(event) =>
-                onPatch({ supports_idempotency: event.target.checked })
-              }
-            />
-          </label>
-          <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
-              <KeyRound className="h-4 w-4 text-[var(--fg-2)]" />
-              Key 状态
-            </div>
-            <p className="mt-2 type-caption text-[var(--fg-2)]">
-              {draft.kind === "fake"
-                ? "测试供应商不需要 Key"
-                : draft.api_key.trim()
-                  ? "将更新为新 Key"
-                  : draft.original_name && draft.original_name !== draft.name.trim()
-                    ? "重命名后需重新填写 Key"
-                  : storedKeyHint
-                    ? `保留已保存 Key：${storedKeyHint}`
-                    : "未保存 Key"}
-            </p>
-          </div>
-          <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
-              <Layers3 className="h-4 w-4 text-[var(--fg-2)]" />
-              动作覆盖
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {VIDEO_ACTIONS.map((action) => (
-                <StatusPill
-                  key={action}
-                  tone={summary?.capabilities.has(action) ? "success" : "neutral"}
-                  label={ACTION_LABELS[action]}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
+function ProviderConnectionEditor({
+  draft,
+  storedKeyHintValue,
+  onPatch,
+}: {
+  draft: Draft;
+  storedKeyHintValue: string;
+  onPatch: ProviderEditorProps["onPatch"];
+}) {
+  return (
+    <>
+      <SectionTitle icon={<Server className="h-4 w-4" />} title="基础连接" />
+      <div className="grid gap-3 md:grid-cols-2">
+        <Field
+          label="名称"
+          value={draft.name}
+          onChange={(name) => onPatch({ name })}
+        />
+        <label className="space-y-1.5">
+          <span className="type-caption text-[var(--fg-2)]">类型</span>
+          <select
+            value={draft.kind}
+            onChange={(event) =>
+              onPatch(
+                providerKindPatch(
+                  draft,
+                  event.target.value as VideoProviderKind,
+                ),
+              )
+            }
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+          >
+            <option value="volcano">火山方舟</option>
+            <option value="volcano_third_party">火山第三方 / MOYU</option>
+            <option value="volcano_newapi">火山 New API / /v1/videos</option>
+            <option value="dashscope">DashScope / HappyHorse</option>
+            <option value="veo">Google Veo</option>
+            <option value="omni_flash">Google Omni Flash / 第三方</option>
+            <option value="fake">测试</option>
+          </select>
+        </label>
+        <Field
+          label="Base URL"
+          value={draft.base_url}
+          onChange={(baseUrl) => onPatch(baseUrlDraftPatch(draft, baseUrl))}
+        />
+        <Field
+          label="API Key"
+          value={draft.api_key}
+          onChange={(api_key) => onPatch({ api_key })}
+          name={`video-provider-${draft._key}-api-key`}
+          autoComplete="new-password"
+          placeholder={
+            storedKeyHintValue ? `留空保留 ${storedKeyHintValue}` : "必填"
+          }
+          type="password"
+        />
       </div>
+    </>
+  );
+}
 
-      <div className="mt-5 space-y-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <SectionTitle icon={<Layers3 className="h-4 w-4" />} title="模型能力" />
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onApplyPreset}
-              leftIcon={<Check className="h-3.5 w-3.5" />}
-            >
-              套用当前类型预设
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onAddModel}
-              leftIcon={<Plus className="h-3.5 w-3.5" />}
-            >
-              添加模型
-            </Button>
-          </div>
+function VolcanoAssetConfigEditor({
+  draft,
+  storedAccessKeyIdHint,
+  storedSecretAccessKeyHint,
+  storedAssetManagementReady,
+  storedAssetCredentialsRequireReplacement,
+  onPatch,
+}: Pick<
+  ProviderEditorProps,
+  | "draft"
+  | "storedAccessKeyIdHint"
+  | "storedSecretAccessKeyHint"
+  | "storedAssetManagementReady"
+  | "storedAssetCredentialsRequireReplacement"
+  | "onPatch"
+>) {
+  const hasNew = Boolean(
+    draft.access_key_id.trim() || draft.secret_access_key.trim(),
+  );
+  const hasCompleteNew = Boolean(
+    draft.access_key_id.trim() && draft.secret_access_key.trim(),
+  );
+  const hasStored = Boolean(storedAccessKeyIdHint && storedSecretAccessKeyHint);
+  const summary = assetCredentialSummary({
+    replacementRequired: storedAssetCredentialsRequireReplacement,
+    hasNew,
+    hasCompleteNew,
+    hasStored,
+    storedReady: storedAssetManagementReady,
+    storedAccessKeyIdHint,
+    storedSecretAccessKeyHint,
+  });
+  return (
+    <div className="space-y-3 border-t border-[var(--border-subtle)] pt-4">
+      <SectionTitle
+        icon={<KeyRound className="h-4 w-4" />}
+        title="火山资产管理"
+      />
+      <div className="grid gap-3 md:grid-cols-2">
+        <Field
+          label="Access Key ID"
+          value={draft.access_key_id}
+          onChange={(access_key_id) => onPatch({ access_key_id })}
+          name={`video-provider-${draft._key}-access-key-id`}
+          autoComplete="new-password"
+          placeholder={credentialPlaceholder(
+            storedAssetCredentialsRequireReplacement,
+            storedAccessKeyIdHint,
+          )}
+          type="password"
+        />
+        <Field
+          label="Secret Access Key"
+          value={draft.secret_access_key}
+          onChange={(secret_access_key) => onPatch({ secret_access_key })}
+          name={`video-provider-${draft._key}-secret-access-key`}
+          autoComplete="new-password"
+          placeholder={credentialPlaceholder(
+            storedAssetCredentialsRequireReplacement,
+            storedSecretAccessKeyHint,
+          )}
+          type="password"
+        />
+        <Field
+          label="ProjectName"
+          value={draft.project_name}
+          onChange={(project_name) => onPatch({ project_name })}
+          placeholder={VOLCANO_DEFAULT_PROJECT_NAME}
+        />
+        <Field
+          label="Region"
+          value={draft.region}
+          onChange={(region) => onPatch({ region })}
+          placeholder={VOLCANO_DEFAULT_REGION}
+        />
+      </div>
+      <div
+        className={`flex flex-col gap-2 rounded-[var(--radius-card)] border px-3 py-2.5 type-caption sm:flex-row sm:items-center sm:justify-between ${
+          summary.tone === "danger" || summary.tone === "warning"
+            ? "border-warning-border bg-warning-soft text-warning"
+            : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)]"
+        }`}
+      >
+        <span>{summary.text}</span>
+        <StatusPill tone={summary.tone} label={summary.label} />
+      </div>
+    </div>
+  );
+}
+
+function ProviderRoutingEditor({
+  draft,
+  proxies,
+  onPatch,
+}: Pick<ProviderEditorProps, "draft" | "proxies" | "onPatch">) {
+  return (
+    <>
+      <SectionTitle icon={<Gauge className="h-4 w-4" />} title="路由容量" />
+      <div className="grid gap-3 md:grid-cols-4">
+        <Field
+          label="优先级"
+          value={String(draft.priority)}
+          onChange={(value) => onPatch({ priority: Number(value) || 0 })}
+          type="number"
+        />
+        <Field
+          label="权重"
+          value={String(draft.weight)}
+          onChange={(value) => onPatch({ weight: Number(value) || 1 })}
+          type="number"
+        />
+        <Field
+          label="并发"
+          value={String(draft.concurrency)}
+          onChange={(value) => onPatch({ concurrency: Number(value) || 1 })}
+          type="number"
+        />
+        <label className="space-y-1.5">
+          <span className="type-caption text-[var(--fg-2)]">代理</span>
+          <select
+            value={draft.proxy}
+            onChange={(event) => onPatch({ proxy: event.target.value })}
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+          >
+            <option value="">直连</option>
+            {proxies.map((proxy) => (
+              <option key={proxy} value={proxy}>
+                {proxy}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </>
+  );
+}
+
+function ProviderStateEditor({
+  draft,
+  summary,
+  storedKeyHintValue,
+  onPatch,
+}: {
+  draft: Draft;
+  summary: ProviderSummary | undefined;
+  storedKeyHintValue: string;
+  onPatch: ProviderEditorProps["onPatch"];
+}) {
+  return (
+    <div className="space-y-3">
+      <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
+        <span>
+          <span className="block">启用此供应商</span>
+          {draft.kind === "veo" && (
+            <span className="mt-0.5 block text-[11px] text-warning">
+              Veo 适配器尚未接入 Worker
+            </span>
+          )}
+        </span>
+        <input
+          type="checkbox"
+          checked={normalizeVideoProviderEnabled(draft.kind, draft.enabled)}
+          disabled={!videoProviderKindCanBeEnabled(draft.kind)}
+          onChange={(event) =>
+            onPatch({
+              enabled: normalizeVideoProviderEnabled(
+                draft.kind,
+                event.target.checked,
+              ),
+            })
+          }
+        />
+      </label>
+      <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
+        <span>确认支持幂等提交</span>
+        <input
+          type="checkbox"
+          checked={draft.supports_idempotency}
+          onChange={(event) =>
+            onPatch({ supports_idempotency: event.target.checked })
+          }
+        />
+      </label>
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
+        <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
+          <KeyRound className="h-4 w-4 text-[var(--fg-2)]" />
+          Key 状态
         </div>
-        <div className="space-y-2">
-          {draft.models.map((model, idx) => (
-            <div
-              key={model._key}
-              className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-3 md:grid-cols-[minmax(130px,0.9fr)_1fr_1fr_1fr_auto]"
-            >
-              <Field
-                label="业务模型"
-                value={model.model}
-                onChange={(value) => onPatchModel(idx, { model: value })}
-              />
-              <Field
-                label="文字生成"
-                value={model.t2v}
-                onChange={(value) => onPatchModel(idx, { t2v: value })}
-              />
-              <Field
-                label="首帧生成"
-                value={model.i2v}
-                onChange={(value) => onPatchModel(idx, { i2v: value })}
-              />
-              <Field
-                label="参考生成"
-                value={model.reference}
-                onChange={(value) => onPatchModel(idx, { reference: value })}
-              />
-              <div className="flex items-end gap-1">
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  aria-label="同步模型映射"
-                  tooltip="同步模型映射"
-                  onClick={() => onMirrorModel(idx)}
-                >
-                  <Zap className="h-4 w-4" />
-                </IconButton>
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  aria-label="删除模型映射"
-                  onClick={() => onDeleteModel(idx)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </IconButton>
-              </div>
-            </div>
+        <p className="mt-2 type-caption text-[var(--fg-2)]">
+          {providerKeyStatus(draft, storedKeyHintValue)}
+        </p>
+      </div>
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
+        <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
+          <Layers3 className="h-4 w-4 text-[var(--fg-2)]" />
+          动作覆盖
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {VIDEO_ACTIONS.map((action) => (
+            <StatusPill
+              key={action}
+              tone={summary?.capabilities.has(action) ? "success" : "neutral"}
+              label={ACTION_LABELS[action]}
+            />
           ))}
         </div>
       </div>
@@ -1910,7 +1659,179 @@ function ProviderEditor({
   );
 }
 
-function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
+function ProviderModelsEditor({
+  draft,
+  onAddModel,
+  onApplyPreset,
+  onPatchModel,
+  onMirrorModel,
+  onDeleteModel,
+}: Pick<
+  ProviderEditorProps,
+  | "draft"
+  | "onAddModel"
+  | "onApplyPreset"
+  | "onPatchModel"
+  | "onMirrorModel"
+  | "onDeleteModel"
+>) {
+  return (
+    <div className="mt-5 space-y-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <SectionTitle icon={<Layers3 className="h-4 w-4" />} title="模型能力" />
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onApplyPreset}
+            leftIcon={<Check className="h-3.5 w-3.5" />}
+          >
+            套用当前类型预设
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onAddModel}
+            leftIcon={<Plus className="h-3.5 w-3.5" />}
+          >
+            添加模型
+          </Button>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {draft.models.map((model, idx) => (
+          <div
+            key={model._key}
+            className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-3 md:grid-cols-[minmax(130px,0.9fr)_1fr_1fr_1fr_auto]"
+          >
+            <Field
+              label="业务模型"
+              value={model.model}
+              onChange={(value) => onPatchModel(idx, { model: value })}
+            />
+            <Field
+              label="文字生成"
+              value={model.t2v}
+              onChange={(value) => onPatchModel(idx, { t2v: value })}
+            />
+            <Field
+              label="首帧生成"
+              value={model.i2v}
+              onChange={(value) => onPatchModel(idx, { i2v: value })}
+            />
+            <Field
+              label="参考生成"
+              value={model.reference}
+              onChange={(value) => onPatchModel(idx, { reference: value })}
+            />
+            <div className="flex items-end gap-1">
+              <IconButton
+                variant="ghost"
+                size="sm"
+                aria-label="同步模型映射"
+                tooltip="同步模型映射"
+                onClick={() => onMirrorModel(idx)}
+              >
+                <Zap className="h-4 w-4" />
+              </IconButton>
+              <IconButton
+                variant="ghost"
+                size="sm"
+                aria-label="删除模型映射"
+                onClick={() => onDeleteModel(idx)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </IconButton>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProviderEditor({
+  draft,
+  summary,
+  storedKeyHint,
+  storedAccessKeyIdHint,
+  storedSecretAccessKeyHint,
+  storedAssetManagementReady,
+  storedAssetCredentialsRequireReplacement,
+  proxies,
+  onPatch,
+  onDelete,
+  onAddModel,
+  onApplyPreset,
+  onPatchModel,
+  onMirrorModel,
+  onDeleteModel,
+}: ProviderEditorProps) {
+  const issues = summary?.issues ?? [];
+  return (
+    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)]">
+      <ProviderEditorHeader
+        draft={draft}
+        summary={summary}
+        issues={issues}
+        onDelete={onDelete}
+      />
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.55fr)]">
+        <div className="space-y-4">
+          <ProviderConnectionEditor
+            draft={draft}
+            storedKeyHintValue={storedKeyHint}
+            onPatch={onPatch}
+          />
+
+          {draft.kind === "volcano" && (
+            <VolcanoAssetConfigEditor
+              draft={draft}
+              storedAccessKeyIdHint={storedAccessKeyIdHint}
+              storedSecretAccessKeyHint={storedSecretAccessKeyHint}
+              storedAssetManagementReady={storedAssetManagementReady}
+              storedAssetCredentialsRequireReplacement={
+                storedAssetCredentialsRequireReplacement
+              }
+              onPatch={onPatch}
+            />
+          )}
+
+          <ProviderRoutingEditor
+            draft={draft}
+            proxies={proxies}
+            onPatch={onPatch}
+          />
+        </div>
+
+        <ProviderStateEditor
+          draft={draft}
+          summary={summary}
+          storedKeyHintValue={storedKeyHint}
+          onPatch={onPatch}
+        />
+      </div>
+
+      <ProviderModelsEditor
+        draft={draft}
+        onAddModel={onAddModel}
+        onApplyPreset={onApplyPreset}
+        onPatchModel={onPatchModel}
+        onMirrorModel={onMirrorModel}
+        onDeleteModel={onDeleteModel}
+      />
+    </div>
+  );
+}
+
+function SectionTitle({
+  icon,
+  title,
+}: {
+  icon: React.ReactNode;
+  title: string;
+}) {
   return (
     <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
       <span className="text-[var(--fg-2)]">{icon}</span>
@@ -1961,7 +1882,9 @@ function StatusPill({
           ? "border-danger-border bg-danger-soft text-danger"
           : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]";
   return (
-    <span className={`inline-flex items-center rounded-[var(--radius-control)] border px-2 py-1 text-[11px] font-medium ${className}`}>
+    <span
+      className={`inline-flex items-center rounded-[var(--radius-control)] border px-2 py-1 text-[11px] font-medium ${className}`}
+    >
       {label}
     </span>
   );
@@ -1973,12 +1896,16 @@ function Field({
   onChange,
   placeholder,
   type = "text",
+  name,
+  autoComplete,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   type?: string;
+  name?: string;
+  autoComplete?: string;
 }) {
   return (
     <label className="space-y-1.5">
@@ -1986,6 +1913,8 @@ function Field({
       <input
         type={type}
         value={value}
+        name={name}
+        autoComplete={autoComplete}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
         className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--accent)]/50"

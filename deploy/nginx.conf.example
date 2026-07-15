@@ -3,7 +3,7 @@
 # / body size）会导致 413 / SSE 断流。
 #
 # 关键不变量（不要随意调整）：
-#   - client_max_body_size 60m   ：与 next.config 60MB 上传上限对齐
+#   - client_max_body_size 80m   ：覆盖 64 MiB 素材视频及 multipart 开销
 #   - proxy_buffering off        ：SSE 必需，否则前端长时间收不到事件
 #   - proxy_request_buffering off：上传大图时不要先缓存到磁盘
 #   - proxy_cache off            ：动态接口不缓存
@@ -78,8 +78,8 @@ server {
     add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none';" always;
 
     # ----- Body / 上传 -----------------------------------------------------
-    # 与 apps/web/next.config 保持一致的 60MB 上限；瘦身到 1m/10m 会触发 413。
-    client_max_body_size 60m;
+    # 与 apps/web/next.config 保持一致的 80MB 上限；覆盖 64 MiB 素材视频及 multipart 开销。
+    client_max_body_size 80m;
     # `proxy_request_buffering off` 后请求体直接 stream 到上游，client_body_buffer_size
     # 只剩 header / 小数据缓冲意义（不影响大文件上传内存占用）；保留 8m 兼容老 nginx。
     client_body_buffer_size 8m;

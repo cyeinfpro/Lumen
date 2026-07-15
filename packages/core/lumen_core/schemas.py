@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import re
+from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -28,10 +27,37 @@ from .constants import (
 )
 from .sizing import AspectRatio as AspectRatioLiteral
 from .url_security import is_private_host
-
+from .video_asset_schemas import (
+    VideoAssetCapabilitiesOut,
+    VideoAssetCreateAcceptedOut,
+    VideoAssetCreateIn,
+    VideoAssetDeleteResultOut,
+    VideoAssetGroupCreateIn,
+    VideoAssetGroupListOut,
+    VideoAssetGroupOut,
+    VideoAssetGroupUpdateIn,
+    VideoAssetListOut,
+    VideoAssetOperationAction,
+    VideoAssetOperationErrorOut,
+    VideoAssetOperationOut,
+    VideoAssetOperationResultOut,
+    VideoAssetOut,
+    VideoAssetQuotaLimitsOut,
+    VideoAssetQuotaUsageOut,
+    VideoAssetUpdateIn,
+)
+from .video_providers import (
+    seedance_20_allowed_resolutions,
+    seedance_20_duration_is_valid,
+)
+from .video_schema_validation import (
+    validate_video_create,
+    validate_video_reference_media,
+)
 
 _ASSET_URL_PREFIX_RE = re.compile(r"^asset\s*:\s*/\s*/", re.IGNORECASE)
 _ASSET_ID_RE = re.compile(r"^asset[-_][A-Za-z0-9_-]+$", re.IGNORECASE)
+_ASSET_ID_MAX_LENGTH = 256
 _ASSET_URL_WRAPPER_CHARS = "\"'`“”‘’"
 
 
@@ -40,10 +66,17 @@ def normalize_asset_reference_url(raw_url: str) -> str | None:
     if not value:
         return None
     without_prefix = _ASSET_URL_PREFIX_RE.sub("", value, count=1)
-    if without_prefix == value and not _ASSET_ID_RE.fullmatch(value):
+    has_asset_prefix = without_prefix != value
+    asset_id = without_prefix.strip() if has_asset_prefix else value
+    if not has_asset_prefix and not _ASSET_ID_RE.fullmatch(asset_id):
         return None
-    asset_id = without_prefix.replace("\\", "/").lstrip("/").strip()
-    return f"asset://{asset_id.lower()}" if asset_id else ""
+    if (
+        not asset_id
+        or len(asset_id) > _ASSET_ID_MAX_LENGTH
+        or _ASSET_ID_RE.fullmatch(asset_id) is None
+    ):
+        return ""
+    return f"asset://{asset_id.lower()}"
 
 
 class BaseOut(BaseModel):
@@ -77,7 +110,9 @@ class RuntimeDefaultsOut(BaseModel):
     fast: bool = True
     upload_max_source_bytes: int = 50 * 1024 * 1024
     canvas_enabled: bool = False
-    nav_visibility: NavigationVisibilityOut = Field(default_factory=NavigationVisibilityOut)
+    nav_visibility: NavigationVisibilityOut = Field(
+        default_factory=NavigationVisibilityOut
+    )
 
 
 class UserOut(BaseOut):
@@ -510,6 +545,10 @@ VideoPricingVariant = Literal[
 VideoResolution = Literal["480p", "720p", "1080p", "4k"]
 VideoAspectRatio = Literal["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
 _VIDEO_REFERENCE_ID_RE = re.compile(r"^ref:(image|video|audio):[1-9][0-9]{0,2}$")
+_VIDEO_REFERENCE_ANCHOR_CANDIDATE_RE = re.compile(
+    r"\[\s*(ref:[^\]\r\n]*)\s*\]",
+    re.IGNORECASE,
+)
 
 
 class VideoReferenceMediaIn(BaseModel):
@@ -524,59 +563,12 @@ class VideoReferenceMediaIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_reference_source(self) -> "VideoReferenceMediaIn":
-        if self.ref_id:
-            ref_id = self.ref_id.strip().lower()
-            match = _VIDEO_REFERENCE_ID_RE.fullmatch(ref_id)
-            if match is None:
-                raise ValueError("reference media ref_id must look like ref:<kind>:1")
-            if match.group(1) != self.kind:
-                raise ValueError("reference media ref_id kind must match kind")
-            self.ref_id = ref_id
-        sources = [
-            bool((self.image_id or "").strip()),
-            bool((self.video_id or "").strip()),
-            bool((self.url or "").strip()),
-        ]
-        if sum(1 for item in sources if item) != 1:
-            raise ValueError("reference media must include exactly one source")
-        if self.kind == "image" and not (
-            (self.image_id or "").strip() or (self.url or "").strip()
-        ):
-            raise ValueError("image reference requires image_id or url")
-        if self.kind == "video" and not (
-            (self.video_id or "").strip() or (self.url or "").strip()
-        ):
-            raise ValueError("video reference requires video_id or url")
-        if self.kind == "audio" and not (self.url or "").strip():
-            raise ValueError("audio reference requires url")
-        if self.kind == "image" and (self.video_id or "").strip():
-            raise ValueError("image reference must not include video_id")
-        if self.kind == "video" and (self.image_id or "").strip():
-            raise ValueError("video reference must not include image_id")
-        if self.kind == "audio" and (
-            (self.image_id or "").strip() or (self.video_id or "").strip()
-        ):
-            raise ValueError("audio reference supports url only")
-        if self.url:
-            asset_url = normalize_asset_reference_url(self.url)
-            if asset_url is not None:
-                if not asset_url:
-                    raise ValueError("reference media asset url must not be empty")
-                self.url = asset_url
-                return self
-            value = self.url.strip()
-            parsed = urlsplit(value)
-            if parsed.scheme.lower() == "asset":
-                if not (parsed.netloc or parsed.path.strip("/")):
-                    raise ValueError("reference media asset url must not be empty")
-                return self
-            if parsed.scheme.lower() != "https" or not parsed.hostname:
-                raise ValueError("reference media url must be an https or asset URL")
-            if parsed.username or parsed.password:
-                raise ValueError("reference media url must not include credentials")
-            if is_private_host(parsed.hostname):
-                raise ValueError("reference media url host is not allowed")
-        return self
+        return validate_video_reference_media(
+            self,
+            reference_id_re=_VIDEO_REFERENCE_ID_RE,
+            normalize_asset_url=normalize_asset_reference_url,
+            private_host=is_private_host,
+        )
 
 
 class VideoReferenceMediaOut(BaseModel):
@@ -607,37 +599,13 @@ class VideoCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_image_contract(self) -> "VideoCreateIn":
-        if self.duration_s != -1 and self.duration_s < 3:
-            raise ValueError("duration_s must be -1 or between 3 and 15")
-        if self.action == "t2v" and self.input_image_id:
-            raise ValueError("t2v must not include input_image_id")
-        if self.action == "t2v" and self.reference_media:
-            raise ValueError("t2v must not include reference_media")
-        if self.action == "i2v" and not self.input_image_id:
-            raise ValueError("i2v requires input_image_id")
-        if self.action == "i2v" and self.reference_media:
-            raise ValueError("i2v must not include reference_media")
-        if self.action == "reference" and self.input_image_id:
-            raise ValueError("reference must not include input_image_id")
-        if self.action == "reference":
-            if not self.reference_media:
-                raise ValueError("reference requires at least one reference media")
-            image_count = sum(
-                1 for item in self.reference_media if item.kind == "image"
-            )
-            video_count = sum(
-                1 for item in self.reference_media if item.kind == "video"
-            )
-            audio_count = sum(
-                1 for item in self.reference_media if item.kind == "audio"
-            )
-            if image_count > 9:
-                raise ValueError("reference supports at most 9 images")
-            if video_count > 3:
-                raise ValueError("reference supports at most 3 videos")
-            if audio_count > 1:
-                raise ValueError("reference supports at most 1 audio")
-        return self
+        return validate_video_create(
+            self,
+            reference_id_re=_VIDEO_REFERENCE_ID_RE,
+            anchor_candidate_re=_VIDEO_REFERENCE_ANCHOR_CANDIDATE_RE,
+            allowed_resolutions=seedance_20_allowed_resolutions,
+            duration_is_valid=seedance_20_duration_is_valid,
+        )
 
 
 class VideoPriceOptionOut(BaseModel):
@@ -662,7 +630,9 @@ class VideoModelOptionOut(BaseModel):
         default_factory=dict
     )
     resolutions: list[VideoResolution] = Field(default_factory=list)
-    reference_media_limits: dict[Literal["image", "video", "audio"], int] = Field(default_factory=dict)
+    reference_media_limits: dict[Literal["image", "video", "audio"], int] = Field(
+        default_factory=dict
+    )
 
 
 class VideoOptionsOut(BaseModel):
@@ -1927,6 +1897,11 @@ class VideoProviderItemOut(BaseModel):
     kind: VideoProviderKind = "volcano"
     base_url: str
     api_key_hint: str
+    access_key_id_hint: str | None = None
+    secret_access_key_hint: str | None = None
+    project_name: str | None = None
+    region: str | None = None
+    asset_management_ready: bool = False
     enabled: bool = True
     priority: int = 0
     weight: int = 1
@@ -1947,7 +1922,11 @@ class VideoProviderItemIn(BaseModel):
     name: str
     kind: VideoProviderKind = "volcano"
     base_url: str
-    api_key: str = ""
+    api_key: str = Field(default="", repr=False)
+    access_key_id: str = Field(default="", repr=False)
+    secret_access_key: str = Field(default="", repr=False)
+    project_name: str = "default"
+    region: str = "cn-beijing"
     enabled: bool = True
     priority: int = 0
     weight: int = 1
@@ -2424,6 +2403,23 @@ __all__ = [
     "VideoProvidersOut",
     "VideoProviderItemIn",
     "VideoProvidersUpdateIn",
+    "VideoAssetCapabilitiesOut",
+    "VideoAssetQuotaLimitsOut",
+    "VideoAssetQuotaUsageOut",
+    "VideoAssetGroupOut",
+    "VideoAssetGroupListOut",
+    "VideoAssetGroupCreateIn",
+    "VideoAssetGroupUpdateIn",
+    "VideoAssetOut",
+    "VideoAssetOperationAction",
+    "VideoAssetDeleteResultOut",
+    "VideoAssetOperationResultOut",
+    "VideoAssetOperationErrorOut",
+    "VideoAssetOperationOut",
+    "VideoAssetCreateAcceptedOut",
+    "VideoAssetListOut",
+    "VideoAssetCreateIn",
+    "VideoAssetUpdateIn",
     "MoneyOut",
     "WalletOut",
     "WalletTransactionOut",

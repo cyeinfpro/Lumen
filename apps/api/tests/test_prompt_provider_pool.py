@@ -105,6 +105,9 @@ def test_video_prompt_enhance_defaults_to_single_motion_first_prompt() -> None:
         in system_prompt
     )
     assert "Preserve exact dialogue, voiceover, music, sound effects" in system_prompt
+    assert "2-3 distinguishing visible features" in system_prompt
+    assert "镜头1/镜头2/镜头3" in system_prompt
+    assert "one primary camera move per shot" in system_prompt
     assert "keep identity, outfit/product details" in system_prompt
     assert "Do NOT repeat or inventory existing subjects" in system_prompt
     assert "motion trajectory" in system_prompt
@@ -1241,10 +1244,7 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     assert db.committed is True
     assert out.hold_amount_micro == 10_000
     assert {item["model"] for item in calls["snapshots"]} == {"gpt-5.4", "gpt-5.5"}
-    assert all(
-        item["rate_multiplier_x10000"] == 10_000
-        for item in calls["breakdowns"]
-    )
+    assert all(item["rate_multiplier_x10000"] == 10_000 for item in calls["breakdowns"])
     assert calls["hold"]["ref_type"] == "prompt_enhance"
     assert calls["hold"]["ref_id"] == out.request_id
     assert calls["hold"]["idempotency_key"] == f"prompt_enhance:hold:{out.request_id}"

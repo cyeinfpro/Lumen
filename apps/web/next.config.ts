@@ -11,17 +11,24 @@ const isDev = process.env.NODE_ENV !== "production";
 // 改它不用重新 build 前端 bundle。不要把它放在 next.config rewrites 里；
 // standalone 构建会把 rewrites destination 固化到 routes manifest。
 
-function optionalHttpOrigin(value: string | undefined, envName: string): string | null {
+function optionalHttpOrigin(
+  value: string | undefined,
+  envName: string,
+): string | null {
   const raw = value?.trim();
   if (!raw || raw.startsWith("/")) return null;
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`${envName} must be an absolute http(s) URL when configured`);
+    throw new Error(
+      `${envName} must be an absolute http(s) URL when configured`,
+    );
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`${envName} must use http: or https:, got: ${url.protocol}`);
+    throw new Error(
+      `${envName} must use http: or https:, got: ${url.protocol}`,
+    );
   }
   return url.origin;
 }
@@ -39,7 +46,9 @@ function optionalSentryOrigin(value: string | undefined): string | null {
 }
 
 function unique(values: Array<string | null | undefined>): string[] {
-  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+  return [
+    ...new Set(values.filter((value): value is string => Boolean(value))),
+  ];
 }
 
 const publicApiOrigin = optionalHttpOrigin(
@@ -76,22 +85,26 @@ const imgSrc = unique([
 ]).join(" ");
 // Next.js emits inline bootstrap/RSC scripts in production. Without a per-request
 // nonce pipeline those scripts must be allowed or the app will not hydrate.
-const scriptSrc = isDev ? "'self' 'unsafe-inline' 'unsafe-eval'" : "'self' 'unsafe-inline'";
+const scriptSrc = isDev
+  ? "'self' 'unsafe-inline' 'unsafe-eval'"
+  : "'self' 'unsafe-inline'";
 const upgradeInsecureRequests =
   !isDev && process.env.LUMEN_UPGRADE_INSECURE_REQUESTS === "true";
 const hsts = unique([
   "max-age=31536000",
-  process.env.LUMEN_HSTS_INCLUDE_SUBDOMAINS === "true" ? "includeSubDomains" : null,
+  process.env.LUMEN_HSTS_INCLUDE_SUBDOMAINS === "true"
+    ? "includeSubDomains"
+    : null,
 ]).join("; ");
 
 const nextConfig: NextConfig = {
   output: "standalone",
   devIndicators: false,
   // Next.js v16 experimental.proxyClientMaxBodySize：
-  // proxy 读 body 时默认只 buffer 10MB；图片上传最大约 50MB，
-  // 这里给 60MB 留 multipart 开销。该实验 API 升级 Next 时需对照 changelog 复核。
+  // proxy 读 body 时默认只 buffer 10MB；素材视频允许 64 MiB，
+  // 这里给 80MB 留 multipart 开销。该实验 API 升级 Next 时需对照 changelog 复核。
   experimental: {
-    proxyClientMaxBodySize: "60mb",
+    proxyClientMaxBodySize: "80mb",
     sri: {
       algorithm: "sha256",
     },
@@ -121,7 +134,10 @@ const nextConfig: NextConfig = {
       { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "X-Frame-Options", value: "DENY" },
-      { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+      {
+        key: "Permissions-Policy",
+        value: "camera=(), microphone=(), geolocation=()",
+      },
     ];
     if (!isDev) {
       // includeSubDomains 影响所有子域，默认关闭；确认全站子域均 HTTPS 后设置
@@ -151,7 +167,10 @@ const nextConfig: NextConfig = {
       {
         source: "/manifest.webmanifest",
         headers: [
-          { key: "Cache-Control", value: "public, max-age=3600, must-revalidate" },
+          {
+            key: "Cache-Control",
+            value: "public, max-age=3600, must-revalidate",
+          },
         ],
       },
     ];

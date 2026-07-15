@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
+import pytest
+
+from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.video_providers import (
+    VideoProviderDefinition,
     parse_video_provider_config_json,
     parse_video_provider_item,
+    seedance_20_variant,
     select_video_provider,
+    video_provider_binding_fingerprint,
     video_reference_media_limits,
 )
 
@@ -53,8 +60,180 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
     )
 
 
+def test_video_provider_definition_preserves_legacy_positional_order() -> None:
+    proxy = ProviderProxyDefinition(
+        "proxy-1",
+        "socks5",
+        "127.0.0.1",
+        1080,
+    )
+    provider = VideoProviderDefinition(
+        "legacy",
+        "fake",
+        "https://video.example.com",
+        "api-key",
+        False,
+        7,
+        8,
+        9,
+        True,
+        {"model:t2v": "upstream-model"},
+        "proxy-1",
+        proxy,
+    )
+
+    assert provider.enabled is False
+    assert provider.priority == 7
+    assert provider.weight == 8
+    assert provider.concurrency == 9
+    assert provider.supports_idempotency is True
+    assert provider.models == {"model:t2v": "upstream-model"}
+    assert provider.proxy_name == "proxy-1"
+    assert provider.proxy is proxy
+    assert provider.access_key_id == ""
+    assert provider.secret_access_key == ""
+    assert provider.project_name == "default"
+    assert provider.region == "cn-beijing"
+
+
+@pytest.mark.parametrize(
+    ("identifier", "expected"),
+    [
+        ("seedance-2.0", "standard"),
+        ("doubao-seedance-2-0-260128", "standard"),
+        ("video-ds-2.0-fast", "fast"),
+        ("dreamina-seedance-2-0-mini-260615", "mini"),
+        ("namespace/doubao-seedance-2-0-fast-260128", "fast"),
+    ],
+)
+def test_seedance_20_variant_matches_supported_tokens(
+    identifier: str,
+    expected: str,
+) -> None:
+    assert seedance_20_variant(identifier) == expected
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "not-seedance-2.0",
+        "not-video-ds-2.0",
+        "prefix-seedance-2.0-fast",
+        "seedance-2.0-faster",
+        "video-ds-2.0-miniature",
+    ],
+)
+def test_seedance_20_variant_rejects_substring_false_positives(
+    identifier: str,
+) -> None:
+    assert seedance_20_variant(identifier) is None
+
+
+def test_video_provider_binding_fingerprint_is_stable_and_secret_safe() -> None:
+    proxy = ProviderProxyDefinition(
+        name="proxy-1",
+        protocol="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username="proxy-user",
+        password="proxy-secret",
+    )
+    provider = replace(
+        parse_video_provider_item(
+            _provider_raw(
+                access_key_id="AKLTasset",
+                secret_access_key="secret-asset-key",
+            ),
+            index=0,
+        ),
+        proxy_name=proxy.name,
+        proxy=proxy,
+    )
+
+    fingerprint = video_provider_binding_fingerprint(provider)
+
+    assert len(fingerprint) == 64
+    assert fingerprint == video_provider_binding_fingerprint(provider)
+    assert "ark-key" not in fingerprint
+    assert "AKLTasset" not in fingerprint
+    assert "secret-asset-key" not in fingerprint
+    assert "proxy-secret" not in fingerprint
+    assert fingerprint != video_provider_binding_fingerprint(
+        replace(provider, secret_access_key="rotated-secret")
+    )
+    assert fingerprint != video_provider_binding_fingerprint(
+        replace(provider, models={"seedance-2.0:t2v": "different-model"})
+    )
+    assert fingerprint != video_provider_binding_fingerprint(
+        replace(provider, proxy=replace(proxy, password="rotated-proxy-secret"))
+    )
+    assert fingerprint == video_provider_binding_fingerprint(
+        replace(provider, priority=999, weight=999, concurrency=32)
+    )
+
+
+def test_parse_volcano_asset_credentials_and_defaults() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            access_key_id="AKLTasset",
+            secret_access_key="secret-asset-key",
+        ),
+        index=0,
+    )
+
+    assert provider.access_key_id == "AKLTasset"
+    assert provider.secret_access_key == "secret-asset-key"
+    assert provider.project_name == "default"
+    assert provider.region == "cn-beijing"
+    assert provider.asset_management_ready is True
+    assert "secret-asset-key" not in repr(provider)
+    assert "AKLTasset" not in repr(provider)
+
+
+def test_non_volcano_provider_ignores_asset_credentials() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            kind="dashscope",
+            access_key_id="AKLTasset",
+            secret_access_key="secret-asset-key",
+            project_name="should-not-persist",
+            region="cn-shanghai",
+        ),
+        index=0,
+    )
+
+    assert provider.access_key_id == ""
+    assert provider.secret_access_key == ""
+    assert provider.asset_management_ready is False
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        "cn.beijing",
+        "cn/beijing",
+        "cn@beijing",
+        "CN-beijing",
+        "cn beijing",
+        "-cn-beijing",
+        "cn-beijing-",
+    ],
+)
+def test_parse_volcano_provider_rejects_unsafe_region(region: str) -> None:
+    raw = json.dumps({"providers": [_provider_raw(region=region)]})
+
+    providers, _proxies, errors = parse_video_provider_config_json(raw)
+
+    assert providers == []
+    assert any("region must use lowercase letters" in error for error in errors)
+
+
 def test_reference_media_limits_match_provider_adapters() -> None:
-    assert video_reference_media_limits("volcano") == {"image": 9, "video": 3}
+    assert video_reference_media_limits("volcano") == {
+        "image": 9,
+        "video": 3,
+        "audio": 3,
+    }
     assert video_reference_media_limits("volcano_newapi") == {
         "image": 4,
         "video": 3,

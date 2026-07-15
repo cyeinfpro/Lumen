@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_provider_stats_schemas_are_exported():
     namespace: dict[str, object] = {}
     exec("from lumen_core.schemas import *", namespace)
@@ -122,6 +125,55 @@ def test_video_provider_schema_accepts_omni_flash():
     item = body.items[0]
     assert item.kind == "omni_flash"
     assert item.models["omni-flash:t2v"] == "gemini_omni_flash"
+
+
+def test_video_asset_create_requires_exactly_one_local_resource_id():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoAssetCreateIn
+
+    image = VideoAssetCreateIn(group_id="group-1", image_id="image-1")
+    video = VideoAssetCreateIn(group_id="group-1", video_id="video-1")
+
+    assert image.image_id == "image-1"
+    assert image.video_id is None
+    assert video.video_id == "video-1"
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn(group_id="group-1")
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn(
+            group_id="group-1",
+            image_id="image-1",
+            video_id="video-1",
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn(group_id="group-1", image_id="i" * 37)
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn(group_id="group-1", video_id="v" * 37)
+
+
+def test_video_asset_create_rejects_remote_url_and_scope_overrides():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoAssetCreateIn
+
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn.model_validate(
+            {
+                "group_id": "group-1",
+                "image_id": "image-1",
+                "url": "https://attacker.example/image.jpg",
+            }
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetCreateIn.model_validate(
+            {
+                "group_id": "group-1",
+                "image_id": "image-1",
+                "project_name": "other-project",
+                "group_type": "Human",
+            }
+        )
 
 
 def test_image_params_support_render_and_output_options():
@@ -441,7 +493,21 @@ def test_video_create_schema_enforces_action_image_contract():
                     "kind": "audio",
                     "url": f"https://example.com/ref-{idx}.mp3",
                 }
-                for idx in range(2)
+                for idx in range(4)
+            ],
+        },
+        {
+            "action": "reference",
+            "prompt": "follow [ref:image:2]",
+            "reference_media": [
+                {"kind": "image", "image_id": "img-1", "ref_id": "ref:image:1"}
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {"kind": "image", "image_id": "img-1", "ref_id": "ref:image:2"},
+                {"kind": "image", "image_id": "img-2"},
             ],
         },
     ):
@@ -478,16 +544,45 @@ def test_video_reference_audio_media_is_url_only():
     VideoCreateIn(
         action="reference",
         model="video-ds-2.0-fast",
-        prompt="use the reference image and audio",
+        prompt="use [ref:image:1] with [ref:audio:1], [ref:audio:2], and [ref:audio:3]",
         reference_media=[
             {"kind": "image", "url": "https://cdn.example.com/ref.png"},
             audio,
+            {
+                "kind": "audio",
+                "url": "https://cdn.example.com/ref-2.mp3",
+            },
+            {
+                "kind": "audio",
+                "url": "https://cdn.example.com/ref-3.mp3",
+            },
         ],
         duration_s=15,
         resolution="720p",
         aspect_ratio="9:16",
         idempotency_key="idem-reference-audio",
     )
+    for reference_media in (
+        [{"kind": "audio", "url": "https://cdn.example.com/ref.mp3"}],
+        [
+            {
+                "kind": "audio",
+                "url": f"https://cdn.example.com/ref-{idx}.mp3",
+            }
+            for idx in range(4)
+        ],
+    ):
+        with pytest.raises(ValidationError):
+            VideoCreateIn(
+                action="reference",
+                model="seedance-2.0",
+                prompt="use the supplied references",
+                reference_media=reference_media,
+                duration_s=5,
+                resolution="720p",
+                aspect_ratio="16:9",
+                idempotency_key="idem-reference-audio-invalid",
+            )
 
     for kwargs in (
         {"kind": "audio", "image_id": "img-1"},
@@ -547,3 +642,174 @@ def test_video_reference_media_rejects_unsafe_url_sources():
             pass
         else:  # pragma: no cover
             raise AssertionError(f"expected validation error for {url}")
+
+
+def test_video_asset_capabilities_expose_stable_quota_limits():
+    from lumen_core.schemas import VideoAssetCapabilitiesOut
+
+    output = VideoAssetCapabilitiesOut(enabled=True)
+
+    assert output.quotas.model_dump() == {
+        "max_assets": 50,
+        "max_asset_groups": 50,
+        "create_asset_qpm": 3,
+        "create_asset_window_seconds": 60,
+    }
+
+
+def test_video_asset_quota_usage_is_exported_and_non_negative():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoAssetQuotaUsageOut
+    from lumen_core.video_asset_schemas import (
+        VideoAssetQuotaUsageOut as DirectVideoAssetQuotaUsageOut,
+    )
+
+    output = VideoAssetQuotaUsageOut(assets_used=42, asset_groups_used=7)
+
+    assert VideoAssetQuotaUsageOut is DirectVideoAssetQuotaUsageOut
+    assert output.model_dump() == {
+        "assets_used": 42,
+        "asset_groups_used": 7,
+    }
+    with pytest.raises(ValidationError):
+        VideoAssetQuotaUsageOut(assets_used=-1, asset_groups_used=0)
+
+
+def test_video_asset_operation_schema_carries_retryable_failure():
+    from lumen_core.schemas import VideoAssetOperationOut
+
+    output = VideoAssetOperationOut(
+        id="operation-1",
+        action="create_asset",
+        status="failed",
+        progress_stage="failed",
+        retryable=True,
+        retry_after_seconds=12,
+        error={
+            "code": "volcano_asset_rate_limited",
+            "message": "retry later",
+            "retryable": True,
+            "retry_after_seconds": 12,
+        },
+        created_at="2026-07-15T00:00:00+00:00",
+        updated_at="2026-07-15T00:00:01+00:00",
+    )
+
+    assert output.error is not None
+    assert output.error.code == "volcano_asset_rate_limited"
+    assert output.error.retryable is True
+    assert output.delivery_generation == 0
+
+
+def test_video_asset_operation_schema_accepts_group_asset_and_delete_results():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoAssetOperationOut
+
+    common = {
+        "status": "succeeded",
+        "progress_stage": "completed",
+        "created_at": "2026-07-15T00:00:00+00:00",
+        "updated_at": "2026-07-15T00:00:01+00:00",
+    }
+    group = VideoAssetOperationOut(
+        id="operation-group",
+        action="create_group",
+        result={
+            "id": "group-1",
+            "name": "Portraits",
+            "title": "Portraits",
+            "group_type": "AIGC",
+            "project_name": "project-a",
+        },
+        **common,
+    )
+    asset = VideoAssetOperationOut(
+        id="operation-asset",
+        action="update_asset",
+        result={
+            "id": "asset-1",
+            "group_id": "group-1",
+            "name": "Portrait",
+            "asset_type": "Image",
+            "project_name": "project-a",
+        },
+        **common,
+    )
+    deleted = VideoAssetOperationOut(
+        id="operation-delete",
+        action="delete_group",
+        result={
+            "id": "group-1",
+            "deleted": True,
+            "already_deleted": True,
+        },
+        **common,
+    )
+
+    assert group.result is not None
+    assert group.result.id == "group-1"
+    assert asset.result is not None
+    assert asset.result.id == "asset-1"
+    assert deleted.result is not None
+    assert deleted.result.deleted is True
+
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-invalid",
+            action="unknown_action",
+            result=None,
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-id-only",
+            action="delete_asset",
+            result={"id": "asset-1"},
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-not-deleted",
+            action="delete_asset",
+            result={"id": "asset-1", "deleted": False},
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-wrong-group-result",
+            action="create_group",
+            result={
+                "id": "asset-1",
+                "group_id": "group-1",
+                "name": "Portrait",
+                "asset_type": "Image",
+                "project_name": "project-a",
+            },
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-wrong-delete-result",
+            action="delete_group",
+            result={
+                "id": "asset-1",
+                "group_id": "group-1",
+                "name": "Portrait",
+                "asset_type": "Image",
+                "project_name": "project-a",
+            },
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        VideoAssetOperationOut(
+            id="operation-wrong-delete-resource",
+            action="delete_group",
+            result={
+                "id": "group-1",
+                "deleted": True,
+                "resource_type": "asset",
+            },
+            **common,
+        )

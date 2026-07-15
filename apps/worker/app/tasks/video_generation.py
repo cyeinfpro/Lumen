@@ -47,6 +47,18 @@ from ..video_events import (
     publish_video_event_after_commit as _publish_after_commit,
     queue_video_event as _queue_video_event,
 )
+from ..video_provider_slots import (
+    MAX_PROVIDER_POLL_DURATION_S as _MAX_PROVIDER_POLL_DURATION_S,
+    VIDEO_PROVIDER_SLOT_LOCK_PREFIX as _VIDEO_PROVIDER_SLOT_LOCK_PREFIX,  # noqa: F401
+    VIDEO_PROVIDER_SLOT_PREFIX as _VIDEO_PROVIDER_SLOT_PREFIX,  # noqa: F401
+    VIDEO_PROVIDER_SLOT_STALE_AFTER_S as _VIDEO_PROVIDER_SLOT_STALE_AFTER_S,  # noqa: F401
+    VIDEO_PROVIDER_SLOT_TTL_S as _VIDEO_PROVIDER_SLOT_TTL_S,  # noqa: F401
+    acquire_provider_slot as _acquire_provider_slot,
+    provider_submit_concurrency as _provider_submit_concurrency,
+    provider_submit_is_exclusive as _provider_submit_is_exclusive,
+    release_provider_slot as _release_provider_slot,
+    release_slot_lock as _release_slot_lock,  # noqa: F401
+)
 from ..video_submit_cache import (
     CachedSubmitResult as _CachedSubmitResult,
     cached_submit_provider_kind as _cached_submit_provider_kind,
@@ -58,8 +70,8 @@ from ..video_submit_cache import (
 from ..video_upstream import (
     PollResult,
     SubmitResult,
-    VideoReferenceMedia,
     VideoProviderAdapter,
+    VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
     adapter_for_provider,
@@ -76,19 +88,15 @@ _POLL_INTERVAL_S = 8
 _MAX_POLL_DURATION_S = 30 * 60
 _MAX_POLL_COUNT = max(1, _MAX_POLL_DURATION_S // _POLL_INTERVAL_S)
 _EXTENDED_POLL_INTERVAL_S = 60
-_MAX_PROVIDER_POLL_DURATION_S = 48 * 60 * 60
 _MAX_SUBMIT_ATTEMPTS = 4
 _SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
 _MAX_UNEXPECTED_POLL_ATTEMPTS = 4
+_MAX_MISSING_RESULT_URL_POLLS = 8
 _RECON_STALE_AFTER_S = 30
 _SUBMIT_UNKNOWN_AFTER_S = max(_LEASE_TTL_S * 2, 5 * 60)
 _SUBMIT_UNKNOWN_FINALIZE_AFTER_S = 60 * 60
 _RECON_LIMIT = 100
-_VIDEO_PROVIDER_SLOT_STALE_AFTER_S = _MAX_PROVIDER_POLL_DURATION_S + 5 * 60
-_VIDEO_PROVIDER_SLOT_TTL_S = _VIDEO_PROVIDER_SLOT_STALE_AFTER_S + 60 * 60
-_VIDEO_PROVIDER_SLOT_PREFIX = "video:provider_slot:"
-_VIDEO_PROVIDER_SLOT_LOCK_PREFIX = "video:provider_slot_lock:"
 _TERMINAL_STATUSES = {
     VideoGenerationStatus.SUCCEEDED.value,
     VideoGenerationStatus.FAILED.value,
@@ -553,57 +561,6 @@ async def _provider_for_generation(generation: VideoGeneration):
     return provider
 
 
-async def _acquire_provider_slot(
-    redis: Any, provider_name: str, concurrency: int, task_id: str
-) -> bool:
-    lock_key = f"{_VIDEO_PROVIDER_SLOT_LOCK_PREFIX}{provider_name}"
-    lock_token = f"{task_id}:{new_uuid7()}"
-    ok = await redis.set(lock_key, lock_token, ex=10, nx=True)
-    if not ok:
-        return False
-    zkey = f"{_VIDEO_PROVIDER_SLOT_PREFIX}{provider_name}"
-    try:
-        cutoff = time.time() - _VIDEO_PROVIDER_SLOT_STALE_AFTER_S
-        await redis.zremrangebyscore(zkey, 0, cutoff)
-        if await redis.zscore(zkey, task_id) is not None:
-            await redis.zadd(zkey, {task_id: time.time()})
-            await redis.expire(zkey, _VIDEO_PROVIDER_SLOT_TTL_S)
-            return True
-        active = await redis.zcard(zkey)
-        if int(active or 0) >= max(1, int(concurrency)):
-            return False
-        await redis.zadd(zkey, {task_id: time.time()})
-        await redis.expire(zkey, _VIDEO_PROVIDER_SLOT_TTL_S)
-        return True
-    finally:
-        await _release_slot_lock(redis, lock_key, lock_token)
-
-
-async def _release_slot_lock(redis: Any, lock_key: str, token: str) -> None:
-    lua = """
-    if redis.call('GET', KEYS[1]) == ARGV[1] then
-      return redis.call('DEL', KEYS[1])
-    end
-    return 0
-    """
-    try:
-        await redis.eval(lua, 1, lock_key, token)
-    except Exception:
-        logger.debug("video provider slot lock release failed key=%s", lock_key)
-
-
-async def _release_provider_slot(redis: Any, provider_name: str, task_id: str) -> None:
-    try:
-        await redis.zrem(f"{_VIDEO_PROVIDER_SLOT_PREFIX}{provider_name}", task_id)
-    except Exception:
-        logger.warning(
-            "video provider slot release failed provider=%s task=%s",
-            provider_name,
-            task_id,
-            exc_info=True,
-        )
-
-
 async def _input_image_bytes(
     session, generation: VideoGeneration
 ) -> tuple[bytes | None, str | None]:
@@ -908,8 +865,9 @@ async def _reserve_video_submit_slot(
     acquired = await _acquire_provider_slot(
         redis,
         provider.name,
-        provider.concurrency,
+        _provider_submit_concurrency(provider, generation),
         generation.id,
+        exclusive=_provider_submit_is_exclusive(provider, generation),
     )
     if acquired:
         return True
@@ -2179,12 +2137,51 @@ async def _apply_poll_result(
 
         if poll.status == "succeeded":
             if not poll.video_url:
+                now = _now()
+                diagnostics = _generation_diagnostics(generation)
+                missing_url_attempts = (
+                    max(
+                        0,
+                        int(diagnostics.get("missing_result_url_attempts") or 0),
+                    )
+                    + 1
+                )
+                if (
+                    missing_url_attempts <= _MAX_MISSING_RESULT_URL_POLLS
+                    and not _provider_tracking_window_exhausted(generation, now)
+                ):
+                    diagnostics["missing_result_url_attempts"] = missing_url_attempts
+                    diagnostics["missing_result_url_retrying"] = True
+                    generation.diagnostics = diagnostics
+                    await _continue_running_poll(
+                        session,
+                        redis,
+                        generation,
+                        PollResult(
+                            status="running",
+                            progress=max(95, int(poll.progress or 0)),
+                            usage_total_tokens=poll.usage_total_tokens,
+                            upstream_billable=poll.upstream_billable,
+                            raw={
+                                **(poll.raw or {}),
+                                "warning": "succeeded_without_video_url",
+                                "missing_result_url_attempts": missing_url_attempts,
+                            },
+                        ),
+                        now=now,
+                        lease_lost=lease_lost,
+                    )
+                    return
                 poll = PollResult(
                     status="failed",
                     failure_class="fetch_failed",
                     usage_total_tokens=poll.usage_total_tokens,
                     upstream_billable=poll.upstream_billable,
-                    raw={**(poll.raw or {}), "error": "missing video_url"},
+                    raw={
+                        **(poll.raw or {}),
+                        "error": "missing video_url",
+                        "missing_result_url_attempts": missing_url_attempts,
+                    },
                 )
             else:
                 await _finish_success(

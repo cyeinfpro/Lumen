@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+from arq import func
 from arq.connections import RedisSettings
 from arq.cron import cron
 
@@ -35,6 +36,7 @@ from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import video_generation as video_generation_tasks
+from .tasks import volcano_assets as volcano_asset_tasks
 from .upstream import close_client
 
 _startup_logger = logging.getLogger(__name__)
@@ -102,6 +104,10 @@ class WorkerSettings:
         context_summary_tasks.manual_compact_conversation,
         memory_tasks.memory_extract,
         memory_tasks.memory_reembed,
+        func(
+            volcano_asset_tasks.process_volcano_asset_operation,
+            max_tries=1000,
+        ),
     ]
     cron_jobs = (
         outbox_tasks.cron_jobs

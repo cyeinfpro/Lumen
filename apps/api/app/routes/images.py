@@ -16,7 +16,6 @@ import logging
 import os
 import secrets
 import shutil
-import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Awaitable, BinaryIO, Iterator, TypeVar
@@ -32,7 +31,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -73,6 +71,7 @@ from lumen_core.model_image_metadata import (
     read_model_image_metadata,
 )
 from lumen_core.schemas import ImageOut
+from lumen_core.volcano_assets import volcano_asset_safe_filename
 
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
@@ -88,11 +87,22 @@ from ..ratelimit import (
 )
 from ..redis_client import get_redis
 from ..services import storage_files
+from ..volcano_asset_media import (
+    VOLCANO_ASSET_IMAGE_KIND,
+    VOLCANO_ASSET_IMAGE_MIME,
+)
 from ..video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
     VIDEO_REFERENCE_IMAGE_MIME,
     VideoReferenceImageError,
     ensure_video_reference_image_variant,
+)
+from ._image_delivery import (
+    etag_matches_if_none_match as _etag_matches_if_none_match,  # noqa: F401
+    internal_redirect_enabled as _internal_redirect_enabled,
+    iter_open_file_and_close as _iter_delivery_file_and_close,
+    open_regular_file_no_symlink as _open_regular_file_no_symlink,
+    storage_streaming_response as _build_storage_streaming_response,
 )
 
 
@@ -113,6 +123,7 @@ _LINK_UNSUPPORTED_ERRNOS = {
 
 MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_LONG_SIDE = 4096
+VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE = 8192
 MAX_IMAGE_PIXELS = 64_000_000
 PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/webp"}
@@ -290,14 +301,22 @@ def _too_many_pixels() -> HTTPException:
     )
 
 
-def _enforce_pixel_limit(size: tuple[int, int]) -> None:
+def _enforce_pixel_limit(
+    size: tuple[int, int],
+    *,
+    max_long_side: int | None = MAX_LONG_SIDE,
+) -> None:
     width, height = size
     if width <= 0 or height <= 0:
         raise _http("invalid_image", "invalid image size", 400)
     if width * height > MAX_IMAGE_PIXELS:
         raise _too_many_pixels()
-    if max(width, height) > MAX_LONG_SIDE:
-        raise _http("too_large", f"image long side exceeds {MAX_LONG_SIDE}px", 413)
+    if max_long_side is not None and max(width, height) > max_long_side:
+        raise _http(
+            "too_large",
+            f"image long side exceeds {max_long_side}px",
+            413,
+        )
 
 
 def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
@@ -320,6 +339,7 @@ def _prepare_upload_image(
     *,
     mask_requested: bool = False,
     reference_size: tuple[int, int] | None = None,
+    allow_large_dimensions: bool = False,
 ) -> tuple[
     bytes,
     str,
@@ -337,9 +357,19 @@ def _prepare_upload_image(
         uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
         if mime in ALLOWED_MIME:
             width, height = im.size
-            _enforce_pixel_limit((width, height))
+            _enforce_pixel_limit(
+                (width, height),
+                max_long_side=(
+                    VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+                    if allow_large_dimensions
+                    else MAX_LONG_SIDE
+                ),
+            )
         elif mime in NORMALIZABLE_UPLOAD_MIME:
-            data, width, height = _normalize_upload_image_to_jpeg(im)
+            data, width, height = _normalize_upload_image_to_jpeg(
+                im,
+                allow_large_dimensions=allow_large_dimensions,
+            )
             mime = "image/jpeg"
             uploaded_model_metadata["upload_normalized"] = {
                 "source_mime": source_mime,
@@ -384,11 +414,22 @@ def _prepare_upload_image(
     )
 
 
-def _normalize_upload_image_to_jpeg(im: PILImage.Image) -> tuple[bytes, int, int]:
+def _normalize_upload_image_to_jpeg(
+    im: PILImage.Image,
+    *,
+    allow_large_dimensions: bool = False,
+) -> tuple[bytes, int, int]:
     try:
         normalized = ImageOps.exif_transpose(im)
         width, height = normalized.size
-        _enforce_pixel_limit((width, height))
+        _enforce_pixel_limit(
+            (width, height),
+            max_long_side=(
+                VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+                if allow_large_dimensions
+                else MAX_LONG_SIDE
+            ),
+        )
         if "A" in normalized.getbands() or "transparency" in getattr(
             normalized, "info", {}
         ):
@@ -444,6 +485,10 @@ def _upload_requests_mask_preflight(purpose: str | None, filename: str | None) -
     name = Path(filename or "").name.lower()
     stem = Path(name).stem
     return stem == "mask" or stem.startswith("mask_")
+
+
+def _upload_allows_large_dimensions(purpose: str | None) -> bool:
+    return (purpose or "").strip().lower() == "volcano_asset"
 
 
 def _key_for_upload(user_id: str, image_id: str, ext: str) -> str:
@@ -880,75 +925,8 @@ def _unlink_file_if_exists(path: Path) -> None:
         )
 
 
-def _open_regular_file_no_symlink(path: Path) -> tuple[BinaryIO, int]:
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError as exc:
-        raise _http("not_found", "binary missing", 404) from exc
-    except OSError as exc:
-        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
-            raise _http("not_found", "binary missing", 404) from exc
-        if exc.errno == errno.ELOOP:
-            raise _http(
-                "invalid_path", "symlink storage paths are not allowed", 400
-            ) from exc
-        raise
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise _http("not_found", "binary missing", 404)
-        return os.fdopen(fd, "rb"), int(st.st_size)
-    except Exception:
-        os.close(fd)
-        raise
-
-
 def _iter_open_file_and_close(f: BinaryIO) -> Iterator[bytes]:
-    yield from storage_files.iter_open_file_and_close(f)
-
-
-_INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"
-
-
-def _internal_redirect_enabled() -> bool:
-    """Whether to emit X-Accel-Redirect for nginx sendfile hand-off.
-
-    Default off: lumen-api ships with the streaming fallback that works
-    behind any reverse proxy. Operators opt in by:
-
-      1. Adding an ``internal`` location in nginx that aliases to
-         storage_root (see deploy/nginx.conf.example).
-      2. Setting ``LUMEN_INTERNAL_REDIRECT_ENABLED=1`` in shared/.env.
-
-    With both in place, lumen-api stops opening files itself —
-    nginx native sendfile + open_file_cache + direct CIFS read takes over.
-    Without either, the streaming path keeps working unchanged.
-    """
-    return os.environ.get("LUMEN_INTERNAL_REDIRECT_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-
-
-def _etag_matches_if_none_match(etag: str, header_value: str) -> bool:
-    """RFC 7232 §3.2: If-None-Match accepts ``*`` or a comma list of opaque tags.
-
-    Both sides may carry the weak prefix ``W/``; for our use case (file-level
-    immutable variants) treating weak and strong as equivalent is fine — the
-    tag identity is what matters.
-    """
-    header_value = header_value.strip()
-    if header_value == "*":
-        return True
-    canonical = etag.removeprefix("W/").strip()
-    for raw in header_value.split(","):
-        candidate = raw.strip().removeprefix("W/").strip()
-        if candidate and candidate == canonical:
-            return True
-    return False
+    yield from _iter_delivery_file_and_close(f)
 
 
 def _storage_streaming_response(
@@ -959,52 +937,21 @@ def _storage_streaming_response(
     cache_control: str,
     storage_key: str | None = None,
     request: Request | None = None,
+    inline_filename: str | None = None,
 ) -> Response:
-    """Serve a file from storage_root with three escalating fast paths.
-
-    1. ``304 Not Modified`` short-circuit when the client's If-None-Match
-       matches our ETag — never opens the file. Always on, no opt-in needed.
-    2. ``X-Accel-Redirect`` hand-off to nginx when
-       ``LUMEN_INTERNAL_REDIRECT_ENABLED=1`` and a ``storage_key`` is supplied.
-       lumen-api emits headers only; nginx native sendfile streams the bytes.
-    3. Fallback: open the file in the Python process and stream chunks via
-       StreamingResponse — works without any nginx cooperation.
-    """
-    headers = {
-        "Cache-Control": cache_control,
-        "ETag": etag,
-    }
-
-    if request is not None:
-        inm = request.headers.get("if-none-match")
-        if inm and _etag_matches_if_none_match(etag, inm):
-            return Response(status_code=304, headers=headers)
-
-    if _internal_redirect_enabled() and storage_key:
-        # Defense in depth: re-validate the key resolves under storage_root.
-        # Callers normally already ran _fs_path; if the key somehow contains
-        # path traversal we fall through to the streaming path which uses
-        # _open_regular_file_no_symlink for the same protection.
-        try:
-            _fs_path(storage_key)
-        except HTTPException:
-            pass
-        else:
-            return Response(
-                status_code=200,
-                media_type=media_type,
-                headers={
-                    **headers,
-                    "X-Accel-Redirect": _INTERNAL_REDIRECT_PREFIX
-                    + storage_key.lstrip("/"),
-                },
-            )
-
-    f, size = _open_regular_file_no_symlink(path)
-    return StreamingResponse(
-        _iter_open_file_and_close(f),
+    return _build_storage_streaming_response(
+        path,
         media_type=media_type,
-        headers={**headers, "Content-Length": str(size)},
+        etag=etag,
+        cache_control=cache_control,
+        storage_key=storage_key,
+        request=request,
+        inline_filename=inline_filename,
+        etag_matches=_etag_matches_if_none_match,
+        validate_storage_key=_fs_path,
+        open_file=_open_regular_file_no_symlink,
+        iter_file=_iter_open_file_and_close,
+        redirect_enabled=_internal_redirect_enabled,
     )
 
 
@@ -1055,6 +1002,7 @@ async def upload_image(
         file.filename,
         mask_requested=_upload_requests_mask_preflight(purpose, file.filename),
         reference_size=reference_size,
+        allow_large_dimensions=_upload_allows_large_dimensions(purpose),
     )
     _ensure_storage_free_space(len(data) + len(normalized_ref))
     buf = bytearray(data)
@@ -1402,25 +1350,49 @@ async def reference_image_binary(
     ):
         raise _http("not_found", "image not found", 404)
     if variant:
-        if variant != VIDEO_REFERENCE_IMAGE_KIND:
-            raise _http("invalid_variant", "unsupported image reference variant", 400)
-        try:
-            ref_variant = await ensure_video_reference_image_variant(
-                db,
-                img,
-                storage_root=settings.storage_root,
+        if variant == VIDEO_REFERENCE_IMAGE_KIND:
+            try:
+                ref_variant = await ensure_video_reference_image_variant(
+                    db,
+                    img,
+                    storage_root=settings.storage_root,
+                )
+                await db.commit()
+            except VideoReferenceImageError as exc:
+                raise _http(exc.code, exc.message, exc.status_code) from exc
+            return _storage_streaming_response(
+                _fs_path(ref_variant.storage_key),
+                media_type=VIDEO_REFERENCE_IMAGE_MIME,
+                etag=f'"{ref_variant.image_id}-{ref_variant.kind}"',
+                cache_control="private, max-age=3600",
+                storage_key=ref_variant.storage_key,
+                request=request,
             )
-            await db.commit()
-        except VideoReferenceImageError as exc:
-            raise _http(exc.code, exc.message, exc.status_code) from exc
-        return _storage_streaming_response(
-            _fs_path(ref_variant.storage_key),
-            media_type=VIDEO_REFERENCE_IMAGE_MIME,
-            etag=f'"{ref_variant.image_id}-{ref_variant.kind}"',
-            cache_control="private, max-age=3600",
-            storage_key=ref_variant.storage_key,
-            request=request,
-        )
+        if variant == VOLCANO_ASSET_IMAGE_KIND:
+            asset_variant = (
+                await db.execute(
+                    select(ImageVariant).where(
+                        ImageVariant.image_id == img.id,
+                        ImageVariant.kind == VOLCANO_ASSET_IMAGE_KIND,
+                    )
+                )
+            ).scalar_one_or_none()
+            if asset_variant is None:
+                raise _http("not_found", "image not found", 404)
+            return _storage_streaming_response(
+                _fs_path(asset_variant.storage_key),
+                media_type=VOLCANO_ASSET_IMAGE_MIME,
+                etag=f'"{asset_variant.image_id}-{asset_variant.kind}"',
+                cache_control="private, max-age=3600",
+                storage_key=asset_variant.storage_key,
+                request=request,
+                inline_filename=volcano_asset_safe_filename(
+                    img.id,
+                    asset_type="Image",
+                ),
+            )
+        else:
+            raise _http("invalid_variant", "unsupported image reference variant", 400)
     return _storage_streaming_response(
         _fs_path(img.storage_key),
         media_type=img.mime,
@@ -1428,6 +1400,27 @@ async def reference_image_binary(
         cache_control="private, max-age=3600",
         storage_key=img.storage_key,
         request=request,
+    )
+
+
+@router.get("/reference/{image_id}/binary/{filename}")
+async def reference_image_binary_named(
+    image_id: str,
+    filename: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: str = Query(min_length=16, max_length=256),
+    variant: str | None = Query(default=None, max_length=32),
+) -> Response:
+    expected = volcano_asset_safe_filename(image_id, asset_type="Image")
+    if filename != expected or variant != VOLCANO_ASSET_IMAGE_KIND:
+        raise _http("not_found", "image not found", 404)
+    return await reference_image_binary(
+        image_id,
+        request,
+        db,
+        token=token,
+        variant=variant,
     )
 
 

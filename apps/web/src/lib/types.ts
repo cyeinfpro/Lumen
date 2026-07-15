@@ -2,11 +2,7 @@
 // 前端自用场景：没有持久化服务端时，消息/图像/任务先在内存中建立，后续接后端时仅替换数据源。
 
 export type Intent =
-  | "auto"
-  | "chat"
-  | "vision_qa"
-  | "text_to_image"
-  | "image_to_image";
+  "auto" | "chat" | "vision_qa" | "text_to_image" | "image_to_image";
 
 export type AspectRatio =
   | "1:1"
@@ -182,17 +178,10 @@ export interface GeneratedImage {
 }
 
 export type GenerationStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "canceled";
+  "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export type GenerationStage =
-  | "queued"
-  | "understanding"
-  | "rendering"
-  | "finalizing";
+  "queued" | "understanding" | "rendering" | "finalizing";
 
 // SSE 进度事件携带的细颗粒子阶段。粗 stage 用于持久化、断线重连恢复；
 // substage 仅在实时 SSE 中出现，不识别时降级到粗 stage 行为。
@@ -345,12 +334,7 @@ export interface CompletionToolCall {
 export interface MemoryWrite {
   id?: string | null;
   kind:
-    | "added"
-    | "updated"
-    | "merged"
-    | "superseded"
-    | "staged"
-    | "rejected_pii";
+    "added" | "updated" | "merged" | "superseded" | "staged" | "rejected_pii";
   type?: "profile" | "preference" | "avoid" | "project" | null;
   content: string;
   source_excerpt?: string | null;
@@ -726,6 +710,11 @@ export interface VideoProviderItemOut {
   kind: VideoProviderKind;
   base_url: string;
   api_key_hint: string;
+  access_key_id_hint?: string;
+  secret_access_key_hint?: string;
+  project_name?: string | null;
+  region?: string | null;
+  asset_management_ready?: boolean;
   enabled: boolean;
   priority: number;
   weight: number;
@@ -747,6 +736,10 @@ export interface VideoProviderItemIn {
   kind: VideoProviderKind;
   base_url: string;
   api_key?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  project_name?: string;
+  region?: string;
   enabled: boolean;
   priority: number;
   weight: number;
@@ -1043,6 +1036,31 @@ export interface BillingSnapshotOut {
   by_kind_30d: BillingUsageByKindOut;
 }
 
+export type {
+  VideoAssetCapabilitiesOut,
+  VideoAssetCapabilityReason,
+  VideoAssetCreateIn,
+  VideoAssetDeleteResultOut,
+  VideoAssetGroupCreateIn,
+  VideoAssetGroupListOut,
+  VideoAssetGroupOut,
+  VideoAssetGroupPatchIn,
+  VideoAssetListOut,
+  VideoAssetOperationAction,
+  VideoAssetOperationErrorOut,
+  VideoAssetOperationOut,
+  VideoAssetOperationResult,
+  VideoAssetOut,
+  VideoAssetPatchIn,
+  VideoAssetQuotaLimitsOut,
+  VideoAssetQuotaUsageOut,
+  VideoAssetStatus,
+  VideoAssetType,
+} from "./videoAssetTypes";
+// ABI fields live in videoAssetTypes.ts:
+// quotas: VideoAssetQuotaLimitsOut
+// delivery_generation: number
+
 export interface AdminBillingUsageOut {
   user_id: string;
   balance_micro: number;
@@ -1200,7 +1218,10 @@ export interface VideoModelOptionOut {
   durations_s?: number[];
   durations_by_action?: Partial<Record<VideoAction, number[]>>;
   durations_by_action_resolution?: Partial<
-    Record<VideoAction, Partial<Record<VideoCreateIn["resolution"] | string, number[]>>>
+    Record<
+      VideoAction,
+      Partial<Record<VideoCreateIn["resolution"] | string, number[]>>
+    >
   >;
   resolutions?: Array<VideoCreateIn["resolution"]>;
   reference_media_limits?: Partial<
