@@ -662,6 +662,7 @@ class VideoModelOptionOut(BaseModel):
         default_factory=dict
     )
     resolutions: list[VideoResolution] = Field(default_factory=list)
+    reference_media_limits: dict[Literal["image", "video", "audio"], int] = Field(default_factory=dict)
 
 
 class VideoOptionsOut(BaseModel):

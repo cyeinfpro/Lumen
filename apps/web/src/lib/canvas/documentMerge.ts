@@ -121,18 +121,13 @@ function documentProjectionVersion(document: CanvasDocument): {
 } {
   return {
     timestamp: Math.max(
-    ...document.recent_executions.map((execution) =>
-      projectionTimestamp(
-        execution.updated_at,
-        execution.finished_at,
-        execution.started_at,
-        execution.created_at,
+      ...document.recent_executions.map((execution) =>
+        executionProjectionTimestamp(execution),
       ),
-    ),
-    ...document.active_runs.map((run) =>
+      ...document.active_runs.map((run) =>
         projectionTimestamp(run.updated_at, run.created_at),
-    ),
-    Number.NEGATIVE_INFINITY,
+      ),
+      Number.NEGATIVE_INFINITY,
     ),
     sequence: Math.max(
       ...document.selections.map((selection) =>
@@ -158,18 +153,26 @@ function compareExecutionProjection(
   right: CanvasNodeExecution,
 ): number {
   return (
+    executionProjectionTimestamp(left) - executionProjectionTimestamp(right)
+  );
+}
+
+function executionProjectionTimestamp(execution: CanvasNodeExecution): number {
+  return Math.max(
     projectionTimestamp(
-      left.updated_at,
-      left.finished_at,
-      left.started_at,
-      left.created_at,
-    ) -
-    projectionTimestamp(
-      right.updated_at,
-      right.finished_at,
-      right.started_at,
-      right.created_at,
-    )
+      execution.updated_at,
+      execution.finished_at,
+      execution.started_at,
+      execution.created_at,
+    ),
+    ...(execution.tasks ?? []).map((task) =>
+      projectionTimestamp(
+        task.updated_at,
+        task.finished_at,
+        task.started_at,
+        task.created_at,
+      ),
+    ),
   );
 }
 

@@ -660,6 +660,14 @@ export function findMatchingCanvasNodeCatalogItem(
   if (!presetId) return undefined;
   const item = findCanvasNodeCatalogItem(presetId);
   if (!item || item.type !== node.type) return undefined;
+  if (
+    presetId === "subject_reference" ||
+    presetId === "product_reference" ||
+    presetId === "style_reference" ||
+    presetId === "background_reference"
+  ) {
+    return item;
+  }
   const expectedConfig = item.overrides?.config;
   if (!expectedConfig) return item;
   return Object.entries(expectedConfig).every(

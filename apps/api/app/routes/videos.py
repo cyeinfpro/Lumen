@@ -112,6 +112,7 @@ from ..video_reference_videos import (
     ensure_video_reference_video_variant,
     video_reference_variant_metadata,
 )
+from ..video_options import reference_media_limits_for_model
 
 
 router = APIRouter()
@@ -1418,11 +1419,31 @@ def _public_video_hold_estimates(
     return out
 
 
+def _forbidden_video_options() -> VideoOptionsOut:
+    return VideoOptionsOut(
+        enabled=False,
+        models=[],
+        durations_s=[],
+        resolutions=[],
+        aspect_ratios=list(_DEFAULT_VIDEO_ASPECT_RATIOS),
+        generate_audio=False,
+        pricing=[],
+        hold_estimates={},
+        unavailable_reason="account_mode_forbidden",
+    )
+
+
 @router.get("/options", response_model=VideoOptionsOut)
 async def video_options(
     _user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoOptionsOut:
+    if getattr(_user, "account_mode", "wallet") != "wallet":
+        return _forbidden_video_options()
+    return await _wallet_video_options(db)
+
+
+async def _wallet_video_options(db: AsyncSession) -> VideoOptionsOut:
     enabled = await _video_enabled(db)
     estimates: dict[str, Any] = {}
     unavailable_reason: str | None = None
@@ -1642,6 +1663,9 @@ async def video_options(
                 resolutions=cast(
                     list[VideoResolution],
                     _ordered_video_resolutions(model_resolutions.get(model, set())),
+                ),
+                reference_media_limits=reference_media_limits_for_model(
+                    providers, model, actions
                 ),
             )
         )

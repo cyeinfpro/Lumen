@@ -365,8 +365,8 @@ def test_resize_mask_rejects_invalid_reference_bytes_without_mask_false_positive
     assert "mask image not decodable" not in str(ei.value)
 
 
-def test_resize_mask_binarizes_partial_alpha_same_size() -> None:
-    """同尺寸但 alpha=128 (partial) → fast path miss，要二值化兜底。
+def test_resize_mask_rejects_partial_alpha_that_becomes_empty() -> None:
+    """同尺寸但 alpha=128 会二值化为全保留区，应直接拒绝而不是静默 no-op。
 
     OpenAI /v1/images/edits 只在 alpha=0/255 时定义；前端 destination-out 描线
     1-px 抗锯齿会留 partial alpha，worker 必须压回二值。
@@ -374,17 +374,21 @@ def test_resize_mask_binarizes_partial_alpha_same_size() -> None:
     ref = _make_png(size=(32, 32))
     mask = _make_partial_alpha_mask_png(size=(32, 32), alpha=128)
 
-    out = generation._resize_mask_to_reference(mask, ref)
-    # 不能直返原字节（alpha 不二值，必须重编码）
-    assert out != mask
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        generation._resize_mask_to_reference(mask, ref)
+    assert exc_info.value.error_code == EC.BAD_REFERENCE_IMAGE.value
+    assert "does not mark any repaint area" in str(exc_info.value)
 
-    with _PILImage.open(_io.BytesIO(out)) as resized:
-        alpha = resized.getchannel("A")
-        lo, hi = alpha.getextrema()
-        # alpha=128 经阈值化（>= 128 → 255），全图 alpha=255
-        assert (lo, hi) == (255, 255), (
-            f"alpha must be binarized (128 → 255 since >= threshold), got {(lo, hi)}"
-        )
+
+def test_resize_mask_rejects_image_without_alpha() -> None:
+    ref = _make_png(size=(32, 32))
+    raw = _io.BytesIO()
+    _PILImage.new("RGB", (32, 32), color=(0, 0, 0)).save(raw, format="JPEG")
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        generation._resize_mask_to_reference(raw.getvalue(), ref)
+    assert exc_info.value.error_code == EC.BAD_REFERENCE_IMAGE.value
+    assert "must include an alpha channel" in str(exc_info.value)
 
 
 # --- normalized_ref loading -----------------------------------------------

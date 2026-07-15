@@ -165,7 +165,7 @@ test("reference video ports enforce image and video media limits", () => {
   }
 });
 
-test("catalog presets assign roles only while their identifying config still matches", () => {
+test("catalog presets preserve their roles after editable config changes", () => {
   const graph = createDefaultCanvasGraph();
   const product = createCanvasNodeFromCatalog(
     "product_reference",
@@ -183,14 +183,17 @@ test("catalog presets assign roles only while their identifying config still mat
   assert.equal(matchingEdge?.role, "product");
 
   product.config.display_name = "已改名的参考图";
-  assert.equal(findMatchingCanvasNodeCatalogItem(product), undefined);
-  const driftedEdge = createCanvasEdge(graph, {
+  assert.equal(
+    findMatchingCanvasNodeCatalogItem(product)?.id,
+    "product_reference",
+  );
+  const renamedEdge = createCanvasEdge(graph, {
     sourceNodeId: product.id,
     sourceHandle: "image",
     targetNodeId: "image-generate-1",
     targetHandle: "references",
   });
-  assert.equal(driftedEdge?.role, null);
+  assert.equal(renamedEdge?.role, "product");
 });
 
 test("specialized image presets remain distinct from base defaults", () => {
@@ -217,6 +220,8 @@ test("specialized image presets remain distinct from base defaults", () => {
     ],
     ["transparent", "png", null],
   );
+  redraw.config.quality = "1k";
+  assert.equal(findMatchingCanvasNodeCatalogItem(redraw), undefined);
 });
 
 test("connection validation rejects a cycle immediately", () => {
@@ -327,6 +332,78 @@ test("video capability validation blocks disabled or incompatible options", () =
     }),
     "当前模式没有可用的视频模型",
   );
+  assert.equal(
+    canvasVideoCapabilityError(video, {
+      ...disabled,
+      unavailable_reason: "account_mode_forbidden",
+    }),
+    "BYOK 模式暂不支持视频生成",
+  );
+});
+
+test("video capability validation respects reference media model limits", () => {
+  const graph = createDefaultCanvasGraph();
+  graph.nodes[0].config = { text: "保持人物一致", locked: false };
+  const referenceVideo = createCanvasNode(
+    "video_reference_generate",
+    { x: 720, y: 120 },
+    {
+      id: "reference-capability",
+      config: { model: "image-only" },
+    },
+  );
+  const videoAsset = createCanvasNode("video_asset", { x: 0, y: 360 }, {
+    id: "reference-video-asset",
+    config: { video_id: "video-1" },
+  });
+  graph.nodes.push(referenceVideo, videoAsset);
+  graph.edges.push(
+    createCanvasEdge(graph, {
+      sourceNodeId: "prompt-1",
+      sourceHandle: "text",
+      targetNodeId: referenceVideo.id,
+      targetHandle: "prompt",
+    })!,
+    createCanvasEdge(graph, {
+      sourceNodeId: videoAsset.id,
+      sourceHandle: "video",
+      targetNodeId: referenceVideo.id,
+      targetHandle: "reference_videos",
+    })!,
+  );
+  const options: Parameters<typeof canvasVideoCapabilityError>[1] = {
+    enabled: true,
+    unavailable_reason: null,
+    models: [
+      {
+        model: "image-only",
+        actions: ["reference"],
+        resolutions: ["720p"],
+        durations_s: [5],
+        reference_media_limits: { image: 9 },
+      },
+      {
+        model: "image-and-video",
+        actions: ["reference"],
+        resolutions: ["720p"],
+        durations_s: [5],
+        reference_media_limits: { image: 9, video: 3 },
+      },
+    ],
+    durations_s: [5],
+    resolutions: ["720p"],
+    aspect_ratios: ["16:9"],
+    generate_audio: true,
+    pricing: [],
+    hold_estimates: {},
+  };
+
+  assert.equal(
+    canvasVideoCapabilityError(referenceVideo, options, graph),
+    "当前视频模型不支持参考视频",
+  );
+  referenceVideo.config.model = null;
+  assert.equal(canvasVideoCapabilityError(referenceVideo, options, graph), null);
 });
 
 test("execution validation matches mask and reference-mode server guards", () => {

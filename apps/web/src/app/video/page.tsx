@@ -135,6 +135,7 @@ import {
   preferredResolution,
   resolutionOptionsForModel,
   toVideoResolution,
+  videoUnavailableReasonMessage,
 } from "./video-options-model";
 
 const VIDEO_EVENTS = [
@@ -404,7 +405,9 @@ function videoConfigurationIssue({
   if (createPending) return "正在提交";
   if (uploadPending) return "等待素材上传完成";
   if (optionsLoading) return "正在读取配置";
-  if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
+  if (!options?.enabled) {
+    return videoUnavailableReasonMessage(options?.unavailable_reason);
+  }
   if (!selectedModel) return "没有可用模型";
   if (!availableResolutions.includes(resolution)) return "当前模型不支持该分辨率";
   if (!availableDurations.includes(durationS)) return "当前模型不支持该时长";
@@ -1726,7 +1729,7 @@ export default function VideoPage() {
     ? "读取视频服务配置"
     : serviceEnabled
       ? `${availableModels.length} 个模型可用`
-      : options?.unavailable_reason ?? "需要先配置可用的视频供应商";
+      : videoUnavailableReasonMessage(options?.unavailable_reason);
   const parameterProfile = `${effectiveResolution} · ${formatDurationLabel(effectiveDurationS)}`;
   const sourceReady =
     action === "t2v" ||

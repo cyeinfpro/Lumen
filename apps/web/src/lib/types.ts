@@ -1203,6 +1203,9 @@ export interface VideoModelOptionOut {
     Record<VideoAction, Partial<Record<VideoCreateIn["resolution"] | string, number[]>>>
   >;
   resolutions?: Array<VideoCreateIn["resolution"]>;
+  reference_media_limits?: Partial<
+    Record<VideoReferenceMediaIn["kind"], number>
+  >;
 }
 
 export interface VideoOptionsOut {

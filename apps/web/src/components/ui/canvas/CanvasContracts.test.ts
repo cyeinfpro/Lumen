@@ -13,7 +13,11 @@ const viewportSource = source("./CanvasViewport.tsx");
 const topBarSource = source("./CanvasTopBar.tsx");
 const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
 const nodesSource = source("./nodes/CanvasNodes.tsx");
+const imageAssetDropSource = source("./nodes/CanvasImageAssetDropZone.tsx");
 const inspectorSource = source("./CanvasInspector.tsx");
+const nodeConfigEditorSource = source("./CanvasNodeConfigEditor.tsx");
+const outputDownloadSource = source("./CanvasOutputDownloadButton.tsx");
+const videoPreviewSource = source("./CanvasVideoPreviewDialog.tsx");
 const workspaceToolsSource = source("./useCanvasWorkspaceTools.ts");
 const commandMenuSource = source("./CanvasCommandMenu.tsx");
 const viewportControlsSource = source("./CanvasViewportControls.tsx");
@@ -200,12 +204,40 @@ test("canvas catalog creation persists presets and filters quick connections by 
   match(workspaceToolsSource, /validateCanvasConnection\(candidateGraph/);
 });
 
+test("canvas mask uploads request strict server preflight", () => {
+  match(inspectorSource, /purpose: kind === "mask" \? "inpaint_mask"/);
+  match(
+    nodeConfigEditorSource,
+    /accept=\{isMask \? "image\/png" : "image\/png,image\/jpeg,image\/webp"\}/,
+  );
+});
+
+test("image asset nodes accept direct paste, drop, and replacement uploads", () => {
+  match(nodesSource, /CanvasImageAssetDropZone/);
+  match(imageAssetDropSource, /data-canvas-image-dropzone/);
+  match(imageAssetDropSource, /data-canvas-native-paste/);
+  match(imageAssetDropSource, /onPaste=\{onPaste\}/);
+  match(imageAssetDropSource, /onDrop=\{onDrop\}/);
+  match(imageAssetDropSource, /uploadImage\(file/);
+  match(imageAssetDropSource, /MAX_UPLOAD_SOURCE_BYTES/);
+  match(workspaceInteractionsSource, /data-canvas-native-paste/);
+});
+
 test("canvas viewport and media rendering stay scalable and accessible", () => {
   match(viewportSource, /onlyRenderVisibleElements/);
   match(viewportSource, /useReducedMotion/);
   match(viewportSource, /COMPACT_MIN_ZOOM = 0\.08/);
   match(viewportSource, /ariaLabelConfig=\{CANVAS_ARIA_LABEL_CONFIG\}/);
-  match(nodesSource, /imageVariantUrl\(output\.image_id, "thumb256"\)/);
+  match(nodesSource, /imageVariantUrl\(output\.image_id, "display2048"\)/);
+  match(nodesSource, /videoBinaryUrl\(output\.video_id\)/);
+  match(nodesSource, /openLightboxFromItems/);
+  match(nodesSource, /CanvasVideoPreviewDialog/);
+  match(nodesSource, /CanvasOutputDownloadButton/);
+  match(inspectorSource, /CanvasOutputDownloadButton/);
+  match(videoPreviewSource, /CanvasOutputDownloadButton/);
+  match(outputDownloadSource, /triggerImageDownload/);
+  match(outputDownloadSource, /videoDownloadUrl/);
+  match(outputDownloadSource, /data-canvas-output-download/);
   match(nodesSource, /output\.poster_url\?\.trim\(\)/);
   match(nodesSource, /loading="lazy"/);
   match(nodesSource, /decoding="async"/);

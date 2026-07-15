@@ -29,6 +29,14 @@ VIDEO_PROVIDER_KINDS = (
     "fake",
 )
 VIDEO_ACTIONS = ("t2v", "i2v", "reference")
+VIDEO_REFERENCE_MEDIA_LIMITS: dict[str, dict[str, int]] = {
+    "volcano": {"image": 9, "video": 3},
+    "volcano_third_party": {"image": 9, "video": 3},
+    "volcano_newapi": {"image": 4, "video": 3, "audio": 1},
+    "dashscope": {"image": 9},
+    "omni_flash": {"image": 9},
+    "fake": {"image": 9, "video": 3},
+}
 _VOLCANO_DOMESTIC_MODEL_ALIASES = {
     "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
 }
@@ -316,13 +324,19 @@ def select_video_provider(
     return None
 
 
+def video_reference_media_limits(provider_kind: str) -> dict[str, int]:
+    return dict(VIDEO_REFERENCE_MEDIA_LIMITS.get(provider_kind, {}))
+
+
 __all__ = [
     "VIDEO_ACTIONS",
     "VIDEO_PROVIDER_KINDS",
+    "VIDEO_REFERENCE_MEDIA_LIMITS",
     "VideoProviderDefinition",
     "ordered_video_providers",
     "parse_video_provider_config_json",
     "parse_video_provider_item",
     "select_video_provider",
     "validate_video_providers",
+    "video_reference_media_limits",
 ]

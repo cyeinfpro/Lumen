@@ -21,6 +21,11 @@ import type {
 } from "#canvas-types";
 import { MAX_PROMPT_CHARS } from "../promptLimits";
 import type { VideoOptionsOut } from "../types";
+import {
+  videoReferenceLimitError,
+  videoUnavailableReasonMessage,
+  type VideoReferenceCounts,
+} from "../../app/video/video-options-model";
 
 export const MAX_CANVAS_NODES = 1_000;
 export const MAX_CANVAS_EDGES = 3_000;
@@ -810,20 +815,63 @@ export function validateCanvasNodeExecution(
 export function canvasVideoCapabilityError(
   node: CanvasNodeDefinition,
   options: VideoOptionsOut,
+  graph?: CanvasGraph,
 ): string | null {
   if (!isCanvasVideoNodeType(node.type)) return null;
   if (!options.enabled) {
-    return options.unavailable_reason?.trim() || "视频生成功能当前不可用";
+    return videoUnavailableReasonMessage(options.unavailable_reason);
   }
   const action = canvasVideoModeForNode(node);
   if (!action) return "视频生成模式无效";
-  return canvasVideoModelCapabilityError(node, options, action);
+  return canvasVideoModelCapabilityError(node, options, action, graph);
+}
+
+export function canvasVideoReferenceCounts(
+  graph: CanvasGraph,
+  nodeId: string,
+): VideoReferenceCounts {
+  const counts: VideoReferenceCounts = { image: 0, video: 0, audio: 0 };
+  for (const edge of graph.edges) {
+    if (edge.target_node_id !== nodeId) continue;
+    if (edge.target_handle === "reference_images") counts.image += 1;
+    if (edge.target_handle === "reference_videos") counts.video += 1;
+  }
+  return counts;
+}
+
+function canvasReferenceCompatibleModels(
+  models: VideoOptionsOut["models"],
+  {
+    action,
+    configuredModel,
+    graph,
+    nodeId,
+  }: {
+    action: NonNullable<ReturnType<typeof canvasVideoModeForNode>>;
+    configuredModel: string;
+    graph?: CanvasGraph;
+    nodeId: string;
+  },
+): { models: VideoOptionsOut["models"]; error: string | null } {
+  if (!graph || action !== "reference") return { models, error: null };
+  const counts = canvasVideoReferenceCounts(graph, nodeId);
+  const compatible = models.filter(
+    (model) => videoReferenceLimitError(model, counts) === null,
+  );
+  if (compatible.length > 0) return { models: compatible, error: null };
+  return {
+    models: compatible,
+    error: configuredModel
+      ? videoReferenceLimitError(models[0], counts)
+      : "没有视频模型支持当前连接的参考素材",
+  };
 }
 
 function canvasVideoModelCapabilityError(
   node: CanvasNodeDefinition,
   options: VideoOptionsOut,
   action: NonNullable<ReturnType<typeof canvasVideoModeForNode>>,
+  graph?: CanvasGraph,
 ): string | null {
   const resolution = String(node.config.resolution ?? "720p");
   const configuredModel = String(node.config.model ?? "");
@@ -831,10 +879,18 @@ function canvasVideoModelCapabilityError(
     model.actions.includes(action),
   );
   if (actionModels.length === 0) return "当前模式没有可用的视频模型";
-  const selectedModels = configuredModel
+  const configuredModels = configuredModel
     ? actionModels.filter((model) => model.model === configuredModel)
     : actionModels;
-  if (selectedModels.length === 0) return "当前视频模型不可用，请重新选择";
+  if (configuredModels.length === 0) return "当前视频模型不可用，请重新选择";
+  const referenceSelection = canvasReferenceCompatibleModels(configuredModels, {
+    action,
+    configuredModel,
+    graph,
+    nodeId: node.id,
+  });
+  if (referenceSelection.error) return referenceSelection.error;
+  const selectedModels = referenceSelection.models;
   const resolutionModels = selectedModels.filter(
     (model) =>
       !model.resolutions?.length ||
