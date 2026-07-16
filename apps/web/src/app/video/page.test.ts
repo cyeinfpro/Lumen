@@ -225,6 +225,41 @@ test("video reference identity, labels, limits, and asset ids are stable", () =>
   equal(referenceDomain.normalizeAssetUrl("https://example.com/asset-1"), "");
 });
 
+test("volcano asset references keep the safe preview URL", () => {
+  const result = referenceDomain.appendVolcanoAssetReferences(
+    [],
+    [
+      {
+        id: "asset-image-1",
+        name: "人物素材",
+        asset_type: "Image",
+        url: null,
+        preview_url: "/api/images/image-1/binary",
+      },
+    ],
+    { image: 1, video: 1, audio: 0 },
+    () => "reference-key-1",
+  );
+
+  equal(result.added, 1);
+  equal(result.references[0]?.previewUrl, "/api/images/image-1/binary");
+
+  const unsafe = referenceDomain.appendVolcanoAssetReferences(
+    [],
+    [
+      {
+        id: "asset-image-2",
+        name: "异常素材",
+        asset_type: "Image",
+        preview_url: "javascript:alert(1)",
+      },
+    ],
+    { image: 1, video: 1, audio: 0 },
+    () => "reference-key-2",
+  );
+  equal(unsafe.references[0]?.previewUrl, null);
+});
+
 test("video reference aliases serialize to anchors and display round trips", () => {
   const imageReference = testReferences[0];
   const videoReference = testReferences[1];

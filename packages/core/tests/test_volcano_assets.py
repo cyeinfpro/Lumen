@@ -305,10 +305,24 @@ def test_normalize_asset_removes_internal_and_sensitive_urls() -> None:
         },
         project_name="project-a",
     )
+    unsafe_scheme = normalize_asset(
+        {
+            "Id": "asset-4",
+            "GroupId": "group-1",
+            "AssetType": "Image",
+            "URL": "javascript:alert(1)",
+        },
+        project_name="project-a",
+    )
 
     assert internal["url"] is None
+    assert internal["preview_url"] == "/api/images/image-1/binary"
     assert external["url"] == "https://cdn.example.com/asset.jpg?width=300"
+    assert external["preview_url"] == "https://cdn.example.com/asset.jpg?width=300"
     assert credentialed["url"] is None
+    assert credentialed["preview_url"] is None
+    assert unsafe_scheme["url"] is None
+    assert unsafe_scheme["preview_url"] is None
 
 
 @pytest.mark.asyncio

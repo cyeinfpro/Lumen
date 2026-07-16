@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -43,6 +43,10 @@ _REGION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _INTERNAL_REFERENCE_PATH_PREFIXES = (
     "/api/images/reference/",
     "/api/videos/reference/",
+)
+_INTERNAL_REFERENCE_PATH_RE = re.compile(
+    r"^/api/(?P<collection>images|videos)/reference/"
+    r"(?P<resource_id>[^/]+)/binary(?:/[^/]+)?/?$"
 )
 _SENSITIVE_ASSET_URL_QUERY_MARKERS = (
     "accesskey",
@@ -790,6 +794,8 @@ def _sanitize_asset_url(raw: Any) -> str | None:
         parsed = urlsplit(value)
     except ValueError:
         return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
     if parsed.username or parsed.password:
         return None
     path = parsed.path.lower()
@@ -823,6 +829,32 @@ def _sanitize_asset_url(raw: Any) -> str | None:
     )
 
 
+def _asset_preview_url(raw: Any, *, asset_type: str) -> str | None:
+    value = _optional_text(raw)
+    if value is None:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    match = _INTERNAL_REFERENCE_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return _sanitize_asset_url(value)
+    expected_collection = (
+        "images"
+        if asset_type.strip().lower() == "image"
+        else "videos"
+        if asset_type.strip().lower() == "video"
+        else None
+    )
+    if match.group("collection") != expected_collection:
+        return None
+    resource_id = unquote(match.group("resource_id"))
+    if not _SAFE_ASSET_ID_RE.fullmatch(resource_id):
+        return None
+    return f"/api/{expected_collection}/{quote(resource_id, safe='')}/binary"
+
+
 def normalize_asset(
     raw: Any,
     *,
@@ -832,6 +864,11 @@ def normalize_asset(
     item = _unwrap_mapping(raw, "Asset", "AssetInfo")
     fallback = fallback or {}
     error_code, error_message = _asset_error(item)
+    asset_type = (
+        _optional_text(_mapping_value(item, "AssetType", "asset_type"))
+        or _text(fallback.get("asset_type"))
+    )
+    raw_url = _mapping_value(item, "URL", "Url", "url")
     return {
         "id": _optional_text(
             _mapping_value(item, "Id", "ID", "AssetId", "id", "asset_id")
@@ -841,11 +878,11 @@ def normalize_asset(
         or _text(fallback.get("group_id")),
         "name": _optional_text(_mapping_value(item, "Name", "name"))
         or _text(fallback.get("name")),
-        "asset_type": _optional_text(_mapping_value(item, "AssetType", "asset_type"))
-        or _text(fallback.get("asset_type")),
+        "asset_type": asset_type,
         "status": _optional_text(_mapping_value(item, "Status", "status"))
         or _text(fallback.get("status")),
-        "url": _sanitize_asset_url(_mapping_value(item, "URL", "Url", "url")),
+        "url": _sanitize_asset_url(raw_url),
+        "preview_url": _asset_preview_url(raw_url, asset_type=asset_type),
         "project_name": _text(
             _mapping_value(item, "ProjectName", "project_name"),
             _text(fallback.get("project_name"), project_name),

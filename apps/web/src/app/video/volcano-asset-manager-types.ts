@@ -19,6 +19,7 @@ export type VolcanoAssetSelection = {
   name: string;
   asset_type: "Image" | "Video";
   url?: string | null;
+  preview_url?: string | null;
   status: string;
   group_id: string;
 };

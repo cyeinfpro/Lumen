@@ -86,6 +86,7 @@ class VideoAssetOut(BaseModel):
     asset_type: str
     status: str = ""
     url: str | None = None
+    preview_url: str | None = None
     project_name: str
     create_time: str | None = None
     update_time: str | None = None
