@@ -160,6 +160,45 @@ test("only active assets are selectable and selected assets can be toggled off",
   );
 });
 
+test("asset media prefers the safe preview URL and keeps it in selections", () => {
+  assert.equal(
+    domain.volcanoAssetMediaUrl({
+      preview_url: "/api/images/image-1/binary",
+      url: "https://cdn.example.com/original.jpg",
+    }),
+    "/api/images/image-1/binary",
+  );
+  assert.equal(
+    domain.volcanoAssetMediaUrl({
+      preview_url: null,
+      url: "https://cdn.example.com/original.jpg",
+    }),
+    "https://cdn.example.com/original.jpg",
+  );
+  assert.equal(
+    domain.volcanoAssetMediaUrl({
+      preview_url: null,
+      url: "asset://asset-image-1",
+    }),
+    null,
+  );
+  assert.equal(
+    domain.volcanoAssetMediaUrl({
+      preview_url: "javascript:alert(1)",
+      url: null,
+    }),
+    null,
+  );
+
+  const selected = managerState.assetSelection(
+    assetFixture("asset-image-1", "Image", {
+      preview_url: "/api/images/image-1/binary",
+      url: null,
+    }),
+  );
+  assert.equal(selected.preview_url, "/api/images/image-1/binary");
+});
+
 test("ingest validation only applies Lumen size and format safety limits", () => {
   const mib = 1024 * 1024;
   assert.deepEqual(
@@ -808,9 +847,9 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /purpose: "volcano_asset"/);
   assert.match(managerSource, /后台优化/);
   assert.match(managerSource, /火山处理中/);
-  assert.match(managerSource, /级联删除组内全部云端素材/);
+  assert.match(managerSource, /组内全部云端素材/);
   assert.match(managerSource, /上传后自动优化为火山规格/);
-  assert.match(managerSource, /当前火山 Project 共享素材库/);
+  assert.match(managerSource, /管理并选择 AIGC 图片与视频/);
   assert.match(managerSource, /const processingUploadKey = useMemo\(/);
   assert.match(
     managerSource,
@@ -823,14 +862,15 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /uploadQueuesRef/);
   assert.match(managerSource, /提交请求已发出但结果未知。系统不会自动重发/);
   assert.match(managerSource, /系统不会自动重复创建/);
-  assert.match(managerSource, /关闭弹窗会暂停本地上传和状态轮询/);
   assert.match(managerSource, /function AssetPagination\(/);
   assert.match(managerSource, /上一页/);
   assert.match(managerSource, /下一页/);
   assert.doesNotMatch(managerSource, /sort_by: "UpdateTime"/);
   assert.match(managerSource, /等待火山提交配额/);
-  assert.match(managerSource, /CreateAsset 3 QPM/);
-  assert.match(managerSource, /最终限流由服务端兜底/);
+  assert.match(managerSource, /上传素材/);
+  assert.match(managerSource, /图片 ≤ 50 MiB · 视频 ≤ 64 MiB/);
+  assert.doesNotMatch(managerSource, /CreateAsset 3 QPM/);
+  assert.doesNotMatch(managerSource, /最终限流由服务端兜底/);
   assert.match(managerSource, /素材总配额/);
   assert.match(managerSource, /素材组总配额/);
   assert.match(
@@ -876,9 +916,17 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /setDeleteTarget\(null\)/);
   assert.match(managerSource, /正在删除素材组/);
   assert.match(managerSource, /正在删除素材/);
-  assert.match(managerSource, /素材名称默认取原文件名去扩展名/);
-  assert.match(managerSource, /仅用于\s+Lumen\/火山素材列表展示和搜索/);
-  assert.match(managerSource, /安全技术文件名/);
+  assert.doesNotMatch(managerSource, /素材名称默认取原文件名去扩展名/);
+  assert.doesNotMatch(
+    managerSource,
+    /仅用于\s+Lumen\/火山素材列表展示和搜索/,
+  );
+  assert.match(managerSource, /const mediaUrl = volcanoAssetMediaUrl\(asset\)/);
+  assert.match(managerSource, /预览加载失败/);
+  assert.match(managerSource, /火山素材链接/);
+  assert.match(managerSource, /安全预览链接/);
+  assert.match(managerSource, /aspect-\[4\/3\]/);
+  assert.match(managerSource, /onClick=\{onToggle\}/);
   assert.match(managerSource, /VOLCANO_ASSET_NAME_MAX_LENGTH/);
   assert.match(managerSource, /uploadNamesRef/);
   assert.match(managerSource, /onDeleted: \(assetIds: string\[\]\) => void/);

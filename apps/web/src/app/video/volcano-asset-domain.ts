@@ -28,6 +28,7 @@ export type VolcanoAssetSelectionLike = {
   name: string;
   asset_type: VideoAssetType;
   url?: string | null;
+  preview_url?: string | null;
   status: string;
   group_id: string;
 };
@@ -225,6 +226,18 @@ export function volcanoQuotaUsage(
     limit: normalizedLimit,
     reached: normalizedUsed >= normalizedLimit,
   };
+}
+
+export function volcanoAssetMediaUrl(
+  asset: Pick<VolcanoAssetSelectionLike, "preview_url" | "url">,
+): string | null {
+  for (const candidate of [asset.preview_url, asset.url]) {
+    const value = candidate?.trim();
+    if (value && (/^https?:\/\//i.test(value) || value.startsWith("/api/"))) {
+      return value;
+    }
+  }
+  return null;
 }
 
 export function volcanoReservedQuotaCount(

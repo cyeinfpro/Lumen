@@ -46,7 +46,6 @@ import {
   GroupEditor,
   InlineMessage,
   LoadingPanel,
-  MetaRow,
   OperationActivity,
   ProjectQuotaBadge,
   SegmentedFilter,
@@ -197,86 +196,75 @@ function ManagerHeader({
   "titleId" | "descriptionId" | "closeButtonRef" | "onClose" | "quotas"
 >) {
   return (
-    <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5 sm:py-4">
-      <div className="min-w-0">
-        <p className="type-page-kicker">SEEDANCE · AIGC ASSET GROUP</p>
-        <h2 id={titleId} className="type-page-title-sm mt-1">
-          火山虚拟素材库
+    <header className="flex shrink-0 flex-col gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <div className="min-w-0 flex-1">
+        <h2 id={titleId} className="type-page-title-sm">
+          火山素材库
         </h2>
         <p
           id={descriptionId}
-          className="type-page-subtitle mt-1 max-w-3xl text-pretty"
+          className="type-page-subtitle mt-0.5 max-w-2xl"
         >
-          当前火山 Project 共享素材库，仅管理官方 AIGC
-          虚拟人像图片和视频。普通非人像素材继续使用视频页“上传参考”。
+          管理并选择 AIGC 图片与视频
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <ProjectQuotaBadge
-            label="素材总配额"
-            used={quotas.projectAssetTotal}
-            limit={VOLCANO_PROJECT_ASSET_LIMIT}
-            loading={quotas.quotaLoading}
-          />
-          <ProjectQuotaBadge
-            label="素材组总配额"
-            used={quotas.projectGroupTotal}
-            limit={VOLCANO_PROJECT_GROUP_LIMIT}
-            loading={quotas.quotaLoading}
-          />
-        </div>
         {quotas.quotaError ? (
-          <p role="alert" className="type-caption mt-2 text-danger">
+          <p role="alert" className="type-caption mt-1 text-danger">
             {quotas.quotaError}
           </p>
         ) : null}
       </div>
-      <IconButton
-        ref={closeButtonRef}
-        aria-label="关闭火山虚拟素材库"
-        tooltip="关闭"
-        variant="ghost"
-        size="md"
-        className="h-11 w-11"
-        onClick={onClose}
-      >
-        <X className="h-4 w-4" />
-      </IconButton>
+      <div className="flex items-center gap-2">
+        <ProjectQuotaBadge
+          label="素材"
+          used={quotas.projectAssetTotal}
+          limit={VOLCANO_PROJECT_ASSET_LIMIT}
+          loading={quotas.quotaLoading}
+        />
+        <ProjectQuotaBadge
+          label="分组"
+          used={quotas.projectGroupTotal}
+          limit={VOLCANO_PROJECT_GROUP_LIMIT}
+          loading={quotas.quotaLoading}
+        />
+        <IconButton
+          ref={closeButtonRef}
+          aria-label="关闭火山素材库"
+          tooltip="关闭"
+          variant="ghost"
+          size="md"
+          className="ml-auto h-10 w-10"
+          onClick={onClose}
+        >
+          <X className="h-4 w-4" />
+        </IconButton>
+      </div>
     </header>
   );
 }
 
-function GroupFixedScope({
+function GroupSidebarHeader({
   capability,
+  groups,
 }: {
   capability: VideoAssetCapabilitiesOut | null;
+  groups: GroupPanelView;
 }) {
+  const scope = [
+    "AIGC",
+    capability?.project_name,
+    capability?.region,
+  ].filter(Boolean);
   return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-3">
-      <p className="type-overline text-[var(--fg-2)]">固定范围</p>
-      <dl className="mt-2 grid gap-1.5 type-caption text-[var(--fg-1)]">
-        <MetaRow label="GroupType" value="AIGC" />
-        <MetaRow
-          label="ProjectName"
-          value={capability?.project_name || "未配置"}
-        />
-        <MetaRow label="Region" value={capability?.region || "未配置"} />
-      </dl>
-    </div>
-  );
-}
-
-function GroupSearchControls({ groups }: { groups: GroupPanelView }) {
-  return (
-    <>
-      <div className="mt-3 flex items-center gap-2">
-        <Input
-          aria-label="搜索素材组"
-          placeholder="搜索素材组"
-          value={groups.search}
-          onChange={(event) => groups.onSearchChange(event.target.value)}
-          leftIcon={<Search className="h-4 w-4" />}
-          wrapperClassName="min-w-0 flex-1"
-        />
+    <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="type-card-title">
+            素材组 {groups.groupTotal ?? groups.groups.length}
+          </p>
+          <p className="type-caption mt-0.5 truncate text-[var(--fg-2)]">
+            {scope.join(" · ") || "范围未配置"}
+          </p>
+        </div>
         <IconButton
           aria-label="新建 AIGC 素材组"
           tooltip={groups.createDisabledReason || "新建素材组"}
@@ -288,12 +276,22 @@ function GroupSearchControls({ groups }: { groups: GroupPanelView }) {
           <FolderPlus className="h-4 w-4" />
         </IconButton>
       </div>
+      <div className="mt-3">
+        <Input
+          aria-label="搜索素材组"
+          placeholder="搜索素材组"
+          value={groups.search}
+          onChange={(event) => groups.onSearchChange(event.target.value)}
+          leftIcon={<Search className="h-4 w-4" />}
+          wrapperClassName="min-w-0"
+        />
+      </div>
       {groups.createDisabledReason ? (
         <p role="status" className="type-caption mt-2 text-warning">
           {groups.createDisabledReason}
         </p>
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -312,6 +310,8 @@ function GroupRow({
     (item) =>
       item.groupId === group.id && uploadBlocksGroupMutation(item),
   );
+  const secondaryText =
+    pendingOperation?.pendingLabel || group.description.trim();
   return (
     <div
       className={cn(
@@ -337,11 +337,11 @@ function GroupRow({
           <span className="type-body-sm block truncate text-[var(--fg-0)]">
             {group.name}
           </span>
-          <span className="type-caption block truncate text-[var(--fg-2)]">
-            {pendingOperation
-              ? pendingOperation.pendingLabel
-              : group.description || "无描述"}
-          </span>
+          {secondaryText ? (
+            <span className="type-caption block truncate text-[var(--fg-2)]">
+              {secondaryText}
+            </span>
+          ) : null}
         </span>
       </button>
       {active ? (
@@ -409,9 +409,8 @@ function GroupSidebar({
   groups: GroupPanelView;
 }) {
   return (
-    <aside className="border-b border-[var(--border)] bg-[var(--bg-0)]/55 p-3 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:p-4">
-      <GroupFixedScope capability={capability} />
-      <GroupSearchControls groups={groups} />
+    <aside className="max-h-72 overflow-y-auto border-b border-[var(--border)] bg-[var(--bg-0)]/55 p-3 lg:max-h-none lg:min-h-0 lg:border-b-0 lg:border-r lg:p-4">
+      <GroupSidebarHeader capability={capability} groups={groups} />
       {groups.form ? (
         <GroupEditor
           form={groups.form}
@@ -434,28 +433,28 @@ function GroupSidebar({
 
 function AssetToolbar({ assets }: { assets: AssetPanelView }) {
   return (
-    <div className="shrink-0 border-b border-[var(--border)] px-3 py-3 sm:px-4">
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+    <div className="shrink-0 border-b border-[var(--border)] px-3 py-2.5 sm:px-4">
+      <div className="flex flex-col gap-2.5 xl:flex-row xl:items-center">
         <div className="min-w-0 flex-1">
           <p className="type-card-title truncate">
             {assets.selectedGroup?.name || "选择素材组"}
           </p>
           <p className="type-caption mt-0.5 text-[var(--fg-2)]">
             {assets.selectedGroup
-              ? `${assets.totalCount} 个云端素材`
-              : "新建或选择 AIGC 素材组后上传"}
+              ? `${assets.totalCount} 个素材`
+              : "选择分组后浏览或上传素材"}
           </p>
         </div>
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           <Input
             aria-label="搜索火山虚拟素材"
-            placeholder="服务端搜索名称"
+            placeholder="搜索素材"
             value={assets.searchInput}
             onChange={(event) =>
               assets.onSearchInputChange(event.target.value)
             }
             leftIcon={<Search className="h-4 w-4" />}
-            wrapperClassName="min-w-0 sm:w-56"
+            wrapperClassName="min-w-0 sm:w-52"
             disabled={!assets.selectedGroupId}
           />
           <SegmentedFilter
@@ -609,8 +608,8 @@ function AssetResults({ assets }: { assets: AssetPanelView }) {
     return (
       <EmptyState
         icon={<FolderPlus className="h-5 w-5" />}
-        title="先选择素材组"
-        description="火山虚拟素材必须存入 GroupType=AIGC 的官方素材组。"
+        title="选择素材组"
+        description="从左侧选择一个分组。"
       />
     );
   }
@@ -623,12 +622,12 @@ function AssetResults({ assets }: { assets: AssetPanelView }) {
       <EmptyState
         icon={<ImageIcon className="h-5 w-5" />}
         title={filtered ? "无结果" : "暂无虚拟素材"}
-        description="上传后自动优化为火山规格；完成处理后即可选入视频草稿。"
+        description={filtered ? "调整筛选条件后重试。" : "上传第一份素材。"}
       />
     );
   }
   return (
-    <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+    <div className="mt-3 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 sm:grid-cols-[repeat(auto-fill,minmax(210px,1fr))]">
       {assets.visibleAssets.map((asset) => (
         <AssetGridItem key={asset.id} asset={asset} assets={assets} />
       ))}
@@ -690,7 +689,7 @@ function ManagerWorkspace({
   assets: AssetPanelView;
 }) {
   return (
-    <div className="grid min-h-full lg:h-full lg:grid-cols-[300px_minmax(0,1fr)]">
+    <div className="grid min-h-full lg:h-full lg:grid-cols-[252px_minmax(0,1fr)]">
       <GroupSidebar capability={capability} groups={groups} />
       <AssetWorkspace
         uploadInputId={uploadInputId}
@@ -754,10 +753,10 @@ function ManagerFooter({
 }: Pick<VolcanoAssetManagerViewProps, "selection" | "onClose">) {
   const hasSelection = selection.selected.length > 0;
   return (
-    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
       <div className="min-w-0 type-body-sm text-[var(--fg-1)]">
         <span className="font-medium text-[var(--fg-0)]">
-          已选 {selection.selected.length} 个
+          已选 {selection.selected.length}
         </span>
         <span className="ml-2 text-[var(--fg-2)]">
           图片 {selection.selectedImageCount}/
@@ -774,10 +773,10 @@ function ManagerFooter({
           disabled={!hasSelection}
           onClick={selection.onClear}
         >
-          取消本次选择
+          清空
         </Button>
         <Button variant="secondary" size="sm" onClick={onClose}>
-          关闭
+          取消
         </Button>
         <Button
           variant="primary"
@@ -787,7 +786,7 @@ function ManagerFooter({
           className="col-span-2 min-[430px]:col-span-1"
           onClick={selection.onUse}
         >
-          使用 {selection.selected.length} 个素材
+          添加 {selection.selected.length} 个
         </Button>
       </div>
     </footer>
@@ -805,18 +804,16 @@ function DeleteDialogView({
     confirmText = "级联删除";
     description = (
       <>
-        删除“{deleteDialog.target.group.name}”会
-        <strong>级联删除组内全部云端素材</strong>
-        ，且无法恢复。这不是取消本次选择。
+        将永久删除“{deleteDialog.target.group.name}”及
+        <strong>组内全部云端素材</strong>，无法恢复。
       </>
     );
   }
   if (deleteDialog.target?.kind === "asset") {
     description = (
       <>
-        将从火山虚拟素材库永久删除“
-        {deleteDialog.target.asset.name || "未命名素材"}”。
-        取消本次选择不会删除云端素材。
+        将永久删除“{deleteDialog.target.asset.name || "未命名素材"}”，
+        无法恢复。
       </>
     );
   }
@@ -870,7 +867,7 @@ export function VolcanoAssetManagerView({
           aria-describedby={descriptionId}
           tabIndex={-1}
           onKeyDown={onKeyDown}
-          className="mobile-dialog-panel surface-dialog flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1480px] flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] sm:h-[min(92dvh,940px)] sm:rounded-[var(--radius-dialog)] sm:border-b"
+          className="mobile-dialog-panel surface-dialog flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1380px] flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] sm:h-[min(92dvh,900px)] sm:rounded-[var(--radius-dialog)] sm:border-b"
         >
           <ManagerHeader
             titleId={titleId}

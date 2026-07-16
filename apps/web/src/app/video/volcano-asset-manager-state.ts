@@ -18,6 +18,7 @@ export function assetSelection(
     name: asset.name || "未命名素材",
     asset_type: asset.asset_type,
     url: asset.url ?? null,
+    preview_url: asset.preview_url ?? null,
     status: asset.status,
     group_id: asset.group_id,
   };

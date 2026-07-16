@@ -71,6 +71,7 @@ export interface VideoAssetOut {
   asset_type: VideoAssetType;
   status: VideoAssetStatus | string;
   url?: string | null;
+  preview_url?: string | null;
   project_name: string;
   create_time?: string | null;
   update_time?: string | null;

@@ -18,6 +18,7 @@ export type VolcanoAssetReferenceCandidate = {
   name: string;
   asset_type: "Image" | "Video";
   url?: string | null;
+  preview_url?: string | null;
 };
 type DraftReference = ReferencePayloadSource & {
   _key: string;
@@ -48,6 +49,18 @@ const CHINESE_DIGITS: Record<number, string> = {
   8: "八",
   9: "九",
 };
+
+function volcanoAssetPreviewUrl(
+  asset: VolcanoAssetReferenceCandidate,
+): string | null {
+  for (const candidate of [asset.preview_url, asset.url]) {
+    const value = candidate?.trim();
+    if (value && (/^https?:\/\//i.test(value) || value.startsWith("/api/"))) {
+      return value;
+    }
+  }
+  return null;
+}
 
 export function normalizeAssetUrl(value: string): string {
   const raw = value
@@ -105,10 +118,7 @@ export function appendVolcanoAssetReferences(
         label: identity.label,
         ref_id: identity.refId,
         display: asset.name || url,
-        previewUrl:
-          asset.url && !/^asset:\/\//i.test(asset.url)
-            ? asset.url.trim() || null
-            : null,
+        previewUrl: volcanoAssetPreviewUrl(asset),
       },
     ];
     added += 1;
