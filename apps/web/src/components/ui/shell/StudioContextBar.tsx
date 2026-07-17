@@ -129,7 +129,7 @@ export function StudioContextBar({
           <div
             role="menu"
             aria-label="会话设置"
-            className="absolute right-0 top-10 z-40 w-[320px] rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/96 p-2 shadow-[var(--shadow-3)] backdrop-blur-xl"
+            className="adaptive-material absolute right-0 top-10 z-40 w-[320px] rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/96 p-2 shadow-[var(--shadow-3)] backdrop-blur-xl"
           >
             <div className="px-2 pb-2 pt-1">
               <p className="text-[12px] font-medium text-[var(--fg-0)]">

@@ -65,7 +65,6 @@ export function ActionSheet({
                   "text-[15px]",
                   a.destructive ? "text-[var(--danger)]" : "text-[var(--fg-0)]",
                 ].join(" ")}
-                role="menuitem"
               >
                 {a.icon && (
                   <span className="inline-flex w-5 h-5 items-center justify-center">

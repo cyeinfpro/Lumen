@@ -28,6 +28,10 @@ const taskUiSource = readFileSync(
   new URL("./video-task-ui.tsx", import.meta.url),
   "utf8",
 );
+const videoWorkbenchUiSource = readFileSync(
+  new URL("./video-workbench-ui.tsx", import.meta.url),
+  "utf8",
+);
 const optionsModelSource = readFileSync(
   new URL("./video-options-model.ts", import.meta.url),
   "utf8",
@@ -37,7 +41,7 @@ const source = [
   referenceDomainSource,
   optionsModelSource,
   readFileSync(new URL("./video-page-utils.ts", import.meta.url), "utf8"),
-  readFileSync(new URL("./video-workbench-ui.tsx", import.meta.url), "utf8"),
+  videoWorkbenchUiSource,
   readFileSync(
     new URL("./video-request-lifecycle.ts", import.meta.url),
     "utf8",
@@ -636,6 +640,27 @@ test("video reference chips render material thumbnails", () => {
   match(source, /onPreview=\{\(\) => setReferencePreviewItem\(item\)\}/);
   match(source, /查看 \$\{displayToken\} 预览/);
   match(source, /promptContainsReferenceMention\(\s*prompt,\s*item,\s*\)/);
+});
+
+test("reference preview dialog renders type-correct accessible media", () => {
+  match(
+    videoWorkbenchUiSource,
+    /if \(item\.kind === "video"\) \{\s*return \(\s*<video\s+src=\{mediaUrl\}\s+poster=\{posterUrl \?\? undefined\}\s+controls\s+playsInline\s+preload="metadata"\s+aria-label=\{`\$\{displayToken\} 视频预览`\}/,
+  );
+  match(
+    videoWorkbenchUiSource,
+    /<audio\s+src=\{mediaUrl\}\s+controls\s+preload="metadata"\s+aria-label=\{`\$\{displayToken\} 音频预览`\}/,
+  );
+  match(
+    videoWorkbenchUiSource,
+    /<img\s+src=\{mediaUrl\}\s+alt=\{`\$\{displayToken\} 图片预览`\}/,
+  );
+  match(videoWorkbenchUiSource, /videoBinaryUrl\(videoId\)/);
+  match(
+    videoWorkbenchUiSource,
+    /aria-describedby=\{`reference-preview-description-\$\{item\._key\}`\}/,
+  );
+  match(videoWorkbenchUiSource, /role=\{failed \? "alert" : "status"\}/);
 });
 
 test("official asset references keep the selected media kind", () => {

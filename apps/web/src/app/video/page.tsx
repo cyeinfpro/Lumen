@@ -1877,7 +1877,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[max(1rem,env(safe-area-inset-bottom,0px))] pt-2 [scroll-padding-bottom:calc(var(--mobile-tabbar-height)+6rem)] md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4 md:[scroll-padding-bottom:1rem]">
+      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[max(1rem,env(safe-area-inset-bottom,0px))] pt-2 [scroll-padding-bottom:calc(var(--mobile-tabbar-height)+6rem)] md:h-[calc(100dvh-var(--appbar-h))] md:px-5 md:pb-4 md:[scroll-padding-bottom:1rem]">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}

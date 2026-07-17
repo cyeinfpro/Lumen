@@ -1,13 +1,10 @@
 "use client";
 
-import { motion } from "framer-motion";
 import {
   type KeyboardEvent,
   type ReactNode,
-  useId,
   useRef,
 } from "react";
-import { SPRING } from "@/lib/motion";
 import { Pressable } from "./Pressable";
 
 export interface SegmentItem<V extends string = string> {
@@ -25,8 +22,6 @@ export interface SegmentedControlProps<V extends string = string> {
   density?: "default" | "compact";
 }
 
-// SPRING.snap 已在 @/lib/motion 统一定义，此处直接引用
-
 export function SegmentedControl<V extends string = string>({
   value,
   onChange,
@@ -35,9 +30,6 @@ export function SegmentedControl<V extends string = string>({
   className = "",
   density = "default",
 }: SegmentedControlProps<V>) {
-  // 每个实例独立 layoutId，避免多个 SegmentedControl 同屏时 indicator 互相漫游
-  const uid = useId();
-  const layoutId = `segmented-indicator-${uid}`;
   const compact = density === "compact";
   const itemRefs = useRef<Array<HTMLElement | null>>([]);
   const selectedIndex = items.findIndex((item) => item.value === value);
@@ -122,15 +114,13 @@ export function SegmentedControl<V extends string = string>({
             ].join(" ")}
           >
             {active && (
-              <motion.span
-                layoutId={layoutId}
+              <span
                 className={[
                   "absolute inset-0 border border-[var(--border)] shadow-[var(--shadow-1)]",
                   compact
                     ? "rounded-[var(--radius-sm)] bg-[var(--bg-1)]"
                     : "rounded-[var(--radius-md)] bg-[var(--bg-0)]",
                 ].join(" ")}
-                transition={SPRING.snap}
                 aria-hidden
               />
             )}

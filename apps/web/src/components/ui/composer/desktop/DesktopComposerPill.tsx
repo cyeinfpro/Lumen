@@ -24,7 +24,6 @@ import {
   Paperclip,
   SquareDashedMousePointer,
   Sparkles,
-  Undo2,
   X,
   Zap,
 } from "lucide-react";
@@ -32,11 +31,11 @@ import {
   SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { useChatStore, type ReasoningEffort } from "@/store/useChatStore";
 import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
-import { enhancePrompt } from "@/lib/apiClient";
 import {
   MAX_PROMPT_CHARS,
   PROMPT_TOO_LONG_MESSAGE,
@@ -44,7 +43,7 @@ import {
 } from "@/lib/promptLimits";
 import { insertImageMentionToken } from "@/lib/promptImageMentions";
 import { useHaptic } from "@/hooks/useHaptic";
-import { DURATION, EASE, SPRING } from "@/lib/motion";
+import { DURATION, EASE } from "@/lib/motion";
 import {
   DesktopPopover,
 } from "./DesktopPopover";
@@ -62,6 +61,10 @@ import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
+import {
+  PromptEnhancementCandidate,
+  usePromptEnhancementCandidate,
+} from "../shared/PromptEnhancementCandidate";
 import { LazyMaskCanvas } from "../LazyMaskCanvas";
 
 interface DesktopComposerPillProps {
@@ -151,9 +154,6 @@ export function DesktopComposerPill({
   const setComposerError = useChatStore((s) => s.setComposerError);
 
   const [expanded, setExpanded] = useState(false);
-  const [isEnhancing, setIsEnhancing] = useState(false);
-  const [originalText, setOriginalText] = useState<string | null>(null);
-  const enhanceAbortRef = useRef<AbortController | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -163,6 +163,13 @@ export function DesktopComposerPill({
     null,
   );
   const { haptic } = useHaptic();
+  const promptEnhancement = usePromptEnhancementCandidate({
+    currentText: text,
+    onApply: setText,
+    haptic,
+    scope: "desktop-composer",
+  });
+  const isEnhancing = promptEnhancement.isEnhancing;
   const promptTooLong = isPromptTooLong(text);
   const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
 
@@ -227,7 +234,7 @@ export function DesktopComposerPill({
     if (!el) return;
     const raf = requestAnimationFrame(() => {
       if (!el) return;
-      el.style.height = "auto";
+      el.style.removeProperty("height");
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
     return () => cancelAnimationFrame(raf);
@@ -235,7 +242,6 @@ export function DesktopComposerPill({
 
   useEffect(() => {
     return () => {
-      enhanceAbortRef.current?.abort();
       isComposingRef.current = false;
       submittingRef.current = false;
       dragDepthRef.current = 0;
@@ -318,7 +324,7 @@ export function DesktopComposerPill({
 
   // BUG-017: canSubmit 必须反映 store 最新文本，避免闭包陈旧导致发送空消息。
   const canSubmit = (() => {
-    if (isSending) return false;
+    if (isSending || isEnhancing) return false;
     const latest = useChatStore.getState().composer;
     if (isPromptTooLong(latest.text)) return false;
     return latest.text.trim().length > 0 || latest.attachments.length > 0;
@@ -386,7 +392,7 @@ export function DesktopComposerPill({
       return;
     }
     submittingRef.current = true;
-    // 快门闪：200ms scale 0.92→1 + 光晕
+    // 发送反馈仅保留短暂光晕；指针缩放由 Pressable 自己处理。
     setShutterBurst(true);
     haptic("medium");
     if (shutterTimerRef.current) clearTimeout(shutterTimerRef.current);
@@ -417,65 +423,12 @@ export function DesktopComposerPill({
   }, [onSubmit, setComposerError, setForceIntent, setText, haptic]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (isComposingRef.current) return;
+    if (isComposingRef.current || !canSubmit) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void handleSubmit();
     }
   };
-
-  const handleEnhance = useCallback(async () => {
-    if (isEnhancing) {
-      enhanceAbortRef.current?.abort();
-      enhanceAbortRef.current = null;
-      setIsEnhancing(false);
-      if (!text.trim() && originalText) {
-        setText(originalText);
-        setOriginalText(null);
-      }
-      haptic("light");
-      pushMobileToast("已取消润色", "success");
-      return;
-    }
-    const current = text.trim();
-    if (!current) return;
-    setOriginalText(current);
-    setIsEnhancing(true);
-    haptic("light");
-    setText("");
-    const ctl = new AbortController();
-    enhanceAbortRef.current = ctl;
-    let accumulated = "";
-    try {
-      await enhancePrompt(
-        current,
-        (delta) => {
-          accumulated += delta;
-          setText(accumulated);
-        },
-        ctl.signal,
-      );
-      haptic("medium");
-      pushMobileToast("提示词已润色", "success");
-    } catch (err) {
-      if (ctl.signal.aborted) return;
-      logError(err, { scope: "desktop-composer", code: "enhance_failed" });
-      setText(current);
-      setOriginalText(null);
-      pushMobileToast("润色失败", "danger");
-    } finally {
-      setIsEnhancing(false);
-      enhanceAbortRef.current = null;
-    }
-  }, [text, isEnhancing, originalText, setText, haptic]);
-
-  const handleUndoEnhance = useCallback(() => {
-    if (originalText !== null) {
-      setText(originalText);
-      setOriginalText(null);
-      haptic("light");
-    }
-  }, [originalText, setText, haptic]);
 
   const insertImageMention = useCallback(
     (imageNumber: number) => {
@@ -558,15 +511,12 @@ export function DesktopComposerPill({
 
   return (
     <>
-    <motion.div
+    <div
       ref={rootRef}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={(e) => void handleDrop(e)}
-      initial={false}
-      animate={{ height: expanded ? "auto" : 56 }}
-      transition={SPRING.sheet}
       className={composerFrameClass(expanded, isDragActive)}
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
@@ -645,11 +595,10 @@ export function DesktopComposerPill({
           <AnimatePresence>
             {isDragActive && (
               <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: DURATION.quick }}
-                className="overflow-hidden"
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: DURATION.quick, ease: EASE.shutter }}
               >
                 <div
                   className={cn(
@@ -781,11 +730,10 @@ export function DesktopComposerPill({
           <AnimatePresence>
             {composerError && (
               <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: DURATION.quick }}
-                className="overflow-hidden"
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: DURATION.quick, ease: EASE.shutter }}
               >
                 <div
                   role="alert"
@@ -809,37 +757,13 @@ export function DesktopComposerPill({
             )}
           </AnimatePresence>
 
-          {/* 提示词已润色 */}
-          <AnimatePresence>
-            {originalText !== null && !isEnhancing && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: DURATION.quick }}
-                className="overflow-hidden"
-              >
-                <div
-                  className={cn(
-                    "mx-3 mt-2 flex items-center gap-2 px-2.5 py-1 rounded-[var(--radius-card)]",
-                    "bg-[var(--amber-400)]/10 border border-[var(--amber-400)]/25 text-[var(--amber-400)]",
-                    "text-xs",
-                  )}
-                >
-                  <Sparkles className="w-3 h-3 shrink-0" />
-                  <span className="flex-1">提示词已润色</span>
-                  <button
-                    type="button"
-                    onClick={handleUndoEnhance}
-                    className="inline-flex items-center gap-1 text-xs underline decoration-dotted hover:text-[var(--fg-0)] transition-colors"
-                  >
-                    <Undo2 className="w-3 h-3" />
-                    撤销
-                  </button>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <PromptEnhancementCandidate
+            status={promptEnhancement.status}
+            candidate={promptEnhancement.candidate}
+            onApply={promptEnhancement.apply}
+            onCancel={promptEnhancement.cancel}
+            onDiscard={promptEnhancement.discard}
+          />
 
           {/* textarea */}
           <div className="px-3 pt-3">
@@ -861,11 +785,13 @@ export function DesktopComposerPill({
               placeholder="描述画面，或直接提问...（⌘↵ 发送）"
               aria-label="输入提示词"
               maxLength={MAX_PROMPT_CHARS}
+              readOnly={isEnhancing}
               rows={1}
               className={cn(
                 "w-full bg-transparent outline-none resize-none",
                 "text-body-md text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                 "min-h-11 max-h-[200px]",
+                isEnhancing && "cursor-wait",
               )}
             />
           </div>
@@ -911,12 +837,12 @@ export function DesktopComposerPill({
             </IconBtn>
 
             <IconBtn
-              label={isEnhancing ? "润色中..." : "润色提示词"}
-              onClick={() => void handleEnhance()}
-              disabled={isEnhancing || !text.trim()}
+              label={promptEnhancement.triggerLabel}
+              onClick={() => void promptEnhancement.trigger(text)}
+              disabled={!isEnhancing && !text.trim()}
             >
               {isEnhancing ? (
-                <Loader2 className="w-4 h-4 animate-spin text-[var(--amber-400)]" />
+                <X className="w-4 h-4 text-[var(--danger)]" />
               ) : (
                 <Sparkles className="w-4 h-4" />
               )}
@@ -999,7 +925,7 @@ export function DesktopComposerPill({
         hidden
         onChange={handleFileInput}
       />
-    </motion.div>
+    </div>
 
     {/* 局部修改 mask 画布弹窗 */}
     {inpaint.open ? (
@@ -1064,21 +990,23 @@ function SendButton({
   size?: "md" | "lg";
 }) {
   const dim = size === "lg" ? "w-10 h-10" : "w-9 h-9";
+  const isActive = canSubmit || isSending;
   return (
-    <motion.button
-      type="button"
-      onClick={onClick}
+    <Pressable
+      size="inline"
+      minHit={false}
+      pressScale="tight"
+      haptic={false}
+      onPress={onClick}
       disabled={!canSubmit}
       aria-label="发送"
-      whileTap={canSubmit ? { scale: 0.92 } : undefined}
-      animate={burst ? { scale: [0.92, 1] } : { scale: 1 }}
-      transition={{ duration: DURATION.normal, ease: EASE.shutter }}
+      aria-busy={isSending || undefined}
       className={cn(
         "shrink-0 inline-flex items-center justify-center rounded-full",
         dim,
-        "transition-[background-color,box-shadow,opacity] duration-200",
+        "transition-[background-color,box-shadow,opacity] duration-[var(--dur-normal)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/70",
-        canSubmit
+        isActive
           ? [
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
@@ -1093,7 +1021,7 @@ function SendButton({
       ) : (
         <ArrowUp className="w-4 h-4" aria-hidden />
       )}
-    </motion.button>
+    </Pressable>
   );
 }
 

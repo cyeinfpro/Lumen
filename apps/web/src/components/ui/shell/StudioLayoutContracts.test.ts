@@ -78,10 +78,7 @@ test("desktop primary navigation is viewport-centered and uses links", () => {
   );
   match(desktopNavSource, /data-testid="desktop-primary-nav"/);
   match(desktopNavSource, /<Link[\s\S]*href=\{tab\.route\}/);
-  match(desktopNavSource, /MoreNavigationMenu/);
-  match(desktopNavSource, /aria-haspopup="dialog"/);
-  match(desktopNavSource, /firstItemRef\.current\?\.focus\(\)/);
-  match(desktopNavSource, /triggerRef\.current\?\.focus\(\)/);
+  doesNotMatch(desktopNavSource, /MoreNavigationMenu|compactOverflowItems/);
   doesNotMatch(desktopNavSource, /router\.push|justify-center overflow-hidden/);
 });
 
@@ -112,6 +109,14 @@ test("mobile bottom stack includes the measured task island", () => {
   match(mobileStudioSource, /paddingBottom: "var\(--bottom-overlay-stack\)"/);
   match(mobileStudioSource, /data-testid="conversation-scroll"/);
   match(mobileCanvasSource, /var\(--bottom-overlay-stack, 120px\)/);
+});
+
+test("empty mobile studio starts at the top instead of auto-scrolling", () => {
+  match(mobileStudioSource, /if \(messages\.length === 0\)/);
+  match(
+    mobileStudioSource,
+    /el\.scrollTo\(\{ top: 0, behavior: "auto" \}\)/,
+  );
 });
 
 test("mobile composer uses one visual viewport coordinate system", () => {
@@ -170,7 +175,7 @@ test("mobile navigation keeps current state and closes transient layers safely",
 
 test("global focus and light text contracts remain accessible", () => {
   match(globalsSource, /outline: 2px solid var\(--focus-outline\) !important/);
-  match(globalsSource, /--fg-2: #6F685C/);
+  match(globalsSource, /--fg-2: #676E7A/);
   match(globalsSource, /--content-composer: 880px/);
   match(globalsSource, /--content-workbench: 1440px/);
   doesNotMatch(globalsSource, /body::before/);

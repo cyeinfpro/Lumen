@@ -1,13 +1,21 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useReducedMotion,
+} from "framer-motion";
 import {
   type ReactNode,
   useCallback,
   useEffect,
   useState,
 } from "react";
-import { DURATION, EASE } from "@/lib/motion";
+import {
+  GESTURE,
+  SPRING,
+  projectMomentum,
+} from "@/lib/motion";
 import { MobileIconButton } from "./MobileIconButton";
 import { X } from "lucide-react";
 
@@ -33,6 +41,7 @@ export function pushMobileToast(message: ReactNode, kind: MobileToastKind = "inf
 
 export function MobileToastViewport() {
   const [items, setItems] = useState<ToastItem[]>([]);
+  const reduceMotion = useReducedMotion();
 
   const push = useCallback((message: ReactNode, kind: MobileToastKind = "info") => {
     setItems((list) => {
@@ -96,10 +105,33 @@ export function MobileToastViewport() {
         {items.map((t) => (
           <motion.div
             key={t.id}
-            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            initial={
+              reduceMotion
+                ? { opacity: 0 }
+                : { opacity: 0, y: 16, scale: 0.96 }
+            }
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.98 }}
-            transition={{ duration: DURATION.normal, ease: EASE.develop }}
+            exit={
+              reduceMotion
+                ? { opacity: 0 }
+                : { opacity: 0, x: 24, scale: 0.98 }
+            }
+            transition={reduceMotion ? { duration: 0 } : SPRING.toast}
+            drag={reduceMotion ? false : "x"}
+            dragConstraints={{ left: 0, right: 0 }}
+            dragElastic={{ left: 0.04, right: 0.28 }}
+            dragMomentum={false}
+            onDragEnd={(_event, info) => {
+              const projectedX =
+                info.offset.x + projectMomentum(info.velocity.x);
+              if (
+                projectedX > GESTURE.snapDistance * 1.5 ||
+                info.velocity.x > GESTURE.dismissVelocity
+              ) {
+                setItems((list) => list.filter((item) => item.id !== t.id));
+              }
+            }}
+            style={{ touchAction: "pan-y" }}
             className={[
               "pointer-events-auto flex items-start gap-2",
               "w-full max-w-[min(28rem,calc(100vw-2rem))] px-3.5 py-2.5 rounded-[var(--radius-card)]",

@@ -14,26 +14,29 @@ import {
   useState,
 } from "react";
 import {
+  AtSign,
   ArrowUp,
   Loader2,
   MessageSquare,
   Palette,
   Paperclip,
+  RefreshCw,
   SquareDashedMousePointer,
   Sparkles,
-  Undo2,
+  Trash2,
   X,
 } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import {
+  ActionSheet,
   BottomSheet,
   SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
-import { enhancePrompt } from "@/lib/apiClient";
 import {
   MAX_PROMPT_CHARS,
   PROMPT_TOO_LONG_MESSAGE,
@@ -46,11 +49,17 @@ import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
-import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
-import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
+import {
+  attachmentRoleLabel,
+  useComposerAttachmentRoles,
+} from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
+import {
+  PromptEnhancementCandidate,
+  usePromptEnhancementCandidate,
+} from "../shared/PromptEnhancementCandidate";
 import { LazyMaskCanvas } from "../LazyMaskCanvas";
 import {
   MOBILE_REASONING_OPTIONS,
@@ -134,8 +143,6 @@ export function MobileComposerPill({
   const [isUploading, setIsUploading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [isEnhancing, setIsEnhancing] = useState(false);
-  const [originalText, setOriginalText] = useState<string | null>(null);
   const {
     inset: keyboardInset,
     viewportBottom,
@@ -150,11 +157,19 @@ export function MobileComposerPill({
   const [reorderTargetAttachmentId, setReorderTargetAttachmentId] = useState<
     string | null
   >(null);
+  const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
   const { haptic } = useHaptic();
+  const promptEnhancement = usePromptEnhancementCandidate({
+    currentText: text,
+    onApply: setText,
+    haptic,
+    scope: "mobile-composer",
+  });
+  const isEnhancing = promptEnhancement.isEnhancing;
   const visibleViewportHeight =
     viewportHeight > 0 ? `${viewportHeight}px` : "100dvh";
   const topChromeHeight =
-    "var(--mobile-top-chrome-height, calc(var(--mobile-topbar-h) + 52px + var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px)))";
+    "var(--mobile-top-chrome-height, calc(var(--mobile-topbar-h) + 52px + var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px)))";
   const expandedMaxHeight = keyboardOffset
     ? `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--overlay-gap) - var(--overlay-gap))`
     : `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--mobile-tabbar-height) - var(--overlay-gap) - var(--overlay-gap))`;
@@ -169,7 +184,6 @@ export function MobileComposerPill({
   const submittingRef = useRef(false);
   const didMountRef = useRef(false);
   const focusExpandedOnOpenRef = useRef(false);
-  const enhanceAbortRef = useRef<AbortController | null>(null);
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepthRef = useRef(0);
   const draggingAttachmentIdRef = useRef<string | null>(null);
@@ -265,7 +279,7 @@ export function MobileComposerPill({
     const raf = window.requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
-      el.style.height = "auto";
+      el.style.removeProperty("height");
       el.style.height = `${Math.min(el.scrollHeight, 168)}px`;
     });
     return () => window.cancelAnimationFrame(raf);
@@ -273,7 +287,6 @@ export function MobileComposerPill({
 
   useEffect(() => {
     return () => {
-      enhanceAbortRef.current?.abort();
       isComposingRef.current = false;
       submittingRef.current = false;
       dragDepthRef.current = 0;
@@ -364,6 +377,13 @@ export function MobileComposerPill({
       ? attachments[0]?.id ?? null
       : null,
   });
+  const attachmentMenuIndex = attachments.findIndex(
+    (attachment) => attachment.id === attachmentMenuId,
+  );
+  const attachmentMenuRole =
+    attachmentMenuIndex >= 0 && attachmentMenuId
+      ? attachmentRoles.getRole(attachmentMenuId)
+      : null;
   const costEstimate = useComposerCostEstimate({
     mode,
     quality,
@@ -398,7 +418,7 @@ export function MobileComposerPill({
     }
     if (!canSubmit) return;
     submittingRef.current = true;
-    // 快门闪：200ms scale 0.92→1 + 光晕
+    // 发送反馈仅保留短暂光晕；指针缩放由 Pressable 自己处理。
     setShutterBurst(true);
     haptic("medium");
     if (shutterTimerRef.current) clearTimeout(shutterTimerRef.current);
@@ -446,67 +466,11 @@ export function MobileComposerPill({
     }
   };
 
-  const handleEnhance = useCallback(async () => {
-    if (isEnhancing) {
-      enhanceAbortRef.current?.abort();
-      enhanceAbortRef.current = null;
-      setIsEnhancing(false);
-      if (!text.trim() && originalText) {
-        setText(originalText);
-        setOriginalText(null);
-      }
-      haptic("light");
-      pushMobileToast("已取消润色", "success");
-      return;
-    }
-    const current = text.trim();
-    if (!current) return;
-    setOriginalText(current);
-    setIsEnhancing(true);
-    haptic("light");
-    setText("");
-    const ctl = new AbortController();
-    enhanceAbortRef.current = ctl;
-    let accumulated = "";
-    try {
-      await enhancePrompt(
-        current,
-        (delta) => {
-          accumulated += delta;
-          setText(accumulated);
-        },
-        ctl.signal,
-      );
-      haptic("medium");
-      pushMobileToast("提示词已润色", "success");
-    } catch (err) {
-      if (ctl.signal.aborted) return;
-      logError(err, { scope: "mobile-composer", code: "enhance_failed" });
-      setText(current);
-      setOriginalText(null);
-      pushMobileToast("润色失败", "danger");
-    } finally {
-      setIsEnhancing(false);
-      enhanceAbortRef.current = null;
-    }
-  }, [text, isEnhancing, originalText, setText, haptic]);
-
-  const handleUndoEnhance = useCallback(() => {
-    if (originalText !== null) {
-      setText(originalText);
-      setOriginalText(null);
-      haptic("light");
-    }
-  }, [originalText, setText, haptic]);
-
   const handleTextChange = useCallback(
     (e: ChangeEvent<HTMLTextAreaElement>) => {
       setText(e.target.value);
-      if (originalText !== null && !isEnhancing) {
-        setOriginalText(null);
-      }
     },
-    [setText, originalText, isEnhancing],
+    [setText],
   );
 
   const insertImageMention = useCallback(
@@ -521,9 +485,6 @@ export function MobileComposerPill({
       );
       setExpanded(true);
       setText(result.text);
-      if (originalText !== null && !isEnhancing) {
-        setOriginalText(null);
-      }
       requestAnimationFrame(() => {
         const target = textareaRef.current;
         if (!target) return;
@@ -531,7 +492,7 @@ export function MobileComposerPill({
         target.setSelectionRange(result.selectionStart, result.selectionEnd);
       });
     },
-    [isEnhancing, originalText, setText],
+    [setText],
   );
 
   const resetAttachmentReorder = useCallback(
@@ -826,11 +787,10 @@ export function MobileComposerPill({
             <AnimatePresence>
               {isDragActive && (
                 <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: DURATION.quick }}
-                  className="overflow-hidden"
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: DURATION.quick, ease: EASE.shutter }}
                 >
                   <div
                     className={cn(
@@ -868,7 +828,7 @@ export function MobileComposerPill({
                       onClickCapture={handleAttachmentClickCapture}
                       aria-grabbed={draggingAttachmentId === att.id || undefined}
                       className={cn(
-                        "relative shrink-0 w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
+                        "relative h-16 w-16 shrink-0 overflow-hidden rounded-[var(--radius-card)]",
                         "border bg-[var(--bg-2)]",
                         attachments.length > 1 &&
                           "cursor-grab active:cursor-grabbing",
@@ -891,39 +851,23 @@ export function MobileComposerPill({
                       <button
                         type="button"
                         data-composer-attachment-action="true"
-                        onClick={() => insertImageMention(idx + 1)}
-                        aria-label={`插入 @图${idx + 1}`}
-                        title={`插入 @图${idx + 1}`}
-                        className={cn(
-                          "absolute top-0.5 left-0.5 h-4 px-1 rounded-[var(--radius-control)]",
-                          "bg-[var(--bg-0)]/80 text-[8px] font-semibold text-[var(--amber-400)]",
-                          "backdrop-blur-sm leading-none",
-                          "active:scale-[0.94] transition-transform motion-reduce:transition-none",
-                        )}
+                        onClick={() => setAttachmentMenuId(att.id)}
+                        aria-label={`打开图 ${idx + 1} 操作`}
+                        aria-haspopup="dialog"
+                        className="absolute inset-0 z-10 rounded-[var(--radius-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
+                      >
+                        <span className="sr-only">打开附件操作</span>
+                      </button>
+                      <span
+                        aria-hidden
+                        className="pointer-events-none absolute left-1 top-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-1 text-[9px] font-semibold leading-none text-[var(--media-control-fg)] backdrop-blur-sm"
                         style={{ fontFamily: "var(--font-mono)" }}
                       >
                         @图{idx + 1}
-                      </button>
-                      <AttachmentRoleBadge
-                        role={role}
-                        imageNumber={idx + 1}
-                        compact
-                        onClick={() => attachmentRoles.cycleRole(att.id)}
-                      />
-                      <button
-                        type="button"
-                        data-composer-attachment-action="true"
-                        onClick={() => removeAttachment(att.id)}
-                        aria-label="移除参考图"
-                        className={cn(
-                          "absolute top-0.5 right-0.5 min-w-5 min-h-5 p-1 rounded-full",
-                          "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
-                          "flex items-center justify-center",
-                          "active:scale-[0.92] transition-transform",
-                        )}
-                      >
-                        <X className="w-3 h-3" aria-hidden />
-                      </button>
+                      </span>
+                      <span className="pointer-events-none absolute inset-x-1 bottom-1 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/88 px-1.5 py-1 text-center text-[9px] font-semibold leading-none text-[var(--fg-0)] backdrop-blur-sm">
+                        {attachmentRoleLabel(role)}
+                      </span>
                     </div>
                   );
                 })}
@@ -964,11 +908,10 @@ export function MobileComposerPill({
             <AnimatePresence>
               {composerError && (
                 <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: DURATION.quick }}
-                  className="overflow-hidden"
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: DURATION.quick, ease: EASE.shutter }}
                 >
                   <div
                     role="alert"
@@ -992,70 +935,16 @@ export function MobileComposerPill({
               )}
             </AnimatePresence>
 
-            {/* 提示词润色状态条 */}
-            <AnimatePresence>
-              {(isEnhancing || (originalText !== null && !isEnhancing)) && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: DURATION.quick }}
-                  className="overflow-hidden"
-                >
-                  <div
-                    className={cn(
-                      "mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-[var(--radius-panel)]",
-                      "bg-[rgba(242,169,58,0.08)] border border-[rgba(242,169,58,0.18)]",
-                      "text-xs",
-                    )}
-                  >
-                    {isEnhancing ? (
-                      <Loader2 className="w-3.5 h-3.5 shrink-0 text-[var(--amber-400)] animate-spin" aria-hidden />
-                    ) : (
-                      <Sparkles className="w-3.5 h-3.5 shrink-0 text-[var(--amber-400)]" aria-hidden />
-                    )}
-                    <span className="flex-1 text-[var(--fg-1)]">
-                      {isEnhancing ? "正在润色..." : "提示词已润色"}
-                    </span>
-                    {!isEnhancing && (
-                      <>
-                        <button
-                          type="button"
-                          data-inline
-                          onClick={handleUndoEnhance}
-                          className={cn(
-                            "inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)]",
-                            "text-xs font-medium text-[var(--amber-400)]",
-                            "bg-[rgba(242,169,58,0.1)] active:bg-[rgba(242,169,58,0.2)]",
-                            "transition-colors",
-                          )}
-                        >
-                          <Undo2 className="w-3 h-3" aria-hidden />
-                          撤销
-                        </button>
-                        <button
-                          type="button"
-                          data-inline
-                          onClick={() => setOriginalText(null)}
-                          aria-label="关闭提示"
-                          className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] active:text-[var(--fg-0)] transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+            <PromptEnhancementCandidate
+              status={promptEnhancement.status}
+              candidate={promptEnhancement.candidate}
+              onApply={promptEnhancement.apply}
+              onCancel={promptEnhancement.cancel}
+              onDiscard={promptEnhancement.discard}
+            />
 
             {/* textarea */}
-            <div
-              className={cn(
-                "relative px-3 pt-1.5 pb-1",
-                isEnhancing && "after:absolute after:left-3 after:right-3 after:bottom-1 after:h-0.5 after:rounded-full after:bg-[var(--amber-400)]/40 after:animate-pulse-soft",
-              )}
-            >
+            <div className="relative px-3 pt-1.5 pb-1">
               <textarea
                 ref={textareaRef}
                 value={text}
@@ -1075,11 +964,9 @@ export function MobileComposerPill({
                 rows={2}
                 className={cn(
                   "w-full bg-transparent outline-none resize-none",
-                  "text-[16px] leading-relaxed placeholder:text-[var(--fg-2)]",
+                  "text-[16px] leading-relaxed text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                   "min-h-[52px] max-h-[168px]",
-                  isEnhancing
-                    ? "text-[var(--amber-300)] cursor-default"
-                    : "text-[var(--fg-0)]",
+                  isEnhancing && "cursor-wait",
                 )}
               />
             </div>
@@ -1129,8 +1016,8 @@ export function MobileComposerPill({
                   </IconBtn>
 
                   <IconBtn
-                    label={isEnhancing ? "取消润色" : "润色提示词"}
-                    onClick={() => void handleEnhance()}
+                    label={promptEnhancement.triggerLabel}
+                    onClick={() => void promptEnhancement.trigger(text)}
                     disabled={!isEnhancing && !text.trim()}
                   >
                     {isEnhancing ? (
@@ -1187,6 +1074,44 @@ export function MobileComposerPill({
           onChange={handleFileInput}
         />
       </div>
+
+      <ActionSheet
+        open={attachmentMenuIndex >= 0}
+        onClose={() => setAttachmentMenuId(null)}
+        title={
+          attachmentMenuIndex >= 0 ? `图 ${attachmentMenuIndex + 1}` : undefined
+        }
+        description={
+          attachmentMenuRole
+            ? `当前用途：${attachmentRoleLabel(attachmentMenuRole)}`
+            : undefined
+        }
+        actions={
+          attachmentMenuIndex >= 0 && attachmentMenuId
+            ? [
+                {
+                  key: "mention",
+                  label: `插入 @图${attachmentMenuIndex + 1}`,
+                  icon: <AtSign className="h-5 w-5" aria-hidden />,
+                  onSelect: () => insertImageMention(attachmentMenuIndex + 1),
+                },
+                {
+                  key: "role",
+                  label: "切换图片用途",
+                  icon: <RefreshCw className="h-5 w-5" aria-hidden />,
+                  onSelect: () => attachmentRoles.cycleRole(attachmentMenuId),
+                },
+                {
+                  key: "remove",
+                  label: "移除参考图",
+                  icon: <Trash2 className="h-5 w-5" aria-hidden />,
+                  destructive: true,
+                  onSelect: () => removeAttachment(attachmentMenuId),
+                },
+              ]
+            : []
+        }
+      />
 
       <BottomSheet
         open={panel === "advanced"}
@@ -1314,20 +1239,22 @@ function SendButton({
   burst?: boolean;
   onClick: () => void;
 }) {
+  const isActive = canSubmit || isSending;
   return (
-    <motion.button
-      type="button"
-      onClick={onClick}
+    <Pressable
+      size="inline"
+      minHit={false}
+      pressScale="tight"
+      haptic={false}
+      onPress={onClick}
       disabled={!canSubmit}
       aria-label="发送"
-      whileTap={canSubmit ? { scale: 0.92 } : undefined}
-      animate={burst ? { scale: [0.92, 1] } : { scale: 1 }}
-      transition={{ duration: DURATION.normal, ease: EASE.shutter }}
+      aria-busy={isSending || undefined}
       className={cn(
         "shrink-0 inline-flex min-h-11 min-w-11 items-center justify-center rounded-full",
         "transition-[background-color,box-shadow,opacity] duration-200 motion-reduce:transition-none",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/70",
-        canSubmit
+        isActive
           ? [
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
@@ -1342,7 +1269,7 @@ function SendButton({
       ) : (
         <ArrowUp className="w-[18px] h-[18px]" aria-hidden />
       )}
-    </motion.button>
+    </Pressable>
   );
 }
 

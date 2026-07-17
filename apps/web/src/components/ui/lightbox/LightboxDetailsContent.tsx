@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Check, ChevronDown, Copy } from "lucide-react";
 import { useMemo, useState } from "react";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import type { LightboxItem } from "./types";
 import {
@@ -183,12 +184,24 @@ export function LightboxDetailsContent({
                 {revisedOpen && (
                   <motion.p
                     key="revised-prompt"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.18, ease: "easeOut" }}
+                    initial={{
+                      opacity: 0,
+                      transform: "translateY(-4px)",
+                    }}
+                    animate={{
+                      opacity: 1,
+                      transform: "translateY(0)",
+                    }}
+                    exit={{
+                      opacity: 0,
+                      transform: "translateY(-4px)",
+                    }}
+                    transition={{
+                      duration: DURATION.quick,
+                      ease: EASE.develop,
+                    }}
                     className={cn(
-                      "overflow-hidden whitespace-pre-wrap break-words px-2 pt-1 text-sm leading-relaxed",
+                      "whitespace-pre-wrap break-words px-2 pt-1 text-sm leading-relaxed",
                       style.text,
                     )}
                   >

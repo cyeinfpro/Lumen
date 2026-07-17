@@ -1,6 +1,15 @@
 "use client";
 
 import { type ReactNode, useEffect, useRef } from "react";
+import {
+  BarChart3,
+  Brain,
+  Boxes,
+  FileText,
+  KeyRound,
+  Send,
+  ShieldCheck,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -16,13 +25,13 @@ interface SettingsShellProps {
 }
 
 const SETTINGS_NAV = [
-  { href: "/settings/api-key", label: "API Key" },
-  { href: "/settings/memory", label: "记忆" },
-  { href: "/settings/privacy", label: "隐私" },
-  { href: "/settings/prompts", label: "提示词" },
-  { href: "/settings/providers", label: "供应商" },
-  { href: "/settings/telegram", label: "Telegram" },
-  { href: "/settings/usage", label: "用量" },
+  { href: "/settings/api-key", label: "API Key", icon: KeyRound },
+  { href: "/settings/memory", label: "记忆", icon: Brain },
+  { href: "/settings/privacy", label: "隐私", icon: ShieldCheck },
+  { href: "/settings/prompts", label: "提示词", icon: FileText },
+  { href: "/settings/providers", label: "供应商", icon: Boxes },
+  { href: "/settings/telegram", label: "Telegram", icon: Send },
+  { href: "/settings/usage", label: "用量", icon: BarChart3 },
 ] as const;
 
 export function SettingsShell({
@@ -50,7 +59,7 @@ export function SettingsShell({
   }, [pathname]);
 
   return (
-    <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)] md:h-auto md:min-h-[100dvh] md:overflow-visible">
+    <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <div className="md:hidden">
         <MobileTopBar
@@ -104,9 +113,54 @@ export function SettingsShell({
 
       <main
         data-app-scroll
-        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-[calc(32px+env(safe-area-inset-bottom,0px))] pt-4 touch-pan-y [overflow-anchor:none] md:overflow-visible md:pb-10 md:pt-8"
+        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-[calc(32px+env(safe-area-inset-bottom,0px))] pt-4 touch-pan-y [overflow-anchor:none] md:px-6 md:pb-10 md:pt-6"
       >
-        <div className={`mx-auto w-full min-w-0 ${maxWidth} safe-x mobile-compact [overflow-wrap:anywhere]`}>{children}</div>
+        <div className="mx-auto grid w-full max-w-[1440px] min-w-0 gap-8 md:grid-cols-[196px_minmax(0,1fr)] lg:grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="hidden min-w-0 md:block">
+            <div className="sticky top-0 border-r border-[var(--border-subtle)] pr-5">
+              <div className="mb-4 px-2">
+                <p className="type-page-kicker">Settings</p>
+                <h1 className="type-section-title mt-1">设置</h1>
+                <p className="type-caption mt-1">账户、模型与系统偏好</p>
+              </div>
+              <nav aria-label="设置分类" className="grid gap-1">
+                {SETTINGS_NAV.map((item) => {
+                  const active = pathname === item.href;
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      className={
+                        "flex min-h-10 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 text-[13px] font-medium transition-colors " +
+                        (active
+                          ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
+                          : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
+                      }
+                    >
+                      <Icon
+                        className={
+                          "h-4 w-4 shrink-0 " +
+                          (active
+                            ? "text-[var(--accent)]"
+                            : "text-[var(--fg-2)]")
+                        }
+                        aria-hidden
+                      />
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </nav>
+            </div>
+          </aside>
+          <div
+            className={`w-full min-w-0 ${maxWidth} safe-x mobile-compact [overflow-wrap:anywhere]`}
+          >
+            {children}
+          </div>
+        </div>
       </main>
 
       <div className="md:hidden">

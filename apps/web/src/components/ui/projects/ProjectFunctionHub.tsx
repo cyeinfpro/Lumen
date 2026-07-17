@@ -12,7 +12,6 @@ import {
   Loader2,
   Palette,
   Shirt,
-  Sparkles,
   Workflow,
 } from "lucide-react";
 import Link from "next/link";
@@ -176,20 +175,17 @@ export function ProjectFunctionHub() {
 
       <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-3">
         <div className="mx-auto grid w-full max-w-[1440px] gap-4">
-          <header className="hidden min-w-0 gap-4 border-b border-[var(--border)] pb-4 md:grid lg:grid-cols-[minmax(0,1fr)_minmax(520px,0.76fr)] lg:items-end">
+          <header className="hidden min-w-0 gap-5 border-b border-[var(--border)] pb-4 md:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
             <div className="min-w-0">
-              <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/78 px-3 py-1.5 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
-                <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
-                项目工作台
-              </p>
-              <h1 className="type-page-title mt-3">
+              <p className="type-page-kicker">项目工作台</p>
+              <h1 className="type-page-title mt-2">
                 继续最近项目，保持创作节奏
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
                 先回到仍在进行的工作；需要开启新任务时，再从下方模板创建。
               </p>
             </div>
-            <div className="grid gap-2 sm:grid-cols-4">
+            <div className="grid grid-cols-4 divide-x divide-[var(--border-subtle)]">
               <ProjectMetric
                 label="可用模板"
                 value={visibleFeatures.filter((feature) => feature.available).length}
@@ -313,7 +309,7 @@ function FeatureCard({
             </p>
             <h2
               className={cn(
-                "mt-1 text-[18px] font-semibold leading-tight tracking-tight transition-colors duration-[var(--dur-base)]",
+                "mt-1 text-[18px] font-semibold leading-tight transition-colors duration-[var(--dur-base)]",
                 feature.available
                   ? "text-[var(--fg-0)]"
                   : "text-[var(--fg-2)]",
@@ -344,7 +340,7 @@ function FeatureCard({
         {feature.description}
       </p>
 
-      <div className="mt-4 grid gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 p-3">
+      <div className="mt-4 grid gap-3 border-y border-[var(--border-subtle)] py-3">
         <div className="grid grid-cols-3 gap-2">
           <FeatureDatum label="输入" value={feature.input} />
           <FeatureDatum label="输出" value={feature.output} />
@@ -353,7 +349,7 @@ function FeatureCard({
         <WorkflowSteps steps={steps} disabled={!feature.available} />
       </div>
 
-      <div className="mt-3 min-h-8 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/44 px-3 py-2 text-xs text-[var(--fg-2)]">
+      <div className="mt-3 min-h-8 text-xs text-[var(--fg-2)]">
         {recentProject ? (
           <span className="flex min-w-0 items-center gap-2">
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success-fg)]" />
@@ -415,7 +411,7 @@ function ProjectMetric({
   detail: string;
 }) {
   return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+    <div className="min-w-[112px] px-4 first:pl-0 last:pr-0">
       <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
       <p className="mt-1 text-[20px] font-semibold tabular-nums text-[var(--fg-0)]">
         {value}
@@ -427,7 +423,7 @@ function ProjectMetric({
 
 function MobileMetric({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 py-2">
+    <div className="border-l border-[var(--border-subtle)] px-3 first:border-l-0 first:pl-0">
       <p className="text-[10px] text-[var(--fg-2)]">{label}</p>
       <p className="mt-0.5 text-base font-semibold tabular-nums text-[var(--fg-0)]">
         {value}
@@ -555,7 +551,7 @@ function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
               </span>
             ) : null}
           </div>
-          <h3 className="mt-1 truncate text-[15px] font-medium tracking-tight text-[var(--fg-0)]">
+          <h3 className="mt-1 truncate text-[15px] font-medium text-[var(--fg-0)]">
             {item.title || info.fallbackTitle}
           </h3>
           <p className="mt-1 truncate text-[12.5px] text-[var(--fg-2)]">

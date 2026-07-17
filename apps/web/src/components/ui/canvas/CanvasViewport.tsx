@@ -81,13 +81,20 @@ import { CanvasViewportControls } from "./CanvasViewportControls";
 import { canvasNodeTypes, type CanvasFlowNode } from "./nodes/CanvasNodes";
 import styles from "./canvas.module.css";
 
+export interface CanvasViewportMotionOptions {
+  instant?: boolean;
+}
+
 export interface CanvasViewportApi {
-  fitView: () => void;
-  fitSelection: (nodeIds?: readonly string[]) => void;
+  fitView: (options?: CanvasViewportMotionOptions) => void;
+  fitSelection: (
+    nodeIds?: readonly string[],
+    options?: CanvasViewportMotionOptions,
+  ) => void;
   focusNode: (nodeId: string) => void;
-  zoomIn: () => void;
-  zoomOut: () => void;
-  resetZoom: () => void;
+  zoomIn: (options?: CanvasViewportMotionOptions) => void;
+  zoomOut: (options?: CanvasViewportMotionOptions) => void;
+  resetZoom: (options?: CanvasViewportMotionOptions) => void;
   toggleMiniMap: () => void;
   getZoom: () => number;
   getViewportCenter: () => { x: number; y: number };
@@ -928,8 +935,16 @@ export function CanvasViewport({
       instanceRef.current = next;
       setInstance(next);
       onReady?.({
-        fitView: () => fitCanvasViewport(next, viewportPreferencesRef.current),
-        fitSelection: (nodeIds) => {
+        fitView: (options) =>
+          fitCanvasViewport(
+            next,
+            viewportPreferencesRef.current,
+            undefined,
+            undefined,
+            undefined,
+            options?.instant ? 0 : undefined,
+          ),
+        fitSelection: (nodeIds, options) => {
           const ids = nodeIds ?? viewportPreferencesRef.current.selectedNodeIds;
           const nodes = ids
             .map((nodeId) => next.getNode(nodeId))
@@ -941,29 +956,36 @@ export function CanvasViewport({
             nodes,
             0.26,
             1.2,
+            options?.instant ? 0 : undefined,
           );
         },
         focusNode: (nodeId) =>
           focusCanvasNode(next, nodeId, viewportPreferencesRef.current),
-        zoomIn: () => {
+        zoomIn: (options) => {
           void next.zoomIn({
-            duration: viewportAnimationDuration(
-              viewportPreferencesRef.current.reducedMotion,
-            ),
+            duration: options?.instant
+              ? 0
+              : viewportAnimationDuration(
+                  viewportPreferencesRef.current.reducedMotion,
+                ),
           });
         },
-        zoomOut: () => {
+        zoomOut: (options) => {
           void next.zoomOut({
-            duration: viewportAnimationDuration(
-              viewportPreferencesRef.current.reducedMotion,
-            ),
+            duration: options?.instant
+              ? 0
+              : viewportAnimationDuration(
+                  viewportPreferencesRef.current.reducedMotion,
+                ),
           });
         },
-        resetZoom: () => {
+        resetZoom: (options) => {
           void next.zoomTo(1, {
-            duration: viewportAnimationDuration(
-              viewportPreferencesRef.current.reducedMotion,
-            ),
+            duration: options?.instant
+              ? 0
+              : viewportAnimationDuration(
+                  viewportPreferencesRef.current.reducedMotion,
+                ),
           });
         },
         toggleMiniMap: () => setMiniMapVisible((current) => !current),

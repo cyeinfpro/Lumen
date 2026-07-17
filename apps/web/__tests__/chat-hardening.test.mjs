@@ -142,21 +142,24 @@ test("SSE recovery requests are coalesced instead of dropped while busy", () => 
   );
 });
 
-test("composer pills abort prompt enhancement and guard duplicate submits", () => {
+test("shared prompt enhancement aborts stale work and composer pills guard duplicate submits", () => {
   const desktop = source(
     "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
   );
   const mobile = source(
     "src/components/ui/composer/mobile/MobileComposerPill.tsx",
   );
+  const enhancement = source(
+    "src/components/ui/composer/shared/PromptEnhancementCandidate.tsx",
+  );
+
+  match(enhancement, /const abortRef = useRef<AbortController \| null>\(null\)/);
+  match(enhancement, /abortRef\.current\?\.abort\(\)/);
+  match(enhancement, /controller\.signal\.aborted/);
+  match(enhancement, /onApply\(candidate\)/);
 
   for (const composer of [desktop, mobile]) {
-    match(
-      composer,
-      /const enhanceAbortRef = useRef<AbortController \| null>\(null\)/,
-    );
-    match(composer, /enhanceAbortRef\.current\?\.abort\(\)/);
-    match(composer, /if \(ctl\.signal\.aborted\) return;/);
+    match(composer, /usePromptEnhancementCandidate/);
     match(composer, /const submittingRef = useRef\(false\)/);
     match(composer, /if \(submittingRef\.current\) return;/);
   }

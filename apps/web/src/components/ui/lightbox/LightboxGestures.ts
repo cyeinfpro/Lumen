@@ -12,6 +12,8 @@
 import { useEffect, useRef } from "react";
 import type { MotionValue } from "framer-motion";
 
+import { projectMomentum, rubberBandDistance } from "@/lib/motion";
+
 export type GestureMode =
   | "idle"
   | "swipe-h" // 横向切图
@@ -52,32 +54,34 @@ export interface LightboxGestureOptions {
 }
 
 const SWIPE_DX_RATIO = 0.4; // 超过 40% 屏宽触发切图
-const SWIPE_VX = 600;
 const DISMISS_DY = 120;
-const DISMISS_VY = 500;
 const REVEAL_DY = -80;
 const LONG_PRESS_MS = 600;
 const DOUBLE_TAP_MS = 280;
 const TAP_SLOP = 8;
-const RUBBER = 20; // 首末张橡皮筋 20px
 const MAX_SCALE = 4;
 const POINTER_ACTIVITY_MOVE_THROTTLE_MS = 180;
-
-function rubberBand(dx: number): number {
-  // 20px 内线性，之后指数衰减
-  const sign = dx < 0 ? -1 : 1;
-  const v = Math.abs(dx);
-  if (v <= RUBBER) return dx;
-  return sign * (RUBBER + (v - RUBBER) * 0.2);
-}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function rubberClamp(value: number, min: number, max: number): number {
-  if (value < min) return min - rubberBand(min - value);
-  if (value > max) return max + rubberBand(value - max);
+function isVerticalMode(mode: GestureMode): boolean {
+  return mode === "dismiss" || mode === "reveal";
+}
+
+function rubberClamp(
+  value: number,
+  min: number,
+  max: number,
+  dimension: number,
+): number {
+  if (value < min) {
+    return min + rubberBandDistance(value - min, dimension);
+  }
+  if (value > max) {
+    return max + rubberBandDistance(value - max, dimension);
+  }
   return value;
 }
 
@@ -311,8 +315,18 @@ export function useLightboxGestures(
         // pinch 放大后平移（由外部 motion x/y 直接驱动）
         const bounds = panBounds();
         scheduleMotion({
-          dragX: rubberClamp(panStartXRef.current + dx, -bounds.x, bounds.x),
-          dragY: rubberClamp(panStartYRef.current + dy, -bounds.y, bounds.y),
+          dragX: rubberClamp(
+            panStartXRef.current + dx,
+            -bounds.x,
+            bounds.x,
+            getWidth(),
+          ),
+          dragY: rubberClamp(
+            panStartYRef.current + dy,
+            -bounds.y,
+            bounds.y,
+            getHeight(),
+          ),
         });
         if (e.cancelable) e.preventDefault();
         return;
@@ -332,17 +346,19 @@ export function useLightboxGestures(
       if (modeRef.current === "swipe-h") {
         // 首末张橡皮筋
         let outDx = dx;
-        if (optRef.current.isFirst && dx > 0) outDx = rubberBand(dx);
-        else if (optRef.current.isLast && dx < 0) outDx = -rubberBand(-dx);
+        if (
+          (optRef.current.isFirst && dx > 0) ||
+          (optRef.current.isLast && dx < 0)
+        ) {
+          outDx = rubberBandDistance(dx, getWidth());
+        }
         scheduleMotion({ dragX: outDx });
         if (e.cancelable) e.preventDefault();
-      } else if (modeRef.current === "dismiss") {
-        const fade = Math.max(0, 1 - dy / 400);
-        scheduleMotion({ dragY: dy, haloOpacity: fade });
-        if (e.cancelable) e.preventDefault();
-      } else if (modeRef.current === "reveal") {
-        // 上拉只记录速度 + 方向；阈值达成后在 pointerup 里触发
-        scheduleMotion({ dragY: Math.max(-60, dy) });
+      } else if (isVerticalMode(modeRef.current)) {
+        const outDy =
+          dy < 0 ? rubberBandDistance(dy, getHeight()) : dy;
+        const fade = clamp(1 - Math.max(0, dy) / 400, 0, 1);
+        scheduleMotion({ dragY: outDy, haloOpacity: fade });
         if (e.cancelable) e.preventDefault();
       }
     };
@@ -376,8 +392,6 @@ export function useLightboxGestures(
 
       const dx = e.clientX - startXRef.current;
       const dy = e.clientY - startYRef.current;
-      const absDx = Math.abs(dx);
-      const absDy = Math.abs(dy);
       const dur = performance.now() - startTimeRef.current;
 
       try {
@@ -410,35 +424,34 @@ export function useLightboxGestures(
 
       if (modeRef.current === "swipe-h") {
         const threshold = getWidth() * SWIPE_DX_RATIO;
-        const fastEnough = Math.abs(vxRef.current) > SWIPE_VX;
+        const projectedX = dx + projectMomentum(vxRef.current);
         let handledByCallback = false;
-        if (absDx > threshold || fastEnough) {
-          if (dx < 0 && !optRef.current.isLast) {
+        if (Math.abs(projectedX) > threshold) {
+          if (projectedX < 0 && !optRef.current.isLast) {
             handledByCallback = cbRef.current.onSwipeLeft() === true;
-          } else if (dx > 0 && !optRef.current.isFirst) {
+          } else if (projectedX > 0 && !optRef.current.isFirst) {
             handledByCallback = cbRef.current.onSwipeRight() === true;
-          } else if (dx < 0 && optRef.current.isLast) {
+          } else if (projectedX < 0 && optRef.current.isLast) {
             cbRef.current.onBoundarySwipe?.("last");
-          } else if (dx > 0 && optRef.current.isFirst) {
+          } else if (projectedX > 0 && optRef.current.isFirst) {
             cbRef.current.onBoundarySwipe?.("first");
           }
         }
         if (!handledByCallback) resetPosition();
-      } else if (modeRef.current === "dismiss") {
-        if (dy > DISMISS_DY || vyRef.current > DISMISS_VY) {
+      } else if (isVerticalMode(modeRef.current)) {
+        const projectedY = dy + projectMomentum(vyRef.current);
+        if (projectedY > DISMISS_DY) {
           cbRef.current.onDismiss();
         } else {
+          if (projectedY < REVEAL_DY) {
+            if (optRef.current.revealOpen) {
+              cbRef.current.onRevealClose();
+            } else {
+              cbRef.current.onRevealOpen();
+            }
+          }
           resetPosition();
         }
-      } else if (modeRef.current === "reveal") {
-        if (dy < REVEAL_DY || vyRef.current < -SWIPE_VX) {
-          if (optRef.current.revealOpen) {
-            cbRef.current.onRevealClose();
-          } else {
-            cbRef.current.onRevealOpen();
-          }
-        }
-        resetPosition();
       } else if (modeRef.current === "pan") {
         const bounds = panBounds();
         optRef.current.dragX.set(
@@ -447,7 +460,6 @@ export function useLightboxGestures(
         optRef.current.dragY.set(
           clamp(optRef.current.dragY.get(), -bounds.y, bounds.y),
         );
-        void absDy;
       }
 
       modeRef.current = pointersRef.current.size > 0 ? modeRef.current : "idle";

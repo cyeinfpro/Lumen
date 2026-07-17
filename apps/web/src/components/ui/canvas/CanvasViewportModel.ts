@@ -113,10 +113,11 @@ export function fitCanvasViewport(
   nodes = instance.getNodes(),
   padding = 0.18,
   maxZoom = 1.12,
+  duration = VIEWPORT_ANIMATION_DURATION,
 ) {
   if (nodes.length === 0) {
     void instance.zoomTo(1, {
-      duration: viewportAnimationDuration(preferences.reducedMotion),
+      duration: viewportAnimationDuration(preferences.reducedMotion, duration),
     });
     return;
   }
@@ -125,7 +126,7 @@ export function fitCanvasViewport(
     padding,
     minZoom: preferences.isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM,
     maxZoom,
-    duration: viewportAnimationDuration(preferences.reducedMotion),
+    duration: viewportAnimationDuration(preferences.reducedMotion, duration),
   });
 }
 

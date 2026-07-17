@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Box,
   Command,
@@ -20,7 +20,6 @@ import {
 } from "react";
 
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
@@ -134,7 +133,6 @@ export function CanvasCommandMenu({
   emptyLabel = "无结果",
   className,
 }: CanvasCommandMenuProps) {
-  const reduceMotion = useReducedMotion();
   const headingId = useId();
   const descriptionId = useId();
   const listboxId = useId();
@@ -230,10 +228,10 @@ export function CanvasCommandMenu({
         <motion.div
           key="canvas-command-menu"
           className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center p-0 sm:items-start sm:px-4 sm:pt-[14vh]"
-          initial={reduceMotion ? false : { opacity: 0 }}
+          initial={false}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: reduceMotion ? 0 : DURATION.quick }}
+          transition={{ duration: 0 }}
         >
           <button
             type="button"
@@ -249,19 +247,10 @@ export function CanvasCommandMenu({
             aria-labelledby={headingId}
             aria-describedby={descriptionId}
             onKeyDown={handleKeyDown}
-            initial={
-              reduceMotion ? false : { opacity: 0, scale: 0.98, y: 10 }
-            }
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={
-              reduceMotion
-                ? { opacity: 0 }
-                : { opacity: 0, scale: 0.98, y: 10 }
-            }
-            transition={{
-              duration: reduceMotion ? 0 : DURATION.normal,
-              ease: EASE.develop,
-            }}
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0 }}
             className={cn(
               "mobile-dialog-panel surface-dialog relative flex max-h-[82dvh] w-full max-w-2xl flex-col overflow-hidden",
               "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none max-sm:border-b-0",

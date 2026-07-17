@@ -52,7 +52,7 @@ export function MobileTopBar({
     <header
       ref={ref}
       className={[
-        "sticky left-0 right-0 top-0 shrink-0 safe-x",
+        "adaptive-material sticky left-0 right-0 top-0 shrink-0 safe-x",
         "transition-[background-color,backdrop-filter,border-color] duration-[var(--dur-normal)]",
         showGlass
           ? "bg-[var(--bg-0)]/72 backdrop-blur-xl mobile-perf-surface border-b border-[var(--border-subtle)]"
@@ -61,7 +61,8 @@ export function MobileTopBar({
       ].join(" ")}
       style={{
         zIndex: "var(--z-header, 10)" as unknown as number,
-        paddingTop: "calc(env(safe-area-inset-top, 0px) + var(--system-banner-height, 0px))",
+        paddingTop:
+          "calc(env(safe-area-inset-top, 0px) + var(--top-banner-stack-height, 0px))",
       }}
     >
       <div className="relative mx-auto flex min-h-[var(--mobile-topbar-h)] max-w-[640px] items-center gap-2 px-3 [@media(max-width:390px)]:gap-1">

@@ -4,7 +4,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { format } from "date-fns";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -33,6 +33,7 @@ import type { BillingSnapshotOut, UsageOut, WalletTransactionOut } from "@/lib/t
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
+import { DURATION, EASE } from "@/lib/motion";
 
 const PRIMARY_SKELETON_KEYS = [
   "messages",
@@ -450,12 +451,19 @@ function StatCard({
   ratio?: number | null;
   delay?: number;
 }) {
+  const reduceMotion = useReducedMotion();
+  const progress = Math.max(0, Math.min(100, ratio ?? 0)) / 100;
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.22, delay, ease: "easeOut" }}
-      className="group rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-[var(--border)] hover:bg-[var(--bg-1)]/80 hover:shadow-[var(--shadow-2)]"
+      initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+      animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+      transition={{
+        duration: reduceMotion ? 0 : DURATION.normal,
+        delay: reduceMotion ? 0 : delay,
+        ease: EASE.develop,
+      }}
+      className="group rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-[transform,border-color,background-color,box-shadow] duration-[var(--dur-quick)] [@media(hover:hover)]:hover:-translate-y-0.5 [@media(hover:hover)]:hover:border-[var(--border)] [@media(hover:hover)]:hover:bg-[var(--bg-1)]/80 [@media(hover:hover)]:hover:shadow-[var(--shadow-2)] motion-reduce:transform-none"
     >
       <div className="flex items-center justify-between">
         <span className="type-overline">
@@ -476,9 +484,14 @@ function StatCard({
       {ratio != null && (
         <div className="mt-3 h-1 overflow-hidden rounded-full bg-[var(--bg-2)]">
           <motion.div
-            initial={{ width: 0 }}
-            animate={{ width: `${Math.max(0, Math.min(100, ratio))}%` }}
-            transition={{ duration: 0.5, delay: delay + 0.15 }}
+            initial={reduceMotion ? false : { scaleX: 0 }}
+            animate={{ scaleX: progress }}
+            transition={{
+              duration: reduceMotion ? 0 : DURATION.sheet,
+              delay: reduceMotion ? 0 : delay + DURATION.quick,
+              ease: EASE.develop,
+            }}
+            style={{ transformOrigin: "left center" }}
             className="h-full rounded-full bg-gradient-to-r from-[var(--accent)]/80 to-[var(--accent)]"
           />
         </div>
@@ -498,12 +511,18 @@ function SecondaryCard({
   children: React.ReactNode;
   delay?: number;
 }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.22, delay, ease: "easeOut" }}
-      className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-[var(--border)] hover:bg-[var(--bg-1)]/80 hover:shadow-[var(--shadow-2)]"
+      initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+      animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+      transition={{
+        duration: reduceMotion ? 0 : DURATION.normal,
+        delay: reduceMotion ? 0 : delay,
+        ease: EASE.develop,
+      }}
+      className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-[transform,border-color,background-color,box-shadow] duration-[var(--dur-quick)] [@media(hover:hover)]:hover:-translate-y-0.5 [@media(hover:hover)]:hover:border-[var(--border)] [@media(hover:hover)]:hover:bg-[var(--bg-1)]/80 [@media(hover:hover)]:hover:shadow-[var(--shadow-2)] motion-reduce:transform-none"
     >
       <div className="flex items-center justify-between mb-3">
         <div className="type-overline">

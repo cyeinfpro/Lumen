@@ -9,7 +9,11 @@
 // - 每行：SwipeRow 左滑 + 显式 ••• ActionSheet
 // - 无限滚动 + 空态/错误态/骨架
 
-import { AnimatePresence, motion } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useReducedMotion,
+} from "framer-motion";
 import {
   Inbox,
   Loader2,
@@ -47,6 +51,7 @@ import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
+import { DURATION, resolveDrawerMotion } from "@/lib/motion";
 
 import { ConversationRowMobile } from "@/components/ui/me/ConversationRowMobile";
 
@@ -146,6 +151,8 @@ export function MobileConversationDrawer({
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<TabKind>("active");
   const { haptic } = useHaptic();
+  const reduceMotion = useReducedMotion();
+  const drawerMotion = resolveDrawerMotion(reduceMotion, DURATION.normal);
   const panelRef = useRef<HTMLElement | null>(null);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -350,7 +357,7 @@ export function MobileConversationDrawer({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.18 }}
+            transition={drawerMotion.scrimTransition}
             onClick={onClose}
             aria-label="关闭会话列表"
             className="fixed inset-0 z-[60] bg-black/55 backdrop-blur-[3px]"
@@ -364,10 +371,10 @@ export function MobileConversationDrawer({
             role="dialog"
             aria-modal="true"
             aria-label="会话列表"
-            initial={{ x: "-100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "-100%" }}
-            transition={{ type: "spring", stiffness: 380, damping: 34 }}
+            initial={drawerMotion.panelInitial}
+            animate={drawerMotion.panelAnimate}
+            exit={drawerMotion.panelExit}
+            transition={drawerMotion.panelTransition}
             className={cn(
               "fixed bottom-0 left-0 top-0 z-[61] flex min-h-0 max-h-[100dvh] flex-col",
               "w-[min(360px,92vw)] bg-[var(--bg-1)]",

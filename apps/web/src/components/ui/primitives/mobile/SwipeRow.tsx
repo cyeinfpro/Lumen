@@ -1,6 +1,11 @@
 "use client";
 
-import { motion, useMotionValue, animate } from "framer-motion";
+import {
+  animate,
+  motion,
+  useMotionValue,
+  useReducedMotion,
+} from "framer-motion";
 import {
   type ReactNode,
   useCallback,
@@ -8,7 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { SPRING } from "@/lib/motion";
+import { GESTURE, SPRING, projectMomentum } from "@/lib/motion";
 import { Pressable } from "./Pressable";
 
 export interface SwipeAction {
@@ -51,8 +56,11 @@ export function SwipeRow({
   className = "",
 }: SwipeRowProps) {
   const x = useMotionValue(0);
-  const width = Math.min(actions.length, 3) * buttonWidth;
+  const reduceMotion = useReducedMotion();
+  const visibleActions = actions.slice(0, 3);
+  const width = visibleActions.length * buttonWidth;
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const animationRef = useRef<{ stop: () => void } | null>(null);
 
@@ -68,42 +76,79 @@ export function SwipeRow({
   }, [stopAnimation]);
 
   const resetTo = useCallback(
-    (target: number) => {
+    (
+      target: number,
+      options: { velocity?: number; preserveConfirm?: boolean } = {},
+    ) => {
       stopAnimation();
-      const ctrl = animate(x, target, SPRING.snap);
+      setActionsOpen(target < 0);
+      if (reduceMotion) {
+        x.set(target);
+        if (!options.preserveConfirm) setConfirmKey(null);
+        return null;
+      }
+      const ctrl = animate(x, target, {
+        ...SPRING.gesture,
+        velocity: options.velocity ?? 0,
+      });
       animationRef.current = ctrl;
-      setConfirmKey(null);
+      void ctrl.then(() => {
+        if (animationRef.current === ctrl) animationRef.current = null;
+      });
+      if (!options.preserveConfirm) setConfirmKey(null);
       return ctrl;
     },
-    [stopAnimation, x],
+    [reduceMotion, stopAnimation, x],
   );
 
   const handleEnd = useCallback(
-    (_e: unknown, info: { offset: { x: number }; velocity: { x: number } }) => {
+    (
+      event: { type?: string },
+      info: { offset: { x: number }; velocity: { x: number } },
+    ) => {
+      if (
+        event.type === "pointercancel" ||
+        event.type === "touchcancel"
+      ) {
+        resetTo(0);
+        return;
+      }
       const dx = info.offset.x;
       const v = info.velocity.x;
-      if (dx <= -fullSwipeThreshold || v < -800) {
-        const last = actions[actions.length - 1];
+      const projectedX = dx + projectMomentum(v);
+      const direction =
+        Math.abs(v) >= GESTURE.snapVelocity
+          ? Math.sign(v)
+          : Math.sign(projectedX);
+      if (
+        direction < 0 &&
+        (projectedX <= -fullSwipeThreshold ||
+          v < -GESTURE.dismissVelocity)
+      ) {
+        const last = visibleActions[visibleActions.length - 1];
         if (!last) {
-          resetTo(0);
+          resetTo(0, { velocity: v });
           return;
         }
         if (last.confirm) {
           setConfirmKey(last.key);
-          resetTo(-width);
+          resetTo(-width, { velocity: v, preserveConfirm: true });
           return;
         }
         last.onAction();
-        resetTo(0);
+        resetTo(0, { velocity: v });
         return;
       }
-      if (dx <= -width / 2 || v < -400) {
-        resetTo(-width);
+      if (
+        direction < 0 &&
+        (projectedX <= -width / 2 || v < -GESTURE.snapVelocity)
+      ) {
+        resetTo(-width, { velocity: v });
       } else {
-        resetTo(0);
+        resetTo(0, { velocity: v });
       }
     },
-    [actions, width, resetTo, fullSwipeThreshold],
+    [visibleActions, width, resetTo, fullSwipeThreshold],
   );
 
   return (
@@ -113,11 +158,12 @@ export function SwipeRow({
     >
       {/* action 层 */}
       <div
-        aria-hidden
+        aria-hidden={!actionsOpen}
+        inert={!actionsOpen ? true : undefined}
         className="absolute inset-y-0 right-0 flex"
         style={{ width }}
       >
-        {actions.map((a) => {
+        {visibleActions.map((a) => {
           const confirming = confirmKey === a.key;
           const labelText = typeof a.label === "string" ? a.label : a.key;
           return (
@@ -152,10 +198,16 @@ export function SwipeRow({
       {/* drag 层 */}
       <motion.div
         drag="x"
-        dragConstraints={{ left: -width - 40, right: 0 }}
-        dragElastic={{ left: 0.05, right: 0 }}
+        dragConstraints={{ left: -width, right: 0 }}
+        dragElastic={
+          reduceMotion ? false : { left: 0.16, right: 0.08 }
+        }
         dragDirectionLock
-        onDragStart={stopAnimation}
+        dragMomentum={false}
+        onDragStart={() => {
+          stopAnimation();
+          setActionsOpen(true);
+        }}
         onDragEnd={handleEnd}
         style={{ x }}
         className="relative bg-[var(--bg-0)]"

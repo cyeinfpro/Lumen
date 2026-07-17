@@ -8,7 +8,7 @@
 //  - InfiniteQuery 语义不变；搜索只 client-filter 已加载页
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   Archive,
   Inbox,
@@ -33,6 +33,7 @@ import type { ConversationSummary } from "@/lib/apiClient";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
+import { DURATION, resolveDrawerMotion } from "@/lib/motion";
 import { Button, IconButton } from "./primitives";
 import { ConversationItem, titleOf } from "./sidebar/ConversationItem";
 import { SearchBox } from "./sidebar/SearchBox";
@@ -92,6 +93,8 @@ export function Sidebar({
   onNavigate?: () => void;
 } = {}) {
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
+  const reduceMotion = useReducedMotion();
+  const drawerMotion = resolveDrawerMotion(reduceMotion, DURATION.quick);
   const currentConvId = useChatStore((s) => s.currentConvId);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
   const loadHistoricalMessages = useChatStore((s) => s.loadHistoricalMessages);
@@ -600,7 +603,7 @@ export function Sidebar({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
+            transition={drawerMotion.scrimTransition}
             onClick={toggleSidebar}
             aria-label="关闭侧栏"
             className="md:hidden fixed inset-0 bg-black/45 backdrop-blur-[2px] z-30"
@@ -612,10 +615,10 @@ export function Sidebar({
           <motion.aside
             key="sidebar-mobile"
             {...ariaCommon}
-            initial={{ x: "-100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "-100%" }}
-            transition={{ type: "spring", damping: 32, stiffness: 360 }}
+            initial={drawerMotion.panelInitial}
+            animate={drawerMotion.panelAnimate}
+            exit={drawerMotion.panelExit}
+            transition={drawerMotion.panelTransition}
             className={cn(
               "fixed inset-y-0 left-0 z-40 md:hidden",
               "w-[min(320px,calc(100vw-44px))] min-w-[min(276px,calc(100vw-44px))]",

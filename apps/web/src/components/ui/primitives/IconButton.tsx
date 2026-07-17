@@ -1,7 +1,7 @@
 "use client";
 
 // 正方形图标按钮。aria-label 在类型层强制；tooltip prop 可选包裹。
-// 微交互由 GlobalGsapMotion 统一接管，避免每个按钮创建独立动画实例。
+// 高频按压反馈使用短 CSS transition，保持即时、可中断且不创建动画实例。
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "./Spinner";
@@ -24,7 +24,7 @@ export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLBut
 
 const BASE =
   "inline-flex items-center justify-center rounded-[var(--radius-control)] touch-manipulation " +
-  "transition-[background-color,color,border-color,filter,opacity] duration-150 " +
+  "transition-[transform,background-color,color,border-color,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
   "shrink-0 select-none active:opacity-[var(--op-press)]";
@@ -71,7 +71,7 @@ export function IconButton({
       type={type ?? "button"}
       disabled={isDisabled}
       aria-busy={loading || undefined}
-      data-lumen-interactive={isDisabled ? undefined : "true"}
+      data-lumen-interactive={isDisabled ? undefined : "tight"}
       className={cn(BASE, VARIANTS[variant], SIZES[size], className)}
       {...props}
     >

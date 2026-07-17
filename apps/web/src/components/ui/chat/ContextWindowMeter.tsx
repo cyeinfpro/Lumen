@@ -150,14 +150,15 @@ function MeterBar({
   return (
     <span className="block h-0.5 w-full overflow-hidden rounded-full bg-white/10">
       <motion.span
-        className={cn("block h-full rounded-full", tone(percent, state))}
+        className={cn(
+          "block h-full w-full origin-left rounded-full transition-transform duration-200 ease-[var(--ease-develop)]",
+          tone(percent, state),
+        )}
         initial={false}
         animate={{
-          width: `${percent}%`,
           backgroundPosition: animated ? ["0% 50%", "100% 50%"] : "0% 50%",
         }}
         transition={{
-          width: reducedMotion ? { duration: 0 } : lumenMotion.spring,
           backgroundPosition: animated
             ? { repeat: Infinity, duration: lumenMotion.shimmerSeconds, ease: "linear" }
             : { duration: 0 },
@@ -168,8 +169,9 @@ function MeterBar({
                 backgroundImage:
                   "linear-gradient(90deg, var(--info), var(--accent), var(--info))",
                 backgroundSize: "200% 100%",
+                transform: `scaleX(${percent / 100})`,
               }
-            : undefined
+            : { transform: `scaleX(${percent / 100})` }
         }
       />
     </span>

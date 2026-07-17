@@ -1044,10 +1044,16 @@ function ExecutionTaskDetails({
       >
         <span
           className={cn(
-            "block h-full rounded-full bg-[var(--accent)] transition-[width]",
-            progress === null && "w-1/3 animate-pulse motion-reduce:animate-none",
+            "block h-full rounded-full bg-[var(--accent)]",
+            progress === null
+              ? "w-1/3 animate-pulse motion-reduce:animate-none"
+              : "w-full origin-left transition-transform duration-[var(--dur-base)] ease-[var(--ease-develop)]",
           )}
-          style={progress === null ? undefined : { width: `${progress}%` }}
+          style={
+            progress === null
+              ? undefined
+              : { transform: `scaleX(${progress / 100})` }
+          }
         />
       </div>
       {rows.length > 0 ? (

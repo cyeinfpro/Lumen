@@ -71,9 +71,10 @@ function syncMediaQuerySnapshot(query: string, next: boolean): void {
 
 function getMediaQuerySnapshot(query: string): boolean | null {
   if (typeof window === "undefined") return null;
-  const cached = mediaQueryCache.get(query);
-  if (cached !== undefined) return cached;
   const next = readMediaQuery(query);
+  // Always reconcile against the live viewport. A cached desktop value can
+  // otherwise survive a resize/navigation and keep the desktop shell mounted
+  // on a narrow viewport until another MediaQueryList event happens to fire.
   mediaQueryCache.set(query, next);
   return next;
 }

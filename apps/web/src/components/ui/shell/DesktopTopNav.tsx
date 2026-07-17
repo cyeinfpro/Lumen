@@ -5,15 +5,11 @@
 // 路由契约集中在 navigation.ts，桌面顶部与移动底栏共用同一套 IA。
 
 import { motion } from "framer-motion";
-import { Menu, MoreHorizontal, Search } from "lucide-react";
+import { Menu, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  useCallback,
-  useEffect,
   useMemo,
-  useRef,
-  useState,
   type ReactNode,
   type Ref,
 } from "react";
@@ -24,7 +20,6 @@ import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { SPRING } from "@/lib/motion";
 import { useUiStore } from "@/store/useUiStore";
 import { DesktopAccountMenu } from "./DesktopAccountMenu";
-import { DesktopPopover } from "../composer/desktop/DesktopPopover";
 import {
   getActiveNavKey,
   getAppNavItems,
@@ -64,18 +59,16 @@ export function DesktopTopNav({
   const currentActive: DesktopNavTab = useMemo(() => {
     return getActiveNavKey(pathname, navVisibility) ?? active;
   }, [pathname, active, navVisibility]);
-  const primaryItems = navItems.slice(0, 3);
-  const compactOverflowItems = navItems.slice(3);
 
   return (
     <header
       className={[
-        "sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-3 px-4 md:px-6",
+        "adaptive-material sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-3 px-4 md:px-6",
         "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
         "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 backdrop-blur-lg",
       ].join(" ")}
       style={{
-        top: "var(--system-banner-height, 0px)",
+        top: "var(--top-banner-stack-height, 0px)",
         zIndex: "var(--z-header, 10)",
       }}
     >
@@ -113,24 +106,11 @@ export function DesktopTopNav({
         className="justify-self-center"
       >
         <ul className="flex items-center gap-1">
-          {primaryItems.map((tab) => (
+          {navItems.map((tab) => (
             <li key={tab.key} className="relative">
               <DesktopNavLink tab={tab} active={tab.key === currentActive} />
             </li>
           ))}
-          {compactOverflowItems.map((tab) => (
-            <li key={tab.key} className="relative hidden min-[1120px]:block">
-              <DesktopNavLink tab={tab} active={tab.key === currentActive} />
-            </li>
-          ))}
-          {compactOverflowItems.length > 0 ? (
-            <li className="min-[1120px]:hidden">
-              <MoreNavigationMenu
-                items={compactOverflowItems}
-                currentActive={currentActive}
-              />
-            </li>
-          ) : null}
         </ul>
       </nav>
 
@@ -188,7 +168,7 @@ function DesktopNavLink({
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
       className={[
-        "relative inline-flex h-9 cursor-pointer items-center whitespace-nowrap px-3 text-[13px] font-medium leading-none transition-colors",
+        "relative inline-flex h-9 cursor-pointer items-center whitespace-nowrap px-2.5 text-[13px] font-medium leading-none transition-colors min-[960px]:px-3",
         active
           ? "text-[var(--fg-0)]"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -204,80 +184,5 @@ function DesktopNavLink({
       ) : null}
       <span className="relative z-10">{tab.label}</span>
     </Link>
-  );
-}
-
-function MoreNavigationMenu({
-  items,
-  currentActive,
-}: {
-  items: readonly AppNavItem[];
-  currentActive: DesktopNavTab;
-}) {
-  const [open, setOpen] = useState(false);
-  const anchorRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const firstItemRef = useRef<HTMLAnchorElement | null>(null);
-  const hasActiveItem = items.some((item) => item.key === currentActive);
-  const closeAndRestoreFocus = useCallback(() => {
-    setOpen(false);
-    window.requestAnimationFrame(() => triggerRef.current?.focus());
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const frame = window.requestAnimationFrame(() =>
-      firstItemRef.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [open]);
-
-  return (
-    <div ref={anchorRef} className="relative">
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className={[
-          "inline-flex h-9 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[13px] font-medium transition-colors",
-          hasActiveItem
-            ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
-            : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-        ].join(" ")}
-      >
-        <MoreHorizontal className="h-4 w-4" aria-hidden />
-        <span>更多</span>
-      </button>
-      <DesktopPopover
-        open={open}
-        onClose={closeAndRestoreFocus}
-        anchorRef={anchorRef}
-        ariaLabel="更多主导航"
-        align="center"
-        className="w-44 p-1.5"
-      >
-        <nav aria-label="更多主导航" className="grid gap-0.5">
-          {items.map((item, index) => (
-            <Link
-              ref={index === 0 ? firstItemRef : undefined}
-              key={item.key}
-              href={item.route}
-              onClick={() => setOpen(false)}
-              aria-current={item.key === currentActive ? "page" : undefined}
-              className={[
-                "flex min-h-10 items-center rounded-[var(--radius-control)] px-3 text-[13px] transition-colors",
-                item.key === currentActive
-                  ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
-                  : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-              ].join(" ")}
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      </DesktopPopover>
-    </div>
   );
 }
