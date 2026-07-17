@@ -107,7 +107,7 @@ export function ProjectsIndex() {
       : "APPAREL · LIBRARY · NEW";
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="page-shell relative h-[100dvh]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -126,8 +126,8 @@ export function ProjectsIndex() {
         }
       />
       <ProjectTopBar />
-      <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-3">
+      <main className="page-scroll lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)]">
+        <div className="page-frame grid gap-3">
           <Hero counts={counts} />
           <ModelLibraryEntry />
           <Toolbar
@@ -185,25 +185,18 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
         : "所有项目都已收束，可以开启下一组棚拍。"
       : "管理模特库、商品图分析、模特候选、展示图生成与交付。";
   return (
-    <section className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-      <div className="flex min-w-0 items-baseline gap-2.5">
-        <p className="type-page-kicker shrink-0">
+    <header className="page-header hidden md:grid">
+      <div className="page-header-copy">
+        <p className="type-page-kicker">
           Project Index
         </p>
-        <h1 className="type-page-title shrink-0">
-          服饰模特图
-        </h1>
-        <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+        <h1 className="type-page-title">服饰模特图</h1>
+        <p className="type-page-subtitle hidden max-w-3xl lg:block">
           {summary}
         </p>
       </div>
 
-      <div className="flex shrink-0 items-center gap-2">
-        <div className="hidden items-center gap-1.5 lg:flex">
-          <CompactStat label="全部" value={counts.all} />
-          <CompactStat label="进行中" value={active} accent={active > 0} />
-          <CompactStat label="已交付" value={counts.completed} />
-        </div>
+      <div className="page-header-actions">
         <Link
           href="/projects/apparel-model-showcase/new"
           className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 text-[12px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
@@ -213,31 +206,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
           <ArrowRight className="h-3.5 w-3.5 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
         </Link>
       </div>
-    </section>
-  );
-}
-
-function CompactStat({
-  label,
-  value,
-  accent = false,
-}: {
-  label: string;
-  value: number;
-  accent?: boolean;
-}) {
-  return (
-    <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
-      <span
-        className={cn(
-          "text-[13px] font-semibold tabular-nums leading-[1.9]",
-          accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
-        )}
-      >
-        {String(value).padStart(2, "0")}
-      </span>
-      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
-    </span>
+    </header>
   );
 }
 
@@ -390,8 +359,8 @@ function Toolbar({
   onKeywordChange: (value: string) => void;
 }) {
   return (
-    <section className="grid gap-2 border-b border-[var(--border)] pb-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)] lg:items-end">
-      <div className="flex min-w-0 flex-wrap gap-x-1 gap-y-1 md:gap-x-1">
+    <section className="toolbar-shell lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)] lg:items-end">
+      <div className="toolbar-group flex-wrap">
         {FILTERS.map((option) => {
           const active = filter === option.key;
           const count = counts[option.key];
@@ -422,7 +391,7 @@ function Toolbar({
           );
         })}
       </div>
-      <div className="relative">
+      <div className="relative min-w-0 flex-1 lg:max-w-[300px]">
         <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
         <input
           value={keyword}
@@ -908,7 +877,7 @@ function ErrorPanel({ onRetry }: { onRetry: () => void }) {
 
 function EmptyHero() {
   return (
-    <section className="border-y border-[var(--border)] py-8 md:py-10">
+    <section className="page-section">
       <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
@@ -929,18 +898,6 @@ function EmptyHero() {
           创建第一个项目
           <ArrowRight className="h-3.5 w-3.5 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
         </Link>
-      </div>
-      <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border-subtle)] md:max-w-2xl">
-        {["商品约束", "模特候选", "展示交付"].map((label, index) => (
-          <div key={label} className="bg-[var(--bg-0)] px-3 py-3 md:px-4 md:py-3.5">
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-              N°{String(index + 1).padStart(2, "0")}
-            </p>
-            <p className="mt-1 text-[13px] font-semibold tracking-tight text-[var(--fg-0)] md:text-[14px]">
-              {label}
-            </p>
-          </div>
-        ))}
       </div>
     </section>
   );

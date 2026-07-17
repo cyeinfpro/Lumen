@@ -396,7 +396,7 @@ export function PosterWorkflowNewPage() {
   };
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
+    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -407,23 +407,25 @@ export function PosterWorkflowNewPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-8 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-3">
-          <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-            <div className="flex min-w-0 items-baseline gap-2.5">
-              <p className="type-page-kicker shrink-0">新建项目</p>
-              <h1 className="type-page-title shrink-0">新建海报设计</h1>
-              <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+      <main className="page-scroll lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)]">
+        <div className="page-frame grid max-w-[1280px] gap-3">
+          <header className="page-header hidden md:grid">
+            <div className="page-header-copy">
+              <p className="type-page-kicker">新建项目</p>
+              <h1 className="type-page-title">新建海报设计</h1>
+              <p className="type-page-subtitle hidden max-w-3xl lg:block">
                 录入文案、选择风格、确定尺寸；剩下交给 AI。
               </p>
             </div>
-            <Link
-              href="/projects"
-              className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              返回项目
-            </Link>
+            <div className="page-header-actions">
+              <Link
+                href="/projects"
+                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                返回项目
+              </Link>
+            </div>
           </header>
 
           <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">

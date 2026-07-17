@@ -7,7 +7,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 import { SPRING } from "@/lib/motion";
@@ -21,17 +21,30 @@ export interface LightboxParamsPanelProps {
   onCopyPrompt?: () => void;
 }
 
-function usePanelReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(false);
+function usePanelPreferences() {
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [reducedTransparency, setReducedTransparency] = useState(false);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReduced(mql.matches);
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const transparencyQuery = window.matchMedia(
+      "(prefers-reduced-transparency: reduce)",
+    );
+    const update = () => {
+      setReducedMotion(motionQuery.matches);
+      setReducedTransparency(transparencyQuery.matches);
+    };
     update();
-    mql.addEventListener("change", update);
-    return () => mql.removeEventListener("change", update);
+    motionQuery.addEventListener("change", update);
+    transparencyQuery.addEventListener("change", update);
+    return () => {
+      motionQuery.removeEventListener("change", update);
+      transparencyQuery.removeEventListener("change", update);
+    };
   }, []);
-  return reduced;
+
+  return { reducedMotion, reducedTransparency };
 }
 
 export function LightboxParamsPanel({
@@ -40,15 +53,47 @@ export function LightboxParamsPanel({
   item,
   onCopyPrompt,
 }: LightboxParamsPanelProps) {
-  const reducedMotion = usePanelReducedMotion();
+  const { reducedMotion, reducedTransparency } = usePanelPreferences();
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
-    if (!open) return;
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!open) {
+      if (previousFocusRef.current?.isConnected) {
+        const frame = window.requestAnimationFrame(() => {
+          previousFocusRef.current?.focus({ preventScroll: true });
+          previousFocusRef.current = null;
+        });
+        return () => window.cancelAnimationFrame(frame);
+      }
+      return;
+    }
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     const frame = window.requestAnimationFrame(() => {
       panelRef.current?.focus({ preventScroll: true });
     });
-    return () => window.cancelAnimationFrame(frame);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.repeat) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCloseRef.current();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
   }, [open]);
 
   return (
@@ -59,11 +104,15 @@ export function LightboxParamsPanel({
           ref={panelRef}
           role="dialog"
           aria-modal="false"
-          aria-label="图片参数"
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId}
           tabIndex={-1}
           className={cn(
             "fixed inset-x-0 bottom-0 z-[var(--z-dialog,90)]",
-            "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)]/96 backdrop-blur-2xl",
+            "rounded-t-[var(--radius-sheet)]",
+            reducedTransparency
+              ? "bg-[var(--bg-1)]"
+              : "bg-[var(--bg-1)]/96 backdrop-blur-2xl",
             "border-t border-[var(--border-subtle)]",
             "mobile-dialog-sheet mobile-dialog-scroll safe-x pb-[var(--mobile-dialog-footer-pad-bottom)]",
             "max-h-[min(70dvh,var(--mobile-dialog-max-height))] overflow-y-auto overscroll-contain",
@@ -83,12 +132,18 @@ export function LightboxParamsPanel({
           </div>
           <div className="flex items-center justify-between px-4 pt-3 pb-1.5">
             <div>
-              <div className="text-[14px] font-semibold text-[var(--fg-0)]">
+              <h2
+                id={titleId}
+                className="text-[14px] font-semibold text-[var(--fg-0)]"
+              >
                 图片信息
-              </div>
-              <div className="mt-0.5 font-mono text-[10px] text-[var(--fg-2)] tracking-wide">
+              </h2>
+              <p
+                id={descriptionId}
+                className="mt-0.5 font-mono text-[10px] text-[var(--fg-2)] tracking-wide"
+              >
                 {item.id}
-              </div>
+              </p>
             </div>
             <MobileIconButton
               icon={<X className="w-4 h-4" />}

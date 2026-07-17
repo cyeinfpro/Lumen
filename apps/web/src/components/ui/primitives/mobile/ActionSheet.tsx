@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { BottomSheet } from "./BottomSheet";
 import { Pressable } from "./Pressable";
 
@@ -30,23 +30,24 @@ export function ActionSheet({
   actions,
   cancelLabel = "取消",
 }: ActionSheetProps) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const accessibleLabel =
+    typeof title === "string" && title.trim() ? title : "操作面板";
+
   return (
-    <BottomSheet open={open} onClose={onClose} ariaLabel="操作面板">
-      <div className="px-4 pt-1 pb-3">
-        {(title || description) && (
-          <div className="text-center py-3 border-b border-[var(--border-subtle)]">
-            {title && (
-              <div className="type-card-title">
-                {title}
-              </div>
-            )}
-            {description && (
-              <div className="type-body-sm mt-1">
-                {description}
-              </div>
-            )}
-          </div>
-        )}
+    <BottomSheet open={open} onClose={onClose} ariaLabel={accessibleLabel}>
+      <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-1 pb-3">
+        <div className="border-b border-[var(--border-subtle)] py-3 text-center">
+          <h2 id={titleId} className="type-card-title">
+            {title ?? "操作面板"}
+          </h2>
+          {description && (
+            <p id={descriptionId} className="type-body-sm mt-1">
+              {description}
+            </p>
+          )}
+        </div>
         <ul className="flex flex-col">
           {actions.map((a) => (
             <li key={a.key} className="border-b border-[var(--border-subtle)] last:border-b-0">
@@ -78,7 +79,7 @@ export function ActionSheet({
         </ul>
       </div>
       {/* spec §9.4：取消按钮单独一格，与 actions 之间 12px 间隙（iOS 标配） */}
-      <div className="mobile-dialog-footer sticky bottom-0 z-10 border-t border-[var(--border-subtle)] bg-[var(--bg-1)] px-4 pt-3">
+      <div className="mobile-dialog-footer shrink-0 border-t border-[var(--border-subtle)] bg-[var(--bg-1)] px-4 pt-3">
         <Pressable
           size="large"
           pressScale="soft"

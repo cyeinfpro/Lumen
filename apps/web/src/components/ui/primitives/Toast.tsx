@@ -4,7 +4,7 @@
 // 在任何组件/回调中调用；需要把 <ToastViewport /> 挂在 layout.tsx 里。
 // 自动 3s 消失，可带 action（一个按钮）。
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
@@ -119,9 +119,9 @@ function ToastRow({ item }: { item: ToastItem }) {
   const dismiss = useToastStore((s) => s.dismiss);
   const reduceMotion = useReducedMotion();
   const tone = TONE_CLASSES[item.tone];
+  const [paused, setPaused] = useState(false);
 
-  // 自毁定时器（使用 effect）
-  useAutoDismiss(item.id, item.durationMs, dismiss);
+  useAutoDismiss(item.id, item.durationMs, dismiss, paused);
 
   return (
     <motion.div
@@ -146,13 +146,23 @@ function ToastRow({ item }: { item: ToastItem }) {
       style={{ touchAction: "pan-y" }}
       role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
       aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocusCapture={() => setPaused(true)}
+      onBlurCapture={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setPaused(false);
+      }}
       className={cn(
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
         // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
         "max-sm:w-full",
-        "flex items-start gap-3 px-3 py-2.5 rounded-[var(--radius-panel)]",
-        "bg-[var(--bg-1)]/95 backdrop-blur-xl border text-[var(--fg-0)]",
-        "shadow-[var(--shadow-3)]",
+        "surface-panel flex items-start gap-3 px-3 py-2.5 text-[var(--fg-0)]",
         tone.border,
       )}
     >
@@ -166,9 +176,9 @@ function ToastRow({ item }: { item: ToastItem }) {
         <ToneIcon tone={item.tone} />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-[13px] font-medium leading-tight truncate">{item.title}</p>
+        <p className="type-label break-words text-[var(--fg-0)]">{item.title}</p>
         {item.description ? (
-          <p className="mt-0.5 text-[11px] text-[var(--fg-1)] leading-relaxed line-clamp-3">
+          <p className="type-caption mt-0.5 line-clamp-3 text-[var(--fg-1)]">
             {item.description}
           </p>
         ) : null}
@@ -198,13 +208,54 @@ function ToastRow({ item }: { item: ToastItem }) {
   );
 }
 
-// 独立的 hook：避免在 ToastRow 重复声明 useEffect 逻辑
-function useAutoDismiss(id: string, durationMs: number, dismiss: (id: string) => void) {
+// 页面隐藏、hover 或 action 获得焦点时暂停，避免用户回来时通知已经消失。
+function useAutoDismiss(
+  id: string,
+  durationMs: number,
+  dismiss: (id: string) => void,
+  paused: boolean,
+) {
+  const remainingMs = useRef(durationMs);
+  const startedAt = useRef(0);
+
+  useEffect(() => {
+    remainingMs.current = durationMs;
+  }, [durationMs, id]);
+
   useEffect(() => {
     if (durationMs <= 0) return;
-    const t = window.setTimeout(() => dismiss(id), durationMs);
-    return () => window.clearTimeout(t);
-  }, [id, durationMs, dismiss]);
+    let timeoutId = 0;
+
+    const stop = () => {
+      if (!timeoutId) return;
+      window.clearTimeout(timeoutId);
+      timeoutId = 0;
+      remainingMs.current = Math.max(
+        0,
+        remainingMs.current - (Date.now() - startedAt.current),
+      );
+    };
+    const start = () => {
+      if (paused || document.hidden || timeoutId) return;
+      if (remainingMs.current <= 0) {
+        dismiss(id);
+        return;
+      }
+      startedAt.current = Date.now();
+      timeoutId = window.setTimeout(() => dismiss(id), remainingMs.current);
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) stop();
+      else start();
+    };
+
+    start();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [dismiss, durationMs, id, paused]);
 }
 
 export function ToastViewport() {
@@ -212,7 +263,7 @@ export function ToastViewport() {
   return (
     <div
       className={cn(
-        "fixed z-[120] flex flex-col gap-2",
+        "fixed z-[var(--z-toast)] flex flex-col gap-2",
         // 桌面：右下角
         "sm:bottom-4 sm:right-4 sm:items-end",
         // 移动端：底部居中，留左右 padding；safe-area 避免被 home indicator / composer 挡住
@@ -220,8 +271,6 @@ export function ToastViewport() {
         "max-sm:bottom-[calc(var(--mobile-tabbar-height)+0.75rem)]",
         "pointer-events-none",
       )}
-      aria-live="polite"
-      aria-atomic="false"
     >
       <AnimatePresence initial={false}>
         {items.map((item) => (

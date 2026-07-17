@@ -443,7 +443,7 @@ export function ApparelWorkflowNewPage() {
   const ctaDisabled = !files.length || isBusy;
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
+    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -454,27 +454,29 @@ export function ApparelWorkflowNewPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-8 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-3">
-          <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-            <div className="flex min-w-0 items-baseline gap-2.5">
-              <p className="type-page-kicker shrink-0">
+      <main className="page-scroll lumen-studio-bg project-mobile-scroll-with-cta mb-[var(--mobile-tabbar-height)] touch-pan-y">
+        <div className="page-frame grid max-w-[1280px] gap-3">
+          <header className="page-header hidden md:grid">
+            <div className="page-header-copy">
+              <p className="type-page-kicker">
                 新建项目
               </p>
-              <h1 className="type-page-title shrink-0">
+              <h1 className="type-page-title">
                 新建服饰模特图
               </h1>
-              <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+              <p className="type-page-subtitle hidden max-w-3xl lg:block">
                 上传 1-3 张商品图，确认模特候选后生成 4 张电商展示图。
               </p>
             </div>
-            <Link
-              href="/projects/apparel-model-showcase"
-              className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              返回服饰模特图
-            </Link>
+            <div className="page-header-actions">
+              <Link
+                href="/projects/apparel-model-showcase"
+                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                返回服饰模特图
+              </Link>
+            </div>
           </header>
 
           <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
@@ -612,7 +614,7 @@ export function ApparelWorkflowNewPage() {
               {/* Settings */}
               <div className="grid gap-5">
                 <SectionHeader
-                  eyebrow="N°03 — 设置"
+                  eyebrow="N°03 — 基本参数"
                   title="基础参数"
                   trailing={
                     <CharCount remaining={promptRemaining} max={PROMPT_MAX} />
@@ -633,36 +635,53 @@ export function ApparelWorkflowNewPage() {
                     options={GENDERS}
                     onChange={setGender}
                   />
-                  <ParamSelect
-                    label="外貌方向"
-                    chineseLabel="外貌方向"
-                    value={appearanceDirection}
-                    options={APPEARANCE_DIRECTIONS}
-                    onChange={setAppearanceDirection}
-                  />
-                  <ParamSelect
-                    label="风格"
-                    chineseLabel="风格气质"
-                    value={styleDirection}
-                    options={STYLE_DIRECTIONS}
-                    onChange={setStyleDirection}
-                  />
                 </div>
 
-                <div className="grid gap-2">
-                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                    Notes <span className="ml-1 normal-case tracking-normal text-[var(--fg-3)]">补充说明</span>
-                  </label>
-                  <textarea
-                    value={extraPrompt}
-                    onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
-                    maxLength={120}
-                    rows={3}
-                    aria-label="补充说明"
-                    placeholder="例如：更活泼一点，适合校园通勤"
-                    className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
-                  />
-                </div>
+                <details className="border-t border-[var(--border-subtle)] pt-4">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[13px] text-[var(--fg-1)]">
+                    <span>
+                      <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+                        高级偏好
+                      </span>
+                      <span className="ml-2 text-[12px] text-[var(--fg-3)]">
+                        外貌、风格与补充说明
+                      </span>
+                    </span>
+                    <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+                      可选
+                    </span>
+                  </summary>
+                  <div className="mt-4 grid gap-x-8 gap-y-6 md:grid-cols-2">
+                    <ParamSelect
+                      label="外貌方向"
+                      chineseLabel="外貌方向"
+                      value={appearanceDirection}
+                      options={APPEARANCE_DIRECTIONS}
+                      onChange={setAppearanceDirection}
+                    />
+                    <ParamSelect
+                      label="风格"
+                      chineseLabel="风格气质"
+                      value={styleDirection}
+                      options={STYLE_DIRECTIONS}
+                      onChange={setStyleDirection}
+                    />
+                    <label className="grid gap-2 md:col-span-2">
+                      <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                        Notes <span className="ml-1 normal-case tracking-normal text-[var(--fg-3)]">补充说明</span>
+                      </span>
+                      <textarea
+                        value={extraPrompt}
+                        onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
+                        maxLength={120}
+                        rows={3}
+                        aria-label="补充说明"
+                        placeholder="例如：更活泼一点，适合校园通勤"
+                        className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
+                      />
+                    </label>
+                  </div>
+                </details>
 
                 <div className="min-w-0 border-t border-[var(--border)] pt-4">
                   <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">

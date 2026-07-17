@@ -15,7 +15,7 @@ import {
 } from "react";
 
 import { LumenMark } from "@/components/ui/brand/LumenMark";
-import { IconButton, Kbd } from "@/components/ui/primitives";
+import { IconButton } from "@/components/ui/primitives";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { SPRING } from "@/lib/motion";
 import { useUiStore } from "@/store/useUiStore";
@@ -63,9 +63,9 @@ export function DesktopTopNav({
   return (
     <header
       className={[
-        "adaptive-material sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-3 px-4 md:px-6",
+        "adaptive-material sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
         "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
-        "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 backdrop-blur-lg",
+        "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 backdrop-blur-lg",
       ].join(" ")}
       style={{
         top: "var(--top-banner-stack-height, 0px)",
@@ -73,7 +73,7 @@ export function DesktopTopNav({
       }}
     >
       {/* Left: sidebar toggle + Logo */}
-      <div className="flex min-w-0 max-w-full items-center gap-2.5 justify-self-start md:gap-3">
+      <div className="flex min-w-0 max-w-full items-center gap-2 justify-self-start">
         {onToggleSidebar && (
           <IconButton
             ref={sidebarTriggerRef}
@@ -94,7 +94,7 @@ export function DesktopTopNav({
           aria-label="Lumen 首页"
         >
           <LumenMark className="text-[var(--accent)]" />
-          <span className="hidden text-[15px] font-semibold tracking-normal text-[var(--fg-0)] min-[960px]:inline">
+          <span className="hidden type-card-title min-[1120px]:inline">
             Lumen
           </span>
         </Link>
@@ -115,24 +115,10 @@ export function DesktopTopNav({
       </nav>
 
       {/* Right: slot */}
-      <div className="flex min-w-0 max-w-full items-center justify-end gap-2 justify-self-end text-sm text-[var(--fg-2)]">
+      <div className="flex min-w-0 max-w-full items-center justify-end gap-1.5 justify-self-end text-[var(--fg-2)]">
         {right ? (
           <div className="flex min-w-0 items-center gap-2">{right}</div>
         ) : null}
-        <button
-          type="button"
-          onClick={() =>
-            window.dispatchEvent(
-              new CustomEvent("lumen:command-palette-open"),
-            )
-          }
-          aria-label="打开命令面板"
-          className="hidden min-h-10 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-2.5 text-[12px] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] lg:inline-flex"
-        >
-          <Search className="h-4 w-4" aria-hidden />
-          <span className="hidden 2xl:inline">搜索</span>
-          <Kbd className="hidden 2xl:inline-flex">⌘K</Kbd>
-        </button>
         <IconButton
           size="md"
           aria-label="打开命令面板"
@@ -142,7 +128,7 @@ export function DesktopTopNav({
               new CustomEvent("lumen:command-palette-open"),
             )
           }
-          className="rounded-[var(--radius-control)] lg:hidden"
+          className="rounded-[var(--radius-control)]"
         >
           <Search className="h-4 w-4" aria-hidden />
         </IconButton>
@@ -168,7 +154,7 @@ function DesktopNavLink({
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
       className={[
-        "relative inline-flex h-9 cursor-pointer items-center whitespace-nowrap px-2.5 text-[13px] font-medium leading-none transition-colors min-[960px]:px-3",
+        "type-nav relative inline-flex h-10 cursor-pointer items-center whitespace-nowrap px-2.5 transition-colors min-[960px]:px-3",
         active
           ? "text-[var(--fg-0)]"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",

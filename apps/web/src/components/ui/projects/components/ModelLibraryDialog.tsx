@@ -13,10 +13,11 @@
 
 import { ArrowUpRight, WandSparkles, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useId, useRef } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import type {
@@ -52,6 +53,9 @@ export function ModelLibraryDialog({
 }: ModelLibraryDialogProps) {
   const isMobile = useIsMobile();
   const router = useRouter();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   const closeLightbox = useUiStore((s) => s.closeLightbox);
   const setLightboxActionPending = useUiStore((s) => s.setLightboxActionPending);
 
@@ -101,6 +105,11 @@ export function ModelLibraryDialog({
   };
 
   const headerHint = "可直接在卡片下方选择模特，也可以点图片预览后在大图内选择";
+  const onDialogKeyDown = useModalLayer({
+    open: isMobile === false && open,
+    rootRef: dialogRef,
+    onClose,
+  });
 
   if (isMobile === null) {
     // SSR / hydration 第一帧：不渲染外壳避免 flash
@@ -120,6 +129,8 @@ export function ModelLibraryDialog({
             onOpenFullLibrary={openFullLibrary}
             onClose={onClose}
             hint={headerHint}
+            titleId={titleId}
+            descriptionId={descriptionId}
           />
           <div className="min-h-0 flex-1 overflow-hidden">
             <ModelLibraryBrowser
@@ -153,15 +164,21 @@ export function ModelLibraryDialog({
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="模特库"
-        className="mobile-dialog-panel flex w-full max-w-6xl flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
+        className="mobile-dialog-panel flex h-[min(90dvh,860px)] min-h-0 w-full max-w-6xl flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
       >
         <DialogHeader
           onOpenFullLibrary={openFullLibrary}
           onClose={onClose}
           hint={headerHint}
+          titleId={titleId}
+          descriptionId={descriptionId}
         />
         <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto">
           <ModelLibraryBrowser
@@ -188,10 +205,14 @@ function DialogHeader({
   onOpenFullLibrary,
   onClose,
   hint,
+  titleId,
+  descriptionId,
 }: {
   onOpenFullLibrary: () => void;
   onClose: () => void;
   hint: string;
+  titleId: string;
+  descriptionId: string;
 }) {
   return (
     <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-4 md:px-6 md:py-5">
@@ -199,10 +220,10 @@ function DialogHeader({
         <p className="type-page-kicker">
           模特库
         </p>
-        <h2 className="type-page-title-sm mt-1.5 md:text-[24px]">
+        <h2 id={titleId} className="type-page-title-sm mt-1.5 md:text-[24px]">
           模特库
         </h2>
-        <p className="type-page-subtitle mt-2 max-w-md">
+        <p id={descriptionId} className="type-page-subtitle mt-2 max-w-md">
           {hint}
         </p>
       </div>
@@ -239,7 +260,7 @@ function DialogFooter({
   generatingCandidates: boolean;
 }) {
   return (
-    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6 md:py-4">
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] bg-[var(--bg-0)] px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6 md:py-4">
       <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
         Tip · 卡片下方和大图内都可以设为当前模特
       </p>

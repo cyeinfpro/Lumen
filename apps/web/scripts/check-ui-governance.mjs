@@ -271,8 +271,12 @@ function scanSharedA11yContracts(root) {
     },
     {
       path: "src/components/ui/primitives/mobile/Toast.tsx",
-      test: (src) => /role=\{t\.kind === "danger" \|\| t\.kind === "warning" \? "alert" : "status"\}/.test(src),
-      message: "MobileToast must keep danger/warning toasts on role=\"alert\".",
+      test: (src) =>
+        /if \(kind === "danger"\) toast\.error\(title\)/.test(src) &&
+        /else if \(kind === "warning"\) toast\.warning\(title\)/.test(src) &&
+        /export function MobileToastViewport\(\) \{\s+return null;\s+\}/.test(src),
+      message:
+        "MobileToast must forward danger/warning tones to the accessible global Toast and avoid a duplicate viewport.",
     },
     {
       path: "src/components/ui/primitives/ErrorState.tsx",

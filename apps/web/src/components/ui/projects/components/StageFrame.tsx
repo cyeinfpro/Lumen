@@ -26,8 +26,8 @@ export function StageFrame({
   className,
 }: StageFrameProps) {
   return (
-    <section className={cn("relative", className)}>
-      <header className="pb-5 pt-1 md:pt-2">
+    <section className={cn("page-section relative", className)}>
+      <header className="pb-5 pt-0 md:pt-1">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
             <p className="type-page-kicker">
@@ -43,7 +43,11 @@ export function StageFrame({
               {subtitle}
             </p>
           </div>
-          {actions ? <div className="w-full shrink-0 self-start sm:w-auto md:self-end">{actions}</div> : null}
+          {actions ? (
+            <div className="page-header-actions w-full shrink-0 self-start sm:w-auto md:self-end">
+              {actions}
+            </div>
+          ) : null}
         </div>
       </header>
       <div className="relative">{children}</div>

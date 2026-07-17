@@ -12,7 +12,7 @@ import NextImage from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Activity,
   AlertCircle,
@@ -407,17 +407,18 @@ function AdminAccessError({
 function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   const [tab, setTab] = useState<Tab>("health");
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
+  const reduceMotion = useReducedMotion();
 
   return (
     <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
       <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-thin">
         <div
           className={cn(
-            "mx-auto max-w-7xl px-3 py-4 min-[380px]:px-4 md:px-8 md:py-10",
+            "mx-auto max-w-7xl px-3 py-4 min-[380px]:px-4 md:px-8 md:py-8",
             adminMobileStyles.root,
           )}
         >
-          <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
+          <header className="mb-5 flex items-start justify-between gap-4 flex-wrap md:mb-7">
             <div className="min-w-0">
               <h1 className="type-page-title">管理后台</h1>
               <p className="type-body mt-1.5">
@@ -426,9 +427,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
             </div>
             <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
               {me?.email && (
-                <div className="flex min-h-[32px] items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/70 px-2.5 py-1.5 text-xs sm:px-3">
+                <div className="flex min-h-11 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/70 px-2.5 py-1.5 type-caption sm:min-h-8 sm:px-3">
                   <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
-                  <span className="text-[var(--fg-1)] truncate max-w-[140px] sm:max-w-[180px]">
+                  <span className="max-w-[140px] truncate text-[var(--fg-1)] sm:max-w-[180px]">
                     {me.email}
                   </span>
                   <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
@@ -438,7 +439,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
               )}
               <Link
                 href="/"
-                className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors min-h-[44px] sm:min-h-0 px-2 sm:px-0"
+                className="inline-flex min-h-11 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] sm:min-h-0 sm:px-0"
               >
                 <ArrowLeft className="w-4 h-4" />
                 返回工作台
@@ -453,10 +454,10 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
             <AnimatePresence mode="wait">
               <motion.div
                 key={tab}
-                initial={{ opacity: 0 }}
+                initial={reduceMotion ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.18, ease: "easeOut" }}
+                transition={reduceMotion ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
               >
                 <AdminPanelContent tab={tab} onOpenTab={setTab} />
               </motion.div>
@@ -537,23 +538,23 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
         </div>
       </div>
 
-      <div className="hidden gap-3 md:grid md:grid-cols-2 lg:grid-cols-4">
+      <div className="hidden gap-6 md:grid md:grid-cols-2 lg:grid-cols-4">
         {TAB_GROUPS.map((group) => {
           const items = TABS.filter((item) => item.group === group.key);
           return (
             <section
               key={group.key}
-              className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/62 p-2.5 shadow-[var(--shadow-1)] backdrop-blur-sm"
+              className="min-w-0 border-l border-[var(--border-subtle)] pl-3 first:border-l-0 first:pl-0"
             >
-              <div className="px-1.5 pb-2">
+              <div className="pb-2">
                 <p className="type-overline text-[var(--fg-1)]">
                   {group.label}
                 </p>
-                <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
+                <p className="mt-0.5 type-caption text-[var(--fg-2)]">
                   {group.description}
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-1">
+              <div className="grid gap-0.5">
                 {items.map((item) => {
                   const active = tab === item.key;
                   const Icon = item.icon;
@@ -564,10 +565,10 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                       aria-current={active ? "page" : undefined}
                       onClick={() => onChange(item.key)}
                       className={cn(
-                        "flex min-h-[44px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left type-caption transition-colors",
+                        "flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-left type-caption transition-colors motion-reduce:transition-none",
                         active
-                          ? "border-accent-border bg-accent text-[var(--accent-on)] shadow-[var(--shadow-amber)]"
-                          : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                          ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
+                          : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
                       )}
                     >
                       <Icon
@@ -594,11 +595,9 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
 function PanelIntro({ tab }: { tab: TabMeta }) {
   const Icon = tab.icon;
   return (
-    <div className="mt-6 flex flex-col gap-3 border-b border-[var(--border-subtle)] pb-4 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mt-5 flex flex-col gap-2 border-b border-[var(--border-subtle)] pb-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 items-start gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
-          <Icon className="h-4 w-4 text-accent" />
-        </div>
+        <Icon className="mt-1 h-4 w-4 shrink-0 text-accent" />
         <div className="min-w-0">
           <h2 className="type-section-title">{tab.title}</h2>
           <p className="mt-1 max-w-3xl type-body-sm text-[var(--fg-2)]">

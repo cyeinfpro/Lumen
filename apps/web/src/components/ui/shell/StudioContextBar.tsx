@@ -15,6 +15,7 @@ import {
 
 import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
+import { IconButton } from "@/components/ui/primitives";
 import { SegmentedControl } from "@/components/ui/primitives/mobile";
 import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
 import { cn } from "@/lib/utils";
@@ -60,9 +61,9 @@ export function StudioContextBar({
   }, [settingsOpen]);
 
   return (
-    <div className="flex h-10 shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/94 px-3 md:px-4">
-      <div className="flex min-w-0 flex-1 items-center gap-3">
-        <p className="truncate text-[13px] font-medium text-[var(--fg-0)]">
+    <div className="flex h-11 shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--surface-chrome)]/88 px-3 md:px-4">
+      <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <p className="type-nav max-w-[min(42vw,360px)] truncate text-[var(--fg-0)]">
           {title}
         </p>
 
@@ -102,18 +103,16 @@ export function StudioContextBar({
       </div>
 
       <div ref={settingsRef} className="relative shrink-0">
-        <button
-          type="button"
+        <IconButton
+          size="sm"
+          variant={settingsOpen ? "secondary" : "ghost"}
           onClick={() => setSettingsOpen((open) => !open)}
           aria-haspopup="menu"
           aria-expanded={settingsOpen}
           aria-label="会话设置"
           className={cn(
-            "relative inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)]",
-            "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-            settingsOpen
-              ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
-              : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+            "relative",
+            !settingsOpen && "text-[var(--fg-2)]",
           )}
         >
           <Settings2 className="h-4 w-4" aria-hidden />
@@ -123,16 +122,16 @@ export function StudioContextBar({
               className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
             />
           )}
-        </button>
+        </IconButton>
 
         {settingsOpen && (
           <div
             role="menu"
             aria-label="会话设置"
-            className="adaptive-material absolute right-0 top-10 z-40 w-[320px] rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/96 p-2 shadow-[var(--shadow-3)] backdrop-blur-xl"
+            className="surface-panel adaptive-material absolute right-0 top-10 z-40 w-[min(320px,calc(100vw-24px))] origin-top-right p-2"
           >
             <div className="px-2 pb-2 pt-1">
-              <p className="text-[12px] font-medium text-[var(--fg-0)]">
+              <p className="type-label text-[var(--fg-0)]">
                 会话设置
               </p>
             </div>
@@ -143,7 +142,7 @@ export function StudioContextBar({
               aria-checked={fast}
               onClick={() => onFastChange(!fast)}
               className={cn(
-                "flex h-9 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
+                "type-control flex min-h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
                 "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
                 fast
                   ? "bg-[var(--accent-soft)] text-[var(--fg-0)]"
@@ -158,7 +157,7 @@ export function StudioContextBar({
                 fill={fast ? "currentColor" : "none"}
                 aria-hidden
               />
-              <span className="min-w-0 flex-1 text-[12px] font-medium">
+              <span className="min-w-0 flex-1">
                 Fast
               </span>
               <span
@@ -172,17 +171,17 @@ export function StudioContextBar({
 
             <div className="my-2 h-px bg-[var(--border-subtle)]" />
 
-            <div className="grid gap-2 px-1 pb-1">
-              <div className="flex items-center justify-between gap-3 px-1">
-                <span className="text-[11px] text-[var(--fg-2)]">上下文</span>
+            <div className="list-group grid px-1">
+              <div className="list-row flex min-h-10 items-center justify-between gap-3 px-1">
+                <span className="type-caption">上下文</span>
                 <ContextWindowMeter stats={contextStats} compact />
               </div>
-              <div className="flex items-center justify-between gap-3 px-1">
-                <span className="text-[11px] text-[var(--fg-2)]">记忆</span>
+              <div className="list-row flex min-h-10 items-center justify-between gap-3 px-1">
+                <span className="type-caption">记忆</span>
                 <ConversationMemoryButton />
               </div>
-              <div className="flex items-center justify-between gap-3 px-1">
-                <span className="text-[11px] text-[var(--fg-2)]">
+              <div className="list-row flex min-h-10 items-center justify-between gap-3 px-1">
+                <span className="type-caption">
                   系统提示词
                 </span>
                 <SystemPromptManager compact />

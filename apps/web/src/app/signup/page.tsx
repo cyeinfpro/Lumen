@@ -172,13 +172,13 @@ export default function SignupPage() {
   const disabled = suppliersQ.isLoading || suppliers.length === 0;
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="safe-x-page flex flex-1 items-start justify-center overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-12">
-        <div className="w-full max-w-md space-y-7">
-          <header className="space-y-2">
+    <div className="page-shell">
+      <main className="auth-stage">
+        <div className="auth-frame">
+          <header className="auth-header">
             <Link
               href="/login"
-              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+              className="type-body-sm inline-flex items-center gap-1.5 hover:text-[var(--fg-0)]"
             >
               <ArrowLeft className="w-4 h-4" />
               返回登录
@@ -187,8 +187,8 @@ export default function SignupPage() {
             <p className="type-body">连接你的 API Key 后继续注册。</p>
           </header>
 
-          <section className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
+          <section className="page-section grid gap-4 !pt-0">
+            <div className="type-label flex items-center gap-2">
               <KeyRound className="w-3.5 h-3.5" />
               连接 API Key
             </div>
@@ -214,15 +214,15 @@ export default function SignupPage() {
                 </button>
               </div>
             )}
-            <label className="block space-y-1.5">
-              <span className="text-xs text-[var(--fg-1)]">供应商</span>
+            <label className="auth-field">
+              <span className="type-label">供应商</span>
               <select
                 id="signup-supplier"
                 name="supplier"
                 value={activeSupplierId}
                 disabled={disabled || verifying || Boolean(verificationToken)}
                 onChange={(e) => setSupplierId(e.target.value)}
-                className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
+                className="auth-control px-3"
               >
                 {suppliers.length === 0 ? (
                   <option value="">暂无可用供应商</option>
@@ -235,8 +235,8 @@ export default function SignupPage() {
                 )}
               </select>
             </label>
-            <label className="block space-y-1.5">
-              <span className="text-xs text-[var(--fg-1)]">API Key</span>
+            <label className="auth-field">
+              <span className="type-label">API Key</span>
               <div className="relative">
                 <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
                 <input
@@ -252,7 +252,7 @@ export default function SignupPage() {
                   autoCorrect="off"
                   spellCheck={false}
                   enterKeyHint="next"
-                  className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
+                  className="auth-control pl-10 pr-3"
                 />
               </div>
             </label>
@@ -261,7 +261,7 @@ export default function SignupPage() {
               onClick={onVerify}
               disabled={disabled || verifying || Boolean(verificationToken)}
               aria-busy={verifying}
-              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm hover:bg-[var(--bg-2)] disabled:opacity-50"
+              className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)] disabled:opacity-50"
             >
               {verifying ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -274,62 +274,73 @@ export default function SignupPage() {
             </button>
           </section>
 
-          <form onSubmit={onCreate} className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
+          <form onSubmit={onCreate} className="page-section auth-form">
+            <div className="type-label flex items-center gap-2">
               <Mail className="w-3.5 h-3.5" />
               创建账号
             </div>
-            <input
-              id="signup-email"
-              name="email"
-              type="email"
-              disabled={submitting}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@example.com"
-              autoComplete="email"
-              inputMode="email"
-              autoCapitalize="none"
-              autoCorrect="off"
-              enterKeyHint="next"
-              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
-            />
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
+            <label className="auth-field">
+              <span className="type-label">邮箱</span>
               <input
-                id="signup-password"
-                name="password"
+                id="signup-email"
+                name="email"
+                type="email"
+                disabled={submitting}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@example.com"
+                autoComplete="email"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                enterKeyHint="next"
+                className="auth-control px-3"
+              />
+            </label>
+            <div className="auth-field">
+              <label htmlFor="signup-password" className="type-label">
+                密码
+              </label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
+                <input
+                  id="signup-password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  disabled={submitting}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="至少 8 位密码"
+                  autoComplete="new-password"
+                  enterKeyHint="next"
+                  className="auth-control pl-10 pr-12"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((value) => !value)}
+                  disabled={submitting}
+                  className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <label className="auth-field">
+              <span className="type-label">确认密码</span>
+              <input
+                id="signup-confirm-password"
+                name="password-confirmation"
                 type={showPassword ? "text" : "password"}
                 disabled={submitting}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="至少 8 位密码"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                placeholder="再次输入密码"
                 autoComplete="new-password"
-                enterKeyHint="next"
-                className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-12 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
+                enterKeyHint="done"
+                className="auth-control px-3"
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword((value) => !value)}
-                disabled={submitting}
-                className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
-                aria-label={showPassword ? "隐藏密码" : "显示密码"}
-              >
-                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-            <input
-              id="signup-confirm-password"
-              name="password-confirmation"
-              type={showPassword ? "text" : "password"}
-              disabled={submitting}
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              placeholder="确认密码"
-              autoComplete="new-password"
-              enterKeyHint="done"
-              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-base focus:border-[var(--color-lumen-amber)]/50 focus:outline-none md:text-sm"
-            />
+            </label>
 
             {error && (
               <div
@@ -346,7 +357,7 @@ export default function SignupPage() {
               type="submit"
               disabled={submitting || !verificationToken}
               aria-busy={submitting}
-              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] text-sm font-medium text-[var(--accent-on)] disabled:opacity-50"
+              className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "创建账号"}
               {!submitting && <ArrowRight className="w-4 h-4" />}

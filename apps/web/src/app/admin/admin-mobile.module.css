@@ -4,7 +4,7 @@
 
 @media (max-width: 767px) {
   .root {
-    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    padding-bottom: max(8rem, calc(6rem + env(safe-area-inset-bottom)));
   }
 
   .root :is(button, [role="button"], a[href]) {
@@ -61,5 +61,47 @@
 
   .root :global(.mobile-dialog-footer) > * {
     min-height: 44px;
+  }
+
+  /* 固定保存条由多个业务面板复用，窄屏统一改为可堆叠布局。 */
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"]) {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] > div) {
+    align-items: stretch;
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] > div > [class~="flex-1"]) {
+    min-width: 0;
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] button) {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 380px) {
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] > div) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] > div > span) {
+    grid-column: 1 / -1;
+    white-space: normal;
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] > div > [class~="flex-1"]) {
+    display: none;
+  }
+
+  .root :global([class~="fixed"][class~="bottom-0"][class~="left-0"][class~="right-0"] button) {
+    width: 100%;
   }
 }

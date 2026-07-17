@@ -134,19 +134,23 @@ export function CanvasSelectionToolbar({
         <Copy className="h-4 w-4" aria-hidden />
       </IconButton>
 
-      <ToolbarMenu
-        label="对齐"
-        icon={AlignCenter}
-        items={alignmentItems}
-        disabled={disabled || !canAlign}
-      />
-      <ToolbarMenu
-        label="分布"
-        icon={Columns3}
-        items={distributionItems}
-        disabled={disabled || !canDistribute}
-        align="end"
-      />
+      {canAlign ? (
+        <ToolbarMenu
+          label="对齐"
+          icon={AlignCenter}
+          items={alignmentItems}
+          disabled={disabled}
+        />
+      ) : null}
+      {canDistribute ? (
+        <ToolbarMenu
+          label="分布"
+          icon={Columns3}
+          items={distributionItems}
+          disabled={disabled}
+          align="end"
+        />
+      ) : null}
 
       <span
         role="separator"

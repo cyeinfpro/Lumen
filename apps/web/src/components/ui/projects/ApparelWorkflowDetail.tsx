@@ -49,7 +49,7 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
   const workflow = query.data;
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="page-shell relative h-[100dvh]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -102,7 +102,7 @@ function ProjectConsole({
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-3 pt-3 min-[390px]:px-4 md:px-6 md:pb-8 md:pt-3 xl:px-6">
+      <section className="page-scroll project-mobile-scroll min-h-0 min-w-0 px-3 pt-3 min-[390px]:px-4 md:px-6 md:pb-8 md:pt-3 xl:px-6">
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
 
@@ -223,7 +223,7 @@ function DetailHeader({
   const stepTotal = STEPS.length;
 
   return (
-    <header className="mb-4 grid gap-2 border-b border-[var(--border)] pb-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
+    <header className="page-header mb-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
       <div className="min-w-0">
         <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           Step {stepNum} / {String(stepTotal).padStart(2, "0")} · Apparel Project

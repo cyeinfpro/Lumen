@@ -371,37 +371,40 @@ function CanvasNodeInspector({
         ) : null}
       </div>
 
-      <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 p-3">
+      <footer className="mobile-dialog-footer grid shrink-0 gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 p-3">
         {runDisabledReason ? (
           <p
             role="alert"
-            className="col-span-2 type-caption text-[var(--danger-fg)]"
+            className="type-caption text-[var(--danger-fg)]"
           >
             {runDisabledReason}
           </p>
         ) : null}
-        <Button
-          variant="danger"
-          leftIcon={<Trash2 className="h-4 w-4" />}
-          onClick={() => removeNodes([node.id])}
-        >
-          删除
-        </Button>
-        {canRun ? (
+        <div className="flex items-center justify-between gap-3">
           <Button
-            variant="primary"
-            loading={runningNodeId === node.id}
-            disabled={Boolean(runDisabledReason)}
-            leftIcon={<Play className="h-4 w-4" />}
-            onClick={() => onRunNode(node.id)}
+            variant="ghost"
+            leftIcon={<Trash2 className="h-4 w-4" />}
+            onClick={() => removeNodes([node.id])}
+            className="text-[var(--danger-fg)] hover:bg-[var(--danger-soft)]"
           >
-            运行节点
+            删除
           </Button>
-        ) : (
-          <Button variant="secondary" disabled>
-            无需运行
-          </Button>
-        )}
+          {canRun ? (
+            <Button
+              variant="primary"
+              loading={runningNodeId === node.id}
+              disabled={Boolean(runDisabledReason)}
+              leftIcon={<Play className="h-4 w-4" />}
+              onClick={() => onRunNode(node.id)}
+            >
+              运行节点
+            </Button>
+          ) : (
+            <Button variant="secondary" disabled>
+              无需运行
+            </Button>
+          )}
+        </div>
       </footer>
     </InspectorShell>
   );
@@ -951,7 +954,14 @@ function ExecutionHistory({
         {executions.map((execution) => (
           <div key={execution.id} className="border-b border-[var(--border-subtle)] pb-3 last:border-0">
             <div className="flex items-center justify-between gap-2">
-              <span className="type-caption font-medium text-[var(--fg-2)]">
+              <span
+                className={cn(
+                  "type-caption font-medium",
+                  execution.status === "partial_failed"
+                    ? "text-[var(--warning-fg)]"
+                    : "text-[var(--fg-2)]",
+                )}
+              >
                 {canvasExecutionStatusLabel(execution.status)}
               </span>
               <span className="type-caption text-[var(--fg-3)]">
@@ -963,7 +973,15 @@ function ExecutionHistory({
             <ExecutionTaskDetails execution={execution} />
             {execution.error_message ||
             canvasExecutionPrimaryTask(execution)?.error_message ? (
-              <p role="alert" className="mt-2 type-caption text-[var(--danger-fg)]">
+              <p
+                role={execution.status === "partial_failed" ? "status" : "alert"}
+                className={cn(
+                  "mt-2 type-caption",
+                  execution.status === "partial_failed"
+                    ? "text-[var(--warning-fg)]"
+                    : "text-[var(--danger-fg)]",
+                )}
+              >
                 {execution.error_message ??
                   canvasExecutionPrimaryTask(execution)?.error_message}
               </p>

@@ -1873,11 +1873,11 @@ export default function VideoPage() {
   ];
 
   return (
-    <div className="min-h-[100dvh] overflow-x-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="page-shell h-[100dvh] overflow-hidden">
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex h-[calc(100dvh-var(--mobile-tabbar-height))] w-full max-w-[1600px] flex-col gap-3 overflow-x-clip overflow-y-auto overscroll-contain px-3 pb-[max(1rem,env(safe-area-inset-bottom,0px))] pt-2 [scroll-padding-bottom:calc(var(--mobile-tabbar-height)+6rem)] md:h-[calc(100dvh-var(--appbar-h))] md:px-5 md:pb-4 md:[scroll-padding-bottom:1rem]">
+      <main className="page-scroll page-frame lumen-studio-bg flex flex-col gap-4 [scroll-padding-bottom:calc(var(--mobile-tabbar-height)+6rem)] max-md:pb-[calc(var(--mobile-tabbar-height)+2rem)] md:[scroll-padding-bottom:1rem]">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={parameterProfile}
@@ -1892,10 +1892,10 @@ export default function VideoPage() {
           onOpenTasks={() => setIsTaskPanelOpen(true)}
         />
 
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_300px] md:items-start lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="grid gap-4 min-[1120px]:grid-cols-[minmax(0,1fr)_340px] min-[1120px]:items-start 2xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="min-w-0">
-            <div className="flex flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 shadow-[var(--shadow-2)] backdrop-blur-xl">
-              <div className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/86 p-2.5 sm:p-3">
+            <div className="flex flex-col overflow-hidden border-y border-[var(--border)] bg-transparent">
+              <div className="shrink-0 border-b border-[var(--border-subtle)] p-2.5 sm:p-3">
                 <div className="mb-2 flex flex-wrap items-end justify-between gap-2 px-1">
                   <div>
                     <p className="text-sm font-semibold text-[var(--fg-0)]">
@@ -1947,7 +1947,7 @@ export default function VideoPage() {
 
               <div className="space-y-3 p-3 sm:p-4 md:pb-5 lg:pb-6">
                 {action === "i2v" && (
-                  <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/66">
+                  <section className="surface-section overflow-hidden">
                     <input
                       ref={fileRef}
                       type="file"
@@ -2017,7 +2017,7 @@ export default function VideoPage() {
                 )}
 
                 {action === "reference" && (
-                  <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/66">
+                  <section className="surface-section overflow-hidden">
                     <input
                       ref={referenceFileRef}
                       type="file"
@@ -2243,7 +2243,7 @@ export default function VideoPage() {
           </section>
 
           <VideoParameterPanel
-            className="scroll-mt-20 pb-[calc(var(--mobile-tabbar-height)+1rem)] md:sticky md:top-[76px] md:pb-0"
+            className="scroll-mt-20 pb-[calc(var(--mobile-tabbar-height)+1rem)] min-[1120px]:sticky min-[1120px]:top-[76px] min-[1120px]:pb-0"
             selectedModel={selectedModel}
             modelOptions={modelOptionValues}
             durationS={effectiveDurationS}

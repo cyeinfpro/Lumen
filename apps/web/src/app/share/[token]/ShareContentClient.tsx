@@ -227,13 +227,11 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   }, [images.length, showNotice]);
 
   return (
-    <div className="mx-auto flex w-full max-w-[1320px] flex-col items-center gap-4 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
-      <section className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-        <div className="min-w-0 space-y-2">
-          <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-xs text-[var(--fg-1)]">
-            <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
-            图片分享
-          </p>
+    <div className="mx-auto flex w-full max-w-[1320px] flex-col items-center gap-5 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
+      <section className="page-header w-full">
+        <div className="page-header-copy">
+          <p className="type-page-kicker">公开画廊</p>
+          <h1 className="type-page-title">图片分享</h1>
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
               <Images className="h-3.5 w-3.5" />
@@ -246,9 +244,9 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 md:justify-end">
+        <div className="page-header-actions">
           {expiresLabel && (
-            <p className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)]">
+            <p className="type-caption inline-flex min-h-10 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-[var(--fg-1)]">
               <Clock className="h-3.5 w-3.5" />
               <span>过期</span>
               <span className="font-mono tabular-nums text-[var(--fg-0)]">
@@ -261,10 +259,10 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             onClick={() => {
               void handleShareLink();
             }}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:opacity-[var(--op-press)]"
+            className="type-control inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-[var(--fg-1)] transition-[transform,background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:scale-[var(--press-scale-soft)]"
           >
             {linkShared ? (
-              <Check className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
+              <Check className="h-3.5 w-3.5 text-[var(--accent)]" />
             ) : (
               <Share2 className="h-3.5 w-3.5" />
             )}
@@ -273,7 +271,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         </div>
 
         {isWeChat && (
-          <div className="rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/20 bg-[var(--color-lumen-amber)]/10 px-3 py-2 text-xs leading-relaxed text-[var(--fg-1)] md:col-span-2">
+          <div className="type-caption border-l-2 border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[var(--fg-1)] md:col-span-2">
             微信内保存：打开大图后长按图片；需要最高分辨率时点「原图」。
           </div>
         )}
@@ -315,10 +313,10 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
       <div className="grid w-full max-w-4xl gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
         {data.show_prompt && prompts.length > 0 ? (
-          <details className="group overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] backdrop-blur-sm transition-colors hover:border-[var(--border-strong)]">
+          <details className="group overflow-hidden border-y border-[var(--border-subtle)] bg-transparent transition-colors hover:border-[var(--border-strong)]">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
               <span className="inline-flex items-center gap-2">
-                <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
+                <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
                 提示词
               </span>
               <ArrowRight className="h-3.5 w-3.5 text-[var(--fg-2)] transition-transform group-open:rotate-90" />
@@ -340,7 +338,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
         <Link
           href="/"
-          className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] md:w-auto"
+          className="type-control inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] md:w-auto"
         >
           打开主页
           <ArrowRight className="h-3.5 w-3.5" />

@@ -27,11 +27,11 @@ const BASE =
   "transition-[transform,background-color,color,border-color,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "shrink-0 select-none active:opacity-[var(--op-press)]";
+  "shrink-0 select-none";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--amber-300)]",
+    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--accent-hover)] shadow-[var(--shadow-1)]",
   secondary:
     "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
     "border border-[var(--border)] hover:border-[var(--border-strong)]",
@@ -47,8 +47,8 @@ const VARIANTS: Record<Variant, string> = {
 // 固定 h/w 冲突（会让图标视觉居中但外框被挤出）。桌面保留紧凑尺寸。
 const SIZES: Record<Size, string> = {
   sm: "h-8 w-8 max-sm:min-h-11 max-sm:min-w-11",
-  md: "h-9 w-9 max-sm:min-h-11 max-sm:min-w-11",
-  lg: "h-10 w-10 max-sm:min-h-11 max-sm:min-w-11",
+  md: "h-10 w-10 max-sm:min-h-11 max-sm:min-w-11",
+  lg: "h-11 w-11",
 };
 
 export function IconButton({

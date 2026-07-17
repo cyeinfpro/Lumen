@@ -188,6 +188,20 @@ supersedes_frontend_guidance: docs/DESIGN.md
 | `surface-dialog` | 弹窗（border + shadow-3 + blur 20） |
 | `control-shell` | 输入框/Segmented 的统一外壳 |
 
+普通页面分区不要默认套 `surface-card`。优先使用：
+
+| class | 用途 |
+|---|---|
+| `page-shell / page-scroll / page-frame` | 路由页面骨架、滚动区与稳定内容宽度 |
+| `page-header / page-header-copy / page-header-actions` | 页面标题、说明和主操作 |
+| `page-section / section-header` | 全宽内容分区，用 hairline 建立层级 |
+| `toolbar-shell / toolbar-group` | 筛选、批量操作和视图工具 |
+| `list-group / list-row` | 设置、账户和高密度操作列表 |
+| `dialog-layout / dialog-header / dialog-body / dialog-footer` | 弹层标题、滚动内容和操作区 |
+
+`Card` 默认不抬升；只有需要从页面中真正浮起的对象才显式使用 elevation。
+避免 `Card` 套 `Card`，也不要把整段页面 section 做成浮动卡片。
+
 ---
 
 ## 7. 反模式速查
@@ -218,11 +232,13 @@ supersedes_frontend_guidance: docs/DESIGN.md
 
 ### 8.2 内容宽度
 
-`globals.css` 提供四个稳定宽度：
+`globals.css` 提供六个稳定宽度：
 
 | token | 用途 |
 |---|---|
 | `--content-text` | 对话、Markdown、代码正文，800px |
+| `--content-form` | 登录、注册、创建流程核心表单，720px |
+| `--content-settings` | 设置页主内容，1080px |
 | `--content-composer` | Desktop Composer，880px |
 | `--content-media` | 图片结果、对比和会话媒体，1160px |
 | `--content-workbench` | 项目、视频和多栏工作台，1440px |

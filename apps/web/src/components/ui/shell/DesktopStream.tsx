@@ -7,7 +7,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
+import { useReducedMotion } from "framer-motion";
 import { useRouter, useSearchParams } from "next/navigation";
 import { usePathname } from "next/navigation";
 import { ArrowUp, Filter, Loader2, RefreshCw, Search } from "lucide-react";
@@ -121,11 +123,62 @@ function StreamToolbar({
   );
 }
 
+function preferredScrollBehavior(reduceMotion: boolean | null): ScrollBehavior {
+  return reduceMotion ? "auto" : "smooth";
+}
+
+function StreamFeedState({
+  hasError,
+  errorMessage,
+  onRetry,
+  isLoading,
+  columns,
+  isEmptyAll,
+  hasFilters,
+  isEmptyFiltered,
+  searchValue,
+  onClear,
+  children,
+}: {
+  hasError: boolean;
+  errorMessage?: string;
+  onRetry: () => void;
+  isLoading: boolean;
+  columns: number;
+  isEmptyAll: boolean;
+  hasFilters: boolean;
+  isEmptyFiltered: boolean;
+  searchValue: string;
+  onClear: () => void;
+  children: ReactNode;
+}) {
+  if (hasError) {
+    return (
+      <div role="alert">
+        <StreamErrorState message={errorMessage} onRetry={onRetry} />
+      </div>
+    );
+  }
+  if (isLoading) return <StreamLoadingState columns={columns} />;
+  if (isEmptyAll) {
+    return hasFilters ? (
+      <StreamNoResultsState onClear={onClear} />
+    ) : (
+      <StreamNeverState />
+    );
+  }
+  if (isEmptyFiltered) {
+    return <StreamNoResultsState searchValue={searchValue} onClear={onClear} />;
+  }
+  return children;
+}
+
 export function DesktopStream() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const isWide = useMediaQuery("(min-width: 1180px)");
+  const reduceMotion = useReducedMotion();
   const desktopCols = isWide ? 4 : 3;
 
   const queryString = searchParams.toString();
@@ -308,11 +361,14 @@ export function DesktopStream() {
   }, [query]);
 
   const scrollToTop = useCallback(() => {
-    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+    scrollRef.current?.scrollTo({
+      top: 0,
+      behavior: preferredScrollBehavior(reduceMotion),
+    });
+  }, [reduceMotion]);
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full flex-col bg-[var(--bg-0)]">
+    <div className="page-shell relative h-[100dvh] min-h-0 overflow-hidden">
       <DesktopTopNav
         active="assets"
         right={
@@ -330,9 +386,18 @@ export function DesktopStream() {
 
       <main
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto"
+        className="page-scroll"
       >
-        <div className="mx-auto max-w-[1280px] px-8 py-6">
+        <div className="page-frame" data-width="media">
+          <header className="page-header">
+            <div className="page-header-copy">
+              <p className="type-page-kicker">Asset Library</p>
+              <h1 className="type-page-title">图库</h1>
+              <p className="type-page-subtitle">
+                浏览、筛选并整理最近生成的图片。
+              </p>
+            </div>
+          </header>
           <StreamSearchBar
             open={searchOpen}
             value={q}
@@ -351,46 +416,44 @@ export function DesktopStream() {
             onClear={clearFilters}
           />
 
-          {!isLoading && !query.isError && (items.length > 0 || hasAnyFilter(filters) || q.trim()) && (
-            <StreamOverview
-              total={total}
-              loaded={items.length}
-              visible={filteredItems.length}
-              promptCount={promptCount}
-              filters={filters}
-              searchValue={deferredQ}
-              refreshing={query.isRefetching}
-              onRefresh={onRefresh}
-              onClearFilters={clearAllControls}
-              onToggleReferenceFilter={onToggleReferenceFilter}
-              onToggleFastFilter={onToggleFastFilter}
-              selectionMode={selectionActive}
-              selectedCount={selectedImageIds.length}
-              sharingSelected={createMultiShareMutation.isPending}
-              onToggleSelectionMode={toggleSelectionMode}
-              onClearSelection={clearSelection}
-              onShareSelected={shareSelectedImages}
-            />
-          )}
+          {!isLoading &&
+            !query.isError &&
+            (items.length > 0 || hasAnyFilter(filters) || q.trim()) && (
+              <StreamOverview
+                total={total}
+                loaded={items.length}
+                visible={filteredItems.length}
+                promptCount={promptCount}
+                filters={filters}
+                searchValue={deferredQ}
+                refreshing={query.isRefetching}
+                onRefresh={onRefresh}
+                onClearFilters={clearAllControls}
+                onToggleReferenceFilter={onToggleReferenceFilter}
+                onToggleFastFilter={onToggleFastFilter}
+                selectionMode={selectionActive}
+                selectedCount={selectedImageIds.length}
+                sharingSelected={createMultiShareMutation.isPending}
+                onToggleSelectionMode={toggleSelectionMode}
+                onClearSelection={clearSelection}
+                onShareSelected={shareSelectedImages}
+              />
+            )}
 
-          {query.isError ? (
-            <StreamErrorState
-              message={query.error?.message}
-              onRetry={() => {
-                void query.refetch();
-              }}
-            />
-          ) : isLoading ? (
-            <StreamLoadingState columns={desktopCols} />
-          ) : isEmptyAll ? (
-            hasAnyFilter(filters) ? (
-              <StreamNoResultsState onClear={clearAllControls} />
-            ) : (
-              <StreamNeverState />
-            )
-          ) : isEmptyFiltered ? (
-            <StreamNoResultsState searchValue={q} onClear={clearAllControls} />
-          ) : (
+          <StreamFeedState
+            hasError={query.isError}
+            errorMessage={query.error?.message}
+            onRetry={() => {
+              void query.refetch();
+            }}
+            isLoading={isLoading}
+            columns={desktopCols}
+            isEmptyAll={isEmptyAll}
+            hasFilters={hasAnyFilter(filters)}
+            isEmptyFiltered={isEmptyFiltered}
+            searchValue={q}
+            onClear={clearAllControls}
+          >
             <GenerationMasonry
               items={filteredItems}
               feed={filteredItems}
@@ -400,7 +463,7 @@ export function DesktopStream() {
               onToggleSelect={toggleSelectedImage}
               highlightId={highlightId}
             />
-          )}
+          </StreamFeedState>
 
           <div ref={sentinelRef} aria-hidden className="h-8" />
           {isFetchingNextPage && (

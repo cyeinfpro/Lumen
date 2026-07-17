@@ -4,9 +4,10 @@
 
 import { motion } from "framer-motion";
 import { X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
@@ -29,6 +30,9 @@ export function PosterStyleEditDialog({
   item,
   onClose,
 }: PosterStyleEditDialogProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   const [title, setTitle] = useState(item.title);
   const [category, setCategory] = useState<PosterStyleCategory>(item.category);
   const [mood, setMood] = useState(item.mood ?? "");
@@ -54,15 +58,11 @@ export function PosterStyleEditDialog({
 
   // ESC + body lock
   useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  const onDialogKeyDown = useModalLayer({
+    open: true,
+    rootRef: dialogRef,
+    onClose,
+  });
 
   const trimmedTitle = title.trim();
   const canSubmit = useMemo(() => {
@@ -103,9 +103,13 @@ export function PosterStyleEditDialog({
       }}
     >
       <motion.div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="编辑风格"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
         initial={{ opacity: 0, y: 24, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 16, scale: 0.98 }}
@@ -115,7 +119,12 @@ export function PosterStyleEditDialog({
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="type-page-kicker">编辑风格</p>
-            <h3 className="type-page-title mt-2 md:text-[26px]">编辑风格</h3>
+            <h2 id={titleId} className="type-page-title mt-2 md:text-[26px]">
+              编辑风格
+            </h2>
+            <p id={descriptionId} className="type-page-subtitle mt-2 max-w-md">
+              调整名称、分类和生成提示，保存后会更新当前风格。
+            </p>
           </div>
           <button
             type="button"

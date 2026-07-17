@@ -94,11 +94,12 @@ export function DesktopPopover({
     );
   }, [align, anchorRef]);
 
-  // ESC 关闭
+  // 非模态 popover 仍响应 Escape，但不接管页面焦点或背景交互。
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
         e.stopPropagation();
         onCloseRef.current();
       }
@@ -170,7 +171,9 @@ export function DesktopPopover({
           ref={panelRef}
           data-lumen-composer-floating
           role="dialog"
-          aria-label={ariaLabel}
+          aria-modal="false"
+          aria-label={ariaLabel ?? "弹出选项"}
+          tabIndex={-1}
           initial={{ opacity: 0, scale: 0.96, y: 4 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.96, y: 4 }}

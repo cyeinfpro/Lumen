@@ -107,13 +107,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   };
 
   return (
-    <main className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <section className="safe-x-page flex flex-1 items-start justify-center overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-12">
-        <div className="w-full max-w-md space-y-6">
-          <header className="space-y-2">
+    <main className="page-shell">
+      <section className="auth-stage">
+        <div className="auth-frame">
+          <header className="auth-header">
             <Link
               href="/login"
-              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+              className="type-body-sm inline-flex items-center gap-1.5 transition-colors hover:text-[var(--fg-0)]"
             >
               <ArrowLeft className="h-4 w-4" />
               返回登录
@@ -143,13 +143,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               <Link
                 href="/login"
                 replace
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] sm:h-10"
+                className="type-control inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)]"
               >
                 去登录 <ArrowRight className="h-4 w-4" />
               </Link>
             </div>
           ) : (
-            <form onSubmit={onSubmit} className="space-y-4" noValidate>
+            <form onSubmit={onSubmit} className="auth-form" noValidate>
               <Field id="reset-password" label="新密码" icon={<Lock className="h-3.5 w-3.5" />}>
                 <div className="relative">
                   <input
@@ -164,7 +164,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     placeholder="至少 8 位"
                     autoComplete="new-password"
                     enterKeyHint="next"
-                    className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                    className="auth-control pl-3 pr-12"
                   />
                   <button
                     type="button"
@@ -211,7 +211,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   autoComplete="new-password"
                   enterKeyHint="done"
                   className={
-                    "h-11 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
+                    "auth-control px-3 " +
                     (confirmMismatch
                       ? "border-danger-border focus:border-danger focus:ring-danger/20"
                       : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -243,7 +243,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                 type="submit"
                 disabled={!canSubmit}
                 aria-busy={submitting}
-                className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
+                className="type-control inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color,opacity] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
               >
                 {submitting ? (
                   <>
@@ -276,10 +276,10 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="auth-field">
       <label
         htmlFor={id}
-        className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--fg-1)]"
+        className="type-label flex items-center gap-1.5"
       >
         {icon}
         {label}

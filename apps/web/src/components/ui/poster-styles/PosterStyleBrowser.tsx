@@ -23,9 +23,10 @@ import {
   X,
 } from "lucide-react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
@@ -701,16 +702,14 @@ function MobileFilterSheet({
   onClose: () => void;
 }) {
   // ESC 关闭 + body lock（模特库等价写法）
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
   useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  const onSheetKeyDown = useModalLayer({
+    open: true,
+    rootRef: sheetRef,
+    onClose,
+  });
 
   return (
     <div
@@ -720,9 +719,12 @@ function MobileFilterSheet({
       }}
     >
       <motion.div
+        ref={sheetRef}
         role="dialog"
         aria-modal="true"
-        aria-label="筛选"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onSheetKeyDown}
         initial={{ y: "100%" }}
         animate={{ y: 0 }}
         exit={{ y: "100%" }}
@@ -732,7 +734,9 @@ function MobileFilterSheet({
         <header className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="type-page-kicker">筛选</p>
-            <h3 className="type-page-title-sm mt-2">筛选</h3>
+            <h2 id={titleId} className="type-page-title-sm mt-2">
+              筛选
+            </h2>
           </div>
           <button
             type="button"
@@ -777,7 +781,7 @@ function MobileFilterSheet({
             </div>
           </div>
         </div>
-        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:items-center md:justify-between">
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-5 py-4 md:flex md:items-center md:justify-between">
           <Button
             variant="outline"
             onClick={() => {
