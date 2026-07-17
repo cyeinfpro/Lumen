@@ -1,14 +1,14 @@
 export default function ShareLoading() {
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)] text-[var(--fg-0)]">
-      <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+    <div className="page-shell">
+      <header className="sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="safe-x-page-wide mx-auto flex min-h-14 max-w-6xl items-center justify-between">
-          <div className="h-6 w-28 animate-pulse rounded bg-white/5" />
-          <div className="h-11 w-28 animate-pulse rounded-full bg-white/5" />
+          <div className="h-6 w-28 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
+          <div className="h-10 w-28 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
         </div>
       </header>
-      <main className="safe-x-page-wide flex flex-1 flex-col items-center justify-start py-4 min-[390px]:py-5 md:py-10">
-        <div className="mx-auto flex w-full max-w-[1320px] flex-col gap-4 md:gap-7">
+      <main className="page-scroll">
+        <div className="page-frame flex flex-col gap-4 md:gap-7" data-width="media">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
             <div className="space-y-2">
               <div className="h-7 w-32 animate-lumen-shimmer rounded-full bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
@@ -23,7 +23,7 @@ export default function ShareLoading() {
             {Array.from({ length: 14 }).map((_, index) => (
               <div
                 key={index}
-                className="mb-1.5 break-inside-avoid overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] min-[390px]:mb-2 md:mb-3"
+                className="mb-1.5 break-inside-avoid overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/70 min-[390px]:mb-2 md:mb-3"
               >
                 <div
                   className="animate-lumen-shimmer bg-[linear-gradient(110deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]"

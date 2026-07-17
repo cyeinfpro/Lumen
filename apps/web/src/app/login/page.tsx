@@ -15,11 +15,9 @@ import {
   Loader2,
   Lock,
   Mail,
-  Sparkles,
-  Wand2,
-  Zap,
 } from "lucide-react";
 
+import { LumenMark } from "@/components/ui/brand/LumenMark";
 import { ApiError, listPublicApiSuppliers, login } from "@/lib/apiClient";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
@@ -101,28 +99,27 @@ function LoginInner() {
   };
 
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto overscroll-contain md:grid-cols-2">
-        {/* —— 左：品牌区（仅桌面） —— */}
-        <BrandPanel />
-
-        {/* —— 右：登录表单 —— */}
-        <section className="safe-x-page flex min-h-full items-start justify-center pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pt-[max(2rem,env(safe-area-inset-top,0px))] md:items-center md:py-16">
+    <div className="page-shell">
+      <main className="page-scroll flex">
+        <section className="auth-stage">
           <motion.div
             initial={false}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, ease: "easeOut" }}
-            className="w-full max-w-md"
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="auth-frame"
           >
-            {/* 移动端品牌头 */}
-            <header className="mb-8 md:mb-10 flex items-center gap-3 md:hidden">
-              {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-              <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
-              <span className="text-lg font-medium tracking-tight">Lumen</span>
+            <header className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                <LumenMark />
+              </span>
+              <div>
+                <p className="type-card-title">Lumen</p>
+                <p className="type-caption">创作工作台</p>
+              </div>
             </header>
 
-            <div className="space-y-6">
-              <div>
+            <div className="grid gap-6">
+              <div className="auth-header">
                 <h1 className="type-page-title">
                   登录 Lumen
                 </h1>
@@ -131,7 +128,7 @@ function LoginInner() {
                 </p>
               </div>
 
-              <form onSubmit={onSubmit} className="space-y-4" noValidate>
+              <form onSubmit={onSubmit} className="auth-form" noValidate>
                 <Field id="login-email" label="邮箱" icon={<Mail className="w-3.5 h-3.5" />}>
                   <input
                     id="login-email"
@@ -147,7 +144,7 @@ function LoginInner() {
                     autoCapitalize="none"
                     autoCorrect="off"
                     enterKeyHint="next"
-                    className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                    className="auth-control px-3"
                   />
                 </Field>
 
@@ -168,7 +165,7 @@ function LoginInner() {
                       placeholder="输入密码"
                       autoComplete="current-password"
                       enterKeyHint="go"
-                      className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:pr-11 md:text-sm"
+                      className="auth-control pl-3 pr-12"
                     />
                     <button
                       type="button"
@@ -193,7 +190,7 @@ function LoginInner() {
                             )}`
                           : "/reset-password"
                       }
-                      className="text-xs text-[var(--color-lumen-amber)] hover:underline"
+                      className="type-caption text-[var(--accent)] hover:underline"
                     >
                       忘记密码？
                     </Link>
@@ -217,7 +214,7 @@ function LoginInner() {
                   type="submit"
                   disabled={submitting}
                   aria-busy={submitting}
-                  className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
+                  className="type-control inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color,opacity] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
                 >
                   {submitting ? (
                     <>
@@ -237,17 +234,17 @@ function LoginInner() {
                   <div className="w-full h-px bg-[var(--border)]" />
                 </div>
                 <div className="relative flex justify-center">
-                  <span className="px-3 bg-[var(--bg-0)] text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                  <span className="type-caption bg-[var(--bg-0)] px-3">
                     还没有账号?
                   </span>
                 </div>
               </div>
 
-              <div className="text-xs text-[var(--fg-2)] text-center leading-relaxed space-y-1">
+              <div className="type-caption space-y-1 text-center">
                 {byokSignupAvailable && (
                   <p>
                     有 API Key？{" "}
-                    <Link href="/signup" className="text-[var(--color-lumen-amber)] hover:underline">
+                    <Link href="/signup" className="text-[var(--accent)] hover:underline">
                       直接注册
                     </Link>
                   </p>
@@ -306,111 +303,15 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="auth-field">
       <label
         htmlFor={id}
-        className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--fg-1)] mb-1.5"
+        className="type-label flex items-center gap-1.5"
       >
         {icon}
         {label}
       </label>
       {children}
     </div>
-  );
-}
-
-function BrandPanel() {
-  return (
-    <aside className="hidden md:flex relative overflow-hidden bg-[var(--bg-1)]/30 border-r border-[var(--border)]">
-      {/* 背景装饰 */}
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(242,169,58,0.10)_0%,transparent_38%,rgba(255,255,255,0.025)_100%)]" />
-        <div
-          className="absolute inset-0 opacity-[0.04]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,0.4) 1px, transparent 1px), linear-gradient(to right, rgba(255,255,255,0.4) 1px, transparent 1px)",
-            backgroundSize: "40px 40px",
-          }}
-        />
-      </div>
-
-      <div className="relative z-10 flex flex-col justify-between w-full p-10 lg:p-14">
-        <motion.div
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-          className="flex items-center gap-3"
-        >
-          {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-          <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
-          <span className="text-xl font-semibold tracking-tight">Lumen</span>
-        </motion.div>
-
-        <div className="space-y-8 max-w-md">
-          <motion.h2
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.35, delay: 0.05 }}
-            className="text-[28px] font-semibold leading-tight tracking-normal lg:text-[32px]"
-          >
-            把想法
-            <br />
-            落到画面里。
-          </motion.h2>
-
-          <ul className="space-y-4">
-            <Feature
-              icon={<Sparkles className="w-4 h-4" />}
-              title="直接写需求"
-              desc="文字、参考图和参数放在同一个输入框里。"
-              delay={0.1}
-            />
-            <Feature
-              icon={<Wand2 className="w-4 h-4" />}
-              title="按会话整理"
-              desc="每次修改都留在原来的上下文里。"
-              delay={0.15}
-            />
-            <Feature
-              icon={<Zap className="w-4 h-4" />}
-              title="状态清楚"
-              desc="排队、生成、完成和失败都直接显示。"
-              delay={0.2}
-            />
-          </ul>
-        </div>
-
-      </div>
-    </aside>
-  );
-}
-
-function Feature({
-  icon,
-  title,
-  desc,
-  delay,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  desc: string;
-  delay: number;
-}) {
-  return (
-    <motion.li
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, delay }}
-      className="flex items-start gap-3"
-    >
-      <span className="shrink-0 w-8 h-8 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/12 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)] flex items-center justify-center">
-        {icon}
-      </span>
-      <div>
-        <p className="text-sm text-[var(--fg-0)] font-medium">{title}</p>
-        <p className="text-xs text-[var(--fg-2)] mt-0.5">{desc}</p>
-      </div>
-    </motion.li>
   );
 }

@@ -19,7 +19,8 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   asChild?: false;
 }
 
-// default 走 globals.css 的 surface-card（自带 shadow-1）；
+// default 走 globals.css 的 surface-card；默认保持平面，只有明确需要抬升时才加阴影，
+// 避免页面区块、列表和工具面板全部呈现为同权重卡片。
 // glass / subtle 走自定义视觉。
 const VARIANTS: Record<Variant, string> = {
   default: "surface-card",
@@ -49,7 +50,7 @@ const PADDINGS: Record<Padding, string> = {
 
 export function Card({
   variant = "default",
-  elevation = 1,
+  elevation = 0,
   padding = "md",
   hover = false,
   className,

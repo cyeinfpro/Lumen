@@ -9,6 +9,7 @@ import {
 } from "@xyflow/react";
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   GripVertical,
   Loader2,
@@ -95,7 +96,8 @@ const ACTIVE = new Set([
   "reconciling",
   "canceling",
 ]);
-const FAILED = new Set(["partial_failed", "failed", "blocked"]);
+const FAILED = new Set(["failed", "blocked"]);
+const WARNING = new Set(["partial_failed"]);
 function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
   const { definition, execution } = data;
   const spec = CANVAS_NODE_SPECS[definition.type];
@@ -106,12 +108,13 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
   const colorTag = nodeColorTag(definition);
   const running = Boolean(execution && ACTIVE.has(execution.status));
   const failed = Boolean(execution && FAILED.has(execution.status));
+  const warning = Boolean(execution && WARNING.has(execution.status));
 
   return (
     <article
       className={cn(
         "relative overflow-visible rounded-[var(--radius-card)] border bg-[var(--bg-1)]/96 text-[var(--fg-0)] backdrop-blur-xl transition-[border-color,box-shadow]",
-        canvasNodeStateClass(failed, running),
+        canvasNodeStateClass(failed, running, warning),
         selected &&
           "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--surface-canvas)]",
       )}
@@ -123,7 +126,7 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
         collapsed,
       )}
     >
-      <NodeActivityBar failed={failed} running={running} />
+      <NodeActivityBar failed={failed} running={running} warning={warning} />
       <NodePorts
         ports={spec.inputs}
         direction="input"
@@ -201,15 +204,25 @@ function CanvasNodeBody({
 function NodeActivityBar({
   failed,
   running,
+  warning,
 }: {
   failed: boolean;
   running: boolean;
+  warning: boolean;
 }) {
   if (failed) {
     return (
       <span
         aria-hidden
         className="absolute inset-x-0 top-0 z-10 h-1 rounded-t-[var(--radius-card)] bg-[var(--danger)]"
+      />
+    );
+  }
+  if (warning) {
+    return (
+      <span
+        aria-hidden
+        className="absolute inset-x-0 top-0 z-10 h-1 rounded-t-[var(--radius-card)] bg-[var(--warning)]"
       />
     );
   }
@@ -222,8 +235,13 @@ function NodeActivityBar({
   );
 }
 
-function canvasNodeStateClass(failed: boolean, running: boolean): string {
+function canvasNodeStateClass(
+  failed: boolean,
+  running: boolean,
+  warning: boolean,
+): string {
   if (failed) return "border-[var(--danger)] shadow-[var(--shadow-2)]";
+  if (warning) return "border-[var(--warning)] shadow-[var(--shadow-2)]";
   if (running) {
     return "border-[var(--accent-border)] shadow-[var(--shadow-amber)]";
   }
@@ -1251,9 +1269,10 @@ function outputDimension(value: number | null | undefined): number | undefined {
 function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
   if (!execution) return null;
   const label = canvasExecutionStatusLabel(execution.status);
+  const title = executionStatusTitle(execution, label);
   if (ACTIVE.has(execution.status)) {
     return (
-      <span role="status" title={label} className="inline-flex shrink-0">
+      <span role="status" title={title} className="inline-flex shrink-0">
         <Loader2
           className="h-4 w-4 animate-spin text-[var(--accent)] motion-reduce:animate-none"
           aria-hidden
@@ -1264,7 +1283,7 @@ function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
   }
   if (execution.status === "failed" || execution.status === "blocked") {
     return (
-      <span role="alert" title={label} className="inline-flex shrink-0">
+      <span role="alert" title={title} className="inline-flex shrink-0">
         <AlertCircle className="h-4 w-4 text-[var(--danger-fg)]" aria-hidden />
         <span className="sr-only">状态：{label}</span>
       </span>
@@ -1272,8 +1291,11 @@ function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
   }
   if (execution.status === "partial_failed") {
     return (
-      <span role="status" title={label} className="inline-flex shrink-0">
-        <AlertCircle className="h-4 w-4 text-[var(--warning-fg)]" aria-hidden />
+      <span role="status" title={title} className="inline-flex shrink-0">
+        <AlertTriangle
+          className="h-4 w-4 text-[var(--warning-fg)]"
+          aria-hidden
+        />
         <span className="sr-only">状态：{label}</span>
       </span>
     );
@@ -1292,13 +1314,24 @@ function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
   return (
     <span
       role="status"
-      title={label}
+      title={title}
       className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
     >
       <span className="h-2 w-2 rounded-full bg-[var(--fg-3)]" aria-hidden />
       <span className="sr-only">状态：{label}</span>
     </span>
   );
+}
+
+function executionStatusTitle(
+  execution: CanvasNodeExecution,
+  label: string,
+): string {
+  const reason =
+    execution.error_message ??
+    execution.tasks?.find((task) => task.error_message)?.error_message ??
+    null;
+  return reason ? `${label}：${reason}` : label;
 }
 
 function NodePorts({

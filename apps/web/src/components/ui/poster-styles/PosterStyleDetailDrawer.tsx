@@ -21,9 +21,10 @@ import {
   X,
 } from "lucide-react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
@@ -53,6 +54,9 @@ export function PosterStyleDetailDrawer({
 }: PosterStyleDetailDrawerProps) {
   const detail = usePosterStyleQuery(itemId);
   const item = detail.data;
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   const [activeSampleIndex, setActiveSampleIndex] = useState(0);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -85,15 +89,11 @@ export function PosterStyleDetailDrawer({
 
   // ESC 关闭 + body lock
   useBodyScrollLock(true);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  const onDrawerKeyDown = useModalLayer({
+    open: true,
+    rootRef: drawerRef,
+    onClose,
+  });
 
   // samples lightbox 适配
   const lightboxItems = useMemo<LightboxItem[]>(() => {
@@ -168,9 +168,13 @@ export function PosterStyleDetailDrawer({
       }}
     >
       <motion.div
+        ref={drawerRef}
         role="dialog"
         aria-modal="true"
-        aria-label="风格详情"
+        aria-labelledby={titleId}
+        aria-describedby={item ? descriptionId : undefined}
+        tabIndex={-1}
+        onKeyDown={onDrawerKeyDown}
         initial={{ x: "100%", opacity: 0.4 }}
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: "100%", opacity: 0 }}
@@ -180,11 +184,14 @@ export function PosterStyleDetailDrawer({
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div className="min-w-0">
             <p className="type-page-kicker">风格详情</p>
-            <h3 className="type-page-title-sm mt-2 truncate">
+            <h2 id={titleId} className="type-page-title-sm mt-2 truncate">
               {item?.title || (detail.isPending ? "加载中" : "未找到")}
-            </h3>
+            </h2>
             {item ? (
-              <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              <p
+                id={descriptionId}
+                className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]"
+              >
                 {POSTER_STYLE_CATEGORY_LABEL[item.category]}
                 {item.mood ? ` · ${item.mood}` : ""}
               </p>

@@ -25,7 +25,7 @@ const VIEWPORT_ANIMATION_DURATION = Math.round(DURATION.panel * 1_000);
 export const CANVAS_MAX_ZOOM = 2.4;
 
 export interface CanvasViewportPreferences {
-  isCompact: boolean;
+  isMobile: boolean;
   reducedMotion: boolean;
   selectedNodeIds: readonly string[];
 }
@@ -75,32 +75,32 @@ export function viewportAnimationDuration(
 }
 
 export function shouldShowMiniMap(
-  isCompact: boolean,
+  isMobile: boolean,
   miniMapVisible: boolean,
   nodeCount: number,
 ): boolean {
-  return !isCompact && miniMapVisible && nodeCount > 0;
+  return !isMobile && miniMapVisible && nodeCount > 0;
 }
 
 export function canvasPanOnDrag(
-  isCompact: boolean,
+  isMobile: boolean,
   toolMode: CanvasToolMode,
 ): boolean | number[] {
-  return isCompact ? toolMode === "hand" : [1];
+  return isMobile ? toolMode === "hand" : [1];
 }
 
 export function canvasNodesConnectable(
-  isCompact: boolean,
+  isMobile: boolean,
   toolMode: CanvasToolMode,
 ): boolean {
-  return !isCompact || toolMode === "connect";
+  return !isMobile || toolMode === "connect";
 }
 
 export function canvasClickConnectionEnabled(
-  isCompact: boolean,
+  isMobile: boolean,
   toolMode: CanvasToolMode,
 ): boolean {
-  return isCompact ? toolMode === "connect" : toolMode === "select";
+  return isMobile ? toolMode === "connect" : toolMode === "select";
 }
 
 export function canvasGridGap(gridSize: number): number {
@@ -124,7 +124,7 @@ export function fitCanvasViewport(
   void instance.fitView({
     nodes,
     padding,
-    minZoom: preferences.isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM,
+    minZoom: preferences.isMobile ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM,
     maxZoom,
     duration: viewportAnimationDuration(preferences.reducedMotion, duration),
   });
@@ -145,7 +145,7 @@ export function focusCanvasNode(
     node.height ??
     node.initialHeight ??
     dimensions.height;
-  const minimumFocusZoom = preferences.isCompact ? 1 : 0.9;
+  const minimumFocusZoom = preferences.isMobile ? 1 : 0.9;
   void instance.setCenter(
     node.internals.positionAbsolute.x + width / 2,
     node.internals.positionAbsolute.y + height / 2,

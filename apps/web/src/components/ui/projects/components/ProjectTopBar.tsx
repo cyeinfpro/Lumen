@@ -67,7 +67,7 @@ export function ProjectMobileTopBar({
           </div>
         </div>
       }
-      right={right}
+      right={right ? <div className="shrink-0">{right}</div> : undefined}
     />
   );
 }

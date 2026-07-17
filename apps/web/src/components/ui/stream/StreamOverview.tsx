@@ -69,10 +69,10 @@ export function StreamOverview({
   return (
     <section
       aria-label="图库概览"
-      className="sticky top-0 z-20 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 px-3 py-2.5 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:py-4 md:backdrop-blur-none"
+      className="toolbar-shell adaptive-material sticky top-0 z-20 bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
     >
       <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+        <div className="type-caption flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
             <ImageIcon className="h-3.5 w-3.5 text-[var(--amber-300)]" />
             <span className="tabular-nums">{visibleLabel} 张</span>
@@ -95,7 +95,7 @@ export function StreamOverview({
                 type="button"
                 onClick={onShareSelected}
                 disabled={sharingSelected}
-                className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.16)] px-3 text-[11px] font-medium text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.22)] disabled:opacity-60 focus-visible:outline-none md:h-8 md:min-h-0"
+                className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none md:h-9 md:min-h-0"
               >
                 <Share2 className="h-3 w-3" />
                 {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
@@ -104,7 +104,7 @@ export function StreamOverview({
                 type="button"
                 onClick={onClearSelection}
                 aria-label="取消选择"
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:w-8 md:min-h-0 md:min-w-0"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -115,10 +115,10 @@ export function StreamOverview({
               onClick={onToggleSelectionMode}
               aria-pressed={selectionMode}
               className={cn(
-                "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors focus-visible:outline-none md:h-8 md:min-h-0",
+                "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none md:h-9 md:min-h-0",
                 selectionMode
-                  ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.14)] text-[var(--amber-300)]"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : "border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
               )}
             >
               <CheckSquare className="h-3 w-3" />
@@ -129,7 +129,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onClearFilters}
-              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:min-h-0"
+              className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:min-h-0"
             >
               <Eraser className="h-3 w-3" />
               清除
@@ -140,14 +140,14 @@ export function StreamOverview({
             onClick={onRefresh}
             disabled={refreshing}
             aria-label="刷新"
-            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none md:h-8 md:w-8 md:min-h-0 md:min-w-0"
+            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </button>
           <button
             type="button"
             onClick={() => router.push("/")}
-            className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-3 text-[12px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none md:h-8 md:min-h-0"
+            className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] focus-visible:outline-none md:h-9 md:min-h-0"
           >
             <WandSparkles className="h-3.5 w-3.5" />
             创作
@@ -176,7 +176,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onToggleFastFilter}
-              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none md:min-h-8"
+              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
             >
               <Gauge className="h-3 w-3" />
               快速

@@ -45,12 +45,15 @@ export function SettingsShell({
 
   useEffect(() => {
     if (!window.matchMedia("(max-width: 767px)").matches) return;
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
     const frame = window.requestAnimationFrame(() => {
       const active = settingsNavRef.current?.querySelector<HTMLElement>(
         '[aria-current="page"]',
       );
       active?.scrollIntoView({
-        behavior: "smooth",
+        behavior: reduceMotion ? "auto" : "smooth",
         block: "nearest",
         inline: "center",
       });
@@ -88,7 +91,7 @@ export function SettingsShell({
       >
         <div
           ref={settingsNavRef}
-          className="flex snap-x snap-mandatory gap-1 overflow-x-auto px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex snap-x snap-mandatory gap-1.5 overflow-x-auto px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_NAV.map((item) => {
             const active = pathname === item.href;
@@ -113,17 +116,17 @@ export function SettingsShell({
 
       <main
         data-app-scroll
-        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-[calc(32px+env(safe-area-inset-bottom,0px))] pt-4 touch-pan-y [overflow-anchor:none] md:px-6 md:pb-10 md:pt-6"
+        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-[calc(32px+env(safe-area-inset-bottom,0px))] pt-4 touch-pan-y [overflow-anchor:none] md:px-8 md:pb-12 md:pt-8"
       >
-        <div className="mx-auto grid w-full max-w-[1440px] min-w-0 gap-8 md:grid-cols-[196px_minmax(0,1fr)] lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="mx-auto grid w-full max-w-[1440px] min-w-0 gap-10 md:grid-cols-[216px_minmax(0,1fr)] lg:grid-cols-[232px_minmax(0,1fr)]">
           <aside className="hidden min-w-0 md:block">
-            <div className="sticky top-0 border-r border-[var(--border-subtle)] pr-5">
-              <div className="mb-4 px-2">
+            <div className="sticky top-4 border-r border-[var(--border-subtle)] pr-6">
+              <div className="mb-5 px-2">
                 <p className="type-page-kicker">Settings</p>
-                <h1 className="type-section-title mt-1">设置</h1>
-                <p className="type-caption mt-1">账户、模型与系统偏好</p>
+                <h1 className="type-page-title-sm mt-1">设置</h1>
+                <p className="type-body-sm mt-1">账户、模型与系统偏好</p>
               </div>
-              <nav aria-label="设置分类" className="grid gap-1">
+              <nav aria-label="设置分类" className="grid gap-0.5">
                 {SETTINGS_NAV.map((item) => {
                   const active = pathname === item.href;
                   const Icon = item.icon;
@@ -133,7 +136,7 @@ export function SettingsShell({
                       href={item.href}
                       aria-current={active ? "page" : undefined}
                       className={
-                        "flex min-h-10 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 text-[13px] font-medium transition-colors " +
+                        "flex min-h-11 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 type-body-sm font-medium transition-colors " +
                         (active
                           ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
                           : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
@@ -156,7 +159,7 @@ export function SettingsShell({
             </div>
           </aside>
           <div
-            className={`w-full min-w-0 ${maxWidth} safe-x mobile-compact [overflow-wrap:anywhere]`}
+            className={`w-full min-w-0 ${maxWidth} safe-x mobile-compact pt-1 md:pt-0 [overflow-wrap:anywhere]`}
           >
             {children}
           </div>

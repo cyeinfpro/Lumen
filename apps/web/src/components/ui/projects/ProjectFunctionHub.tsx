@@ -146,18 +146,6 @@ export function ProjectFunctionHub() {
     () => workflowsQuery.data?.items ?? [],
     [workflowsQuery.data?.items],
   );
-  const activeCount = useMemo(
-    () => recentProjects.filter((item) => item.status !== "completed").length,
-    [recentProjects],
-  );
-  const completedCount = useMemo(
-    () => recentProjects.filter((item) => item.status === "completed").length,
-    [recentProjects],
-  );
-  const outputCount = useMemo(
-    () => recentProjects.reduce((sum, item) => sum + item.output_count, 0),
-    [recentProjects],
-  );
   const recentByType = useMemo(() => {
     const map = new Map<string, WorkflowRunListItem>();
     for (const item of recentProjects) {
@@ -167,60 +155,33 @@ export function ProjectFunctionHub() {
   }, [recentProjects]);
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="page-shell relative h-[100dvh]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar title="项目" subtitle="工作流 · 最近" />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 min-[390px]:px-4 md:mb-0 md:px-6 md:pb-6 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-4">
-          <header className="hidden min-w-0 gap-5 border-b border-[var(--border)] pb-4 md:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-            <div className="min-w-0">
+      <main className="page-scroll lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)]">
+        <div className="page-frame grid gap-4">
+          <header className="page-header hidden md:grid">
+            <div className="page-header-copy">
               <p className="type-page-kicker">项目工作台</p>
-              <h1 className="type-page-title mt-2">
+              <h1 className="type-page-title">
                 继续最近项目，保持创作节奏
               </h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+              <p className="type-page-subtitle max-w-2xl">
                 先回到仍在进行的工作；需要开启新任务时，再从下方模板创建。
               </p>
             </div>
-            <div className="grid grid-cols-4 divide-x divide-[var(--border-subtle)]">
-              <ProjectMetric
-                label="可用模板"
-                value={visibleFeatures.filter((feature) => feature.available).length}
-                detail={`${visibleFeatures.length} 个入口`}
-              />
-              <ProjectMetric
-                label="进行中"
-                value={activeCount}
-                detail="最近任务"
-              />
-              <ProjectMetric
-                label="已完成"
-                value={completedCount}
-                detail="可查看交付"
-              />
-              <ProjectMetric
-                label="产出"
-                value={outputCount}
-                detail="最近成品"
-              />
-            </div>
           </header>
 
-          <section className="grid gap-2 border-b border-[var(--border)] pb-3 md:hidden">
+          <header className="page-header grid gap-2 md:hidden">
             <p className="type-page-kicker">项目中心</p>
             <h1 className="type-page-title">项目工作台</h1>
-            <p className="text-[13px] leading-[1.6] text-[var(--fg-1)]">
+            <p className="type-page-subtitle">
               先继续最近项目，也可以从模板开启新的工作流。
             </p>
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              <MobileMetric label="模板" value={visibleFeatures.filter((feature) => feature.available).length} />
-              <MobileMetric label="进行中" value={activeCount} />
-              <MobileMetric label="产出" value={outputCount} />
-            </div>
-          </section>
+          </header>
 
           <RecentProjects
             items={recentProjects}
@@ -239,7 +200,7 @@ export function ProjectFunctionHub() {
                 每张卡片都可以直接新建，或接回对应的最近项目。
               </p>
             </div>
-            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
+            <div className="grid gap-0">
               {visibleFeatures.map((feature, index) => (
                 <FeatureCard
                   key={feature.title}
@@ -284,63 +245,42 @@ function FeatureCard({
   return (
     <article
       className={cn(
-        "group flex min-w-0 flex-col rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/82 p-4 shadow-[var(--shadow-1)] transition-[border-color,box-shadow,background-color] duration-[var(--dur-base)] focus-within:shadow-[var(--ring)]",
+        "group grid min-w-0 gap-4 border-t border-[var(--border)] py-4 transition-colors duration-[var(--dur-base)] md:grid-cols-[minmax(0,1.05fr)_minmax(0,1.15fr)_auto] md:items-center md:gap-6 md:py-5",
         feature.available
-          ? "border-[var(--border)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]"
-          : "border-[var(--border-subtle)] opacity-72",
+          ? "hover:bg-[var(--bg-1)]/45"
+          : "opacity-60",
       )}
       aria-disabled={feature.available ? undefined : "true"}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 gap-3">
-          <span
-            className={cn(
-              "flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
-              feature.available
-                ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-3)]",
-            )}
-          >
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center border border-[var(--border)] bg-[var(--bg-0)] text-[var(--accent)]">
             <Icon className="h-5 w-5" strokeWidth={1.7} />
           </span>
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
               {num} · {feature.en}
             </p>
-            <h2
-              className={cn(
-                "mt-1 text-[18px] font-semibold leading-tight transition-colors duration-[var(--dur-base)]",
-                feature.available
-                  ? "text-[var(--fg-0)]"
-                  : "text-[var(--fg-2)]",
-              )}
-            >
+            <h2 className="type-section-title mt-1">
               {feature.title}
             </h2>
           </div>
         </div>
-        <span
-          className={cn(
-            "shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-            feature.available
-              ? "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-1)]"
-              : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-3)]",
-          )}
-        >
+        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
           {feature.badge}
         </span>
       </div>
 
       <p
         className={cn(
-          "mt-3 min-h-[3rem] text-[13px] leading-6",
+          "min-w-0 text-[13px] leading-6 md:line-clamp-3",
           feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-3)]",
         )}
       >
         {feature.description}
       </p>
 
-      <div className="mt-4 grid gap-3 border-y border-[var(--border-subtle)] py-3">
+      <div className="grid gap-3 border-y border-[var(--border-subtle)] py-3 md:border-y-0 md:border-l md:pl-5">
         <div className="grid grid-cols-3 gap-2">
           <FeatureDatum label="输入" value={feature.input} />
           <FeatureDatum label="输出" value={feature.output} />
@@ -349,7 +289,7 @@ function FeatureCard({
         <WorkflowSteps steps={steps} disabled={!feature.available} />
       </div>
 
-      <div className="mt-3 min-h-8 text-xs text-[var(--fg-2)]">
+      <div className="min-h-8 text-xs text-[var(--fg-2)] md:hidden">
         {recentProject ? (
           <span className="flex min-w-0 items-center gap-2">
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success-fg)]" />
@@ -370,11 +310,11 @@ function FeatureCard({
         )}
       </div>
 
-      <div className="mt-auto grid grid-cols-1 gap-2 pt-4 min-[420px]:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 md:min-w-[168px]">
         {feature.available && "primaryHref" in feature ? (
           <Link
             href={feature.primaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)] sm:min-h-10"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)] sm:min-h-10"
           >
             {feature.primaryLabel}
             <ArrowRight className="h-3.5 w-3.5" />
@@ -387,7 +327,7 @@ function FeatureCard({
         {feature.available ? (
           <Link
             href={secondaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
           >
             {secondaryLabel}
           </Link>
@@ -398,37 +338,6 @@ function FeatureCard({
         )}
       </div>
     </article>
-  );
-}
-
-function ProjectMetric({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value: number;
-  detail: string;
-}) {
-  return (
-    <div className="min-w-[112px] px-4 first:pl-0 last:pr-0">
-      <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
-      <p className="mt-1 text-[20px] font-semibold tabular-nums text-[var(--fg-0)]">
-        {value}
-      </p>
-      <p className="mt-0.5 truncate text-[11px] text-[var(--fg-3)]">{detail}</p>
-    </div>
-  );
-}
-
-function MobileMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="border-l border-[var(--border-subtle)] px-3 first:border-l-0 first:pl-0">
-      <p className="text-[10px] text-[var(--fg-2)]">{label}</p>
-      <p className="mt-0.5 text-base font-semibold tabular-nums text-[var(--fg-0)]">
-        {value}
-      </p>
-    </div>
   );
 }
 
@@ -452,10 +361,10 @@ function WorkflowSteps({ steps, disabled }: { steps: string[]; disabled: boolean
         <span
           key={`${step}-${stepIndex}`}
           className={cn(
-            "inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-[11px]",
+            "inline-flex min-h-7 max-w-full items-center gap-1.5 border-b px-1 text-[11px]",
             disabled
               ? "border-[var(--border-subtle)] text-[var(--fg-3)]"
-              : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
+              : "border-[var(--border)] text-[var(--fg-1)]",
           )}
         >
           <span className="font-mono text-[10px] tabular-nums text-[var(--fg-3)]">
@@ -494,7 +403,7 @@ function RecentProjects({
         </Link>
       </div>
 
-      <div className="mt-3 border-y border-[var(--border)]">
+      <div className="list-group mt-3">
         {loading ? (
           <div className="flex min-h-24 items-center justify-center gap-2 text-[var(--fg-2)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -515,7 +424,7 @@ function RecentProjects({
             还没有项目。先从上方模板开始，生成后的 poster 和服饰项目都会在这里继续。
           </div>
         ) : (
-          <ul className="divide-y divide-[var(--border)]">
+          <ul>
             {items.map((item) => (
               <RecentProjectRow key={item.id} item={item} />
             ))}
@@ -532,7 +441,7 @@ function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
   const statusLabel = STATUS_LABEL[item.status] ?? item.status;
   const updatedAt = formatRelativeTime(item.updated_at);
   return (
-    <li className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <li className="list-row grid gap-3 px-0 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <div className="flex min-w-0 gap-3">
         <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]">
           <Icon className="h-4 w-4" />

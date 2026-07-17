@@ -122,8 +122,13 @@ test("canvas text and titles edit directly inside deliberate drag handles", () =
   doesNotMatch(inspectorSource, /<Textarea/);
 });
 
-test("compact canvas keeps inspector explicit and exposes redo", () => {
-  match(workspaceSource, /open=\{isCompact && inspectorOpen\}/);
+test("canvas keeps inspector explicit across mobile, tablet, and desktop", () => {
+  match(
+    workspaceSource,
+    /const showTabletInspector = !isMobile && isCompact && open/,
+  );
+  match(workspaceSource, /<BottomSheet\s+open=\{open\}/);
+  match(workspaceSource, /\{hasSelection \? \(/);
   doesNotMatch(workspaceSource, /inspectorOpen \|\| Boolean\(selectedNodeId\)/);
   match(mobileToolbarSource, /label="重做"/);
 });

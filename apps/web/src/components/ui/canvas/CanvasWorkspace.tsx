@@ -33,7 +33,10 @@ import {
 } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import { CanvasCommandMenu } from "./CanvasCommandMenu";
-import { CanvasInspector } from "./CanvasInspector";
+import {
+  CanvasInspector,
+  type CanvasInspectorProps,
+} from "./CanvasInspector";
 import { CanvasNodePalette } from "./CanvasNodePalette";
 import { CanvasSelectionToolbar } from "./CanvasSelectionToolbar";
 import { CanvasShortcutsDialog } from "./CanvasShortcutsDialog";
@@ -130,6 +133,7 @@ function CanvasWorkspaceInner({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const isMobile = useMediaQuery("(max-width: 767px)") !== false;
   const isCompact = useMediaQuery("(max-width: 1199px)") !== false;
   const store = useCanvasStoreApi();
   const graph = useCanvasStore((state) => state.graph);
@@ -151,6 +155,8 @@ function CanvasWorkspaceInner({
   const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
   const selectedNodeIds = useCanvasStore((state) => state.selectedNodeIds);
   const selectedEdgeId = useCanvasStore((state) => state.selectedEdgeId);
+  const hasInspectorSelection =
+    selectedNodeIds.length > 0 || Boolean(selectedEdgeId);
   const [title, setTitle] = useState(document.title);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -398,6 +404,11 @@ function CanvasWorkspaceInner({
     },
     [patchCanvas],
   );
+  const closeMobileInspector = useCallback(() => {
+    setInspectorOpen(false);
+    store.getState().selectNode(null);
+    store.getState().selectEdge(null);
+  }, [store]);
 
   return (
     <div
@@ -415,7 +426,6 @@ function CanvasWorkspaceInner({
         saveMessage={saveMessage}
         onRename={renameCanvas}
         onFitView={() => viewportApi?.fitView()}
-        onRunSelected={runSelected}
         onOpenInspector={() => setInspectorOpen(true)}
         onOpenCommandMenu={() => tools.openCommandMenu(null)}
         onOpenShortcuts={tools.openShortcuts}
@@ -426,7 +436,6 @@ function CanvasWorkspaceInner({
             : () => void autosaveRef.current?.flush()
         }
         fullscreen={fullscreen}
-        running={Boolean(runningNodeId)}
       />
 
       {saveState === "conflict" ? (
@@ -463,7 +472,14 @@ function CanvasWorkspaceInner({
         <DurabilityBanner message={durabilityWarning} />
       ) : null}
 
-      <div className="grid min-h-0 flex-1 min-[1200px]:grid-cols-[248px_minmax(0,1fr)_352px]">
+      <div
+        className={cn(
+          "grid min-h-0 flex-1",
+          hasInspectorSelection
+            ? "min-[1200px]:grid-cols-[248px_minmax(0,1fr)_352px]"
+            : "min-[1200px]:grid-cols-[248px_minmax(0,1fr)]",
+        )}
+      >
         <aside className="hidden min-h-0 border-r border-[var(--border)] bg-[var(--bg-1)] min-[1200px]:flex min-[1200px]:flex-col">
           <header className="border-b border-[var(--border)] px-3 py-3">
             <p className="type-page-kicker">节点工具</p>
@@ -492,69 +508,38 @@ function CanvasWorkspaceInner({
               onAutoLayout={tools.autoLayoutSelection}
               onFitSelection={tools.fitSelection}
               onDelete={tools.deleteSelection}
-              className="absolute bottom-3 left-1/2 z-[var(--z-tabbar)] -translate-x-1/2 max-[1199px]:hidden"
+              className="absolute bottom-3 left-1/2 z-[var(--z-tabbar)] -translate-x-1/2 max-[767px]:hidden"
             />
           </div>
-          <CanvasMobileToolbar
-            onAdd={() => setPaletteOpen(true)}
-            onFitView={() => viewportApi?.fitView()}
-            onOpenCommandMenu={() => tools.openCommandMenu(null)}
-          />
+          <div className="hidden max-[767px]:contents">
+            <CanvasMobileToolbar
+              onAdd={() => setPaletteOpen(true)}
+              onFitView={() => viewportApi?.fitView()}
+              onOpenCommandMenu={() => tools.openCommandMenu(null)}
+            />
+          </div>
         </main>
 
-        <aside className="hidden min-h-0 border-l border-[var(--border)] bg-[var(--bg-1)] min-[1200px]:block">
-          <CanvasInspector
-            document={mergedDocument}
-            onRunNode={runNode}
-            runningNodeId={runningNodeId}
-            onDuplicateSelection={tools.duplicateSelection}
-            onAlignSelection={tools.alignSelection}
-            onDistributeSelection={tools.distributeSelection}
-            onAutoLayoutSelection={tools.autoLayoutSelection}
-            onFitSelection={tools.fitSelection}
-          />
-        </aside>
+        <CanvasInspectorSurfaces
+          isMobile={isMobile}
+          isCompact={isCompact}
+          open={inspectorOpen}
+          hasSelection={hasInspectorSelection}
+          onClose={() => setInspectorOpen(false)}
+          onCloseMobile={closeMobileInspector}
+          document={mergedDocument}
+          onRunNode={runNode}
+          runningNodeId={runningNodeId}
+          onDuplicateSelection={tools.duplicateSelection}
+          onAlignSelection={tools.alignSelection}
+          onDistributeSelection={tools.distributeSelection}
+          onAutoLayoutSelection={tools.autoLayoutSelection}
+          onFitSelection={tools.fitSelection}
+        />
       </div>
 
       <BottomSheet
-        open={isCompact && inspectorOpen}
-        onClose={() => {
-          setInspectorOpen(false);
-          store.getState().selectNode(null);
-          store.getState().selectEdge(null);
-        }}
-        ariaLabel="节点检查器"
-        snapPoints={["88%"]}
-        className="mobile-dialog-sheet"
-      >
-        <div className="relative h-full min-h-0">
-          <IconButton
-            aria-label="关闭检查器"
-            size="lg"
-            onClick={() => {
-              setInspectorOpen(false);
-              store.getState().selectNode(null);
-              store.getState().selectEdge(null);
-            }}
-            className="absolute right-3 top-3 z-[var(--z-tabbar)]"
-          >
-            <X className="h-4 w-4" />
-          </IconButton>
-          <CanvasInspector
-            document={mergedDocument}
-            onRunNode={runNode}
-            runningNodeId={runningNodeId}
-            onDuplicateSelection={tools.duplicateSelection}
-            onAlignSelection={tools.alignSelection}
-            onDistributeSelection={tools.distributeSelection}
-            onAutoLayoutSelection={tools.autoLayoutSelection}
-            onFitSelection={tools.fitSelection}
-          />
-        </div>
-      </BottomSheet>
-
-      <BottomSheet
-        open={isCompact && paletteOpen}
+        open={isMobile && paletteOpen}
         onClose={() => setPaletteOpen(false)}
         ariaLabel="添加节点"
         snapPoints={["82%"]}
@@ -590,6 +575,73 @@ function CanvasWorkspaceInner({
         onOpenChange={tools.setShortcutsOpen}
       />
     </div>
+  );
+}
+
+function CanvasInspectorSurfaces({
+  isMobile,
+  isCompact,
+  open,
+  hasSelection,
+  onClose,
+  onCloseMobile,
+  ...inspectorProps
+}: CanvasInspectorProps & {
+  isMobile: boolean;
+  isCompact: boolean;
+  open: boolean;
+  hasSelection: boolean;
+  onClose: () => void;
+  onCloseMobile: () => void;
+}) {
+  const showTabletInspector = !isMobile && isCompact && open;
+
+  return (
+    <>
+      {hasSelection ? (
+        <aside className="hidden min-h-0 border-l border-[var(--border)] bg-[var(--bg-1)] min-[1200px]:block">
+          <CanvasInspector {...inspectorProps} />
+        </aside>
+      ) : null}
+
+      {showTabletInspector ? (
+        <div className="pointer-events-none absolute inset-0 z-[var(--z-popover)] flex justify-end p-3">
+          <aside className="pointer-events-auto relative flex h-full w-[min(352px,calc(100vw-24px))] min-h-0 flex-col border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-2)]">
+            <IconButton
+              aria-label="关闭检查器"
+              size="lg"
+              onClick={onClose}
+              className="absolute right-2 top-2 z-[var(--z-tabbar)]"
+            >
+              <X className="h-4 w-4" />
+            </IconButton>
+            <CanvasInspector {...inspectorProps} />
+          </aside>
+        </div>
+      ) : null}
+
+      {isMobile ? (
+        <BottomSheet
+          open={open}
+          onClose={onCloseMobile}
+          ariaLabel="节点检查器"
+          snapPoints={["88%"]}
+          className="mobile-dialog-sheet"
+        >
+          <div className="relative h-full min-h-0">
+            <IconButton
+              aria-label="关闭检查器"
+              size="lg"
+              onClick={onCloseMobile}
+              className="absolute right-3 top-3 z-[var(--z-tabbar)]"
+            >
+              <X className="h-4 w-4" />
+            </IconButton>
+            <CanvasInspector {...inspectorProps} />
+          </div>
+        </BottomSheet>
+      ) : null}
+    </>
   );
 }
 

@@ -14,6 +14,7 @@ export interface CanvasViewportControlsProps {
   onZoomIn: () => void;
   onResetZoom: () => void;
   onFitView: () => void;
+  showFitView?: boolean;
   gridVisible: boolean;
   onGridVisibleChange: (visible: boolean) => void;
   minimapVisible: boolean;
@@ -34,6 +35,7 @@ export function CanvasViewportControls({
   onZoomIn,
   onResetZoom,
   onFitView,
+  showFitView = true,
   gridVisible,
   onGridVisibleChange,
   minimapVisible,
@@ -102,21 +104,25 @@ export function CanvasViewportControls({
       >
         100%
       </Button>
-      <IconButton
-        aria-label="适应画布"
-        tooltip="适应画布"
-        size="sm"
-        disabled={disabled}
-        onClick={onFitView}
-      >
-        <Scan className="h-4 w-4" aria-hidden />
-      </IconButton>
+      {showFitView ? (
+        <>
+          <IconButton
+            aria-label="适应画布"
+            tooltip="适应画布"
+            size="sm"
+            disabled={disabled}
+            onClick={onFitView}
+          >
+            <Scan className="h-4 w-4" aria-hidden />
+          </IconButton>
 
-      <span
-        role="separator"
-        aria-orientation="vertical"
-        className="mx-1 h-5 w-px shrink-0 bg-[var(--border)]"
-      />
+          <span
+            role="separator"
+            aria-orientation="vertical"
+            className="mx-1 h-5 w-px shrink-0 bg-[var(--border)]"
+          />
+        </>
+      ) : null}
 
       <IconButton
         aria-label={gridVisible ? "隐藏网格" : "显示网格"}

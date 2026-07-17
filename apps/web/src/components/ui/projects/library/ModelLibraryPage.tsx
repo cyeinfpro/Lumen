@@ -55,7 +55,7 @@ export function ModelLibraryPage() {
   };
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="page-shell relative h-[100dvh]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -65,8 +65,8 @@ export function ModelLibraryPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(var(--mobile-tabbar-h)+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-[max(0.75rem,env(safe-area-inset-left,0px))] pb-[calc(1rem+env(safe-area-inset-bottom,0px))] pt-1 md:mb-0 md:px-6 md:pb-6 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1520px] gap-3">
+      <main className="page-scroll lumen-studio-bg project-mobile-scroll mb-[var(--mobile-tabbar-height)]">
+        <div className="page-frame grid max-w-[1520px] gap-3">
           <LibraryHeader current={tab} onChange={setTab} />
 
           <Tabs
@@ -115,19 +115,17 @@ function LibraryHeader({
   onChange: (next: LibraryTab) => void;
 }) {
   return (
-    <section className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-      <div className="flex min-w-0 items-baseline gap-2.5">
-        <p className="type-page-kicker shrink-0">
+    <header className="page-header hidden md:grid">
+      <div className="page-header-copy">
+        <p className="type-page-kicker">
           模特库
         </p>
-        <h1 className="type-page-title shrink-0">
-          模特库
-        </h1>
-        <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+        <h1 className="type-page-title">模特库</h1>
+        <p className="type-page-subtitle hidden max-w-3xl lg:block">
           浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="page-header-actions">
         <Tabs current={current} onChange={onChange} compact />
         <Link
           href="/projects"
@@ -137,7 +135,7 @@ function LibraryHeader({
           返回项目
         </Link>
       </div>
-    </section>
+    </header>
   );
 }
 
@@ -153,13 +151,13 @@ function Tabs({
   compact?: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        "flex min-w-0 flex-wrap gap-x-1 gap-y-1",
+      <div
+        className={cn(
+          "flex min-w-0 flex-wrap gap-x-1 gap-y-1",
         compact
           ? ""
           : "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl md:relative md:top-auto md:z-auto md:bg-transparent md:backdrop-blur-none",
-        "border-b border-[var(--border)]",
+        compact ? "" : "border-b border-[var(--border)]",
         className,
       )}
     >

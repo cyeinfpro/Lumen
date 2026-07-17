@@ -20,21 +20,21 @@ export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 }
 
 const BASE =
-  "inline-flex max-w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] font-medium " +
+  "type-control inline-flex max-w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] " +
   "transition-[transform,background-color,color,border-color,box-shadow,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "select-none text-center leading-tight active:opacity-[var(--op-press)] touch-manipulation";
+  "select-none text-center leading-tight touch-manipulation";
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--amber-300)] " +
-    "shadow-[var(--shadow-amber)]",
+    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--accent-hover)] " +
+    "shadow-[var(--shadow-1)]",
   secondary:
     "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
-    "border border-[var(--border)] hover:border-[var(--border-strong)] backdrop-blur-sm",
+    "border border-[var(--border)] hover:border-[var(--border-strong)]",
   ghost:
-    "bg-transparent text-[var(--fg-0)] hover:bg-[var(--bg-2)] " +
+    "bg-transparent text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] " +
     "border border-transparent",
   danger:
     "bg-[var(--danger)] text-[var(--danger-on)] hover:brightness-110 " +
@@ -58,7 +58,7 @@ const VARIANTS: Record<Variant, string> = {
 // 但显式 min-h 可避免在视觉层出现"矮按钮 + 外挂 padding"的错位。
 const SIZES: Record<Size, string> = {
   sm: "h-9 px-3 text-xs max-sm:min-h-11 max-sm:px-3.5",
-  md: "h-9 px-4 text-sm max-sm:min-h-11 max-sm:text-[15px]",
+  md: "h-10 px-4 max-sm:min-h-11 max-sm:text-[15px]",
   lg: "h-11 px-6 text-[15px] rounded-[var(--radius-card)] max-sm:min-h-12 max-sm:px-5",
 };
 

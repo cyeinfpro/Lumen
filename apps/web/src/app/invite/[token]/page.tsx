@@ -39,6 +39,7 @@ import {
   Users as UsersIcon,
 } from "lucide-react";
 
+import { LumenMark } from "@/components/ui/brand/LumenMark";
 import { usePublicInviteQuery } from "@/lib/queries";
 import { ApiError, signup } from "@/lib/apiClient";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
@@ -54,24 +55,21 @@ export default function InvitePage({
   const showSkeleton = useDelayedFlag(q.isLoading, 180);
 
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="safe-x-page flex flex-1 flex-col items-center justify-start overscroll-contain pb-6 pt-[max(2rem,env(safe-area-inset-top,0px))] md:justify-center md:py-16">
+    <div className="page-shell">
+      <main className="auth-stage">
         <motion.div
           initial={false}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, ease: "easeOut" }}
-          className="w-full max-w-md"
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className="auth-frame"
         >
-          <header className="mb-8 flex items-center gap-3">
-            {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-            <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
+          <header className="flex items-center gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+              <LumenMark />
+            </span>
             <div>
-              <p className="text-lg font-medium tracking-tight leading-none">
-                Lumen
-              </p>
-              <p className="text-[11px] uppercase tracking-wider text-[var(--fg-2)] mt-0.5">
-                邀请注册
-              </p>
+              <p className="type-card-title">Lumen</p>
+              <p className="type-caption">邀请注册</p>
             </div>
           </header>
 
@@ -241,8 +239,8 @@ function SignupForm({
   };
 
   return (
-    <div className="space-y-6">
-      <div>
+    <div className="grid gap-6">
+      <div className="auth-header">
         <h1 className="type-page-title">
           加入 Lumen
         </h1>
@@ -252,8 +250,8 @@ function SignupForm({
       </div>
 
       {/* 邀请信息 */}
-      <div className="rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/[0.05] backdrop-blur-sm p-4 space-y-2">
-        <div className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-[var(--color-lumen-amber)]">
+      <div className="surface-section grid gap-2 py-4">
+        <div className="type-label flex items-center gap-1.5 text-[var(--accent)]">
           <Sparkles className="w-3.5 h-3.5" /> 邀请详情
         </div>
         <InfoLine label="角色" icon={<UserCog className="w-3 h-3" />}>
@@ -271,7 +269,7 @@ function SignupForm({
         </InfoLine>
       </div>
 
-      <form onSubmit={onSubmit} className="space-y-4">
+      <form onSubmit={onSubmit} className="auth-form">
         <Field id="invite-email" label="邮箱" icon={<Mail className="w-3.5 h-3.5" />}>
           <input
             id="invite-email"
@@ -292,7 +290,7 @@ function SignupForm({
             autoCorrect="off"
             enterKeyHint="next"
             className={
-              "h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm " +
+              "auth-control px-3 " +
               (lockedEmail ? "opacity-70 cursor-not-allowed" : "")
             }
           />
@@ -321,7 +319,7 @@ function SignupForm({
               placeholder="至少 8 位"
               autoComplete="new-password"
               enterKeyHint="next"
-              className="h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-12 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+              className="auth-control pl-3 pr-12"
             />
             <button
               type="button"
@@ -368,7 +366,7 @@ function SignupForm({
             autoComplete="new-password"
             enterKeyHint="done"
             className={
-              "h-11 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
+              "auth-control px-3 " +
               (confirmMismatch
                 ? "border-danger-border focus:border-danger focus:ring-danger/20"
                 : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -405,7 +403,7 @@ function SignupForm({
           type="submit"
           disabled={!canSubmit}
           aria-busy={submitting}
-          className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity,box-shadow] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-50"
+          className="type-control inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color,opacity] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
         >
           {submitting ? (
             <>
@@ -479,13 +477,13 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
       <div className="grid grid-cols-2 gap-2">
         <Link
           href="/login"
-          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+          className="type-control inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] transition-colors hover:bg-[var(--bg-3)]"
         >
           去登录
         </Link>
         <Link
           href="/"
-          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+          className="type-control inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] transition-colors hover:bg-[var(--bg-3)]"
         >
           返回首页
         </Link>
@@ -526,7 +524,7 @@ function ErrorView({
             type="button"
             onClick={onRetry}
             disabled={pending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
+            className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
           >
             {pending && <Loader2 className="h-4 w-4 animate-spin" />}
             {pending ? "重试中" : "重试"}
@@ -534,14 +532,14 @@ function ErrorView({
         ) : (
           <Link
             href="/login"
-            className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+            className="type-control inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] transition-colors hover:bg-[var(--bg-3)]"
           >
             去登录
           </Link>
         )}
         <Link
           href="/"
-          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-sm transition-colors hover:bg-[var(--bg-2)]"
+          className="type-control inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] transition-colors hover:bg-[var(--bg-3)]"
         >
           返回首页
         </Link>
@@ -562,10 +560,10 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="auth-field">
       <label
         htmlFor={id}
-        className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--fg-1)] mb-1.5"
+        className="type-label flex items-center gap-1.5"
       >
         {icon}
         {label}

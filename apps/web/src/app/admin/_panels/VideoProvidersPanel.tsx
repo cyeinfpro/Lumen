@@ -442,9 +442,9 @@ function ProviderEditorView({
           </div>
         )}
       </div>
-      <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
-        <div className="flex items-center gap-2 rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:gap-3 sm:px-4">
-          <span className="min-w-0 type-caption text-[var(--fg-1)]">
+      <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
+        <div className="grid grid-cols-2 items-stretch gap-2 rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:flex sm:items-center sm:gap-3 sm:px-4">
+          <span className="col-span-2 min-w-0 type-caption text-[var(--fg-1)] sm:col-span-1">
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]" />
               编辑中
@@ -456,7 +456,7 @@ function ProviderEditorView({
               {metrics.statusText}
             </span>
           </span>
-          <div className="flex-1 sm:flex-none" />
+          <div className="hidden flex-1 sm:block sm:flex-none" />
           <Button
             variant="secondary"
             size="sm"

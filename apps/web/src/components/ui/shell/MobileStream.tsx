@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useReducedMotion } from "framer-motion";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ArrowUp, Loader2 } from "lucide-react";
 import { MobileTabBar } from "./MobileTabBar";
@@ -79,6 +80,7 @@ export function MobileStream() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const reduceMotion = useReducedMotion();
 
   const queryString = searchParams.toString();
   const queryFilters = useMemo(
@@ -263,8 +265,11 @@ export function MobileStream() {
   }, [applyFilters, filters]);
 
   const scrollToTop = useCallback(() => {
-    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+    scrollRef.current?.scrollTo({
+      top: 0,
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, [reduceMotion]);
 
   useLayoutEffect(() => {
     const scroller = scrollRef.current;

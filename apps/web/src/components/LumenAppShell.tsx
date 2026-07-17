@@ -14,7 +14,6 @@ import {
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import { SSEProvider } from "@/components/SSEProvider";
 import { SystemUpgradeBanner } from "@/components/SystemUpgradeBanner";
-import { MobileToastViewport } from "@/components/ui/primitives/mobile/Toast";
 import { ToastViewport } from "@/components/ui/primitives";
 import { PageTransitions } from "@/components/ui/shell/PageTransitions";
 
@@ -77,7 +76,6 @@ export function LumenAppShell({ children, initialRuntimeDefaults }: Props) {
       <SystemUpgradeBanner />
       <OfflineBanner />
       <ToastViewport />
-      <MobileToastViewport />
 
       <OptionalIsland>
         <CommandPalette />

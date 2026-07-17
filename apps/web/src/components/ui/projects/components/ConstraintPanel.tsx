@@ -9,13 +9,14 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
+import { useId, useRef } from "react";
 
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { ImageGrid } from "./ImageGrid";
-import { InfoPanel } from "./StageFrame";
 import { jsonValue, stepOf } from "../utils";
 
 interface ConstraintPanelProps {
@@ -33,29 +34,46 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
   const qualitySummary = stepOf(workflow, "quality_review")?.output_json ?? {};
 
   return (
-    <div className="min-w-0">
-      <InfoPanel title="商品原图">
+    <div className="min-w-0 divide-y divide-[var(--border)]">
+      <ConstraintSection title="商品原图">
         <ImageGrid images={workflow.product_images} compact />
-      </InfoPanel>
-      <InfoPanel title="商品还原点">
+      </ConstraintSection>
+      <ConstraintSection title="商品还原点">
         <p className="whitespace-pre-wrap break-words">{jsonValue(product.must_preserve)}</p>
-      </InfoPanel>
-      <InfoPanel title="推荐背景">
+      </ConstraintSection>
+      <ConstraintSection title="推荐背景">
         <p className="whitespace-pre-wrap break-words">{jsonValue(product.background_recommendation)}</p>
-      </InfoPanel>
-      <InfoPanel title="已确认模特">
+      </ConstraintSection>
+      <ConstraintSection title="已确认模特">
         <p className="break-words">{selected ? `方案 ${selected.candidate_index}` : "未确认"}</p>
-      </InfoPanel>
-      <InfoPanel title="配饰四宫格">
+      </ConstraintSection>
+      <ConstraintSection title="配饰四宫格">
         <p className="whitespace-pre-wrap break-words">{jsonValue(accessory)}</p>
-      </InfoPanel>
-      <InfoPanel title="输出规格">
+      </ConstraintSection>
+      <ConstraintSection title="输出规格">
         <p className="whitespace-pre-wrap break-words">{jsonValue(outputSpecs)}</p>
-      </InfoPanel>
-      <InfoPanel title="质检摘要">
+      </ConstraintSection>
+      <ConstraintSection title="质检摘要">
         <p className="whitespace-pre-wrap break-words">{jsonValue(qualitySummary)}</p>
-      </InfoPanel>
+      </ConstraintSection>
     </div>
+  );
+}
+
+function ConstraintSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="grid gap-2 py-4 first:pt-0 last:pb-0">
+      <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {title}
+      </h4>
+      <div className="type-body-sm min-w-0 text-[var(--fg-1)]">{children}</div>
+    </section>
   );
 }
 
@@ -80,14 +98,20 @@ interface ConstraintDrawerProps extends ConstraintPanelProps {
   onClose: () => void;
 }
 
-function DrawerHeader({ onClose }: { onClose: () => void }) {
+function DrawerHeader({
+  onClose,
+  titleId,
+}: {
+  onClose: () => void;
+  titleId: string;
+}) {
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
       <div className="min-w-0">
         <p className="type-page-kicker">
           Constraints
         </p>
-        <h2 className="type-section-title mt-1.5">
+        <h2 id={titleId} className="type-section-title mt-1.5">
           项目约束
         </h2>
       </div>
@@ -108,6 +132,13 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
   // 客户端挂载后由 matchMedia 修正；避免 hydration 抖动也避免移动端首屏就跑全屏 motion。
   const isMobile = useIsMobile();
   const isDesktop = isMobile !== true;
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+  const onDrawerKeyDown = useModalLayer({
+    open: isDesktop && open,
+    rootRef: drawerRef,
+    onClose,
+  });
 
   if (!isDesktop) {
     return (
@@ -117,8 +148,8 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
         ariaLabel="项目约束面板"
         snapPoints={["80%", "60%"]}
       >
-        <DrawerHeader onClose={onClose} />
-        <div className="min-w-0 px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
+        <DrawerHeader onClose={onClose} titleId={titleId} />
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
           <ConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>
@@ -138,11 +169,14 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) onClose();
           }}
-          role="dialog"
-          aria-modal="true"
-          aria-label="项目约束面板"
         >
           <motion.aside
+            ref={drawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            tabIndex={-1}
+            onKeyDown={onDrawerKeyDown}
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
@@ -152,7 +186,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
               "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]",
             )}
           >
-            <DrawerHeader onClose={onClose} />
+            <DrawerHeader onClose={onClose} titleId={titleId} />
             <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-6">
               <ConstraintBody workflow={workflow} />
             </div>

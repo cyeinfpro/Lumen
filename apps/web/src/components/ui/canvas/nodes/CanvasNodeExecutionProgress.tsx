@@ -1,5 +1,7 @@
 "use client";
 
+import { AlertCircle, AlertTriangle } from "lucide-react";
+
 import {
   canvasExecutionElapsedMs,
   canvasExecutionPrimaryTask,
@@ -16,8 +18,51 @@ export function CanvasNodeExecutionProgress({
 }: {
   execution?: CanvasNodeExecution | null;
 }) {
-  if (!execution || !isCanvasExecutionActive(execution)) return null;
+  if (!execution) return null;
   const task = canvasExecutionPrimaryTask(execution);
+  if (!isCanvasExecutionActive(execution)) {
+    return <ExecutionFailureNotice execution={execution} task={task} />;
+  }
+  return <ActiveExecutionProgress execution={execution} task={task} />;
+}
+
+type ExecutionTask = ReturnType<typeof canvasExecutionPrimaryTask>;
+
+function ExecutionFailureNotice({
+  execution,
+  task,
+}: {
+  execution: CanvasNodeExecution;
+  task: ExecutionTask;
+}) {
+  const presentation = failurePresentation(execution.status);
+  if (!presentation) return null;
+  const failureMessage =
+    execution.error_message ?? task?.error_message ?? presentation.fallback;
+  const FailureIcon = presentation.icon;
+
+  return (
+    <div
+      role={presentation.role}
+      className={cn(
+        "flex items-start gap-2 border-t px-3 py-2 type-caption",
+        presentation.className,
+      )}
+      title={failureMessage}
+    >
+      <FailureIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+      <span className="min-w-0 break-words">{failureMessage}</span>
+    </div>
+  );
+}
+
+function ActiveExecutionProgress({
+  execution,
+  task,
+}: {
+  execution: CanvasNodeExecution;
+  task: ExecutionTask;
+}) {
   const progress = canvasExecutionProgressPercent(execution);
   const elapsed = formatCanvasTaskElapsed(canvasExecutionElapsedMs(execution));
   const stage = canvasExecutionStageLabel(execution);
@@ -63,4 +108,26 @@ export function CanvasNodeExecutionProgress({
       </div>
     </div>
   );
+}
+
+function failurePresentation(status: CanvasNodeExecution["status"]) {
+  if (status === "partial_failed") {
+    return {
+      className:
+        "border-[var(--warning)]/30 bg-[var(--warning)]/10 text-[var(--warning-fg)]",
+      fallback: "部分输出失败",
+      icon: AlertTriangle,
+      role: "status" as const,
+    };
+  }
+  if (status === "failed" || status === "blocked") {
+    return {
+      className:
+        "border-[var(--danger)]/30 bg-[var(--danger-soft)] text-[var(--danger-fg)]",
+      fallback: "节点运行失败",
+      icon: AlertCircle,
+      role: "alert" as const,
+    };
+  }
+  return null;
 }

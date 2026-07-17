@@ -58,14 +58,14 @@ export function AccountRow({
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <span
           className={cn(
-            "min-w-0 break-words text-[15px] leading-snug",
+            "min-w-0 break-words type-body-sm font-medium",
             destructive ? "text-[var(--danger)]" : "text-[var(--fg-0)]",
           )}
         >
           {label}
         </span>
         {displayBadge != null && (
-          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--amber-400)]/15 text-[10px] font-medium text-[var(--amber-400)] tabular-nums">
+          <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[var(--amber-400)]/15 px-1 type-caption font-medium tabular-nums text-[var(--amber-400)]">
             {displayBadge}
           </span>
         )}
@@ -89,10 +89,10 @@ export function AccountRow({
   );
 
   const baseClass = cn(
-    "flex min-h-[52px] w-full items-center gap-3 py-2",
+    "flex min-h-11 w-full items-center gap-3 py-2",
     grouped ? "px-4" : "px-4",
     !last && "border-b border-[var(--border-subtle)]",
-    "text-left active:bg-[var(--bg-2)] transition-colors",
+    "text-left transition-colors active:bg-[var(--bg-2)] motion-reduce:transition-none",
     className,
   );
 
@@ -140,7 +140,7 @@ function ToggleSwitch({
       aria-label={ariaLabel}
       className={cn(
         "relative inline-flex items-center shrink-0",
-        "w-[46px] h-7 rounded-full transition-colors duration-200",
+        "h-7 w-[46px] rounded-full transition-colors duration-200 motion-reduce:transition-none",
         checked
           ? "bg-[var(--amber-400)]"
           : "bg-[var(--bg-3)] border border-[var(--border-subtle)]",
@@ -149,8 +149,8 @@ function ToggleSwitch({
       <span
         aria-hidden
         className={cn(
-          "absolute top-[3px] left-[3px] w-[22px] h-[22px] rounded-full bg-white shadow-sm",
-          "transition-transform duration-200",
+          "absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full bg-[var(--accent-on)] shadow-sm",
+          "transition-transform duration-200 motion-reduce:transition-none",
           checked ? "translate-x-[18px]" : "translate-x-0",
         )}
       />

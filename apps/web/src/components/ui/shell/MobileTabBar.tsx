@@ -8,6 +8,7 @@ import {
   User,
   type LucideIcon,
 } from "lucide-react";
+import { useReducedMotion } from "framer-motion";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -36,6 +37,7 @@ export function MobileTabBar() {
   const pathname = usePathname();
   const router = useRouter();
   const { haptic } = useHaptic();
+  const reduceMotion = useReducedMotion();
   // spec §3.3：Lightbox 打开时 fade-out
   const lightboxOpen = useUiStore((s) => s.lightbox.open);
   const navVisibility = useUiStore((s) => s.navVisibility);
@@ -62,13 +64,14 @@ export function MobileTabBar() {
         const scroller = document.querySelector<HTMLElement>(
           "[data-app-viewport] [data-app-scroll], [data-lumen-app-shell] [data-app-scroll]",
         );
-        if (scroller) scroller.scrollTo({ top: 0, behavior: "smooth" });
-        else window.scrollTo({ top: 0, behavior: "smooth" });
+        const behavior = reduceMotion ? "auto" : "smooth";
+        if (scroller) scroller.scrollTo({ top: 0, behavior });
+        else window.scrollTo({ top: 0, behavior });
         return;
       }
       router.push(tab.route);
     },
-    [haptic, pathname, router],
+    [haptic, pathname, reduceMotion, router],
   );
 
   const navigationHidden = lightboxOpen || isKeyboardOpen;
@@ -80,7 +83,7 @@ export function MobileTabBar() {
       aria-hidden={navigationHidden || undefined}
       inert={navigationHidden ? true : undefined}
       className={[
-        "adaptive-material fixed inset-x-0 bottom-0 border-t border-[var(--border-subtle)] bg-[var(--bg-1)]/96 safe-x backdrop-blur-xl",
+        "adaptive-material mobile-perf-surface fixed inset-x-0 bottom-0 border-t border-[var(--border-subtle)] bg-[var(--bg-0)]/96 safe-x backdrop-blur-xl",
         "transition-[transform,opacity] duration-[var(--dur-normal)] ease-[var(--ease-shutter)]",
         lightboxOpen ? "opacity-0 pointer-events-none" : "opacity-100",
         isKeyboardOpen ? "translate-y-full pointer-events-none" : "translate-y-0",

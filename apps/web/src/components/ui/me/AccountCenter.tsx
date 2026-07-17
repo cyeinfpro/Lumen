@@ -38,7 +38,7 @@ const APP_VERSION = rawAppVersion.startsWith("v") ? rawAppVersion : `v${rawAppVe
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-4 pt-6 pb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--fg-2)]">
+    <div className="px-4 pb-2 pt-6 type-overline text-[var(--fg-2)]">
       {children}
     </div>
   );
@@ -106,7 +106,7 @@ export function AccountCenter() {
   return (
     <div className="flex flex-col">
       <SectionLabel>设置</SectionLabel>
-      <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
+      <div className="mx-4 overflow-hidden border-y border-[var(--border-subtle)]">
         <AccountRow
           href="/settings/usage"
           icon={<BarChart3 className="w-4 h-4" />}
@@ -167,22 +167,9 @@ export function AccountCenter() {
         />
       </div>
 
-      {isAdmin && (
-        <>
-          <SectionLabel>管理</SectionLabel>
-          <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-            <AccountRow
-              href="/admin"
-              icon={<Shield className="w-4 h-4" />}
-              label="管理面板"
-              grouped
-              last
-            />
-          </div>
-        </>
-      )}
+      <AdminAccountSection visible={isAdmin} />
 
-      <div className="mx-4 mt-5 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
+      <div className="mx-4 mt-5 overflow-hidden border-y border-[var(--border-subtle)]">
         <AccountRow
           icon={<LogOut className="w-4 h-4" />}
           label="退出登录"
@@ -214,5 +201,23 @@ export function AccountCenter() {
         ]}
       />
     </div>
+  );
+}
+
+function AdminAccountSection({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <>
+      <SectionLabel>管理</SectionLabel>
+      <div className="mx-4 overflow-hidden border-y border-[var(--border-subtle)]">
+        <AccountRow
+          href="/admin"
+          icon={<Shield className="h-4 w-4" />}
+          label="管理面板"
+          grouped
+          last
+        />
+      </div>
+    </>
   );
 }

@@ -10,7 +10,6 @@ import {
   Maximize2,
   Minimize2,
   PanelRight,
-  Play,
   Redo2,
   Scan,
   Undo2,
@@ -30,28 +29,24 @@ export function CanvasTopBar({
   saveMessage,
   onRename,
   onFitView,
-  onRunSelected,
   onOpenInspector,
   onOpenCommandMenu,
   onOpenShortcuts,
   onToggleFullscreen,
   onRetrySave,
   fullscreen,
-  running,
 }: {
   title: string;
   saveState: CanvasSaveState;
   saveMessage?: string | null;
   onRename: (title: string) => void;
   onFitView: () => void;
-  onRunSelected: () => void;
   onOpenInspector: () => void;
   onOpenCommandMenu: () => void;
   onOpenShortcuts: () => void;
   onToggleFullscreen: () => void;
   onRetrySave?: () => void;
   fullscreen: boolean;
-  running: boolean;
 }) {
   const historyLength = useCanvasStore((state) => state.history.length);
   const futureLength = useCanvasStore((state) => state.future.length);
@@ -68,7 +63,10 @@ export function CanvasTopBar({
 
   return (
     <>
-      <header className="hidden h-[var(--appbar-h)] shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-3 min-[1200px]:flex">
+      <header
+        data-canvas-selected-runnable={runnable ? "true" : "false"}
+        className="hidden h-[var(--appbar-h)] shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-3 min-[768px]:flex"
+      >
         <Link
           href="/projects/canvas"
           aria-label="返回画布列表"
@@ -104,7 +102,12 @@ export function CanvasTopBar({
           >
             <Redo2 className="h-4 w-4" />
           </IconButton>
-          <IconButton aria-label="适应视图" tooltip="适应视图" onClick={onFitView}>
+          <IconButton
+            aria-label="适应视图"
+            tooltip="适应视图"
+            onClick={onFitView}
+            className="hidden min-[1200px]:inline-flex"
+          >
             <Scan className="h-4 w-4" />
           </IconButton>
           <IconButton
@@ -133,24 +136,19 @@ export function CanvasTopBar({
               <Maximize2 className="h-4 w-4" />
             )}
           </IconButton>
-          <button
-            type="button"
-            disabled={!runnable || running}
-            onClick={onRunSelected}
-            className="ml-2 inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-medium text-[var(--accent-on)] transition-opacity hover:opacity-[var(--op-hover)] disabled:pointer-events-none disabled:opacity-40"
+          <IconButton
+            aria-label="打开检查器"
+            tooltip="检查器"
+            onClick={onOpenInspector}
+            className="min-[1200px]:hidden"
           >
-            {running ? (
-              <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-            运行节点
-          </button>
+            <PanelRight className="h-4 w-4" />
+          </IconButton>
         </div>
       </header>
 
       <header
-        className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-[max(8px,env(safe-area-inset-left,0px))] min-[1200px]:hidden"
+        className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-chrome)] px-[max(8px,env(safe-area-inset-left,0px))] min-[768px]:hidden"
         style={{
           minHeight:
             "calc(var(--mobile-topbar-h) + max(env(safe-area-inset-top, 0px), calc(var(--system-banner-height, 0px) + var(--offline-banner-height, 0px))))",
@@ -185,15 +183,6 @@ export function CanvasTopBar({
           ) : (
             <Maximize2 className="h-4 w-4" />
           )}
-        </IconButton>
-        <IconButton
-          aria-label="运行节点"
-          variant="primary"
-          disabled={!runnable || running}
-          loading={running}
-          onClick={onRunSelected}
-        >
-          <Play className="h-4 w-4" />
         </IconButton>
         <IconButton aria-label="打开检查器" onClick={onOpenInspector}>
           <PanelRight className="h-4 w-4" />

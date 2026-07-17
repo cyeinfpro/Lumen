@@ -165,7 +165,9 @@ export function CanvasViewport({
   const updateDocumentSettings = useCanvasStore(
     (state) => state.updateDocumentSettings,
   );
-  const isCompact = useMediaQuery("(max-width: 1199px)") !== false;
+  const isMobile = useMediaQuery("(max-width: 767px)") !== false;
+  const isTablet =
+    useMediaQuery("(min-width: 768px) and (max-width: 1199px)") === true;
   const reducedMotion = Boolean(useReducedMotion());
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const interactionActiveRef = useRef(false);
@@ -207,25 +209,25 @@ export function CanvasViewport({
     const gridSize = Math.max(1, Math.round(graph.settings.grid_size));
     return [gridSize, gridSize];
   }, [graph.settings.grid_size]);
-  const minimumZoom = canvasMinimumZoom(isCompact);
+  const minimumZoom = canvasMinimumZoom(isMobile);
   const showMiniMap = shouldShowMiniMap(
-    isCompact,
+    isMobile,
     miniMapVisible,
     graph.nodes.length,
   );
   const viewportPreferencesRef = useRef<CanvasViewportPreferences>({
-    isCompact,
+    isMobile,
     reducedMotion,
     selectedNodeIds,
   });
 
   useEffect(() => {
     viewportPreferencesRef.current = {
-      isCompact,
+      isMobile,
       reducedMotion,
       selectedNodeIds,
     };
-  }, [isCompact, reducedMotion, selectedNodeIds]);
+  }, [isMobile, reducedMotion, selectedNodeIds]);
 
   useEffect(() => {
     connectionDraftRef.current = connectionDraft;
@@ -388,8 +390,8 @@ export function CanvasViewport({
   }, [graph]);
   const startClickConnection = useCallback(
     (nodeId: string, handleId: string, dataType: CanvasDataType) => {
-      if (isCompact && toolMode !== "connect") return;
-      if (!isCompact && toolMode !== "select") return;
+      if (isMobile && toolMode !== "connect") return;
+      if (!isMobile && toolMode !== "select") return;
       blurActiveCanvasEditor();
       setTargetPickerOpen(false);
       const sameSource =
@@ -405,7 +407,7 @@ export function CanvasViewport({
             },
       );
     },
-    [isCompact, toolMode, updateConnectionDraft],
+    [isMobile, toolMode, updateConnectionDraft],
   );
   const completeClickConnection = useCallback(
     (targetNodeId: string, targetHandle: string) => {
@@ -424,9 +426,9 @@ export function CanvasViewport({
   );
 
   const projectedNodes = useMemo<CanvasFlowNode[]>(() => {
-    const connectable = !isCompact || toolMode === "connect";
+    const connectable = !isMobile || toolMode === "connect";
     const clickConnectionEnabled = canvasClickConnectionEnabled(
-      isCompact,
+      isMobile,
       toolMode,
     );
     const editingEnabled = toolMode === "select" && connectionDraft === null;
@@ -499,7 +501,7 @@ export function CanvasViewport({
     focusNodeEditor,
     graph,
     inputCountsByNode,
-    isCompact,
+    isMobile,
     measuredDimensions,
     onRunNode,
     resolvedTextsByNode,
@@ -899,7 +901,7 @@ export function CanvasViewport({
             return;
           }
         }
-        if (!isCompact || toolMode !== "connect") {
+        if (!isMobile || toolMode !== "connect") {
           window.setTimeout(() => updateConnectionDraft(null), 0);
         }
       } finally {
@@ -909,7 +911,7 @@ export function CanvasViewport({
     [
       createActionRequest,
       finishInteraction,
-      isCompact,
+      isMobile,
       onOpenQuickAdd,
       toolMode,
       updateConnectionDraft,
@@ -1075,7 +1077,7 @@ export function CanvasViewport({
         onNodeContextMenu={handleNodeContextMenu}
         onEdgeClick={(_event, edge) => {
           selectEdge(edge.id);
-          if (isCompact) onOpenInspector?.();
+          if (isMobile) onOpenInspector?.();
         }}
         onEdgeContextMenu={handleEdgeContextMenu}
         onPaneClick={handlePaneClick}
@@ -1116,16 +1118,16 @@ export function CanvasViewport({
         onlyRenderVisibleElements
         elevateNodesOnSelect={false}
         deleteKeyCode={["Backspace", "Delete"]}
-        panOnDrag={canvasPanOnDrag(isCompact, toolMode)}
+         panOnDrag={canvasPanOnDrag(isMobile, toolMode)}
         panActivationKeyCode="Space"
         nodesDraggable={toolMode === "select"}
-        nodesConnectable={canvasNodesConnectable(isCompact, toolMode)}
+         nodesConnectable={canvasNodesConnectable(isMobile, toolMode)}
         connectOnClick={false}
-        selectionOnDrag={!isCompact && toolMode === "select"}
+         selectionOnDrag={!isMobile && toolMode === "select"}
         selectionKeyCode="Shift"
         multiSelectionKeyCode="Shift"
         zoomOnPinch
-        zoomOnScroll={!isCompact}
+         zoomOnScroll={!isMobile}
         zoomOnDoubleClick={false}
         ariaLabelConfig={CANVAS_ARIA_LABEL_CONFIG}
         proOptions={{ hideAttribution: true }}
@@ -1148,7 +1150,7 @@ export function CanvasViewport({
           />
         ) : null}
       </ReactFlow>
-      {!isCompact && instance ? (
+      {!isMobile && instance ? (
         <CanvasViewportControls
           zoom={zoom}
           minZoom={minimumZoom}
@@ -1171,6 +1173,7 @@ export function CanvasViewport({
           onFitView={() =>
             fitCanvasViewport(instance, viewportPreferencesRef.current)
           }
+          showFitView={isTablet}
           gridVisible={snapToGrid}
           onGridVisibleChange={(visible) =>
             updateDocumentSettings({ snap_to_grid: visible })
@@ -1183,7 +1186,7 @@ export function CanvasViewport({
       {graph.nodes.length === 0 ? (
         <CanvasEmptyState onCreate={handleEmptyQuickAdd} />
       ) : null}
-      {isCompact && connectionDraft ? (
+      {isMobile && connectionDraft ? (
         <MobileConnectTargets
           open={targetPickerOpen}
           targets={connectionCompatibility.targets}
@@ -1219,8 +1222,8 @@ export function CanvasViewport({
   );
 }
 
-function canvasMinimumZoom(isCompact: boolean): number {
-  return isCompact ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM;
+function canvasMinimumZoom(isMobile: boolean): number {
+  return isMobile ? COMPACT_MIN_ZOOM : DESKTOP_MIN_ZOOM;
 }
 
 function buildConnectionCompatibility(
