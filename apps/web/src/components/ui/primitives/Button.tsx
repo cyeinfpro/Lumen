@@ -1,7 +1,7 @@
 "use client";
 
 // 通用按钮原语。variant × size 正交；loading 时禁用并替换左图标为 Spinner。
-// 微交互由 GlobalGsapMotion 统一接管，避免每个按钮创建独立动画实例。
+// 高频按压反馈使用短 CSS transition，保持即时、可中断且不创建动画实例。
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "./Spinner";
@@ -21,7 +21,7 @@ export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 
 const BASE =
   "inline-flex max-w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] font-medium " +
-  "transition-[background-color,color,border-color,box-shadow,filter,opacity] duration-150 " +
+  "transition-[transform,background-color,color,border-color,box-shadow,filter,opacity] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
   "select-none text-center leading-tight active:opacity-[var(--op-press)] touch-manipulation";
@@ -91,7 +91,7 @@ export function Button({
       type={type ?? "button"}
       disabled={isDisabled}
       aria-busy={loading || undefined}
-      data-lumen-interactive={isDisabled ? undefined : "true"}
+      data-lumen-interactive={isDisabled ? undefined : "soft"}
       className={cn(
         BASE,
         VARIANTS[variant],

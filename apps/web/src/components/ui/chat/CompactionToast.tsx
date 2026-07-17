@@ -134,21 +134,18 @@ export function CompactionToast({
 
               {event.phase === "progress" && event.progress?.totalSegments ? (
                 <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
-                  <motion.div
-                    className="h-full rounded-full bg-[var(--info)]"
-                    initial={false}
-                    animate={{
-                      width: `${Math.min(
-                        100,
+                  <div
+                    className="h-full w-full origin-left rounded-full bg-[var(--info)] transition-transform duration-200 ease-[var(--ease-develop)]"
+                    style={{
+                      transform: `scaleX(${Math.min(
+                        1,
                         Math.max(
                           0,
-                          (event.progress.currentSegment / event.progress.totalSegments) * 100,
+                          event.progress.currentSegment /
+                            event.progress.totalSegments,
                         ),
-                      )}%`,
+                      )})`,
                     }}
-                    transition={
-                      reducedMotion ? { duration: 0 } : { duration: 0.2, ease: lumenMotion.easeOut }
-                    }
                   />
                 </div>
               ) : null}

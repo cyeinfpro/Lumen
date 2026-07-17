@@ -13,12 +13,15 @@
 
 import {
   AnimatePresence,
+  animate,
   motion,
   type PanInfo,
   useDragControls,
   useIsPresent,
+  useMotionValue,
   useReducedMotion,
 } from "framer-motion";
+import { X } from "lucide-react";
 import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -32,7 +35,14 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { SPRING, DURATION, EASE } from "@/lib/motion";
+import {
+  DURATION,
+  EASE,
+  GESTURE,
+  SPRING,
+  projectMomentum,
+} from "@/lib/motion";
+import { Pressable } from "./Pressable";
 import { useModalLayer, usePortalReady } from "./useModalLayer";
 
 export type SnapPoint = "auto" | `${number}%` | number;
@@ -161,10 +171,14 @@ function BottomSheetLayer({
   const closingRef = useRef(false);
   const bodyDragStartRef = useRef<{
     pointerId: number;
+    startX: number;
     startY: number;
     scrollElement: HTMLElement;
   } | null>(null);
-  const bodyDragControls = useDragControls();
+  const settleAnimationRef = useRef<{ stop: () => void } | null>(null);
+  const settleFrameRef = useRef(0);
+  const sheetDragControls = useDragControls();
+  const sheetY = useMotionValue(0);
   const isPresent = useIsPresent();
   const reduceMotion = useReducedMotion();
   const labelId = useId();
@@ -176,6 +190,34 @@ function BottomSheetLayer({
   );
   const [snapIndex, setSnapIndex] = useState<number>(clampedInitial);
   const [viewport, setViewport] = useState(readVisualViewport);
+
+  const stopSettleAnimation = useCallback(() => {
+    if (settleFrameRef.current !== 0) {
+      window.cancelAnimationFrame(settleFrameRef.current);
+      settleFrameRef.current = 0;
+    }
+    settleAnimationRef.current?.stop();
+    settleAnimationRef.current = null;
+  }, []);
+
+  const settleSheet = useCallback(() => {
+    stopSettleAnimation();
+    if (reduceMotion) {
+      sheetY.set(0);
+      return;
+    }
+    const control = animate(sheetY, 0, SPRING.sheet);
+    settleAnimationRef.current = control;
+    void control.then(() => {
+      if (settleAnimationRef.current === control) {
+        settleAnimationRef.current = null;
+      }
+    });
+  }, [reduceMotion, sheetY, stopSettleAnimation]);
+
+  useEffect(() => {
+    return () => stopSettleAnimation();
+  }, [stopSettleAnimation]);
 
   useEffect(() => {
     closingRef.current = !isPresent;
@@ -227,51 +269,135 @@ function BottomSheetLayer({
   useEffect(() => {
     if (!isPresent) return;
     const raf = window.requestAnimationFrame(() => {
+      sheetY.set(0);
       setSnapIndex((current) => (
         current === clampedInitial ? current : clampedInitial
       ));
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [clampedInitial, isPresent]);
+  }, [clampedInitial, isPresent, sheetY]);
 
   const currentHeightPx = resolveSnapHeight(
     effectiveSnapPoints[snapIndex] ?? "auto",
     viewport.height,
   );
 
+  const readSheetHeightLimit = useCallback(() => {
+    const sheet = sheetRef.current;
+    if (!sheet) return viewport.height;
+    const maxHeight = Number.parseFloat(
+      window.getComputedStyle(sheet).maxHeight,
+    );
+    return Number.isFinite(maxHeight) && maxHeight > 0
+      ? Math.min(maxHeight, viewport.height)
+      : viewport.height;
+  }, [viewport.height]);
+
+  const readSnapHeight = useCallback(
+    (index: number) => {
+      const point = effectiveSnapPoints[index] ?? "auto";
+      const limit = readSheetHeightLimit();
+      const resolved = resolveSnapHeight(point, viewport.height);
+      if (resolved != null) return Math.min(resolved, limit);
+      const handleHeight = 44;
+      const naturalContentHeight =
+        contentRef.current?.scrollHeight ??
+        sheetRef.current?.scrollHeight ??
+        limit;
+      return Math.min(
+        limit,
+        Math.max(handleHeight, naturalContentHeight + handleHeight),
+      );
+    },
+    [effectiveSnapPoints, readSheetHeightLimit, viewport.height],
+  );
+
+  const settleToSnap = useCallback(
+    (targetIndex: number) => {
+      const nextIndex = Math.max(
+        0,
+        Math.min(targetIndex, effectiveSnapPoints.length - 1),
+      );
+      const currentHeight =
+        sheetRef.current?.getBoundingClientRect().height ??
+        readSnapHeight(snapIndex);
+      const targetHeight = readSnapHeight(nextIndex);
+      const heightDelta = currentHeight - targetHeight;
+      const releaseY = sheetY.get();
+
+      stopSettleAnimation();
+      sheetY.set(releaseY - heightDelta);
+      setSnapIndex(nextIndex);
+      settleFrameRef.current = window.requestAnimationFrame(() => {
+        settleFrameRef.current = 0;
+        settleSheet();
+      });
+    },
+    [
+      effectiveSnapPoints.length,
+      readSnapHeight,
+      settleSheet,
+      sheetY,
+      snapIndex,
+      stopSettleAnimation,
+    ],
+  );
+
   // 拖拽结束：按方向切 snap 或关闭
   const handleDragEnd = useCallback(
-    (_e: unknown, info: PanInfo) => {
+    (event: { type?: string }, info: PanInfo) => {
+      if (
+        event.type === "pointercancel" ||
+        event.type === "touchcancel"
+      ) {
+        settleSheet();
+        return;
+      }
       const dy = info.offset.y;
       const v = info.velocity.y;
+      const projectedY = dy + projectMomentum(v);
+      const direction =
+        Math.abs(v) >= GESTURE.snapVelocity
+          ? Math.sign(v)
+          : Math.sign(projectedY);
       // 向下
-      if (dy > 0) {
+      if (direction > 0) {
         // 先看是否已经在最低 snap 且超过关闭阈值
         const atLowest = snapIndex >= effectiveSnapPoints.length - 1;
-        if (atLowest && (dy > dragCloseThreshold || v > 500)) {
+        if (
+          atLowest &&
+          (projectedY > dragCloseThreshold ||
+            v > GESTURE.dismissVelocity)
+        ) {
           requestClose();
           return;
         }
-        if (dy > 48 || v > 350) {
-          setSnapIndex((i) =>
-            Math.min(effectiveSnapPoints.length - 1, i + 1),
-          );
+        if (
+          projectedY > GESTURE.snapDistance ||
+          v > GESTURE.snapVelocity
+        ) {
+          settleToSnap(snapIndex + 1);
           return;
         }
       }
       // 向上
-      if (dy < 0) {
-        if (-dy > 48 || -v > 350) {
-          setSnapIndex((i) => Math.max(0, i - 1));
+      if (direction < 0) {
+        if (
+          -projectedY > GESTURE.snapDistance ||
+          -v > GESTURE.snapVelocity
+        ) {
+          settleToSnap(snapIndex - 1);
           return;
         }
       }
-      // 其它 → 回弹（靠 animate 自动回到 0）
+      settleSheet();
     },
     [
       dragCloseThreshold,
       effectiveSnapPoints.length,
       requestClose,
+      settleSheet,
+      settleToSnap,
       snapIndex,
     ],
   );
@@ -285,6 +411,7 @@ function BottomSheetLayer({
       const scrollElement = closestScrollableElement(target, content);
       if (
         event.pointerType === "mouse" ||
+        !event.isPrimary ||
         !content ||
         !scrollElement ||
         scrollElement.scrollTop > 0 ||
@@ -296,6 +423,7 @@ function BottomSheetLayer({
       }
       bodyDragStartRef.current = {
         pointerId: event.pointerId,
+        startX: event.clientX,
         startY: event.clientY,
         scrollElement,
       };
@@ -313,41 +441,70 @@ function BottomSheetLayer({
       ) {
         return;
       }
+      const horizontalDistance = event.clientX - start.startX;
       const distance = event.clientY - start.startY;
-      if (distance < -8) {
+      if (
+        Math.max(
+          Math.abs(horizontalDistance),
+          Math.abs(distance),
+        ) < GESTURE.intentSlop
+      ) {
+        return;
+      }
+      if (
+        distance <= 0 ||
+        Math.abs(distance) <=
+          Math.abs(horizontalDistance) * GESTURE.directionBias
+      ) {
         bodyDragStartRef.current = null;
         return;
       }
-      if (distance > 8) {
+      bodyDragStartRef.current = null;
+      stopSettleAnimation();
+      sheetDragControls.start(event);
+      if (event.cancelable) event.preventDefault();
+    },
+    [sheetDragControls, stopSettleAnimation],
+  );
+  const clearBodyDragStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (bodyDragStartRef.current?.pointerId === event.pointerId) {
         bodyDragStartRef.current = null;
-        bodyDragControls.start(event);
       }
     },
-    [bodyDragControls],
+    [],
   );
-  const clearBodyDragStart = useCallback(() => {
-    bodyDragStartRef.current = null;
-  }, []);
 
   const onHandleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSnapIndex((i) =>
-          Math.min(effectiveSnapPoints.length - 1, i + 1),
-        );
+        settleToSnap(snapIndex + 1);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSnapIndex((i) => Math.max(0, i - 1));
+        settleToSnap(snapIndex - 1);
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         if (effectiveSnapPoints.length > 1) {
-          setSnapIndex((i) => (i + 1) % effectiveSnapPoints.length);
+          settleToSnap((snapIndex + 1) % effectiveSnapPoints.length);
         }
       }
     },
-    [effectiveSnapPoints.length],
+    [effectiveSnapPoints.length, settleToSnap, snapIndex],
   );
+
+  const dragTravel = Math.max(
+    GESTURE.snapDistance * 2,
+    Math.min(240, viewport.height * 0.34),
+  );
+  const dragConstraints = {
+    top: snapIndex > 0 ? -dragTravel : 0,
+    bottom:
+      snapIndex < effectiveSnapPoints.length - 1
+        ? dragTravel
+        : Math.max(dragTravel, dragCloseThreshold * 1.5),
+  };
+  const sliderValue = effectiveSnapPoints.length - snapIndex;
 
   return (
     <motion.div
@@ -380,12 +537,6 @@ function BottomSheetLayer({
         aria-hidden
       />
       <motion.div
-        ref={sheetRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelId}
-        tabIndex={-1}
-        onKeyDown={onSheetKeyDown}
         variants={
           reduceMotion
             ? {
@@ -398,69 +549,101 @@ function BottomSheetLayer({
               }
         }
         transition={reduceMotion ? { duration: 0 } : SPRING.sheet}
-        style={
-          currentHeightPx != null
-            ? { height: currentHeightPx }
-            : undefined
-        }
-        className={[
-          "relative w-full max-w-[640px] mx-auto",
-          "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
-          "shadow-[var(--shadow-3)]",
-          "mobile-perf-surface",
-          "flex min-h-0 flex-col overflow-hidden",
-          currentHeightPx == null
-            ? "mobile-dialog-sheet"
-            : "max-h-[var(--mobile-dialog-max-height)]",
-          "safe-x",
-          "focus:outline-none",
-          className,
-        ].join(" ")}
+        className="relative mx-auto w-full max-w-[640px] rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)]"
       >
         <motion.div
+          ref={sheetRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={labelId}
+          tabIndex={-1}
+          onKeyDown={onSheetKeyDown}
           drag="y"
-          dragConstraints={{ top: 0, bottom: 0 }}
-          dragElastic={{ top: 0.1, bottom: 0.4 }}
-          onDragEnd={handleDragEnd}
-          onKeyDown={onHandleKeyDown}
-          className="flex min-h-11 shrink-0 items-center justify-center cursor-grab active:cursor-grabbing touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]/60"
-          role="slider"
-          tabIndex={0}
-          aria-label="调整面板高度"
-          aria-valuemin={1}
-          aria-valuemax={effectiveSnapPoints.length}
-          aria-valuenow={snapIndex + 1}
-          aria-valuetext={`第 ${snapIndex + 1} 档，共 ${effectiveSnapPoints.length} 档`}
-          data-autofocus-skip
-        >
-          <span
-            aria-hidden
-            className="block h-1 w-7 rounded-full bg-[var(--fg-3)]/80"
-          />
-        </motion.div>
-
-        <motion.div
-          drag="y"
-          dragControls={bodyDragControls}
+          dragControls={sheetDragControls}
           dragListener={false}
-          dragConstraints={{ top: 0, bottom: 0 }}
-          dragElastic={{ top: 0, bottom: 0.4 }}
+          dragConstraints={dragConstraints}
+          dragElastic={{ top: 0.12, bottom: 0.18 }}
+          dragMomentum={false}
+          onDragStart={stopSettleAnimation}
           onDragEnd={handleDragEnd}
-          className="flex min-h-0 flex-1 touch-pan-y flex-col overflow-hidden"
+          style={{
+            y: sheetY,
+            ...(currentHeightPx != null ? { height: currentHeightPx } : {}),
+          }}
+          className={[
+            "relative w-full",
+            "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
+            "shadow-[var(--shadow-3)]",
+            "mobile-perf-surface",
+            "flex min-h-0 flex-col overflow-hidden",
+            currentHeightPx == null
+              ? "mobile-dialog-sheet"
+              : "max-h-[var(--mobile-dialog-max-height)]",
+            "safe-x",
+            "focus:outline-none",
+            className,
+          ].join(" ")}
         >
           <div
-            ref={contentRef}
-            onPointerDown={onContentPointerDown}
-            onPointerMove={onContentPointerMove}
-            onPointerUp={clearBodyDragStart}
-            onPointerCancel={clearBodyDragStart}
-            className="mobile-dialog-scroll flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
-            style={{ overscrollBehaviorY: "contain" }}
+            onPointerDown={(event) => {
+              if (
+                event.button !== 0 ||
+                !event.isPrimary ||
+                closingRef.current
+              ) {
+                return;
+              }
+              stopSettleAnimation();
+              sheetDragControls.start(event);
+            }}
+            onKeyDown={onHandleKeyDown}
+            className="flex min-h-11 shrink-0 items-center justify-center cursor-grab active:cursor-grabbing touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]/60"
+            role="slider"
+            tabIndex={0}
+            aria-label="调整面板高度"
+            aria-orientation="vertical"
+            aria-valuemin={1}
+            aria-valuemax={effectiveSnapPoints.length}
+            aria-valuenow={sliderValue}
+            aria-valuetext={`高度第 ${sliderValue} 级，共 ${effectiveSnapPoints.length} 级`}
+            data-autofocus-skip
           >
-            <span id={labelId} className="sr-only">
-              {ariaLabel ?? "底部面板"}
-            </span>
-            {children}
+            <span
+              aria-hidden
+              className="block h-1 w-7 rounded-full bg-[var(--fg-3)]/80"
+            />
+          </div>
+
+          <div className="absolute right-1 top-0 z-20">
+            <Pressable
+              size="default"
+              minHit
+              pressScale="tight"
+              haptic="light"
+              onPress={requestClose}
+              aria-label="关闭面板"
+              data-autofocus-skip
+              className="h-11 w-11 rounded-full text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </Pressable>
+          </div>
+
+          <div className="flex min-h-0 flex-1 touch-pan-y flex-col overflow-hidden">
+            <div
+              ref={contentRef}
+              onPointerDown={onContentPointerDown}
+              onPointerMove={onContentPointerMove}
+              onPointerUp={clearBodyDragStart}
+              onPointerCancel={clearBodyDragStart}
+              className="mobile-dialog-scroll flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
+              style={{ overscrollBehaviorY: "contain" }}
+            >
+              <span id={labelId} className="sr-only">
+                {ariaLabel ?? "底部面板"}
+              </span>
+              {children}
+            </div>
           </div>
         </motion.div>
       </motion.div>

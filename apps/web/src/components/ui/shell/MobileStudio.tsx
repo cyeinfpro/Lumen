@@ -135,6 +135,12 @@ export function MobileStudio() {
     if (scrollTo) return; // deep-link 定位时不干扰
     const el = scrollRef.current;
     if (!el) return;
+    if (messages.length === 0) {
+      requestAnimationFrame(() => {
+        el.scrollTo({ top: 0, behavior: "auto" });
+      });
+      return;
+    }
     if (!stickToBottomRef.current) return;
     const activeElement = document.activeElement;
     if (
@@ -154,7 +160,14 @@ export function MobileStudio() {
         behavior: prefersReduced || latestIsStreaming ? "auto" : "smooth",
       });
     });
-  }, [currentConvId, generations, latestIsStreaming, scrollSignature, scrollTo]);
+  }, [
+    currentConvId,
+    generations,
+    latestIsStreaming,
+    messages.length,
+    scrollSignature,
+    scrollTo,
+  ]);
 
   const isEmpty = messages.length === 0;
   const overlayGap = taskIslandHeight > 0 ? 20 : 12;
@@ -165,7 +178,7 @@ export function MobileStudio() {
   const topChromeBlockSize =
     topChromeHeight > 0
       ? `${topChromeHeight}px`
-      : "calc(var(--mobile-topbar-h) + 52px + var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))";
+      : "calc(var(--mobile-topbar-h) + 52px + var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))";
 
   return (
     <div

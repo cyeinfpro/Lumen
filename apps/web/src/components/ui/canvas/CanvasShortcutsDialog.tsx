@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Command,
   Keyboard,
@@ -18,7 +18,6 @@ import {
 } from "react";
 
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
@@ -118,7 +117,6 @@ export function CanvasShortcutsDialog({
   description = "查看画布导航、选择与布局操作。",
   className,
 }: CanvasShortcutsDialogProps) {
-  const reduceMotion = useReducedMotion();
   const headingId = useId();
   const descriptionId = useId();
   const dialogRef = useRef<HTMLElement>(null);
@@ -146,10 +144,10 @@ export function CanvasShortcutsDialog({
         <motion.div
           key="canvas-shortcuts-dialog"
           className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center p-0 sm:items-center sm:px-4"
-          initial={reduceMotion ? false : { opacity: 0 }}
+          initial={false}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: reduceMotion ? 0 : DURATION.quick }}
+          transition={{ duration: 0 }}
         >
           <button
             type="button"
@@ -166,19 +164,10 @@ export function CanvasShortcutsDialog({
             aria-describedby={descriptionId}
             tabIndex={-1}
             onKeyDown={onDialogKeyDown}
-            initial={
-              reduceMotion ? false : { opacity: 0, scale: 0.98, y: 12 }
-            }
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={
-              reduceMotion
-                ? { opacity: 0 }
-                : { opacity: 0, scale: 0.98, y: 12 }
-            }
-            transition={{
-              duration: reduceMotion ? 0 : DURATION.normal,
-              ease: EASE.develop,
-            }}
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0 }}
             className={cn(
               "mobile-dialog-panel surface-dialog relative flex max-h-[86dvh] w-full max-w-3xl flex-col overflow-hidden",
               "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none max-sm:border-b-0",

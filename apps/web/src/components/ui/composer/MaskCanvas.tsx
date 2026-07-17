@@ -23,6 +23,7 @@ import {
 
 import { Button } from "@/components/ui/primitives";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 import type { MaskBoardHandle, MaskExport } from "../inpaint/MaskBoard";
@@ -198,11 +199,23 @@ function MaskCanvasInner({
           <AnimatePresence>
             {warning && (
               <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.18 }}
-                className="overflow-hidden border-t border-[var(--border-subtle)]"
+                initial={{
+                  opacity: 0,
+                  transform: "translateY(-4px)",
+                }}
+                animate={{
+                  opacity: 1,
+                  transform: "translateY(0)",
+                }}
+                exit={{
+                  opacity: 0,
+                  transform: "translateY(-4px)",
+                }}
+                transition={{
+                  duration: DURATION.quick,
+                  ease: EASE.develop,
+                }}
+                className="border-t border-[var(--border-subtle)]"
               >
                 <div
                   className={cn(

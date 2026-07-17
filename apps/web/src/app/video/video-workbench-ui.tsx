@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  AudioLines,
   ChevronDown,
   CircleCheck,
   Clapperboard,
@@ -24,6 +25,7 @@ import {
 } from "lucide-react";
 
 import { Button, IconButton, toast } from "@/components/ui/primitives";
+import { videoBinaryUrl } from "@/lib/apiClient";
 import { formatRmb } from "@/lib/money";
 import type { VideoAction, VideoReferenceMediaIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -1068,6 +1070,134 @@ function ReferenceThumbnail({
   );
 }
 
+function referenceMediaPreviewSources(item: ReferenceDraft): {
+  mediaUrl: string | null;
+  posterUrl: string | null;
+} {
+  const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  if (item.kind === "image") {
+    return { mediaUrl: previewUrl, posterUrl: null };
+  }
+
+  const directMediaUrl = cleanReferencePreviewUrl(item.url);
+  if (item.kind === "audio") {
+    return {
+      mediaUrl: directMediaUrl ?? previewUrl,
+      posterUrl: null,
+    };
+  }
+
+  const videoId = item.video_id?.trim();
+  const mediaUrl = videoId
+    ? videoBinaryUrl(videoId)
+    : (directMediaUrl ?? previewUrl);
+  return {
+    mediaUrl,
+    posterUrl:
+      previewUrl && previewUrl !== mediaUrl ? previewUrl : null,
+  };
+}
+
+function ReferenceMediaPreviewIcon({ item }: { item: ReferenceDraft }) {
+  if (item.kind === "video") {
+    return <VideoIcon className="h-8 w-8" aria-hidden="true" />;
+  }
+  if (item.kind === "audio") {
+    return <AudioLines className="h-8 w-8" aria-hidden="true" />;
+  }
+  if (item.url) {
+    return <Tags className="h-8 w-8" aria-hidden="true" />;
+  }
+  return <ImageIcon className="h-8 w-8" aria-hidden="true" />;
+}
+
+function ReferenceMediaPreviewContent({
+  item,
+  displayToken,
+  mediaUrl,
+  posterUrl,
+  failed,
+  onError,
+}: {
+  item: ReferenceDraft;
+  displayToken: string;
+  mediaUrl: string | null;
+  posterUrl: string | null;
+  failed: boolean;
+  onError: () => void;
+}) {
+  const referenceNoun = referenceKindNoun(item.kind);
+
+  if (!mediaUrl || failed) {
+    return (
+      <div
+        role={failed ? "alert" : "status"}
+        className="flex flex-col items-center justify-center gap-2 px-5 text-center text-[var(--fg-2)]"
+      >
+        <ReferenceMediaPreviewIcon item={item} />
+        <p className="text-sm font-medium text-[var(--fg-1)]">
+          {failed
+            ? `${referenceNoun}预览加载失败`
+            : `这个${referenceNoun}暂无可显示预览`}
+        </p>
+        <p className="max-w-md text-xs leading-5">
+          {failed
+            ? "请确认素材仍可访问，或稍后重试。"
+            : `官方${referenceNoun}素材可能只有素材 ID，暂时无法在这里直接预览。`}
+        </p>
+      </div>
+    );
+  }
+
+  if (item.kind === "video") {
+    return (
+      <video
+        src={mediaUrl}
+        poster={posterUrl ?? undefined}
+        controls
+        playsInline
+        preload="metadata"
+        aria-label={`${displayToken} 视频预览`}
+        className="h-full w-full object-contain"
+        onError={onError}
+      >
+        当前浏览器不支持视频预览。
+      </video>
+    );
+  }
+
+  if (item.kind === "audio") {
+    return (
+      <div className="flex w-full max-w-2xl flex-col items-center gap-4 px-5 py-8">
+        <AudioLines
+          className="h-8 w-8 text-[var(--fg-2)]"
+          aria-hidden="true"
+        />
+        <audio
+          src={mediaUrl}
+          controls
+          preload="metadata"
+          aria-label={`${displayToken} 音频预览`}
+          className="w-full"
+          onError={onError}
+        >
+          当前浏览器不支持音频预览。
+        </audio>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={mediaUrl}
+      alt={`${displayToken} 图片预览`}
+      className="h-full w-full object-contain"
+      decoding="async"
+      onError={onError}
+    />
+  );
+}
+
 export function ReferenceMediaPreviewDialog({
   item,
   onClose,
@@ -1082,11 +1212,11 @@ export function ReferenceMediaPreviewDialog({
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
-  const previewUrl = cleanReferencePreviewUrl(item.previewUrl);
+  const { mediaUrl, posterUrl } = referenceMediaPreviewSources(item);
   const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null);
-  const failed = previewUrl != null && failedPreviewUrl === previewUrl;
+  const failed = mediaUrl != null && failedPreviewUrl === mediaUrl;
   const displayToken = referenceDisplayToken(item);
-  const Icon = item.kind === "video" ? VideoIcon : item.url ? Tags : ImageIcon;
+  const referenceNoun = referenceKindNoun(item.kind);
 
   useEffect(() => {
     const previousFocus =
@@ -1127,13 +1257,14 @@ export function ReferenceMediaPreviewDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`reference-preview-${item._key}`}
+        aria-describedby={`reference-preview-description-${item._key}`}
         tabIndex={-1}
         className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-4xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(760px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b landscape:max-sm:rounded-[var(--radius-panel)] landscape:max-sm:border-b"
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">
-              {item.kind === "video" ? "参考视频" : "参考图片"}
+              {`参考${referenceNoun}`}
             </p>
             <h2
               id={`reference-preview-${item._key}`}
@@ -1141,7 +1272,10 @@ export function ReferenceMediaPreviewDialog({
             >
               {displayToken} · {item.label}
             </h2>
-            <p className="mt-1 truncate font-mono text-xs text-[var(--fg-2)]">
+            <p
+              id={`reference-preview-description-${item._key}`}
+              className="mt-1 truncate font-mono text-xs text-[var(--fg-2)]"
+            >
               {item.display}
             </p>
           </div>
@@ -1157,25 +1291,14 @@ export function ReferenceMediaPreviewDialog({
         </header>
         <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto bg-[var(--bg-0)] p-3 sm:p-5">
           <div className="flex h-full min-h-0 items-center justify-center overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] sm:min-h-[18rem]">
-            {previewUrl && !failed ? (
-              <img
-                src={previewUrl}
-                alt={`${displayToken} 预览`}
-                className="h-full w-full object-contain"
-                decoding="async"
-                onError={() => setFailedPreviewUrl(previewUrl)}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center gap-2 px-5 text-center text-[var(--fg-2)]">
-                <Icon className="h-8 w-8" aria-hidden="true" />
-                <p className="text-sm font-medium text-[var(--fg-1)]">
-                  {failed ? "预览加载失败" : "这个素材暂无可显示预览"}
-                </p>
-                <p className="max-w-md text-xs leading-5">
-                  官方 asset 素材可能只有素材 ID；上传图片会优先显示展示图。
-                </p>
-              </div>
-            )}
+            <ReferenceMediaPreviewContent
+              item={item}
+              displayToken={displayToken}
+              mediaUrl={mediaUrl}
+              posterUrl={posterUrl}
+              failed={failed}
+              onError={() => setFailedPreviewUrl(mediaUrl)}
+            />
           </div>
         </div>
         <footer className="mobile-dialog-footer flex shrink-0 flex-col items-stretch gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:px-5">

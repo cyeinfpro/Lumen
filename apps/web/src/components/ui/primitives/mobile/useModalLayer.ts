@@ -28,6 +28,10 @@ type ModalLayer = {
 
 const activeModalLayers: ModalLayer[] = [];
 const pendingFocusRestoreTimers = new Set<number>();
+const isolatedElements = new Map<
+  HTMLElement,
+  { inert: boolean; ariaHidden: string | null }
+>();
 const PORTAL_SUBSCRIBE = (): (() => void) => () => {};
 const PORTAL_CLIENT_SNAPSHOT = (): true => true;
 const PORTAL_SERVER_SNAPSHOT = (): false => false;
@@ -39,6 +43,53 @@ function cancelPendingFocusRestores() {
   pendingFocusRestoreTimers.clear();
 }
 
+function restoreModalIsolation() {
+  for (const [element, previous] of isolatedElements) {
+    element.inert = previous.inert;
+    if (previous.ariaHidden === null) {
+      element.removeAttribute("aria-hidden");
+    } else {
+      element.setAttribute("aria-hidden", previous.ariaHidden);
+    }
+  }
+  isolatedElements.clear();
+}
+
+function isolateElement(element: HTMLElement) {
+  if (isolatedElements.has(element)) return;
+  isolatedElements.set(element, {
+    inert: element.inert,
+    ariaHidden: element.getAttribute("aria-hidden"),
+  });
+  element.inert = true;
+  element.setAttribute("aria-hidden", "true");
+}
+
+function syncModalIsolation() {
+  restoreModalIsolation();
+  const topLayer = topModalLayer();
+  if (!topLayer) return;
+
+  let branch: HTMLElement =
+    topLayer.root.closest<HTMLElement>("[data-lumen-modal-layer]") ??
+    topLayer.root.parentElement ??
+    topLayer.root;
+  let parent = branch.parentElement;
+  while (parent) {
+    for (const sibling of Array.from(parent.children)) {
+      if (
+        sibling !== branch &&
+        sibling instanceof HTMLElement &&
+        !["SCRIPT", "STYLE", "LINK"].includes(sibling.tagName)
+      ) {
+        isolateElement(sibling);
+      }
+    }
+    branch = parent;
+    parent = parent.parentElement;
+  }
+}
+
 function registerModalLayer(layer: ModalLayer) {
   const previousIndex = activeModalLayers.findIndex(
     (candidate) => candidate.id === layer.id,
@@ -46,11 +97,13 @@ function registerModalLayer(layer: ModalLayer) {
   if (previousIndex >= 0) activeModalLayers.splice(previousIndex, 1);
   activeModalLayers.push(layer);
   cancelPendingFocusRestores();
+  syncModalIsolation();
 }
 
 function unregisterModalLayer(id: symbol) {
   const index = activeModalLayers.findIndex((layer) => layer.id === id);
   if (index >= 0) activeModalLayers.splice(index, 1);
+  syncModalIsolation();
 }
 
 function topModalLayer(): ModalLayer | null {

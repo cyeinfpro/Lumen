@@ -75,7 +75,9 @@ function createCanvasShortcutBindings(
       else store.getState().undo();
     }),
     binding(modifiedKey("y"), () => store.getState().redo()),
-    binding(modifiedKey("0"), () => viewportApi?.fitView()),
+    binding(modifiedKey("0"), () =>
+      viewportApi?.fitView({ instant: true }),
+    ),
     binding(modifiedKey("a"), () => {
       const state = store.getState();
       state.selectNodes(state.graph.nodes.map((node) => node.id));
@@ -87,7 +89,9 @@ function createCanvasShortcutBindings(
       (event) => hasModifier(event) && event.key === "Enter",
       actions.onRunSelected,
     ),
-    binding(shiftedKey("2"), actions.onFitSelection),
+    binding(shiftedKey("2"), () =>
+      viewportApi?.fitSelection(undefined, { instant: true }),
+    ),
     binding(shiftedKey("a"), actions.onAutoLayout),
     binding(
       (event) => !hasModifier(event) && !event.shiftKey && event.key === "/",
@@ -98,10 +102,10 @@ function createCanvasShortcutBindings(
     binding(plainKey("m"), actions.onToggleMiniMap),
     binding(
       (event) => event.key === "+" || event.key === "=",
-      () => viewportApi?.zoomIn(),
+      () => viewportApi?.zoomIn({ instant: true }),
     ),
-    binding(plainKey("-"), () => viewportApi?.zoomOut()),
-    binding(plainKey("0"), () => viewportApi?.resetZoom()),
+    binding(plainKey("-"), () => viewportApi?.zoomOut({ instant: true })),
+    binding(plainKey("0"), () => viewportApi?.resetZoom({ instant: true })),
     binding(plainKey("escape"), actions.onEscape),
   ];
 }

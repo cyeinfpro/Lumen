@@ -259,10 +259,10 @@ export function DesktopStudio() {
                   {studioView === "images" ? (
                     <motion.div
                       key="conversation-images"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
-                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                      transition={{ duration: DURATION.instant, ease: EASE.shutter }}
                     >
                       <ConversationImageGallery
                         messages={messages}
@@ -272,10 +272,10 @@ export function DesktopStudio() {
                   ) : isEmpty ? (
                     <motion.div
                       key="onboarding"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
-                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                      transition={{ duration: DURATION.instant, ease: EASE.shutter }}
                     >
                       <Onboarding
                         onPick={(text, m) => {
@@ -287,10 +287,10 @@ export function DesktopStudio() {
                   ) : (
                     <motion.div
                       key="conversation"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
-                      transition={{ duration: DURATION.page, ease: EASE.develop }}
+                      transition={{ duration: DURATION.instant, ease: EASE.shutter }}
                     >
                       <DesktopConversationCanvas
                         messages={messages}
@@ -433,7 +433,7 @@ function DesktopSidebarDrawer({
             key="drawer-backdrop"
             className="fixed inset-x-0 bottom-0 z-[calc(var(--z-dialog)-1)] bg-[var(--surface-scrim)] min-[1440px]:hidden"
             style={{
-              top: "calc(var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))",
+              top: "calc(var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))",
             }}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -448,12 +448,12 @@ function DesktopSidebarDrawer({
             tabIndex={-1}
             className="fixed bottom-0 left-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] pb-[env(safe-area-inset-bottom,0px)] min-[1440px]:hidden"
             style={{
-              top: "calc(var(--system-banner-height, 0px) + env(safe-area-inset-top, 0px))",
+              top: "calc(var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))",
             }}
             initial={{ x: -288 }}
             animate={{ x: 0 }}
             exit={{ x: -288 }}
-            transition={SPRING.sheet}
+            transition={SPRING.drawer}
             role="dialog"
             aria-modal="true"
             aria-labelledby="desktop-sidebar-drawer-title"

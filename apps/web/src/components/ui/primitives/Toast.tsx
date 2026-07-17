@@ -15,6 +15,11 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  GESTURE,
+  SPRING,
+  projectMomentum,
+} from "@/lib/motion";
 import { IconButton } from "./IconButton";
 
 type ToastTone = "success" | "error" | "info" | "warning";
@@ -124,7 +129,21 @@ function ToastRow({ item }: { item: ToastItem }) {
       initial={reduceMotion ? false : { opacity: 0, y: 16, scale: 0.96 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 24, scale: 0.96 }}
-      transition={reduceMotion ? { duration: 0 } : { type: "spring", damping: 22, stiffness: 260 }}
+      transition={reduceMotion ? { duration: 0 } : SPRING.toast}
+      drag={reduceMotion ? false : "x"}
+      dragConstraints={{ left: 0, right: 0 }}
+      dragElastic={{ left: 0.04, right: 0.28 }}
+      dragMomentum={false}
+      onDragEnd={(_event, info) => {
+        const projectedX = info.offset.x + projectMomentum(info.velocity.x);
+        if (
+          projectedX > GESTURE.snapDistance * 1.5 ||
+          info.velocity.x > GESTURE.dismissVelocity
+        ) {
+          dismiss(item.id);
+        }
+      }}
+      style={{ touchAction: "pan-y" }}
       role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
       aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
       className={cn(
