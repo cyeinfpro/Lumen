@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { ErrorBlock } from "../_components/AdminFeedback";
+import { SettingDetails } from "../_components/SettingDetails";
 import { CANVAS_ENABLED_KEY, CANVAS_SETTING_META } from "./canvasSettingMeta";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
@@ -1554,7 +1555,13 @@ function SettingCard({
         )}
       </div>
 
-      <SettingDetails open={showDetails} item={item} meta={meta} />
+      <SettingDetails
+        open={showDetails}
+        detail={meta.detail}
+        settingKey={item.key}
+        description={item.description}
+        summary={meta.summary}
+      />
 
       {fieldError && (
         <p className="mt-3 flex items-center gap-1.5 type-caption text-danger">
@@ -1573,40 +1580,6 @@ function SettingCard({
         </p>
       )}
     </motion.article>
-  );
-}
-
-function SettingDetails({
-  open,
-  item,
-  meta,
-}: {
-  open: boolean;
-  item: SystemSettingItem;
-  meta: SettingMeta;
-}) {
-  return (
-    <AnimatePresence initial={false}>
-      {open ? (
-        <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
-          exit={{ opacity: 0, height: 0 }}
-          className="overflow-hidden"
-        >
-          <div className="mt-3 space-y-2 border-t border-[var(--border-subtle)] pt-3 type-caption text-[var(--fg-2)]">
-            {meta.detail ? <p>{meta.detail}</p> : null}
-            <p>
-              技术名{" "}
-              <code className="font-mono text-[var(--fg-1)]">{item.key}</code>
-            </p>
-            {item.description && item.description !== meta.summary ? (
-              <p>{item.description}</p>
-            ) : null}
-          </div>
-        </motion.div>
-      ) : null}
-    </AnimatePresence>
   );
 }
 
@@ -1633,14 +1606,7 @@ function SettingControl({
     getBrowserOriginSSR,
   );
 
-  const controlValue =
-    op?.kind === "clear"
-      ? ""
-      : op?.kind === "set"
-        ? op.value
-        : item.value ?? meta.defaultValue ?? "";
-  const inputValue =
-    op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
+  const { controlValue, inputValue } = settingControlValues(item, meta, op);
   const showDefaultAction =
     item.value != null &&
     item.value !== "" &&
@@ -1887,6 +1853,23 @@ function SettingControl({
       />
     </div>
   );
+}
+
+function settingControlValues(
+  item: SystemSettingItem,
+  meta: SettingMeta,
+  op: Op | undefined,
+) {
+  if (op?.kind === "clear") {
+    return { controlValue: "", inputValue: "" };
+  }
+  if (op?.kind === "set") {
+    return { controlValue: op.value, inputValue: op.value };
+  }
+  return {
+    controlValue: item.value ?? meta.defaultValue ?? "",
+    inputValue: item.value ?? "",
+  };
 }
 
 function ModelSelectControl({

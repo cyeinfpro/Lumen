@@ -9,7 +9,6 @@ import {
 } from "@xyflow/react";
 import {
   AlertCircle,
-  AlertTriangle,
   CheckCircle2,
   GripVertical,
   Loader2,
@@ -26,7 +25,6 @@ import {
   imageVariantUrl,
   videoBinaryUrl,
 } from "@/lib/apiClient";
-import { canvasExecutionStatusLabel } from "@/lib/canvas/executionPresentation";
 import {
   CANVAS_NODE_SPECS,
   findMatchingCanvasNodeCatalogItem,
@@ -49,6 +47,7 @@ import { CanvasOutputDownloadButton } from "../CanvasOutputDownloadButton";
 import { CanvasVideoPreviewDialog } from "../CanvasVideoPreviewDialog";
 import { CanvasImageAssetDropZone } from "./CanvasImageAssetDropZone";
 import { CanvasNodeExecutionProgress } from "./CanvasNodeExecutionProgress";
+import { CanvasNodeStatus } from "./CanvasNodeStatus";
 import styles from "../canvas.module.css";
 
 export interface CanvasFlowNodeData extends Record<string, unknown> {
@@ -163,7 +162,7 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
             {displayLabel}
           </p>
         </div>
-        <NodeStatus execution={execution} />
+        <CanvasNodeStatus execution={execution} />
       </header>
 
       <CanvasNodeBody collapsed={collapsed} data={data} />
@@ -1264,74 +1263,6 @@ function outputDimension(value: number | null | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.round(value)
     : undefined;
-}
-
-function NodeStatus({ execution }: { execution?: CanvasNodeExecution | null }) {
-  if (!execution) return null;
-  const label = canvasExecutionStatusLabel(execution.status);
-  const title = executionStatusTitle(execution, label);
-  if (ACTIVE.has(execution.status)) {
-    return (
-      <span role="status" title={title} className="inline-flex shrink-0">
-        <Loader2
-          className="h-4 w-4 animate-spin text-[var(--accent)] motion-reduce:animate-none"
-          aria-hidden
-        />
-        <span className="sr-only">状态：{label}</span>
-      </span>
-    );
-  }
-  if (execution.status === "failed" || execution.status === "blocked") {
-    return (
-      <span role="alert" title={title} className="inline-flex shrink-0">
-        <AlertCircle className="h-4 w-4 text-[var(--danger-fg)]" aria-hidden />
-        <span className="sr-only">状态：{label}</span>
-      </span>
-    );
-  }
-  if (execution.status === "partial_failed") {
-    return (
-      <span role="status" title={title} className="inline-flex shrink-0">
-        <AlertTriangle
-          className="h-4 w-4 text-[var(--warning-fg)]"
-          aria-hidden
-        />
-        <span className="sr-only">状态：{label}</span>
-      </span>
-    );
-  }
-  if (TERMINAL_OK.has(execution.status)) {
-    return (
-      <span role="status" title={label} className="inline-flex shrink-0">
-        <CheckCircle2
-          className="h-4 w-4 text-[var(--success-fg)]"
-          aria-hidden
-        />
-        <span className="sr-only">状态：{label}</span>
-      </span>
-    );
-  }
-  return (
-    <span
-      role="status"
-      title={title}
-      className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
-    >
-      <span className="h-2 w-2 rounded-full bg-[var(--fg-3)]" aria-hidden />
-      <span className="sr-only">状态：{label}</span>
-    </span>
-  );
-}
-
-function executionStatusTitle(
-  execution: CanvasNodeExecution,
-  label: string,
-): string {
-  const reason =
-    execution.error_message ??
-    execution.tasks?.find((task) => task.error_message)?.error_message ??
-    null;
-  return reason ? `${label}：${reason}` : label;
 }
 
 function NodePorts({
