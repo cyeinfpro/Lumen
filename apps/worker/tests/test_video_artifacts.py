@@ -9,6 +9,7 @@ import pytest
 
 from app import video_artifacts, video_upstream
 from app.video_artifacts import (
+    InvalidVideoArtifactError,
     UnsupportedVideoMediaError,
     copy_video_file_exclusive,
     copy_video_file_exclusive_result,
@@ -93,7 +94,22 @@ def test_downloaded_video_from_bytes_tracks_real_mime_and_cleans_up() -> None:
 def test_postprocess_video_bytes_preserves_detected_extension_without_ffmpeg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(video_artifacts.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        video_artifacts.shutil,
+        "which",
+        lambda name: "ffprobe" if name == "ffprobe" else None,
+    )
+    monkeypatch.setattr(
+        video_artifacts,
+        "probe_video",
+        lambda _ffprobe, _path: {
+            "width": 16,
+            "height": 16,
+            "duration_ms": 1000,
+            "fps": 24.0,
+            "has_audio": False,
+        },
+    )
 
     processed, diagnostics = video_artifacts.postprocess_video_bytes(_mp4_bytes())
 
@@ -102,6 +118,45 @@ def test_postprocess_video_bytes_preserves_detected_extension_without_ffmpeg(
     assert processed["video_bytes"] == _mp4_bytes()
     assert diagnostics["output_mime"] == "video/mp4"
     assert diagnostics["output_extension"] == ".mp4"
+
+
+def test_postprocess_video_bytes_rejects_missing_ffprobe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(video_artifacts.shutil, "which", lambda _name: None)
+
+    with pytest.raises(InvalidVideoArtifactError, match="ffprobe is required"):
+        video_artifacts.postprocess_video_bytes(_mp4_bytes())
+
+
+def test_postprocess_video_cleans_remux_temp_when_ffmpeg_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloaded = downloaded_video_from_bytes(_mp4_bytes())
+    remux_path = tmp_path / "failed-remux.mp4"
+
+    def temporary_path(_suffix: str) -> Path:
+        remux_path.touch()
+        return remux_path
+
+    def fail_run(*_args: object, **_kwargs: object) -> object:
+        raise OSError("ffmpeg unavailable")
+
+    monkeypatch.setattr(
+        video_artifacts.shutil,
+        "which",
+        lambda name: name,
+    )
+    monkeypatch.setattr(video_artifacts, "_temporary_video_path", temporary_path)
+    monkeypatch.setattr(video_artifacts.subprocess, "run", fail_run)
+
+    try:
+        with pytest.raises(OSError, match="ffmpeg unavailable"):
+            video_artifacts.postprocess_video_file(downloaded)
+        assert not remux_path.exists()
+    finally:
+        downloaded.cleanup()
 
 
 def test_copy_video_file_exclusive_is_idempotent_and_never_overwrites(

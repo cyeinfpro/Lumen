@@ -23,6 +23,10 @@ import type { Generation, RecommendedErrorAction } from "@/lib/types";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { IconButton } from "@/components/ui/primitives";
+import {
+  userTaskQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { TaskItem } from "./TaskItem";
 
 type TaskFilter = "all" | "active" | "failed";
@@ -190,11 +194,16 @@ export function TaskCenter({
 }: TaskCenterProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
   const qc = useQueryClient();
+  const userScope = useUserQueryScope();
   const status =
     filter === "active" ? "active" : filter === "failed" ? "failed" : undefined;
   const query = useQuery({
-    queryKey: ["tasks", "recent", status ?? "all"],
+    queryKey: userTaskQueryKeys.recent(
+      userScope.userId,
+      status ?? "all",
+    ),
     queryFn: ({ signal }) => listTasks({ status, limit: 80 }, { signal }),
+    enabled: userScope.enabled,
     staleTime: 8_000,
   });
 
@@ -203,7 +212,9 @@ export function TaskCenter({
       await retryTask(taskKindPath(task), task.id);
     },
     onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["tasks"] });
+      await qc.invalidateQueries({
+        queryKey: userTaskQueryKeys.all(userScope.userId),
+      });
     },
     onError: (err, task) => {
       logWarn("task-center.retry_failed", {
@@ -218,7 +229,9 @@ export function TaskCenter({
       await cancelTask(taskKindPath(task), task.id);
     },
     onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["tasks"] });
+      await qc.invalidateQueries({
+        queryKey: userTaskQueryKeys.all(userScope.userId),
+      });
     },
     onError: (err, task) => {
       logWarn("task-center.cancel_failed", {
@@ -263,6 +276,7 @@ export function TaskCenter({
           size="sm"
           tooltip="刷新任务"
           onClick={() => void query.refetch()}
+          disabled={!userScope.enabled}
           aria-label="刷新任务"
         >
           <RefreshCw

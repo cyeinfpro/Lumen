@@ -33,10 +33,16 @@ from lumen_core.models import (
     Conversation,
     Generation,
     Image,
+    MemoryExtractionRun,
     Message,
     User,
 )
-from lumen_core.schemas import SessionOut, SessionsOut, UsageOut
+from lumen_core.schemas import (
+    SessionOut,
+    SessionsOut,
+    UsageOut,
+    public_message_content,
+)
 
 from ..audit import request_ip_hash, write_audit
 from ..billing_cache_state import invalidate_balance_cache
@@ -97,6 +103,18 @@ def _iter_tempfile_and_close(tmp: BinaryIO) -> Iterator[bytes]:
             yield chunk
     finally:
         tmp.close()
+
+
+def _export_message_record(message: Any) -> dict[str, Any]:
+    return {
+        "conversation_id": message.conversation_id,
+        "id": message.id,
+        "role": message.role,
+        "content": public_message_content(message.content),
+        "intent": message.intent,
+        "status": message.status,
+        "created_at": (message.created_at.isoformat() if message.created_at else None),
+    }
 
 
 def _fs_path_safe(storage_key: str | None) -> Path | None:
@@ -260,15 +278,46 @@ async def _cancel_account_active_tasks(
                 )
         elif completion.status == CompletionStatus.STREAMING.value:
             streaming_completion_ids.append(completion.id)
+    memory_extractions_canceled = await _cancel_account_memory_extractions(
+        db,
+        user_id=user_id,
+        canceled_at=canceled_at,
+    )
     return {
         "generations_canceled": len(generations),
         "completions_canceled": len(completions),
+        "memory_extractions_canceled": memory_extractions_canceled,
         "holds_released": holds_released,
         "task_ids": task_ids,
         "queued_generation_ids": queued_generation_ids,
         "running_generation_ids": running_generation_ids,
         "streaming_completion_ids": streaming_completion_ids,
     }
+
+
+async def _cancel_account_memory_extractions(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    canceled_at: datetime,
+) -> int | None:
+    result = await db.execute(
+        update(MemoryExtractionRun)
+        .where(
+            MemoryExtractionRun.user_id == user_id,
+            MemoryExtractionRun.status.in_(("pending", "running", "retryable")),
+        )
+        .values(
+            status="canceled",
+            owner=None,
+            lease_expires_at=None,
+            canceled_at=canceled_at,
+            cancel_reason="account_deleted",
+            fence=MemoryExtractionRun.fence + 1,
+            updated_at=canceled_at,
+        )
+    )
+    return _dml_rowcount(result)
 
 
 async def _release_account_generation_queue_state(redis: Any, task_id: str) -> None:
@@ -563,17 +612,7 @@ async def export_my_data(
                     if not rows:
                         break
                     for m in rows:
-                        line = {
-                            "conversation_id": m.conversation_id,
-                            "id": m.id,
-                            "role": m.role,
-                            "content": m.content,
-                            "intent": m.intent,
-                            "status": m.status,
-                            "created_at": (
-                                m.created_at.isoformat() if m.created_at else None
-                            ),
-                        }
+                        line = _export_message_record(m)
                         await asyncio.to_thread(
                             messages_file.write,
                             json.dumps(line, ensure_ascii=False).encode("utf-8")
@@ -745,6 +784,7 @@ async def delete_my_account(
             "images_deleted": _dml_rowcount(images_result),
             "generations_canceled": task_cleanup["generations_canceled"],
             "completions_canceled": task_cleanup["completions_canceled"],
+            "memory_extractions_canceled": task_cleanup["memory_extractions_canceled"],
         },
     )
     await db.commit()

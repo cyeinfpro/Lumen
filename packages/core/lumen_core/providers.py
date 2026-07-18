@@ -8,14 +8,19 @@ Both api and worker need the same effective provider list:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import errno
 import hashlib
+import hmac
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -58,6 +63,23 @@ class ProviderProxyDefinition:
     password: str | None = field(default=None, repr=False, compare=False)
     private_key_path: str | None = None
     enabled: bool = True
+    known_hosts_path: str | None = None
+    host_key_fingerprint: str | None = field(
+        default=None,
+        repr=False,
+    )
+
+    @property
+    def known_hosts_file(self) -> str | None:
+        return self.known_hosts_path
+
+    @property
+    def known_hosts(self) -> str | None:
+        return self.known_hosts_path
+
+    @property
+    def fingerprint(self) -> str | None:
+        return self.host_key_fingerprint
 
 
 @dataclass(frozen=True)
@@ -124,6 +146,7 @@ _PROXY_PROTOCOL_ALIASES = {
     "socks5h": "socks5",
     "ssh": "ssh",
 }
+_SSH_HOST_KEY_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}=?$")
 
 
 def endpoint_kind_allowed(provider: Any, endpoint_kind: str | None) -> bool:
@@ -199,7 +222,9 @@ def provider_supports_route(
             return False
         return True
     if endpoint_kind == "generations":
-        return _provider_capability(provider, "image_generations_supported") is not False
+        return (
+            _provider_capability(provider, "image_generations_supported") is not False
+        )
     # endpoint_kind unknown / "auto" → allow if neither image capability is
     # explicitly disabled (still need at least one viable path).
     img_resp = _provider_capability(provider, "image_responses_supported")
@@ -211,7 +236,13 @@ def provider_supports_route(
 
 def route_to_purpose(route: str | None) -> str:
     """Map legacy high-level provider routes to account-level purposes."""
-    if route in {"image", "image_jobs", "image2", "image2_direct", "image2_edit_direct"}:
+    if route in {
+        "image",
+        "image_jobs",
+        "image2",
+        "image2_direct",
+        "image2_edit_direct",
+    }:
         return "image"
     if route == "embedding":
         return "embedding"
@@ -226,9 +257,7 @@ def has_embedding_purpose(providers: list[ProviderDefinition]) -> bool:
     feature must short-circuit instead of writing deterministic placeholders
     that won't match anything at retrieval time.
     """
-    return any(
-        p.enabled and "embedding" in p.purposes for p in providers
-    )
+    return any(p.enabled and "embedding" in p.purposes for p in providers)
 
 
 def normalize_provider_purposes(raw: Any) -> tuple[str, ...]:
@@ -261,7 +290,9 @@ def normalize_provider_purposes(raw: Any) -> tuple[str, ...]:
 @dataclass
 class RoundRobinState:
     counters: dict[int, int] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
 
     def advance(self, priority: int) -> int:
         with self._lock:
@@ -362,6 +393,23 @@ def _parse_proxy_port(raw: Any, *, default: int) -> int:
     if port < 1 or port > 65535:
         raise ValueError("proxy port must be between 1 and 65535")
     return port
+
+
+def _parse_proxy_alias_string(
+    item: dict[str, Any],
+    *,
+    keys: tuple[str, ...],
+    field_name: str,
+    proxy_name: str,
+) -> str | None:
+    values = [
+        (key, value)
+        for key in keys
+        if (value := _parse_optional_str(item.get(key))) is not None
+    ]
+    if len({value for _key, value in values}) > 1:
+        raise ValueError(f"proxy {proxy_name}: {field_name} aliases disagree")
+    return values[0][1] if values else None
 
 
 def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefinition:
@@ -472,6 +520,24 @@ def parse_proxy_item(item: dict[str, Any], *, index: int) -> ProviderProxyDefini
     private_key_path = _parse_optional_str(
         item.get("private_key_path") or item.get("identity_file")
     )
+    known_hosts_path = _parse_proxy_alias_string(
+        item,
+        keys=("known_hosts_path", "known_hosts_file", "known_hosts"),
+        field_name="known_hosts_path",
+        proxy_name=name,
+    )
+    host_key_fingerprint = _parse_proxy_alias_string(
+        item,
+        keys=("host_key_fingerprint", "fingerprint"),
+        field_name="host_key_fingerprint",
+        proxy_name=name,
+    )
+    if host_key_fingerprint and not _SSH_HOST_KEY_FINGERPRINT_RE.fullmatch(
+        host_key_fingerprint
+    ):
+        raise ValueError(
+            f"proxy {name}: host_key_fingerprint must use SHA256:... format"
+        )
     return ProviderProxyDefinition(
         name=name.strip(),
         protocol=protocol,
@@ -480,6 +546,8 @@ def parse_proxy_item(item: dict[str, Any], *, index: int) -> ProviderProxyDefini
         username=username,
         password=password,
         private_key_path=private_key_path,
+        known_hosts_path=known_hosts_path,
+        host_key_fingerprint=host_key_fingerprint,
         enabled=_parse_bool(item.get("enabled"), default=True, field="enabled"),
     )
 
@@ -572,7 +640,9 @@ def parse_provider_json(raw: str | None) -> tuple[list[ProviderDefinition], list
     return providers, errors
 
 
-def parse_proxy_json(raw: str | None) -> tuple[list[ProviderProxyDefinition], list[str]]:
+def parse_proxy_json(
+    raw: str | None,
+) -> tuple[list[ProviderProxyDefinition], list[str]]:
     _providers, proxies, errors = parse_provider_config_json(raw)
     return proxies, errors
 
@@ -752,6 +822,8 @@ def _ssh_tunnel_key(proxy: ProviderProxyDefinition) -> str:
             proxy.username or "",
             password_digest,
             proxy.private_key_path or "",
+            proxy.known_hosts_path or "",
+            proxy.host_key_fingerprint or "",
         ]
     )
 
@@ -846,8 +918,261 @@ def _write_ssh_askpass_helper() -> str:
     fd, path = _atomic_secret_open("lumen-ssh-askpass-", 0o700)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("#!/bin/sh\n")
-        fh.write("cat \"$LUMEN_SSH_PASSWORD_FILE\"\n")
+        fh.write('cat "$LUMEN_SSH_PASSWORD_FILE"\n')
     return path
+
+
+def _normalize_ssh_fingerprint(value: str) -> str:
+    return value.strip().rstrip("=")
+
+
+def _ssh_key_fingerprint(key_blob: bytes) -> str:
+    encoded = base64.b64encode(hashlib.sha256(key_blob).digest()).decode("ascii")
+    return f"SHA256:{encoded.rstrip('=')}"
+
+
+def _known_hosts_file_error(
+    proxy: ProviderProxyDefinition,
+    path: str,
+    detail: str,
+) -> RuntimeError:
+    return RuntimeError(f"ssh proxy {proxy.name} known_hosts {detail}: {path}")
+
+
+def _open_known_hosts_file(
+    proxy: ProviderProxyDefinition,
+    path: str,
+) -> tuple[int, os.stat_result]:
+    try:
+        path_stat = os.lstat(path)
+    except OSError as exc:
+        raise _known_hosts_file_error(proxy, path, "file is unavailable") from exc
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise _known_hosts_file_error(proxy, path, "path must not be a symlink")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = -1
+    try:
+        source_fd = os.open(path, flags)
+        file_stat = os.fstat(source_fd)
+    except OSError as exc:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if exc.errno == errno.ELOOP:
+            raise _known_hosts_file_error(
+                proxy,
+                path,
+                "path must not be a symlink",
+            ) from exc
+        raise _known_hosts_file_error(proxy, path, "file is unavailable") from exc
+    if (path_stat.st_dev, path_stat.st_ino) != (
+        file_stat.st_dev,
+        file_stat.st_ino,
+    ):
+        os.close(source_fd)
+        raise _known_hosts_file_error(
+            proxy,
+            path,
+            "path changed during validation",
+        )
+    return source_fd, file_stat
+
+
+def _validate_known_hosts_file(
+    proxy: ProviderProxyDefinition,
+    path: str,
+    file_stat: os.stat_result,
+) -> None:
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise _known_hosts_file_error(proxy, path, "path is not a regular file")
+    if not (file_stat.st_mode & 0o444):
+        raise _known_hosts_file_error(proxy, path, "file is not readable")
+    if file_stat.st_mode & 0o022:
+        raise _known_hosts_file_error(
+            proxy,
+            path,
+            "file is group/world writable",
+        )
+    if file_stat.st_size <= 0:
+        raise _known_hosts_file_error(proxy, path, "file is empty")
+
+
+def _copy_file_descriptor(source_fd: int, target_fd: int) -> int:
+    copied = 0
+    while True:
+        chunk = os.read(source_fd, 64 * 1024)
+        if not chunk:
+            return copied
+        view = memoryview(chunk)
+        while view:
+            written = os.write(target_fd, view)
+            if written <= 0:
+                raise OSError("known_hosts snapshot write returned no progress")
+            copied += written
+            view = view[written:]
+
+
+def _known_hosts_stat_signature(file_stat: os.stat_result) -> tuple[int, ...]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _copy_known_hosts_snapshot(
+    proxy: ProviderProxyDefinition,
+    path: str,
+    source_fd: int,
+    source_stat: os.stat_result,
+) -> str:
+    snapshot_fd, snapshot_path = _atomic_secret_open(
+        "lumen-ssh-known-hosts-",
+        0o600,
+    )
+    try:
+        copied = _copy_file_descriptor(source_fd, snapshot_fd)
+        final_stat = os.fstat(source_fd)
+        if (
+            copied != source_stat.st_size
+            or _known_hosts_stat_signature(final_stat)
+            != _known_hosts_stat_signature(source_stat)
+        ):
+            raise _known_hosts_file_error(
+                proxy,
+                path,
+                "file changed during snapshot",
+            )
+    except BaseException:
+        os.close(snapshot_fd)
+        _unlink_quietly(snapshot_path)
+        raise
+    else:
+        os.close(snapshot_fd)
+        return snapshot_path
+
+
+def _validated_known_hosts_path(proxy: ProviderProxyDefinition) -> str | None:
+    raw_path = (proxy.known_hosts_path or "").strip()
+    if not raw_path:
+        return None
+    path = os.path.abspath(os.path.expanduser(raw_path))
+    source_fd, file_stat = _open_known_hosts_file(proxy, path)
+    try:
+        _validate_known_hosts_file(proxy, path, file_stat)
+        return _copy_known_hosts_snapshot(
+            proxy,
+            path,
+            source_fd,
+            file_stat,
+        )
+    finally:
+        os.close(source_fd)
+
+
+def _parse_ssh_keyscan_output(
+    output: str,
+    *,
+    expected_fingerprint: str,
+) -> str | None:
+    expected = _normalize_ssh_fingerprint(expected_fingerprint)
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            key_blob = base64.b64decode(fields[2], validate=True)
+        except (TypeError, ValueError):
+            continue
+        if hmac.compare_digest(_ssh_key_fingerprint(key_blob), expected):
+            return line
+    return None
+
+
+async def _scan_ssh_host_key(
+    proxy: ProviderProxyDefinition,
+    *,
+    fingerprint: str,
+) -> str:
+    keyscan_bin = shutil.which("ssh-keyscan")
+    if not keyscan_bin:
+        raise RuntimeError(
+            f"ssh proxy {proxy.name} requires ssh-keyscan for fingerprint verification"
+        )
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                keyscan_bin,
+                "-T",
+                "5",
+                "-p",
+                str(proxy.port),
+                "--",
+                proxy.host,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=6,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"ssh proxy {proxy.name} host key scan failed: {type(exc).__name__}"
+        ) from None
+    output = result.stdout if isinstance(result.stdout, str) else ""
+    matched = _parse_ssh_keyscan_output(
+        output,
+        expected_fingerprint=fingerprint,
+    )
+    if matched is None:
+        detail = result.stderr.strip() if isinstance(result.stderr, str) else ""
+        suffix = f": {detail[:200]}" if detail else ""
+        raise RuntimeError(
+            f"ssh proxy {proxy.name} host key fingerprint mismatch{suffix}"
+        )
+    return matched
+
+
+def _write_known_hosts_line(line: str) -> str:
+    fd, path = _atomic_secret_open("lumen-ssh-known-hosts-", 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
+    except BaseException:
+        _unlink_quietly(path)
+        raise
+    return path
+
+
+async def _prepare_ssh_host_key_verification(
+    proxy: ProviderProxyDefinition,
+) -> tuple[str, str | None]:
+    fingerprint = (proxy.host_key_fingerprint or "").strip()
+    if fingerprint and not _SSH_HOST_KEY_FINGERPRINT_RE.fullmatch(fingerprint):
+        raise RuntimeError(
+            f"ssh proxy {proxy.name} has an invalid host key fingerprint"
+        )
+    if fingerprint:
+        matched_line = await _scan_ssh_host_key(proxy, fingerprint=fingerprint)
+        temporary_path = _write_known_hosts_line(matched_line)
+        return temporary_path, temporary_path
+
+    known_hosts_path = _validated_known_hosts_path(proxy)
+    if known_hosts_path is None:
+        raise RuntimeError(
+            f"ssh proxy {proxy.name} requires known_hosts_path or "
+            "host_key_fingerprint; refusing unknown host key"
+        )
+    return known_hosts_path, known_hosts_path
 
 
 def _unlink_quietly(path: str | None) -> None:
@@ -909,70 +1234,82 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
 
         last_error = ""
         for _attempt in range(_SSH_TUNNEL_START_ATTEMPTS):
-            local_port = _free_local_port()
-            target = f"{proxy.username}@{proxy.host}" if proxy.username else proxy.host
-            cmd = [
-                ssh_bin,
-                "-N",
-                "-D",
-                f"127.0.0.1:{local_port}",
-                "-p",
-                str(proxy.port),
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ServerAliveInterval=30",
-                "-o",
-                "ServerAliveCountMax=3",
-            ]
-            if proxy.password:
-                cmd.extend(
-                    [
-                        "-o",
-                        "BatchMode=no",
-                        "-o",
-                        "PasswordAuthentication=yes",
-                        "-o",
-                        "KbdInteractiveAuthentication=yes",
-                        "-o",
-                        "PreferredAuthentications=password,keyboard-interactive,publickey",
-                    ]
-                )
-            else:
-                cmd.extend(
-                    [
-                        "-o",
-                        "BatchMode=yes",
-                        "-o",
-                        "PasswordAuthentication=no",
-                    ]
-                )
-            if proxy.private_key_path:
-                cmd.extend(["-i", proxy.private_key_path])
-            cmd.append(target)
-
-            env = None
-            askpass_path = None
-            password_file = None
-            sshpass_bin = shutil.which("sshpass") if proxy.password else None
-            if proxy.password:
-                password_file = _write_secret_file(proxy.password)
-            if proxy.password and sshpass_bin and password_file:
-                cmd = [sshpass_bin, "-f", password_file, *cmd]
-                env = os.environ.copy()
-            elif proxy.password:
-                askpass_path = _write_ssh_askpass_helper()
-                env = os.environ.copy()
-                env["SSH_ASKPASS"] = askpass_path
-                env["SSH_ASKPASS_REQUIRE"] = "force"
-                env.setdefault("DISPLAY", "localhost:0")
-                env["LUMEN_SSH_PASSWORD_FILE"] = str(password_file)
-
+            (
+                known_hosts_path,
+                temporary_known_hosts_path,
+            ) = await _prepare_ssh_host_key_verification(proxy)
             proc: asyncio.subprocess.Process | None = None
             tunnel_started = False
+            askpass_path = None
+            password_file = None
             try:
+                local_port = _free_local_port()
+                target = (
+                    f"{proxy.username}@{proxy.host}" if proxy.username else proxy.host
+                )
+                cmd = [
+                    ssh_bin,
+                    "-N",
+                    "-D",
+                    f"127.0.0.1:{local_port}",
+                    "-p",
+                    str(proxy.port),
+                    "-o",
+                    "ExitOnForwardFailure=yes",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    f"UserKnownHostsFile={known_hosts_path}",
+                    "-o",
+                    f"GlobalKnownHostsFile={os.devnull}",
+                    "-o",
+                    "UpdateHostkeys=no",
+                    "-o",
+                    "ServerAliveInterval=30",
+                    "-o",
+                    "ServerAliveCountMax=3",
+                ]
+                if proxy.password:
+                    cmd.extend(
+                        [
+                            "-o",
+                            "BatchMode=no",
+                            "-o",
+                            "PasswordAuthentication=yes",
+                            "-o",
+                            "KbdInteractiveAuthentication=yes",
+                            "-o",
+                            "PreferredAuthentications=password,keyboard-interactive,publickey",
+                        ]
+                    )
+                else:
+                    cmd.extend(
+                        [
+                            "-o",
+                            "BatchMode=yes",
+                            "-o",
+                            "PasswordAuthentication=no",
+                        ]
+                    )
+                if proxy.private_key_path:
+                    cmd.extend(["-i", proxy.private_key_path])
+                cmd.extend(["--", target])
+
+                env = None
+                sshpass_bin = shutil.which("sshpass") if proxy.password else None
+                if proxy.password:
+                    password_file = _write_secret_file(proxy.password)
+                if proxy.password and sshpass_bin and password_file:
+                    cmd = [sshpass_bin, "-f", password_file, *cmd]
+                    env = os.environ.copy()
+                elif proxy.password:
+                    askpass_path = _write_ssh_askpass_helper()
+                    env = os.environ.copy()
+                    env["SSH_ASKPASS"] = askpass_path
+                    env["SSH_ASKPASS_REQUIRE"] = "force"
+                    env.setdefault("DISPLAY", "localhost:0")
+                    env["LUMEN_SSH_PASSWORD_FILE"] = str(password_file)
+
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdin=subprocess.DEVNULL,
@@ -983,9 +1320,7 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
                 for _ in range(_SSH_TUNNEL_READY_CHECKS):
                     if proc.returncode is not None:
                         stderr = await _read_process_stderr(proc)
-                        last_error = (
-                            f"exited with {proc.returncode}: {stderr}".strip()
-                        )
+                        last_error = f"exited with {proc.returncode}: {stderr}".strip()
                         break
                     if await _local_port_accepts(local_port):
                         url = f"socks5h://127.0.0.1:{local_port}"
@@ -995,12 +1330,15 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
                     await asyncio.sleep(0.1)
                 else:
                     stderr = await _read_process_stderr(proc)
-                    last_error = f"timed out waiting for local SOCKS port: {stderr}".strip()
+                    last_error = (
+                        f"timed out waiting for local SOCKS port: {stderr}".strip()
+                    )
             finally:
                 if proc is not None and not tunnel_started:
                     await _terminate_process(proc)
                 _unlink_quietly(askpass_path)
                 _unlink_quietly(password_file)
+                _unlink_quietly(temporary_known_hosts_path)
 
         raise RuntimeError(
             f"ssh proxy {proxy.name} failed to start after "

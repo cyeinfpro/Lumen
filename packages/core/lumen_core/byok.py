@@ -15,12 +15,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from . import byok_sse as _byok_sse
+
+
+extract_response_output_text = _byok_sse.extract_response_output_text
+extract_sse_output_text = _byok_sse.extract_sse_output_text
 
 
 BYOK_DEFAULT_VALIDATION_MODEL = "gpt-5.4"
@@ -41,9 +46,7 @@ _PROVIDER_PROBE_INPUT = (
 # Accept: pure 0, or non-zero-leading 1-3 digits + optional thousands groups
 # (each exactly 3 digits, separated by ',' or ' '), or any plain non-zero
 # multi-digit integer. Rejects "1,2,3", "1 2 3", "12 34", "1,23".
-_ANSWER_RE = re.compile(
-    r"^[+-]?(?:0|[1-9]\d{0,2}(?:[, ]\d{3})*|[1-9]\d+)$"
-)
+_ANSWER_RE = re.compile(r"^[+-]?(?:0|[1-9]\d{0,2}(?:[, ]\d{3})*|[1-9]\d+)$")
 
 
 class ByokCryptoError(RuntimeError):
@@ -75,7 +78,9 @@ def _derive_key(
 ) -> bytes:
     secret = (master_secret or "").strip()
     if len(secret) < 32:
-        raise ByokCryptoError("BYOK API key master secret must be at least 32 characters")
+        raise ByokCryptoError(
+            "BYOK API key master secret must be at least 32 characters"
+        )
     return hmac.new(
         secret.encode("utf-8"),
         f"lumen-byok:{version}:{purpose}".encode("utf-8"),
@@ -87,7 +92,9 @@ def _new_aesgcm(key: bytes) -> Any:
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
-        raise ByokCryptoError("cryptography package is required for BYOK encryption") from exc
+        raise ByokCryptoError(
+            "cryptography package is required for BYOK encryption"
+        ) from exc
     return AESGCM(key)
 
 
@@ -235,79 +242,6 @@ def build_provider_probe_request() -> dict[str, Any]:
         "stream": False,
         "store": False,
     }
-
-
-def extract_response_output_text(payload: object) -> str:
-    """Extract text from common OpenAI Responses-compatible JSON shapes."""
-    if not isinstance(payload, dict):
-        return ""
-
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text:
-        return output_text
-
-    chunks: list[str] = []
-    output = payload.get("output")
-    if isinstance(output, list):
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                text = part.get("text") or part.get("output_text")
-                if isinstance(text, str) and text:
-                    chunks.append(text)
-    if chunks:
-        return "".join(chunks)
-
-    try:
-        return json.dumps(payload, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def extract_sse_output_text(raw: str) -> str:
-    chunks: list[str] = []
-    buffer = raw.replace("\r\n", "\n")
-    for raw_event in buffer.split("\n\n"):
-        data_lines: list[str] = []
-        for line in raw_event.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                data_lines.append(line[len("data:") :].strip())
-        if not data_lines:
-            continue
-        data = "\n".join(data_lines)
-        if data == "[DONE]":
-            continue
-        try:
-            obj = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-
-        delta = obj.get("delta")
-        if isinstance(delta, str) and delta:
-            chunks.append(delta)
-            continue
-
-        text = obj.get("text") or obj.get("output_text")
-        if isinstance(text, str) and text:
-            chunks.append(text)
-            continue
-
-        for key in ("response", "item", "part"):
-            nested = obj.get(key)
-            nested_text = extract_response_output_text(nested)
-            if nested_text:
-                chunks.append(nested_text)
-                break
-    return "".join(chunks)
 
 
 def normalize_integer_answer(text: str) -> str | None:

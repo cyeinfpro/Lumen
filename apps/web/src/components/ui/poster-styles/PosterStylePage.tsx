@@ -13,8 +13,11 @@ import { useState } from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
 import { SPRING } from "@/lib/motion";
-import { useGeneratePosterStyleMutation } from "@/lib/queries";
 import type { PosterStyleGenerateIn } from "@/lib/apiClient";
+import {
+  useGeneratePosterStyleMutation,
+  usePosterStyleJobsQuery,
+} from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import {
   ProjectMobileTabBar,
@@ -38,6 +41,7 @@ export function PosterStylePage() {
   const searchParams = useSearchParams();
   const initialTab = parseLibraryTab(searchParams.get("tab"));
   const [tab, setTab] = useState<LibraryTab>(initialTab);
+  const jobs = usePosterStyleJobsQuery({ limit: 50 });
 
   const generate = useGeneratePosterStyleMutation({
     onSuccess: () => {
@@ -57,9 +61,8 @@ export function PosterStylePage() {
   };
 
   // 从 jobs 面板点击"查看入库"时，切到 browse；详情抽屉自身在 PosterStyleBrowser
-  // 里以 itemId state 打开。这里通过 sessionStorage 桥接，避免 props drilling。
+  // 里消费并清理一次性 itemId。先写入再切 tab，确保浏览器挂载时可读取。
   const handleOpenItemFromJob = (itemId: string) => {
-    setTab("browse");
     if (typeof window !== "undefined") {
       try {
         window.sessionStorage.setItem("posterStyle.openItemId", itemId);
@@ -67,6 +70,7 @@ export function PosterStylePage() {
         // ignore
       }
     }
+    setTab("browse");
   };
 
   return (
@@ -98,7 +102,7 @@ export function PosterStylePage() {
           ) : null}
 
           {tab === "jobs" ? (
-            <PosterStyleJobsPanel onOpenItem={handleOpenItemFromJob} />
+            <PosterStyleJobsPanel jobs={jobs} onOpenItem={handleOpenItemFromJob} />
           ) : null}
 
           {tab === "create" ? (

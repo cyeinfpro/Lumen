@@ -66,9 +66,7 @@ def _make_pool(*configs: ProviderConfig) -> ProviderPool:
                 "output": [
                     {
                         "type": "message",
-                        "content": [
-                            {"type": "output_text", "text": "9801"}
-                        ],
+                        "content": [{"type": "output_text", "text": "9801"}],
                     }
                 ]
             },
@@ -80,16 +78,33 @@ def _make_pool(*configs: ProviderConfig) -> ProviderPool:
                 "output": [
                     {
                         "content": [
-                            {"text": "the answer is "},
-                            {"text": "9801"},
+                            {
+                                "type": "output_text",
+                                "text": "the answer is ",
+                            },
+                            {"type": "output_text", "text": "9801"},
                         ]
                     }
                 ]
             },
             "9801",
         ),
-        # 兜底：用 json.dumps 整个 payload，确保 9801 仍能匹配
-        ({"random_field": {"nested": "9801"}}, "9801"),
+        # 兼容网关：output_text part 使用 output_text 字段承载文本
+        (
+            {
+                "output": [
+                    {
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "output_text": "9801",
+                            }
+                        ]
+                    }
+                ]
+            },
+            "9801",
+        ),
     ],
 )
 def test_extract_response_output_text_variants(
@@ -102,6 +117,101 @@ def test_extract_response_output_text_variants(
 def test_extract_response_output_text_returns_empty_for_non_dict() -> None:
     assert ProviderPool._extract_response_output_text("not a dict") == ""
     assert ProviderPool._extract_response_output_text(None) == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"metadata": {"probe_answer": "9801"}},
+        {"error": {"message": "expected answer: 9801"}},
+        {"usage": {"debug": "9801"}},
+        {
+            "output": [
+                {
+                    "content": [
+                        {"type": "input_text", "text": "9801"},
+                    ]
+                }
+            ]
+        },
+        {"output": [{"content": [{"text": "9801"}]}]},
+        {
+            "output": [
+                {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "metadata": {"debug": "9801"},
+                        }
+                    ]
+                }
+            ]
+        },
+    ],
+)
+def test_extract_response_output_text_ignores_non_output_text(
+    payload: dict[str, Any],
+) -> None:
+    assert ProviderPool._extract_response_output_text(payload) == ""
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":"9801"}\n\n',
+            "9801",
+        ),
+        (
+            "event: response.output_text.done\n"
+            'data: {"type":"response.output_text.done","text":"9801"}\n\n',
+            "9801",
+        ),
+        (
+            "event: response.content_part.done\n"
+            'data: {"type":"response.content_part.done",'
+            '"part":{"type":"output_text","text":"9801"}}\n\n',
+            "9801",
+        ),
+        (
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"output":['
+            '{"content":[{"type":"output_text","text":"9801"}]}]}}\n\n',
+            "9801",
+        ),
+        # 兼容仅发送 data JSON 的网关，但仍只接受明确 output_text 路径。
+        ('data: {"output_text":"9801"}\n\n', "9801"),
+    ],
+)
+def test_extract_sse_output_text_accepts_whitelisted_output(
+    raw: str,
+    expected: str,
+) -> None:
+    assert ProviderPool._extract_sse_output_text(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "event: response.failed\n"
+        'data: {"type":"response.failed","error":{"message":"9801"}}\n\n',
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"debug":"9801"}}}\n\n',
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"metadata":{"probe_answer":"9801"}}}\n\n',
+        "event: response.content_part.done\n"
+        'data: {"type":"response.content_part.done",'
+        '"part":{"type":"input_text","text":"9801"}}\n\n',
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.failed","delta":"9801"}\n\n',
+        'data: {"message":"9801"}\n\n',
+    ],
+)
+def test_extract_sse_output_text_ignores_non_output_events(raw: str) -> None:
+    assert ProviderPool._extract_sse_output_text(raw) == ""
 
 
 # --- _probe_one：算术验证 ---------------------------------------------------
@@ -148,9 +258,7 @@ async def test_probe_one_returns_true_when_answer_is_9801(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     # 模拟 gpt-5.4-mini 答出 9801
-    stub = _StubAsyncClient(
-        _StubResponse(200, {"output_text": "9801"})
-    )
+    stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
 
     def fake_async_client(*_a: Any, **_kw: Any) -> _StubAsyncClient:
         return stub
@@ -169,12 +277,31 @@ async def test_probe_one_returns_false_when_answer_is_wrong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
-    stub = _StubAsyncClient(
-        _StubResponse(200, {"output_text": "9802"})
-    )
+    stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9802"}))
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
     ok = await pool._probe_one(pool._providers[0])
     assert ok is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"metadata": {"probe_answer": "9801"}},
+        {"error": {"message": "expected answer: 9801"}},
+        {"usage": {"output_tokens": 9801}},
+        {"output": [{"content": [{"type": "input_text", "text": "9801"}]}]},
+    ],
+)
+async def test_probe_one_rejects_9801_outside_output_text(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    pool = _make_pool(_cfg("acc1"))
+    stub = _StubAsyncClient(_StubResponse(200, payload))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
+
+    assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -246,14 +373,36 @@ async def test_probe_one_extracts_from_sse_response(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     raw = (
-        'event: response.output_text.delta\n'
+        "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"9801"}\n\n'
-        'event: response.completed\n'
+        "event: response.completed\n"
         'data: {"type":"response.completed"}\n\n'
     )
     stub = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
     assert await pool._probe_one(pool._providers[0]) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "event: response.failed\n"
+        'data: {"type":"response.failed","error":{"message":"9801"}}\n\n',
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"debug":"9801"}}}\n\n',
+    ],
+)
+async def test_probe_one_rejects_9801_in_non_output_sse(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    pool = _make_pool(_cfg("acc1"))
+    stub = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
+
+    assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -674,9 +823,7 @@ async def test_probe_image_all_limits_parallelism(
             active -= 1
 
     monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
-    monkeypatch.setitem(
-        pool.probe_image_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2
-    )
+    monkeypatch.setitem(pool.probe_image_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2)
     monkeypatch.setattr(pool, "_probe_image_one", fake_probe)
 
     results = await pool.probe_image_all()

@@ -16,8 +16,13 @@ on:
         default: ""
 
 concurrency:
+  # Every trigger keeps an independent build. Run-scoped image tags avoid
+  # cross-trigger writes; compatibility SHA and stable aliases serialize below.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -25,31 +30,133 @@ env:
   NPM_VERSION: "10.9.0"
 
 jobs:
-  version-check:
-    name: Version consistency gate
+  resolve-ref:
+    name: Resolve immutable source commit
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      short_sha: ${{ steps.source.outputs.short_sha }}
+      build_tag: ${{ steps.source.outputs.build_tag }}
+      sha_tag: ${{ steps.source.outputs.sha_tag }}
+      release_tag: ${{ steps.source.outputs.release_tag }}
+      is_release: ${{ steps.source.outputs.is_release }}
+      is_main_push: ${{ steps.source.outputs.is_main_push }}
     steps:
       - name: Reject tag-like workflow dispatch refs
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && startsWith(github.event.inputs.ref, 'v')
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && (startsWith(github.event.inputs.ref, 'v') || startsWith(github.event.inputs.ref, 'refs/tags/'))
         run: |
           echo "workflow_dispatch.ref cannot create release semantics for tag refs." >&2
           echo "Push the v* tag instead so github.ref is refs/tags/<tag>." >&2
           exit 1
 
+      - name: Checkout requested source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve source commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          event_name="${GITHUB_EVENT_NAME}"
+          event_ref="${GITHUB_REF}"
+          ref_name="${GITHUB_REF_NAME}"
+          release_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          release_tag=""
+          is_release=false
+          is_main_push=false
+
+          case "${event_name}" in
+            push)
+              if [[ "${event_ref}" == "refs/heads/main" ]]; then
+                if [[ "${ref_name}" != "main" ]]; then
+                  echo "main ref name does not match refs/heads/main" >&2
+                  exit 1
+                fi
+                is_main_push=true
+              elif [[ "${event_ref}" == refs/tags/* ]]; then
+                release_tag="${event_ref#refs/tags/}"
+                if [[ "${release_tag}" != "${ref_name}" ]]; then
+                  echo "tag ref name does not match the pushed ref" >&2
+                  exit 1
+                fi
+                if [[ ! "${release_tag}" =~ ${release_pattern} ]]; then
+                  echo "release tag is not an allowed Lumen semver tag" >&2
+                  exit 1
+                fi
+                is_release=true
+              else
+                echo "unsupported Docker Release push ref" >&2
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              ;;
+            *)
+              echo "unsupported Docker Release event" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "${GITHUB_RUN_ID}" =~ ^[0-9]+$ || ! "${GITHUB_RUN_ATTEMPT}" =~ ^[0-9]+$ ]]; then
+            echo "GitHub run identity is not numeric" >&2
+            exit 1
+          fi
+
+          commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolved source is not a full commit SHA" >&2
+            exit 1
+          fi
+          short_sha="${commit:0:7}"
+
+          if [[ "${is_release}" == "true" ]]; then
+            tag_commit="$(git rev-parse --verify "${event_ref}^{commit}")"
+            if [[ ! "${tag_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "release tag did not resolve to a commit" >&2
+              exit 1
+            fi
+            if [[ "${tag_commit}" != "${commit}" ]]; then
+              echo "resolved tag commit does not match checkout HEAD" >&2
+              exit 1
+            fi
+          fi
+
+          build_tag="sha-${commit}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sha_tag="sha-${short_sha}"
+          {
+            printf '%s\n' "commit=${commit}"
+            printf '%s\n' "short_sha=${short_sha}"
+            printf '%s\n' "build_tag=${build_tag}"
+            printf '%s\n' "sha_tag=${sha_tag}"
+            printf '%s\n' "release_tag=${release_tag}"
+            printf '%s\n' "is_release=${is_release}"
+            printf '%s\n' "is_main_push=${is_main_push}"
+          } >> "${GITHUB_OUTPUT}"
+
+  version-check:
+    name: Version consistency gate
+    runs-on: ubuntu-latest
+    needs: resolve-ref
+    steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.resolve-ref.outputs.commit }}
       - name: Check version consistency
         run: python3 scripts/version.py check
       - name: Assert tag matches VERSION
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: python3 scripts/version.py assert-tag "${GITHUB_REF_NAME}"
+        if: needs.resolve-ref.outputs.is_release == 'true'
+        env:
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
+        run: python3 scripts/version.py assert-tag "${RELEASE_TAG}"
 
   quality-gate:
     name: Release quality gate
     runs-on: ubuntu-latest
-    needs: version-check
+    needs: [resolve-ref, version-check]
     services:
       postgres:
         image: postgres:16
@@ -70,7 +177,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.resolve-ref.outputs.commit }}
           fetch-depth: 0
 
       - name: Install uv
@@ -164,9 +271,9 @@ jobs:
         run: docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
 
   build:
-    name: Build & push ${{ matrix.image.name }}
+    name: Build, push & sign ${{ matrix.image.name }}
     runs-on: ubuntu-latest
-    needs: quality-gate
+    needs: [resolve-ref, quality-gate]
     permissions:
       contents: read
       packages: write
@@ -185,27 +292,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.resolve-ref.outputs.commit }}
           fetch-depth: 0
-
-      - name: Reject tag-like workflow dispatch refs
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && startsWith(github.event.inputs.ref, 'v')
-        run: |
-          echo "workflow_dispatch.ref cannot create release semantics for tag refs." >&2
-          echo "Push the v* tag instead so github.ref is refs/tags/<tag>." >&2
-          exit 1
 
       - name: Compute build metadata
         id: meta-vars
+        env:
+          SHORT_SHA: ${{ needs.resolve-ref.outputs.short_sha }}
+          IS_RELEASE: ${{ needs.resolve-ref.outputs.is_release }}
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
         run: |
-          short_sha=$(git rev-parse --short=7 HEAD)
-          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "lumen_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]
+          if [[ "${IS_RELEASE}" == "true" ]]; then
+            [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+            release_tag="${RELEASE_TAG}"
+            lumen_version="${release_tag#v}"
+          elif [[ "${IS_RELEASE}" == "false" && -z "${RELEASE_TAG}" ]]; then
+            lumen_version="sha-${SHORT_SHA}"
           else
-            echo "lumen_version=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+            echo "invalid release metadata" >&2
+            exit 1
           fi
-          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "lumen_version=${lumen_version}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "build_time=${build_time}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
@@ -220,24 +332,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata (tags + OCI labels)
+      - name: Extract run-scoped Docker metadata
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          flavor: latest=false
           tags: |
-            type=raw,value=sha-{{sha}}
-            type=ref,event=branch
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ needs.resolve-ref.outputs.build_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/cyeinfpro/Lumen
             org.opencontainers.image.version=${{ steps.meta-vars.outputs.lumen_version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.resolve-ref.outputs.commit }}
 
       - name: Build and push ${{ matrix.image.name }}
+        id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: ${{ matrix.image.context }}
@@ -252,32 +361,49 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
           build-args: |
             LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
-            LUMEN_GIT_SHA=${{ github.sha }}
+            LUMEN_GIT_SHA=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
-            LUMEN_REVISION=${{ github.sha }}
+            LUMEN_REVISION=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
 
       - name: Install cosign
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Sign pushed tags
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Sign immutable image digest
         env:
           COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          while IFS= read -r image; do
-            [ -n "${image}" ] || continue
-            cosign sign --yes "${image}"
-          done <<< "${{ steps.meta.outputs.tags }}"
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Export signed image digest
+        env:
+          IMAGE_NAME: ${{ matrix.image.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          service="${IMAGE_NAME#lumen-}"
+          mkdir -p /tmp/release-digests
+          printf '%s\n' "${DIGEST}" > "/tmp/release-digests/${service}"
+
+      - name: Upload signed image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-digest-${{ matrix.image.name }}
+          path: /tmp/release-digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   build-web:
-    name: Build & push lumen-web (${{ matrix.platform.tag }})
+    name: Build, push & sign lumen-web (${{ matrix.platform.tag }})
     runs-on: ${{ matrix.platform.runs_on }}
-    needs: quality-gate
+    needs: [resolve-ref, quality-gate]
     permissions:
       contents: read
       packages: write
@@ -292,27 +418,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.resolve-ref.outputs.commit }}
           fetch-depth: 0
-
-      - name: Reject tag-like workflow dispatch refs
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && startsWith(github.event.inputs.ref, 'v')
-        run: |
-          echo "workflow_dispatch.ref cannot create release semantics for tag refs." >&2
-          echo "Push the v* tag instead so github.ref is refs/tags/<tag>." >&2
-          exit 1
 
       - name: Compute build metadata
         id: meta-vars
+        env:
+          SHORT_SHA: ${{ needs.resolve-ref.outputs.short_sha }}
+          IS_RELEASE: ${{ needs.resolve-ref.outputs.is_release }}
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
         run: |
-          short_sha=$(git rev-parse --short=7 HEAD)
-          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "lumen_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]
+          if [[ "${IS_RELEASE}" == "true" ]]; then
+            [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+            release_tag="${RELEASE_TAG}"
+            lumen_version="${release_tag#v}"
+          elif [[ "${IS_RELEASE}" == "false" && -z "${RELEASE_TAG}" ]]; then
+            lumen_version="sha-${SHORT_SHA}"
           else
-            echo "lumen_version=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+            echo "invalid release metadata" >&2
+            exit 1
           fi
-          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "lumen_version=${lumen_version}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "build_time=${build_time}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -339,20 +470,38 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/cyeinfpro/Lumen
             org.opencontainers.image.version=${{ steps.meta-vars.outputs.lumen_version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.resolve-ref.outputs.commit }}
           build-args: |
             LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
-            LUMEN_GIT_SHA=${{ github.sha }}
+            LUMEN_GIT_SHA=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
-            LUMEN_REVISION=${{ github.sha }}
+            LUMEN_REVISION=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
             NPM_VERSION=${{ env.NPM_VERSION }}
 
-      - name: Export digest
+      - name: Install cosign
         run: |
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Sign immutable platform digest
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -363,9 +512,11 @@ jobs:
           retention-days: 1
 
   merge-web:
-    name: Merge lumen-web manifest list
+    name: Merge & sign immutable lumen-web manifest
     runs-on: ubuntu-latest
-    needs: build-web
+    needs: [resolve-ref, build-web]
+    outputs:
+      digest: ${{ steps.merge.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -374,7 +525,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.resolve-ref.outputs.commit }}
 
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -393,58 +544,249 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
-          tags: |
-            type=raw,value=sha-{{sha}}
-            type=ref,event=branch
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-
-      - name: Create manifest list & push
+      - name: Create run-scoped immutable web manifest
+        id: merge
         working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
+          BUILD_TAG: ${{ needs.resolve-ref.outputs.build_tag }}
         run: |
+          set -euo pipefail
+          [[ "${BUILD_TAG}" =~ ^sha-[0-9a-f]{40}-run-[0-9]+-[0-9]+$ ]]
+          mapfile -t digest_files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "${#digest_files[@]}" -ne 2 ]]; then
+            echo "expected two lumen-web platform digests, found ${#digest_files[@]}" >&2
+            exit 1
+          fi
+          sources=()
+          for digest_hex in "${digest_files[@]}"; do
+            [[ "${digest_hex}" =~ ^[0-9a-f]{64}$ ]]
+            sources+=("${IMAGE}@sha256:${digest_hex}")
+          done
+          build_ref="${IMAGE}:${BUILD_TAG}"
+          metadata_file="/tmp/lumen-web-create-metadata.json"
           docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web@sha256:%s ' *)
-
-      - name: Inspect manifest
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web:${{ steps.meta.outputs.version }}
+            --tag "${build_ref}" \
+            --metadata-file "${metadata_file}" \
+            "${sources[@]}"
+          digest="$(jq -r '."containerimage.descriptor".digest // empty' "${metadata_file}")"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "${IMAGE}@${digest}"
+          {
+            echo "digest=${digest}"
+            echo "build_ref=${build_ref}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Sign lumen-web manifest tags
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Sign immutable web manifest
         env:
           COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
+          DIGEST: ${{ steps.merge.outputs.digest }}
         run: |
           set -euo pipefail
-          while IFS= read -r image; do
-            [ -n "${image}" ] || continue
-            cosign sign --yes "${image}"
-          done <<< "${{ steps.meta.outputs.tags }}"
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Export signed web digest
+        env:
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p /tmp/release-digests
+          printf '%s\n' "${DIGEST}" > /tmp/release-digests/web
+
+      - name: Upload signed web digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-digest-lumen-web
+          path: /tmp/release-digests/web
+          if-no-files-found: error
+          retention-days: 1
+
+  promote:
+    name: Publish SHA and release/main aliases
+    runs-on: ubuntu-latest
+    needs: [resolve-ref, build, merge-web]
+    concurrency:
+      group: ${{ github.workflow }}-sha-${{ needs.resolve-ref.outputs.short_sha }}
+      cancel-in-progress: false
+    outputs:
+      api_digest: ${{ steps.digests.outputs.api_digest }}
+      worker_digest: ${{ steps.digests.outputs.worker_digest }}
+      tgbot_digest: ${{ steps.digests.outputs.tgbot_digest }}
+      web_digest: ${{ steps.digests.outputs.web_digest }}
+      is_prerelease: ${{ steps.publication.outputs.is_prerelease }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.resolve-ref.outputs.commit }}
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Download signed image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/release-digests
+          pattern: release-digest-*
+          merge-multiple: true
+
+      - name: Validate promotion digest set
+        id: digests
+        env:
+          WEB_JOB_DIGEST: ${{ needs.merge-web.outputs.digest }}
+        run: |
+          set -euo pipefail
+          file_count="$(find /tmp/release-digests -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [[ "${file_count}" -ne 4 ]]; then
+            echo "expected four signed service digests, found ${file_count}" >&2
+            exit 1
+          fi
+          for service in api worker tgbot web; do
+            path="/tmp/release-digests/${service}"
+            [[ -f "${path}" ]]
+            IFS= read -r digest < "${path}"
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "${service}_digest=${digest}" >> "$GITHUB_OUTPUT"
+            if [[ "${service}" == "web" && "${digest}" != "${WEB_JOB_DIGEST}" ]]; then
+              echo "web digest artifact does not match merge-web job output" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build jobs only publish run-scoped tags. This serialized step retains
+      # the historical sha-<7> compatibility alias without concurrent writers.
+      - name: Publish serialized compatibility SHA aliases
+        env:
+          REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+          SHA_TAG: ${{ needs.resolve-ref.outputs.sha_tag }}
+          API_DIGEST: ${{ steps.digests.outputs.api_digest }}
+          WORKER_DIGEST: ${{ steps.digests.outputs.worker_digest }}
+          TGBOT_DIGEST: ${{ steps.digests.outputs.tgbot_digest }}
+          WEB_DIGEST: ${{ steps.digests.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${REGISTRY_NAMESPACE}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
+          [[ "${SHA_TAG}" =~ ^sha-[0-9a-f]{7}$ ]]
+          services=(api worker tgbot web)
+          digests=("${API_DIGEST}" "${WORKER_DIGEST}" "${TGBOT_DIGEST}" "${WEB_DIGEST}")
+          for digest in "${digests[@]}"; do
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+
+          for index in "${!services[@]}"; do
+            service="${services[index]}"
+            digest="${digests[index]}"
+            image="${REGISTRY_NAMESPACE}/lumen-${service}"
+            manifest_file="/tmp/lumen-sha-source-${service}.json"
+            docker buildx imagetools inspect \
+              "${image}@${digest}" \
+              --format '{{json .Manifest}}' > "${manifest_file}"
+            actual_digest="$(jq -er 'if type == "string" then . elif type == "object" then (.digest // .Digest // empty) else empty end' "${manifest_file}")"
+            if [[ "${actual_digest}" != "${digest}" ]]; then
+              echo "immutable source digest mismatch for ${service}" >&2
+              exit 1
+            fi
+          done
+
+          for index in "${!services[@]}"; do
+            service="${services[index]}"
+            digest="${digests[index]}"
+            image="${REGISTRY_NAMESPACE}/lumen-${service}"
+            docker buildx imagetools create \
+              --tag "${image}:${SHA_TAG}" \
+              "${image}@${digest}"
+          done
+
+          for index in "${!services[@]}"; do
+            service="${services[index]}"
+            digest="${digests[index]}"
+            image="${REGISTRY_NAMESPACE}/lumen-${service}"
+            manifest_file="/tmp/lumen-sha-alias-${service}.json"
+            docker buildx imagetools inspect \
+              "${image}:${SHA_TAG}" \
+              --format '{{json .Manifest}}' > "${manifest_file}"
+            actual_digest="$(jq -er 'if type == "string" then . elif type == "object" then (.digest // .Digest // empty) else empty end' "${manifest_file}")"
+            if [[ "${actual_digest}" != "${digest}" ]]; then
+              echo "compatibility SHA alias verification failed for ${service}" >&2
+              exit 1
+            fi
+          done
+
+      # Alias policy is implemented and behavior-tested in
+      # scripts/promote_release_images.py. Stable releases replace the former
+      # metadata rules type=semver,pattern=v{{version}},
+      # type=semver,pattern=v{{major}}.{{minor}}, and
+      # type=semver,pattern=v{{major}}.
+      - name: Publish exact release tags or main alias
+        id: publication
+        if: needs.resolve-ref.outputs.is_release == 'true' || needs.resolve-ref.outputs.is_main_push == 'true'
+        env:
+          REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+          IS_RELEASE: ${{ needs.resolve-ref.outputs.is_release }}
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
+          API_DIGEST: ${{ steps.digests.outputs.api_digest }}
+          WORKER_DIGEST: ${{ steps.digests.outputs.worker_digest }}
+          TGBOT_DIGEST: ${{ steps.digests.outputs.tgbot_digest }}
+          WEB_DIGEST: ${{ steps.digests.outputs.web_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mode=main
+          phase=mutable
+          release_args=()
+          if [[ "${IS_RELEASE}" == "true" ]]; then
+            mode=release
+            phase=exact
+            release_args=(--release-tag "${RELEASE_TAG}")
+          fi
+          python3 scripts/promote_release_images.py \
+            --mode "${mode}" \
+            --phase "${phase}" \
+            "${release_args[@]}" \
+            --registry "${REGISTRY_NAMESPACE}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --image-digest "api=${API_DIGEST}" \
+            --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "tgbot=${TGBOT_DIGEST}" \
+            --image-digest "web=${WEB_DIGEST}" \
+            --github-output "${GITHUB_OUTPUT}"
 
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, merge-web]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [resolve-ref, promote]
+    if: needs.resolve-ref.outputs.is_release == 'true'
     permissions:
       contents: write
       packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.resolve-ref.outputs.commit }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -465,6 +807,65 @@ jobs:
             uv run alembic heads
           ) | tee alembic_heads.txt
 
+      - name: Build release manifest and notes
+        id: body
+        env:
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
+          COMMIT_SHA: ${{ needs.resolve-ref.outputs.commit }}
+          SHORT_SHA: ${{ needs.resolve-ref.outputs.short_sha }}
+          REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+          API_DIGEST: ${{ needs.promote.outputs.api_digest }}
+          WORKER_DIGEST: ${{ needs.promote.outputs.worker_digest }}
+          TGBOT_DIGEST: ${{ needs.promote.outputs.tgbot_digest }}
+          WEB_DIGEST: ${{ needs.promote.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+          uv run python scripts/build_release_manifest.py \
+            --version "${RELEASE_TAG}" \
+            --commit "${COMMIT_SHA}" \
+            --short-sha "${SHORT_SHA}" \
+            --registry "${REGISTRY_NAMESPACE}" \
+            --alembic-heads-file alembic_heads.txt \
+            --image-digest "api=${API_DIGEST}" \
+            --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "tgbot=${TGBOT_DIGEST}" \
+            --image-digest "web=${WEB_DIGEST}" \
+            --output release-manifest.json \
+            --notes-output release_body.md
+          echo "path=release_body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ needs.resolve-ref.outputs.release_tag }}
+          name: ${{ needs.resolve-ref.outputs.release_tag }}
+          body_path: ${{ steps.body.outputs.path }}
+          files: release-manifest.json
+          draft: false
+          prerelease: ${{ needs.promote.outputs.is_prerelease }}
+
+  promote-shared:
+    name: Promote stable shared aliases
+    runs-on: ubuntu-latest
+    needs: [resolve-ref, promote, release]
+    if: needs.resolve-ref.outputs.is_release == 'true' && needs.promote.outputs.is_prerelease == 'false'
+    concurrency:
+      group: ${{ github.workflow }}-stable-mutable-aliases
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.resolve-ref.outputs.commit }}
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
@@ -475,31 +876,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute short sha
-        id: sha
-        run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Build release manifest and notes
-        id: body
+      - name: Publish stable shared aliases
+        env:
+          REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
+          API_DIGEST: ${{ needs.promote.outputs.api_digest }}
+          WORKER_DIGEST: ${{ needs.promote.outputs.worker_digest }}
+          TGBOT_DIGEST: ${{ needs.promote.outputs.tgbot_digest }}
+          WEB_DIGEST: ${{ needs.promote.outputs.web_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          uv run python scripts/build_release_manifest.py \
-            --version "${GITHUB_REF_NAME}" \
-            --commit "${GITHUB_SHA}" \
-            --short-sha "${{ steps.sha.outputs.short_sha }}" \
-            --registry "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}" \
-            --alembic-heads-file alembic_heads.txt \
-            --resolve-images \
-            --output release-manifest.json \
-            --notes-output release_body.md
-          echo "path=release_body.md" >> "$GITHUB_OUTPUT"
-
-      - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body_path: ${{ steps.body.outputs.path }}
-          files: release-manifest.json
-          draft: false
-          prerelease: false
+          python3 scripts/promote_release_images.py \
+            --mode release \
+            --phase mutable \
+            --release-tag "${RELEASE_TAG}" \
+            --registry "${REGISTRY_NAMESPACE}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --image-digest "api=${API_DIGEST}" \
+            --image-digest "worker=${WORKER_DIGEST}" \
+            --image-digest "tgbot=${TGBOT_DIGEST}" \
+            --image-digest "web=${WEB_DIGEST}"

@@ -25,6 +25,8 @@ const expected = {
   "--sidebar-rail-w": "64px",
   "--sidebar-panel-w": "248px",
   "--content-text": "800px",
+  "--content-form": "720px",
+  "--content-settings": "1080px",
   "--content-composer": "880px",
   "--content-media": "1160px",
   "--content-workbench": "1440px",

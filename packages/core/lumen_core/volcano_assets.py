@@ -78,8 +78,8 @@ local score = tonumber(ARGV[4])
 local member = ARGV[5]
 local ttl = tonumber(ARGV[6])
 redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
-local reservations = redis.call('ZCARD', key)
 local existing = redis.call('ZSCORE', key, member)
+local reservations = redis.call('ZCARD', key)
 local other_reservations = reservations
 if existing then
   other_reservations = math.max(0, reservations - 1)
@@ -864,10 +864,9 @@ def normalize_asset(
     item = _unwrap_mapping(raw, "Asset", "AssetInfo")
     fallback = fallback or {}
     error_code, error_message = _asset_error(item)
-    asset_type = (
-        _optional_text(_mapping_value(item, "AssetType", "asset_type"))
-        or _text(fallback.get("asset_type"))
-    )
+    asset_type = _optional_text(
+        _mapping_value(item, "AssetType", "asset_type")
+    ) or _text(fallback.get("asset_type"))
     raw_url = _mapping_value(item, "URL", "Url", "url")
     return {
         "id": _optional_text(

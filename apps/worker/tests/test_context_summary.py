@@ -318,12 +318,8 @@ def test_summarize_text_blob_handles_json_code_plain_and_file_read() -> None:
     )
     assert "top-level keys" in context_summary._summarize_text_blob(json_blob)
 
-    code_blob = (
-        "```python\n"
-        "def build_input(value):\n"
-        "    return value\n"
-        "```\n"
-        + ("x\n" * 900)
+    code_blob = "```python\ndef build_input(value):\n    return value\n```\n" + (
+        "x\n" * 900
     )
     code_summary = context_summary._summarize_text_blob(code_blob)
     assert "def build_input" in code_summary
@@ -346,7 +342,12 @@ def test_message_to_summary_line_serializes_attachments_and_generated_image() ->
         "text": "describe this",
         "attachments": [
             {"kind": "image", "image_id": "img-1", "caption": "A red cube on a desk"},
-            {"kind": "file", "name": "brief.pdf", "mime": "application/pdf", "size": 123},
+            {
+                "kind": "file",
+                "name": "brief.pdf",
+                "mime": "application/pdf",
+                "size": 123,
+            },
             {"kind": "unknown"},
         ],
     }
@@ -365,9 +366,12 @@ def test_message_to_summary_line_serializes_attachments_and_generated_image() ->
         "text": "old image",
         "attachments": [{"kind": "image", "image_id": "img-missing-caption"}],
     }
-    assert "caption='cached visual caption'" in context_summary._message_to_summary_line(
-        no_caption,
-        image_captions={"img-missing-caption": "cached visual caption"},
+    assert (
+        "caption='cached visual caption'"
+        in context_summary._message_to_summary_line(
+            no_caption,
+            image_captions={"img-missing-caption": "cached visual caption"},
+        )
     )
 
     assistant = _message(2, "", Role.ASSISTANT.value)
@@ -379,8 +383,18 @@ def test_message_to_summary_line_serializes_attachments_and_generated_image() ->
             "caption": "poster art",
         },
         "images": [
-            {"image_id": "gen-1", "width": 1024, "height": 1024, "caption": "poster art"},
-            {"image_id": "gen-2", "width": 768, "height": 1024, "caption": "detail crop"},
+            {
+                "image_id": "gen-1",
+                "width": 1024,
+                "height": 1024,
+                "caption": "poster art",
+            },
+            {
+                "image_id": "gen-2",
+                "width": 768,
+                "height": 1024,
+                "caption": "detail crop",
+            },
         ],
     }
     assistant_line = context_summary._message_to_summary_line(assistant)
@@ -657,7 +671,9 @@ async def test_segment_limit_does_not_cross_cap_for_one_oversized_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fail_call(*_args: Any, **_kwargs: Any) -> str:
-        raise AssertionError("no complete message boundary exists within the segment cap")
+        raise AssertionError(
+            "no complete message boundary exists within the segment cap"
+        )
 
     monkeypatch.setattr(context_summary, "_call_summary_upstream", fail_call)
     monkeypatch.setattr(
@@ -707,8 +723,7 @@ async def test_segment_failure_returns_last_complete_message_boundary(
         context_summary,
         "_message_to_summary_line",
         lambda message, **_kwargs: (
-            f"{message.id} "
-            + ("x" * (500 if message.id == "msg-001" else 20_000))
+            f"{message.id} " + ("x" * (500 if message.id == "msg-001" else 20_000))
         ),
     )
     coverage = context_summary._SummaryCoverage()
@@ -869,6 +884,37 @@ async def test_redis_summary_lock_release_does_not_delete_new_owner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_compact_active_release_uses_atomic_job_owner_cas() -> None:
+    key = "context:manual_compact:active:user-1:conv-1"
+
+    class Redis:
+        def __init__(self) -> None:
+            self.value = json.dumps({"job_id": "job-new"})
+            self.calls: list[tuple[Any, ...]] = []
+
+        async def eval(self, *args: Any) -> int:
+            self.calls.append(args)
+            _script, _numkeys, eval_key, job_id = args
+            payload = json.loads(self.value)
+            if eval_key == key and payload.get("job_id") == job_id:
+                self.value = ""
+                return 1
+            return 0
+
+    redis = Redis()
+    await context_summary._safe_release_manual_compact_active(
+        redis,
+        user_id="user-1",
+        conv_id="conv-1",
+        job_id="job-old",
+    )
+
+    assert json.loads(redis.value)["job_id"] == "job-new"
+    assert redis.calls[0][1:] == (1, key, "job-old")
+    assert "cjson.decode" in redis.calls[0][0]
+
+
+@pytest.mark.asyncio
 async def test_redis_summary_lock_renew_does_not_expire_new_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1008,8 +1054,12 @@ async def test_ensure_context_summary_dry_run_does_not_call_upstream_or_write(
     boundary = _message(3)
     conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
-        return context_summary.LoadedSummaryMessages([_message(1), _message(2)], 2, 42, 0)
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
+        return context_summary.LoadedSummaryMessages(
+            [_message(1), _message(2)], 2, 42, 0
+        )
 
     async def fail_segment(*_args: Any, **_kwargs: Any) -> str:
         raise AssertionError("dry_run must not call upstream")
@@ -1048,8 +1098,12 @@ async def test_ensure_context_summary_writes_summary_and_returns_public_metadata
     redis = _FakeRedis()
     written: dict[str, Any] = {}
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
-        return context_summary.LoadedSummaryMessages([_message(1), _message(2)], 2, 1000, 1)
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
+        return context_summary.LoadedSummaryMessages(
+            [_message(1), _message(2)], 2, 1000, 1
+        )
 
     async def fake_segment(**kwargs: Any) -> str:
         assert kwargs["image_captions"] == {"img-1": "generated caption"}
@@ -1076,7 +1130,11 @@ async def test_ensure_context_summary_writes_summary_and_returns_public_metadata
         _FakeSession(),
         conv,
         boundary,
-        {"redis": redis, "context.summary_target_tokens": 300, "context.summary_model": "gpt-test"},
+        {
+            "redis": redis,
+            "context.summary_target_tokens": 300,
+            "context.summary_model": "gpt-test",
+        },
         extra_instruction="keep image ids",
         trigger="manual",
     )
@@ -1109,7 +1167,9 @@ async def test_ensure_context_summary_writes_local_fallback_when_upstream_fails(
     redis = _FakeRedis()
     written: dict[str, Any] = {}
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages(
             [_message(1, "original goal"), _message(2, "important file /tmp/a.py")],
             2,
@@ -1156,6 +1216,87 @@ async def test_ensure_context_summary_writes_local_fallback_when_upstream_fails(
 
 
 @pytest.mark.asyncio
+async def test_local_fallback_advances_only_contiguous_source_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(4)
+    messages = [_message(index, f"message {index}") for index in range(1, 5)]
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+    load_after_ids: list[str | None] = []
+    written: list[dict[str, Any]] = []
+
+    async def fake_load(
+        _session: Any,
+        _conv_id: str,
+        after_message_id: str | None,
+        _before_boundary_id: str,
+    ) -> context_summary.LoadedSummaryMessages:
+        load_after_ids.append(after_message_id)
+        start = 0 if after_message_id is None else int(after_message_id[-3:])
+        selected = messages[start:]
+        return context_summary.LoadedSummaryMessages(
+            selected,
+            len(selected),
+            1000,
+            0,
+        )
+
+    async def fake_segment(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_cas(
+        _session: Any,
+        _conv_id: str,
+        summary: dict[str, Any],
+        **_kwargs: Any,
+    ) -> bool:
+        written.append(summary)
+        conv.summary_jsonb = summary
+        return True
+
+    async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", fake_segment)
+    monkeypatch.setattr(context_summary, "_cas_write_summary", fake_cas)
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fake_caption)
+    monkeypatch.setattr(
+        context_summary,
+        "_message_to_summary_line",
+        lambda message, **_kwargs: f"{message.id} " + ("x" * 700),
+    )
+
+    first = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": _FakeRedis(), "context.summary_target_tokens": 300},
+    )
+    second = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": _FakeRedis(), "context.summary_target_tokens": 300},
+    )
+    third = await context_summary.ensure_context_summary(
+        _FakeSession(),
+        conv,
+        boundary,
+        {"redis": _FakeRedis(), "context.summary_target_tokens": 300},
+    )
+
+    assert first is not None and second is not None and third is not None
+    assert first["summary_up_to_message_id"] == "msg-002"
+    assert second["summary_up_to_message_id"] == "msg-003"
+    assert third["summary_up_to_message_id"] == "msg-004"
+    assert load_after_ids == [None, "msg-002", "msg-003"]
+    assert "msg-001" in written[0]["text"]
+    assert "msg-002" in written[0]["text"]
+    assert "msg-003" not in written[0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_open_circuit_local_fallback_does_not_record_failure_sample(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1164,7 +1305,9 @@ async def test_open_circuit_local_fallback_does_not_record_failure_sample(
     redis = _FakeRedis()
     metric_outcomes: list[str] = []
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages(
             [_message(1, "goal"), _message(2, "decision")],
             2,
@@ -1227,7 +1370,9 @@ async def test_segment_limit_local_fallback_does_not_record_failure_sample(
     conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
     redis = _FakeRedis()
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
 
     async def segment_limited(**kwargs: Any) -> None:
@@ -1292,7 +1437,9 @@ async def test_ensure_context_summary_lock_busy_waits_and_reuses_latest(
     async def fake_sleep(_seconds: float) -> None:
         return None
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
 
     monkeypatch.setattr(context_summary, "_acquire_summary_lock", fake_acquire)
@@ -1343,7 +1490,9 @@ async def test_ensure_context_summary_lock_busy_does_not_reuse_mismatched_extra_
     async def fake_sleep(_seconds: float) -> None:
         return None
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
 
     monkeypatch.setattr(context_summary, "_acquire_summary_lock", fake_acquire)
@@ -1451,7 +1600,9 @@ async def test_summary_releases_business_transaction_before_upstream(
 
     session.commit = commit  # type: ignore[method-assign]
 
-    async def fake_load(*_args: Any, **_kwargs: Any) -> context_summary.LoadedSummaryMessages:
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
         return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
 
     async def fake_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:

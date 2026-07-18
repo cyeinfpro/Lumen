@@ -120,6 +120,7 @@ async def mark_generation_attempt_failed(
     retriable: bool,
     statuses: tuple[str, ...] = ("running",),
 ) -> bool:
+    failure_delivery = None
     try:
         async with _g.SessionLocal() as session:
             result = await session.execute(
@@ -147,6 +148,19 @@ async def mark_generation_attempt_failed(
                         generation,
                         reason=error_code,
                     )
+            failure_delivery = _g._stage_generation_event(
+                session,
+                user_id,
+                _g.task_channel(task_id),
+                _g.EV_GEN_FAILED,
+                {
+                    "generation_id": task_id,
+                    "message_id": message_id,
+                    "code": error_code,
+                    "message": error_message,
+                    "retriable": retriable,
+                },
+            )
             await session.commit()
             await _g.worker_billing.flush_balance_cache_refreshes(session)
     except _g._StaleGenerationAttempt as stale_exc:
@@ -159,19 +173,9 @@ async def mark_generation_attempt_failed(
         )
         return False
 
-    await _g.publish_event(
-        redis,
-        user_id,
-        _g.task_channel(task_id),
-        _g.EV_GEN_FAILED,
-        {
-            "generation_id": task_id,
-            "message_id": message_id,
-            "code": error_code,
-            "message": error_message,
-            "retriable": retriable,
-        },
-    )
+    if failure_delivery is None:
+        raise RuntimeError("generation failure outbox event was not staged")
+    await _g._deliver_generation_event(redis, failure_delivery)
     return True
 
 

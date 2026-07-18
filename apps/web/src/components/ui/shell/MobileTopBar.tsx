@@ -4,6 +4,11 @@ import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  AUTH_USER_QUERY_KEY,
+  userBillingQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 import { formatRmb, formatRmbCompact } from "@/lib/money";
 
@@ -83,23 +88,27 @@ export function MobileTopBar({
 
 function MobileWalletPill() {
   const pathname = usePathname();
+  const userScope = useUserQueryScope();
   const meQuery = useQuery<AuthUser>({
-    queryKey: ["me"],
+    queryKey: AUTH_USER_QUERY_KEY,
     queryFn: getMe,
     retry: false,
     staleTime: 60_000,
   });
   const enabled =
-    meQuery.data?.account_mode === "wallet" && !pathname.startsWith("/admin");
+    userScope.enabled &&
+    meQuery.data?.id === userScope.userId &&
+    meQuery.data.account_mode === "wallet" &&
+    !pathname.startsWith("/admin");
   const walletQuery = useQuery({
-    queryKey: ["me", "wallet"],
+    queryKey: userBillingQueryKeys.wallet(userScope.userId),
     queryFn: getMyWallet,
     enabled,
     retry: false,
     staleTime: 30_000,
   });
   const pricingQuery = useQuery({
-    queryKey: ["me", "pricing"],
+    queryKey: userBillingQueryKeys.pricing(userScope.userId),
     queryFn: getPricing,
     enabled,
     retry: false,

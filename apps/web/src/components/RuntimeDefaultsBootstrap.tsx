@@ -4,13 +4,15 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
+import { getMe, type AuthUser } from "@/lib/apiClient";
 import { isPublicPath } from "@/lib/auth/publicPaths";
+import { AUTH_USER_QUERY_KEY } from "@/components/QueryProvider";
 import {
   getRedirectForHiddenNavPath,
   normalizeNavVisibility,
   type NavVisibility,
 } from "@/components/ui/shell/navigation";
+import { useIdentityRevalidation } from "@/components/useIdentityRevalidation";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 
@@ -45,6 +47,12 @@ function pickRuntimeDefaults(
   return next;
 }
 
+function applyRuntimeDefaultsToStores(defaults: RuntimeDefaults): void {
+  useChatStore.getState().applyRuntimeDefaults(defaults);
+  useUiStore.getState().setNavVisibility(defaults.nav_visibility);
+  useUiStore.getState().setCanvasEnabled(defaults.canvas_enabled === true);
+}
+
 function writeRuntimeDefaultsCookie(defaults: RuntimeDefaults) {
   try {
     const payload = encodeURIComponent(JSON.stringify(defaults));
@@ -52,16 +60,6 @@ function writeRuntimeDefaultsCookie(defaults: RuntimeDefaults) {
   } catch {
     // Cookie warm cache is best-effort; React Query remains authoritative.
   }
-}
-
-function shouldClearChatIdentity(
-  isPublicAuthPath: boolean,
-  error: unknown,
-): boolean {
-  return (
-    isPublicAuthPath ||
-    (error instanceof ApiError && error.status === 401)
-  );
 }
 
 // SSR 阶段把 layout.tsx 抓到的 defaults 同步到 store（首屏不闪烁），
@@ -98,23 +96,28 @@ export function RuntimeDefaultsBootstrap({
   );
 
   useLayoutEffect(() => {
-    useChatStore.getState().applyRuntimeDefaults(initialDefaults);
-    useUiStore.getState().setNavVisibility(initialDefaults.nav_visibility);
-    useUiStore.getState().setCanvasEnabled(initialDefaults.canvas_enabled === true);
+    applyRuntimeDefaultsToStores(initialDefaults);
   }, [initialDefaults]);
 
   const meQuery = useQuery<AuthUser>({
-    queryKey: ["me"],
+    queryKey: AUTH_USER_QUERY_KEY,
     queryFn: getMe,
     retry: false,
+    networkMode: "online",
+    refetchOnReconnect: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     enabled: !isPublicAuthPath,
   });
+  const { identityUnavailable } = useIdentityRevalidation({
+    isPublicAuthPath,
+    query: meQuery,
+  });
   const serverRuntimeDefaults = meQuery.data?.runtime_defaults;
   const serverFast = serverRuntimeDefaults?.fast;
-  const serverUploadMaxSourceBytes = serverRuntimeDefaults?.upload_max_source_bytes;
+  const serverUploadMaxSourceBytes =
+    serverRuntimeDefaults?.upload_max_source_bytes;
   const serverCanvasEnabled = serverRuntimeDefaults?.canvas_enabled;
   const serverNavVisibility = serverRuntimeDefaults?.nav_visibility;
 
@@ -135,32 +138,27 @@ export function RuntimeDefaultsBootstrap({
   );
 
   useLayoutEffect(() => {
-    if (!meQuery.data) return;
-    const chatStore = useChatStore.getState();
-    chatStore.setCurrentUser(meQuery.data.id);
-    chatStore.applyRuntimeDefaults(runtimeDefaults);
-    useUiStore.getState().setNavVisibility(runtimeDefaults.nav_visibility);
-    useUiStore.getState().setCanvasEnabled(runtimeDefaults.canvas_enabled === true);
-  }, [meQuery.data, runtimeDefaults]);
-
-  useLayoutEffect(() => {
-    if (!shouldClearChatIdentity(isPublicAuthPath, meQuery.error)) return;
-    useChatStore.getState().setCurrentUser(null);
-  }, [isPublicAuthPath, meQuery.error]);
+    if (!meQuery.data || identityUnavailable) return;
+    useChatStore.getState().setCurrentUser(meQuery.data.id);
+    applyRuntimeDefaultsToStores(runtimeDefaults);
+  }, [identityUnavailable, meQuery.data, runtimeDefaults]);
 
   useEffect(() => {
-    if (!meQuery.data) return;
+    if (!meQuery.data || identityUnavailable) return;
     writeRuntimeDefaultsCookie(runtimeDefaults);
-  }, [meQuery.data, runtimeDefaults]);
+  }, [identityUnavailable, meQuery.data, runtimeDefaults]);
 
   const effectiveNavVisibility =
-    meQuery.data && runtimeDefaults.nav_visibility
+    meQuery.data && !identityUnavailable && runtimeDefaults.nav_visibility
       ? runtimeDefaults.nav_visibility
       : initialDefaults.nav_visibility;
 
   useEffect(() => {
     if (isPublicAuthPath) return;
-    const redirectTo = getRedirectForHiddenNavPath(pathname, effectiveNavVisibility);
+    const redirectTo = getRedirectForHiddenNavPath(
+      pathname,
+      effectiveNavVisibility,
+    );
     if (!redirectTo || redirectTo === pathname) return;
     router.replace(redirectTo);
   }, [effectiveNavVisibility, isPublicAuthPath, pathname, router]);
@@ -168,13 +166,20 @@ export function RuntimeDefaultsBootstrap({
   useEffect(() => {
     if (
       !meQuery.data ||
+      identityUnavailable ||
       runtimeDefaults.canvas_enabled === true ||
       !pathname.startsWith("/projects/canvas")
     ) {
       return;
     }
     router.replace("/projects");
-  }, [meQuery.data, pathname, router, runtimeDefaults.canvas_enabled]);
+  }, [
+    identityUnavailable,
+    meQuery.data,
+    pathname,
+    router,
+    runtimeDefaults.canvas_enabled,
+  ]);
 
   return null;
 }

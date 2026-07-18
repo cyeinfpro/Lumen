@@ -1,6 +1,8 @@
-import { doesNotMatch, match, ok } from "node:assert/strict";
+import { deepEqual, doesNotMatch, match, ok } from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+import * as ts from "typescript";
 
 function source(path: string) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
@@ -19,6 +21,7 @@ const settingsShellSource = source("./SettingsShell.tsx");
 const mobileDrawerSource = source("./MobileConversationDrawer.tsx");
 const sidebarSource = source("../Sidebar.tsx");
 const mobileCanvasSource = source("../chat/mobile/MobileConversationCanvas.tsx");
+const generationTileSource = source("../stream/GenerationTile.tsx");
 const mobileComposerSource = source("../composer/mobile/MobileComposerPill.tsx");
 const streamSearchSource = source("../stream/StreamSearchBar.tsx");
 const viewportSource = source("../../../hooks/useKeyboardInset.ts");
@@ -26,6 +29,53 @@ const mediaQuerySource = source("../../../hooks/useMediaQuery.ts");
 const inputSource = source("../primitives/Input.tsx");
 const textareaSource = source("../primitives/Textarea.tsx");
 const globalsSource = source("../../../app/globals.css");
+
+type ScrollToGate = {
+  targetId: string;
+  locatedAtMessageCount: number;
+  resumed: boolean;
+} | null;
+
+type ScrollToGateResult = {
+  next: ScrollToGate;
+  suppress: boolean;
+  forceResume: boolean;
+};
+
+function loadScrollToGate() {
+  const start = mobileStudioSource.indexOf("type ScrollToAutoScrollGate");
+  const end = mobileStudioSource.indexOf("export function MobileStudio");
+  ok(start >= 0 && end > start, "missing scrollTo gate helper");
+  const output = ts.transpileModule(
+    `${mobileStudioSource.slice(start, end)}
+export { nextScrollToAutoScrollGate };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+  const moduleRecord = {
+    exports: {} as {
+      nextScrollToAutoScrollGate: (input: {
+        current: ScrollToGate;
+        targetId: string | null;
+        targetReady: boolean;
+        messageCount: number;
+      }) => ScrollToGateResult;
+    },
+  };
+  runInNewContext(output, {
+    module: moduleRecord,
+    exports: moduleRecord.exports,
+  });
+  return moduleRecord.exports.nextScrollToAutoScrollGate;
+}
+
+function plainValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 function cssBlock(selector: string): string {
   const start = globalsSource.indexOf(selector);
@@ -117,6 +167,75 @@ test("empty mobile studio starts at the top instead of auto-scrolling", () => {
     mobileStudioSource,
     /el\.scrollTo\(\{ top: 0, behavior: "auto" \}\)/,
   );
+});
+
+test("mobile scrollTo suppresses location once and resumes for the next message", () => {
+  const nextGate = loadScrollToGate();
+
+  deepEqual(
+    plainValue(nextGate({
+      current: null,
+      targetId: "message-4",
+      targetReady: false,
+      messageCount: 0,
+    })),
+    { next: null, suppress: true, forceResume: false },
+  );
+
+  const located = nextGate({
+    current: null,
+    targetId: "message-4",
+    targetReady: true,
+    messageCount: 4,
+  });
+  deepEqual(plainValue(located), {
+    next: {
+      targetId: "message-4",
+      locatedAtMessageCount: 4,
+      resumed: false,
+    },
+    suppress: true,
+    forceResume: false,
+  });
+
+  const resumed = nextGate({
+    current: located.next,
+    targetId: "message-4",
+    targetReady: true,
+    messageCount: 5,
+  });
+  deepEqual(plainValue(resumed), {
+    next: {
+      targetId: "message-4",
+      locatedAtMessageCount: 4,
+      resumed: true,
+    },
+    suppress: false,
+    forceResume: true,
+  });
+  deepEqual(
+    plainValue(nextGate({
+      current: resumed.next,
+      targetId: "message-4",
+      targetReady: true,
+      messageCount: 6,
+    })),
+    {
+      next: {
+        targetId: "message-4",
+        locatedAtMessageCount: 4,
+        resumed: true,
+      },
+      suppress: false,
+      forceResume: false,
+    },
+  );
+});
+
+test("stream location carries both conversation and message identity", () => {
+  match(generationTileSource, /conversationId: item\.conversation_id/);
+  match(generationTileSource, /scrollTo: item\.message_id/);
+  match(generationTileSource, /router\.push\(`\/\?\$\{query\.toString\(\)\}`\)/);
 });
 
 test("mobile composer uses one visual viewport coordinate system", () => {

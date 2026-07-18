@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   Inbox,
@@ -101,8 +102,6 @@ export function Sidebar({
 
   const [tab, setTab] = useState<TabKind>("active");
   const [query, setQuery] = useState("");
-  const listRef = useRef<HTMLDivElement | null>(null);
-  const archiveMenuRef = useRef<HTMLDivElement | null>(null);
   const [archiveMenuOpen, setArchiveMenuOpen] = useState(false);
 
   // 移动端抽屉打开时锁定 body 滚动；viewport / open 变化时自动 rerun
@@ -163,8 +162,11 @@ export function Sidebar({
   useEffect(() => {
     if (!archiveMenuOpen) return;
     const onPointerDown = (event: PointerEvent) => {
-      const root = archiveMenuRef.current;
-      if (root && event.target instanceof Node && !root.contains(event.target)) {
+      const target = event.target;
+      const clickedInsideMenu =
+        target instanceof Element &&
+        Boolean(target.closest("[data-sidebar-archive-menu]"));
+      if (!clickedInsideMenu) {
         setArchiveMenuOpen(false);
       }
     };
@@ -220,12 +222,6 @@ export function Sidebar({
     () => allConvs.filter((c) => c.archived).length,
     [allConvs],
   );
-
-  // 扁平 id 列表（按渲染顺序），键盘导航用
-  const flatIds = useMemo(() => {
-    if (tab === "archived") return filtered.map((c) => c.id);
-    return BUCKET_ORDER.flatMap((b) => grouped[b].map((c) => c.id));
-  }, [filtered, grouped, tab]);
 
   useEffect(() => {
     if (!list.hasNextPage || list.isFetchingNextPage) return;
@@ -322,24 +318,13 @@ export function Sidebar({
     [deleteMut, currentConvId, setCurrentConv],
   );
 
-  // 缓存 rows DOM 引用，避免每次 keydown 跑 querySelectorAll
-  const rowsCacheRef = useRef<HTMLElement[]>([]);
-  useEffect(() => {
-    const root = listRef.current;
-    if (!root) {
-      rowsCacheRef.current = [];
-      return;
-    }
-    rowsCacheRef.current = Array.from(
-      root.querySelectorAll<HTMLElement>("[data-conv-id]"),
-    );
-  }, [flatIds]);
-
   // 键盘导航：在列表区按 ↑/↓ 遍历；Enter 打开；Delete 触发删除 popover（通过 more 按钮 focus）
   const handleListKey = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-      const rows = rowsCacheRef.current;
+      const rows = Array.from(
+        e.currentTarget.querySelectorAll<HTMLElement>("[data-conv-id]"),
+      );
       if (rows.length === 0) return;
       const activeEl = document.activeElement as HTMLElement | null;
       const currentIndex = rows.findIndex(
@@ -417,7 +402,7 @@ export function Sidebar({
             <span className="text-[11px] font-medium text-[var(--fg-2)]">
               {tab === "active" ? "会话" : "已归档"}
             </span>
-            <div ref={archiveMenuRef} className="relative">
+            <div data-sidebar-archive-menu className="relative">
               <IconButton
                 variant="ghost"
                 size="sm"
@@ -483,7 +468,7 @@ export function Sidebar({
 
         {/* ——— 列表 ——— */}
         <div
-          ref={listRef}
+          data-sidebar-scroll
           onKeyDown={handleListKey}
           role="region"
           aria-label={tab === "active" ? "会话列表" : "归档会话列表"}
@@ -524,7 +509,6 @@ export function Sidebar({
                 deleteMut.isPending ? (deleteMut.variables as string | undefined) : undefined
               }
               patchPendingId={patchMut.isPending ? patchMut.variables?.id : undefined}
-              scrollRef={listRef}
               onSelect={handleSelect}
               onRename={handleRename}
               onArchive={handleArchive}
@@ -635,6 +619,8 @@ export function Sidebar({
       {/* 桌面端：始终在 DOM，用 CSS width 控制展开/收起，不走 framer-motion */}
       <aside
         {...ariaCommon}
+        aria-hidden={!sidebarOpen}
+        inert={!sidebarOpen ? true : undefined}
         className={cn(
           "relative hidden h-[100dvh] shrink-0 flex-col overflow-hidden md:flex",
           "bg-[var(--bg-1)] border-r border-[var(--border-subtle)]",
@@ -729,7 +715,6 @@ function ArchivedList({
   currentConvId,
   deletePendingId,
   patchPendingId,
-  scrollRef,
   onSelect,
   onRename,
   onArchive,
@@ -739,40 +724,37 @@ function ArchivedList({
   currentConvId: string | null;
   deletePendingId: string | undefined;
   patchPendingId: string | undefined;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
   onSelect: (conv: ConversationSummary) => void;
   onRename: (conv: ConversationSummary, nextTitle: string) => void;
   onArchive: (conv: ConversationSummary, nextArchived: boolean) => void;
   onDelete: (conv: ConversationSummary) => void;
 }) {
   const shouldVirtualize = items.length > VIRTUALIZE_AFTER;
-  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
+  const virtualRootRef = useRef<HTMLDivElement | null>(null);
+  const layoutKey = useMemo(
+    () =>
+      JSON.stringify(
+        items.map((conv) => [conv.id, titleOf(conv), conv.archived]),
+      ),
+    [items],
+  );
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () =>
+      virtualRootRef.current?.closest<HTMLDivElement>(
+        "[data-sidebar-scroll]",
+      ) ?? null,
+    estimateSize: () => ARCHIVED_ROW_HEIGHT,
+    getItemKey: (index) => items[index]?.id ?? index,
+    overscan: ARCHIVED_ROW_OVERSCAN,
+    enabled: shouldVirtualize,
+  });
 
   useEffect(() => {
     if (!shouldVirtualize) return;
-    const scrollEl = scrollRef.current;
-    if (!scrollEl) return;
-
-    const updateViewport = () => {
-      setViewport({
-        scrollTop: scrollEl.scrollTop,
-        height: scrollEl.clientHeight,
-      });
-    };
-
-    updateViewport();
-    scrollEl.addEventListener("scroll", updateViewport, { passive: true });
-    const resizeObserver =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(updateViewport);
-    resizeObserver?.observe(scrollEl);
-
-    return () => {
-      scrollEl.removeEventListener("scroll", updateViewport);
-      resizeObserver?.disconnect();
-    };
-  }, [scrollRef, shouldVirtualize, items.length]);
+    rowVirtualizer.measure();
+  }, [layoutKey, rowVirtualizer, shouldVirtualize]);
 
   if (!shouldVirtualize) {
     return (
@@ -795,30 +777,26 @@ function ArchivedList({
     );
   }
 
-  const startIndex = Math.max(
-    0,
-    Math.floor(viewport.scrollTop / ARCHIVED_ROW_HEIGHT) - ARCHIVED_ROW_OVERSCAN,
-  );
-  const visibleCount =
-    Math.ceil(viewport.height / ARCHIVED_ROW_HEIGHT) + ARCHIVED_ROW_OVERSCAN * 2;
-  const endIndex = Math.min(items.length, startIndex + visibleCount);
-  const virtualRows = items.slice(startIndex, endIndex);
+  const virtualRows = rowVirtualizer.getVirtualItems();
 
-  // 虚拟化模式：固定行高窗口渲染；ConversationItem 内部仍渲染 <li>。
+  // 虚拟化模式：按稳定会话 id 缓存并测量真实行高；ConversationItem 内部仍渲染 <li>。
   return (
     <div
+      ref={virtualRootRef}
       role="list"
       className="relative px-2"
-      style={{ height: items.length * ARCHIVED_ROW_HEIGHT }}
+      style={{ height: rowVirtualizer.getTotalSize() }}
     >
-      {virtualRows.map((conv, offset) => {
-        const index = startIndex + offset;
+      {virtualRows.map((virtualRow) => {
+        const conv = items[virtualRow.index];
+        if (!conv) return null;
         return (
           <div
-            key={conv.id}
-            data-index={index}
-            className="absolute left-0 right-0"
-            style={{ transform: `translateY(${index * ARCHIVED_ROW_HEIGHT}px)` }}
+            key={virtualRow.key}
+            ref={rowVirtualizer.measureElement}
+            data-index={virtualRow.index}
+            className="absolute left-0 right-0 pb-0.5"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
           >
             <ul className="space-y-0.5">
               <ConversationItem

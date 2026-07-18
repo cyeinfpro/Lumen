@@ -29,6 +29,7 @@ import {
   uploadReferenceVideo,
 } from "@/app/video/video-request-lifecycle";
 import {
+  imageBinaryUrl,
   imageVariantUrl,
   uploadImage,
   videoPosterUrl,
@@ -42,6 +43,10 @@ import {
   formatCanvasTaskElapsed,
   isCanvasExecutionActive,
 } from "@/lib/canvas/executionPresentation";
+import {
+  CANVAS_NODE_TITLE_MAX_CHARS,
+  normalizeCanvasNodeTitle,
+} from "@/lib/canvas/constants";
 import {
   canvasVideoCapabilityError,
   validateCanvasNodeExecution,
@@ -62,23 +67,26 @@ import {
   isCanvasExecutableNodeType,
 } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
+import { deleteCanvasUploadedAsset } from "@/lib/api/canvases";
 import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
 import { cn } from "@/lib/utils";
 import { Button, Input, toast } from "@/components/ui/primitives";
+import {
+  ColorSwatchField,
+  InlineConfigConfirmation,
+  InspectorSection,
+  InspectorShell,
+  ReadOnlyRow,
+  SelectField,
+  ToggleField,
+} from "./CanvasInspectorFields";
+import type { SelectOption } from "./CanvasInspectorFields";
 import { CanvasNodeConfigEditor } from "./CanvasNodeConfigEditor";
 import { CanvasOutputDownloadButton } from "./CanvasOutputDownloadButton";
 import {
   useCanvasStore,
   useCanvasStoreApi,
 } from "./CanvasStoreProvider";
-
-const SELECT_CLASS =
-  "h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm text-[var(--fg-0)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-soft)] max-sm:min-h-11 max-sm:text-base";
-
-type SelectOption = {
-  value: string;
-  label: string;
-};
 
 type CanvasEdgeRole = NonNullable<CanvasEdgeDefinition["role"]>;
 
@@ -128,14 +136,6 @@ const EDGE_ROLE_OPTIONS: readonly SelectOption[] = [
   { value: "background", label: "背景" },
   { value: "other", label: "其他" },
 ];
-
-const NODE_COLOR_OPTIONS = [
-  { value: null, label: "无颜色", color: "var(--bg-3)" },
-  { value: "accent", label: "琥珀色", color: "var(--accent)" },
-  { value: "success", label: "绿色", color: "var(--success)" },
-  { value: "info", label: "蓝色", color: "var(--info)" },
-  { value: "danger", label: "红色", color: "var(--danger)" },
-] as const;
 
 export function CanvasInspector({
   document,
@@ -301,8 +301,15 @@ function CanvasNodeInspector({
             label="名称"
             defaultValue={node.title}
             key={`${node.id}:${node.title}`}
-            maxLength={80}
-            onBlur={(event) => updateNodeTitle(node.id, event.currentTarget.value)}
+            maxLength={CANVAS_NODE_TITLE_MAX_CHARS}
+            onBlur={(event) => {
+              const title = normalizeCanvasNodeTitle(
+                event.currentTarget.value,
+                node.title,
+              );
+              event.currentTarget.value = title;
+              if (title !== node.title) updateNodeTitle(node.id, title);
+            }}
           />
           <ToggleField
             label="折叠节点"
@@ -446,6 +453,7 @@ function useCanvasAssetUpload(
     nodeId: string;
     controller: AbortController;
     assetField: "image_id" | "video_id";
+    kind: CanvasAssetKind;
     initialAssetId: unknown;
     initialDisplayName: unknown;
   } | null>(null);
@@ -480,6 +488,7 @@ function useCanvasAssetUpload(
       nodeId: initialNode.id,
       controller: new AbortController(),
       assetField,
+      kind,
       initialAssetId: initialNode.config[assetField],
       initialDisplayName: initialNode.config.display_name,
     };
@@ -496,10 +505,26 @@ function useCanvasAssetUpload(
         requestRef.current?.id !== request.id ||
         state.selectedNodeId !== request.nodeId
       ) {
+        await cleanupStaleCanvasAsset(
+          state.graph,
+          request.kind,
+          asset.id,
+          asset.created,
+          request.initialAssetId,
+        );
         return;
       }
       const node = state.graph.nodes.find((item) => item.id === request.nodeId);
-      if (!node) return;
+      if (!node) {
+        await cleanupStaleCanvasAsset(
+          state.graph,
+          request.kind,
+          asset.id,
+          asset.created,
+          request.initialAssetId,
+        );
+        return;
+      }
       if (
         !Object.is(
           node.config[request.assetField],
@@ -510,6 +535,13 @@ function useCanvasAssetUpload(
           request.initialDisplayName,
         )
       ) {
+        await cleanupStaleCanvasAsset(
+          state.graph,
+          request.kind,
+          asset.id,
+          asset.created,
+          request.initialAssetId,
+        );
         toast.info("上传已完成，但节点内容已被修改，未自动覆盖。");
         return;
       }
@@ -549,16 +581,69 @@ async function uploadCanvasAsset(
   signal: AbortSignal,
 ) {
   if (kind !== "video") {
-    return uploadImage(file, {
+    const asset = await uploadImage(file, {
       signal,
       purpose: kind === "mask" ? "inpaint_mask" : undefined,
     });
+    return { ...asset, created: true };
   }
   return uploadReferenceVideo(file, signal);
 }
 
 function canvasAssetIdField(kind: CanvasAssetKind): "image_id" | "video_id" {
   return kind === "video" ? "video_id" : "image_id";
+}
+
+function isCanvasAssetReferenced(
+  graph: CanvasDocument["graph"],
+  kind: CanvasAssetKind,
+  assetId: string,
+): boolean {
+  const field = canvasAssetIdField(kind);
+  return graph.nodes.some((node) => node.config[field] === assetId);
+}
+
+function shouldCleanupStaleCanvasAsset(
+  graph: CanvasDocument["graph"],
+  kind: CanvasAssetKind,
+  assetId: string,
+  createdByRequest: boolean,
+  initialAssetId: unknown,
+): boolean {
+  return (
+    createdByRequest &&
+    assetId.trim().length > 0 &&
+    !Object.is(assetId, initialAssetId) &&
+    !isCanvasAssetReferenced(graph, kind, assetId)
+  );
+}
+
+async function cleanupStaleCanvasAsset(
+  graph: CanvasDocument["graph"],
+  kind: CanvasAssetKind,
+  assetId: string,
+  createdByRequest: boolean,
+  initialAssetId: unknown,
+): Promise<void> {
+  if (
+    !shouldCleanupStaleCanvasAsset(
+      graph,
+      kind,
+      assetId,
+      createdByRequest,
+      initialAssetId,
+    )
+  ) {
+    return;
+  }
+  try {
+    await deleteCanvasUploadedAsset(
+      kind === "video" ? "video" : "image",
+      assetId,
+    );
+  } catch {
+    // The server keeps a referenced asset; cleanup is best effort.
+  }
 }
 
 function queryErrorMessage(
@@ -999,12 +1084,12 @@ function ExecutionHistory({
                     }
                     loading={
                       selectOutput.isPending &&
-                      selectOutput.variables?.executionId === execution.id &&
-                      selectOutput.variables.outputIndex === index
+                      selectOutput.variables?.nodeId === execution.node_id
                     }
                     onSelect={() =>
                       selectOutput.mutate(
                         {
+                          nodeId: execution.node_id,
                           executionId: execution.id,
                           outputIndex: index,
                           selectionRevision: current?.revision,
@@ -1184,9 +1269,14 @@ function HistoryOutput({
   onSelect: () => void;
 }) {
   const Icon = output.type === "image" ? ImageIcon : Video;
-  const src = historyOutputPreviewSource(output);
-  const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const visibleSrc = src === failedSrc ? null : src;
+  const sources = historyOutputPreviewSources(output);
+  const sourceKey = sources.join("\n");
+  const [sourceState, setSourceState] = useState({
+    key: sourceKey,
+    index: 0,
+  });
+  const sourceIndex = sourceState.key === sourceKey ? sourceState.index : 0;
+  const visibleSrc = sources[sourceIndex] ?? null;
   return (
     <div
       style={{ aspectRatio: historyOutputAspectRatio(output) }}
@@ -1208,7 +1298,9 @@ function HistoryOutput({
             loading="lazy"
             decoding="async"
             className="h-full w-full object-contain"
-            onError={() => setFailedSrc(visibleSrc)}
+            onError={() =>
+              setSourceState({ key: sourceKey, index: sourceIndex + 1 })
+            }
           />
         ) : (
           <span className="grid h-full place-items-center text-[var(--fg-2)]">
@@ -1234,22 +1326,31 @@ function HistoryOutput({
   );
 }
 
-function historyOutputPreviewSource(output: CanvasOutput): string | null {
+function historyOutputPreviewSources(output: CanvasOutput): string[] {
   if (output.type === "video") {
-    return (
-      output.poster_url ??
-      output.preview_url ??
-      (output.video_id ? videoPosterUrl(output.video_id) : null) ??
-      null
-    );
+    return uniqueMediaSources([
+      output.poster_url,
+      output.preview_url,
+      output.video_id ? videoPosterUrl(output.video_id) : null,
+    ]);
   }
-  return (
-    (output.image_id
-      ? imageVariantUrl(output.image_id, "display2048")
-      : null) ??
-    output.preview_url ??
-    output.url ??
-    null
+  return uniqueMediaSources([
+    output.image_id ? imageVariantUrl(output.image_id, "display2048") : null,
+    output.preview_url,
+    output.url,
+    output.image_id ? imageBinaryUrl(output.image_id) : null,
+  ]);
+}
+
+function uniqueMediaSources(
+  sources: Array<string | null | undefined>,
+): string[] {
+  return Array.from(
+    new Set(
+      sources
+        .map((source) => source?.trim() ?? "")
+        .filter((source) => source.length > 0),
+    ),
   );
 }
 
@@ -1265,193 +1366,6 @@ function historyOutputAspectRatio(output: CanvasOutput): string {
     return `${width} / ${height}`;
   }
   return output.type === "video" ? "16 / 9" : "1 / 1";
-}
-
-function InlineConfigConfirmation({
-  removedConnections,
-  onCancel,
-  onConfirm,
-}: {
-  removedConnections: number;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <section
-      aria-label="模式切换确认"
-      className="m-4 grid gap-3 rounded-[var(--radius-card)] border border-[var(--danger)]/35 bg-[var(--danger-soft)] p-3"
-    >
-      <div role="alert" aria-live="assertive">
-        <h3 className="type-body-sm font-medium text-[var(--danger-fg)]">
-          确认切换模式
-        </h3>
-        <p className="mt-1 type-caption text-[var(--fg-1)]">
-          继续后会移除 {removedConnections} 条不兼容连接。
-        </p>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <Button size="sm" variant="outline" onClick={onCancel}>
-          取消
-        </Button>
-        <Button size="sm" variant="danger" onClick={onConfirm}>
-          继续
-        </Button>
-      </div>
-    </section>
-  );
-}
-
-function ColorSwatchField({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: string | null;
-  disabled?: boolean;
-  onChange: (value: string | null) => void;
-}) {
-  return (
-    <fieldset disabled={disabled} className="grid gap-2">
-      <legend className="type-caption font-medium text-[var(--fg-1)]">
-        颜色标记
-      </legend>
-      <div className="flex flex-wrap gap-2">
-        {NODE_COLOR_OPTIONS.map((option) => {
-          const selected = value === option.value;
-          return (
-            <button
-              key={option.label}
-              type="button"
-              title={option.label}
-              aria-label={option.label}
-              aria-pressed={selected}
-              onClick={() => onChange(option.value)}
-              style={{ backgroundColor: option.color }}
-              className={`relative grid h-11 w-11 place-items-center rounded-full border transition-[border-color,box-shadow,opacity] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 ${
-                selected
-                  ? "border-[var(--fg-0)] ring-2 ring-[var(--accent)]/35"
-                  : "border-[var(--border-strong)]"
-              }`}
-            >
-              {option.value === null ? (
-                <span
-                  aria-hidden
-                  className="h-px w-6 rotate-45 bg-[var(--fg-2)]"
-                />
-              ) : null}
-              {selected ? (
-                <Check
-                  className="absolute bottom-0.5 right-0.5 h-3.5 w-3.5 rounded-full bg-[var(--bg-0)] p-0.5 text-[var(--fg-0)]"
-                  aria-hidden
-                />
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-    </fieldset>
-  );
-}
-
-function InspectorShell({
-  eyebrow,
-  title,
-  children,
-}: {
-  eyebrow: string;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--bg-1)] text-[var(--fg-0)]">
-      <header className="shrink-0 border-b border-[var(--border)] px-4 py-3">
-        <p className="type-page-kicker">{eyebrow}</p>
-        <h2 className="type-card-title mt-1 truncate">{title}</h2>
-      </header>
-      {children}
-    </div>
-  );
-}
-
-function InspectorSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="grid gap-3 border-b border-[var(--border)] p-4 last:border-0">
-      <h3 className="type-overline text-[var(--fg-2)]">{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly SelectOption[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="grid gap-1">
-      <span className="type-caption font-medium text-[var(--fg-1)]">{label}</span>
-      <select
-        className={SELECT_CLASS}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function ToggleField({
-  label,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className="flex min-h-11 items-center justify-between gap-3">
-      <span className="type-body-sm text-[var(--fg-1)]">{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.checked)}
-        className="h-5 w-5 accent-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-      />
-    </label>
-  );
-}
-
-function ReadOnlyRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 type-body-sm">
-      <span className="text-[var(--fg-2)]">{label}</span>
-      <span className="truncate text-[var(--fg-0)]">{value}</span>
-    </div>
-  );
 }
 
 function portLabel(

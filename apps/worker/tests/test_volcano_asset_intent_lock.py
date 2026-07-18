@@ -52,12 +52,16 @@ def _install_runtime(
     async def noop(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def no_receipt(_operation: dict[str, Any]) -> None:
+    async def no_receipt(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> None:
         return None
 
     async def write_receipt(
         operation: dict[str, Any],
         asset: dict[str, Any],
+        **_kwargs: Any,
     ) -> None:
         receipts.append((str(operation["id"]), str(asset["id"])))
 

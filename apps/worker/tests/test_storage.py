@@ -9,6 +9,17 @@ import app.storage as storage_mod
 from app.storage import LocalStorage, StorageDiskFullError
 
 
+def test_deferred_storage_root_is_created_only_when_explicitly_ready(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "deferred"
+    storage = LocalStorage(root, create_root=False)
+
+    assert not root.exists()
+    storage.ensure_ready()
+    assert root.is_dir()
+
+
 def test_path_for_rejects_resolved_escape(tmp_path: Path) -> None:
     storage = LocalStorage(tmp_path)
 
@@ -122,3 +133,13 @@ def test_put_bytes_translates_enospc_to_storage_disk_full(
 
     assert exc_info.value.error_code == "disk_full"
     assert exc_info.value.errno == errno.ENOSPC
+
+
+def test_public_url_encodes_each_key_segment(tmp_path: Path) -> None:
+    storage = LocalStorage(tmp_path)
+
+    assert storage.public_url("u/user name/g/gen/file?#%.png") == (
+        "/api/images/_/by-key/u/user%20name/g/gen/file%3F%23%25.png"
+    )
+    with pytest.raises(ValueError):
+        storage.public_url("../escape.png")

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from app import sse_publish
 from app.tasks import completion
+from lumen_core.models import OutboxEvent
 
 
 @pytest.mark.asyncio
@@ -249,139 +250,220 @@ async def test_run_completion_setup_lease_loss_does_not_mutate_row(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("current_attempt", "text", "expected_event"),
+    ("event_name", "event_data"),
     [
-        (0, "", completion.EV_COMP_STARTED),
-        (1, "partial", completion.EV_COMP_RESTARTED),
+        (completion.EV_COMP_STARTED, {"completion_id": "comp-1"}),
+        (completion.EV_COMP_DELTA, {"completion_id": "comp-1", "text_delta": "x"}),
+        (
+            completion.EV_COMP_PROGRESS,
+            {"completion_id": "comp-1", "stage": "tool_call"},
+        ),
     ],
 )
-async def test_run_completion_publish_failure_uses_unified_cleanup(
+async def test_completion_publish_failure_stages_stable_sse_redrive(
     monkeypatch: pytest.MonkeyPatch,
-    current_attempt: int,
-    text: str,
-    expected_event: str,
+    event_name: str,
+    event_data: dict[str, Any],
 ) -> None:
-    row = SimpleNamespace(
-        id="comp-1",
-        status=completion.CompletionStatus.QUEUED.value,
-        progress_stage=completion.CompletionStage.QUEUED,
-        attempt=current_attempt,
-        text=text,
-        user_id="user-1",
-        message_id="message-1",
-        system_prompt=None,
-        user_api_credential_id=None,
-        model=None,
-        upstream_request={},
-        created_at=datetime.now(timezone.utc),
-        started_at=None,
-        finished_at=None,
-        error_code=None,
-        error_message=None,
-    )
-    message = SimpleNamespace(conversation_id="conversation-1")
-
-    class Result:
-        def scalar_one_or_none(self) -> Any:
-            return row
-
     class Session:
+        def __init__(self) -> None:
+            self.rows: list[OutboxEvent] = []
+            self.commits = 0
+
         async def __aenter__(self) -> "Session":
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def execute(self, _statement: Any) -> Result:
-            return Result()
-
-        async def get(self, model: Any, _row_id: str) -> Any:
-            if model is completion.User:
-                return SimpleNamespace(account_mode="wallet")
-            if model is completion.Message:
-                return message
-            if model is completion.Completion:
-                return row
-            return None
+        def add(self, row: OutboxEvent) -> None:
+            self.rows.append(row)
 
         async def commit(self) -> None:
-            return None
+            self.commits += 1
 
-    class Redis:
-        async def set(self, _key: str, _token: str, **_kwargs: Any) -> bool:
-            return True
-
-    async def no_lock(_session: Any, _task_id: str) -> None:
-        return None
-
-    async def preflight(_session: Any, _row: Any) -> tuple[int, None]:
-        return current_attempt + 1, None
-
-    renewer_started = asyncio.Event()
-    renewer_stopped = asyncio.Event()
-
-    async def renewer(
-        _redis: Any,
-        _task_id: str,
-        _token: str,
-        _lease_lost: asyncio.Event,
-    ) -> None:
-        renewer_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            renewer_stopped.set()
-
-    published: list[str] = []
+    session = Session()
+    attempted: list[dict[str, Any]] = []
 
     async def fail_publish(
         _redis: Any,
         _user_id: str,
         _channel: str,
-        event: str,
-        _payload: dict[str, Any],
+        _event_name: str,
+        payload: dict[str, Any],
     ) -> None:
-        published.append(event)
-        await asyncio.sleep(0)
-        raise RuntimeError("publish failed")
-
-    released: list[tuple[str, str]] = []
-
-    async def release(_redis: Any, task_id: str, token: str) -> None:
-        released.append((task_id, token))
-
-    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
-    monkeypatch.setattr(completion, "_acquire_completion_xact_lock", no_lock)
-    monkeypatch.setattr(completion, "_completion_preflight_failure", preflight)
-    monkeypatch.setattr(completion, "_lease_renewer", renewer)
-    monkeypatch.setattr(completion, "_release_lease", release)
-    monkeypatch.setattr(completion, "publish_event", fail_publish)
-    monkeypatch.setattr(
-        completion,
-        "completion_queue_metadata",
-        lambda **_kwargs: {"queue_wait_ms": 1},
-    )
-    monkeypatch.setattr(
-        completion,
-        "merge_queue_metadata",
-        lambda request, metadata: {**request, **metadata},
-    )
-
-    with pytest.raises(RuntimeError, match="publish failed"):
-        await completion.run_completion(
-            {"redis": Redis(), "worker_id": "worker-1"},
-            "comp-1",
+        attempted.append(payload)
+        raise sse_publish.SSEPublishRetryableError(
+            stream_key="sse:user-1:task:comp-1",
+            event_id=str(payload["event_id"]),
+            diagnostic_dlq_persisted=True,
         )
 
-    assert renewer_started.is_set()
-    assert renewer_stopped.is_set()
-    assert published == [expected_event]
-    assert row.attempt == current_attempt + 1
-    assert row.status == completion.CompletionStatus.STREAMING.value
-    assert row.text == ""
-    assert len(released) == 1
-    assert released[0][0] == "comp-1"
-    assert released[0][1].startswith("worker-1:")
+    monkeypatch.setattr(completion, "SessionLocal", lambda: session)
+    monkeypatch.setattr(completion, "_publish_sse_event", fail_publish)
+
+    await completion.publish_event(
+        object(),
+        "user-1",
+        "task:comp-1",
+        event_name,
+        event_data,
+    )
+
+    assert session.commits == 1
+    assert len(session.rows) == 1
+    row = session.rows[0]
+    assert row.kind == "sse"
+    assert row.published_at is None
+    assert row.payload["event_name"] == event_name
+    assert row.payload["data"]["event_id"] == attempted[0]["event_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_name", "event_data"),
+    [
+        (completion.EV_COMP_SUCCEEDED, {"text": "done"}),
+        (completion.EV_COMP_FAILED, {"code": "upstream_error"}),
+        (completion.EV_COMP_FAILED, {"code": "cancelled"}),
+    ],
+)
+async def test_terminal_completion_publish_failure_keeps_outbox_for_redrive(
+    event_name: str,
+    event_data: dict[str, Any],
+) -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.rows: list[OutboxEvent] = []
+
+        def add(self, row: OutboxEvent) -> None:
+            self.rows.append(row)
+
+    class BrokenRedis:
+        async def get(self, _key: str) -> None:
+            raise RuntimeError("redis unavailable")
+
+    session = Session()
+    delivery = completion._stage_completion_event(
+        session,
+        "user-1",
+        "task:comp-1",
+        event_name,
+        event_data,
+    )
+    event_id = delivery[2]["data"]["event_id"]
+
+    await completion._deliver_completion_event(BrokenRedis(), delivery)
+
+    assert len(session.rows) == 1
+    assert session.rows[0].published_at is None
+    assert session.rows[0].payload["data"]["event_id"] == event_id
+
+
+@pytest.mark.asyncio
+async def test_memory_extract_outbox_is_staged_before_success_commit() -> None:
+    user = SimpleNamespace(
+        id="user-1",
+        memory_disabled=False,
+        memory_paused=False,
+    )
+    conversation = SimpleNamespace(
+        id="conversation-1",
+        user_id="user-1",
+        memory_disabled=False,
+    )
+
+    class Session:
+        def __init__(self) -> None:
+            self.rows: list[OutboxEvent] = []
+            self.committed = False
+
+        async def get(self, model: Any, _row_id: str) -> Any:
+            if model is completion.User:
+                return user
+            if model is completion.Conversation:
+                return conversation
+            return None
+
+        def add(self, row: OutboxEvent) -> None:
+            self.rows.append(row)
+
+        async def commit(self) -> None:
+            assert any(row.kind == "memory_extract" for row in self.rows)
+            self.committed = True
+
+    session = Session()
+    delivery = (
+        await completion._completion_tool_images._stage_completion_memory_extract(
+            session,
+            feature_enabled=True,
+            user_id="user-1",
+            conversation_id="conversation-1",
+            source_message_id="source-1",
+            assistant_message_id="assistant-1",
+            hooks=completion._COMPLETION_EVENT_HOOKS,
+        )
+    )
+    await session.commit()
+
+    assert delivery is not None
+    assert session.committed is True
+    row = session.rows[0]
+    assert row.published_at is None
+    assert row.payload["task_id"] == "assistant-1"
+    assert row.payload["event_id"] == "memory-extract:source-1:assistant-1"
+    assert row.payload["source_user_message_id"] == "source-1"
+    assert row.payload["assistant_message_id"] == "assistant-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("feature_enabled", "source_message_id", "user_disabled", "conversation_disabled"),
+    [
+        (False, "source-1", False, False),
+        (True, None, False, False),
+        (True, "source-1", True, False),
+        (True, "source-1", False, True),
+    ],
+)
+async def test_memory_extract_outbox_requires_enabled_complete_context(
+    feature_enabled: bool,
+    source_message_id: str | None,
+    user_disabled: bool,
+    conversation_disabled: bool,
+) -> None:
+    class Session:
+        async def get(self, model: Any, _row_id: str) -> Any:
+            if model is completion.User:
+                return SimpleNamespace(
+                    id="user-1",
+                    memory_disabled=user_disabled,
+                    memory_paused=False,
+                )
+            if model is completion.Conversation:
+                return SimpleNamespace(
+                    id="conversation-1",
+                    user_id="user-1",
+                    memory_disabled=conversation_disabled,
+                )
+            return None
+
+        def add(self, _row: OutboxEvent) -> None:
+            raise AssertionError("disabled or incomplete memory context must not stage")
+
+    delivery = (
+        await completion._completion_tool_images._stage_completion_memory_extract(
+            Session(),
+            feature_enabled=feature_enabled,
+            user_id="user-1",
+            conversation_id="conversation-1",
+            source_message_id=source_message_id,
+            assistant_message_id="assistant-1",
+            hooks=completion._COMPLETION_EVENT_HOOKS,
+        )
+    )
+
+    assert delivery is None
 
 
 @pytest.mark.asyncio

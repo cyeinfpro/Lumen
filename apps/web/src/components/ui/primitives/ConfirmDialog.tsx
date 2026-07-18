@@ -43,9 +43,10 @@ export function ConfirmDialog({
   const descriptionId = useId();
   useBodyScrollLock(open);
   const handleCancel = useCallback(() => {
+    if (confirming) return;
     onOpenChange(false);
     onCancel?.();
-  }, [onCancel, onOpenChange]);
+  }, [confirming, onCancel, onOpenChange]);
   const onDialogKeyDown = useModalLayer({
     open,
     rootRef: dialogRef,
@@ -79,6 +80,7 @@ export function ConfirmDialog({
             ref={dialogRef}
             role="dialog"
             aria-modal="true"
+            aria-busy={confirming || undefined}
             aria-labelledby={titleId}
             aria-describedby={description ? descriptionId : undefined}
             tabIndex={-1}

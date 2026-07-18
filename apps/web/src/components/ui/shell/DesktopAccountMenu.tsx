@@ -15,6 +15,11 @@ import { useMemo, useRef, useState } from "react";
 
 import { DesktopPopover } from "@/components/ui/composer/desktop/DesktopPopover";
 import {
+  AUTH_USER_QUERY_KEY,
+  userBillingQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
+import {
   getMe,
   getMyWallet,
   getPricing,
@@ -87,22 +92,26 @@ export function DesktopAccountMenu() {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const pathname = usePathname();
+  const userScope = useUserQueryScope();
   const meQuery = useQuery<MenuUser>({
-    queryKey: ["me"],
+    queryKey: AUTH_USER_QUERY_KEY,
     queryFn: () => getMe() as Promise<MenuUser>,
     retry: false,
     staleTime: 60_000,
   });
-  const walletEnabled = walletIsEnabled(meQuery.data);
+  const walletEnabled =
+    userScope.enabled &&
+    meQuery.data?.id === userScope.userId &&
+    walletIsEnabled(meQuery.data);
   const walletQuery = useQuery({
-    queryKey: ["me", "wallet"],
+    queryKey: userBillingQueryKeys.wallet(userScope.userId),
     queryFn: getMyWallet,
     enabled: walletEnabled,
     retry: false,
     staleTime: 30_000,
   });
   const pricingQuery = useQuery({
-    queryKey: ["me", "pricing"],
+    queryKey: userBillingQueryKeys.pricing(userScope.userId),
     queryFn: getPricing,
     enabled: walletEnabled,
     retry: false,

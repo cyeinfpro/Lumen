@@ -1,11 +1,10 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   CheckCircle2,
-  EyeOff,
   KeyRound,
   Plus,
   RefreshCw,
@@ -33,7 +32,16 @@ import {
 import type { AdminWalletAuditOut } from "@/lib/types";
 import type { PricingRuleOut, PricingRuleUpsertIn } from "@/lib/types";
 import { Button, Card, toast } from "@/components/ui/primitives";
+import {
+  userBillingQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { formatRmb } from "@/lib/money";
+import {
+  MetricCard,
+  RedemptionSecretControl,
+  SwitchField,
+} from "./BillingPanelParts";
 import { RedemptionPanel } from "./RedemptionPanel";
 
 const DEFAULT_IMAGE_THRESHOLDS: Record<string, number> = {
@@ -562,28 +570,9 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
   );
 }
 
-function MetricCard({
-  label,
-  value,
-  icon,
-}: {
-  label: string;
-  value: string;
-  icon: ReactNode;
-}) {
-  return (
-    <Card variant="subtle" padding="md" className="space-y-2">
-      <div className="flex items-center gap-2 text-[var(--fg-2)]">
-        {icon}
-        <span className="type-caption">{label}</span>
-      </div>
-      <p className="text-lg font-semibold tabular-nums text-[var(--fg-0)]">{value}</p>
-    </Card>
-  );
-}
-
 function PricingSubpanel() {
   const qc = useQueryClient();
+  const userScope = useUserQueryScope();
   const pricingQ = useQuery({
     queryKey: ["admin", "pricing"],
     queryFn: getAdminPricing,
@@ -677,8 +666,9 @@ function PricingSubpanel() {
       qc.invalidateQueries({ queryKey: ["admin", "pricing"] }),
       qc.invalidateQueries({ queryKey: ["admin", "settings"] }),
       qc.invalidateQueries({ queryKey: ["admin", "billing", "overview"] }),
-      qc.invalidateQueries({ queryKey: ["me", "pricing"] }),
-      qc.invalidateQueries({ queryKey: ["me", "wallet"] }),
+      qc.invalidateQueries({
+        queryKey: userBillingQueryKeys.all(userScope.userId),
+      }),
     ]);
   };
 
@@ -1094,40 +1084,13 @@ function PricingSubpanel() {
             />
           </label>
         </div>
-        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <EyeOff className="h-4 w-4 text-[var(--fg-2)]" />
-              <div>
-                <p className="text-sm text-[var(--fg-0)]">兑换码 secret</p>
-                <p className="type-caption text-[var(--fg-2)]">
-                  {secretConfigured ? "已配置；轮换会撤销所有未兑换码" : "未配置；创建和兑换都会被拒绝"}
-                </p>
-              </div>
-            </div>
-            <div className="flex w-full justify-end sm:w-auto">
-              <Button
-                variant={secretConfigured ? "outline" : "primary"}
-                size="md"
-                disabled={secretConfigured && !secretConfirmed}
-                loading={rotateSecretMut.isPending}
-                onClick={() => rotateSecretMut.mutate()}
-              >
-                {secretConfigured ? "轮换" : "生成"}
-              </Button>
-            </div>
-          </div>
-          {secretConfigured && (
-            <label className="mt-3 flex items-center gap-2 text-xs text-[var(--fg-2)]">
-              <input
-                type="checkbox"
-                checked={secretConfirmed}
-                onChange={(e) => setSecretConfirmed(e.target.checked)}
-              />
-              我确认轮换 secret 会作废所有未兑换码
-            </label>
-          )}
-        </div>
+        <RedemptionSecretControl
+          configured={secretConfigured}
+          confirmed={secretConfirmed}
+          loading={rotateSecretMut.isPending}
+          onConfirmedChange={setSecretConfirmed}
+          onRotate={() => rotateSecretMut.mutate()}
+        />
       </Card>
 
       <Card variant="subtle" padding="lg" className="space-y-4">
@@ -1601,49 +1564,6 @@ function PricingSubpanel() {
           </Button>
         </div>
       </Card>
-    </div>
-  );
-}
-
-function SwitchField({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <span className="type-caption text-[var(--fg-2)]">{label}</span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={[
-          "flex h-10 w-full items-center justify-between rounded-[var(--radius-control)] border px-3 text-sm",
-          checked
-            ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
-            : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
-        ].join(" ")}
-      >
-        <span>{checked ? "开启" : "关闭"}</span>
-        <span
-          className={[
-            "relative h-5 w-9 rounded-full transition-colors",
-            checked ? "bg-[var(--accent)]" : "bg-[var(--bg-2)]",
-          ].join(" ")}
-        >
-          <span
-            className={[
-              "absolute top-0.5 h-4 w-4 rounded-full bg-[var(--fg-0)]/90 transition-transform",
-              checked ? "translate-x-4" : "translate-x-0.5",
-            ].join(" ")}
-          />
-        </span>
-      </button>
     </div>
   );
 }

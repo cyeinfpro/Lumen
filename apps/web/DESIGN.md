@@ -92,7 +92,7 @@ supersedes_frontend_guidance: docs/DESIGN.md
 
 ---
 
-## 4. 排版：11 档 type-* class（已定义）
+## 4. 排版：14 档 type-* class（已定义）
 
 中文/英文混排，统一用 `type-*` class，不用 `text-{size} font-{weight}` 组合。
 

@@ -75,6 +75,7 @@ class _StreamResponse:
         self.chunks = chunks or []
         self.yielded = 0
         self.closed = False
+        self.read_called = False
 
     async def __aenter__(self) -> _StreamResponse:
         return self
@@ -82,11 +83,19 @@ class _StreamResponse:
     async def __aexit__(self, *_args: object) -> None:
         self.closed = True
 
-    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+    async def aiter_bytes(
+        self,
+        chunk_size: int | None = None,
+    ) -> AsyncIterator[bytes]:
+        _ = chunk_size
         for chunk in self.chunks:
             self.yielded += 1
             await asyncio.sleep(0)
             yield chunk
+
+    async def aread(self) -> bytes:
+        self.read_called = True
+        return b"".join(self.chunks)
 
 
 def _configure_db(app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -542,6 +551,28 @@ def test_upstream_error_body_content_length_preflight_is_bounded(
     assert exc.value.upstream_body["truncated"] is True
     assert exc.value.outcome_uncertain is True
     assert response.yielded == 0
+
+
+def test_upstream_error_body_stops_at_streamed_limit_without_reading_full_body(
+    monkeypatch,
+) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "MAX_UPSTREAM_ERROR_BODY_BYTES", 4)
+    response = _StreamResponse(
+        status_code=502,
+        headers={"content-type": "text/plain"},
+        chunks=[b"1234", b"5678", b"unread"],
+    )
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(app._raise_upstream_http_error(response))
+
+    assert exc.value.upstream_body == {
+        "preview": 1234,
+        "truncated": True,
+    }
+    assert response.yielded == 2
+    assert response.read_called is False
 
 
 def test_image_candidate_count_limit(monkeypatch) -> None:

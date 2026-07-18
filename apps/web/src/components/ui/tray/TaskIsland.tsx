@@ -5,6 +5,10 @@ import { ListChecks } from "lucide-react";
 import { useEffect, useMemo } from "react";
 
 import { listTasks } from "@/lib/apiClient";
+import {
+  userTaskQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
@@ -17,7 +21,7 @@ export function TaskIsland({
   className?: string;
 }) {
   const generations = useChatStore((state) => state.generations);
-  const userId = useChatStore((state) => state.currentUserId);
+  const userScope = useUserQueryScope();
   const setTaskTrayMinimized = useUiStore(
     (state) => state.setTaskTrayMinimized,
   );
@@ -31,17 +35,17 @@ export function TaskIsland({
   }, [setTaskIslandMounted]);
 
   const activeQuery = useQuery({
-    queryKey: ["tasks", "island", "active"],
+    queryKey: userTaskQueryKeys.islandActive(userScope.userId),
     queryFn: ({ signal }) =>
       listTasks({ status: "active", limit: 24 }, { signal }),
-    enabled: Boolean(userId),
+    enabled: userScope.enabled,
     staleTime: 5_000,
     refetchInterval: 8_000,
   });
   const recentQuery = useQuery({
-    queryKey: ["tasks", "island", "recent"],
+    queryKey: userTaskQueryKeys.islandRecent(userScope.userId),
     queryFn: ({ signal }) => listTasks({ limit: 1 }, { signal }),
-    enabled: Boolean(userId),
+    enabled: userScope.enabled,
     staleTime: 15_000,
   });
 

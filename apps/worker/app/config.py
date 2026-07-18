@@ -14,6 +14,7 @@ _DEFAULT_REDIS_PASSWORD = "lumen-redis-dev-password"
 _DEFAULT_REDIS_URL = f"redis://:{_DEFAULT_REDIS_PASSWORD}@localhost:6379/0"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://lumen:lumen@localhost:5432/lumen"
+_DEV_ENVIRONMENTS = frozenset({"dev", "development", "local", "test"})
 
 
 class Settings(BaseSettings):
@@ -86,11 +87,19 @@ class Settings(BaseSettings):
         if self.edit_race_lanes < 1:
             raise ValueError("EDIT_RACE_LANES must be at least 1")
         env = self.app_env.strip().lower()
-        is_dev = env in {"dev", "development", "local", "test"}
+        is_dev = env in _DEV_ENVIRONMENTS
         image_job_base = self.image_job_base_url.strip().rstrip("/")
         if not is_dev and image_job_base == _DEFAULT_IMAGE_JOB_BASE_URL:
             raise ValueError(
                 "IMAGE_JOB_BASE_URL must not use the example.com placeholder outside development"
+            )
+        if not is_dev and self.redis_url.strip() == _DEFAULT_REDIS_URL:
+            raise ValueError(
+                "REDIS_URL must be explicitly configured outside development"
+            )
+        if not is_dev and self.database_url.strip() == _DEFAULT_DATABASE_URL:
+            raise ValueError(
+                "DATABASE_URL must be explicitly configured outside development"
             )
         secret = (self.byok_api_key_master_secret or "").strip()
         # dev/test：未设时 fallback 到与 API 端一致的 deterministic dummy

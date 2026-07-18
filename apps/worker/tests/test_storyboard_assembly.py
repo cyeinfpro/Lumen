@@ -35,55 +35,54 @@ def _claim(
 
 @pytest.mark.parametrize("pending_status", ("waiting", "compositing"))
 @pytest.mark.asyncio
-async def test_pending_to_compositing_cas_allows_only_one_concurrent_claim(
+async def test_pending_to_compositing_claim_compiles_full_cas_predicate(
     pending_status: str,
 ) -> None:
-    state: dict[str, Any] = {"status": pending_status, "claimed": False}
-    lock = asyncio.Lock()
     statements: list[Any] = []
 
     class Result:
-        def __init__(self, rowcount: int) -> None:
-            self.rowcount = rowcount
+        rowcount = 1
 
     class Session:
         async def execute(self, statement: Any) -> Result:
             statements.append(statement)
-            async with lock:
-                await asyncio.sleep(0)
-                if state["claimed"]:
-                    return Result(0)
-                state["claimed"] = True
-                state["status"] = "compositing"
-                return Result(1)
+            return Result()
 
     output = {
         "assembly_attempt_token": "attempt-1",
         "assembly_fingerprint": "fingerprint-1",
+        "assembly_claimed_at": "2026-07-18T00:00:00+00:00",
     }
-    claimed = await asyncio.gather(
-        *(
-            storyboard_assembly._claim_waiting_assembly(  # noqa: SLF001
-                Session(),
-                step_id="assembly-1",
-                attempt_token="attempt-1",
-                fingerprint="fingerprint-1",
-                output_json=output,
-                status=pending_status,
-            )
-            for _ in range(2)
-        )
+    claimed = await storyboard_assembly._claim_waiting_assembly(  # noqa: SLF001
+        Session(),
+        step_id="assembly-1",
+        attempt_token="attempt-1",
+        fingerprint="fingerprint-1",
+        output_json=output,
+        status=pending_status,
     )
 
-    assert sorted(claimed) == [False, True]
-    assert state["status"] == "compositing"
-    compiled = statements[0].compile(dialect=postgresql.dialect())
-    rendered = str(compiled)
-    assert "workflow_steps.status" in rendered
-    assert "assembly_attempt_token" in compiled.params.values()
-    assert "assembly_fingerprint" in compiled.params.values()
-    assert "assembly_claimed_at" in compiled.params.values()
-    assert pending_status in compiled.params.values()
+    assert claimed is True
+    assert len(statements) == 1
+    where_sql = str(
+        statements[0].whereclause.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert f"workflow_steps.status = '{pending_status}'" in where_sql
+    assert (
+        "CAST((workflow_steps.output_json ->> 'assembly_attempt_token') AS VARCHAR) "
+        "= 'attempt-1'"
+    ) in where_sql
+    assert (
+        "CAST((workflow_steps.output_json ->> 'assembly_fingerprint') AS VARCHAR) "
+        "= 'fingerprint-1'"
+    ) in where_sql
+    assert (
+        "CAST((workflow_steps.output_json ->> 'assembly_claimed_at') AS VARCHAR) "
+        "IS NULL"
+    ) in where_sql
 
 
 @pytest.mark.asyncio

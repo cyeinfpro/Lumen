@@ -7,6 +7,9 @@ import hashlib
 import importlib
 import io
 import logging
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_UPSTREAM_IMAGE_FORMATS = {"PNG", "WEBP", "JPEG"}
 _MAX_UPSTREAM_IMAGE_SIDE = 10000
+_MAX_UPSTREAM_IMAGE_BYTES = 50 * 1024 * 1024
+_MAX_UPSTREAM_IMAGE_B64_CHARS = ((_MAX_UPSTREAM_IMAGE_BYTES + 2) // 3) * 4
+_MAX_UPSTREAM_IMAGE_PIXELS = 64_000_000
+_MAX_BASE64_HEADER_CHARS = 4096
 
 
 @dataclass(frozen=True)
@@ -68,11 +75,28 @@ def _sha256(data: bytes) -> str:
 
 
 def _decode_upstream_image_b64(value: str) -> bytes:
+    if not isinstance(value, str):
+        raise TypeError("upstream image base64 must be a string")
     raw = value.strip()
+    if len(raw) > _MAX_UPSTREAM_IMAGE_B64_CHARS + _MAX_BASE64_HEADER_CHARS:
+        raise ValueError("upstream image base64 input exceeds size limit")
     if raw[:5].lower() == "data:" and "," in raw:
         raw = raw.split(",", 1)[1]
     raw = "".join(raw.split())
-    return base64.b64decode(raw, validate=True)
+    if len(raw) > _MAX_UPSTREAM_IMAGE_B64_CHARS:
+        raise ValueError("upstream image base64 exceeds size limit")
+    decoded = base64.b64decode(raw, validate=True)
+    if len(decoded) > _MAX_UPSTREAM_IMAGE_BYTES:
+        raise ValueError("upstream image raw bytes exceed size limit")
+    return decoded
+
+
+def _validate_raw_image_bytes(raw_image: bytes) -> None:
+    if len(raw_image) > _MAX_UPSTREAM_IMAGE_BYTES:
+        raise ValueError(
+            "upstream image raw bytes exceed size limit: "
+            f"{len(raw_image)} > {_MAX_UPSTREAM_IMAGE_BYTES}"
+        )
 
 
 def _validate_generated_image_metadata(
@@ -89,19 +113,44 @@ def _validate_generated_image_metadata(
         or height > _MAX_UPSTREAM_IMAGE_SIDE
     ):
         raise ValueError(f"upstream image dimensions out of range: {width}x{height}")
+    pixels = width * height
+    if pixels > _MAX_UPSTREAM_IMAGE_PIXELS:
+        raise ValueError(
+            "upstream image pixel count out of range: "
+            f"{pixels} > {_MAX_UPSTREAM_IMAGE_PIXELS}"
+        )
     return orig_format
 
 
+@contextmanager
+def _validated_image(raw_image: bytes) -> Iterator[PILImage.Image]:
+    """Open and fully decode an image only after cheap size/header checks."""
+    _validate_raw_image_bytes(raw_image)
+    pil: PILImage.Image | None = None
+    try:
+        with warnings.catch_warnings():
+            # Enforce our explicit pixel ceiling below rather than Pillow's
+            # warning threshold, while still translating hard bomb errors.
+            warnings.simplefilter("ignore", PILImage.DecompressionBombWarning)
+            pil = PILImage.open(io.BytesIO(raw_image))
+            _validate_generated_image_metadata(
+                pil.format,
+                pil.size[0],
+                pil.size[1],
+            )
+            pil.load()
+        yield pil
+    except (PILImage.DecompressionBombError, PILImage.DecompressionBombWarning) as exc:
+        raise ValueError(f"upstream image decompression bomb: {exc}") from exc
+    finally:
+        if pil is not None:
+            pil.close()
+
+
 def _inspect_generated_image_sync(raw_image: bytes) -> _GeneratedImageInspection:
-    with PILImage.open(io.BytesIO(raw_image)) as pil:
-        pil.load()
-        orig_format = _validate_generated_image_metadata(
-            pil.format,
-            pil.size[0],
-            pil.size[1],
-        )
+    with _validated_image(raw_image) as pil:
         return _GeneratedImageInspection(
-            orig_format=orig_format,
+            orig_format=str(pil.format),
             width=pil.size[0],
             height=pil.size[1],
             has_transparency=_image_has_transparency(pil),
@@ -204,6 +253,7 @@ def _make_variants_with_vips_sync(
     raw_image: bytes,
     inspection: _GeneratedImageInspection,
 ) -> _ImageVariantBundle:
+    _validate_raw_image_bytes(raw_image)
     pyvips = importlib.import_module("pyvips")
 
     image = pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
@@ -241,19 +291,9 @@ def _make_variants_with_pil_sync(
     raw_image: bytes,
     inspection: _GeneratedImageInspection | None = None,
 ) -> _ImageVariantBundle:
-    with PILImage.open(io.BytesIO(raw_image)) as pil:
-        pil.load()
-        if inspection is None:
-            inspection = _GeneratedImageInspection(
-                orig_format=_validate_generated_image_metadata(
-                    pil.format,
-                    pil.size[0],
-                    pil.size[1],
-                ),
-                width=pil.size[0],
-                height=pil.size[1],
-                has_transparency=_image_has_transparency(pil),
-            )
+    if inspection is None:
+        inspection = _inspect_generated_image_sync(raw_image)
+    with _validated_image(raw_image) as pil:
         display_bytes, display_size = _make_display(pil)
         preview_bytes, preview_size = _make_preview(pil)
         thumb_bytes, thumb_size = _make_thumb(pil)

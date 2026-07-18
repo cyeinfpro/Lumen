@@ -7,6 +7,7 @@ import time
 import pytest
 
 from app.tasks import generation
+from app.tasks.generation_parts import queue as generation_queue
 
 
 class _QueueRedis:
@@ -25,12 +26,15 @@ class _QueueRedis:
         *,
         nx: bool = False,
         ex: int | float | None = None,
+        px: int | float | None = None,
     ) -> bool:
         if nx and key in self.strings:
             return False
         self.strings[key] = str(value)
         if ex is not None:
             self.expires[key] = int(ex)
+        if px is not None:
+            self.expires[key] = int(px)
         return True
 
     async def delete(self, *keys: str) -> int:
@@ -99,17 +103,36 @@ class _QueueRedis:
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
         if numkeys == 1:
-            key, token = keys_and_args
+            key, token = keys_and_args[:2]
             if self.strings.get(str(key)) == str(token):
+                if script == generation_queue.RENEW_IMAGE_QUEUE_LOCK_LUA:
+                    return 1
                 await self.delete(str(key))
                 return 1
             return 0
 
-        if numkeys != 4:
+        if numkeys == 2:
+            data_key, lock_key, token, now = keys_and_args
+            if self.strings.get(str(lock_key)) != str(token):
+                return -1
+            if script == generation_queue.CLEANUP_IMAGE_QUEUE_ACTIVE_LUA:
+                return await self.zremrangebyscore(data_key, "-inf", now)
+            await self.zremrangebyscore(data_key, "-inf", now)
+            return await self.zcard(data_key)
+
+        if numkeys != 7:
             raise AssertionError(f"unexpected eval numkeys={numkeys}")
 
-        provider_zset, global_zset, task_provider_key, not_before_key = (
-            str(item) for item in keys_and_args[:4]
+        (
+            provider_zset,
+            global_zset,
+            task_provider_key,
+            not_before_key,
+            lock_key,
+            cursor_key,
+            reservation_key,
+        ) = (
+            str(item) for item in keys_and_args[:7]
         )
         (
             now_raw,
@@ -120,7 +143,12 @@ class _QueueRedis:
             global_cap_raw,
             task_provider_ttl_raw,
             provider_zset_ttl_raw,
-        ) = keys_and_args[4:]
+            lock_token,
+            cursor_steps,
+            reservation_ttl,
+        ) = keys_and_args[7:]
+        if self.strings.get(lock_key) != str(lock_token):
+            return -1
         now = float(now_raw)
         expiry = float(expiry_raw)
         provider_cap = int(provider_cap_raw)
@@ -140,8 +168,14 @@ class _QueueRedis:
             str(provider_name),
             ex=int(task_provider_ttl_raw),
         )
+        await self.set(
+            reservation_key,
+            str(lock_token),
+            ex=int(reservation_ttl),
+        )
         await self.zadd(global_zset, {str(task_id): expiry})
         await self.delete(not_before_key)
+        await self.incrby(cursor_key, int(cursor_steps))
         return 1
 
 

@@ -20,6 +20,14 @@ const managerStateUrl = new URL(
 const managerState = (await import(
   managerStateUrl.href
 )) as typeof import("./volcano-asset-manager-state");
+const operationControllerSource = readFileSync(
+  new URL("./use-volcano-operation-controller.ts", import.meta.url),
+  "utf8",
+);
+const uploadControllerSource = readFileSync(
+  new URL("./use-volcano-upload-controller.ts", import.meta.url),
+  "utf8",
+);
 
 const activeImage: VolcanoAssetSelectionLike = {
   id: "asset-image-1",
@@ -518,6 +526,24 @@ test("closing or switching models pauses known operations without resubmitting u
   assert.equal(domain.volcanoOperationBlocksMutation(paused[0]), true);
   assert.equal(domain.volcanoOperationBlocksMutation(paused[1]), true);
   assert.equal(domain.volcanoOperationBlocksMutation(paused[3]), false);
+});
+
+test("Volcano operation start time is write-once across progress callbacks", () => {
+  assert.equal(domain.volcanoOperationStartedAt(1_000, 2_000), 1_000);
+  assert.equal(domain.volcanoOperationStartedAt(undefined, 2_000), 2_000);
+  assert.equal(domain.volcanoOperationStartedAt(Number.NaN, 3_000), 3_000);
+  assert.match(
+    operationControllerSource,
+    /runner\.onProgress\?\.\(operation, sessionId, operationStartedAt\)/,
+  );
+  assert.match(
+    uploadControllerSource,
+    /operationStartedAt,\s*\n\s*operationRetryable:/,
+  );
+  assert.doesNotMatch(
+    uploadControllerSource,
+    /queuedItem\?\.operationStartedAt \?\? Date\.now\(\)/,
+  );
 });
 
 test("hierarchical locks block group and child asset races", () => {

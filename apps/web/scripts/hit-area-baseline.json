@@ -1,0 +1,384 @@
+{
+  "version": 1,
+  "note": "Known hit-area debt exposed when the scanner stopped treating a file-level Pressable/MobileIconButton import as a blanket exemption.",
+  "findings": [
+    {
+      "key": "src/app/admin/_panels/AdminUpdatePanel.tsx|6acc73f83e86b9b3",
+      "path": "src/app/admin/_panels/AdminUpdatePanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"switch\" aria-checked={useProxyPool} aria-label={`更新时使用代理池 ${useProxyPool ? \"关闭\" : \"开启\"}`} disabled={saving || loading}",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/BackupsPanel.tsx|18eafc740454ec62",
+      "path": "src/app/admin/_panels/BackupsPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setBanner(null)} aria-label={copy.action.close} className=\"shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[va",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/BillingPanel.tsx|1adc79872155d52a",
+      "path": "src/app/admin/_panels/BillingPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"switch\" aria-checked={checked} onClick={() => onChange(!checked)} className={[ \"flex h-10 w-full items-center justify-between rounded-[var(--r",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/ProvidersPanel.tsx|0c7c1e9233a00e30",
+      "path": "src/app/admin/_panels/ProvidersPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onToggleEnabled(p.name, !p.enabled)} disabled={quickSaving} className={ \"inline-flex items-center justify-center w-7 h-7",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/ProvidersPanel.tsx|21793e599c3c75c3",
+      "path": "src/app/admin/_panels/ProvidersPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onProbeSingle(p.name)} disabled={probing || !p.enabled} className=\"opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex item",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/RequestEventsPanel.tsx|1eb6b0228ca90e4d",
+      "path": "src/app/admin/_panels/RequestEventsPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setSearch(\"\")} className=\"inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-co",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/RequestEventsPanel.tsx|7ae2f0bcac0d4e15",
+      "path": "src/app/admin/_panels/RequestEventsPanel.tsx",
+      "tag": "button",
+      "snippet": "<button key={option.value} type=\"button\" role=\"tab\" aria-selected={active} onClick={() => onChange(option.value)} className={cn( \"h-9",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/SettingsPanel.tsx|89a11bc59a2d244a",
+      "path": "src/app/admin/_panels/SettingsPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"switch\" aria-checked={checked} aria-label={`${meta.title} ${checked ? \"关闭\" : \"开启\"}`} onClick={() => onChange({ kind: \"set\", value: checked ? \"",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/TelegramPanel.tsx|0c02853bc75b7a99",
+      "path": "src/app/admin/_panels/TelegramPanel.tsx",
+      "tag": "button",
+      "snippet": "<button key={p.name} type=\"button\" onClick={() => toggleProxy(p.name)} className={ \"inline-flex items-center gap-1.5 h",
+      "count": 1
+    },
+    {
+      "key": "src/app/admin/_panels/TelegramPanel.tsx|ad0165d5d482e73a",
+      "path": "src/app/admin/_panels/TelegramPanel.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"switch\" aria-checked={on} onClick={() => onChange(!on)} className={ \"shrink-0 mt-0.5 w-11 h-6 rounded-full transition-colors relative \" +",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/canvas/nodes/CanvasNodes.tsx|f7f91a2498dae4ff",
+      "path": "src/components/ui/canvas/nodes/CanvasNodes.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-label={label.aria} title={label.title} disabled={running || Boolean(disabledReason)} onClick={(event) => { event.stopPropagation(); data.onRun?.(da",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/ConversationMemoryButton.tsx|67c795550abb06f1",
+      "path": "src/components/ui/chat/ConversationMemoryButton.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" disabled={!currentConvId} onClick={() => setOpen((value) => !value)} className={[ \"inline-flex items-center justify-center gap-1 rounded-full transition-col",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|a3dd3ef5656e87ad",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setStudioView(\"chat\")} className={cn( \"mt-5 inline-flex h-9 items-center gap-2 rounded-full px-3 text-sm\", \"border border-[var(--",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|f5f8f1552e79dc8c",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={clearSelection} aria-label=\"取消选择\" disabled={bulkBusy} className={cn( \"inline-flex h-7 w-7 i",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|3830506930299ff3",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setSelectionMode((value) => !value)} aria-pressed={selectionMode} className={cn( \"inline-flex h-7 items-center",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|2fb8da71c9d1ba20",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setStudioView(\"chat\")} className={cn( \"inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]\",",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|816b5278ee41dc4b",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={onClick} disabled={disabled || loading} title={title} className={cn( \"inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|bba0d89491b3a8a8",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button key={value} type=\"button\" aria-pressed={gender === value} onClick={() => onGenderChange(value)} className={cn( \"inline-flex h-",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/ConversationImageGallery.tsx|6754243a95986f27",
+      "path": "src/components/ui/chat/desktop/ConversationImageGallery.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"tab\" aria-selected={active} onClick={onClick} className={cn( \"inline-flex h-7 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[11px] transi",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx|18ff5265560df203",
+      "path": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={handleCopy} aria-label={copied ? \"已复制\" : \"复制\"} className={cn( \"shrink-0 inline-flex items-center gap-1 h-6 rounded-[var(--radius-control)]\", \"transit",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx|6589ec068ffcc2d6",
+      "path": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onRetryText(msg.id)} className={cn( \"inline-flex h-7 items-center gap-1 rounded-full px-2.5\", \"bg-[var(--bg-2)] border",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx|355cdd47850b5f71",
+      "path": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-label=\"更多操作\" onClick={handleMoreClick} onContextMenu={handleContextMenu} className={cn( \"absolute top-1.5 right-1.5 inline-flex ite",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx|8a074249a480e35f",
+      "path": "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+      "tag": "button",
+      "snippet": "<button key={a.key} type=\"button\" role=\"menuitem\" onClick={() => { a.onSelect(); onClose(); }} className={cn( \"w-full text-l",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx|3fb9e54d3fbcfcd4",
+      "path": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx",
+      "tag": "button",
+      "snippet": "<button ref={aspectAnchorRef} type=\"button\" aria-label=\"宽高比\" aria-haspopup=\"dialog\" aria-expanded={aspectOpen} title=\"宽高比\" onClick={() => setAspectOpe",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx|324b9231f8e5a70d",
+      "path": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-pressed={fast} aria-label={fast ? \"关闭 Fast\" : \"开启 Fast\"} title=\"Fast\" onClick={() => onFastChange(!fast)} className={cn(",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx|b520239a23a946ed",
+      "path": "src/components/ui/composer/desktop/DesktopComposerExecutionControls.tsx",
+      "tag": "button",
+      "snippet": "<button key={item.value} type=\"button\" aria-pressed={active} title={`${ariaLabel}：${item.label}`} onClick={() => onChange(item.value)} className={cn",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerPill.tsx|d87516c8d1cf26d7",
+      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={expandAndFocus} aria-label=\"展开输入框\" aria-expanded={false} className={cn( \"flex-1 min-w-0 h-10 px-3 text-left rounded",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerPill.tsx|7defaf13fe5519e8",
+      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => insertImageMention(idx + 1)} aria-label={`插入 @图${idx + 1}`} title={`插入 @图${idx + 1}`}",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerPill.tsx|dcc45475af1c1b8b",
+      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => removeAttachment(att.id)} aria-label=\"移除参考图\" className={cn( \"absolute t",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerPill.tsx|7cdc41d04b2626dd",
+      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-label=\"关闭错误提示\" onClick={() => setComposerError(null)} className=\"shrink-0 w-5 h-5 inline-flex items-center justif",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/desktop/DesktopComposerPill.tsx|8f2ac38bd2ee9a35",
+      "path": "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={onClick} disabled={disabled} aria-label={label} title={label} className={cn( \"relative shrink-0 inline-flex items-center justify-center w-10 h-10",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/MaskCanvas.tsx|781ebed21b7c54a9",
+      "path": "src/components/ui/composer/MaskCanvas.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => { if (submitting) return; onClose(); }} disabled={submitting} aria-label=\"关闭\"",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/mobile/MobileComposerExecutionControls.tsx|62cf1b2c5cc098d3",
+      "path": "src/components/ui/composer/mobile/MobileComposerExecutionControls.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-label=\"更多执行设置\" aria-haspopup=\"dialog\" title=\"更多执行设置\" onClick={onAdjust} className=\"ml-auto grid h-6 w-6 shrink-0 place-items-center r",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/mobile/MobileComposerPill.tsx|6a69ab9383935882",
+      "path": "src/components/ui/composer/mobile/MobileComposerPill.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" aria-label=\"关闭错误提示\" onClick={() => setComposerError(null)} className=\"shrink-0 w-5 h-5 inline-flex items-cente",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/composer/shared/AttachmentRoleBadge.tsx|786028df332a763c",
+      "path": "src/components/ui/composer/shared/AttachmentRoleBadge.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" data-composer-attachment-action=\"true\" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClick(); }}",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/inpaint/MaskBoard.tsx|de9e1075efbb718f",
+      "path": "src/components/ui/inpaint/MaskBoard.tsx",
+      "tag": "button",
+      "snippet": "<button key={v} type=\"button\" onClick={() => onChange(v)} disabled={disabled} aria-pressed={active} aria-label={`${label} (${hint})`} ti",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/lightbox/DesktopLightbox.tsx|5925b7d54201aba7",
+      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={resetView} title=\"重置为适应窗口（0）\" aria-label=\"重置为适应窗口（0）\" className={cn( \"h-9 min-w",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/lightbox/DesktopLightbox.tsx|14a9a29574f45f6d",
+      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={handleOpenOriginal} className={cn( \"inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radiu",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/lightbox/DesktopLightbox.tsx|5293f8a96a66774d",
+      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={handleDownload} disabled={downloadStatus === \"downloading\"} className={cn( \"inline-flex",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/lightbox/DesktopLightbox.tsx|e24458d620d68862",
+      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={onClick} disabled={disabled} aria-label={title} title={title} className={cn( \"inline-flex h-9 w-9 items-center justify-center rounded-full\",",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/lightbox/DesktopLightbox.tsx|d171c25d7fea3861",
+      "path": "src/components/ui/lightbox/DesktopLightbox.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={onClick} disabled={disabled} title={title} aria-label={title} className={cn( \"inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-sm\",",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/primitives/Button.tsx|d181d4caa9220e48",
+      "path": "src/components/ui/primitives/Button.tsx",
+      "tag": "button",
+      "snippet": "<button ref={ref} type={type ?? \"button\"} disabled={isDisabled} aria-busy={loading || undefined} data-lumen-interactive={isDisabled ? undefined : \"soft\"} className={cn( BASE,",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/primitives/IconButton.tsx|665f665360f5c11f",
+      "path": "src/components/ui/primitives/IconButton.tsx",
+      "tag": "button",
+      "snippet": "<button ref={ref} type={type ?? \"button\"} disabled={isDisabled} aria-busy={loading || undefined} data-lumen-interactive={isDisabled ? undefined : \"tight\"} className={cn(BASE, VARIANTS[",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/projects/components/PosterInpaintDialog.tsx|fbb41e5c3780ccd8",
+      "path": "src/components/ui/projects/components/PosterInpaintDialog.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setMode(\"draw\")} className={cn( \"inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono tex",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/projects/components/PosterInpaintDialog.tsx|118f08610035cf5a",
+      "path": "src/components/ui/projects/components/PosterInpaintDialog.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setMode(\"erase\")} className={cn( \"inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono te",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/projects/components/SelectableImageGrid.tsx|8ff0aac72cc951fe",
+      "path": "src/components/ui/projects/components/SelectableImageGrid.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onSelect(selected ? null : image.id)} disabled={saving} className={cn( \"mt-2 flex h-10 w-full items-center just",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/projects/stages/PosterMultiSizeStage.tsx|f6f551191e664e98",
+      "path": "src/components/ui/projects/stages/PosterMultiSizeStage.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onScopeChange(\"background\")} className={cn( \"inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 fo",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/projects/stages/PosterMultiSizeStage.tsx|d0dd90e05c557e02",
+      "path": "src/components/ui/projects/stages/PosterMultiSizeStage.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => onScopeChange(\"style\")} className={cn( \"inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 font-mo",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/shell/DesktopAccountMenu.tsx|8934617724f8f215",
+      "path": "src/components/ui/shell/DesktopAccountMenu.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={() => setOpen((value) => !value)} aria-haspopup=\"dialog\" aria-expanded={open} aria-label=\"打开账户菜单\" className={cn( \"inline-flex h-9 w",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/Sidebar.tsx|528a309e5aeca32f",
+      "path": "src/components/ui/Sidebar.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" role=\"menuitem\" onClick={() => { setTab(tab === \"active\" ? \"archived\" : \"active\"); s",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/sidebar/ConversationItem.tsx|a80e7ead1a135664",
+      "path": "src/components/ui/sidebar/ConversationItem.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={(e) => { e.stopPropagation(); setView(\"closed\"); }} className=\"h-8 rounded-[v",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/sidebar/ConversationItem.tsx|05bbabd3959b4f2d",
+      "path": "src/components/ui/sidebar/ConversationItem.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"submit\" onClick={(e) => e.stopPropagation()} className=\"inline-flex items-center gap-1 px-2.5 h-7 text-xs rounded-[var(--radius-control)] bg-[var(--acce",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/sidebar/ConversationItem.tsx|e7382511e5607bd3",
+      "path": "src/components/ui/sidebar/ConversationItem.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={(e) => { e.stopPropagation(); setView(\"closed\"); }} className=\"inline-flex h-",
+      "count": 1
+    },
+    {
+      "key": "src/components/ui/sidebar/ConversationItem.tsx|8b9395daf2327f92",
+      "path": "src/components/ui/sidebar/ConversationItem.tsx",
+      "tag": "button",
+      "snippet": "<button type=\"button\" onClick={(e) => { e.stopPropagation(); onDelete(); setView(\"closed\"); }}",
+      "count": 1
+    }
+  ]
+}

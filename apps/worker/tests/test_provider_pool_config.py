@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.provider_pool import ProviderPool
 from app.provider_pool import ProviderConfig, ProviderHealth, ResolvedProvider
+from app import config as config_mod
 from app.config import BYOK_DEV_MASTER_SECRET, Settings
 
 
@@ -34,6 +35,30 @@ def test_worker_non_dev_rejects_byok_dev_fallback_secret() -> None:
 
 def test_worker_default_redis_url_matches_password_protected_dev_redis() -> None:
     assert Settings().redis_url == "redis://:lumen-redis-dev-password@localhost:6379/0"
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("redis_url", "REDIS_URL"),
+        ("database_url", "DATABASE_URL"),
+    ],
+)
+def test_worker_non_dev_rejects_development_connection_defaults(
+    field: str,
+    message: str,
+) -> None:
+    values = {
+        "app_env": "production",
+        "byok_api_key_master_secret": "p" * 32,
+        "image_job_base_url": "https://image-job.internal",
+        "redis_url": "redis://prod.example:6379/0",
+        "database_url": "postgresql+asyncpg://prod:secret@db.internal/lumen",
+    }
+    values[field] = getattr(config_mod, f"_DEFAULT_{field.upper()}")
+
+    with pytest.raises(ValidationError, match=message):
+        Settings(**values)
 
 
 def test_worker_non_dev_rejects_image_job_example_placeholder() -> None:
@@ -344,7 +369,9 @@ async def test_provider_pool_reload_cleans_orphan_health_entries(
         return raw_base
 
     monkeypatch.setattr(pool, "_load_provider_config", fake_load_provider_config)
-    monkeypatch.setattr(pool, "_validate_provider_base_url", fake_validate_provider_base_url)
+    monkeypatch.setattr(
+        pool, "_validate_provider_base_url", fake_validate_provider_base_url
+    )
 
     await pool._maybe_reload()
 

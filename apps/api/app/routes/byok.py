@@ -648,9 +648,7 @@ async def probe_my_api_credential(
         raise _http("supplier_not_available", "supplier is not available", 404)
     key_ciphertext = credential.key_ciphertext
     supplier_id = supplier.id
-    await _PROBE_SUPPLIER_LIMITER.check(
-        redis, f"rl:byok:probe:supplier:{supplier_id}"
-    )
+    await _PROBE_SUPPLIER_LIMITER.check(redis, f"rl:byok:probe:supplier:{supplier_id}")
     await db.commit()
 
     try:
@@ -771,6 +769,17 @@ async def put_my_api_credential(
         or not supplier.user_bind_enabled
     ):
         raise _http("supplier_not_available", "supplier is not available", 404)
+
+    redis = get_redis()
+    ip = require_client_ip(request)
+    await _PROBE_IP_LIMITER.check(redis, f"rl:byok:put:ip:{ip}")
+    await _PROBE_USER_LIMITER.check(redis, f"rl:byok:put:user:{user.id}")
+    await _PROBE_SUPPLIER_LIMITER.check(redis, f"rl:byok:put:supplier:{supplier.id}")
+    try:
+        key_hash_for_limit = api_key_rate_limit_hash(body.api_key)
+    except ValueError as exc:
+        raise _http("invalid_api_key", "API key is invalid", 400) from exc
+    await _PROBE_KEY_LIMITER.check(redis, f"rl:byok:put:key:{key_hash_for_limit}")
 
     outcome = await validate_api_key_with_supplier(
         db,

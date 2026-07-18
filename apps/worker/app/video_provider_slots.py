@@ -6,8 +6,6 @@ import logging
 import time
 from typing import Any
 
-from lumen_core.models import new_uuid7
-
 logger = logging.getLogger(__name__)
 
 MAX_PROVIDER_POLL_DURATION_S = 48 * 60 * 60
@@ -15,6 +13,66 @@ VIDEO_PROVIDER_SLOT_STALE_AFTER_S = MAX_PROVIDER_POLL_DURATION_S + 5 * 60
 VIDEO_PROVIDER_SLOT_TTL_S = VIDEO_PROVIDER_SLOT_STALE_AFTER_S + 60 * 60
 VIDEO_PROVIDER_SLOT_PREFIX = "video:provider_slot:"
 VIDEO_PROVIDER_SLOT_LOCK_PREFIX = "video:provider_slot_lock:"
+
+_ACQUIRE_PROVIDER_SLOT_LUA = """
+local active_key = KEYS[1]
+local exclusive_key = KEYS[2]
+local task_id = ARGV[1]
+local now = tonumber(ARGV[2])
+local cutoff = tonumber(ARGV[3])
+local concurrency = tonumber(ARGV[4])
+local wants_exclusive = tonumber(ARGV[5])
+local ttl = tonumber(ARGV[6])
+
+redis.call('ZREMRANGEBYSCORE', active_key, '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', exclusive_key, '-inf', cutoff)
+
+local task_active = redis.call('ZSCORE', active_key, task_id)
+local task_exclusive = redis.call('ZSCORE', exclusive_key, task_id)
+local active_count = redis.call('ZCARD', active_key)
+local exclusive_count = redis.call('ZCARD', exclusive_key)
+
+if task_active then
+  if wants_exclusive == 1 then
+    if active_count ~= 1 or exclusive_count > 1 then
+      return 0
+    end
+    if exclusive_count == 1 and not task_exclusive then
+      return 0
+    end
+  elseif exclusive_count > 0 and not task_exclusive then
+    return 0
+  end
+
+  redis.call('ZADD', active_key, now, task_id)
+  redis.call('EXPIRE', active_key, ttl)
+  if wants_exclusive == 1 then
+    redis.call('ZADD', exclusive_key, now, task_id)
+    redis.call('EXPIRE', exclusive_key, ttl)
+  end
+  return 1
+end
+
+if wants_exclusive == 1 then
+  if active_count > 0 or exclusive_count > 0 then
+    return 0
+  end
+elseif exclusive_count > 0 then
+  return 0
+end
+
+if active_count >= concurrency then
+  return 0
+end
+
+redis.call('ZADD', active_key, now, task_id)
+redis.call('EXPIRE', active_key, ttl)
+if wants_exclusive == 1 then
+  redis.call('ZADD', exclusive_key, now, task_id)
+  redis.call('EXPIRE', exclusive_key, ttl)
+end
+return 1
+"""
 
 
 async def acquire_provider_slot(
@@ -25,48 +83,22 @@ async def acquire_provider_slot(
     *,
     exclusive: bool = False,
 ) -> bool:
-    lock_key = f"{VIDEO_PROVIDER_SLOT_LOCK_PREFIX}{provider_name}"
-    lock_token = f"{task_id}:{new_uuid7()}"
-    ok = await redis.set(lock_key, lock_token, ex=10, nx=True)
-    if not ok:
-        return False
     zkey = f"{VIDEO_PROVIDER_SLOT_PREFIX}{provider_name}"
     exclusive_zkey = f"{zkey}:exclusive"
-    try:
-        cutoff = time.time() - VIDEO_PROVIDER_SLOT_STALE_AFTER_S
-        await redis.zremrangebyscore(zkey, 0, cutoff)
-        await redis.zremrangebyscore(exclusive_zkey, 0, cutoff)
-        task_active = await redis.zscore(zkey, task_id) is not None
-        task_exclusive = await redis.zscore(exclusive_zkey, task_id) is not None
-        exclusive_count = int(await redis.zcard(exclusive_zkey) or 0)
-        if task_active:
-            active = int(await redis.zcard(zkey) or 0)
-            if exclusive and (active != 1 or exclusive_count not in {0, 1}):
-                return False
-            if not exclusive and exclusive_count and not task_exclusive:
-                return False
-            await redis.zadd(zkey, {task_id: time.time()})
-            await redis.expire(zkey, VIDEO_PROVIDER_SLOT_TTL_S)
-            if exclusive:
-                await redis.zadd(exclusive_zkey, {task_id: time.time()})
-                await redis.expire(exclusive_zkey, VIDEO_PROVIDER_SLOT_TTL_S)
-            return True
-        active = await redis.zcard(zkey)
-        if exclusive:
-            if int(active or 0) > 0 or exclusive_count > 0:
-                return False
-        elif exclusive_count > 0:
-            return False
-        if int(active or 0) >= max(1, int(concurrency)):
-            return False
-        await redis.zadd(zkey, {task_id: time.time()})
-        await redis.expire(zkey, VIDEO_PROVIDER_SLOT_TTL_S)
-        if exclusive:
-            await redis.zadd(exclusive_zkey, {task_id: time.time()})
-            await redis.expire(exclusive_zkey, VIDEO_PROVIDER_SLOT_TTL_S)
-        return True
-    finally:
-        await release_slot_lock(redis, lock_key, lock_token)
+    now = time.time()
+    acquired = await redis.eval(
+        _ACQUIRE_PROVIDER_SLOT_LUA,
+        2,
+        zkey,
+        exclusive_zkey,
+        task_id,
+        now,
+        now - VIDEO_PROVIDER_SLOT_STALE_AFTER_S,
+        max(1, int(concurrency)),
+        1 if exclusive else 0,
+        VIDEO_PROVIDER_SLOT_TTL_S,
+    )
+    return bool(acquired)
 
 
 async def release_slot_lock(redis: Any, lock_key: str, token: str) -> None:

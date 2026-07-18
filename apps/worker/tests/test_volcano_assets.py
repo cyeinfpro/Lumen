@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -92,12 +93,16 @@ async def test_provider_operation_binding_uses_exact_named_provider(
 def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tasks import volcano_assets
 
-    async def read(_operation: dict[str, Any]) -> dict[str, Any] | None:
+    async def read(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
         return None
 
     async def write(
         _operation: dict[str, Any],
         _asset: dict[str, Any],
+        **_kwargs: Any,
     ) -> None:
         return None
 
@@ -211,6 +216,9 @@ async def test_worker_create_asset_forces_scope_and_safe_url(
     stored = redis.operation()
     assert stored["status"] == "succeeded"
     assert stored["result"]["status"] == "Processing"
+    assert stored["attempt"] == 1
+    assert stored["fencing"] == 1
+    assert stored["lock_token"]
     assert released == ["operation-1"]
     assert audits[0][0] == "video_asset.create"
     assert "URL" not in str(audits)
@@ -266,6 +274,9 @@ async def test_worker_asset_quota_failure_is_retryable(
     assert stored["status"] == "failed"
     assert stored["retryable"] is True
     assert stored["error"]["code"] == "volcano_asset_quota_exceeded"
+    assert stored["attempt"] == 1
+    assert stored["fencing"] == 1
+    assert stored["lock_token"]
 
 
 @pytest.mark.asyncio
@@ -492,12 +503,16 @@ async def test_worker_recovers_success_receipt_without_resubmitting(
     async def acquire(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def read(_operation: dict[str, Any]) -> dict[str, Any] | None:
+    async def read(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
         return receipt
 
     async def write(
         _operation: dict[str, Any],
         asset: dict[str, Any],
+        **_kwargs: Any,
     ) -> None:
         nonlocal receipt
         receipt = dict(asset)
@@ -812,6 +827,167 @@ async def test_worker_does_not_submit_after_lease_loss(
 
     assert create_calls == 0
     assert released == ["operation-1"]
+
+
+@pytest.mark.asyncio
+async def test_operation_heartbeat_converges_during_redis_outage_near_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import volcano_assets
+
+    operation = _operation()
+    redis = _Redis(operation)
+    lock_key = "video-assets:operation-lock:operation-1"
+    fencing_key = volcano_assets._operation_fencing_key("operation-1")
+    redis.values[lock_key] = "worker-old"
+    redis.values[fencing_key] = "1"
+    clock = {"now": 0.0}
+    eval_calls = 0
+    real_sleep = asyncio.sleep
+
+    async def unavailable_eval(*_args: Any, **_kwargs: Any) -> int:
+        nonlocal eval_calls
+        eval_calls += 1
+        raise ConnectionError("redis unavailable")
+
+    async def fake_sleep(delay: float) -> None:
+        clock["now"] += delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(redis, "eval", unavailable_eval)
+    monkeypatch.setattr(volcano_assets.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(volcano_assets.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(volcano_assets.random, "uniform", lambda *_args: 0.0)
+    fence = volcano_assets._OperationFence(
+        operation_id="operation-1",
+        lock_key=lock_key,
+        lock_token="worker-old",
+        fencing_key=fencing_key,
+        fencing=1,
+        lease_lost=asyncio.Event(),
+        lease_deadline=float(volcano_assets._OPERATION_LOCK_TTL_SECONDS),
+        attempt=1,
+    )
+
+    await volcano_assets._operation_lock_heartbeat(
+        volcano_assets._OperationPersistence(redis, fence)
+    )
+
+    assert eval_calls > 0
+    assert fence.lease_lost.is_set()
+    assert clock["now"] >= volcano_assets._OPERATION_LOCK_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_old_owner_cannot_persist_success_or_failure_after_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import volcano_assets
+
+    async def reject_receipt(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("superseded owner must not write a receipt")
+
+    async def reject_audit(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("superseded owner must not write a terminal audit")
+
+    monkeypatch.setattr(volcano_assets, "_write_success_receipt", reject_receipt)
+    monkeypatch.setattr(volcano_assets, "_write_audit", reject_audit)
+
+    for terminal_status in ("succeeded", "failed"):
+        operation = _operation()
+        redis = _Redis(operation)
+        lock_key = "video-assets:operation-lock:operation-1"
+        fencing_key = volcano_assets._operation_fencing_key("operation-1")
+        redis.values[lock_key] = "worker-old"
+        redis.values[fencing_key] = "1"
+        fence = volcano_assets._OperationFence(
+            operation_id="operation-1",
+            lock_key=lock_key,
+            lock_token="worker-old",
+            fencing_key=fencing_key,
+            fencing=1,
+            lease_lost=asyncio.Event(),
+            lease_deadline=(
+                volcano_assets.time.monotonic()
+                + volcano_assets._OPERATION_LOCK_TTL_SECONDS
+            ),
+            attempt=1,
+        )
+        persistence = volcano_assets._OperationPersistence(redis, fence)
+        redis.values[lock_key] = "worker-new"
+        redis.values[fencing_key] = "2"
+
+        with pytest.raises(volcano_assets._LeaseLostError):
+            if terminal_status == "succeeded":
+                await volcano_assets._complete_operation(
+                    persistence,
+                    operation,
+                    {
+                        "id": "asset-1",
+                        "group_id": "group-1",
+                        "name": "User Display Name",
+                        "asset_type": "Video",
+                        "status": "Processing",
+                        "project_name": "project-a",
+                    },
+                )
+            else:
+                await volcano_assets._record_operation_failure(
+                    persistence,
+                    operation,
+                    volcano_assets._OperationFailure(
+                        "temporary",
+                        "temporary failure",
+                        retryable=True,
+                    ),
+                )
+
+        assert redis.operation()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_terminal_boundary_rejects_superseded_attempt() -> None:
+    from app.tasks import volcano_assets
+
+    operation = _operation()
+    redis = _Redis(operation)
+    lock_key = "video-assets:operation-lock:operation-1"
+    fencing_key = volcano_assets._operation_fencing_key("operation-1")
+    redis.values[lock_key] = "worker-1"
+    redis.values[fencing_key] = "1"
+    persistence = volcano_assets._OperationPersistence(
+        redis,
+        volcano_assets._OperationFence(
+            operation_id="operation-1",
+            lock_key=lock_key,
+            lock_token="worker-1",
+            fencing_key=fencing_key,
+            fencing=1,
+            lease_lost=asyncio.Event(),
+            lease_deadline=(
+                volcano_assets.time.monotonic()
+                + volcano_assets._OPERATION_LOCK_TTL_SECONDS
+            ),
+            attempt=1,
+        ),
+    )
+    superseded = redis.operation()
+    superseded["attempt"] = 2
+    redis.values[volcano_asset_operation_key("operation-1")] = json.dumps(superseded)
+
+    with pytest.raises(volcano_assets._LeaseLostError):
+        await volcano_assets._record_operation_failure(
+            persistence,
+            operation,
+            volcano_assets._OperationFailure(
+                "temporary",
+                "temporary failure",
+                retryable=True,
+            ),
+        )
+
+    assert redis.operation()["attempt"] == 2
+    assert redis.operation()["status"] == "queued"
 
 
 @pytest.mark.asyncio

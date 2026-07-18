@@ -17,11 +17,15 @@ provider = 一个账号。account_limiter 提供"该账号还有几次额度"的
 
 from __future__ import annotations
 
+import inspect
+import logging
 import math
 import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from redis.exceptions import WatchError
 
 # Redis key 模板（约定：lumen:acct:{name}:image:...）
 _KEY_TS = "lumen:acct:{name}:image:ts"
@@ -29,6 +33,8 @@ _KEY_DAILY = "lumen:acct:{name}:image:daily:{day}"
 _TS_TTL_S = 86400 * 2
 REDIS_ERROR_RETRY_AFTER_S = 5.0
 _MAX_WALL_CLOCK_DRIFT_S = 10 * 366 * 86400.0
+_ATOMIC_FALLBACK_RETRIES = 3
+logger = logging.getLogger(__name__)
 
 _CHECK_WINDOW_LUA = """
 local key = KEYS[1]
@@ -304,15 +310,265 @@ async def _record_image_call_fallback(
     member: str,
     cur_now: float,
 ) -> None:
-    added_raw = await redis.zadd(ts_key, {member: cur_now})
-    await redis.expire(ts_key, _TS_TTL_S)
+    """Record a call atomically with WATCH/MULTI/EXEC."""
+    for attempt in range(_ATOMIC_FALLBACK_RETRIES):
+        pipe: Any | None = None
+        try:
+            pipe = _make_transaction_pipeline(redis, "accounting")
+            await pipe.watch(ts_key)
+            if await pipe.zscore(ts_key, member) is not None:
+                return
+
+            pipe.multi()
+            pipe.zadd(ts_key, {member: cur_now}, nx=True)
+            pipe.expire(ts_key, _TS_TTL_S)
+            pipe.incr(day_key)
+            pipe.expireat(day_key, _daily_expire_at(cur_now))
+            results = await pipe.execute()
+            if not results or int(results[0] or 0) != 1:
+                raise RuntimeError("quota accounting transaction did not add member")
+            return
+        except WatchError as exc:
+            if attempt + 1 >= _ATOMIC_FALLBACK_RETRIES:
+                logger.warning(
+                    "account quota accounting transaction conflicted repeatedly "
+                    "key=%s member=%s",
+                    ts_key,
+                    member,
+                    exc_info=True,
+                )
+                raise AccountLimiterUnavailable("quota accounting unavailable") from exc
+            logger.debug(
+                "account quota accounting transaction conflict; retrying "
+                "attempt=%d key=%s member=%s",
+                attempt + 1,
+                ts_key,
+                member,
+            )
+        except AccountLimiterUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account quota accounting transaction failed key=%s member=%s",
+                ts_key,
+                member,
+                exc_info=True,
+            )
+            raise AccountLimiterUnavailable("quota accounting unavailable") from exc
+        finally:
+            if pipe is not None:
+                await _reset_pipeline(pipe)
+
+
+async def _reset_pipeline(pipe: Any) -> None:
+    reset_fn = getattr(pipe, "reset", None)
+    if not callable(reset_fn):
+        return
+    result = reset_fn()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _make_transaction_pipeline(redis: Any, operation: str) -> Any:
+    pipeline_fn = getattr(redis, "pipeline", None)
+    if not callable(pipeline_fn):
+        logger.error(
+            "account quota %s unavailable without EVAL or transactional pipeline",
+            operation,
+        )
+        raise AccountLimiterUnavailable(f"quota {operation} unavailable")
     try:
-        added = int(added_raw or 0)
+        return pipeline_fn(transaction=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "account quota %s transaction pipeline creation failed",
+            operation,
+            exc_info=True,
+        )
+        raise AccountLimiterUnavailable(f"quota {operation} unavailable") from exc
+
+
+def _parse_counter(raw: Any) -> int:
+    try:
+        return int(raw or 0)
     except (TypeError, ValueError):
-        added = 1
-    if added > 0:
-        await redis.incr(day_key)
-        await redis.expireat(day_key, _daily_expire_at(cur_now))
+        return 0
+
+
+def _window_retry_after(
+    oldest: Any,
+    *,
+    cur_now: float,
+    window_s: float,
+) -> float:
+    if oldest in (None, "", b""):
+        return float(window_s)
+    try:
+        return max(1.0, (float(oldest) + window_s) - cur_now)
+    except (TypeError, ValueError):
+        return float(window_s)
+
+
+async def _reserve_quota_fallback(
+    redis: Any,
+    *,
+    ts_key: str,
+    day_key: str,
+    member: str,
+    cur_now: float,
+    cutoff: float,
+    parsed: tuple[int, int] | None,
+    has_daily: bool,
+    daily_quota: int | None,
+) -> tuple[bool, float, str]:
+    """Reserve quota with an optimistic, server-side atomic transaction."""
+    try:
+        await redis.zremrangebyscore(ts_key, 0, cutoff)
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota reservation unavailable") from exc
+
+    for attempt in range(_ATOMIC_FALLBACK_RETRIES):
+        pipe: Any | None = None
+        try:
+            pipe = _make_transaction_pipeline(redis, "reservation")
+            watch_keys = [ts_key]
+            if has_daily:
+                watch_keys.append(day_key)
+            await pipe.watch(*watch_keys)
+
+            if await pipe.zscore(ts_key, member) is not None:
+                return True, 0.0, member
+
+            if has_daily:
+                used_daily = _parse_counter(await pipe.get(day_key))
+                if daily_quota is not None and used_daily >= daily_quota:
+                    return (
+                        False,
+                        _seconds_until_next_utc_day(cur_now),
+                        member,
+                    )
+
+            if parsed is not None:
+                count_limit, window_s = parsed
+                used = _parse_counter(await pipe.zcard(ts_key))
+                if used >= count_limit:
+                    head = await pipe.zrange(
+                        ts_key,
+                        0,
+                        0,
+                        withscores=True,
+                    )
+                    oldest = head[0][1] if head else None
+                    return (
+                        False,
+                        _window_retry_after(
+                            oldest,
+                            cur_now=cur_now,
+                            window_s=float(window_s),
+                        ),
+                        member,
+                    )
+
+            pipe.multi()
+            pipe.zadd(ts_key, {member: cur_now}, nx=True)
+            pipe.expire(ts_key, _TS_TTL_S)
+            pipe.incr(day_key)
+            pipe.expireat(day_key, _daily_expire_at(cur_now))
+            results = await pipe.execute()
+            if not results or int(results[0] or 0) != 1:
+                raise RuntimeError("quota reservation transaction did not add member")
+            return True, 0.0, member
+        except WatchError as exc:
+            if attempt + 1 >= _ATOMIC_FALLBACK_RETRIES:
+                logger.warning(
+                    "account quota reservation transaction conflicted repeatedly "
+                    "key=%s member=%s",
+                    ts_key,
+                    member,
+                    exc_info=True,
+                )
+                raise AccountLimiterUnavailable(
+                    "quota reservation unavailable"
+                ) from exc
+            logger.debug(
+                "account quota reservation transaction conflict; retrying "
+                "attempt=%d key=%s member=%s",
+                attempt + 1,
+                ts_key,
+                member,
+            )
+        except AccountLimiterUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account quota reservation transaction failed key=%s member=%s",
+                ts_key,
+                member,
+                exc_info=True,
+            )
+            raise AccountLimiterUnavailable("quota reservation unavailable") from exc
+        finally:
+            if pipe is not None:
+                await _reset_pipeline(pipe)
+
+
+async def _release_quota_fallback(
+    redis: Any,
+    *,
+    ts_key: str,
+    day_key: str,
+    reservation_member: str,
+) -> bool:
+    """Release a reservation and its daily count in one watched transaction."""
+    for attempt in range(_ATOMIC_FALLBACK_RETRIES):
+        pipe: Any | None = None
+        try:
+            pipe = _make_transaction_pipeline(redis, "release")
+            await pipe.watch(ts_key, day_key)
+            if await pipe.zscore(ts_key, reservation_member) is None:
+                return False
+
+            used_daily = _parse_counter(await pipe.get(day_key))
+            pipe.multi()
+            pipe.zrem(ts_key, reservation_member)
+            if used_daily > 1:
+                pipe.decr(day_key)
+            elif used_daily == 1:
+                pipe.delete(day_key)
+            results = await pipe.execute()
+            if not results or int(results[0] or 0) != 1:
+                raise RuntimeError("quota release transaction did not remove member")
+            return True
+        except WatchError as exc:
+            if attempt + 1 >= _ATOMIC_FALLBACK_RETRIES:
+                logger.warning(
+                    "account quota release transaction conflicted repeatedly "
+                    "key=%s member=%s",
+                    ts_key,
+                    reservation_member,
+                    exc_info=True,
+                )
+                raise AccountLimiterUnavailable("quota release unavailable") from exc
+            logger.debug(
+                "account quota release transaction conflict; retrying "
+                "attempt=%d key=%s member=%s",
+                attempt + 1,
+                ts_key,
+                reservation_member,
+            )
+        except AccountLimiterUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account quota release transaction failed key=%s member=%s",
+                ts_key,
+                reservation_member,
+                exc_info=True,
+            )
+            raise AccountLimiterUnavailable("quota release unavailable") from exc
+        finally:
+            if pipe is not None:
+                await _reset_pipeline(pipe)
 
 
 async def check_quota(
@@ -410,10 +666,12 @@ async def reserve_quota(
 ) -> tuple[bool, float, str]:
     """Atomically check and reserve one image call for an account.
 
-    This is the race-free companion to ``check_quota`` for callers that are
-    about to reserve an execution slot. The reservation is represented by the
-    same ZSET/daily counters used by ``record_image_call`` so later recording
-    with the same task id is idempotent instead of double-counting.
+    EVAL is preferred. Clients without EVAL must provide redis-py's
+    transactional pipeline contract so the fallback can use WATCH/MULTI/EXEC;
+    otherwise the reservation fails closed with ``AccountLimiterUnavailable``.
+    The reservation is represented by the same ZSET/daily counters used by
+    ``record_image_call`` so later recording with the same task id is
+    idempotent instead of double-counting.
 
     Returns:
         (allowed, retry_after_s, reservation_member)
@@ -470,26 +728,22 @@ async def reserve_quota(
                 pass
         return False, retry_after, member
 
-    allowed, retry_after = await check_quota(
-        redis,
-        account,
-        rate_limit,
-        daily_quota,
-        now=cur_now,
-    )
-    if not allowed:
-        return False, retry_after, member
     try:
-        await _record_image_call_fallback(
+        return await _reserve_quota_fallback(
             redis,
             ts_key=ts_key,
             day_key=day_key,
             member=member,
             cur_now=cur_now,
+            cutoff=cutoff,
+            parsed=parsed,
+            has_daily=has_daily,
+            daily_quota=daily_quota,
         )
+    except AccountLimiterUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise AccountLimiterUnavailable("quota reservation unavailable") from exc
-    return True, 0.0, member
 
 
 async def record_image_call(
@@ -505,6 +759,7 @@ async def record_image_call(
     member 用 task_id（保证唯一）；没传时退化为 ts:<秒.6>。
 
     redis=None → 启动早期或测试短路；Redis 错误 → fail closed，避免配额计数漂移。
+    无 EVAL 时仅使用 WATCH/MULTI/EXEC，不提供非原子写入 fallback。
     """
     if redis is None:
         return
@@ -568,14 +823,14 @@ async def release_quota(
         except Exception as exc:  # noqa: BLE001
             raise AccountLimiterUnavailable("quota release unavailable") from exc
     try:
-        removed = int(await redis.zrem(ts_key, reservation_member) or 0)
-        if removed:
-            used_daily = int(await redis.get(day_key) or 0)
-            if used_daily > 1:
-                await redis.decr(day_key)
-            elif used_daily == 1:
-                await redis.delete(day_key)
-        return removed == 1
+        return await _release_quota_fallback(
+            redis,
+            ts_key=ts_key,
+            day_key=day_key,
+            reservation_member=reservation_member,
+        )
+    except AccountLimiterUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise AccountLimiterUnavailable("quota release unavailable") from exc
 

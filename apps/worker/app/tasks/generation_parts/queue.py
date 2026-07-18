@@ -1,17 +1,28 @@
 from __future__ import annotations
 
-import asyncio
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from . import queue_lock as _queue_lock
 from ._facade import GenerationFacade
 
+DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA = _queue_lock.DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA
+ImageQueueLockLease = _queue_lock.ImageQueueLockLease
+ImageQueueLockLost = _queue_lock.ImageQueueLockLost
+RENEW_IMAGE_QUEUE_LOCK_LUA = _queue_lock.RENEW_IMAGE_QUEUE_LOCK_LUA
+SET_IMAGE_QUEUE_VALUE_IF_OWNER_LUA = _queue_lock.SET_IMAGE_QUEUE_VALUE_IF_OWNER_LUA
+image_queue_lock = _queue_lock.image_queue_lock
+
 _g = GenerationFacade()
-bind_generation_facade = _g.bind
+
+
+def bind_generation_facade(resolver: Any) -> None:
+    _g.bind(resolver)
+    _queue_lock.bind_generation_facade(resolver)
+
 
 IMAGE_QUEUE_LOCK_KEY = "generation:image_queue:lock"
 IMAGE_QUEUE_ACTIVE_KEY = "generation:image_queue:active"
@@ -52,6 +63,43 @@ IMAGE_QUEUE_LANE_RANK: dict[str, int] = {
     lane: idx for idx, lane in enumerate(IMAGE_QUEUE_LANE_ORDER)
 }
 IMAGE_GENERATION_CONCURRENCY_SETTING = "image.generation_concurrency"
+
+CLEANUP_IMAGE_QUEUE_ACTIVE_LUA = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
+  return -1
+end
+return redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
+"""
+
+CLEANUP_IMAGE_QUEUE_PROVIDER_LUA = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
+  return -1
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
+return redis.call('ZCARD', KEYS[1])
+"""
+
+ADVANCE_IMAGE_QUEUE_CURSOR_LUA = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
+  return -1
+end
+local value = redis.call('INCRBY', KEYS[1], tonumber(ARGV[2]))
+redis.call('EXPIRE', KEYS[1], 3600)
+return value
+"""
+
+CLEAR_STALE_IMAGE_QUEUE_RESERVATION_LUA = """
+if redis.call('GET', KEYS[4]) ~= ARGV[1] then
+  return -1
+end
+if redis.call('GET', KEYS[3]) ~= ARGV[2] then
+  return 0
+end
+redis.call('ZREM', KEYS[1], ARGV[3])
+redis.call('ZREM', KEYS[2], ARGV[4])
+redis.call('DEL', KEYS[3])
+return 1
+"""
 
 
 @dataclass(frozen=True)
@@ -184,54 +232,30 @@ async def inflight_clear(redis: Any, task_id: str) -> None:
         await redis.delete(_g._image_inflight_key(task_id))
 
 
-@asynccontextmanager
-async def image_queue_lock(redis: Any) -> AsyncIterator[None]:
-    token = _g.new_uuid7()
-    deadline = asyncio.get_event_loop().time() + _g._IMAGE_QUEUE_LOCK_WAIT_S
-    while True:
-        got = await redis.set(
-            _g._IMAGE_QUEUE_LOCK_KEY,
-            token,
-            nx=True,
-            ex=_g._IMAGE_QUEUE_LOCK_TTL_S,
-        )
-        if got:
-            break
-        if asyncio.get_event_loop().time() >= deadline:
-            raise _g.UpstreamError(
-                "image queue scheduler busy",
-                error_code=_g.EC.LOCAL_QUEUE_FULL.value,
-                status_code=None,
+async def cleanup_image_queue_active(
+    redis: Any,
+    *,
+    lock: ImageQueueLockLease | None = None,
+) -> None:
+    try:
+        if lock is None:
+            await redis.zremrangebyscore(
+                _g._IMAGE_QUEUE_ACTIVE_KEY,
+                "-inf",
+                time.time(),
             )
-        await asyncio.sleep(0.05)
-
-    try:
-        yield
-    finally:
-        try:
-            eval_fn = getattr(redis, "eval", None)
-            if callable(eval_fn):
-                await eval_fn(
-                    _g._RELEASE_LEASE_LUA,
-                    1,
-                    _g._IMAGE_QUEUE_LOCK_KEY,
-                    token,
-                )
-            else:
-                current = _g._redis_text(await redis.get(_g._IMAGE_QUEUE_LOCK_KEY))
-                if current == token:
-                    await redis.delete(_g._IMAGE_QUEUE_LOCK_KEY)
-        except Exception:  # noqa: BLE001
-            _g.logger.warning("image queue lock release failed", exc_info=True)
-
-
-async def cleanup_image_queue_active(redis: Any) -> None:
-    try:
-        await redis.zremrangebyscore(
-            _g._IMAGE_QUEUE_ACTIVE_KEY,
-            "-inf",
-            time.time(),
-        )
+        else:
+            await lock.eval_fenced(
+                CLEANUP_IMAGE_QUEUE_ACTIVE_LUA,
+                2,
+                _g._IMAGE_QUEUE_ACTIVE_KEY,
+                _g._IMAGE_QUEUE_LOCK_KEY,
+                lock.token,
+                str(time.time()),
+                lost_result=-1,
+            )
+    except ImageQueueLockLost:
+        raise
     except Exception:  # noqa: BLE001
         _g.logger.debug("image queue active cleanup failed", exc_info=True)
 
@@ -248,11 +272,28 @@ async def active_image_provider_names(redis: Any) -> set[str]:
     return {name for item in raw_names or [] if (name := _g._redis_text(item))}
 
 
-async def provider_active_count(redis: Any, provider_name: str) -> int | None:
+async def provider_active_count(
+    redis: Any,
+    provider_name: str,
+    *,
+    lock: ImageQueueLockLease | None = None,
+) -> int | None:
     key = _g._image_provider_active_key(provider_name)
     try:
-        await redis.zremrangebyscore(key, "-inf", time.time())
-        count = await redis.zcard(key)
+        if lock is None:
+            await redis.zremrangebyscore(key, "-inf", time.time())
+            count = await redis.zcard(key)
+        else:
+            count = await lock.eval_fenced(
+                CLEANUP_IMAGE_QUEUE_PROVIDER_LUA,
+                2,
+                key,
+                _g._IMAGE_QUEUE_LOCK_KEY,
+                lock.token,
+                str(time.time()),
+                lost_result=-1,
+                lose_on_error=False,
+            )
     except Exception as exc:  # noqa: BLE001
         _g.logger.warning(
             "image queue active_count failed provider=%s err=%s",
@@ -264,6 +305,34 @@ async def provider_active_count(redis: Any, provider_name: str) -> int | None:
         return int(count or 0)
     except (TypeError, ValueError):
         return 0
+
+
+async def clear_stale_image_queue_reservation(
+    redis: Any,
+    lock: ImageQueueLockLease,
+    *,
+    task_id: str,
+    provider_name: str,
+) -> bool:
+    """Clear one stale reservation only while this lock token still owns the fence."""
+    provider_zset = _g._image_provider_active_key(provider_name)
+    active_member = (
+        provider_name if _g._is_dual_race_sentinel(provider_name) else task_id
+    )
+    result = await lock.eval_fenced(
+        CLEAR_STALE_IMAGE_QUEUE_RESERVATION_LUA,
+        4,
+        provider_zset,
+        _g._IMAGE_QUEUE_ACTIVE_KEY,
+        _g._image_task_provider_key(task_id),
+        _g._IMAGE_QUEUE_LOCK_KEY,
+        lock.token,
+        provider_name,
+        task_id,
+        active_member,
+        lost_result=-1,
+    )
+    return int(result or 0) == 1
 
 
 async def queued_generation_ids(limit: int) -> list[str]:
@@ -429,8 +498,24 @@ async def select_ready_generation_ids_by_lane(
     return selected
 
 
-async def advance_image_queue_lane_cursor(redis: Any, steps: int = 1) -> None:
+async def advance_image_queue_lane_cursor(
+    redis: Any,
+    steps: int = 1,
+    *,
+    lock: ImageQueueLockLease | None = None,
+) -> None:
     if steps <= 0:
+        return
+    if lock is not None:
+        await lock.eval_fenced(
+            ADVANCE_IMAGE_QUEUE_CURSOR_LUA,
+            2,
+            _g._IMAGE_QUEUE_LANE_CURSOR_KEY,
+            _g._IMAGE_QUEUE_LOCK_KEY,
+            lock.token,
+            int(steps),
+            lost_result=-1,
+        )
         return
     with suppress(Exception):
         await redis.incrby(_g._IMAGE_QUEUE_LANE_CURSOR_KEY, int(steps))
@@ -442,6 +527,7 @@ async def ready_queued_generation_ids(
     limit: int,
     *,
     advance_cursor: bool = False,
+    lock: ImageQueueLockLease | None = None,
 ) -> list[str]:
     candidates = await _g._queued_generation_candidates(
         max(limit, _g._IMAGE_QUEUE_FAIR_SCAN_LIMIT)
@@ -454,7 +540,7 @@ async def ready_queued_generation_ids(
     now_mono = time.monotonic()
     active_members: set[str] = set()
     with suppress(_g.UpstreamError):
-        await _g._cleanup_image_queue_active(redis)
+        await _g._cleanup_image_queue_active(redis, lock=lock)
     with suppress(_g.UpstreamError):
         active_members = await _g._active_image_provider_names(redis)
     for candidate in candidates:
@@ -476,8 +562,11 @@ async def ready_queued_generation_ids(
                 if float(raw_not_before) > now:
                     continue
             except ValueError:
-                with suppress(Exception):
-                    await redis.delete(not_before_key)
+                if lock is not None:
+                    await lock.delete_if_owner(not_before_key)
+                else:
+                    with suppress(Exception):
+                        await redis.delete(not_before_key)
         ready_fifo.append(queued_id)
         ready_by_lane.setdefault(
             candidate.queue_lane or _g._IMAGE_QUEUE_DEFAULT_LANE,

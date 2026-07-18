@@ -58,6 +58,7 @@ fi
 LOCKFILE="${LUMEN_BACKUP_RESTORE_LOCKFILE:-${LOCK_BASE}/lumen-backup-restore.lock}"
 LOCKDIR="$LOCKFILE.d"
 LOCK_KIND=""
+RESTORE_LOCK_OWNER_TOKEN=""
 TMP_DIR=""
 SERVICES_STOPPED=0
 REDIS_NEEDS_START=0
@@ -72,7 +73,10 @@ release_lock() {
         flock -u 7 2>/dev/null || true
         exec 7>&- 2>/dev/null || true
     elif [ "$LOCK_KIND" = "mkdir" ]; then
-        rm -rf "$LOCKDIR" 2>/dev/null || true
+        if ! lumen_release_owned_lock_dir \
+                "$LOCKDIR" "${RESTORE_LOCK_OWNER_TOKEN:-}"; then
+            log "WARN backup/restore lock owner changed; refusing removal: $LOCKDIR"
+        fi
     fi
 }
 
@@ -149,28 +153,17 @@ acquire_lock() {
         return 0
     fi
 
-    if mkdir "$LOCKDIR" 2>/dev/null; then
-        printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
+    if lumen_try_create_owned_lock_dir "$LOCKDIR" script "restore.sh"; then
+        RESTORE_LOCK_OWNER_TOKEN="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
         LOCK_KIND="mkdir"
         return 0
     fi
 
-    # mkdir 失败：stale-check（进程被 kill -9 后锁残留）。同 lib.sh 行为。
-    local _owner_pid="" _stale=0
-    if [ -f "$LOCKDIR/pid" ]; then
-        _owner_pid="$(cat "$LOCKDIR/pid" 2>/dev/null | tr -d '[:space:]')"
-        if [ -n "$_owner_pid" ] && ! kill -0 "$_owner_pid" 2>/dev/null; then
-            _stale=1
-        fi
-    fi
-    if [ "$_stale" = "1" ]; then
-        log "WARN stale lock (owner pid=$_owner_pid 已死)，清理后重试"
-        rm -rf "$LOCKDIR" 2>/dev/null || true
-        if mkdir "$LOCKDIR" 2>/dev/null; then
-            printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
-            LOCK_KIND="mkdir"
-            return 0
-        fi
+    local _owner_pid=""
+    _owner_pid="$(lumen_lock_owner_pid "$LOCKDIR")"
+    if [ "${LUMEN_LAST_LOCK_STALE:-0}" = "1" ]; then
+        log "ERROR: stale backup/restore lock detected (owner=${LUMEN_LAST_STALE_LOCK_PID:-${_owner_pid:-未知}}); refusing automatic removal"
+        log "ERROR: confirm no backup/restore process is running, then remove: $LOCKDIR"
     fi
 
     log "ERROR: another backup/restore is already running (lock: $LOCKDIR, owner=${_owner_pid:-未知})"

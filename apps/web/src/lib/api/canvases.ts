@@ -39,6 +39,19 @@ export interface ApplyCanvasMutationsOutput {
   updated_at?: string;
 }
 
+export type CanvasUploadedAssetKind = "image" | "video";
+
+export function deleteCanvasUploadedAsset(
+  kind: CanvasUploadedAssetKind,
+  assetId: string,
+): Promise<void> {
+  const resource = kind === "image" ? "images" : "videos";
+  return apiFetchNoContent(
+    `/${resource}/${encodeURIComponent(assetId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export function listCanvases(
   options: ListCanvasesOptions = {},
 ): Promise<CanvasListResponse> {
@@ -124,7 +137,7 @@ export function selectCanvasExecutionOutput(
   canvasId: string,
   executionId: string,
   outputIndex: number,
-  selectionRevision?: number,
+  selectionRevision = 0,
 ): Promise<CanvasNodeSelection> {
   return apiFetch(
     `/canvases/${encodeURIComponent(canvasId)}/executions/${encodeURIComponent(executionId)}/select`,

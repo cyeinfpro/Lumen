@@ -5,6 +5,61 @@ export type VideoGenerationWithVideo = VideoGenerationOut & {
 };
 
 export type VideoHistoryFilter = "all" | "succeeded" | "failed";
+export const VIDEO_SETTLING_TIMEOUT_MS = 60_000;
+
+export type VideoSettlingPhase = "settling" | "expired";
+
+export type VideoSettlingCheckpoint = {
+  phase: VideoSettlingPhase;
+  startedAtMs: number;
+  deadlineAtMs: number;
+};
+
+export function isVideoMaterializationPending(
+  item: Pick<VideoGenerationOut, "status" | "video">,
+): boolean {
+  return item.status === "succeeded" && item.video == null;
+}
+
+export function createVideoSettlingCheckpoint(
+  nowMs = Date.now(),
+  timeoutMs = VIDEO_SETTLING_TIMEOUT_MS,
+): VideoSettlingCheckpoint {
+  const startedAtMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const durationMs = Number.isFinite(timeoutMs)
+    ? Math.max(0, timeoutMs)
+    : VIDEO_SETTLING_TIMEOUT_MS;
+  return {
+    phase: "settling",
+    startedAtMs,
+    deadlineAtMs: startedAtMs + durationMs,
+  };
+}
+
+export function ensureVideoSettlingCheckpoint(
+  checkpoint: VideoSettlingCheckpoint | undefined,
+  nowMs = 0,
+): VideoSettlingCheckpoint {
+  if (!checkpoint) return createVideoSettlingCheckpoint(nowMs);
+  if (checkpoint.phase === "expired") return checkpoint;
+  if (nowMs >= checkpoint.deadlineAtMs) {
+    return { ...checkpoint, phase: "expired" };
+  }
+  return checkpoint;
+}
+
+export function isVideoSettlingActive(
+  item: Pick<VideoGenerationOut, "status" | "video">,
+  checkpoint: VideoSettlingCheckpoint | undefined,
+  nowMs?: number,
+): boolean {
+  if (!isVideoMaterializationPending(item)) return false;
+  if (!checkpoint) return false;
+  return (
+    checkpoint.phase === "settling" &&
+    (nowMs === undefined || nowMs < checkpoint.deadlineAtMs)
+  );
+}
 
 export const MODE_COPY: Record<
   VideoAction,
@@ -49,7 +104,6 @@ const TERMINAL_VIDEO_STATUSES = [
   "canceled",
   "expired",
 ] as const;
-const SETTLING_VIDEO_STAGES = ["fetching"] as const;
 const STAGE_COPY: Record<
   string,
   {
@@ -124,7 +178,14 @@ export function taskElapsedLabel(item: VideoGenerationOut): string | null {
   return `${isTerminalVideo(item) ? "耗时" : "已耗时"} ${elapsed}`;
 }
 
-export function isActiveVideo(item: VideoGenerationOut): boolean {
+export function isActiveVideo(
+  item: VideoGenerationOut,
+  settling?: VideoSettlingCheckpoint,
+  nowMs?: number,
+): boolean {
+  if (isVideoMaterializationPending(item)) {
+    return isVideoSettlingActive(item, settling, nowMs);
+  }
   if (
     ACTIVE_VIDEO_STATUSES.includes(
       item.status as (typeof ACTIVE_VIDEO_STATUSES)[number],
@@ -132,9 +193,7 @@ export function isActiveVideo(item: VideoGenerationOut): boolean {
   ) {
     return true;
   }
-  return SETTLING_VIDEO_STAGES.includes(
-    item.progress_stage as (typeof SETTLING_VIDEO_STAGES)[number],
-  );
+  return false;
 }
 
 export function isTerminalVideo(item: VideoGenerationOut): boolean {
@@ -160,6 +219,12 @@ export function actionLabel(action: VideoAction): string {
 export function stageCopy(
   item: VideoGenerationOut,
 ): { label: string; detail: string } {
+  if (isVideoMaterializationPending(item)) {
+    return {
+      label: "整理中",
+      detail: "任务已完成，正在等待视频文件保存。",
+    };
+  }
   return (
     STAGE_COPY[item.progress_stage] ??
     STAGE_COPY[item.status] ?? {

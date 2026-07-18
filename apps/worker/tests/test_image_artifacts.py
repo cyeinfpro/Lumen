@@ -43,6 +43,40 @@ def test_decode_upstream_image_b64_rejects_invalid_input() -> None:
         image_artifacts._decode_upstream_image_b64("not-valid-base64!")
 
 
+def test_decode_upstream_image_b64_rejects_oversized_encoded_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_artifacts, "_MAX_UPSTREAM_IMAGE_B64_CHARS", 8)
+
+    with pytest.raises(ValueError, match="base64"):
+        image_artifacts._decode_upstream_image_b64("A" * 9)
+
+
+def test_decode_upstream_image_b64_rejects_oversized_decoded_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_artifacts, "_MAX_UPSTREAM_IMAGE_BYTES", 3)
+
+    with pytest.raises(ValueError, match="raw bytes"):
+        image_artifacts._decode_upstream_image_b64(
+            base64.b64encode(b"1234").decode("ascii")
+        )
+
+
+def test_inspect_rejects_oversized_raw_bytes_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_artifacts, "_MAX_UPSTREAM_IMAGE_BYTES", 3)
+
+    def unexpected_open(_value: object) -> None:
+        raise AssertionError("oversized raw bytes must be rejected before Pillow")
+
+    monkeypatch.setattr(image_artifacts.PILImage, "open", unexpected_open)
+
+    with pytest.raises(ValueError, match="raw bytes"):
+        image_artifacts._inspect_generated_image_sync(b"1234")
+
+
 @pytest.mark.parametrize("image_format", ["PNG", "WEBP", "JPEG"])
 def test_validate_generated_image_metadata_accepts_supported_formats(
     image_format: str,
@@ -76,6 +110,51 @@ def test_validate_generated_image_metadata_rejects_invalid_metadata(
             width,
             height,
         )
+
+
+def test_validate_generated_image_metadata_rejects_excessive_pixel_count() -> None:
+    with pytest.raises(ValueError, match="pixel count"):
+        image_artifacts._validate_generated_image_metadata("PNG", 8001, 8001)
+
+
+def test_inspect_rejects_pixel_limit_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_calls = 0
+
+    class HeaderOnlyImage:
+        format = "PNG"
+        size = (8001, 8001)
+
+        def load(self) -> None:
+            nonlocal load_calls
+            load_calls += 1
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        image_artifacts.PILImage,
+        "open",
+        lambda _value: HeaderOnlyImage(),
+    )
+
+    with pytest.raises(ValueError, match="pixel count"):
+        image_artifacts._inspect_generated_image_sync(b"header")
+
+    assert load_calls == 0
+
+
+def test_inspect_translates_decompression_bomb_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_value: object) -> None:
+        raise image_artifacts.PILImage.DecompressionBombError("too many pixels")
+
+    monkeypatch.setattr(image_artifacts.PILImage, "open", boom)
+
+    with pytest.raises(ValueError, match="decompression bomb"):
+        image_artifacts._inspect_generated_image_sync(b"header")
 
 
 @pytest.mark.parametrize(

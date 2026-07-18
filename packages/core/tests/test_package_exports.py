@@ -5,3 +5,10 @@ def test_package_exports_context_window_and_runtime_settings_modules():
 
     assert lumen_core.context_window is context_window
     assert lumen_core.runtime_settings is runtime_settings
+
+
+def test_models_exports_memory_extraction_run():
+    namespace: dict[str, object] = {}
+    exec("from lumen_core.models import *", namespace)
+
+    assert "MemoryExtractionRun" in namespace

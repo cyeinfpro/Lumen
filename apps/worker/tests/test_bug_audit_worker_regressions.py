@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from redis.exceptions import WatchError
 
 from app import account_limiter, sse_publish, upstream, video_artifacts
 from app.provider_pool import ProviderConfig, ProviderPool
@@ -20,6 +21,7 @@ from app.tasks import (
     video_generation,
 )
 from app.tasks.generation_parts import lifecycle as generation_lifecycle
+from app.tasks.generation_parts import event_delivery as generation_event_delivery
 
 
 def test_completion_charge_uses_same_session_before_success_commit() -> None:
@@ -47,6 +49,59 @@ def test_completion_rechecks_cancel_after_billing_charge_before_commit() -> None
     commit_idx = source.index("await session.commit()", charge_idx)
 
     assert charge_idx < cancel_idx < commit_idx
+
+
+def test_generation_success_event_is_staged_before_commit_and_delivered_after() -> None:
+    source = inspect.getsource(generation.run_generation)
+    stage_idx = source.index("success_delivery = _stage_generation_success_event(")
+    commit_idx = source.index("await session.commit()", stage_idx)
+    deliver_idx = source.index(
+        "await _deliver_generation_event(redis, success_delivery)",
+        commit_idx,
+    )
+
+    assert stage_idx < commit_idx < deliver_idx
+
+
+@pytest.mark.asyncio
+async def test_generation_sse_failure_is_deferred_without_failing_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deferred: list[dict[str, Any]] = []
+
+    async def fail_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise sse_publish.SSEPublishRetryableError(
+            stream_key="events:user:user-1",
+            event_id="event-1",
+            diagnostic_dlq_persisted=True,
+        )
+
+    async def persist_for_retry(**kwargs: Any) -> None:
+        deferred.append(kwargs)
+
+    monkeypatch.setattr(generation_event_delivery, "_publish_sse_event", fail_publish)
+    monkeypatch.setattr(
+        generation_event_delivery,
+        "_persist_generation_event_for_retry",
+        persist_for_retry,
+    )
+
+    await generation.publish_event(
+        object(),
+        "user-1",
+        "task:gen-1",
+        generation.EV_GEN_STARTED,
+        {"generation_id": "gen-1", "message_id": "msg-1"},
+    )
+
+    assert deferred == [
+        {
+            "user_id": "user-1",
+            "channel": "task:gen-1",
+            "event_name": generation.EV_GEN_STARTED,
+            "data": {"generation_id": "gen-1", "message_id": "msg-1"},
+        }
+    ]
 
 
 def test_completion_flushes_before_each_delta_publish() -> None:
@@ -398,16 +453,9 @@ def test_completion_terminal_failure_preserves_partial_usage_buckets() -> None:
     branch = source[start : source.index("await session.commit()", start)]
     settle_idx = branch.index("await _settle_failed_completion_billing")
 
-    for assignment in (
-        "comp_partial.cache_read_tokens = cache_read_tokens",
-        "comp_partial.cache_creation_tokens = cache_creation_tokens",
-        "comp_partial.cache_creation_5m_tokens = cache_creation_5m_tokens",
-        "comp_partial.cache_creation_1h_tokens = cache_creation_1h_tokens",
-        "comp_partial.reasoning_tokens = reasoning_tokens",
-        "comp_partial.image_output_tokens = image_output_tokens",
-    ):
-        assert assignment in branch
-        assert branch.index(assignment) < settle_idx
+    apply_idx = branch.index("usage_totals.apply_to(comp_partial)")
+    assert apply_idx < settle_idx
+    assert "usage_values=usage_totals.values()" in branch
     assert "_fallback_completion_tool_image_tokens(" in branch
 
 
@@ -423,6 +471,21 @@ def test_completion_success_fallbacks_tool_image_tokens_before_charge() -> None:
     assert "and reserved_tool_image_budget_micro > 0" in branch
     assert fallback_idx < update_idx
     assert fallback_idx < charge_idx
+
+
+def test_completion_success_stages_memory_extract_before_commit() -> None:
+    source = inspect.getsource(completion.run_completion)
+    success_start = source.index("# --- 6. 成功态 ---")
+    commit_idx = source.index("await session.commit()", success_start)
+    success_tx = source[success_start:commit_idx]
+
+    stage_idx = success_tx.index("_stage_completion_memory_extract(")
+    succeeded_event_idx = success_tx.index("EV_COMP_SUCCEEDED")
+    assert succeeded_event_idx < stage_idx
+    assert "source_message_id=" in success_tx
+    assert "assistant_message_id=message_id" in success_tx
+    assert 'enqueue_job("memory_extract"' not in source
+    assert "memory_extraction.memory_extract(" not in source
 
 
 def test_completion_stale_flush_exits_without_weakening_epoch_fence() -> None:
@@ -500,7 +563,7 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
     assert "provider_name=slot_provider_name" in run_source
 
 
-def test_video_postprocess_returns_processed_and_diagnostics(
+def test_video_postprocess_rejects_unvalidated_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     video_bytes = (
@@ -508,14 +571,14 @@ def test_video_postprocess_returns_processed_and_diagnostics(
     )
     monkeypatch.setattr(video_artifacts.shutil, "which", lambda _name: None)
 
-    processed, diagnostics = video_generation._postprocess_video_bytes(  # noqa: SLF001
-        video_bytes
-    )
+    with pytest.raises(
+        video_artifacts.InvalidVideoArtifactError,
+        match="ffprobe is required",
+    ) as exc_info:
+        video_generation._postprocess_video_bytes(video_bytes)  # noqa: SLF001
 
-    assert processed["video_bytes"] == video_bytes
-    assert processed["poster_bytes"] is None
-    assert processed["faststart"] is False
-    assert diagnostics["faststart"] is False
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics["ffprobe_missing"] is True
     assert diagnostics["ffmpeg_missing"] is True
     assert "video_bytes" not in diagnostics
     assert "poster_bytes" not in diagnostics
@@ -711,6 +774,58 @@ async def test_video_generation_stale_epoch_does_not_release_current_slot(
     assert released == []
 
 
+async def _eval_video_provider_slot(redis: Any, *args: Any) -> int:
+    (
+        _script,
+        numkeys,
+        active_key,
+        exclusive_key,
+        task_id,
+        now,
+        cutoff,
+        concurrency,
+        wants_exclusive,
+        ttl,
+    ) = args
+    assert numkeys == 2
+    now = float(now)
+    cutoff = float(cutoff)
+    concurrency = int(concurrency)
+    wants_exclusive = bool(int(wants_exclusive))
+    for key in (active_key, exclusive_key):
+        redis.zsets[key] = {
+            member: score
+            for member, score in redis.zsets.get(key, {}).items()
+            if score > cutoff
+        }
+    active = redis.zsets.setdefault(active_key, {})
+    exclusive = redis.zsets.setdefault(exclusive_key, {})
+    if task_id in active:
+        if wants_exclusive and (
+            len(active) != 1
+            or len(exclusive) > 1
+            or (len(exclusive) == 1 and task_id not in exclusive)
+        ):
+            return 0
+        if not wants_exclusive and exclusive and task_id not in exclusive:
+            return 0
+    else:
+        if wants_exclusive and (active or exclusive):
+            return 0
+        if not wants_exclusive and exclusive:
+            return 0
+        if len(active) >= concurrency:
+            return 0
+    active[task_id] = now
+    if hasattr(redis, "expires"):
+        redis.expires[active_key] = int(ttl)
+    if wants_exclusive:
+        exclusive[task_id] = now
+        if hasattr(redis, "expires"):
+            redis.expires[exclusive_key] = int(ttl)
+    return 1
+
+
 @pytest.mark.asyncio
 async def test_video_provider_slot_reacquire_refreshes_same_task(
     monkeypatch: pytest.MonkeyPatch,
@@ -746,8 +861,8 @@ async def test_video_provider_slot_reacquire_refreshes_same_task(
         async def expire(self, key: str, ttl: int) -> None:
             self.expires[key] = ttl
 
-        async def eval(self, *_args: Any) -> int:
-            return 1
+        async def eval(self, *args: Any) -> int:
+            return await _eval_video_provider_slot(self, *args)
 
     redis = SlotRedis()
     monkeypatch.setattr(video_generation.time, "time", lambda: 1000.0)
@@ -805,8 +920,8 @@ async def test_video_provider_exclusive_slot_blocks_mixed_4k_and_standard_work()
         async def expire(self, *_args: Any, **_kwargs: Any) -> None:
             return None
 
-        async def eval(self, *_args: Any) -> int:
-            return 1
+        async def eval(self, *args: Any) -> int:
+            return await _eval_video_provider_slot(self, *args)
 
     redis = SlotRedis()
 
@@ -1742,7 +1857,7 @@ def test_completion_retry_enqueue_failure_marks_terminal_failed() -> None:
     assert "status=CompletionStatus.FAILED.value" in branch
     assert "worker_billing.release_completion(" in branch
     assert "EV_COMP_FAILED" in branch
-    assert '"retriable": False' in branch
+    assert "retriable=False" in branch
 
 
 @pytest.mark.asyncio
@@ -1800,7 +1915,7 @@ async def test_zero_usage_failed_completion_releases_hold(
 def test_completion_cancel_branch_checks_rowcount_before_message_update() -> None:
     source = inspect.getsource(completion.run_completion)
     start = source.index("except _TaskCancelled as exc:")
-    end = source.index("await publish_event(", start)
+    end = source.index("\n    except Exception as exc:", start)
     branch = source[start:end]
 
     assert "res = await session.execute(" in branch
@@ -1812,6 +1927,8 @@ def test_completion_cancel_branch_checks_rowcount_before_message_update() -> Non
     assert branch.index(
         "except _CompletionEpochSuperseded as stale_exc:"
     ) < branch.index("except Exception as db_exc:")
+    assert "_stage_completion_event(" in branch
+    assert "await _deliver_completion_event(redis, cancel_delivery)" in branch
 
 
 def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:
@@ -1838,7 +1955,8 @@ def test_sse_xadd_dedupe_uses_per_event_set_nx_ex() -> None:
 
     assert "HSET" not in sse_publish._XADD_IDEMPOTENT_LUA
     assert "HGET" not in sse_publish._XADD_IDEMPOTENT_LUA
-    assert "redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))" in lua
+    assert "redis.call('SET', KEYS[2], ARGV[8], 'NX', 'EX', tonumber(ARGV[5]))" in lua
+    assert "local ttl_set = redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))" in lua
     assert "return existing" in lua
 
 
@@ -2165,27 +2283,155 @@ async def test_account_limiter_daily_expiry_stays_in_the_future() -> None:
 async def test_image_queue_lock_release_uses_owner_cas() -> None:
     class Redis:
         def __init__(self) -> None:
+            self.store: dict[str, str] = {}
             self.eval_args: tuple[Any, ...] | None = None
 
-        async def set(self, *_args: Any, **_kwargs: Any) -> bool:
+        async def set(
+            self,
+            key: str,
+            value: Any,
+            **_kwargs: Any,
+        ) -> bool:
+            self.store[key] = str(value)
             return True
 
         async def eval(self, *args: Any) -> int:
             self.eval_args = args
-            return 0
+            key = str(args[2])
+            token = str(args[3])
+            if self.store.get(key) != token:
+                return 0
+            del self.store[key]
+            return 1
 
     redis = Redis()
 
     async with generation._image_queue_lock(redis):
-        pass
+        redis.store["generation:image_queue:lock"] = "new-owner"
 
     assert redis.eval_args is not None
     assert redis.eval_args[1] == 1
     assert redis.eval_args[2] == "generation:image_queue:lock"
+    assert redis.store["generation:image_queue:lock"] == "new-owner"
+
+
+@pytest.mark.asyncio
+async def test_image_queue_lock_acquisition_failure_is_fail_closed() -> None:
+    class Redis:
+        async def set(self, *_args: Any, **_kwargs: Any) -> bool:
+            raise RuntimeError("redis unavailable")
+
+        async def eval(self, *_args: Any) -> int:
+            raise AssertionError("release must not run when acquisition fails")
+
+    entered = False
+    with pytest.raises(
+        generation.UpstreamError,
+        match="image queue lock acquisition unavailable",
+    ) as exc_info:
+        async with generation._image_queue_lock(Redis()):
+            entered = True
+
+    assert entered is False
+    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert exc_info.value.payload["retry_after"] > 0
+
+
+@pytest.mark.asyncio
+async def test_image_queue_lock_transaction_does_not_delete_new_owner() -> None:
+    class Redis:
+        eval = None
+
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+            self.version = 0
+            self.read_started = asyncio.Event()
+            self.allow_release = asyncio.Event()
+            self.barrier_used = False
+            self.applied_deletes = 0
+
+        async def set(
+            self,
+            key: str,
+            value: Any,
+            *,
+            nx: bool = False,
+            ex: int | None = None,
+        ) -> bool:
+            _ = ex
+            if nx and key in self.store:
+                return False
+            self.store[key] = str(value)
+            self.version += 1
+            return True
+
+        def pipeline(self, *, transaction: bool = True) -> Pipeline:
+            assert transaction is True
+            return Pipeline(self)
+
+        def switch_owner(self, key: str, owner: str) -> None:
+            self.store[key] = owner
+            self.version += 1
+
+    class Pipeline:
+        def __init__(self, redis: Redis) -> None:
+            self.redis = redis
+            self.watched_version = 0
+            self.delete_key: str | None = None
+
+        async def watch(self, _key: str) -> None:
+            self.watched_version = self.redis.version
+
+        async def get(self, key: str) -> str | None:
+            value = self.redis.store.get(key)
+            if not self.redis.barrier_used:
+                self.redis.barrier_used = True
+                self.redis.read_started.set()
+                await self.redis.allow_release.wait()
+            return value
+
+        def multi(self) -> None:
+            return None
+
+        def delete(self, key: str) -> None:
+            self.delete_key = key
+
+        async def execute(self) -> list[int]:
+            if self.redis.version != self.watched_version:
+                raise WatchError("owner changed")
+            assert self.delete_key is not None
+            existed = self.delete_key in self.redis.store
+            self.redis.store.pop(self.delete_key, None)
+            self.redis.version += 1
+            self.redis.applied_deletes += int(existed)
+            return [int(existed)]
+
+        async def reset(self) -> None:
+            return None
+
+    redis = Redis()
+
+    async def acquire_and_release() -> None:
+        async with generation._image_queue_lock(redis):
+            pass
+
+    release_task = asyncio.create_task(acquire_and_release())
+    await redis.read_started.wait()
+    redis.switch_owner("generation:image_queue:lock", "new-owner")
+    redis.allow_release.set()
+    await release_task
+
+    assert redis.store["generation:image_queue:lock"] == "new-owner"
+    assert redis.applied_deletes == 0
 
 
 def test_image_queue_reserve_has_atomic_lua_path() -> None:
     source = inspect.getsource(generation._reserve_image_queue_slot)
 
     assert "_RESERVE_IMAGE_SLOT_LUA" in source
-    assert "redis.zadd(provider_zset" in source
+    assert "lock.eval_fenced(" in source
+    assert "lost_result=-1" in source
+    assert (
+        "redis.call('GET', lock_key) ~= lock_token"
+        in generation._RESERVE_IMAGE_SLOT_LUA
+    )

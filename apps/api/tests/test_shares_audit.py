@@ -371,6 +371,7 @@ async def test_delete_conversation_writes_audit_log(
         "completions_canceled": 0,
         "generations_canceled": 0,
         "images_deleted": 0,
+        "memory_extractions_canceled": 0,
     }
 
 

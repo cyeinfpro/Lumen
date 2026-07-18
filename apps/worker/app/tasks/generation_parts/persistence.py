@@ -626,6 +626,56 @@ async def handle_dual_race_bonus_image(
                         height=height,
                         image_count=1,
                     )
+                attached_delivery = _g._stage_generation_event(
+                    session,
+                    user_id,
+                    channel,
+                    _g.EV_GEN_ATTACHED,
+                    {
+                        "message_id": message_id,
+                        "generation_id": bonus_generation_id,
+                        "parent_generation_id": parent_task_id,
+                        "action": action,
+                        "prompt": prompt,
+                        "size_requested": size_requested,
+                        "aspect_ratio": aspect_ratio,
+                        "input_image_ids": list(input_image_ids),
+                        "primary_input_image_id": primary_input_image_id,
+                        **result_billing_meta,
+                    },
+                )
+                success_delivery = _g._stage_generation_event(
+                    session,
+                    user_id,
+                    channel,
+                    _g.EV_GEN_SUCCEEDED,
+                    {
+                        "generation_id": bonus_generation_id,
+                        "message_id": message_id,
+                        "images": [
+                            {
+                                "image_id": image_id,
+                                "from_generation_id": bonus_generation_id,
+                                "actual_size": f"{width}x{height}",
+                                "mime": orig_mime,
+                                "url": _g.storage.public_url(key_orig),
+                                "display_url": (
+                                    f"/api/images/{image_id}/variants/display2048"
+                                ),
+                                "preview_url": (
+                                    f"/api/images/{image_id}/variants/preview1024"
+                                ),
+                                "thumb_url": (
+                                    f"/api/images/{image_id}/variants/thumb256"
+                                ),
+                                "filename": image_metadata.get("suggested_filename"),
+                                **result_billing_meta,
+                            }
+                        ],
+                        "final_size": f"{width}x{height}",
+                        **result_billing_meta,
+                    },
+                )
                 await session.commit()
                 if settle_billing:
                     await _g.worker_billing.flush_balance_cache_refreshes(session)
@@ -638,59 +688,10 @@ async def handle_dual_race_bonus_image(
         )
         return False
 
-    try:
-        await _g.publish_event(
-            redis,
-            user_id,
-            channel,
-            _g.EV_GEN_ATTACHED,
-            {
-                "message_id": message_id,
-                "generation_id": bonus_generation_id,
-                "parent_generation_id": parent_task_id,
-                "action": action,
-                "prompt": prompt,
-                "size_requested": size_requested,
-                "aspect_ratio": aspect_ratio,
-                "input_image_ids": list(input_image_ids),
-                "primary_input_image_id": primary_input_image_id,
-                **result_billing_meta,
-            },
-        )
-        await _g.publish_event(
-            redis,
-            user_id,
-            channel,
-            _g.EV_GEN_SUCCEEDED,
-            {
-                "generation_id": bonus_generation_id,
-                "message_id": message_id,
-                "images": [
-                    {
-                        "image_id": image_id,
-                        "from_generation_id": bonus_generation_id,
-                        "actual_size": f"{width}x{height}",
-                        "mime": orig_mime,
-                        "url": _g.storage.public_url(key_orig),
-                        "display_url": (f"/api/images/{image_id}/variants/display2048"),
-                        "preview_url": (f"/api/images/{image_id}/variants/preview1024"),
-                        "thumb_url": (f"/api/images/{image_id}/variants/thumb256"),
-                        "filename": image_metadata.get("suggested_filename"),
-                        **result_billing_meta,
-                    }
-                ],
-                "final_size": f"{width}x{height}",
-                **result_billing_meta,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        _g.logger.warning(
-            "%s publish failed parent=%s err=%r",
-            log_label,
-            parent_task_id,
-            exc,
-        )
-        return False
+    await _g._deliver_generation_events(
+        redis,
+        [attached_delivery, success_delivery],
+    )
 
     _g.logger.info(
         "%s image done: parent=%s bonus=%s",

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from arq.cron import cron
 from sqlalchemy import or_, select
 
@@ -36,6 +35,7 @@ from ..db import SessionLocal
 from ..storage import StorageDiskFullError, storage
 from ..video_artifacts import (
     DownloadedVideo,
+    InvalidVideoArtifactError,
     ProcessedVideoFile as _ProcessedVideoFile,
     copy_video_file_exclusive_result,
     postprocess_video_bytes as _postprocess_video_bytes,
@@ -76,6 +76,20 @@ from ..video_upstream import (
     VideoUpstreamError,
     adapter_for_provider,
 )
+from .video_generation_parts.errors import (
+    RETRYABLE_VIDEO_ERROR_CODES as _RETRYABLE_VIDEO_ERROR_CODES,  # noqa: F401
+    SUBMIT_RETRY_DELAYS_S as _SUBMIT_RETRY_DELAYS_S,  # noqa: F401
+    append_bounded_history as _append_bounded_history,
+    exception_log_info as _exception_log_info,
+    generation_attempt as _generation_attempt,
+    generation_diagnostics as _generation_diagnostics,
+    is_retryable_video_exception as _is_retryable_video_exception,
+    submit_failure_billable_hint as _submit_failure_billable_hint,
+    submit_outcome_unknown as _submit_outcome_unknown,
+    submit_retry_delay_s as _submit_retry_delay_s,
+    video_exception_code as _video_exception_code,
+    video_exception_message as _video_exception_message,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -89,13 +103,13 @@ _MAX_POLL_DURATION_S = 30 * 60
 _MAX_POLL_COUNT = max(1, _MAX_POLL_DURATION_S // _POLL_INTERVAL_S)
 _EXTENDED_POLL_INTERVAL_S = 60
 _MAX_SUBMIT_ATTEMPTS = 4
-_SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
 _POLL_RETRY_DELAY_S = 12
 _MAX_UNEXPECTED_POLL_ATTEMPTS = 4
 _MAX_MISSING_RESULT_URL_POLLS = 8
 _RECON_STALE_AFTER_S = 30
 _SUBMIT_UNKNOWN_AFTER_S = max(_LEASE_TTL_S * 2, 5 * 60)
 _SUBMIT_UNKNOWN_FINALIZE_AFTER_S = 60 * 60
+_INVALID_VIDEO_ARTIFACT_REASON = "invalid_video_artifact_after_upstream_success"
 _RECON_LIMIT = 100
 _TERMINAL_STATUSES = {
     VideoGenerationStatus.SUCCEEDED.value,
@@ -106,15 +120,6 @@ _TERMINAL_STATUSES = {
 _NON_RESUBMIT_STATUSES = {
     *_TERMINAL_STATUSES,
     VideoGenerationStatus.SUBMIT_UNKNOWN.value,
-}
-_RETRYABLE_VIDEO_ERROR_CODES = {
-    "capacity",
-    "fetch_failed",
-    "provider_error",
-    "upstream_network_error",
-    "upstream_not_ready",
-    "upstream_timeout",
-    "upstream_unknown",
 }
 
 
@@ -156,96 +161,6 @@ def _poll_elapsed_s(generation: VideoGeneration, now: datetime) -> int | None:
     if submitted_at is None:
         return None
     return int((now - submitted_at).total_seconds())
-
-
-def _video_exception_code(exc: Exception, *, default: str) -> str:
-    if isinstance(exc, VideoUpstreamError):
-        value = (exc.error_code or "").strip()
-        return value or default
-    raw_code = getattr(exc, "error_code", None)
-    if isinstance(raw_code, str) and raw_code.strip():
-        return raw_code.strip()[:64]
-    if isinstance(exc, httpx.TimeoutException) or isinstance(exc, asyncio.TimeoutError):
-        return "upstream_timeout"
-    if isinstance(exc, httpx.TransportError):
-        return "upstream_network_error"
-    return default
-
-
-def _video_exception_message(exc: Exception, *, phase: str) -> str:
-    raw = str(exc).strip()
-    if raw:
-        return raw[:1000]
-    code = _video_exception_code(exc, default="provider_unavailable")
-    status_code = getattr(exc, "status_code", None)
-    suffix = f" status={status_code}" if status_code else ""
-    return f"video upstream {phase} failed: {code} ({exc.__class__.__name__}){suffix}"[
-        :1000
-    ]
-
-
-def _is_retryable_video_exception(exc: Exception) -> bool:
-    if isinstance(exc, VideoUpstreamError):
-        if exc.status_code in {408, 409, 425, 429}:
-            return True
-        if exc.status_code is not None and exc.status_code >= 500:
-            return True
-        return exc.error_code in _RETRYABLE_VIDEO_ERROR_CODES
-    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
-        return True
-    return isinstance(exc, httpx.TransportError)
-
-
-def _submit_outcome_unknown(exc: Exception) -> bool:
-    if isinstance(
-        exc, (httpx.TimeoutException, asyncio.TimeoutError, httpx.TransportError)
-    ):
-        return True
-    if not isinstance(exc, VideoUpstreamError):
-        return False
-    if exc.status_code in {408, 409}:
-        return True
-    if exc.status_code is not None and exc.status_code >= 500:
-        return True
-    return exc.error_code in {"bad_response", "upstream_unknown"}
-
-
-def _submit_retry_delay_s(attempt: int) -> int:
-    index = max(0, min(attempt - 1, len(_SUBMIT_RETRY_DELAYS_S) - 1))
-    return _SUBMIT_RETRY_DELAYS_S[index]
-
-
-def _generation_attempt(generation: VideoGeneration) -> int:
-    return int(getattr(generation, "attempt", 0) or 0)
-
-
-def _generation_diagnostics(generation: VideoGeneration) -> dict[str, Any]:
-    raw = getattr(generation, "diagnostics", None)
-    return dict(raw or {}) if isinstance(raw, dict) else {}
-
-
-def _submit_failure_billable_hint(exc: Exception) -> bool | None:
-    if _is_retryable_video_exception(exc):
-        return None
-    if isinstance(exc, VideoUpstreamError) and exc.error_code in {
-        "bad_response",
-        "upstream_unknown",
-    }:
-        return None
-    return False
-
-
-def _exception_log_info(exc: Exception):
-    return (type(exc), exc, exc.__traceback__)
-
-
-def _append_bounded_history(
-    diagnostics: dict[str, Any], key: str, item: dict[str, Any], *, limit: int = 10
-) -> None:
-    raw = diagnostics.get(key)
-    history = list(raw) if isinstance(raw, list) else []
-    history.append(item)
-    diagnostics[key] = history[-limit:]
 
 
 async def _acquire_lease(redis: Any, task_id: str, token: str) -> bool:
@@ -2184,14 +2099,25 @@ async def _apply_poll_result(
                     },
                 )
             else:
-                await _finish_success(
-                    session,
-                    redis,
-                    generation,
-                    poll,
-                    adapter=adapter,
-                    lease_lost=lease_lost,
-                )
+                try:
+                    await _finish_success(
+                        session,
+                        redis,
+                        generation,
+                        poll,
+                        adapter=adapter,
+                        lease_lost=lease_lost,
+                    )
+                except InvalidVideoArtifactError as exc:
+                    await _finish_terminal_failure(
+                        session,
+                        redis,
+                        generation,
+                        _invalid_video_artifact_poll(poll, exc),
+                        fallback_error_message=str(exc)[:1000],
+                        lease_lost=lease_lost,
+                        billing_reason=_INVALID_VIDEO_ARTIFACT_REASON,
+                    )
                 return
 
         await _finish_terminal_failure(
@@ -2275,6 +2201,30 @@ def _cancelled_poll_during_finalization(poll: PollResult) -> PollResult:
     return PollResult(
         status="cancelled",
         failure_class="canceled",
+        usage_total_tokens=poll.usage_total_tokens,
+        upstream_billable=poll.upstream_billable,
+        raw=raw,
+    )
+
+
+def _invalid_video_artifact_poll(
+    poll: PollResult,
+    exc: InvalidVideoArtifactError,
+) -> PollResult:
+    raw = {
+        **(poll.raw or {}),
+        "reason": _INVALID_VIDEO_ARTIFACT_REASON,
+        "phase": "artifact_validation",
+        "provider_status": poll.status,
+        "error": str(exc)[:1000],
+        "error_code": exc.error_code,
+        "artifact_diagnostics": exc.diagnostics,
+    }
+    if poll.usage_total_tokens is None and poll.upstream_billable is None:
+        raw["upstream_cost_ambiguous"] = True
+    return PollResult(
+        status="failed",
+        failure_class=exc.error_code,
         usage_total_tokens=poll.usage_total_tokens,
         upstream_billable=poll.upstream_billable,
         raw=raw,
@@ -2436,6 +2386,7 @@ async def _finish_terminal_failure(
     *,
     fallback_error_message: str | None,
     lease_lost: asyncio.Event | None = None,
+    billing_reason: str | None = None,
 ) -> None:
     release_provider_name = generation.provider_name
     release_provider_slot = False
@@ -2452,7 +2403,7 @@ async def _finish_terminal_failure(
             session,
             generation,
             poll_result=poll,
-            reason=poll.status,
+            reason=billing_reason or poll.status,
         )
         _raise_if_video_lease_lost(
             lease_lost,

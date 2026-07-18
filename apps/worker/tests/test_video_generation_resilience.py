@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from lumen_core.models import OutboxEvent
 
 from app import video_artifacts
 from app.tasks.video_generation import (
@@ -32,7 +33,7 @@ from app.video_upstream import (
 
 
 @pytest.mark.parametrize("streams", [None, {}, "invalid"])
-def test_probe_video_tolerates_malformed_streams(
+def test_probe_video_rejects_payloads_without_video_stream(
     monkeypatch: pytest.MonkeyPatch,
     streams: object,
 ) -> None:
@@ -46,12 +47,31 @@ def test_probe_video_tolerates_malformed_streams(
         ),
     )
 
-    result = video_artifacts.probe_video("ffprobe", Path("ignored.mp4"))
+    with pytest.raises(
+        video_artifacts.InvalidVideoArtifactError,
+        match="no video stream",
+    ):
+        video_artifacts.probe_video("ffprobe", Path("ignored.mp4"))
 
-    assert result["width"] == 0
-    assert result["height"] == 0
-    assert result["duration_ms"] == 0
-    assert result["has_audio"] is False
+
+def test_probe_video_rejects_ffprobe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        video_artifacts.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b"invalid data",
+        ),
+    )
+
+    with pytest.raises(
+        video_artifacts.InvalidVideoArtifactError,
+        match="ffprobe rejected",
+    ):
+        video_artifacts.probe_video("ffprobe", Path("ignored.mp4"))
 
 
 def test_blank_submit_timeout_gets_actionable_error_message() -> None:
@@ -105,6 +125,29 @@ def test_retryable_video_upstream_errors_are_transient_only() -> None:
         )
         is False
     )
+
+
+def test_invalid_video_artifact_poll_preserves_upstream_billing_evidence() -> None:
+    poll = video_generation._invalid_video_artifact_poll(  # noqa: SLF001
+        PollResult(
+            status="succeeded",
+            usage_total_tokens=42,
+            upstream_billable=True,
+            raw={"provider_state": "succeeded"},
+        ),
+        video_artifacts.InvalidVideoArtifactError(
+            "no video stream",
+            diagnostics={"probe_error": "no video stream"},
+        ),
+    )
+
+    assert poll.status == "failed"
+    assert poll.failure_class == "invalid_video_artifact"
+    assert poll.usage_total_tokens == 42
+    assert poll.upstream_billable is True
+    assert poll.raw["reason"] == "invalid_video_artifact_after_upstream_success"
+    assert poll.raw["phase"] == "artifact_validation"
+    assert poll.raw["provider_status"] == "succeeded"
 
 
 def test_submit_retry_delays_are_bounded() -> None:
@@ -545,17 +588,137 @@ async def test_terminal_failure_does_not_rebill_terminal_generation(
     assert billing_calls == 0
 
 
-def test_terminal_video_events_are_queued_before_commit() -> None:
-    for helper, event_name in (
-        (video_generation._finish_success, "EV_VIDEO_SUCCEEDED"),  # noqa: SLF001
-        (video_generation._finish_terminal_failure, "EV_VIDEO_FAILED"),  # noqa: SLF001
-    ):
-        source = inspect.getsource(helper)
-        event_idx = source.index(event_name)
-        queue_idx = source.rfind("_queue_video_event(", 0, event_idx)
-        commit_idx = source.index("await session.commit()", event_idx)
+@pytest.mark.asyncio
+async def test_invalid_artifact_terminal_event_is_staged_and_rolled_back_with_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        provider_name="provider-1",
+        status="running",
+        cancel_requested_at=None,
+        progress_stage="rendering",
+        progress_pct=90,
+        upstream_response=None,
+        diagnostics={},
+        error_code=None,
+        error_message=None,
+        billed_tokens=None,
+        billed_cost_micro=None,
+        finished_at=None,
+    )
 
-        assert queue_idx < event_idx < commit_idx
+    class Result:
+        def scalar_one_or_none(self) -> SimpleNamespace:
+            return generation
+
+    class Session:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+            self.staged: list[object] = []
+            self.staged_at_terminal_commit: list[object] = []
+
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: object,
+            _exc: object,
+            _traceback: object,
+        ) -> None:
+            if exc_type is not None:
+                await self.rollback()
+
+        async def execute(self, _statement: object) -> Result:
+            return Result()
+
+        def add(self, value: object) -> None:
+            self.staged.append(value)
+
+        async def commit(self) -> None:
+            self.commits += 1
+            if self.commits == 1:
+                assert self.staged == []
+                return
+            self.staged_at_terminal_commit = list(self.staged)
+            raise RuntimeError("terminal commit failed")
+
+        async def rollback(self) -> None:
+            self.rollbacks += 1
+            self.staged.clear()
+
+    class Adapter:
+        async def download_result(
+            self,
+            _url: str,
+            *,
+            ensure_active: object,
+        ) -> bytes:
+            ensure_active()
+            return b"not-a-video"
+
+    async def reject_artifact(*_args: object, **_kwargs: object) -> object:
+        raise video_artifacts.InvalidVideoArtifactError(
+            "no video stream",
+            diagnostics={"probe_error": "no video stream"},
+        )
+
+    billing_calls: list[tuple[object, PollResult, str]] = []
+
+    async def billing(
+        session_arg: object,
+        _generation: object,
+        *,
+        poll_result: PollResult,
+        reason: str,
+    ) -> SimpleNamespace:
+        billing_calls.append((session_arg, poll_result, reason))
+        return SimpleNamespace(
+            decision="failure_usage_settle",
+            actual_tokens=poll_result.usage_total_tokens,
+            actual_micro=321,
+        )
+
+    session = Session()
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: session)
+    monkeypatch.setattr(video_generation, "_store_video_asset", reject_artifact)
+    monkeypatch.setattr(video_generation, "resolve_video_billing", billing)
+    monkeypatch.setattr(video_generation, "_publish", _noop_async)
+    monkeypatch.setattr(video_generation, "_release_provider_slot", _noop_async)
+
+    with pytest.raises(RuntimeError, match="terminal commit failed"):
+        await video_generation._apply_poll_result(  # noqa: SLF001
+            object(),
+            generation.id,
+            PollResult(
+                status="succeeded",
+                video_url="https://cdn.example/invalid.mp4",
+                usage_total_tokens=42,
+                upstream_billable=True,
+                raw={"provider_state": "succeeded"},
+            ),
+            adapter=Adapter(),  # type: ignore[arg-type]
+        )
+
+    assert len(billing_calls) == 1
+    billing_session, billing_poll, billing_reason = billing_calls[0]
+    assert billing_session is session
+    assert billing_reason == "invalid_video_artifact_after_upstream_success"
+    assert billing_poll.usage_total_tokens == 42
+    assert billing_poll.upstream_billable is True
+    assert billing_poll.raw["reason"] == "invalid_video_artifact_after_upstream_success"
+    assert session.commits == 2
+    assert session.rollbacks == 1
+    assert session.staged == []
+    assert len(session.staged_at_terminal_commit) == 1
+    event = session.staged_at_terminal_commit[0]
+    assert isinstance(event, OutboxEvent)
+    assert event.payload["event_name"] == "video.failed"
+    assert event.payload["data"]["status"] == "failed"
+    assert event.payload["data"]["error_code"] == "invalid_video_artifact"
 
 
 def test_video_provider_slot_ttl_covers_tracking_window() -> None:

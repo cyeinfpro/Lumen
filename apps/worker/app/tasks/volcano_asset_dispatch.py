@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -31,15 +30,17 @@ def _delivery_result(
 
 
 async def _load_delivery(
-    redis: Any,
+    persistence: Any,
     operation_id: str,
     expected_attempt: int | None,
     expected_delivery_generation: int | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     runtime = _runtime()
+    redis = persistence.redis
     operation = await runtime._get_operation(redis, operation_id)
     if operation is None:
         return None, {"status": "missing", "operation_id": operation_id}
+    persistence.bind(operation)
     current_attempt = max(1, int(operation.get("attempt") or 1))
     current_generation = max(
         0,
@@ -58,7 +59,10 @@ async def _load_delivery(
     )
     if not generation_mismatch:
         return operation, None
-    recovered = await runtime._recover_unconfirmed_delivery(redis, operation)
+    recovered = await runtime._recover_unconfirmed_delivery(
+        persistence,
+        operation,
+    )
     return None, _delivery_result(
         operation_id,
         status="delivery_recovered" if recovered else "stale",
@@ -68,7 +72,7 @@ async def _load_delivery(
 
 
 async def _normalize_operation(
-    redis: Any,
+    persistence: Any,
     operation: dict[str, Any],
 ) -> None:
     runtime = _runtime()
@@ -86,23 +90,26 @@ async def _normalize_operation(
         if normalized_name != operation.get("name"):
             operation["name"] = normalized_name
             if operation.get("status") in {"queued", "running"}:
-                await runtime._set_operation(redis, operation)
+                await persistence.update(operation, name=normalized_name)
     if action == "create_group" and not runtime._operation_has_value(
         operation,
         "description",
     ):
         operation["description"] = ""
         if operation.get("status") in {"queued", "running"}:
-            await runtime._set_operation(redis, operation)
+            await persistence.update(operation, description="")
 
 
 async def _receipt_completion(
-    redis: Any,
+    persistence: Any,
     operation: dict[str, Any],
 ) -> dict[str, Any] | None:
     runtime = _runtime()
     try:
-        receipt_result = await runtime._read_success_receipt(operation)
+        receipt_result = await runtime._read_success_receipt(
+            operation,
+            fence=persistence.fence,
+        )
     except Exception:  # noqa: BLE001
         logger.warning(
             "video_asset.success_receipt_lookup_failed operation_id=%s",
@@ -113,7 +120,7 @@ async def _receipt_completion(
     if receipt_result is None:
         return None
     return await runtime._complete_operation(
-        redis,
+        persistence,
         operation,
         receipt_result,
         receipt_exists=True,
@@ -156,9 +163,7 @@ async def _process_locked(
     expected_attempt: int | None,
     expected_delivery_generation: int | None,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     """Run one idempotent or safely reconcilable Volcano asset operation."""
     runtime = _runtime()
@@ -166,7 +171,7 @@ async def _process_locked(
     if redis is None:
         raise RuntimeError("Redis is required for Volcano asset operations")
     operation, early_result = await _load_delivery(
-        redis,
+        persistence,
         operation_id,
         expected_attempt,
         expected_delivery_generation,
@@ -174,8 +179,8 @@ async def _process_locked(
     if early_result is not None:
         return early_result
     assert operation is not None
-    await _normalize_operation(redis, operation)
-    receipt_result = await _receipt_completion(redis, operation)
+    await _normalize_operation(persistence, operation)
+    receipt_result = await _receipt_completion(persistence, operation)
     if receipt_result is not None:
         return receipt_result
     terminal_result = _terminal_result(operation)
@@ -187,18 +192,18 @@ async def _process_locked(
             redis,
             operation,
             failure,
-            lock_key=lock_key,
-            lock_token=lock_token,
-            lease_lost=lease_lost,
+            persistence=persistence,
         )
     if failure is not None:
-        return await runtime._record_operation_failure(redis, operation, failure)
+        return await runtime._record_operation_failure(
+            persistence,
+            operation,
+            failure,
+        )
     return await runtime._process_management_action(
         redis,
         operation,
-        lock_key=lock_key,
-        lock_token=lock_token,
-        lease_lost=lease_lost,
+        persistence=persistence,
     )
 
 

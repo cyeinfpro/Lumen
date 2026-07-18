@@ -61,10 +61,8 @@ async def settle_existing_generated_image(
             generation,
             reason=_g.EC.CANCELLED.value,
         )
-        await session.commit()
-        await _g.worker_billing.flush_balance_cache_refreshes(session)
-        await _g.publish_event(
-            redis,
+        failure_delivery = _g._stage_generation_event(
+            session,
             user_id,
             _g.task_channel(task_id),
             _g.EV_GEN_FAILED,
@@ -76,6 +74,9 @@ async def settle_existing_generated_image(
                 "retriable": False,
             },
         )
+        await session.commit()
+        await _g.worker_billing.flush_balance_cache_refreshes(session)
+        await _g._deliver_generation_event(redis, failure_delivery)
         return "failed"
 
     _g.logger.info(
@@ -110,10 +111,8 @@ async def settle_existing_generated_image(
         width=existing_image.width,
         height=existing_image.height,
     )
-    await session.commit()
-    await _g.worker_billing.flush_balance_cache_refreshes(session)
-    await _g.publish_event(
-        redis,
+    success_delivery = _g._stage_generation_event(
+        session,
         user_id,
         _g.task_channel(task_id),
         _g.EV_GEN_SUCCEEDED,
@@ -124,13 +123,16 @@ async def settle_existing_generated_image(
                 {
                     "image_id": existing_image.id,
                     "from_generation_id": task_id,
-                    "actual_size": (f"{existing_image.width}x{existing_image.height}"),
+                    "actual_size": f"{existing_image.width}x{existing_image.height}",
                     "url": _g.storage.public_url(existing_image.storage_key),
                 }
             ],
             "final_size": f"{existing_image.width}x{existing_image.height}",
         },
     )
+    await session.commit()
+    await _g.worker_billing.flush_balance_cache_refreshes(session)
+    await _g._deliver_generation_event(redis, success_delivery)
     try:
         duration = asyncio.get_event_loop().time() - task_started_at
         _g.task_duration_seconds.labels(
@@ -156,6 +158,7 @@ async def finalize_running_generation_cancel(
         task_id,
         reason,
     )
+    failure_delivery = None
     try:
         async with _g.SessionLocal() as session:
             result = await session.execute(
@@ -186,6 +189,19 @@ async def finalize_running_generation_cancel(
                     generation,
                     reason="cancelled",
                 )
+            failure_delivery = _g._stage_generation_event(
+                session,
+                user_id,
+                _g.task_channel(task_id),
+                _g.EV_GEN_FAILED,
+                {
+                    "generation_id": task_id,
+                    "message_id": message_id,
+                    "code": "cancelled",
+                    "message": "cancelled by user",
+                    "retriable": False,
+                },
+            )
             await session.commit()
             await _g.worker_billing.flush_balance_cache_refreshes(session)
     except _g._StaleGenerationAttempt as stale_exc:
@@ -202,17 +218,20 @@ async def finalize_running_generation_cancel(
             task_id,
             db_exc,
         )
-    await _g.publish_event(
-        redis,
-        user_id,
-        _g.task_channel(task_id),
-        _g.EV_GEN_FAILED,
-        {
-            "generation_id": task_id,
-            "message_id": message_id,
-            "code": "cancelled",
-            "message": "cancelled by user",
-            "retriable": False,
-        },
-    )
+    if failure_delivery is not None:
+        await _g._deliver_generation_event(redis, failure_delivery)
+    else:
+        await _g.publish_event(
+            redis,
+            user_id,
+            _g.task_channel(task_id),
+            _g.EV_GEN_FAILED,
+            {
+                "generation_id": task_id,
+                "message_id": message_id,
+                "code": "cancelled",
+                "message": "cancelled by user",
+                "retriable": False,
+            },
+        )
     return "failed"

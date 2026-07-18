@@ -47,19 +47,6 @@ function embeddedModelLibraryMetadata(image: {
     : null;
 }
 
-function isModelLibraryItemAgeSegment(
-  value: unknown,
-): value is ModelLibraryItemAgeSegment {
-  return (
-    typeof value === "string" &&
-    AGE_TABS.some(([option]) => option !== "all" && option === value)
-  );
-}
-
-function isModelLibraryGender(value: unknown): value is ModelLibraryGender {
-  return value === "female" || value === "male";
-}
-
 function isSelectableAppearance(
   value: unknown,
 ): value is Exclude<ModelLibraryAppearance, "all"> {
@@ -205,24 +192,17 @@ function UploadDialog({
     }
     const embedded = embeddedModelLibraryMetadata(uploaded);
     const embeddedTags = styleTagsFromMetadata(embedded?.style_tags);
-    const ageSegment =
-      embedded && isModelLibraryItemAgeSegment(embedded.age_segment)
-        ? embedded.age_segment
-        : form.age_segment;
-    const gender =
-      embedded && isModelLibraryGender(embedded.gender)
-        ? embedded.gender
-        : form.gender;
     const appearanceDirection =
-      embedded && isSelectableAppearance(embedded.appearance_direction)
+      form.appearance_direction ||
+      (embedded && isSelectableAppearance(embedded.appearance_direction)
         ? embedded.appearance_direction
-        : form.appearance_direction || null;
+        : null);
     createItem.mutate({
       source: "user_upload",
       image_id: uploaded.id,
       title,
-      age_segment: ageSegment,
-      gender,
+      age_segment: form.age_segment,
+      gender: form.gender,
       appearance_direction: appearanceDirection,
       style_tags: uploadTagsEnabled ? splitTags(form.style_tags) : embeddedTags,
     });

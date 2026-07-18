@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import re
-import secrets
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
@@ -40,6 +39,32 @@ from lumen_core.models import (
 
 from ..db import SessionLocal
 from ..sse_publish import publish_event
+from .memory_extraction_parts.contracts import (
+    CompletedMemoryExtraction as _CompletedMemoryExtraction,
+    MemoryExtractionClaim as _MemoryExtractionClaim,
+    PreparedMemoryCandidate as _PreparedMemoryCandidate,
+    cancel_memory_extraction_run as _cancel_memory_extraction_run_impl,
+    mark_memory_extraction_committed as _mark_memory_extraction_committed_impl,
+    memory_extraction_event_id as _memory_extraction_event_id,
+    memory_extraction_owner as _memory_extraction_owner,
+    utc_now as _utc_now,
+)
+from .memory_extraction_parts.delivery import (
+    CommittedDeliveryDependencies,
+    append_memory_writes,
+    cleanup_expired_memory_extraction_undo,
+    load_committed_memory_extraction,
+    mark_undo_delivery_ready,
+    prune_expired_memory_extraction_undo,
+    restore_undo_tokens,
+)
+from .memory_extraction_parts.run_state import (
+    MemoryExtractionStateDependencies,
+    abandon_memory_extraction_claim,
+    claim_memory_extraction,
+    finalize_memory_extraction,
+    lock_memory_extraction_run,
+)
 
 
 _UNDO_TTL_SECONDS = 300
@@ -52,6 +77,8 @@ _EMBEDDING_TIMEOUT_S = 15.0
 _CONFIRM_WEEKLY_LIMIT = 5
 _LAST_USED_PENDING_KEY = "memory:last_used_pending"
 _MAX_POSITIVE_SIGNAL = 20
+_MEMORY_EXTRACTION_LEASE_SECONDS = 600
+_MEMORY_UNDO_CLEANUP_BATCH = 1000
 
 _logger = logging.getLogger(__name__)
 
@@ -92,6 +119,40 @@ async def _try_advisory_xact_lock(session: Any, key: str) -> None:
         await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(key))))
     except Exception:
         return
+
+
+async def _lock_memory_extraction_run(
+    session: Any,
+    *,
+    event_id: str,
+) -> Any:
+    return await lock_memory_extraction_run(
+        session,
+        event_id=event_id,
+        advisory_xact_lock=_try_advisory_xact_lock,
+    )
+
+
+def _cancel_memory_extraction_run(
+    run: Any,
+    *,
+    reason: str,
+) -> None:
+    _cancel_memory_extraction_run_impl(run, reason=reason, now=_utc_now())
+
+
+def _mark_memory_extraction_committed(
+    run: Any,
+    *,
+    writes: list[dict[str, Any]],
+    undo_operations: list[dict[str, Any]],
+) -> None:
+    _mark_memory_extraction_committed_impl(
+        run,
+        writes=writes,
+        undo_operations=undo_operations,
+        now=_utc_now(),
+    )
 
 
 _EXTRACTION_INSTRUCTIONS = """从用户单轮消息中抽取长期适用的账号记忆，输出严格 JSON。
@@ -711,48 +772,13 @@ async def _pick_confirmation_candidate(
     return None
 
 
-async def _undo_token(redis: Any, payload: dict[str, Any]) -> str | None:
-    token = secrets.token_urlsafe(24)
-    try:
-        await redis.setex(
-            f"memory:undo:{token}",
-            _UNDO_TTL_SECONDS,
-            json.dumps(payload, separators=(",", ":")),
-        )
-        return token
-    except Exception:
-        return None
-
-
-def _write_payload(
-    *,
-    id: str | None,
-    kind: str,
-    type: str | None,
-    content: str,
-    source_excerpt: str | None,
-    undo_token: str | None = None,
-    scope_id: str | None = None,
-    recommended_scope_id: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "id": id,
-        "kind": kind,
-        "type": type,
-        "content": content,
-        "source_excerpt": source_excerpt,
-        "undo_token": undo_token,
-        "scope_id": scope_id,
-        "recommended_scope_id": recommended_scope_id,
-    }
-
-
 async def _publish_memory_writes(
     redis: Any,
     *,
     user_id: str,
     conversation_id: str,
     assistant_message_id: str,
+    event_id: str,
     writes: list[dict[str, Any]],
 ) -> None:
     if not writes:
@@ -763,6 +789,7 @@ async def _publish_memory_writes(
         conv_channel(conversation_id),
         _MEMORY_EVENT,
         {
+            "event_id": event_id,
             "conversation_id": conversation_id,
             "assistant_message_id": assistant_message_id,
             "message_id": assistant_message_id,
@@ -772,16 +799,182 @@ async def _publish_memory_writes(
 
 
 async def _append_writes_to_message(
-    session: Any, assistant_msg: Message, writes: list[dict[str, Any]]
+    session: Any,
+    assistant_message_id: str,
+    writes: list[dict[str, Any]],
+) -> Message | None:
+    return await append_memory_writes(
+        session,
+        assistant_message_id,
+        writes,
+    )
+
+
+def _memory_extraction_state_dependencies() -> MemoryExtractionStateDependencies:
+    return MemoryExtractionStateDependencies(
+        session_factory=SessionLocal,
+        advisory_xact_lock=_try_advisory_xact_lock,
+        append_writes_to_message=_append_writes_to_message,
+        default_scope=_default_scope,
+        text_from_message=_text_from_message,
+        topic_key=_topic_key,
+        bump_positive_signal=_bump_positive_signal,
+        now=_utc_now,
+        lease_seconds=_MEMORY_EXTRACTION_LEASE_SECONDS,
+        staging_ttl_days=_STAGING_TTL_DAYS,
+    )
+
+
+async def _claim_memory_extraction(
+    *,
+    conversation_id: str,
+    source_message_id: str,
+    assistant_message_id: str,
+    event_id: str,
+    owner: str,
+    job_id: str | None,
+) -> _MemoryExtractionClaim | _CompletedMemoryExtraction | None:
+    return await claim_memory_extraction(
+        _memory_extraction_state_dependencies(),
+        conversation_id=conversation_id,
+        source_message_id=source_message_id,
+        assistant_message_id=assistant_message_id,
+        event_id=event_id,
+        owner=owner,
+        job_id=job_id,
+    )
+
+
+async def _abandon_memory_extraction_claim(
+    claim: _MemoryExtractionClaim,
+    *,
+    reason: str,
+) -> bool:
+    return await abandon_memory_extraction_claim(
+        _memory_extraction_state_dependencies(),
+        claim,
+        reason=reason,
+    )
+
+
+async def _best_effort_abandon_memory_extraction_claim(
+    claim: _MemoryExtractionClaim,
+    *,
+    reason: str,
 ) -> None:
-    if not writes:
-        return
-    content = dict(assistant_msg.content or {})
-    existing = content.get("memory_writes")
-    merged = [*(existing if isinstance(existing, list) else []), *writes]
-    content["memory_writes"] = merged
-    assistant_msg.content = content
-    await session.flush()
+    try:
+        await _abandon_memory_extraction_claim(claim, reason=reason)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "memory_extraction.claim_abandon_failed message=%s owner=%s fence=%s",
+            claim.source_message_id,
+            claim.owner,
+            claim.fence,
+            exc_info=True,
+        )
+
+
+async def _prepare_memory_extraction(
+    ctx: dict[str, Any],
+    claim: _MemoryExtractionClaim,
+) -> tuple[list[_PreparedMemoryCandidate], bool]:
+    candidates, rejected_pii = extract_memories(claim.text, explicit_only=False)
+    if candidates and not rejected_pii:
+        llm_candidates = await _try_llm_extract(
+            claim.text,
+            explicit_only=False,
+            scope_hint=claim.scope_hint,
+        )
+        if llm_candidates:
+            candidates = llm_candidates
+    prepared: list[_PreparedMemoryCandidate] = []
+    for candidate in candidates:
+        prepared.append(
+            _PreparedMemoryCandidate(
+                candidate=candidate,
+                embedding=await _embedding_literal_async(ctx, candidate.content),
+            )
+        )
+    return prepared, rejected_pii
+
+
+async def _finalize_memory_extraction(
+    claim: _MemoryExtractionClaim,
+    *,
+    prepared_candidates: list[_PreparedMemoryCandidate],
+    rejected_pii: bool,
+) -> _CompletedMemoryExtraction | None:
+    return await finalize_memory_extraction(
+        _memory_extraction_state_dependencies(),
+        claim,
+        prepared_candidates=prepared_candidates,
+        rejected_pii=rejected_pii,
+    )
+
+
+def _committed_delivery_dependencies() -> CommittedDeliveryDependencies:
+    return CommittedDeliveryDependencies(
+        session_factory=SessionLocal,
+        advisory_xact_lock=_try_advisory_xact_lock,
+        append_writes_to_message=_append_writes_to_message,
+        now=_utc_now,
+        logger=_logger,
+        undo_ttl_seconds=_UNDO_TTL_SECONDS,
+        undo_cleanup_batch=_MEMORY_UNDO_CLEANUP_BATCH,
+    )
+
+
+async def _prune_expired_memory_extraction_undo(
+    event_id: str,
+    *,
+    now: datetime,
+) -> bool:
+    return await prune_expired_memory_extraction_undo(
+        _committed_delivery_dependencies(),
+        event_id,
+        now=now,
+    )
+
+
+async def _load_committed_memory_extraction(
+    event_id: str,
+) -> _CompletedMemoryExtraction | None:
+    return await load_committed_memory_extraction(
+        _committed_delivery_dependencies(),
+        event_id,
+    )
+
+
+async def _mark_undo_delivery_ready(
+    completed: _CompletedMemoryExtraction,
+) -> None:
+    await mark_undo_delivery_ready(
+        _committed_delivery_dependencies(),
+        completed,
+    )
+
+
+async def _restore_undo_tokens(
+    redis: Any,
+    completed: _CompletedMemoryExtraction,
+) -> None:
+    await restore_undo_tokens(
+        _committed_delivery_dependencies(),
+        redis,
+        completed,
+    )
+
+
+async def _prepare_committed_memory_extraction_for_delivery(
+    redis: Any,
+    event_id: str,
+) -> _CompletedMemoryExtraction | None:
+    completed = await _load_committed_memory_extraction(event_id)
+    if completed is None:
+        return None
+    if completed.undo_operations:
+        await _restore_undo_tokens(redis, completed)
+    return completed
 
 
 async def memory_extract(
@@ -790,248 +983,84 @@ async def memory_extract(
     user_msg_id: str,
     assistant_msg_id: str,
 ) -> None:
-    if not await _embedding_provider_available(ctx):
-        return
     redis = ctx.get("redis")
-    async with SessionLocal() as session:
-        conv = await session.get(Conversation, conversation_id)
-        user_msg = await session.get(Message, user_msg_id)
-        assistant_msg = await session.get(Message, assistant_msg_id)
-        if conv is None or user_msg is None or assistant_msg is None:
-            return
-        user = await session.get(User, conv.user_id)
-        if (
-            user is None
-            or user.memory_disabled
-            or user.memory_paused
-            or conv.memory_disabled
-        ):
-            return
-        text = _text_from_message(user_msg)
-        writes: list[dict[str, Any]] = []
-        candidates, rejected_pii = extract_memories(text, explicit_only=False)
-        if rejected_pii:
-            writes.append(
-                _write_payload(
-                    id=None,
-                    kind="rejected_pii",
-                    type=None,
-                    content="",
-                    source_excerpt=" ".join(text.split())[:160],
-                )
+    event_id = _memory_extraction_event_id(user_msg_id, assistant_msg_id)
+    owner, job_id = _memory_extraction_owner(ctx, assistant_msg_id)
+    claim_result = await _claim_memory_extraction(
+        conversation_id=conversation_id,
+        source_message_id=user_msg_id,
+        assistant_message_id=assistant_msg_id,
+        event_id=event_id,
+        owner=owner,
+        job_id=job_id,
+    )
+    if isinstance(claim_result, _CompletedMemoryExtraction):
+        if redis is not None:
+            completed = await _prepare_committed_memory_extraction_for_delivery(
+                redis,
+                claim_result.event_id,
             )
-        if not candidates and not writes:
+        else:
+            completed = None
+        if completed is not None and completed.writes:
+            await _publish_memory_writes(
+                redis,
+                user_id=completed.user_id,
+                conversation_id=completed.conversation_id,
+                assistant_message_id=completed.assistant_message_id,
+                event_id=completed.event_id,
+                writes=completed.writes,
+            )
+        return
+    if claim_result is None:
+        return
+
+    claim = claim_result
+    try:
+        if not await _embedding_provider_available(ctx):
+            await _best_effort_abandon_memory_extraction_claim(
+                claim,
+                reason="embedding_provider_unavailable",
+            )
             return
-        default_scope = await _default_scope(session, user.id)
-        scope_id = conv.active_scope_id or default_scope.id
-        active_scope = await session.get(UserMemoryScope, scope_id)
-        scope_hint = (
-            active_scope.name if active_scope and not active_scope.is_default else None
+        prepared_candidates, rejected_pii = await _prepare_memory_extraction(
+            ctx,
+            claim,
         )
-        if candidates and not rejected_pii:
-            llm_candidates = await _try_llm_extract(
-                text,
-                explicit_only=False,
-                scope_hint=scope_hint,
+        completed = await _finalize_memory_extraction(
+            claim,
+            prepared_candidates=prepared_candidates,
+            rejected_pii=rejected_pii,
+        )
+    except asyncio.CancelledError:
+        await asyncio.shield(
+            _best_effort_abandon_memory_extraction_claim(
+                claim,
+                reason="worker_cancelled",
             )
-            if llm_candidates:
-                candidates = llm_candidates
-        # 默认 0.80 (0020 migration), forget 反馈会推到 0.95 上限 / pin 反馈推到 0.6 下限.
-        threshold = max(0.6, min(0.95, float(user.extraction_threshold or 0.80)))
-        for candidate in candidates:
-            existing = (
-                (
-                    await session.execute(
-                        select(UserMemory).where(
-                            UserMemory.user_id == user.id,
-                            UserMemory.disabled.is_(False),
-                            UserMemory.superseded_by.is_(None),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            duplicate = next(
-                (
-                    m
-                    for m in existing
-                    if m.type == candidate.type
-                    and canonical_memory_text(m.content)
-                    == canonical_memory_text(candidate.content)
-                ),
-                None,
-            )
-            if duplicate is not None:
-                _bump_positive_signal(duplicate)
-                session.add(
-                    MemoryAudit(
-                        user_id=user.id,
-                        memory_id=duplicate.id,
-                        event_type="merged",
-                        old_content=duplicate.content,
-                        new_content=duplicate.content,
-                        source_message_id=user_msg.id,
-                        details={"source": "auto"},
-                    )
-                )
-                # 把 candidate 元数据塞进 token, undo "merged" 时按设计 §5.4
-                # 必须拆出独立条, 没这些字段就无法重建.
-                token = (
-                    await _undo_token(
-                        redis,
-                        {
-                            "user_id": user.id,
-                            "action": "merged",
-                            "memory_id": duplicate.id,
-                            "candidate": {
-                                "type": candidate.type,
-                                "content": candidate.content,
-                                "source_excerpt": candidate.source_excerpt,
-                                "source_message_id": user_msg.id,
-                                "scope_id": scope_id,
-                                "source": "auto",
-                                "confidence": candidate.confidence,
-                            },
-                        },
-                    )
-                    if redis is not None
-                    else None
-                )
-                writes.append(
-                    _write_payload(
-                        id=duplicate.id,
-                        kind="merged",
-                        type=duplicate.type,
-                        content=duplicate.content,
-                        source_excerpt=candidate.source_excerpt,
-                        undo_token=token,
-                        scope_id=duplicate.scope_id,
-                        recommended_scope_id=scope_id,
-                    )
-                )
-                continue
-            conflict = next(
-                (
-                    m
-                    for m in existing
-                    if _topic_key(m.content)
-                    and _topic_key(m.content) == _topic_key(candidate.content)
-                    and m.type != candidate.type
-                ),
-                None,
-            )
-            if (
-                candidate.confidence < threshold
-                and candidate.intent_kind != "directive"
-            ):
-                staging = UserMemoryStaging(
-                    user_id=user.id,
-                    type=candidate.type,
-                    content=candidate.content,
-                    source_message_id=user_msg.id,
-                    source_excerpt=candidate.source_excerpt,
-                    source="auto",
-                    embedding=await _embedding_literal_async(ctx, candidate.content),
-                    confidence=candidate.confidence,
-                    scope_id=scope_id,
-                    recommended_scope_id=scope_id,
-                    decision="pending",
-                    expires_at=datetime.now(timezone.utc)
-                    + timedelta(days=_STAGING_TTL_DAYS),
-                )
-                session.add(staging)
-                await session.flush()
-                token = (
-                    await _undo_token(
-                        redis,
-                        {
-                            "user_id": user.id,
-                            "action": "staged",
-                            "staging_id": staging.id,
-                        },
-                    )
-                    if redis is not None
-                    else None
-                )
-                writes.append(
-                    _write_payload(
-                        id=staging.id,
-                        kind="staged",
-                        type=staging.type,
-                        content=staging.content,
-                        source_excerpt=staging.source_excerpt,
-                        undo_token=token,
-                        scope_id=staging.scope_id,
-                        recommended_scope_id=staging.recommended_scope_id,
-                    )
-                )
-                continue
-            memory = UserMemory(
-                user_id=user.id,
-                type=candidate.type,
-                content=candidate.content,
-                source_message_id=user_msg.id,
-                source_excerpt=candidate.source_excerpt,
-                source="explicit" if candidate.intent_kind == "directive" else "auto",
-                embedding=await _embedding_literal_async(ctx, candidate.content),
-                confidence=max(candidate.confidence, threshold),
-                scope_id=scope_id,
-                last_used_at=datetime.now(timezone.utc),
-            )
-            session.add(memory)
-            await session.flush()
-            kind = "added"
-            details: dict[str, Any] = {"source": memory.source}
-            if conflict is not None:
-                conflict.superseded_by = memory.id
-                kind = "superseded"
-                details["superseded_memory_id"] = conflict.id
-            session.add(
-                MemoryAudit(
-                    user_id=user.id,
-                    memory_id=memory.id,
-                    event_type=kind,
-                    old_content=conflict.content if conflict is not None else None,
-                    new_content=memory.content,
-                    source_message_id=user_msg.id,
-                    details=details,
-                )
-            )
-            token = (
-                await _undo_token(
-                    redis,
-                    {
-                        "user_id": user.id,
-                        "action": kind,
-                        "memory_id": memory.id,
-                        "old_memory_id": conflict.id if conflict is not None else None,
-                    },
-                )
-                if redis is not None
-                else None
-            )
-            writes.append(
-                _write_payload(
-                    id=memory.id,
-                    kind=kind,
-                    type=memory.type,
-                    content=memory.content,
-                    source_excerpt=memory.source_excerpt,
-                    undo_token=token,
-                    scope_id=memory.scope_id,
-                    recommended_scope_id=scope_id,
-                )
-            )
-        await _append_writes_to_message(session, assistant_msg, writes)
-        await session.commit()
-    if redis is not None and writes:
+        )
+        raise
+    except Exception as exc:
+        await _best_effort_abandon_memory_extraction_claim(
+            claim,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    if completed is None or redis is None:
+        return
+
+    completed = await _prepare_committed_memory_extraction_for_delivery(
+        redis,
+        completed.event_id,
+    )
+    if completed is not None and completed.writes:
         await _publish_memory_writes(
             redis,
-            user_id=conv.user_id,
-            conversation_id=conversation_id,
-            assistant_message_id=assistant_msg_id,
-            writes=writes,
+            user_id=completed.user_id,
+            conversation_id=completed.conversation_id,
+            assistant_message_id=completed.assistant_message_id,
+            event_id=completed.event_id,
+            writes=completed.writes,
         )
 
 
@@ -1071,6 +1100,14 @@ async def cleanup_memory(ctx: dict[str, Any]) -> None:
         for memory in old_deleted:
             await session.delete(memory)
         await session.commit()
+    await _cleanup_expired_memory_extraction_undo(now)
+
+
+async def _cleanup_expired_memory_extraction_undo(now: datetime) -> int:
+    return await cleanup_expired_memory_extraction_undo(
+        _committed_delivery_dependencies(),
+        now,
+    )
 
 
 async def memory_reembed(

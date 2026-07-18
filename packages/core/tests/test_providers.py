@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +48,16 @@ class _FakeSshProcess:
         return 0
 
 
+def _write_known_hosts(tmp_path: Path) -> str:
+    path = tmp_path / "known_hosts"
+    path.write_text(
+        "[203.0.113.10]:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA==\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return str(path)
+
+
 def _provider(name: str, *, weight: int = 1) -> ProviderDefinition:
     return ProviderDefinition(
         name=name,
@@ -61,10 +75,12 @@ def test_weighted_priority_order_advances_shared_counter_serially():
     with ThreadPoolExecutor(max_workers=16) as pool:
         orders = list(
             pool.map(
-                lambda _: weighted_priority_order_and_advance(
-                    providers,
-                    state,
-                )[0].name,
+                lambda _: (
+                    weighted_priority_order_and_advance(
+                        providers,
+                        state,
+                    )[0].name
+                ),
                 range(64),
             )
         )
@@ -240,6 +256,47 @@ def test_parse_proxy_item_parses_string_enabled_without_truthy_coercion():
     assert proxy.enabled is False
 
 
+def test_parse_ssh_proxy_accepts_managed_host_key_trust_aliases() -> None:
+    fingerprint = f"SHA256:{'A' * 43}"
+    proxy = parse_proxy_item(
+        {
+            "name": "ssh-hop",
+            "type": "ssh",
+            "host": "ssh.example.com",
+            "known_hosts_file": " /run/secrets/lumen_known_hosts ",
+            "fingerprint": fingerprint,
+        },
+        index=0,
+    )
+
+    assert proxy.known_hosts_path == "/run/secrets/lumen_known_hosts"
+    assert proxy.known_hosts_file == proxy.known_hosts_path
+    assert proxy.host_key_fingerprint == fingerprint
+    assert proxy.fingerprint == fingerprint
+
+
+def test_parse_ssh_proxy_rejects_conflicting_or_invalid_trust_material() -> None:
+    base = {
+        "name": "ssh-hop",
+        "type": "ssh",
+        "host": "ssh.example.com",
+    }
+    with pytest.raises(ValueError, match="aliases disagree"):
+        parse_proxy_item(
+            {
+                **base,
+                "known_hosts_path": "/etc/ssh/known_hosts",
+                "known_hosts_file": "/run/secrets/known_hosts",
+            },
+            index=0,
+        )
+    with pytest.raises(ValueError, match="SHA256"):
+        parse_proxy_item(
+            {**base, "host_key_fingerprint": "md5:invalid"},
+            index=0,
+        )
+
+
 def test_build_effective_provider_config_attaches_named_proxy():
     raw = json.dumps(
         {
@@ -359,9 +416,11 @@ def test_socks_proxy_url_quotes_credentials():
 @pytest.mark.asyncio
 async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     provider_mod._SSH_TUNNELS.clear()
     captured: dict[str, object] = {}
+    source_known_hosts = _write_known_hosts(tmp_path)
 
     def fake_which(name: str) -> str | None:
         if name == "ssh":
@@ -374,6 +433,14 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     ) -> _FakeSshProcess:
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
+        known_hosts_option = next(
+            item for item in cmd if item.startswith("UserKnownHostsFile=")
+        )
+        known_hosts_path = known_hosts_option.split("=", 1)[1]
+        captured["known_hosts_path"] = known_hosts_path
+        captured["known_hosts_at_spawn"] = Path(known_hosts_path).read_text(
+            encoding="utf-8"
+        )
         return _FakeSshProcess()
 
     async def fake_local_port_accepts(port: int) -> bool:
@@ -381,7 +448,9 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
         return True
 
     monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41555)
     monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
 
@@ -393,6 +462,7 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
             port=22,
             username="root",
             password="secret-password",
+            known_hosts_path=source_known_hosts,
         )
     )
 
@@ -403,6 +473,20 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     assert cmd[0] == "/usr/bin/ssh"
     assert "BatchMode=no" in cmd
     assert "PasswordAuthentication=yes" in cmd
+    assert "StrictHostKeyChecking=yes" in cmd
+    assert "StrictHostKeyChecking=accept-new" not in cmd
+    assert any(
+        item.startswith("UserKnownHostsFile=") for item in cmd if isinstance(item, str)
+    )
+    known_hosts_path = captured["known_hosts_path"]
+    assert isinstance(known_hosts_path, str)
+    assert known_hosts_path != source_known_hosts
+    assert captured["known_hosts_at_spawn"] == Path(source_known_hosts).read_text(
+        encoding="utf-8"
+    )
+    assert not os.path.exists(known_hosts_path)
+    assert os.path.exists(source_known_hosts)
+    assert f"GlobalKnownHostsFile={os.devnull}" in cmd
     assert "root@203.0.113.10" in cmd
     assert isinstance(env, dict)
     assert "LUMEN_SSH_PASSWORD" not in env
@@ -416,8 +500,268 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
 
 
 @pytest.mark.asyncio
+async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    source = Path(_write_known_hosts(tmp_path))
+    link = tmp_path / "known_hosts-link"
+    try:
+        link.symlink_to(source)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    launched = False
+
+    async def fake_create_subprocess_exec(
+        *_cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        nonlocal launched
+        launched = True
+        return _FakeSshProcess()
+
+    monkeypatch.setattr(
+        provider_mod.shutil,
+        "which",
+        lambda name: "/usr/bin/ssh" if name == "ssh" else None,
+    )
+    monkeypatch.setattr(
+        provider_mod.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with pytest.raises(RuntimeError, match="must not be a symlink"):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-symlinked",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                known_hosts_path=str(link),
+            )
+        )
+
+    assert launched is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_rejects_missing_host_key_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    launched = False
+
+    def fake_which(name: str) -> str | None:
+        return "/usr/bin/ssh" if name == "ssh" else None
+
+    async def fake_create_subprocess_exec(
+        *_cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        nonlocal launched
+        launched = True
+        return _FakeSshProcess()
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        provider_mod.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with pytest.raises(RuntimeError, match="refusing unknown host key"):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-untrusted",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                username="root",
+            )
+        )
+
+    assert launched is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_rejects_writable_known_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    known_hosts_path = _write_known_hosts(tmp_path)
+    os.chmod(known_hosts_path, 0o666)
+    monkeypatch.setattr(
+        provider_mod.shutil,
+        "which",
+        lambda name: "/usr/bin/ssh" if name == "ssh" else None,
+    )
+
+    with pytest.raises(RuntimeError, match="group/world writable"):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-unmanaged",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                known_hosts_path=known_hosts_path,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    captured: dict[str, object] = {}
+    key_blob = b"synthetic-ed25519-host-key"
+    encoded_key = base64.b64encode(key_blob).decode("ascii")
+    fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(key_blob).digest()
+    ).decode("ascii").rstrip("=")
+    keyscan_line = f"[203.0.113.10]:22 ssh-ed25519 {encoded_key}"
+
+    def fake_which(name: str) -> str | None:
+        if name == "ssh":
+            return "/usr/bin/ssh"
+        if name == "ssh-keyscan":
+            return "/usr/bin/ssh-keyscan"
+        return None
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["keyscan_cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=f"{keyscan_line}\n",
+            stderr="",
+        )
+
+    async def fake_create_subprocess_exec(
+        *cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        captured["cmd"] = cmd
+        known_hosts_option = next(
+            item for item in cmd if item.startswith("UserKnownHostsFile=")
+        )
+        path = known_hosts_option.split("=", 1)[1]
+        captured["known_hosts_path"] = path
+        captured["known_hosts_at_spawn"] = Path(path).read_text(encoding="utf-8")
+        return _FakeSshProcess()
+
+    async def fake_local_port_accepts(_port: int) -> bool:
+        return True
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(provider_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        provider_mod.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        provider_mod,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
+    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41558)
+
+    url = await provider_mod.resolve_provider_proxy_url(
+        ProviderProxyDefinition(
+            name="ssh-pinned",
+            protocol="ssh",
+            host="203.0.113.10",
+            port=22,
+            username="root",
+            host_key_fingerprint=fingerprint,
+        )
+    )
+
+    assert url == "socks5h://127.0.0.1:41558"
+    assert captured["keyscan_cmd"] == [
+        "/usr/bin/ssh-keyscan",
+        "-T",
+        "5",
+        "-p",
+        "22",
+        "--",
+        "203.0.113.10",
+    ]
+    assert captured["known_hosts_at_spawn"] == f"{keyscan_line}\n"
+    known_hosts_path = captured["known_hosts_path"]
+    assert isinstance(known_hosts_path, str)
+    assert not os.path.exists(known_hosts_path)
+
+    await provider_mod.close_provider_proxy_tunnels()
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_rejects_host_key_fingerprint_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_mod._SSH_TUNNELS.clear()
+    launched = False
+    expected_blob = b"expected-host-key"
+    presented_blob = b"attacker-host-key"
+    expected_fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(expected_blob).digest()
+    ).decode("ascii").rstrip("=")
+    presented_key = base64.b64encode(presented_blob).decode("ascii")
+
+    def fake_which(name: str) -> str | None:
+        if name == "ssh":
+            return "/usr/bin/ssh"
+        if name == "ssh-keyscan":
+            return "/usr/bin/ssh-keyscan"
+        return None
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=f"[203.0.113.10]:22 ssh-ed25519 {presented_key}\n",
+            stderr="",
+        )
+
+    async def fake_create_subprocess_exec(
+        *_cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        nonlocal launched
+        launched = True
+        return _FakeSshProcess()
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(provider_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        provider_mod.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with pytest.raises(RuntimeError, match="fingerprint mismatch"):
+        await provider_mod.resolve_provider_proxy_url(
+            ProviderProxyDefinition(
+                name="ssh-mismatch",
+                protocol="ssh",
+                host="203.0.113.10",
+                port=22,
+                username="root",
+                host_key_fingerprint=expected_fingerprint,
+            )
+        )
+
+    assert launched is False
+
+
+@pytest.mark.asyncio
 async def test_resolve_ssh_proxy_terminates_failed_password_process_before_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     provider_mod._SSH_TUNNELS.clear()
     captured: dict[str, object] = {}
@@ -443,7 +787,9 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
         return None
 
     monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41556)
     monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
@@ -459,6 +805,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
                 port=22,
                 username="root",
                 password="secret-password",
+                known_hosts_path=_write_known_hosts(tmp_path),
             )
         )
 
@@ -474,6 +821,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
 @pytest.mark.asyncio
 async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     provider_mod._SSH_TUNNELS.clear()
     captured: dict[str, object] = {}
@@ -516,7 +864,9 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
         original_unlink(path)
 
     monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41557)
     monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
@@ -532,6 +882,7 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
                 port=22,
                 username="root",
                 password="secret-password",
+                known_hosts_path=_write_known_hosts(tmp_path),
             )
         )
 

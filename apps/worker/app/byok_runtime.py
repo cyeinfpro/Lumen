@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +19,7 @@ from lumen_core.models import (
     UserApiCredential,
 )
 from lumen_core.providers import parse_provider_bool, parse_proxy_json
-from lumen_core.url_security import resolve_public_http_target
+from lumen_core.url_security import PublicHttpTarget, resolve_public_http_target
 
 from .config import settings
 from .provider_pool import ResolvedProvider
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 # 跳过 BYOK provider，否则会污染共享 provider 池的健康度 / 配额计数。
 _BYOK_PROVIDER_PREFIX = "user:"
 _DEV_ENVS = {"dev", "development", "local", "test"}
+_BYOK_HTTP_TARGET_CONTEXT: ContextVar[PublicHttpTarget | None] = ContextVar(
+    "byok_http_target",
+    default=None,
+)
 
 
 def is_byok_provider(provider: Any) -> bool:
@@ -53,15 +59,55 @@ def _is_dev_env() -> bool:
     return settings.app_env.strip().lower() in _DEV_ENVS
 
 
-async def _validate_supplier_base_url(raw_base_url: str) -> str:
+def _http_origin(value: str) -> tuple[str, str, int]:
+    parsed = urlsplit(value)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."), port
+
+
+def current_byok_http_target(url: str | None = None) -> PublicHttpTarget | None:
+    target = _BYOK_HTTP_TARGET_CONTEXT.get()
+    if target is None or not target.resolved_ips:
+        return None
+    if url is not None and _http_origin(target.url) != _http_origin(url):
+        return None
+    return target
+
+
+def validate_byok_http_target(
+    target: PublicHttpTarget | None,
+    url: str,
+) -> PublicHttpTarget | None:
+    """Return a usable pin only when it matches the outbound request origin."""
+    if target is None or not target.resolved_ips:
+        return None
+    if _http_origin(target.url) != _http_origin(url):
+        raise ValueError("validated BYOK target origin does not match request URL")
+    return target
+
+
+def bind_byok_http_target(
+    target: PublicHttpTarget | None,
+) -> Token[PublicHttpTarget | None]:
+    return _BYOK_HTTP_TARGET_CONTEXT.set(target)
+
+
+def reset_byok_http_target(token: Token[PublicHttpTarget | None]) -> None:
+    _BYOK_HTTP_TARGET_CONTEXT.reset(token)
+
+
+async def _resolve_supplier_base_target(raw_base_url: str) -> PublicHttpTarget:
     dev_env = _is_dev_env()
-    safe_target = await resolve_public_http_target(
+    return await resolve_public_http_target(
         raw_base_url,
         allow_http=dev_env,
         allow_private=dev_env,
         allow_unresolved=dev_env,
     )
-    return safe_target.url
+
+
+async def _validate_supplier_base_url(raw_base_url: str) -> str:
+    return (await _resolve_supplier_base_target(raw_base_url)).url
 
 
 async def resolve_user_credential_runtime(
@@ -135,7 +181,7 @@ async def resolve_user_credential_runtime(
         ) from exc
     proxy = await _resolve_supplier_proxy(db, supplier.proxy_name)
     try:
-        safe_base_url = await _validate_supplier_base_url(supplier.base_url)
+        safe_target = await _resolve_supplier_base_target(supplier.base_url)
     except ValueError as exc:
         raise UpstreamError(
             "user API supplier URL is not allowed",
@@ -143,7 +189,11 @@ async def resolve_user_credential_runtime(
             error_code=EC.UPSTREAM_INVALID_REQUEST.value,
             payload={"credential_id": credential_id},
         ) from exc
-    caps = supplier.capabilities_jsonb if isinstance(supplier.capabilities_jsonb, dict) else {}
+    caps = (
+        supplier.capabilities_jsonb
+        if isinstance(supplier.capabilities_jsonb, dict)
+        else {}
+    )
     try:
         image_jobs_enabled = parse_provider_bool(
             caps.get("image_jobs_enabled", False),
@@ -152,9 +202,9 @@ async def resolve_user_credential_runtime(
     except ValueError:
         image_jobs_enabled = False
     image_jobs_endpoint = str(caps.get("image_jobs_endpoint", "auto"))
-    return ResolvedProvider(
+    provider = ResolvedProvider(
         name=_credential_provider_name(supplier, credential.id),
-        base_url=safe_base_url,
+        base_url=safe_target.url,
         api_key=api_key,
         proxy=proxy,
         image_jobs_enabled=image_jobs_enabled,
@@ -170,6 +220,11 @@ async def resolve_user_credential_runtime(
         image_generations_supported=None,
         image_responses_supported=True,
     )
+    # Preserve the exact DNS result that passed BYOK validation. Direct callers
+    # bind their transport to these addresses; proxy callers intentionally keep
+    # the existing proxy path and ignore this target.
+    object.__setattr__(provider, "_byok_http_target", safe_target)
+    return provider
 
 
 async def _resolve_supplier_proxy(

@@ -126,11 +126,11 @@ async def resolve_video_billing(
     )
     usage_tokens_raw = _poll_attr(poll_result, "usage_total_tokens")
     usage_tokens: int | None = None
-    if usage_tokens_raw is not None:
+    if usage_tokens_raw is not None and not isinstance(usage_tokens_raw, bool):
         try:
             parsed = int(usage_tokens_raw)
             usage_tokens = parsed if parsed >= 0 else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             usage_tokens = None
     upstream_billable = _poll_attr(poll_result, "upstream_billable")
     status = str(_poll_attr(poll_result, "status", "") or "")

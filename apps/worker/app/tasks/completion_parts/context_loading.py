@@ -6,7 +6,7 @@ import asyncio
 import base64
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -39,7 +39,7 @@ from .history import (
     _summary_age_seconds,
     _summary_compressed_at,
     _summary_covers_boundary,
-    _with_summary_guardrail,
+    _instructions_with_summary_guardrail,
 )
 
 
@@ -145,19 +145,6 @@ async def _build_input_from_packed_context(
     message_to_input_item: Callable[..., Awaitable[dict[str, Any] | None]],
 ) -> list[dict[str, Any]]:
     input_list: list[dict[str, Any]] = []
-    include_guardrail = packed.summary_used or packed.sticky_used
-    system_prompt = _with_summary_guardrail(
-        packed._system_prompt,
-        enabled=include_guardrail,
-    )
-    if system_prompt:
-        input_list.append(
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            }
-        )
-
     if packed.sticky_used and packed._sticky_message is not None:
         sticky_text = _sticky_text_from_message(packed._sticky_message)
         if sticky_text:
@@ -191,6 +178,28 @@ async def _build_input_from_packed_context(
         if item is not None:
             input_list.append(item)
     return input_list
+
+
+def _reestimate_existing_summary_tokens(
+    packed: PackedContext,
+    *,
+    system_prompt: str | None,
+    hooks: ContextLoadingHooks,
+) -> PackedContext:
+    instructions = _instructions_with_summary_guardrail(system_prompt, enabled=True)
+    used_tokens = hooks.estimate_system_prompt_tokens(instructions)
+    if packed.sticky_used and packed._sticky_message is not None:
+        sticky_text = format_sticky_input_text(
+            _sticky_text_from_message(packed._sticky_message)
+        )
+        used_tokens += MESSAGE_OVERHEAD_TOKENS + hooks.count_tokens(sticky_text)
+    if packed.summary_used:
+        used_tokens += MESSAGE_OVERHEAD_TOKENS + packed.summary_tokens
+    used_tokens += sum(
+        hooks.count_message_tokens(message.role, message.content)
+        for message in packed._recent_rows
+    )
+    return replace(packed, estimated_tokens=used_tokens)
 
 
 async def _load_rows_desc(
@@ -496,9 +505,7 @@ async def _pack_recent_history(
     hooks: ContextLoadingHooks,
 ) -> PackedContext:
     input_budget = (
-        hooks.get_input_budget(chat_model)
-        if chat_model
-        else hooks.input_token_budget
+        hooks.get_input_budget(chat_model) if chat_model else hooks.input_token_budget
     )
     target = await session.get(Message, up_to_message_id)
     if target is None:
@@ -568,6 +575,11 @@ async def _pack_recent_history(
             input_budget=input_budget,
             current_user=current_user,
             first_user=first_user,
+        )
+        existing_summary_packed = _reestimate_existing_summary_tokens(
+            existing_summary_packed,
+            system_prompt=system_prompt,
+            hooks=hooks,
         )
         if (
             not compression_enabled
@@ -703,7 +715,7 @@ async def _pack_recent_history(
 
     used_tokens = (
         hooks.estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
+            _instructions_with_summary_guardrail(system_prompt, enabled=True)
         )
         + sticky_tokens
         + target_tokens
@@ -776,15 +788,17 @@ async def _pack_recent_history(
         summary,
         boundary_message,
     ):
-        fallback_rows_desc, fallback_tokens, fallback_truncated = (
-            await hooks.load_rows_desc(
-                session,
-                conversation_id=conversation_id,
-                target=target,
-                budget_tokens=input_budget,
-                system_prompt=system_prompt,
-                retention_filter=retention_filter,
-            )
+        (
+            fallback_rows_desc,
+            fallback_tokens,
+            fallback_truncated,
+        ) = await hooks.load_rows_desc(
+            session,
+            conversation_id=conversation_id,
+            target=target,
+            budget_tokens=input_budget,
+            system_prompt=system_prompt,
+            retention_filter=retention_filter,
         )
         packed = _fallback_pack(
             system_prompt=system_prompt,
@@ -801,10 +815,13 @@ async def _pack_recent_history(
             packed,
         )
 
-    if not _summary_covers_boundary(
-        summary,
-        boundary_message,
-    ) and conversation is not None:
+    if (
+        not _summary_covers_boundary(
+            summary,
+            boundary_message,
+        )
+        and conversation is not None
+    ):
         boundary = _SummaryBoundary(
             conversation_id=conversation_id,
             up_to_message_id=boundary_message.id,
@@ -841,15 +858,17 @@ async def _pack_recent_history(
             summary = new_summary
 
     if not _summary_covers_boundary(summary, boundary_message):
-        fallback_rows_desc, fallback_tokens, fallback_truncated = (
-            await hooks.load_rows_desc(
-                session,
-                conversation_id=conversation_id,
-                target=target,
-                budget_tokens=input_budget,
-                system_prompt=system_prompt,
-                retention_filter=retention_filter,
-            )
+        (
+            fallback_rows_desc,
+            fallback_tokens,
+            fallback_truncated,
+        ) = await hooks.load_rows_desc(
+            session,
+            conversation_id=conversation_id,
+            target=target,
+            budget_tokens=input_budget,
+            system_prompt=system_prompt,
+            retention_filter=retention_filter,
         )
         packed = _fallback_pack(
             system_prompt=system_prompt,
@@ -871,7 +890,7 @@ async def _pack_recent_history(
     recent_rows = tuple(reversed(recent_desc))
     estimated_tokens = (
         hooks.estimate_system_prompt_tokens(
-            _with_summary_guardrail(system_prompt, enabled=True)
+            _instructions_with_summary_guardrail(system_prompt, enabled=True)
         )
         + (sticky_tokens if sticky_message is not None else 0)
         + MESSAGE_OVERHEAD_TOKENS

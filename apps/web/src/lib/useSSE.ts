@@ -23,6 +23,7 @@ export interface SSEHandlers {
 // 未知事件类型 console.warn 去重缓存：每种 type 只警告一次，避免日志风暴。
 const warnedUnknownTypes: Set<string> = new Set();
 const sharedSSEConnections: Map<string, SharedSSEConnection> = new Map();
+const INTERNAL_SSE_EVENT_NAMES = new Set(["replay_truncated"]);
 
 export type SSEStatus = "connecting" | "open" | "closed" | "error";
 
@@ -163,6 +164,10 @@ class SharedSSEConnection {
     const listener = (ev: MessageEvent) => {
       const seq = this.connectionSeq;
       if (this.disposed || seq !== this.connectionSeq) return;
+      if (INTERNAL_SSE_EVENT_NAMES.has(name)) {
+        if (ev.lastEventId) this.lastEventId = ev.lastEventId;
+        return;
+      }
       this.dispatchNamed(ev);
     };
     this.namedListeners.set(name, listener);
@@ -170,7 +175,7 @@ class SharedSSEConnection {
   }
 
   syncNamedListeners(): void {
-    const eventNames = new Set<string>();
+    const eventNames = new Set<string>(INTERNAL_SSE_EVENT_NAMES);
     for (const subscriber of this.subscribers) {
       for (const name of subscriber.eventNames) eventNames.add(name);
     }

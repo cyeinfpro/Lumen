@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -51,6 +50,7 @@ from lumen_core.context_window import (
     compose_summary_guardrail as compose_summary_guardrail,
     count_tokens,
     estimate_system_prompt_tokens,
+    estimate_text_tokens,
     get_input_budget,
 )
 from lumen_core.chat_tools import (
@@ -99,7 +99,7 @@ from ..image_artifacts import (
     _sha256,
 )
 from ..retry import RetryDecision, is_retriable
-from ..sse_publish import publish_event
+from ..sse_publish import publish_event as _publish_sse_event
 from ..storage import storage
 from ..upstream import UpstreamError, stream_completion
 from ..upstream import (
@@ -153,6 +153,13 @@ from .completion_parts.history import (
     _truncate_sticky_text as _truncate_sticky_text,
     _with_summary_guardrail as _with_summary_guardrail,
 )
+from .completion_parts.request_metadata import (
+    _completion_upstream_provider_event as _completion_upstream_provider_event,
+    _content_str_list as _content_str_list,
+    _merge_completion_upstream_metadata as _merge_completion_upstream_metadata,
+    _normalize_reasoning_effort_for_upstream as _normalize_reasoning_effort_for_upstream,
+    _split_csv_ids as _split_csv_ids,
+)
 from .completion_parts import history as _completion_history
 from .completion_parts import context_loading as _completion_context_loading
 from .completion_parts import stream as _completion_stream
@@ -173,11 +180,17 @@ from .completion_parts.stream import (
     _raise_for_terminal_response_event as _raise_for_terminal_response_event,
 )
 from .completion_parts.tool_images import (
+    _CompletionUsageAccumulator as _CompletionUsageAccumulator,
     _decode_upstream_image_b64 as _decode_upstream_image_b64,
+    _completion_event_payload as _completion_event_payload,
+    _estimate_completion_request_input_tokens as _estimate_completion_request_input_tokens,
+    _estimate_completion_tool_output_tokens as _estimate_completion_tool_output_tokens,
     _extract_image_events_from_response as _extract_image_events_from_response,
+    _fallback_completion_usage_tokens as _fallback_completion_usage_tokens,
     _settle_cancelled_completion_billing as _settle_cancelled_completion_billing,
     _tool_image_dedupe_key as _tool_image_dedupe_key,
 )
+from . import outbox as _completion_outbox
 
 from .generation import (
     _cleanup_storage_on_error,
@@ -269,91 +282,12 @@ def _count_message_tokens(role: str, content: dict[str, Any] | None) -> int:
     )
 
 
-def _split_csv_ids(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for part in raw.split(","):
-        value = part.strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
-
-
-def _content_str_list(content: dict[str, Any] | None, key: str) -> list[str]:
-    raw = (content or {}).get(key)
-    if not isinstance(raw, list):
-        return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in raw:
-        if not isinstance(item, str):
-            continue
-        value = item.strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
-
-
-def _normalize_reasoning_effort_for_upstream(
-    effort: str | None,
-) -> str | None:
-    if effort == "minimal":
-        # Newer GPT-5.x models use "none" for no reasoning; keep accepting
-        # historical UI/API values while avoiding upstream 400s.
-        return "none"
-    return effort
-
-
-def _completion_upstream_provider_event(event: dict[str, Any]) -> dict[str, str]:
-    if event.get("type") != "provider_used":
-        return {}
-    provider = event.get("provider")
-    route = event.get("route")
-    endpoint = event.get("endpoint")
-    source = event.get("source")
-    out: dict[str, str] = {}
-    if isinstance(provider, str) and provider.strip():
-        out["provider"] = provider.strip()
-    if isinstance(route, str) and route.strip():
-        out["route"] = route.strip()
-    if isinstance(endpoint, str) and endpoint.strip():
-        out["endpoint"] = endpoint.strip()
-    if isinstance(source, str) and source.strip():
-        out["source"] = source.strip()
-    return out
-
-
-def _merge_completion_upstream_metadata(
-    upstream_request: dict[str, Any],
-    *,
-    provider_event: dict[str, str] | None,
-    fast_mode: bool,
-) -> dict[str, Any]:
-    out = dict(upstream_request)
-    provider = (provider_event or {}).get("provider")
-    route = (provider_event or {}).get("route") or "responses"
-    endpoint = (provider_event or {}).get("endpoint") or "responses"
-    source = (provider_event or {}).get("source") or "text"
-
-    out["upstream_route"] = route
-    out["actual_route"] = route
-    out["actual_endpoint"] = endpoint
-    out["actual_source"] = source
-    if provider:
-        out["provider"] = provider
-        out["actual_provider"] = provider
-        out["request_event_provider"] = provider
-    if fast_mode:
-        out["service_tier"] = "priority"
-    else:
-        out.pop("service_tier", None)
-    return out
+def _estimate_system_prompt_tokens_once(system_prompt: str | None) -> int:
+    prompt = system_prompt or DEFAULT_CHAT_INSTRUCTIONS
+    estimated = estimate_system_prompt_tokens(prompt)
+    if estimated <= 0:
+        return 0
+    return max(0, estimated - estimate_text_tokens(prompt))
 
 
 async def _record_completion_upstream_metadata(
@@ -452,25 +386,6 @@ def _configure_chat_tools(body: dict[str, Any], tools: list[dict[str, Any]]) -> 
     body["parallel_tool_calls"] = False
 
 
-def _fallback_completion_usage_tokens(
-    input_list: list[dict[str, Any]],
-    output_text: str,
-    *,
-    tokens_in: int,
-    tokens_out: int,
-) -> tuple[int, int]:
-    next_in = tokens_in
-    next_out = tokens_out
-    if next_out <= 0 and output_text:
-        next_out = max(1, count_tokens(output_text))
-    if next_in <= 0 and input_list:
-        try:
-            next_in = max(1, count_tokens(json.dumps(input_list, ensure_ascii=False)))
-        except Exception:  # noqa: BLE001
-            next_in = 1
-    return next_in, next_out
-
-
 async def _settle_failed_completion_billing(
     session: Any,
     completion: Completion,
@@ -515,6 +430,33 @@ async def _publish_completion_tool_progress(
             "tool_calls": tool_calls,
         },
     )
+
+
+_COMPLETION_EVENT_HOOKS = _completion_tool_images.CompletionEventHooks(
+    session_factory=lambda: SessionLocal(),
+    stage_outbox_event=_completion_outbox._stage_outbox_event,
+    raw_publish_event=lambda *args, **kwargs: _publish_sse_event(*args, **kwargs),
+    new_event_id=new_uuid7,
+    user_model=User,
+    conversation_model=Conversation,
+    logger=logger,
+)
+
+_stage_completion_event = partial(
+    _completion_tool_images._stage_completion_event,
+    hooks=_COMPLETION_EVENT_HOOKS,
+)
+publish_event = partial(
+    _completion_tool_images._publish_completion_event,
+    hooks=_COMPLETION_EVENT_HOOKS,
+)
+
+
+async def _deliver_completion_event(
+    redis: Any,
+    delivery: tuple[str, str, dict[str, Any]],
+) -> None:
+    await _completion_outbox._deliver_staged_outbox_events(redis, [delivery])
 
 
 async def _publish_completion_tool_updates(
@@ -1021,7 +963,7 @@ async def _load_rows_desc(
         system_prompt=system_prompt,
         retention_filter=retention_filter,
         count_message_tokens=_count_message_tokens,
-        estimate_system_prompt_tokens=estimate_system_prompt_tokens,
+        estimate_system_prompt_tokens=_estimate_system_prompt_tokens_once,
     )
 
 
@@ -1117,7 +1059,7 @@ def _context_loading_hooks() -> _completion_context_loading.ContextLoadingHooks:
     return _completion_context_loading.ContextLoadingHooks(
         count_message_tokens=_count_message_tokens,
         count_tokens=count_tokens,
-        estimate_system_prompt_tokens=estimate_system_prompt_tokens,
+        estimate_system_prompt_tokens=_estimate_system_prompt_tokens_once,
         get_input_budget=get_input_budget,
         message_retention_filter_for_account=_message_retention_filter_for_account,
         resolve_summary_model=_resolve_summary_model,
@@ -1532,23 +1474,24 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                 if lease_lost.is_set():
                     raise _LeaseLost("lease lost before preflight failure commit")
-                await session.commit()
-                await worker_billing.flush_balance_cache_refreshes(session)
-                await publish_event(
-                    redis,
+                failed_delivery = _stage_completion_event(
+                    session,
                     user_id,
                     task_channel(task_id),
                     EV_COMP_FAILED,
-                    {
-                        "completion_id": task_id,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "attempt_epoch": attempt_epoch,
-                        "code": err_code,
-                        "message": err_msg,
-                        "retriable": False,
-                    },
+                    _completion_event_payload(
+                        task_id,
+                        message_id,
+                        attempt,
+                        attempt_epoch,
+                        code=err_code,
+                        message=err_msg,
+                        retriable=False,
+                    ),
                 )
+                await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
+                await _deliver_completion_event(redis, failed_delivery)
                 _task_outcome = "failed"
                 return
 
@@ -1582,40 +1525,6 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
         channel = task_channel(task_id)
 
-        # --- 2. publish started / restarted ---
-        if lease_lost.is_set():
-            raise _LeaseLost("lease lost before completion start event")
-        if was_restarted:
-            await publish_event(
-                redis,
-                user_id,
-                channel,
-                EV_COMP_RESTARTED,
-                {
-                    "completion_id": task_id,
-                    "message_id": message_id,
-                    "attempt": attempt,
-                    "attempt_epoch": attempt_epoch,
-                    **queue_metadata_payload,
-                },
-            )
-        else:
-            await publish_event(
-                redis,
-                user_id,
-                channel,
-                EV_COMP_STARTED,
-                {
-                    "completion_id": task_id,
-                    "message_id": message_id,
-                    "attempt": attempt,
-                    "attempt_epoch": attempt_epoch,
-                    **queue_metadata_payload,
-                },
-            )
-        if lease_lost.is_set():
-            raise _LeaseLost("lease lost during completion start event")
-
         accumulated_text = ""
         accumulated_thinking = ""
         flushed_len = 0
@@ -1624,14 +1533,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         stored_image_call_ids: set[str] = set()
         reserved_tool_image_budget_micro = 0
         tool_tracker = _CompletionToolTracker()
-        tokens_in = 0
-        tokens_out = 0
-        cache_read_tokens = 0
-        cache_creation_tokens = 0
-        cache_creation_5m_tokens = 0
-        cache_creation_1h_tokens = 0
-        reasoning_tokens = 0
-        image_output_tokens = 0
+        usage_totals = _CompletionUsageAccumulator()
+        round_text_start = 0
+        round_thinking_start = 0
+        request_sent = False
         upstream_provider_event: dict[str, str] | None = None
 
         # 观测：整个 upstream 流式阶段一层 span；手动 enter/exit 以免嵌套大块改缩进
@@ -1667,6 +1572,24 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
 
     try:
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost before completion start event")
+        await publish_event(
+            redis,
+            user_id,
+            channel,
+            EV_COMP_RESTARTED if was_restarted else EV_COMP_STARTED,
+            {
+                "completion_id": task_id,
+                "message_id": message_id,
+                "attempt": attempt,
+                "attempt_epoch": attempt_epoch,
+                **queue_metadata_payload,
+            },
+        )
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost during completion start event")
+
         if user_api_credential_id:
             async with SessionLocal() as session:
                 runtime_override = await resolve_user_credential_runtime(
@@ -1704,13 +1627,6 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             target_msg = await session.get(Message, message_id)
             if conversation_id is None:
                 input_list = []
-                if system_prompt:
-                    input_list.append(
-                        {
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": system_prompt}],
-                        }
-                    )
             else:
                 packed = await _pack_recent_history(
                     session,
@@ -1832,6 +1748,18 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
         )
         tool_loop_truncated = False
+        request_sent = True
+        round_text_start = len(accumulated_text)
+        round_thinking_start = len(accumulated_thinking)
+        usage_totals.start_round(
+            input_fallback_tokens=_estimate_completion_request_input_tokens(
+                input_list,
+                instructions=instructions,
+            ),
+            tool_output_tokens=_estimate_completion_tool_output_tokens(
+                tool_tracker.content()
+            ),
+        )
         async for ev in _iter_completion_stream_with_abort(
             stream_completion(body, runtime_override=runtime_override),
             cancel_requested=cancel_requested,
@@ -1989,16 +1917,14 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 raw_resp = ev.get("response")
                 resp = raw_resp if isinstance(raw_resp, dict) else {}
                 completed_response = resp
-                usage = resp.get("usage") or {}
-                parsed_usage = parse_usage(chat_model, usage)
-                tokens_in = parsed_usage.input_tokens
-                tokens_out = parsed_usage.output_tokens
-                cache_read_tokens = parsed_usage.cache_read_tokens
-                cache_creation_tokens = parsed_usage.cache_creation_tokens
-                cache_creation_5m_tokens = parsed_usage.cache_creation_5m_tokens
-                cache_creation_1h_tokens = parsed_usage.cache_creation_1h_tokens
-                reasoning_tokens = parsed_usage.reasoning_tokens
-                image_output_tokens = parsed_usage.image_output_tokens
+                raw_usage = resp.get("usage")
+                usage_totals.record_usage(
+                    parse_usage(
+                        chat_model,
+                        raw_usage if isinstance(raw_usage, dict) else None,
+                    ),
+                    raw_usage=raw_usage if isinstance(raw_usage, dict) else None,
+                )
                 # 同时抄一下 output_text（兜底：某些网关只在 completed 里给完整文本）
                 if not accumulated_text:
                     accumulated_text = _extract_completed_output_text(resp)
@@ -2102,7 +2028,25 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             # 其他事件（content_part.added 等）忽略
 
         if tool_loop_truncated:
+            usage_totals.finish_round(
+                output_text=accumulated_text[round_text_start:],
+                reasoning_text=accumulated_thinking[round_thinking_start:],
+                tool_output_tokens=_estimate_completion_tool_output_tokens(
+                    tool_tracker.content()
+                ),
+            )
             fallback_body = _tool_limited_completion_body(body)
+            round_text_start = len(accumulated_text)
+            round_thinking_start = len(accumulated_thinking)
+            usage_totals.start_round(
+                input_fallback_tokens=_estimate_completion_request_input_tokens(
+                    fallback_body["input"],
+                    instructions=fallback_body.get("instructions"),
+                ),
+                tool_output_tokens=_estimate_completion_tool_output_tokens(
+                    tool_tracker.content()
+                ),
+            )
             async for ev in _iter_completion_stream_with_abort(
                 stream_completion(fallback_body, runtime_override=runtime_override),
                 cancel_requested=cancel_requested,
@@ -2207,16 +2151,14 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     raw_resp = ev.get("response")
                     resp = raw_resp if isinstance(raw_resp, dict) else {}
                     completed_response = resp
-                    usage = resp.get("usage") or {}
-                    parsed_usage = parse_usage(chat_model, usage)
-                    tokens_in = parsed_usage.input_tokens
-                    tokens_out = parsed_usage.output_tokens
-                    cache_read_tokens = parsed_usage.cache_read_tokens
-                    cache_creation_tokens = parsed_usage.cache_creation_tokens
-                    cache_creation_5m_tokens = parsed_usage.cache_creation_5m_tokens
-                    cache_creation_1h_tokens = parsed_usage.cache_creation_1h_tokens
-                    reasoning_tokens = parsed_usage.reasoning_tokens
-                    image_output_tokens = parsed_usage.image_output_tokens
+                    raw_usage = resp.get("usage")
+                    usage_totals.record_usage(
+                        parse_usage(
+                            chat_model,
+                            raw_usage if isinstance(raw_usage, dict) else None,
+                        ),
+                        raw_usage=(raw_usage if isinstance(raw_usage, dict) else None),
+                    )
                     completed_text = _extract_completed_output_text(resp)
                     if completed_text and not accumulated_text.endswith(completed_text):
                         accumulated_text = (
@@ -2340,6 +2282,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                     _raise_for_terminal_response_event(ev_type, resp, ev.get("error"))
 
+        usage_totals.finish_round(
+            output_text=accumulated_text[round_text_start:],
+            reasoning_text=accumulated_thinking[round_thinking_start:],
+            tool_output_tokens=_estimate_completion_tool_output_tokens(
+                tool_tracker.content()
+            ),
+        )
         if tool_loop_truncated and accumulated_text:
             final_text = _apply_url_citations(
                 accumulated_text,
@@ -2355,13 +2304,6 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 error_code=EC.NO_TEXT_RETURNED.value,
                 status_code=200,
             )
-        tokens_in, tokens_out = _fallback_completion_usage_tokens(
-            input_list,
-            final_text,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-        )
-
         # --- 6. 成功态 ---
         # 写终态 db 前最后一道 lease 检查：如果 stream 期间 lease 丢失但事件循环
         # 没立刻 raise（lease_lost.set() + 当前 await 不在 stream 循环里），
@@ -2392,15 +2334,20 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 and comp_for_usage.attempt == attempt_epoch
                 and comp_for_usage.status in _RUNNING_COMPLETION_STATUSES
                 and tool_images
-                and image_output_tokens <= 0
+                and usage_totals.image_output_tokens <= 0
                 and reserved_tool_image_budget_micro > 0
             ):
-                image_output_tokens = await _fallback_completion_tool_image_tokens(
-                    session,
-                    comp_for_usage,
-                    budget_micro=reserved_tool_image_budget_micro,
+                usage_totals.image_output_tokens = (
+                    await _fallback_completion_tool_image_tokens(
+                        session,
+                        comp_for_usage,
+                        budget_micro=reserved_tool_image_budget_micro,
+                    )
                 )
-                tokens_out = max(tokens_out, image_output_tokens)
+                usage_totals.tokens_out = max(
+                    usage_totals.tokens_out,
+                    usage_totals.image_output_tokens,
+                )
             res = await session.execute(
                 update(Completion)
                 .where(
@@ -2412,14 +2359,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     status=CompletionStatus.SUCCEEDED.value,
                     progress_stage=CompletionStage.FINALIZING,
                     text=final_text,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                    cache_creation_5m_tokens=cache_creation_5m_tokens,
-                    cache_creation_1h_tokens=cache_creation_1h_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    image_output_tokens=image_output_tokens,
+                    **usage_totals.model_values(),
                     finished_at=datetime.now(timezone.utc),
                     error_code=None,
                     error_message=None,
@@ -2461,14 +2401,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     fast_mode=fast_mode,
                 )
                 comp_for_billing.upstream_request = upstream_request or None
-                comp_for_billing.tokens_in = tokens_in
-                comp_for_billing.tokens_out = tokens_out
-                comp_for_billing.cache_read_tokens = cache_read_tokens
-                comp_for_billing.cache_creation_tokens = cache_creation_tokens
-                comp_for_billing.cache_creation_5m_tokens = cache_creation_5m_tokens
-                comp_for_billing.cache_creation_1h_tokens = cache_creation_1h_tokens
-                comp_for_billing.reasoning_tokens = reasoning_tokens
-                comp_for_billing.image_output_tokens = image_output_tokens
+                usage_totals.apply_to(comp_for_billing)
                 await _raise_if_completion_cancelled(
                     redis,
                     task_id,
@@ -2480,37 +2413,55 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     task_id,
                     "cancelled before success commit",
                 )
+            success_delivery = _stage_completion_event(
+                session,
+                user_id,
+                channel,
+                EV_COMP_SUCCEEDED,
+                _completion_event_payload(
+                    task_id,
+                    message_id,
+                    attempt,
+                    attempt_epoch,
+                    text=final_text,
+                    tokens_in=usage_totals.tokens_in,
+                    tokens_out=usage_totals.tokens_out,
+                    tool_calls=tool_tracker.content(),
+                    tool_loop_truncated=tool_loop_truncated,
+                    used_memory_ids=memory_meta_for_event.get(
+                        "used_memory_ids",
+                        [],
+                    ),
+                    used_memory_summary=memory_meta_for_event.get(
+                        "used_memory_summary",
+                        [],
+                    ),
+                    confirmation_candidate_id=memory_meta_for_event.get(
+                        "confirmation_candidate_id"
+                    ),
+                ),
+            )
+            memory_delivery = (
+                await _completion_tool_images._stage_completion_memory_extract(
+                    session,
+                    feature_enabled=memory_extraction is not None,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    source_message_id=(
+                        getattr(msg, "parent_message_id", None)
+                        if msg is not None
+                        else None
+                    ),
+                    assistant_message_id=message_id,
+                    hooks=_COMPLETION_EVENT_HOOKS,
+                )
+            )
             await session.commit()
             await worker_billing.flush_balance_cache_refreshes(session)
 
-        # publish_event 是 SSE 推送+回放写入；万一 lease 已丢，就别再以"我"的身份
-        # 把 succeeded 推给前端——接管 worker 会再推一次造成重复。
-        if lease_lost.is_set():
-            raise _LeaseLost("lease lost before success event")
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_COMP_SUCCEEDED,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                "text": final_text,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "tool_calls": tool_tracker.content(),
-                "tool_loop_truncated": tool_loop_truncated,
-                "used_memory_ids": memory_meta_for_event.get("used_memory_ids", []),
-                "used_memory_summary": memory_meta_for_event.get(
-                    "used_memory_summary", []
-                ),
-                "confirmation_candidate_id": memory_meta_for_event.get(
-                    "confirmation_candidate_id"
-                ),
-            },
-        )
+        await _deliver_completion_event(redis, success_delivery)
+        if memory_delivery is not None:
+            await _deliver_completion_event(redis, memory_delivery)
         _task_outcome = "succeeded"
         upstream_calls_total.labels(kind="completion", outcome="ok").inc()
 
@@ -2519,35 +2470,6 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             from .auto_title import maybe_enqueue_auto_title
 
             await maybe_enqueue_auto_title(redis, conversation_id)
-            if memory_extraction is not None:
-                try:
-                    # Best effort: extraction is intentionally off the critical
-                    # response path. Prefer arq enqueue when available; fall back
-                    # to in-process deterministic extraction for tests.
-                    arq_pool = ctx.get("arq_pool")
-                    if arq_pool is not None:
-                        await arq_pool.enqueue_job(
-                            "memory_extract",
-                            conversation_id,
-                            getattr(msg, "parent_message_id", None)
-                            if msg is not None
-                            else "",
-                            message_id,
-                        )
-                    elif msg is not None and msg.parent_message_id:
-                        await memory_extraction.memory_extract(
-                            ctx,
-                            conversation_id,
-                            msg.parent_message_id,
-                            message_id,
-                        )
-                except Exception:
-                    logger.warning(
-                        "memory extraction enqueue failed conversation=%s message=%s",
-                        conversation_id,
-                        message_id,
-                        exc_info=True,
-                    )
 
     except _LeaseLost as exc:
         logger.warning(
@@ -2567,6 +2489,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     except _TaskCancelled as exc:
         # GEN-P1-4: 用户主动取消——标 cancelled 并 publish failed(retriable=false)。
         logger.info("completion cancelled by user task=%s reason=%s", task_id, exc)
+        usage_totals.finish_round(
+            output_text=accumulated_text[round_text_start:],
+            reasoning_text=accumulated_thinking[round_thinking_start:],
+            tool_output_tokens=_estimate_completion_tool_output_tokens(
+                tool_tracker.content()
+            ),
+        )
         await _publish_completion_tool_updates(
             redis=redis,
             user_id=user_id,
@@ -2578,6 +2507,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             tool_tracker=tool_tracker,
             updates=tool_tracker.finalize_active(ToolStatus.CANCELLED.value),
         )
+        cancel_delivery: tuple[str, str, dict[str, Any]] | None = None
         try:
             async with SessionLocal() as session:
                 res = await session.execute(
@@ -2618,21 +2548,47 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         session,
                         comp_cancel,
                         has_partial=has_partial,
-                        input_list=input_list if "input_list" in locals() else None,
+                        input_list=(
+                            input_list
+                            if request_sent and "input_list" in locals()
+                            else None
+                        ),
+                        instructions=(
+                            instructions
+                            if request_sent and "instructions" in locals()
+                            else None
+                        ),
+                        usage_is_finalized=True,
                         accumulated_text=accumulated_text,
-                        tokens_in=tokens_in,
-                        tokens_out=tokens_out,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_creation_tokens=cache_creation_tokens,
-                        cache_creation_5m_tokens=cache_creation_5m_tokens,
-                        cache_creation_1h_tokens=cache_creation_1h_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        image_output_tokens=image_output_tokens,
+                        tokens_in=usage_totals.tokens_in,
+                        tokens_out=usage_totals.tokens_out,
+                        cache_read_tokens=usage_totals.cache_read_tokens,
+                        cache_creation_tokens=usage_totals.cache_creation_tokens,
+                        cache_creation_5m_tokens=usage_totals.cache_creation_5m_tokens,
+                        cache_creation_1h_tokens=usage_totals.cache_creation_1h_tokens,
+                        reasoning_tokens=usage_totals.reasoning_tokens,
+                        image_output_tokens=usage_totals.image_output_tokens,
                         tool_images=tool_images,
                         reserved_tool_image_budget_micro=reserved_tool_image_budget_micro,
                         reason=EC.CANCELLED.value,
                     )
+                staged_cancel_delivery = _stage_completion_event(
+                    session,
+                    user_id,
+                    channel,
+                    EV_COMP_FAILED,
+                    _completion_event_payload(
+                        task_id,
+                        message_id,
+                        attempt,
+                        attempt_epoch,
+                        code="cancelled",
+                        message="cancelled by user",
+                        retriable=False,
+                    ),
+                )
                 await session.commit()
+                cancel_delivery = staged_cancel_delivery
                 await worker_billing.flush_balance_cache_refreshes(session)
         except _CompletionEpochSuperseded as stale_exc:
             logger.info(
@@ -2650,25 +2606,20 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 task_id,
                 db_exc,
             )
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_COMP_FAILED,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                "code": "cancelled",
-                "message": "cancelled by user",
-                "retriable": False,
-            },
-        )
+        if cancel_delivery is not None:
+            await _deliver_completion_event(redis, cancel_delivery)
         _task_outcome = "failed"
         return
 
     except Exception as exc:  # noqa: BLE001
+        if has_partial or tool_loop_truncated:
+            usage_totals.finish_round(
+                output_text=accumulated_text[round_text_start:],
+                reasoning_text=accumulated_thinking[round_thinking_start:],
+                tool_output_tokens=_estimate_completion_tool_output_tokens(
+                    tool_tracker.content()
+                ),
+            )
         if isinstance(exc, _ToolIdleTimeout):
             await _publish_completion_tool_updates(
                 redis=redis,
@@ -2819,23 +2770,24 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             comp_failed,
                             reason=enqueue_err,
                         )
+                    enqueue_failure_delivery = _stage_completion_event(
+                        session,
+                        user_id,
+                        channel,
+                        EV_COMP_FAILED,
+                        _completion_event_payload(
+                            task_id,
+                            message_id,
+                            attempt,
+                            attempt_epoch,
+                            code=enqueue_err,
+                            message=enqueue_msg,
+                            retriable=False,
+                        ),
+                    )
                     await session.commit()
                     await worker_billing.flush_balance_cache_refreshes(session)
-                await publish_event(
-                    redis,
-                    user_id,
-                    channel,
-                    EV_COMP_FAILED,
-                    {
-                        "completion_id": task_id,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "attempt_epoch": attempt_epoch,
-                        "code": enqueue_err,
-                        "message": enqueue_msg,
-                        "retriable": False,
-                    },
-                )
+                await _deliver_completion_event(redis, enqueue_failure_delivery)
                 _task_outcome = "failed"
             return
 
@@ -2892,53 +2844,30 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             # upstream work. Preserve parsed usage buckets when available, and
             # estimate a minimum input/text/image usage only when the provider
             # never sent a usage frame.
-            if has_partial:
-                if "input_list" in locals():
-                    tokens_in, tokens_out = _fallback_completion_usage_tokens(
-                        input_list,
-                        accumulated_text,
-                        tokens_in=tokens_in,
-                        tokens_out=tokens_out,
-                    )
-                else:
-                    tokens_out = max(1, count_tokens(accumulated_text))
+            if has_partial or tool_loop_truncated or any(usage_totals.values()):
                 comp_partial = await session.get(Completion, task_id)
                 if comp_partial is not None:
                     if (
                         tool_images
-                        and image_output_tokens <= 0
+                        and usage_totals.image_output_tokens <= 0
                         and reserved_tool_image_budget_micro > 0
                     ):
-                        image_output_tokens = await (
-                            _fallback_completion_tool_image_tokens(
+                        usage_totals.image_output_tokens = (
+                            await _fallback_completion_tool_image_tokens(
                                 session,
                                 comp_partial,
                                 budget_micro=reserved_tool_image_budget_micro,
                             )
                         )
-                        tokens_out = max(tokens_out, image_output_tokens)
-                    comp_partial.tokens_in = tokens_in
-                    comp_partial.tokens_out = tokens_out
-                    comp_partial.cache_read_tokens = cache_read_tokens
-                    comp_partial.cache_creation_tokens = cache_creation_tokens
-                    comp_partial.cache_creation_5m_tokens = cache_creation_5m_tokens
-                    comp_partial.cache_creation_1h_tokens = cache_creation_1h_tokens
-                    comp_partial.reasoning_tokens = reasoning_tokens
-                    comp_partial.image_output_tokens = image_output_tokens
-                    usage_values = (
-                        tokens_in,
-                        tokens_out,
-                        cache_read_tokens,
-                        cache_creation_tokens,
-                        cache_creation_5m_tokens,
-                        cache_creation_1h_tokens,
-                        reasoning_tokens,
-                        image_output_tokens,
-                    )
+                        usage_totals.tokens_out = max(
+                            usage_totals.tokens_out,
+                            usage_totals.image_output_tokens,
+                        )
+                    usage_totals.apply_to(comp_partial)
                     await _settle_failed_completion_billing(
                         session,
                         comp_partial,
-                        usage_values=usage_values,
+                        usage_values=usage_totals.values(),
                         reason=str(err_code),
                     )
             else:
@@ -2949,24 +2878,25 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         comp_failed,
                         reason=str(err_code),
                     )
+            failure_delivery = _stage_completion_event(
+                session,
+                user_id,
+                channel,
+                EV_COMP_FAILED,
+                _completion_event_payload(
+                    task_id,
+                    message_id,
+                    attempt,
+                    attempt_epoch,
+                    code=err_code,
+                    message=err_msg,
+                    retriable=False,
+                ),
+            )
             await session.commit()
             await worker_billing.flush_balance_cache_refreshes(session)
 
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_COMP_FAILED,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                "code": err_code,
-                "message": err_msg,
-                "retriable": False,
-            },
-        )
+        await _deliver_completion_event(redis, failure_delivery)
 
     finally:
         await _cleanup_completion_runtime(

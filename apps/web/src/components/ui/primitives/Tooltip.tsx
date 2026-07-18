@@ -5,7 +5,7 @@
 // 便于键盘用户预览。
 
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
-import { useEffect, useRef, useState, useId } from "react";
+import { cloneElement, useEffect, useRef, useState, useId } from "react";
 import { cn } from "@/lib/utils";
 
 type Side = "top" | "bottom" | "left" | "right";
@@ -36,6 +36,12 @@ const SIDE_ORIGIN: Record<Side, string> = {
 
 const TOOLTIP_WARM_WINDOW_MS = 800;
 let tooltipWarmUntil = 0;
+
+function mergeDescribedBy(existing: string | undefined, tooltipId: string) {
+  return [...new Set([...(existing?.split(/\s+/) ?? []), tooltipId])]
+    .filter(Boolean)
+    .join(" ");
+}
 
 export function Tooltip({
   content,
@@ -76,6 +82,9 @@ export function Tooltip({
     return children;
   }
 
+  const trigger = children as React.ReactElement<{
+    "aria-describedby"?: string;
+  }>;
   const showPointer = () => {
     if (timer.current) clearTimeout(timer.current);
     const nextDelay = Date.now() < tooltipWarmUntil ? 0 : delayMs;
@@ -101,11 +110,17 @@ export function Tooltip({
       onFocus={showFocus}
       onBlur={hide}
     >
-      {children}
+      {cloneElement(trigger, {
+        "aria-describedby": mergeDescribedBy(
+          trigger.props["aria-describedby"],
+          id,
+        ),
+      })}
       <AnimatePresence>
         {open && (
           <motion.span
             key={id}
+            id={id}
             role="tooltip"
             initial={
               reduceMotion || instant

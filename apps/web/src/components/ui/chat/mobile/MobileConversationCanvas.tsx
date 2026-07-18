@@ -26,6 +26,7 @@ import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { Markdown } from "@/components/ui/Markdown";
 import { ViewportImage } from "@/components/ui/ViewportImage";
 import { cn } from "@/lib/utils";
+import { tryCopyTextToClipboard } from "@/lib/clipboard";
 import { CompletionStatusLine } from "@/components/ui/chat/CompletionStatusLine";
 import { generationRenderSignature } from "@/components/ui/chat/generationRenderSignature";
 import { useHistoryPaging } from "@/hooks/useHistoryPaging";
@@ -515,7 +516,11 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     if (!msg.text) return;
-    void navigator.clipboard?.writeText(msg.text).then(() => {
+    void tryCopyTextToClipboard(msg.text).then((success) => {
+      if (!success) {
+        pushMobileToast("复制失败", "danger");
+        return;
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
     });
@@ -613,7 +618,11 @@ const AssistantTurn = memo(function AssistantTurn({
   const [copied, setCopied] = useState(false);
   const copy = () => {
     if (!msg.text) return;
-    void navigator.clipboard?.writeText(msg.text).then(() => {
+    void tryCopyTextToClipboard(msg.text).then((success) => {
+      if (!success) {
+        pushMobileToast("复制失败", "danger");
+        return;
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
     });
@@ -690,7 +699,7 @@ const AssistantTurn = memo(function AssistantTurn({
         <div className="flex items-center gap-2 pt-0.5">
           <button
             type="button"
-            onClick={() => onRegenerate(msg.id, "text_to_image")}
+            onClick={() => onRegenerate(msg.id, msg.intent_resolved)}
             className={cn(
               "inline-flex min-h-11 items-center gap-1 px-3 rounded-full",
               "border border-[var(--border-subtle)] bg-[var(--bg-1)]",
@@ -755,6 +764,14 @@ function areAssistantTurnPropsEqual(
   next: AssistantTurnProps,
 ): boolean {
   if (prev.msg !== next.msg) return false;
+  if (
+    prev.onEditImage !== next.onEditImage ||
+    prev.onRetryGen !== next.onRetryGen ||
+    prev.onRetryText !== next.onRetryText ||
+    prev.onRegenerate !== next.onRegenerate
+  ) {
+    return false;
+  }
   return (
     assistantGenerationsRenderSignature(prev.msg, prev.generations) ===
     assistantGenerationsRenderSignature(next.msg, next.generations)
@@ -797,10 +814,12 @@ const FinalImage = memo(function FinalImage({
     .join(" · ");
 
   const handleCopy = () => {
-    void navigator.clipboard
-      ?.writeText(gen.prompt)
-      .then(() => pushMobileToast("已复制 prompt", "success"))
-      .catch(() => pushMobileToast("复制失败", "danger"));
+    void tryCopyTextToClipboard(gen.prompt).then((success) => {
+      pushMobileToast(
+        success ? "已复制 prompt" : "复制失败",
+        success ? "success" : "danger",
+      );
+    });
   };
 
   const handleClick = () => {

@@ -17,6 +17,17 @@ def _facade() -> Any:
     return importlib.import_module(_UPSTREAM_MODULE_NAME)
 
 
+def _provider_pinned_target(
+    facade: Any, provider: Any, proxy: Any | None
+) -> Any | None:
+    if proxy is not None or not facade._is_byok_provider(provider):
+        return None
+    target = getattr(provider, "_byok_http_target", None)
+    if target is None or not getattr(target, "resolved_ips", ()):
+        return None
+    return target
+
+
 async def _direct_generate_image_with_failover(
     *,
     prompt: str,
@@ -80,6 +91,9 @@ async def _direct_generate_image_with_failover(
                 proxy = facade._provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
+                pinned_target = _provider_pinned_target(facade, provider, proxy)
+                if pinned_target is not None:
+                    kwargs["pinned_target_override"] = pinned_target
                 kwargs["before_attempt"] = facade._image_request_attempt_claim(
                     pool,
                     provider,
@@ -264,6 +278,9 @@ async def _direct_edit_image_with_failover(
                 proxy = facade._provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
+                pinned_target = _provider_pinned_target(facade, provider, proxy)
+                if pinned_target is not None:
+                    kwargs["pinned_target_override"] = pinned_target
                 async with facade._image_quota_claim(
                     pool,
                     provider,
@@ -457,6 +474,9 @@ async def _responses_image_stream_with_failover(
                 proxy = facade._provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
+                pinned_target = _provider_pinned_target(facade, provider, proxy)
+                if pinned_target is not None:
+                    kwargs["pinned_target_override"] = pinned_target
                 if user_id is not None:
                     kwargs["user_id"] = user_id
                 kwargs["before_attempt"] = facade._image_request_attempt_claim(

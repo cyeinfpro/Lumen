@@ -474,6 +474,21 @@ def test_usage_metadata_classification_and_total_values() -> None:
         )
         == 7_500
     )
+    assert usage._scaled_meta_cost({"cost": 5_000}, "cost") == 5_000  # noqa: SLF001
+    assert (  # noqa: SLF001
+        usage._scaled_meta_cost(
+            {"cost": 5_000, "rate_multiplier_x10000": None},
+            "cost",
+        )
+        == 5_000
+    )
+    assert (  # noqa: SLF001
+        usage._scaled_meta_cost(
+            {"cost": 5_000, "rate_multiplier_x10000": 0},
+            "cost",
+        )
+        == 0
+    )
     assert result == BillingUsageByKindOut(
         input=5_000,
         output=40_000,

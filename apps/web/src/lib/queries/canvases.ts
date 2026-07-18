@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type UseMutationOptions,
 } from "@tanstack/react-query";
+import { useRef } from "react";
 
 import {
   createCanvas,
@@ -137,18 +138,62 @@ export function useExecuteCanvasNodeMutation(canvasId: string) {
 
 export function useSelectCanvasOutputMutation(canvasId: string) {
   const client = useQueryClient();
+  const queueRef = useRef(new Map<string, Promise<void>>());
+  const revisionRef = useRef(new Map<string, number>());
   return useMutation<
     CanvasNodeSelection,
     Error,
-    { executionId: string; outputIndex: number; selectionRevision?: number }
+    {
+      nodeId: string;
+      executionId: string;
+      outputIndex: number;
+      selectionRevision?: number;
+    }
   >({
-    mutationFn: ({ executionId, outputIndex, selectionRevision }) =>
-      selectCanvasExecutionOutput(
-        canvasId,
-        executionId,
-        outputIndex,
-        selectionRevision,
-      ),
+    mutationFn: async ({
+      nodeId,
+      executionId,
+      outputIndex,
+      selectionRevision,
+    }) => {
+      const queueKey = nodeId || executionId;
+      const previous = queueRef.current.get(queueKey) ?? Promise.resolve();
+      const task = previous.catch(() => undefined).then(async () => {
+        const requestedRevision = normalizeCanvasSelectionRevision(
+          selectionRevision,
+        );
+        const knownRevision = revisionRef.current.get(queueKey) ?? 0;
+        const revision = Math.max(knownRevision, requestedRevision);
+        try {
+          const selection = await selectCanvasExecutionOutput(
+            canvasId,
+            executionId,
+            outputIndex,
+            revision,
+          );
+          revisionRef.current.set(
+            queueKey,
+            selection.revision ?? revision + 1,
+          );
+          return selection;
+        } catch (error) {
+          revisionRef.current.delete(queueKey);
+          throw error;
+        }
+      });
+      const tail = task.then(
+        () => undefined,
+        () => undefined,
+      );
+      queueRef.current.set(queueKey, tail);
+      try {
+        return await task;
+      } finally {
+        if (queueRef.current.get(queueKey) === tail) {
+          queueRef.current.delete(queueKey);
+        }
+      }
+    },
     onSuccess(selection) {
       if (typeof BroadcastChannel !== "undefined") {
         try {
@@ -167,4 +212,12 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
       void client.invalidateQueries({ queryKey: canvasQueryKeys.detail(canvasId) });
     },
   });
+}
+
+function normalizeCanvasSelectionRevision(value: number | undefined): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0
+    ? value
+    : 0;
 }

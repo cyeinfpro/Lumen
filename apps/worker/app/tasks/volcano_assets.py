@@ -9,8 +9,10 @@ import logging
 import math
 import random
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -51,7 +53,6 @@ from lumen_core.volcano_assets import (
     volcano_asset_reference_url,
 )
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from .. import runtime_settings
 from ..config import settings
@@ -65,24 +66,36 @@ from . import (
 from . import (
     volcano_asset_dispatch as _dispatch_parts,
 )
+from .volcano_assets_parts.receipts import (
+    AIGC_GROUP_TYPE as _AIGC_GROUP_TYPE,
+    LEGACY_SUCCESS_RECEIPT_EVENT as _LEGACY_SUCCESS_RECEIPT_EVENT,  # noqa: F401
+    RECEIPT_BINDING_FIELDS as _RECEIPT_BINDING_FIELDS,  # noqa: F401
+    SUCCESS_RECEIPT_EVENT as _SUCCESS_RECEIPT_EVENT,  # noqa: F401
+    operation_has_value as _operation_has_value,
+    read_success_receipt as _read_success_receipt_impl,
+    receipt_asset as _receipt_asset,  # noqa: F401
+    receipt_binding_matches as _receipt_binding_matches,  # noqa: F401
+    receipt_fence_matches as _receipt_fence_matches,  # noqa: F401
+    receipt_group as _receipt_group,  # noqa: F401
+    receipt_result as _receipt_result,  # noqa: F401
+    success_receipt_details as _success_receipt_details,  # noqa: F401
+    validated_receipt_result as _validated_receipt_result,  # noqa: F401
+    write_success_receipt as _write_success_receipt_impl,
+)
 
 logger = logging.getLogger(__name__)
 
-_AIGC_GROUP_TYPE = "AIGC"
 _REFERENCE_TOKEN_TTL = timedelta(hours=24)
 _JOB_NAME = "process_volcano_asset_operation"
 _OPERATION_LOCK_TTL_SECONDS = 10 * 60
 _OPERATION_LOCK_RENEW_INTERVAL_SECONDS = 60
 _REDIS_RETRY_ATTEMPTS = 3
 _REDIS_RETRY_BASE_DELAY_SECONDS = 0.02
-_SUCCESS_RECEIPT_EVENT = "video_asset.operation.receipt"
-_LEGACY_SUCCESS_RECEIPT_EVENT = "video_asset.create.receipt"
 _AMBIGUOUS_RECONCILE_ATTEMPTS = 3
 _GROUP_RECONCILE_BEFORE_SECONDS = 2 * 60
 _GROUP_RECONCILE_AFTER_SECONDS = 10 * 60
 _ASSET_SCAN_PAGE_SIZE = 100
 _ASSET_SCAN_MAX_ITEMS = 3000
-_RECEIPT_BINDING_FIELDS = ("provider_name", "region", "provider_binding")
 _SUPPORTED_ACTIONS = frozenset(
     {
         "create_group",
@@ -93,6 +106,7 @@ _SUPPORTED_ACTIONS = frozenset(
         "delete_asset",
     }
 )
+_OPERATION_FENCING_KEY_PREFIX = "video-assets:operation-fencing:"
 _RELEASE_OPERATION_LOCK_SCRIPT = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -104,6 +118,67 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 return 0
+"""
+_ALLOCATE_OPERATION_FENCING_SCRIPT = """
+-- volcano-operation-fence-allocate
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+local fencing = redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], ARGV[2])
+return fencing
+"""
+_CONFIRM_OPERATION_FENCE_SCRIPT = """
+-- volcano-operation-fence-confirm
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return -1
+end
+if tostring(redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then
+  return -2
+end
+if ARGV[3] ~= '' then
+  local raw = redis.call('GET', KEYS[3])
+  if not raw then
+    return -3
+  end
+  local ok, operation = pcall(cjson.decode, raw)
+  if not ok or type(operation) ~= 'table' then
+    return -4
+  end
+  if tonumber(operation['attempt'] or 1) ~= tonumber(ARGV[3]) then
+    return -5
+  end
+end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+"""
+_SET_FENCED_OPERATION_SCRIPT = """
+-- volcano-operation-fence-set
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return -1
+end
+if tostring(redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then
+  return -2
+end
+local raw = redis.call('GET', KEYS[3])
+if not raw then
+  return -3
+end
+local ok, current = pcall(cjson.decode, raw)
+if not ok or type(current) ~= 'table' then
+  return -4
+end
+if tonumber(current['attempt'] or 1) ~= tonumber(ARGV[3]) then
+  return -5
+end
+local current_status = tostring(current['status'] or '')
+if (current_status == 'succeeded' or current_status == 'failed')
+    and ARGV[7] ~= '1' then
+  return -6
+end
+redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[5])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return 1
 """
 
 
@@ -129,6 +204,88 @@ class _SuccessPersistenceError(RuntimeError):
 
 class _LeaseLostError(RuntimeError):
     """The operation lease is no longer owned by this worker."""
+
+
+@dataclass
+class _OperationFence:
+    operation_id: str
+    lock_key: str
+    lock_token: str
+    fencing_key: str
+    fencing: int
+    lease_lost: asyncio.Event
+    lease_deadline: float
+    attempt: int | None = None
+
+    def bind(self, operation: dict[str, Any]) -> None:
+        attempt = max(1, int(operation.get("attempt") or 1))
+        if self.attempt is None:
+            self.attempt = attempt
+            return
+        if self.attempt != attempt:
+            self.mark_lost()
+            raise _LeaseLostError(
+                "Volcano asset operation attempt fence was superseded"
+            )
+
+    def mark_confirmed(self) -> None:
+        self.lease_deadline = time.monotonic() + _OPERATION_LOCK_TTL_SECONDS
+
+    def mark_lost(self) -> None:
+        self.lease_lost.set()
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.lease_deadline
+
+    def details(self) -> dict[str, Any]:
+        if self.attempt is None:
+            raise RuntimeError("Volcano asset operation fence is not bound")
+        return {
+            "lock_token": self.lock_token,
+            "attempt": self.attempt,
+            "fencing": self.fencing,
+        }
+
+
+@dataclass
+class _OperationPersistence:
+    redis: Any
+    fence: _OperationFence
+
+    def bind(self, operation: dict[str, Any]) -> None:
+        self.fence.bind(operation)
+
+    async def confirm(self) -> None:
+        await _confirm_operation_fence(self.redis, self.fence)
+
+    async def update(
+        self,
+        operation: dict[str, Any],
+        **changes: Any,
+    ) -> None:
+        candidate = {
+            **operation,
+            **changes,
+            "updated_at": _utc_iso(),
+        }
+        await self.replace(operation, candidate)
+
+    async def replace(
+        self,
+        operation: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        terminal: bool = False,
+    ) -> None:
+        self.bind(candidate)
+        await _set_fenced_operation(
+            self.redis,
+            self.fence,
+            candidate,
+            terminal=terminal,
+        )
+        operation.clear()
+        operation.update(candidate)
 
 
 def _utc_iso() -> str:
@@ -192,6 +349,106 @@ async def _update_operation(
     operation.update(changes)
     operation["updated_at"] = _utc_iso()
     await _set_operation(redis, operation)
+
+
+def _operation_fencing_key(operation_id: str) -> str:
+    return f"{_OPERATION_FENCING_KEY_PREFIX}{operation_id}"
+
+
+async def _allocate_operation_fencing(
+    redis: Any,
+    *,
+    lock_key: str,
+    lock_token: str,
+    fencing_key: str,
+) -> int:
+    fencing = await _retry_redis_call(
+        lambda: redis.eval(
+            _ALLOCATE_OPERATION_FENCING_SCRIPT,
+            2,
+            lock_key,
+            fencing_key,
+            lock_token,
+            VOLCANO_ASSET_OPERATION_TTL_SECONDS,
+        )
+    )
+    return max(0, int(fencing or 0))
+
+
+def _raise_lost_fence(fence: _OperationFence) -> None:
+    fence.mark_lost()
+    raise _LeaseLostError("Volcano asset operation lease was lost")
+
+
+async def _confirm_operation_fence(
+    redis: Any,
+    fence: _OperationFence,
+) -> None:
+    if fence.lease_lost.is_set() or fence.expired():
+        _raise_lost_fence(fence)
+    try:
+        confirmed = await _retry_redis_call(
+            lambda: redis.eval(
+                _CONFIRM_OPERATION_FENCE_SCRIPT,
+                3,
+                fence.lock_key,
+                fence.fencing_key,
+                volcano_asset_operation_key(fence.operation_id),
+                fence.lock_token,
+                fence.fencing,
+                "" if fence.attempt is None else fence.attempt,
+                _OPERATION_LOCK_TTL_SECONDS,
+            )
+        )
+    except VolcanoAssetRedisUnavailable:
+        if fence.expired():
+            _raise_lost_fence(fence)
+        raise
+    if int(confirmed or 0) != 1:
+        _raise_lost_fence(fence)
+    fence.mark_confirmed()
+
+
+async def _set_fenced_operation(
+    redis: Any,
+    fence: _OperationFence,
+    operation: dict[str, Any],
+    *,
+    terminal: bool,
+) -> None:
+    if fence.attempt is None:
+        fence.bind(operation)
+    if fence.lease_lost.is_set() or fence.expired():
+        _raise_lost_fence(fence)
+    payload = json.dumps(
+        operation,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    try:
+        stored = await _retry_redis_call(
+            lambda: redis.eval(
+                _SET_FENCED_OPERATION_SCRIPT,
+                3,
+                fence.lock_key,
+                fence.fencing_key,
+                volcano_asset_operation_key(fence.operation_id),
+                fence.lock_token,
+                fence.fencing,
+                fence.attempt,
+                payload,
+                VOLCANO_ASSET_OPERATION_TTL_SECONDS,
+                _OPERATION_LOCK_TTL_SECONDS,
+                1 if terminal else 0,
+            )
+        )
+    except VolcanoAssetRedisUnavailable:
+        if fence.expired():
+            _raise_lost_fence(fence)
+        raise
+    if int(stored or 0) != 1:
+        _raise_lost_fence(fence)
+    fence.mark_confirmed()
 
 
 async def _provider_for_operation(
@@ -439,270 +696,30 @@ async def _write_audit(
         await session.commit()
 
 
-def _receipt_asset(asset: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: asset.get(key)
-        for key in (
-            "id",
-            "group_id",
-            "name",
-            "asset_type",
-            "status",
-            "project_name",
-            "create_time",
-            "update_time",
-            "error_code",
-            "error_message",
-        )
-    }
-
-
-def _receipt_group(group: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: group.get(key)
-        for key in (
-            "id",
-            "name",
-            "title",
-            "description",
-            "group_type",
-            "project_name",
-            "create_time",
-            "update_time",
-        )
-    }
-
-
-def _operation_has_value(operation: dict[str, Any], key: str) -> bool:
-    return key in operation and operation.get(key) is not None
-
-
-def _receipt_result(
-    operation: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    action = str(operation.get("action") or "")
-    if action in {"create_group", "update_group"}:
-        return _receipt_group(result)
-    if action in {"create_asset", "update_asset"}:
-        return _receipt_asset(result)
-    if action in {"delete_group", "delete_asset"}:
-        return {
-            "id": result.get("id"),
-            "deleted": bool(result.get("deleted")),
-            "resource_type": result.get("resource_type"),
-            "group_id": result.get("group_id"),
-            "asset_id": result.get("asset_id"),
-            "deleted_asset_ids": [
-                str(asset_id)
-                for asset_id in (
-                    result.get("deleted_asset_ids")
-                    if isinstance(result.get("deleted_asset_ids"), list)
-                    else []
-                )
-                if asset_id is not None and str(asset_id)
-            ],
-            "already_deleted": bool(result.get("already_deleted")),
-            "cascade_assets": result.get("cascade_assets"),
-        }
-    return {}
-
-
-def _success_receipt_details(
-    operation: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "operation_id": str(operation.get("id") or ""),
-        "action": str(operation.get("action") or ""),
-        "provider_name": str(operation.get("provider_name") or ""),
-        "provider_binding": str(operation.get("provider_binding") or ""),
-        "project_name": str(operation.get("project_name") or ""),
-        "region": str(operation.get("region") or ""),
-        "result": _receipt_result(operation, result),
-    }
-
-
-def _receipt_binding_matches(
-    operation: dict[str, Any],
-    details: dict[str, Any],
-) -> bool:
-    for field in _RECEIPT_BINDING_FIELDS:
-        expected = str(operation.get(field) or "")
-        if not expected or str(details.get(field) or "") != expected:
-            return False
-    return True
-
-
-def _validated_receipt_result(
-    operation: dict[str, Any],
-    raw: Any,
-) -> dict[str, Any] | None:
-    if not isinstance(raw, dict) or not raw.get("id"):
-        return None
-    action = str(operation.get("action") or "")
-    project_name = str(operation.get("project_name") or "")
-    if action == "create_asset":
-        expected = {
-            "group_id": str(operation.get("group_id") or ""),
-            "name": str(operation.get("name") or ""),
-            "asset_type": str(operation.get("asset_type") or ""),
-            "project_name": project_name,
-        }
-        if any(str(raw.get(key) or "") != value for key, value in expected.items()):
-            return None
-    elif action == "update_asset":
-        if (
-            str(raw.get("id") or "") != str(operation.get("asset_id") or "")
-            or str(raw.get("name") or "") != str(operation.get("name") or "")
-            or str(raw.get("project_name") or "") != project_name
-        ):
-            return None
-    elif action in {"create_group", "update_group"}:
-        expected_id = (
-            str(operation.get("group_id") or "")
-            if action == "update_group"
-            else str(raw.get("id") or "")
-        )
-        if (
-            str(raw.get("id") or "") != expected_id
-            or str(raw.get("group_type") or "").upper() != _AIGC_GROUP_TYPE
-            or str(raw.get("project_name") or "") != project_name
-        ):
-            return None
-        if _operation_has_value(operation, "name") and str(
-            raw.get("name") or ""
-        ) != str(operation.get("name") or ""):
-            return None
-        if _operation_has_value(operation, "description") and str(
-            raw.get("description") or ""
-        ) != str(operation.get("description") or ""):
-            return None
-    elif action == "delete_group":
-        if (
-            str(raw.get("id") or "") != str(operation.get("group_id") or "")
-            or raw.get("resource_type") != "group"
-            or str(raw.get("group_id") or "") != str(operation.get("group_id") or "")
-            or raw.get("deleted") is not True
-            or raw.get("cascade_assets") is not True
-            or not isinstance(raw.get("deleted_asset_ids"), list)
-        ):
-            return None
-    elif action == "delete_asset":
-        if (
-            str(raw.get("id") or "") != str(operation.get("asset_id") or "")
-            or raw.get("resource_type") != "asset"
-            or str(raw.get("asset_id") or "") != str(operation.get("asset_id") or "")
-            or raw.get("deleted") is not True
-            or not isinstance(raw.get("deleted_asset_ids"), list)
-            or str(operation.get("asset_id") or "")
-            not in {str(item) for item in raw.get("deleted_asset_ids") or []}
-        ):
-            return None
-    else:
-        return None
-    return _receipt_result(operation, raw)
-
-
 async def _read_success_receipt(
     operation: dict[str, Any],
+    *,
+    fence: _OperationFence,
 ) -> dict[str, Any] | None:
-    operation_id = str(operation.get("id") or "")
-    user_id = str(operation.get("user_id") or "")
-    if not operation_id or not user_id:
-        return None
-    async with SessionLocal() as session:
-        row = (
-            await session.execute(
-                select(AuditLog).where(
-                    AuditLog.id == operation_id,
-                    AuditLog.user_id == user_id,
-                    AuditLog.event_type.in_(
-                        (
-                            _SUCCESS_RECEIPT_EVENT,
-                            _LEGACY_SUCCESS_RECEIPT_EVENT,
-                        )
-                    ),
-                )
-            )
-        ).scalar_one_or_none()
-    if row is None or not isinstance(row.details, dict):
-        return None
-    if str(row.details.get("operation_id") or "") != operation_id:
-        return None
-    action = str(operation.get("action") or "")
-    if row.event_type == _LEGACY_SUCCESS_RECEIPT_EVENT:
-        if action != "create_asset" or not _receipt_binding_matches(
-            operation,
-            row.details,
-        ):
-            return None
-        raw_result = row.details.get("asset")
-    else:
-        if str(row.details.get("action") or "") != action:
-            return None
-        if str(row.details.get("project_name") or "") != str(
-            operation.get("project_name") or ""
-        ):
-            return None
-        if not _receipt_binding_matches(operation, row.details):
-            return None
-        raw_result = row.details.get("result")
-    return _validated_receipt_result(operation, raw_result)
+    return await _read_success_receipt_impl(
+        operation,
+        fence=fence,
+        session_factory=SessionLocal,
+    )
 
 
 async def _write_success_receipt(
     operation: dict[str, Any],
     result: dict[str, Any],
+    *,
+    fence: _OperationFence,
 ) -> None:
-    operation_id = str(operation.get("id") or "")
-    receipt = AuditLog(
-        id=operation_id,
-        user_id=str(operation.get("user_id") or "") or None,
-        event_type=_SUCCESS_RECEIPT_EVENT,
-        actor_email_hash=operation.get("actor_email_hash"),
-        actor_ip_hash=operation.get("actor_ip_hash"),
-        details=_success_receipt_details(operation, result),
+    await _write_success_receipt_impl(
+        operation,
+        result,
+        fence=fence,
+        session_factory=SessionLocal,
     )
-    async with SessionLocal() as session:
-        session.add(receipt)
-        try:
-            await session.commit()
-            return
-        except IntegrityError:
-            await session.rollback()
-        existing = await session.get(AuditLog, operation_id)
-        if (
-            existing is None
-            or existing.event_type
-            not in {_SUCCESS_RECEIPT_EVENT, _LEGACY_SUCCESS_RECEIPT_EVENT}
-            or str(existing.user_id or "") != str(operation.get("user_id") or "")
-            or not isinstance(existing.details, dict)
-            or not _receipt_binding_matches(operation, existing.details)
-            or (
-                existing.event_type == _LEGACY_SUCCESS_RECEIPT_EVENT
-                and str(operation.get("action") or "") != "create_asset"
-            )
-            or (
-                existing.event_type == _SUCCESS_RECEIPT_EVENT
-                and (
-                    str(existing.details.get("action") or "")
-                    != str(operation.get("action") or "")
-                    or str(existing.details.get("project_name") or "")
-                    != str(operation.get("project_name") or "")
-                )
-            )
-            or _validated_receipt_result(
-                operation,
-                (
-                    existing.details.get("asset")
-                    if existing.event_type == _LEGACY_SUCCESS_RECEIPT_EVENT
-                    else existing.details.get("result")
-                ),
-            )
-            is None
-        ):
-            raise RuntimeError("Volcano asset success receipt conflicts")
 
 
 def _service_failure(exc: VolcanoAssetServiceError) -> _OperationFailure:
@@ -743,14 +760,13 @@ def _source_url_is_fresh(operation: dict[str, Any]) -> bool:
 
 
 async def _source_url_for_submit(
-    redis: Any,
+    persistence: _OperationPersistence,
     operation: dict[str, Any],
 ) -> str:
     if _source_url_is_fresh(operation):
         return str(operation["source_url"])
     public_url, variant_kind = await _normalized_source_url(operation)
-    await _update_operation(
-        redis,
+    await persistence.update(
         operation,
         source_url=public_url,
         source_variant=variant_kind,
@@ -936,40 +952,62 @@ async def _reconcile_ambiguous_submit(
     return None
 
 
-async def _persist_success(
-    redis: Any,
+async def _persist_terminal_operation(
+    persistence: _OperationPersistence,
     operation: dict[str, Any],
-    result: dict[str, Any],
     *,
+    status: str,
+    result: dict[str, Any] | None,
+    error: dict[str, Any] | None,
+    retryable: bool,
+    retry_after_seconds: int | None,
     receipt_exists: bool = False,
 ) -> None:
-    if not receipt_exists:
+    persistence.bind(operation)
+    if status == "succeeded" and not receipt_exists:
+        assert result is not None
+        await persistence.confirm()
         try:
-            await _write_success_receipt(operation, result)
+            await _write_success_receipt(
+                operation,
+                result,
+                fence=persistence.fence,
+            )
         except Exception as exc:  # noqa: BLE001
             raise _SuccessPersistenceError(
                 "could not persist Volcano asset ownership receipt"
             ) from exc
-    operation.pop("source_url", None)
-    operation.pop("source_url_created_at", None)
-    operation.pop("baseline_asset_ids", None)
-    operation.pop("submit_outcome_uncertain", None)
+    candidate = dict(operation)
+    if status == "succeeded":
+        candidate.pop("source_url", None)
+        candidate.pop("source_url_created_at", None)
+        candidate.pop("baseline_asset_ids", None)
+        candidate.pop("submit_outcome_uncertain", None)
+    candidate.update(
+        {
+            "status": status,
+            "progress_stage": "completed" if status == "succeeded" else "failed",
+            "retryable": retryable,
+            "retry_after_seconds": retry_after_seconds,
+            "result": result,
+            "error": error,
+            "completed_at": _utc_iso(),
+            "updated_at": _utc_iso(),
+            **persistence.fence.details(),
+        }
+    )
     try:
-        await _update_operation(
-            redis,
+        await persistence.replace(
             operation,
-            status="succeeded",
-            progress_stage="completed",
-            retryable=False,
-            retry_after_seconds=None,
-            result=result,
-            error=None,
-            completed_at=_utc_iso(),
+            candidate,
+            terminal=True,
         )
     except VolcanoAssetRedisUnavailable as exc:
-        raise _SuccessPersistenceError(
-            "could not persist completed Volcano asset operation"
-        ) from exc
+        if status == "succeeded":
+            raise _SuccessPersistenceError(
+                "could not persist completed Volcano asset operation"
+            ) from exc
+        raise
 
 
 async def _release_quota_best_effort(
@@ -1015,57 +1053,47 @@ async def _renew_operation_lock(
 
 
 async def _operation_lock_heartbeat(
-    redis: Any,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: _OperationPersistence,
 ) -> None:
     while True:
-        await asyncio.sleep(_OPERATION_LOCK_RENEW_INTERVAL_SECONDS)
+        remaining = persistence.fence.lease_deadline - time.monotonic()
+        if remaining <= 0:
+            persistence.fence.mark_lost()
+            return
+        await asyncio.sleep(min(_OPERATION_LOCK_RENEW_INTERVAL_SECONDS, remaining))
+        if persistence.fence.expired():
+            persistence.fence.mark_lost()
+            return
         try:
-            renewed = await _renew_operation_lock(
-                redis,
-                lock_key,
-                lock_token,
-            )
+            await persistence.confirm()
         except VolcanoAssetRedisUnavailable:
             logger.warning(
                 "video_asset.operation_lock_renew_unavailable",
                 exc_info=True,
             )
             continue
-        if not renewed:
-            lease_lost.set()
+        except _LeaseLostError:
             return
 
 
 async def _confirm_operation_lock(
-    redis: Any,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: _OperationPersistence,
 ) -> None:
-    if lease_lost.is_set() or not await _renew_operation_lock(
-        redis,
-        lock_key,
-        lock_token,
-    ):
-        lease_lost.set()
-        raise _LeaseLostError("Volcano asset operation lease was lost")
+    await persistence.confirm()
 
 
 async def _defer_for_rate_limit(
-    redis: Any,
+    persistence: _OperationPersistence,
     operation: dict[str, Any],
     exc: VolcanoAssetCreateRateLimited,
 ) -> None:
+    redis = persistence.redis
     retry_after_seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
     delivery_generation = max(0, int(operation.get("delivery_generation") or 0)) + 1
     retry_not_before = (
         datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)
     ).isoformat()
-    await _update_operation(
-        redis,
+    await persistence.update(
         operation,
         status="queued",
         progress_stage="waiting_rate_limit",
@@ -1094,17 +1122,17 @@ async def _defer_for_rate_limit(
             ),
         )
     )
-    await _update_operation(
-        redis,
+    await persistence.update(
         operation,
         delivery_enqueued=True,
     )
 
 
 async def _recover_unconfirmed_delivery(
-    redis: Any,
+    persistence: _OperationPersistence,
     operation: dict[str, Any],
 ) -> bool:
+    redis = persistence.redis
     if (
         operation.get("status") != "queued"
         or operation.get("progress_stage") != "waiting_rate_limit"
@@ -1141,8 +1169,7 @@ async def _recover_unconfirmed_delivery(
             ),
         )
     )
-    await _update_operation(
-        redis,
+    await persistence.update(
         operation,
         delivery_enqueued=True,
     )
@@ -1150,7 +1177,7 @@ async def _recover_unconfirmed_delivery(
 
 
 async def _complete_operation(
-    redis: Any,
+    persistence: _OperationPersistence,
     operation: dict[str, Any],
     result: dict[str, Any],
     *,
@@ -1161,10 +1188,14 @@ async def _complete_operation(
         operation["provider_name"] = provider.name
         operation["region"] = provider.region
         operation["provider_binding"] = video_provider_binding_fingerprint(provider)
-    await _persist_success(
-        redis,
+    await _persist_terminal_operation(
+        persistence,
         operation,
-        result,
+        status="succeeded",
+        result=result,
+        error=None,
+        retryable=False,
+        retry_after_seconds=None,
         receipt_exists=receipt_exists,
     )
     if provider is not None:
@@ -1183,6 +1214,7 @@ async def _complete_operation(
             "model": operation.get("model"),
             "provider_name": provider.name,
             "project_name": provider.project_name,
+            **persistence.fence.details(),
         }
         if action.endswith("_group"):
             details["group_id"] = result.get("id") or operation.get("group_id")
@@ -1359,14 +1391,41 @@ async def process_volcano_asset_operation(
             "recovery_scheduled": recovery_scheduled,
         }
     lease_lost = asyncio.Event()
-    heartbeat = asyncio.create_task(
-        _operation_lock_heartbeat(
+    fencing_key = _operation_fencing_key(operation_id)
+    try:
+        fencing = await _allocate_operation_fencing(
             redis,
-            lock_key,
-            lock_token,
-            lease_lost,
+            lock_key=lock_key,
+            lock_token=lock_token,
+            fencing_key=fencing_key,
         )
+    except VolcanoAssetRedisUnavailable as exc:
+        with suppress(VolcanoAssetRedisUnavailable):
+            await _retry_redis_call(
+                lambda: redis.eval(
+                    _RELEASE_OPERATION_LOCK_SCRIPT,
+                    1,
+                    lock_key,
+                    lock_token,
+                )
+            )
+        raise Retry(defer=5 + random.uniform(0, 2)) from exc
+    if fencing <= 0:
+        lease_lost.set()
+        raise Retry(defer=5 + random.uniform(0, 2))
+    persistence = _OperationPersistence(
+        redis=redis,
+        fence=_OperationFence(
+            operation_id=operation_id,
+            lock_key=lock_key,
+            lock_token=lock_token,
+            fencing_key=fencing_key,
+            fencing=fencing,
+            lease_lost=lease_lost,
+            lease_deadline=time.monotonic() + _OPERATION_LOCK_TTL_SECONDS,
+        ),
     )
+    heartbeat = asyncio.create_task(_operation_lock_heartbeat(persistence))
     try:
         try:
             return await _process_locked(
@@ -1374,9 +1433,7 @@ async def process_volcano_asset_operation(
                 operation_id,
                 expected_attempt,
                 expected_delivery_generation,
-                lock_key=lock_key,
-                lock_token=lock_token,
-                lease_lost=lease_lost,
+                persistence=persistence,
             )
         except _create_parts._IntentLockBusyError as exc:
             delay = exc.retry_after_seconds

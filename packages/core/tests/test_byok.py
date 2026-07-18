@@ -150,6 +150,45 @@ def test_extract_sse_output_text_handles_delta_and_nested_responses() -> None:
     assert byok.extract_sse_output_text(raw) == "123"
 
 
+def test_extract_sse_prefers_output_text_done_over_streamed_deltas() -> None:
+    raw = "\n\n".join(
+        [
+            (
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","delta":"12"}'
+            ),
+            (
+                "event: response.output_text.done\n"
+                'data: {"type":"response.output_text.done","text":"123"}'
+            ),
+        ]
+    )
+
+    assert byok.extract_sse_output_text(raw) == "123"
+
+
+def test_extract_sse_prefers_completed_response_over_intermediate_snapshots() -> None:
+    raw = "\n\n".join(
+        [
+            (
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","delta":"12"}'
+            ),
+            (
+                "event: response.output_text.done\n"
+                'data: {"type":"response.output_text.done","text":"123"}'
+            ),
+            (
+                "event: response.completed\n"
+                'data: {"type":"response.completed","response":'
+                '{"output_text":"123"}}'
+            ),
+        ]
+    )
+
+    assert byok.extract_sse_output_text(raw) == "123"
+
+
 def test_validate_api_key_shape_strips_and_caps_length() -> None:
     assert byok.validate_api_key_shape("  sk-test  ") == "sk-test"
     with pytest.raises(ValueError):

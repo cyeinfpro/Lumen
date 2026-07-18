@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -189,6 +190,61 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
     # capabilities_jsonb 应当被透传到 ResolvedProvider，而不再被一刀切成 False/auto。
     assert provider.image_jobs_enabled is True
     assert provider.image_jobs_endpoint == "responses"
+    assert provider._byok_http_target.url == provider.base_url
+    assert byok_runtime.current_byok_http_target() is None
+
+
+def test_validate_byok_http_target_requires_same_origin() -> None:
+    target = PublicHttpTarget(
+        "https://byok.example/v1",
+        ("203.0.113.10",),
+    )
+
+    assert (
+        byok_runtime.validate_byok_http_target(
+            target,
+            "https://byok.example/v1/images/generations",
+        )
+        is target
+    )
+    with pytest.raises(ValueError, match="origin does not match"):
+        byok_runtime.validate_byok_http_target(
+            target,
+            "https://image-job.internal/v1/image-jobs",
+        )
+
+
+@pytest.mark.asyncio
+async def test_byok_http_target_context_is_task_local_and_resets() -> None:
+    targets = (
+        PublicHttpTarget("https://a.example/v1", ("203.0.113.10",)),
+        PublicHttpTarget("https://b.example/v1", ("203.0.113.11",)),
+    )
+    ready = (asyncio.Event(), asyncio.Event())
+    release = asyncio.Event()
+
+    async def observe(
+        target: PublicHttpTarget,
+        started: asyncio.Event,
+    ) -> PublicHttpTarget | None:
+        token = byok_runtime.bind_byok_http_target(target)
+        try:
+            started.set()
+            await release.wait()
+            return byok_runtime.current_byok_http_target()
+        finally:
+            byok_runtime.reset_byok_http_target(token)
+
+    tasks = [
+        asyncio.create_task(observe(target, started))
+        for target, started in zip(targets, ready, strict=True)
+    ]
+    await asyncio.gather(*(started.wait() for started in ready))
+
+    assert byok_runtime.current_byok_http_target() is None
+    release.set()
+    assert await asyncio.gather(*tasks) == list(targets)
+    assert byok_runtime.current_byok_http_target() is None
 
 
 @pytest.mark.asyncio
@@ -310,9 +366,10 @@ async def test_supplier_base_url_validation_rejects_private_rebind_after_cache(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    assert await byok_runtime._validate_supplier_base_url(
-        "https://rebind.example/v1"
-    ) == "https://rebind.example/v1"
+    assert (
+        await byok_runtime._validate_supplier_base_url("https://rebind.example/v1")
+        == "https://rebind.example/v1"
+    )
     with pytest.raises(ValueError, match="private address"):
         await byok_runtime._validate_supplier_base_url("https://rebind.example/v1")
 

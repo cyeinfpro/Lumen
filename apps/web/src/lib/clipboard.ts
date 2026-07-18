@@ -24,3 +24,12 @@ export async function copyTextToClipboard(text: string): Promise<void> {
     document.body.removeChild(textarea);
   }
 }
+
+export async function tryCopyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await copyTextToClipboard(text);
+    return true;
+  } catch {
+    return false;
+  }
+}

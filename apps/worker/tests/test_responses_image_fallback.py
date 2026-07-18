@@ -8,6 +8,7 @@ import os
 import textwrap
 from typing import Any
 
+import httpx
 import pytest
 from PIL import Image as _PILImage
 
@@ -130,14 +131,16 @@ def _patch_provider_pool_to_use_resolved_runtime(
         # image-job per-endpoint stats (auto-mode endpoint chain)。测试用 stub
         # 不维护状态；endpoint_chain 直接返回 configured 或默认顺序。
         def record_endpoint_success(
-            self, _provider_name: str, _endpoint: str, *, latency_ms: float | None = None
+            self,
+            _provider_name: str,
+            _endpoint: str,
+            *,
+            latency_ms: float | None = None,
         ) -> None:
             _ = latency_ms
             return None
 
-        def record_endpoint_failure(
-            self, _provider_name: str, _endpoint: str
-        ) -> None:
+        def record_endpoint_failure(self, _provider_name: str, _endpoint: str) -> None:
             return None
 
         def endpoint_chain(
@@ -198,14 +201,9 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-class DummyResponse:
+class DummyResponse(httpx.Response):
     def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
-        self.status_code = status_code
-        self._payload = payload
-        self.text = str(payload)
-
-    def json(self) -> dict[str, Any]:
-        return self._payload
+        super().__init__(status_code, json=payload)
 
 
 class DummyStreamResponse:
@@ -321,25 +319,45 @@ class InterruptedStreamResponse:
         raise httpx.RemoteProtocolError("server disconnected")
 
 
+class _BufferedPostResponse:
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+
+    async def __aenter__(self) -> httpx.Response:
+        return self.response
+
+    async def __aexit__(self, *args: Any) -> None:
+        _ = args
+        await self.response.aclose()
+
+
 class DummyClient:
     def __init__(self) -> None:
         self.posts: list[dict[str, Any]] = []
         self.streams: list[dict[str, Any]] = []
 
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
         return DummyResponse(
             500, {"error": {"message": "direct failed", "code": "boom"}}
         )
 
-    def stream(self, method: str, url: str, **kwargs: Any) -> DummyStreamResponse:
-        self.streams.append({"method": method, "url": url, **kwargs})
+    def _responses_stream_response(self) -> Any:
         return DummyStreamResponse()
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> Any:
+        request = {"method": method, "url": url, **kwargs}
+        if url.rstrip("/").endswith("/responses"):
+            self.streams.append(request)
+            return self._responses_stream_response()
+        assert method == "POST"
+        self.posts.append({"url": url, **kwargs})
+        return _BufferedPostResponse(self._post_response(url, **kwargs))
 
 
 class SuccessfulDirectClient(DummyClient):
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
         return DummyResponse(
             200,
             {"data": [{"b64_json": PNG_B64, "revised_prompt": "direct prompt"}]},
@@ -347,8 +365,8 @@ class SuccessfulDirectClient(DummyClient):
 
 
 class MultiDirectClient(DummyClient):
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
         return DummyResponse(
             200,
             {
@@ -361,7 +379,7 @@ class MultiDirectClient(DummyClient):
         )
 
 
-class ImageJobResponse:
+class ImageJobResponse(httpx.Response):
     def __init__(
         self,
         status_code: int,
@@ -369,15 +387,10 @@ class ImageJobResponse:
         *,
         content: bytes = b"",
     ) -> None:
-        self.status_code = status_code
-        self._payload = payload
-        self.content = content
-        self.headers: dict[str, str] = {}
-
-    def json(self) -> dict[str, Any]:
-        if self._payload is None:
-            raise ValueError("no json payload")
-        return self._payload
+        if payload is None:
+            super().__init__(status_code, content=content)
+        else:
+            super().__init__(status_code, json=payload)
 
 
 class SuccessfulImageJobClient(DummyClient):
@@ -386,8 +399,8 @@ class SuccessfulImageJobClient(DummyClient):
         self.gets: list[dict[str, Any]] = []
         self.poll_count = 0
 
-    async def post(self, url: str, **kwargs: Any) -> ImageJobResponse:
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
         return ImageJobResponse(
             200,
             {
@@ -402,7 +415,9 @@ class SuccessfulImageJobClient(DummyClient):
         if url.endswith("/v1/image-jobs/img_test_123"):
             self.poll_count += 1
             if self.poll_count == 1:
-                return ImageJobResponse(200, {"job_id": "img_test_123", "status": "running"})
+                return ImageJobResponse(
+                    200, {"job_id": "img_test_123", "status": "running"}
+                )
             return ImageJobResponse(
                 200,
                 {
@@ -422,8 +437,8 @@ class SuccessfulImageJobClient(DummyClient):
 
 
 class FailingThenSuccessfulImageJobClient(SuccessfulImageJobClient):
-    async def post(self, url: str, **kwargs: Any) -> ImageJobResponse:
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url
         endpoint = kwargs["json"]["endpoint"]
         if endpoint == "/v1/responses":
             return ImageJobResponse(
@@ -466,27 +481,15 @@ class FailingThenSuccessfulImageJobClient(SuccessfulImageJobClient):
 
 
 class TimeoutDirectClient(DummyClient):
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        import httpx
-
-        self.posts.append({"url": url, **kwargs})
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
         raise httpx.ReadTimeout("direct image endpoint timed out")
 
 
 class BadJsonDirectClient(DummyClient):
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        self.posts.append({"url": url, **kwargs})
-
-        class BadJsonResponse(DummyResponse):
-            text = "not-json"
-
-            def __init__(self) -> None:
-                self.status_code = 200
-
-            def json(self) -> dict[str, Any]:
-                raise ValueError("invalid json")
-
-        return BadJsonResponse()
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
+        return httpx.Response(200, content=b"not-json")
 
 
 class BadJsonDirectImagesClient(BadJsonDirectClient):
@@ -494,32 +497,22 @@ class BadJsonDirectImagesClient(BadJsonDirectClient):
 
 
 class RealGatewayStreamClient(DummyClient):
-    def stream(self, method: str, url: str, **kwargs: Any) -> RealGatewayStreamResponse:
-        self.streams.append({"method": method, "url": url, **kwargs})
+    def _responses_stream_response(self) -> RealGatewayStreamResponse:
         return RealGatewayStreamResponse()
 
 
 class NoImageStreamClient(DummyClient):
-    def stream(self, method: str, url: str, **kwargs: Any) -> NoImageStreamResponse:
-        self.streams.append({"method": method, "url": url, **kwargs})
+    def _responses_stream_response(self) -> NoImageStreamResponse:
         return NoImageStreamResponse()
 
 
 class ErrorStreamClient(DummyClient):
-    async def post(self, url: str, **kwargs: Any) -> DummyResponse:
-        self.posts.append({"url": url, **kwargs})
-        return DummyResponse(
-            500, {"error": {"message": "direct failed", "code": "boom"}}
-        )
-
-    def stream(self, method: str, url: str, **kwargs: Any) -> ErrorStreamResponse:
-        self.streams.append({"method": method, "url": url, **kwargs})
+    def _responses_stream_response(self) -> ErrorStreamResponse:
         return ErrorStreamResponse()
 
 
 class InterruptedStreamClient(DummyClient):
-    def stream(self, method: str, url: str, **kwargs: Any) -> InterruptedStreamResponse:
-        self.streams.append({"method": method, "url": url, **kwargs})
+    def _responses_stream_response(self) -> InterruptedStreamResponse:
         return InterruptedStreamResponse()
 
 
@@ -877,9 +870,7 @@ async def test_generate_image_uses_responses_stream(
     # instructions 对齐 Codex CLI 标准模板：字段必须存在但内容为空串
     assert stream_body.get("instructions") == ""
     progress_types = [
-        event["type"]
-        for event in progress_events
-        if event["type"] != "provider_used"
+        event["type"] for event in progress_events if event["type"] != "provider_used"
     ]
     assert progress_types == [
         "fallback_started",
@@ -1039,9 +1030,7 @@ async def test_generate_image_can_use_image2_direct_route(
         "moderation": "low",
     }
     progress_types = [
-        event["type"]
-        for event in progress_events
-        if event["type"] != "provider_used"
+        event["type"] for event in progress_events if event["type"] != "provider_used"
     ]
     assert progress_types == [
         "final_image",

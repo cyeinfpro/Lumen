@@ -47,7 +47,10 @@ def _install_create_asset_runtime(
     async def reject_receipt(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("ambiguous operation must not write ownership receipt")
 
-    async def no_receipt(_operation: dict[str, Any]) -> None:
+    async def no_receipt(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> None:
         return None
 
     monkeypatch.setattr(volcano_assets, "_provider_for_operation", provider_for)

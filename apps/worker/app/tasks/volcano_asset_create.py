@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import time
@@ -31,9 +30,7 @@ class _CreateAssetState:
     redis: Any
     operation: dict[str, Any]
     operation_id: str
-    lock_key: str
-    lock_token: str
-    lease_lost: asyncio.Event
+    persistence: Any
     provider: Any = None
     client: Any = None
     quota_key: Any = None
@@ -46,7 +43,7 @@ class _CreateAssetState:
 
 
 def _ensure_lease(state: _CreateAssetState) -> None:
-    if state.lease_lost.is_set():
+    if state.persistence.fence.lease_lost.is_set():
         raise _runtime()._LeaseLostError("Volcano asset operation lease was lost")
 
 
@@ -70,9 +67,7 @@ def _intent_lock_key(state: _CreateAssetState) -> str:
 
 
 async def _wait_for_intent_lock(state: _CreateAssetState) -> None:
-    runtime = _runtime()
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         status="queued",
         progress_stage="waiting_intent_lock",
@@ -178,8 +173,7 @@ async def _release_reservation(state: _CreateAssetState) -> None:
 async def _prepare_scope(state: _CreateAssetState) -> None:
     runtime = _runtime()
     _ensure_lease(state)
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         status="running",
         progress_stage="validating_scope",
@@ -218,7 +212,7 @@ async def _recover_prior_submission(
     if recovered is None:
         raise runtime._ambiguous_create_asset_failure()
     return await runtime._complete_operation(
-        state.redis,
+        state.persistence,
         state.operation,
         recovered,
         provider=state.provider,
@@ -228,8 +222,7 @@ async def _recover_prior_submission(
 async def _reserve_asset_quota(state: _CreateAssetState) -> None:
     runtime = _runtime()
     _ensure_lease(state)
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         progress_stage="checking_quota",
     )
@@ -262,8 +255,7 @@ async def _reserve_asset_quota(state: _CreateAssetState) -> None:
 async def _prepare_source_url(state: _CreateAssetState) -> str:
     runtime = _runtime()
     _ensure_lease(state)
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         progress_stage=(
             "normalizing_image"
@@ -271,15 +263,17 @@ async def _prepare_source_url(state: _CreateAssetState) -> str:
             else "normalizing_video"
         ),
     )
-    return await runtime._source_url_for_submit(state.redis, state.operation)
+    return await runtime._source_url_for_submit(
+        state.persistence,
+        state.operation,
+    )
 
 
 async def _wait_for_submit_slot(
     state: _CreateAssetState,
 ) -> dict[str, Any] | None:
     runtime = _runtime()
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         progress_stage="waiting_submit_slot",
     )
@@ -295,7 +289,11 @@ async def _wait_for_submit_slot(
             now_ms=int(time.time() * 1000),
         )
     except runtime.VolcanoAssetCreateRateLimited as exc:
-        await runtime._defer_for_rate_limit(state.redis, state.operation, exc)
+        await runtime._defer_for_rate_limit(
+            state.persistence,
+            state.operation,
+            exc,
+        )
         state.deferred = True
         return {
             "status": "deferred",
@@ -324,8 +322,7 @@ async def _request_asset(
     except runtime.VolcanoAssetServiceError as exc:
         mapped_failure = runtime._service_failure(exc)
         if exc.status_code == 429:
-            await runtime._update_operation(
-                state.redis,
+            await state.persistence.update(
                 state.operation,
                 submit_started_at=None,
                 submit_outcome_uncertain=False,
@@ -342,8 +339,7 @@ async def _request_asset(
             if recovered is not None:
                 return recovered, True
             raise runtime._ambiguous_create_asset_failure() from exc
-        await runtime._update_operation(
-            state.redis,
+        await state.persistence.update(
             state.operation,
             submit_started_at=None,
             submit_outcome_uncertain=False,
@@ -402,20 +398,14 @@ async def _submit_asset(
         state.provider,
         state.operation,
     )
-    await runtime._update_operation(
-        state.redis,
+    await state.persistence.update(
         state.operation,
         progress_stage="submitting",
         submit_started_at=runtime._utc_iso(),
         submit_outcome_uncertain=True,
         baseline_asset_ids=baseline_asset_ids,
     )
-    await runtime._confirm_operation_lock(
-        state.redis,
-        state.lock_key,
-        state.lock_token,
-        state.lease_lost,
-    )
+    await runtime._confirm_operation_lock(state.persistence)
     await _confirm_intent_lock(state)
     raw_asset, normalized = await _request_asset(state, public_url)
     asset = await _normalize_submitted_asset(
@@ -424,7 +414,7 @@ async def _submit_asset(
         already_normalized=normalized,
     )
     result = await runtime._complete_operation(
-        state.redis,
+        state.persistence,
         state.operation,
         asset,
         provider=state.provider,
@@ -490,62 +480,15 @@ async def _record_create_failure(
     state: _CreateAssetState,
     failure: Any,
 ) -> dict[str, Any]:
-    runtime = _runtime()
     try:
-        await runtime._update_operation(
-            state.redis,
+        return await _runtime()._record_operation_failure(
+            state.persistence,
             state.operation,
-            status="failed",
-            progress_stage="failed",
-            retryable=failure.retryable,
-            retry_after_seconds=failure.retry_after_seconds,
-            result=None,
-            error={
-                "code": failure.code,
-                "message": failure.message,
-                "retryable": failure.retryable,
-                "retry_after_seconds": failure.retry_after_seconds,
-            },
-            completed_at=runtime._utc_iso(),
-        )
-    except runtime.VolcanoAssetRedisUnavailable:
-        if not state.deferred:
-            await _release_reservation(state)
-        raise
-    try:
-        await runtime._write_audit(
-            state.operation,
-            event_type="video_asset.create.failed",
-            details={
-                "operation_id": state.operation_id,
-                "group_id": state.operation.get("group_id"),
-                "asset_type": state.operation.get("asset_type"),
-                "local_source_id": state.operation.get("local_source_id"),
-                "model": state.operation.get("model"),
-                "provider_name": state.operation.get("provider_name"),
-                "project_name": state.operation.get("project_name"),
-                "error_code": failure.code,
-                "retryable": failure.retryable,
-            },
-        )
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "video_asset.failure_audit_failed operation_id=%s",
-            state.operation_id,
-            exc_info=True,
+            failure,
         )
     finally:
         if not state.deferred:
             await _release_reservation(state)
-    return {
-        "status": "failed",
-        "operation_id": state.operation_id,
-        "error": {
-            "code": failure.code,
-            "message": failure.message,
-            "retryable": failure.retryable,
-        },
-    }
 
 
 async def _process_create_asset(
@@ -553,18 +496,14 @@ async def _process_create_asset(
     operation: dict[str, Any],
     failure: Any | None,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     state = _CreateAssetState(
         redis=redis,
         operation=operation,
         operation_id=str(operation.get("id") or ""),
-        lock_key=lock_key,
-        lock_token=lock_token,
-        lease_lost=lease_lost,
+        persistence=persistence,
     )
     try:
         try:

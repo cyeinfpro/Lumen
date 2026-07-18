@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -8,10 +10,16 @@ from typing import Any
 import pytest
 from fastapi import HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.routes import billing
 from app.services import pricing_cache
 from lumen_core import billing as billing_core
+from lumen_core.models import Base, UserWallet, WalletTransaction
 from lumen_core.schemas import (
     AdminBillingBootstrapIn,
     AdminRedemptionCodeCreateIn,
@@ -32,6 +40,27 @@ def _request(
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+@asynccontextmanager
+async def _wallet_session() -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(
+                sync_connection,
+                tables=[
+                    UserWallet.__table__,
+                    WalletTransaction.__table__,
+                ],
+            )
+        )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            yield session
+    finally:
+        await engine.dispose()
 
 
 def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
@@ -210,6 +239,136 @@ def test_generated_redemption_secret_is_strong_and_random() -> None:
 
     assert len(first) >= 48
     assert first != second
+
+
+@pytest.mark.asyncio
+async def test_wallet_api_24h_activity_aggregates_all_rows_and_window_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
+    window_start = now - timedelta(hours=24)
+    user_id = "user-aggregate"
+
+    async def low_balance_threshold(_db: Any) -> int:
+        return 2_000_000
+
+    monkeypatch.setattr(billing, "_low_balance_threshold", low_balance_threshold)
+    monkeypatch.setattr(billing, "_wallet_activity_window_end", lambda: now)
+
+    rows = [
+        WalletTransaction(
+            id=f"tx-{index:04d}",
+            user_id=user_id,
+            kind="topup_redeem",
+            amount_micro=1_000,
+            balance_after=0,
+            hold_after=0,
+            idempotency_key=f"idempotency-{index:04d}",
+            meta={},
+            created_at=now - timedelta(hours=1, seconds=index),
+        )
+        for index in range(35)
+    ]
+    rows.extend(
+        [
+            WalletTransaction(
+                id="tx-window-start",
+                user_id=user_id,
+                kind="topup_redeem",
+                amount_micro=2_000,
+                balance_after=0,
+                hold_after=0,
+                idempotency_key="idempotency-window-start",
+                meta={},
+                created_at=window_start,
+            ),
+            WalletTransaction(
+                id="tx-before-window",
+                user_id=user_id,
+                kind="topup_redeem",
+                amount_micro=500_000,
+                balance_after=0,
+                hold_after=0,
+                idempotency_key="idempotency-before-window",
+                meta={},
+                created_at=window_start - timedelta(microseconds=1),
+            ),
+            WalletTransaction(
+                id="tx-inside-spend",
+                user_id=user_id,
+                kind="charge",
+                amount_micro=-4_000,
+                balance_after=0,
+                hold_after=0,
+                idempotency_key="idempotency-inside-spend",
+                meta={},
+                created_at=now - timedelta(hours=2),
+            ),
+            WalletTransaction(
+                id="tx-window-end",
+                user_id=user_id,
+                kind="charge",
+                amount_micro=-3_000,
+                balance_after=0,
+                hold_after=0,
+                idempotency_key="idempotency-window-end",
+                meta={},
+                created_at=now,
+            ),
+            WalletTransaction(
+                id="tx-future",
+                user_id=user_id,
+                kind="charge",
+                amount_micro=-900_000,
+                balance_after=0,
+                hold_after=0,
+                idempotency_key="idempotency-future",
+                meta={},
+                created_at=now + timedelta(microseconds=1),
+            ),
+        ]
+    )
+
+    async with _wallet_session() as db:
+        db.add(
+            UserWallet(
+                user_id=user_id,
+                balance_micro=123_000,
+                hold_micro=0,
+            )
+        )
+        db.add_all(rows)
+        await db.flush()
+
+        first_page = await billing.list_my_wallet_transactions(
+            SimpleNamespace(id=user_id, account_mode="wallet"),
+            db,
+            limit=30,
+            cursor=None,
+            kind=None,
+        )
+        wallet = await billing.get_my_wallet(
+            SimpleNamespace(id=user_id, account_mode="wallet"),
+            db,
+        )
+
+    assert len(first_page.items) == 30
+    assert first_page.next_cursor is not None
+    assert wallet.activity_24h.topup.micro == 37_000
+    assert wallet.activity_24h.spend.micro == 7_000
+
+
+@pytest.mark.asyncio
+async def test_byok_wallet_activity_has_explicit_zero_semantics() -> None:
+    out = await billing._wallet_out(  # noqa: SLF001
+        _Db(),
+        SimpleNamespace(id="byok-user", account_mode="byok"),
+    )
+
+    assert out.mode == "byok"
+    assert out.balance is None
+    assert out.activity_24h.topup.micro == 0
+    assert out.activity_24h.spend.micro == 0
 
 
 class _Db:

@@ -28,6 +28,7 @@ import type {
   StoryboardRun,
   StoryboardShot,
 } from "@/lib/apiClient";
+import { useUserQueryScope } from "@/components/QueryProvider";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
@@ -435,6 +436,7 @@ export function StoryboardIndexPage() {
 
 export function StoryboardDetailPage({ storyboardId }: { storyboardId: string }) {
   const query = useStoryboardQuery(storyboardId);
+  const userScope = useUserQueryScope();
   const qc = useQueryClient();
   const router = useRouter();
   const pathname = usePathname();
@@ -447,29 +449,37 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
     [`storyboard:${storyboardId}`],
     useMemo(
       () => {
-        const refresh = () => qc.invalidateQueries({ queryKey: qk.storyboard(storyboardId) });
+        const userKeys = qk.user(userScope.userId);
+        const refreshDetail = () => {
+          qc.invalidateQueries({ queryKey: userKeys.storyboard(storyboardId) });
+        };
+        const refreshDetailAndList = () => {
+          refreshDetail();
+          qc.invalidateQueries({ queryKey: userKeys.storyboardsAll() });
+        };
         return {
-          "storyboard.updated": refresh,
-          "storyboard.asset_generating": refresh,
-          "storyboard.asset_ready": refresh,
-          "storyboard.keyframe_generating": refresh,
-          "storyboard.keyframe_ready": refresh,
-          "storyboard.shot_submitted": refresh,
-          "storyboard.shot_done": refresh,
-          "storyboard.assembling": refresh,
-          "storyboard.assembled": refresh,
-          "storyboard.assembly_failed": refresh,
-          "generation.succeeded": refresh,
-          "generation.failed": refresh,
-          "generation.canceled": refresh,
-          "video.progress": refresh,
-          "video.fetching": refresh,
-          "video.succeeded": refresh,
-          "video.failed": refresh,
-          "video.canceled": refresh,
+          "storyboard.updated": refreshDetailAndList,
+          "storyboard.deleted": refreshDetailAndList,
+          "storyboard.asset_generating": refreshDetailAndList,
+          "storyboard.asset_ready": refreshDetailAndList,
+          "storyboard.keyframe_generating": refreshDetailAndList,
+          "storyboard.keyframe_ready": refreshDetailAndList,
+          "storyboard.shot_submitted": refreshDetailAndList,
+          "storyboard.shot_done": refreshDetailAndList,
+          "storyboard.assembling": refreshDetailAndList,
+          "storyboard.assembled": refreshDetailAndList,
+          "storyboard.assembly_failed": refreshDetailAndList,
+          "generation.succeeded": refreshDetailAndList,
+          "generation.failed": refreshDetailAndList,
+          "generation.canceled": refreshDetailAndList,
+          "video.progress": refreshDetail,
+          "video.fetching": refreshDetailAndList,
+          "video.succeeded": refreshDetailAndList,
+          "video.failed": refreshDetailAndList,
+          "video.canceled": refreshDetailAndList,
         };
       },
-      [qc, storyboardId],
+      [qc, storyboardId, userScope.userId],
     ),
   );
 

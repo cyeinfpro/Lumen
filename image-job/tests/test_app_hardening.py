@@ -66,10 +66,11 @@ class _ChunkedRequest:
         chunks: list[bytes],
         *,
         content_length: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
-        self.headers = (
-            {"content-length": content_length} if content_length is not None else {}
-        )
+        self.headers = dict(headers or {})
+        if content_length is not None:
+            self.headers["content-length"] = content_length
         self._chunks = chunks
         self.stream_started = False
 
@@ -377,13 +378,14 @@ class _ScriptedSseResponse:
         self._lines = lines
         self._delay_s = delay_s
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        _ = chunk_size
         for line in self._lines:
             if self._delay_s:
                 await asyncio.sleep(self._delay_s)
             else:
                 await asyncio.sleep(0)
-            yield line
+            yield line.encode("utf-8") + b"\n"
 
 
 def test_responses_stream_response_failed_raises_validation_for_moderation(
@@ -463,9 +465,10 @@ def test_responses_stream_idle_timeout_raises_retryable_network(monkeypatch) -> 
         status_code = 200
         headers = {"content-type": "text/event-stream"}
 
-        async def aiter_lines(self):
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            _ = chunk_size
             await asyncio.sleep(1.0)  # 模拟上游 stall
-            yield "data: {}"
+            yield b"data: {}\n"
 
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
@@ -476,6 +479,50 @@ def test_responses_stream_idle_timeout_raises_retryable_network(monkeypatch) -> 
     assert exc.value.error_class == app.ERROR_CLASS_NETWORK
     assert exc.value.retryable is True
     assert "idle" in exc.value.error.lower()
+
+
+def test_responses_stream_rejects_overlong_unterminated_line_before_decoder_buffers(
+    monkeypatch,
+) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "RESPONSES_STREAM_MAX_BYTES", 32)
+
+    class _RawOnlyResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.chunks_requested = 0
+            self.line_decoder_called = False
+
+        async def aiter_lines(self):
+            self.line_decoder_called = True
+            raise AssertionError("SSE must not use httpx line decoding")
+            yield ""
+
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            _ = chunk_size
+            self.chunks_requested += 1
+            yield b"data: " + (b"x" * 64)
+            raise AssertionError("reader requested bytes after the limit was hit")
+
+    response = _RawOnlyResponse()
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.extract_responses_stream_images(
+                response,
+                SimpleNamespace(),
+                job_id="job_long_line",
+            )
+        )
+
+    assert exc.value.error == (
+        "Responses stream exceeded sidecar byte budget before final image"
+    )
+    assert exc.value.error_class == app.ERROR_CLASS_NETWORK
+    assert exc.value.retryable is True
+    assert response.chunks_requested == 1
+    assert response.line_decoder_called is False
 
 
 # --- 3) download_image_url streaming 预检 ----------------------------------
@@ -495,6 +542,7 @@ class _StreamGetResponse:
         self.is_success = 200 <= status_code < 400
         self.yielded = 0
         self.closed = False
+        self.read_called = False
 
     async def __aenter__(self) -> "_StreamGetResponse":
         return self
@@ -502,17 +550,20 @@ class _StreamGetResponse:
     async def __aexit__(self, *_args: object) -> None:
         self.closed = True
 
-    async def aiter_raw(self):
+    async def aiter_raw(self, chunk_size: int | None = None):
+        _ = chunk_size
         for c in self._chunks:
             self.yielded += 1
             await asyncio.sleep(0)
             yield c
 
-    async def aiter_bytes(self):
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        _ = chunk_size
         async for chunk in self.aiter_raw():
             yield chunk
 
     async def aread(self) -> bytes:
+        self.read_called = True
         return b"".join(self._chunks)
 
 
@@ -1189,6 +1240,40 @@ def test_refs_dedupe_is_scoped_by_auth_hash(monkeypatch, tmp_path) -> None:
     app._write_ref_sync("auth-b", sha, "token-b", "png", raw)  # noqa: SLF001
     assert app._existing_ref_sync("auth-a", sha) == ("token-a", "png")  # noqa: SLF001
     assert app._existing_ref_sync("auth-b", sha) == ("token-b", "png")  # noqa: SLF001
+
+
+def test_reference_upload_uses_pillow_format_for_mismatched_content_type(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = load_app_module()
+    db_path = tmp_path / "image_jobs.sqlite3"
+    refs_dir = tmp_path / "refs"
+    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", refs_dir)
+    app.init_storage_sync()
+
+    raw = _png_bytes()
+    request = _ChunkedRequest(
+        [raw],
+        headers={
+            "authorization": "Bearer sk-test",
+            "content-type": "image/jpeg",
+        },
+    )
+
+    result = asyncio.run(app.upload_reference(request))
+
+    assert result["url"].endswith(".png")
+    files = list(refs_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].suffix == ".png"
+    assert files[0].read_bytes() == raw
+    assert app._candidate_filename(
+        "ref-0",
+        app.ImageCandidate(raw, "image/jpeg"),
+    ) == ("ref-0.png", "image/png")
 
 
 def test_image_metadata_rejects_images_above_pixel_limit(monkeypatch) -> None:

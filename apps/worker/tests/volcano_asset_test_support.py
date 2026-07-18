@@ -112,15 +112,55 @@ class Redis:
     async def eval(
         self,
         script: str,
-        _numkeys: int,
-        key: str,
-        token: str,
-        *args: Any,
+        numkeys: int,
+        *parts: Any,
     ) -> int:
+        keys = [str(item) for item in parts[:numkeys]]
+        args = list(parts[numkeys:])
+        if "volcano-operation-fence-allocate" in script:
+            lock_key, fencing_key = keys
+            token = str(args[0])
+            if self.values.get(lock_key) != token:
+                return 0
+            fencing = int(self.values.get(fencing_key) or 0) + 1
+            self.values[fencing_key] = str(fencing)
+            return fencing
+        if "volcano-operation-fence-confirm" in script:
+            lock_key, fencing_key, operation_key = keys
+            token, fencing, attempt = map(str, args[:3])
+            if self.values.get(lock_key) != token:
+                return -1
+            if str(self.values.get(fencing_key) or "") != fencing:
+                return -2
+            if self.renew_result != 1:
+                return 0
+            if attempt:
+                operation = json.loads(self.values[operation_key])
+                if int(operation.get("attempt") or 1) != int(attempt):
+                    return -5
+            return 1
+        if "volcano-operation-fence-set" in script:
+            lock_key, fencing_key, operation_key = keys
+            token, fencing, attempt, payload = map(str, args[:4])
+            if self.values.get(lock_key) != token:
+                return -1
+            if str(self.values.get(fencing_key) or "") != fencing:
+                return -2
+            current = json.loads(self.values[operation_key])
+            if int(current.get("attempt") or 1) != int(attempt):
+                return -5
+            candidate = json.loads(payload)
+            if self.fail_success_sets > 0 and candidate.get("status") == "succeeded":
+                self.fail_success_sets -= 1
+                raise ConnectionError("success state unavailable")
+            self.values[operation_key] = payload
+            return 1
+        key = keys[0]
+        token = str(args[0])
         if self.values.get(key) != token:
             return 0
         if "EXPIRE" in script:
-            assert args
+            assert args[1:]
             return self.renew_result
         self.values.pop(key, None)
         return 1

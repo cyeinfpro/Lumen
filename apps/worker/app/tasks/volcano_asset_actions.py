@@ -322,9 +322,7 @@ async def _process_create_group(
     provider: VideoProviderDefinition,
     client: Any,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     operation_id = str(operation.get("id") or "")
@@ -333,15 +331,13 @@ async def _process_create_group(
         and "submit_outcome_uncertain" not in operation
     )
     if prior_submit_is_uncertain:
-        await runtime._update_operation(
-            redis,
+        await persistence.update(
             operation,
             progress_stage="submit_outcome_uncertain",
         )
         raise runtime._ambiguous_create_group_failure()
 
-    await runtime._update_operation(
-        redis,
+    await persistence.update(
         operation,
         progress_stage="checking_quota",
     )
@@ -372,14 +368,8 @@ async def _process_create_group(
     )
     reservation_acquired = True
     try:
-        await runtime._confirm_operation_lock(
-            redis,
-            lock_key,
-            lock_token,
-            lease_lost,
-        )
-        await runtime._update_operation(
-            redis,
+        await runtime._confirm_operation_lock(persistence)
+        await persistence.update(
             operation,
             progress_stage="submitting",
             submit_started_at=runtime._utc_iso(),
@@ -399,8 +389,7 @@ async def _process_create_group(
             mapped_failure = runtime._service_failure(exc)
             if exc.status_code in {502, 503, 504}:
                 raise runtime._ambiguous_create_group_failure() from exc
-            await runtime._update_operation(
-                redis,
+            await persistence.update(
                 operation,
                 submit_started_at=None,
                 submit_outcome_uncertain=False,
@@ -426,7 +415,7 @@ async def _process_create_group(
         if not valid_group:
             raise runtime._ambiguous_create_group_failure()
         return await runtime._complete_operation(
-            redis,
+            persistence,
             operation,
             group,
             provider=provider,
@@ -447,16 +436,14 @@ async def _process_update_group(
     provider: VideoProviderDefinition,
     client: Any,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     group_id = str(operation.get("group_id") or "")
     current = await runtime._get_scoped_group(client, provider, group_id)
     if runtime._group_target_reached(operation, current):
         return await runtime._complete_operation(
-            redis,
+            persistence,
             operation,
             current,
             provider=provider,
@@ -474,14 +461,8 @@ async def _process_update_group(
         payload["Description"] = str(operation.get("description") or "")
         fallback["description"] = payload["Description"]
 
-    await runtime._confirm_operation_lock(
-        redis,
-        lock_key,
-        lock_token,
-        lease_lost,
-    )
-    await runtime._update_operation(
-        redis,
+    await runtime._confirm_operation_lock(persistence)
+    await persistence.update(
         operation,
         progress_stage="submitting",
         submit_started_at=runtime._utc_iso(),
@@ -497,7 +478,7 @@ async def _process_update_group(
             )
             if recovered is not None:
                 return await runtime._complete_operation(
-                    redis,
+                    persistence,
                     operation,
                     recovered,
                     provider=provider,
@@ -529,7 +510,7 @@ async def _process_update_group(
             )
         group = recovered
     return await runtime._complete_operation(
-        redis,
+        persistence,
         operation,
         group,
         provider=provider,
@@ -542,9 +523,7 @@ async def _process_delete_group(
     provider: VideoProviderDefinition,
     client: Any,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     group_id = str(operation.get("group_id") or "")
@@ -554,7 +533,7 @@ async def _process_delete_group(
         if not runtime._is_not_found(exc):
             raise
         return await runtime._complete_operation(
-            redis,
+            persistence,
             operation,
             runtime._delete_group_result(
                 group_id,
@@ -564,8 +543,7 @@ async def _process_delete_group(
             provider=provider,
         )
 
-    await runtime._update_operation(
-        redis,
+    await persistence.update(
         operation,
         progress_stage="inventorying_assets",
     )
@@ -575,19 +553,12 @@ async def _process_delete_group(
         operation,
     )
     if deleted_asset_ids != runtime._operation_deleted_asset_ids(operation):
-        await runtime._update_operation(
-            redis,
+        await persistence.update(
             operation,
             deleted_asset_ids=deleted_asset_ids,
         )
-    await runtime._confirm_operation_lock(
-        redis,
-        lock_key,
-        lock_token,
-        lease_lost,
-    )
-    await runtime._update_operation(
-        redis,
+    await runtime._confirm_operation_lock(persistence)
+    await persistence.update(
         operation,
         progress_stage="submitting",
         submit_started_at=runtime._utc_iso(),
@@ -613,7 +584,7 @@ async def _process_delete_group(
         else:
             raise
     return await runtime._complete_operation(
-        redis,
+        persistence,
         operation,
         runtime._delete_group_result(
             group_id,
@@ -630,28 +601,20 @@ async def _process_update_asset(
     provider: VideoProviderDefinition,
     client: Any,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     asset_id = str(operation.get("asset_id") or "")
     current = await runtime._get_scoped_asset(client, provider, asset_id)
     if runtime._asset_target_reached(operation, current):
         return await runtime._complete_operation(
-            redis,
+            persistence,
             operation,
             current,
             provider=provider,
         )
-    await runtime._confirm_operation_lock(
-        redis,
-        lock_key,
-        lock_token,
-        lease_lost,
-    )
-    await runtime._update_operation(
-        redis,
+    await runtime._confirm_operation_lock(persistence)
+    await persistence.update(
         operation,
         progress_stage="submitting",
         submit_started_at=runtime._utc_iso(),
@@ -674,7 +637,7 @@ async def _process_update_asset(
             )
             if recovered is not None:
                 return await runtime._complete_operation(
-                    redis,
+                    persistence,
                     operation,
                     recovered,
                     provider=provider,
@@ -708,7 +671,7 @@ async def _process_update_asset(
             )
         asset = recovered
     return await runtime._complete_operation(
-        redis,
+        persistence,
         operation,
         asset,
         provider=provider,
@@ -721,9 +684,7 @@ async def _process_delete_asset(
     provider: VideoProviderDefinition,
     client: Any,
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     asset_id = str(operation.get("asset_id") or "")
@@ -734,7 +695,7 @@ async def _process_delete_asset(
         if not runtime._is_not_found(exc):
             raise
         return await runtime._complete_operation(
-            redis,
+            persistence,
             operation,
             runtime._delete_asset_result(
                 asset_id,
@@ -744,14 +705,8 @@ async def _process_delete_asset(
             provider=provider,
         )
 
-    await runtime._confirm_operation_lock(
-        redis,
-        lock_key,
-        lock_token,
-        lease_lost,
-    )
-    await runtime._update_operation(
-        redis,
+    await runtime._confirm_operation_lock(persistence)
+    await persistence.update(
         operation,
         progress_stage="submitting",
         submit_started_at=runtime._utc_iso(),
@@ -777,7 +732,7 @@ async def _process_delete_asset(
         else:
             raise
     return await runtime._complete_operation(
-        redis,
+        persistence,
         operation,
         runtime._delete_asset_result(
             asset_id,
@@ -789,28 +744,27 @@ async def _process_delete_asset(
 
 
 async def _record_operation_failure(
-    redis: Any,
+    persistence: Any,
     operation: dict[str, Any],
     failure: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     operation_id = str(operation.get("id") or "")
     action = str(operation.get("action") or "")
-    await runtime._update_operation(
-        redis,
+    error = {
+        "code": failure.code,
+        "message": failure.message,
+        "retryable": failure.retryable,
+        "retry_after_seconds": failure.retry_after_seconds,
+    }
+    await runtime._persist_terminal_operation(
+        persistence,
         operation,
         status="failed",
-        progress_stage="failed",
+        result=None,
+        error=error,
         retryable=failure.retryable,
         retry_after_seconds=failure.retry_after_seconds,
-        result=None,
-        error={
-            "code": failure.code,
-            "message": failure.message,
-            "retryable": failure.retryable,
-            "retry_after_seconds": failure.retry_after_seconds,
-        },
-        completed_at=runtime._utc_iso(),
     )
     event_type = {
         "create_group": "video_asset_group.create.failed",
@@ -836,6 +790,7 @@ async def _record_operation_failure(
                 "project_name": operation.get("project_name"),
                 "error_code": failure.code,
                 "retryable": failure.retryable,
+                **persistence.fence.details(),
             },
         )
     except Exception:  # noqa: BLE001
@@ -859,17 +814,14 @@ async def _process_management_action(
     redis: Any,
     operation: dict[str, Any],
     *,
-    lock_key: str,
-    lock_token: str,
-    lease_lost: asyncio.Event,
+    persistence: Any,
 ) -> dict[str, Any]:
     runtime = _runtime()
     action = str(operation.get("action") or "")
     try:
-        if lease_lost.is_set():
+        if persistence.fence.lease_lost.is_set():
             raise runtime._LeaseLostError("Volcano asset operation lease was lost")
-        await runtime._update_operation(
-            redis,
+        await persistence.update(
             operation,
             status="running",
             progress_stage="validating_scope",
@@ -898,9 +850,7 @@ async def _process_management_action(
             operation,
             provider,
             client,
-            lock_key=lock_key,
-            lock_token=lock_token,
-            lease_lost=lease_lost,
+            persistence=persistence,
         )
     except (
         runtime._LeaseLostError,
@@ -937,7 +887,11 @@ async def _process_management_action(
             retryable=True,
             retry_after_seconds=10,
         )
-    return await runtime._record_operation_failure(redis, operation, failure)
+    return await runtime._record_operation_failure(
+        persistence,
+        operation,
+        failure,
+    )
 
 
 def _operation_contract_failure(operation: dict[str, Any]) -> Any | None:

@@ -13,6 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useStore } from "zustand";
 
 import {
   copySubgraph,
@@ -78,6 +79,7 @@ export function useCanvasWorkspaceTools({
   const [actionRequest, setActionRequest] =
     useState<CanvasViewportActionRequest | null>(null);
   const clipboardRef = useRef<CanvasSubgraph | null>(null);
+  const selectedNodeId = useStore(store, (state) => state.selectedNodeId);
 
   const selectedCount = selectedNodeIds.length;
 
@@ -176,8 +178,9 @@ export function useCanvasWorkspaceTools({
     let subgraph = clipboardRef.current;
     try {
       const text = await navigator.clipboard?.readText();
-      const parsed = text ? parseCanvasSubgraph(text) : null;
-      if (parsed) subgraph = parsed;
+      if (typeof text === "string") {
+        subgraph = parseCanvasSubgraph(text);
+      }
     } catch {
       // Use the in-memory clipboard if system clipboard access is unavailable.
     }
@@ -321,11 +324,17 @@ export function useCanvasWorkspaceTools({
       buildCommandItems({
         graph,
         actionRequest,
-        selectedNodeIds,
+        selectedNodeId,
         selectedCount,
         selectedEdgeId,
       }),
-    [actionRequest, graph, selectedCount, selectedEdgeId, selectedNodeIds],
+    [
+      actionRequest,
+      graph,
+      selectedCount,
+      selectedEdgeId,
+      selectedNodeId,
+    ],
   );
 
   const commandHandlers = useMemo<Record<string, () => void>>(
@@ -411,20 +420,18 @@ export function useCanvasWorkspaceTools({
 function buildCommandItems({
   graph,
   actionRequest,
-  selectedNodeIds,
+  selectedNodeId,
   selectedCount,
   selectedEdgeId,
 }: {
   graph: CanvasGraph;
   actionRequest: CanvasViewportActionRequest | null;
-  selectedNodeIds: readonly string[];
+  selectedNodeId: string | null;
   selectedCount: number;
   selectedEdgeId: string | null;
 }): CanvasCommandMenuItem[] {
   const draftType = actionRequest?.connectionDraft?.dataType ?? null;
-  const selectedNode = graph.nodes.find(
-    (node) => node.id === selectedNodeIds[0],
-  );
+  const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
   const selectedNodeRunnable = Boolean(
     selectedNode &&
       isCanvasExecutableNodeType(selectedNode.type) &&

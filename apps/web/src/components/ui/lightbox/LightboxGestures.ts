@@ -99,6 +99,7 @@ export function useLightboxGestures(
   const startTimeRef = useRef(0);
   const lastMoveTimeRef = useRef(0);
   const lastTapTimeRef = useRef(0);
+  const tapTimerRef = useRef<number | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStartDistRef = useRef(0);
@@ -129,7 +130,15 @@ export function useLightboxGestures(
 
   useEffect(() => {
     const pointers = pointersRef.current;
+    const clearTapTimer = () => {
+      if (tapTimerRef.current !== null) {
+        window.clearTimeout(tapTimerRef.current);
+        tapTimerRef.current = null;
+      }
+    };
     if (!enabled) {
+      clearTapTimer();
+      lastTapTimeRef.current = 0;
       pointers.clear();
       modeRef.current = "idle";
       return;
@@ -405,12 +414,15 @@ export function useLightboxGestures(
         const now = performance.now();
         const gap = now - lastTapTimeRef.current;
         if (gap < DOUBLE_TAP_MS) {
+          clearTapTimer();
           lastTapTimeRef.current = 0;
           cbRef.current.onDoubleTap();
         } else {
+          clearTapTimer();
           lastTapTimeRef.current = now;
           // 推迟单击判定：若 280ms 内未再次 tap，执行 onTap
-          window.setTimeout(() => {
+          tapTimerRef.current = window.setTimeout(() => {
+            tapTimerRef.current = null;
             if (lastTapTimeRef.current === now) {
               lastTapTimeRef.current = 0;
               cbRef.current.onTap();
@@ -468,6 +480,8 @@ export function useLightboxGestures(
     const onPointerCancel = (e: PointerEvent) => {
       pointersRef.current.delete(e.pointerId);
       clearLongPress();
+      clearTapTimer();
+      lastTapTimeRef.current = 0;
       modeRef.current = "idle";
       resetPosition();
     };
@@ -479,6 +493,8 @@ export function useLightboxGestures(
 
     return () => {
       clearLongPress();
+      clearTapTimer();
+      lastTapTimeRef.current = 0;
       if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current);
         rafRef.current = null;

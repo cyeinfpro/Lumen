@@ -30,6 +30,13 @@ import {
   listMyWalletTransactions,
 } from "@/lib/apiClient";
 import type { BillingSnapshotOut, UsageOut, WalletTransactionOut } from "@/lib/types";
+import {
+  AUTH_USER_QUERY_KEY,
+  isUserScopedQueryKeyForUser,
+  userBillingQueryKeys,
+  userScopedQueryKey,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
@@ -51,31 +58,7 @@ const USAGE_PERIODS = [
 
 export default function UsagePage() {
   const [days, setDays] = useState(30);
-  const meQ = useQuery({
-    queryKey: ["me"],
-    queryFn: getMe,
-    retry: false,
-    staleTime: 60_000,
-  });
-  const q = useQuery<UsageOut>({
-    queryKey: ["me", "usage", { days }],
-    queryFn: () => getUsage(days),
-    placeholderData: (previous) => previous,
-    staleTime: 30_000,
-  });
-  const billingQ = useQuery<BillingSnapshotOut>({
-    queryKey: ["me", "billing", "snapshot"],
-    queryFn: getMyBillingSnapshot,
-    retry: false,
-    staleTime: 30_000,
-  });
-  const txQ = useQuery({
-    queryKey: ["me", "wallet", "transactions", "charge", "usage-page"],
-    queryFn: () => listMyWalletTransactions({ limit: 3, kind: "charge" }),
-    enabled: meQ.data?.account_mode === "wallet",
-    retry: false,
-    staleTime: 30_000,
-  });
+  const { meQ, q, billingQ, txQ } = useUsagePageQueries(days);
   const selectedPeriod =
     USAGE_PERIODS.find((period) => period.value === days) ?? USAGE_PERIODS[1];
 
@@ -134,6 +117,53 @@ export default function UsagePage() {
       </motion.div>
     </SettingsShell>
   );
+}
+
+function useUsagePageQueries(days: number) {
+  const userScope = useUserQueryScope();
+  const meQ = useQuery({
+    queryKey: AUTH_USER_QUERY_KEY,
+    queryFn: getMe,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const identityReady =
+    userScope.enabled && meQ.data?.id === userScope.userId;
+  const walletAccount =
+    identityReady && meQ.data?.account_mode === "wallet";
+  const q = useQuery<UsageOut>({
+    queryKey: userScopedQueryKey(userScope.userId, ["me", "usage", { days }]),
+    queryFn: () => getUsage(days),
+    placeholderData: (previous, previousQuery) =>
+      isUserScopedQueryKeyForUser(
+        previousQuery?.queryKey ?? [],
+        userScope.userId,
+      )
+        ? previous
+        : undefined,
+    staleTime: 30_000,
+    enabled: identityReady,
+  });
+  const billingQ = useQuery<BillingSnapshotOut>({
+    queryKey: userBillingQueryKeys.snapshot(userScope.userId),
+    queryFn: getMyBillingSnapshot,
+    retry: false,
+    staleTime: 30_000,
+    enabled: walletAccount,
+  });
+  const txQ = useQuery({
+    queryKey: userBillingQueryKeys.walletTransactions(userScope.userId, {
+      kind: "charge",
+      limit: 3,
+      pagination: "list",
+    }),
+    queryFn: () => listMyWalletTransactions({ limit: 3, kind: "charge" }),
+    enabled: walletAccount,
+    retry: false,
+    staleTime: 30_000,
+  });
+
+  return { meQ, q, billingQ, txQ };
 }
 
 function getUsage(days: number): Promise<UsageOut> {

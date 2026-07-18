@@ -11,6 +11,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from lumen_core.constants import GenerationErrorCode as EC
 
@@ -42,9 +43,22 @@ class StoragePutResult:
 
 
 class LocalStorage:
-    def __init__(self, root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        create_root: bool = True,
+    ) -> None:
         self.root = Path(root or settings.storage_root).resolve()
+        if create_root:
+            self.ensure_ready()
+
+    def ensure_ready(self) -> Path:
+        """Create and validate the configured root during worker startup."""
         self.root.mkdir(parents=True, exist_ok=True)
+        if not self.root.is_dir():
+            raise NotADirectoryError(f"storage root is not a directory: {self.root}")
+        return self.root
 
     def path_for(self, key: str) -> Path:
         if not key or "\x00" in key:
@@ -163,10 +177,12 @@ class LocalStorage:
     def public_url(self, key: str) -> str:
         # API 的图像反代路径（DESIGN §8.3）；Agent B 在 images.py 里实现 `/images/:id/binary`。
         # 返回相对路径 —— 前端反代 /api/* → 后端 /*；避免把 host 焊死到 DB/响应中。
-        return f"/api/images/_/by-key/{key}"
+        self.path_for(key)
+        encoded_key = "/".join(quote(segment, safe="") for segment in key.split("/"))
+        return f"/api/images/_/by-key/{encoded_key}"
 
 
-storage = LocalStorage()
+storage = LocalStorage(create_root=False)
 
 
 __all__ = ["LocalStorage", "StorageDiskFullError", "StoragePutResult", "storage"]

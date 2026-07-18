@@ -33,14 +33,18 @@ from lumen_core.constants import (
     GenerationStage,
     GenerationStatus,
     MessageStatus,
+    Role,
     user_channel,
 )
 from lumen_core.models import (
     Completion,
+    Conversation,
     Generation,
+    MemoryExtractionRun,
     Message,
     OutboxDeadLetter,
     OutboxEvent,
+    User,
     new_uuid7,
 )
 
@@ -72,11 +76,17 @@ _RECON_GENERATION_MAX_ATTEMPTS = 5
 _RECON_COMPLETION_MAX_ATTEMPTS = 3
 _RECON_TIMEOUT_CODE = "timeout"
 _RECON_TIMEOUT_MESSAGE = "task stuck; reconciler timed out"
+_MEMORY_RECON_LOCK_KEY = "lock:outbox:memory_reconciler"
+_MEMORY_RECON_LOCK_TTL_S = 50
+_MEMORY_RECON_BATCH = 100
+_MEMORY_RETRY_BACKOFF_BASE_S = 30
+_MEMORY_RETRY_BACKOFF_MAX_S = 15 * 60
 _EV_GEN_REQUEUED = "generation.requeued"
 _EV_COMP_REQUEUED = "completion.requeued"
 _OUTBOX_TASK_JOBS = {
     "generation": "run_generation",
     "completion": "run_completion",
+    "memory_extract": "memory_extract",
     "video_generation": "run_video_generation",
     "storyboard_assembly": "run_storyboard_assembly",
 }
@@ -269,6 +279,33 @@ async def _deliver_outbox_event(
         )
         return dedupe_key, user_id, True
 
+    if kind == "memory_extract":
+        conversation_id = payload.get("conversation_id")
+        source_message_id = payload.get("source_user_message_id")
+        assistant_message_id = payload.get("assistant_message_id")
+        task_id = payload.get("task_id")
+        memory_event_id = payload.get("event_id")
+        expected_event_id = f"memory-extract:{source_message_id}:{assistant_message_id}"
+        if (
+            not isinstance(conversation_id, str)
+            or not conversation_id
+            or not isinstance(source_message_id, str)
+            or not source_message_id
+            or not isinstance(assistant_message_id, str)
+            or not assistant_message_id
+            or task_id != assistant_message_id
+            or memory_event_id != expected_event_id
+        ):
+            raise _OutboxPayloadError("invalid memory_extract payload")
+        await redis.enqueue_job(
+            _OUTBOX_TASK_JOBS[kind],
+            conversation_id,
+            source_message_id,
+            assistant_message_id,
+            _job_id=arq_job_id(kind, assistant_message_id, event_id),
+        )
+        return dedupe_key, assistant_message_id, True
+
     job_name = _OUTBOX_TASK_JOBS.get(kind)
     task_id = payload.get("task_id") or payload.get("id")
     if job_name is None or not task_id:
@@ -293,7 +330,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
     去重记录；如果本轮 enqueue 成功但 PG rollback，后续重试仍由稳定 arq
     job_id / task 幂等吸收，而不会把一个短 TTL 占位误当成已发布事实。
 
-    可恢复的 enqueue 异常永远不写 published_at。达到失败阈值只持久化一条
+    可恢复的 delivery 异常永远不写 published_at。达到失败阈值只持久化一条
     unresolved DLQ 告警；后续成功投递会在同一事务中 resolve 它。
     """
     processed = 0
@@ -353,13 +390,15 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     if payload != raw_payload:
                         row.payload = payload
                     try:
-                        dedupe_key, marker, should_set_dedupe = (
-                            await _deliver_outbox_event(
-                                redis,
-                                event_id=str(ev_id),
-                                kind=ev_kind,
-                                payload=payload,
-                            )
+                        (
+                            dedupe_key,
+                            marker,
+                            should_set_dedupe,
+                        ) = await _deliver_outbox_event(
+                            redis,
+                            event_id=str(ev_id),
+                            kind=ev_kind,
+                            payload=payload,
                         )
                     except _OutboxPayloadError:
                         logger.warning(
@@ -383,7 +422,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     except Exception as exc:
                         fail_count = await _increment_outbox_fail_count(redis, ev_id)
                         logger.warning(
-                            "outbox enqueue failed; leaving unpublished for retry "
+                            "outbox delivery failed; leaving unpublished for retry "
                             "event=%s marker=%s kind=%s fail_count=%d err=%s",
                             ev_id,
                             payload.get("task_id") or payload.get("user_id"),
@@ -988,6 +1027,195 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
     return touched
 
 
+def _memory_retry_backoff_seconds(attempt: int | None) -> int:
+    normalized_attempt = max(1, int(attempt or 1))
+    exponent = min(normalized_attempt - 1, 8)
+    return min(
+        _MEMORY_RETRY_BACKOFF_MAX_S,
+        _MEMORY_RETRY_BACKOFF_BASE_S * (2**exponent),
+    )
+
+
+def _aware_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _memory_run_due(run: MemoryExtractionRun, now: datetime) -> bool:
+    status = str(run.status or "")
+    if status not in {"retryable", "running"}:
+        return False
+    lease_expires_at = _aware_utc(run.lease_expires_at)
+    if lease_expires_at is not None and lease_expires_at > now:
+        return False
+    if status == "running":
+        return True
+    updated_at = (
+        _aware_utc(run.updated_at) or _aware_utc(run.created_at) or lease_expires_at
+    )
+    if updated_at is None:
+        return True
+    retry_at = updated_at + timedelta(
+        seconds=_memory_retry_backoff_seconds(run.attempt)
+    )
+    return retry_at <= now
+
+
+async def _memory_run_invalid_reason(
+    session: Any,
+    run: MemoryExtractionRun,
+) -> str | None:
+    user = await session.get(User, run.user_id)
+    conversation = await session.get(Conversation, run.conversation_id)
+    source_message = await session.get(Message, run.source_message_id)
+    assistant_message = await session.get(Message, run.assistant_message_id)
+    expected_event_id = (
+        f"memory-extract:{run.source_message_id}:{run.assistant_message_id}"
+    )
+    if run.event_id != expected_event_id:
+        return "event_id_mismatch"
+    if user is None or getattr(user, "deleted_at", None) is not None:
+        return "user_deleted"
+    if bool(user.memory_disabled) or bool(user.memory_paused):
+        return "memory_disabled"
+    if (
+        conversation is None
+        or conversation.user_id != run.user_id
+        or getattr(conversation, "deleted_at", None) is not None
+    ):
+        return "conversation_deleted"
+    if bool(conversation.memory_disabled):
+        return "memory_disabled"
+    if (
+        source_message is None
+        or source_message.conversation_id != run.conversation_id
+        or source_message.role != Role.USER.value
+        or getattr(source_message, "deleted_at", None) is not None
+    ):
+        return "source_message_deleted"
+    if (
+        assistant_message is None
+        or assistant_message.conversation_id != run.conversation_id
+        or assistant_message.role != Role.ASSISTANT.value
+        or assistant_message.parent_message_id != run.source_message_id
+        or getattr(assistant_message, "deleted_at", None) is not None
+    ):
+        return "assistant_message_deleted"
+    if assistant_message.status in {MessageStatus.CANCELED.value, "cancelled"}:
+        return "assistant_message_canceled"
+    return None
+
+
+def _cancel_memory_run(
+    run: MemoryExtractionRun,
+    *,
+    reason: str,
+    now: datetime,
+) -> None:
+    run.status = "canceled"
+    run.owner = None
+    run.job_id = None
+    run.fence = max(0, int(run.fence or 0)) + 1
+    run.claimed_at = None
+    run.lease_expires_at = None
+    run.canceled_at = now
+    run.cancel_reason = reason[:160]
+    run.retry_reason = None
+    run.updated_at = now
+
+
+def _requeue_memory_run(run: MemoryExtractionRun, *, now: datetime) -> None:
+    run.status = "pending"
+    run.owner = None
+    run.job_id = None
+    run.fence = max(0, int(run.fence or 0)) + 1
+    run.recovery_count = max(0, int(run.recovery_count or 0)) + 1
+    run.claimed_at = None
+    run.lease_expires_at = None
+    run.canceled_at = None
+    run.cancel_reason = None
+    run.retry_reason = None
+    run.updated_at = now
+
+
+async def reconcile_memory_extractions(ctx: dict[str, Any]) -> int:
+    """Durably re-dispatch retryable or abandoned memory extraction runs."""
+    redis = ctx["redis"]
+    async with _owned_redis_lock(
+        redis,
+        key=_MEMORY_RECON_LOCK_KEY,
+        ttl_s=_MEMORY_RECON_LOCK_TTL_S,
+    ) as acquired:
+        if not acquired:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        touched = 0
+        pending_outbox: list[_PendingOutboxDelivery] = []
+        async with SessionLocal() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(MemoryExtractionRun)
+                        .where(
+                            MemoryExtractionRun.status.in_(("retryable", "running")),
+                            or_(
+                                MemoryExtractionRun.lease_expires_at.is_(None),
+                                MemoryExtractionRun.lease_expires_at <= now,
+                            ),
+                        )
+                        .order_by(
+                            MemoryExtractionRun.updated_at,
+                            MemoryExtractionRun.id,
+                        )
+                        .limit(_MEMORY_RECON_BATCH)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).scalars()
+            )
+            for run in rows:
+                if not _memory_run_due(run, now):
+                    continue
+                invalid_reason = await _memory_run_invalid_reason(session, run)
+                if invalid_reason is not None:
+                    _cancel_memory_run(run, reason=invalid_reason, now=now)
+                    touched += 1
+                    continue
+
+                previous_status = str(run.status)
+                _requeue_memory_run(run, now=now)
+                pending_outbox.append(
+                    _stage_outbox_event(
+                        session,
+                        kind="memory_extract",
+                        payload={
+                            "task_id": run.assistant_message_id,
+                            "event_id": run.event_id,
+                            "user_id": run.user_id,
+                            "conversation_id": run.conversation_id,
+                            "source_user_message_id": run.source_message_id,
+                            "assistant_message_id": run.assistant_message_id,
+                            "kind": "memory_extract",
+                            "source": "memory_extraction_reconciler",
+                            "recovered_from": previous_status,
+                            "attempt": int(run.attempt or 0),
+                            "fence": int(run.fence or 0),
+                        },
+                    )
+                )
+                touched += 1
+            await session.commit()
+
+        await _deliver_staged_outbox_events(redis, pending_outbox)
+
+    if touched:
+        logger.info("memory extraction reconcile: touched %d rows", touched)
+    return touched
+
+
 # ---------------------------------------------------------------------------
 # cron registration
 # ---------------------------------------------------------------------------
@@ -1004,7 +1232,17 @@ cron_jobs = [
         reconcile_tasks,
         minute=set(range(0, 60)),
     ),
+    cron(
+        reconcile_memory_extractions,
+        second={20},
+        run_at_startup=True,
+    ),
 ]
 
 
-__all__ = ["publish_outbox", "reconcile_tasks", "cron_jobs"]
+__all__ = [
+    "publish_outbox",
+    "reconcile_tasks",
+    "reconcile_memory_extractions",
+    "cron_jobs",
+]

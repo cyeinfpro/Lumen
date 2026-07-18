@@ -5,6 +5,7 @@ import type {
   VideoGenerationOut,
   VideoGenerationsOut,
   VideoOptionsOut,
+  VideoUploadOut,
 } from "@/lib/types";
 
 import type { ReferenceDraft } from "./video-workbench-ui";
@@ -74,10 +75,10 @@ export function fetchVideoGeneration(
 export function uploadReferenceVideo(
   file: File,
   signal: AbortSignal,
-): Promise<NonNullable<VideoGenerationOut["video"]>> {
+): Promise<VideoUploadOut> {
   const body = new FormData();
   body.append("file", file);
-  return apiFetch<NonNullable<VideoGenerationOut["video"]>>("/videos/upload", {
+  return apiFetch<VideoUploadOut>("/videos/upload", {
     method: "POST",
     signal,
     body,

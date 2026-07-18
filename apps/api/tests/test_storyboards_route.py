@@ -268,7 +268,7 @@ def test_assembly_replay_uses_explicit_lease_expiry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_assemble_replay_returns_existing_status_without_reenqueue(
+async def test_assemble_sequential_replay_returns_status_without_reenqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = SimpleNamespace(id="run-1", current_step="shots")

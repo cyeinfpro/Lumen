@@ -20,7 +20,12 @@ def _meta_int(mapping: dict[str, Any], key: str) -> int:
 
 def _scaled_meta_cost(mapping: dict[str, Any], key: str) -> int:
     value = _meta_int(mapping, key)
-    multiplier = _meta_int(mapping, "rate_multiplier_x10000") or 10_000
+    raw_multiplier = mapping.get("rate_multiplier_x10000")
+    multiplier = (
+        _meta_int(mapping, "rate_multiplier_x10000")
+        if raw_multiplier is not None
+        else 10_000
+    )
     return (value * multiplier) // 10_000
 
 

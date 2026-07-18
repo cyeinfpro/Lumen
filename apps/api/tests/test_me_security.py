@@ -11,11 +11,13 @@ import pytest
 from app.config import settings
 from app.routes import me
 from lumen_core.constants import CompletionStatus, GenerationStatus
+from sqlalchemy.dialects import postgresql
 
 
 class _Result:
     def __init__(self, rows: list[Any]) -> None:
         self.rows = rows
+        self.rowcount = 0
 
     def scalars(self) -> "_Result":
         return self
@@ -93,6 +95,57 @@ def test_export_tempfile_iterator_closes_on_early_close() -> None:
     assert tmp.closed is True
 
 
+def test_export_message_record_strips_internal_fields_but_keeps_memory_writes() -> None:
+    record = me._export_message_record(  # noqa: SLF001
+        SimpleNamespace(
+            conversation_id="conv-1",
+            id="message-1",
+            role="assistant",
+            content={
+                "text": "public",
+                "memory_writes": [{"kind": "added", "id": "memory-1"}],
+                "_memory_extraction": {"owner": "private"},
+                "_future_internal": {"secret": True},
+            },
+            intent="chat",
+            status="succeeded",
+            created_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+        )
+    )
+
+    assert record["content"] == {
+        "text": "public",
+        "memory_writes": [{"kind": "added", "id": "memory-1"}],
+    }
+    assert record["created_at"] == "2026-07-18T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_cancel_account_memory_extractions_fences_active_runs() -> None:
+    class Db:
+        def __init__(self) -> None:
+            self.statement: Any = None
+
+        async def execute(self, statement: Any) -> SimpleNamespace:
+            self.statement = statement
+            return SimpleNamespace(rowcount=3)
+
+    db = Db()
+    canceled_at = datetime.now(timezone.utc)
+    count = await me._cancel_account_memory_extractions(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        canceled_at=canceled_at,
+    )
+
+    rendered = str(db.statement.compile(dialect=postgresql.dialect()))
+    assert count == 3
+    assert "UPDATE memory_extraction_runs" in rendered
+    assert "memory_extraction_runs.user_id" in rendered
+    assert "memory_extraction_runs.status IN" in rendered
+    assert "memory_extraction_runs.fence + " in rendered
+
+
 @pytest.mark.asyncio
 async def test_cancel_account_active_tasks_releases_only_queued_holds(
     monkeypatch: pytest.MonkeyPatch,
@@ -151,6 +204,7 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
     assert cleanup == {
         "generations_canceled": 2,
         "completions_canceled": 2,
+        "memory_extractions_canceled": 0,
         "holds_released": 2,
         "task_ids": [
             "gen-queued",
@@ -191,6 +245,7 @@ async def test_cancel_account_active_tasks_skips_holds_for_byok(
         "_release_account_delete_task_hold",
         release_account_delete_task_hold,
     )
+
     async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
         return False
 

@@ -1,5 +1,10 @@
 # 一键更新排障
 
+下文 `/opt/lumendata/backup` 是默认路径。若
+`/opt/lumen/shared/.env` 配置了其他 `LUMEN_BACKUP_ROOT`，安装/更新脚本会把 path
+unit 和 runner 日志路径渲染到实际目录；先用
+`systemctl cat lumen-update.path lumen-update-runner.service` 核对后再替换命令中的路径。
+
 ## has_update=false 但我知道有新版
 
 先确认 channel：
@@ -24,7 +29,7 @@ curl -sS https://你的域名/api/admin/update/check?force=true
 1. 在 Admin → 代理池里配置可访问 GitHub 的代理。
 2. 设置 `update.proxy_name` 指定代理。
 3. 点“重新检查”，确认 `cache.stale=false`。
-4. 紧急情况下可在触发更新时传 `target_tag`，但 tag 必须匹配 `vX.Y.Z`、`main` 或 `latest`。
+4. 紧急情况下可在触发更新时传 `target_tag`，但 runner 只接受 `v*`（例如 `v1.2.3`）或 `main`。不要传字面量 `latest`；stable 通道应先把 GitHub latest release 解析成具体 `v*` tag。
 
 ## update_running 或锁卡住
 

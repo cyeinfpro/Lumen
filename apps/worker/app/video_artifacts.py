@@ -48,6 +48,19 @@ class UnsupportedVideoMediaError(ValueError):
     pass
 
 
+class InvalidVideoArtifactError(ValueError):
+    error_code = "invalid_video_artifact"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
+
 @dataclass(frozen=True)
 class DownloadedVideo:
     path: Path
@@ -83,6 +96,14 @@ class ProcessedVideoFile:
 class VideoArtifactWriteResult:
     size: int
     created: bool
+
+
+@dataclass(frozen=True)
+class _VideoOutput:
+    path: Path
+    mime: str
+    extension: str
+    temporary: bool
 
 
 def _normalized_declared_mime(raw: str | None) -> str:
@@ -280,145 +301,178 @@ def _ffmpeg_error(proc: subprocess.CompletedProcess[bytes]) -> str:
     return proc.stderr.decode("utf-8", "replace")[-1000:]
 
 
-def postprocess_video_file(downloaded: DownloadedVideo) -> ProcessedVideoFile:
-    diagnostics: dict[str, Any] = {
-        "input_mime": downloaded.mime,
-        "input_extension": downloaded.extension,
-        "declared_input_mime": downloaded.declared_mime,
-    }
-    output_path = downloaded.path
-    output_mime = downloaded.mime
-    output_extension = downloaded.extension
-    output_temporary = False
-    poster_bytes: bytes | None = None
-    poster_path: Path | None = None
-    remux_path: Path | None = None
+def _remux_video_if_needed(
+    downloaded: DownloadedVideo,
+    ffmpeg: str | None,
+    diagnostics: dict[str, Any],
+) -> _VideoOutput:
     input_faststart = (
         _looks_faststart_path(downloaded.path)
         if downloaded.mime == "video/mp4"
         else False
     )
     diagnostics["faststart_input"] = input_faststart
+    original = _VideoOutput(
+        path=downloaded.path,
+        mime=downloaded.mime,
+        extension=downloaded.extension,
+        temporary=False,
+    )
+    if downloaded.mime == "video/mp4" and input_faststart:
+        return original
+    if not ffmpeg:
+        diagnostics["ffmpeg_missing"] = True
+        return original
+
+    diagnostics["remux_attempted"] = True
+    remux_path = _temporary_video_path(".mp4")
+    keep_remux = False
+    try:
+        try:
+            proc = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(downloaded.path),
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    str(remux_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            diagnostics["remux_error"] = f"ffmpeg timeout after {exc.timeout}s"
+            return original
+        if (
+            proc.returncode == 0
+            and remux_path.is_file()
+            and remux_path.stat().st_size > 0
+            and sniff_video_mime(_read_file_prefix(remux_path)) == "video/mp4"
+        ):
+            keep_remux = True
+            diagnostics["remux_succeeded"] = True
+            return _VideoOutput(
+                path=remux_path,
+                mime="video/mp4",
+                extension=".mp4",
+                temporary=True,
+            )
+        diagnostics["remux_error"] = _ffmpeg_error(proc)
+        return original
+    finally:
+        if not keep_remux:
+            remux_path.unlink(missing_ok=True)
+
+
+def _probe_processed_video(
+    ffprobe: str | None,
+    output_path: Path,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    if not ffprobe:
+        diagnostics["ffprobe_missing"] = True
+        raise InvalidVideoArtifactError(
+            "ffprobe is required to validate video artifacts",
+            diagnostics=diagnostics,
+        )
+    try:
+        return probe_video(ffprobe, output_path)
+    except InvalidVideoArtifactError as exc:
+        raise InvalidVideoArtifactError(
+            str(exc),
+            diagnostics={**diagnostics, **exc.diagnostics},
+        ) from exc
+
+
+def _extract_video_poster(
+    ffmpeg: str | None,
+    output_path: Path,
+    diagnostics: dict[str, Any],
+) -> bytes | None:
+    if not ffmpeg:
+        diagnostics["ffmpeg_missing"] = True
+        return None
+    poster_path = _temporary_video_path(".jpg")
+    try:
+        try:
+            proc = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-ss",
+                    "0",
+                    "-i",
+                    str(output_path),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(poster_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            diagnostics["poster_error"] = f"ffmpeg poster timeout after {exc.timeout}s"
+            return None
+        if proc.returncode == 0 and poster_path.is_file():
+            if poster_path.stat().st_size > 0:
+                return poster_path.read_bytes()
+        diagnostics["poster_error"] = _ffmpeg_error(proc)
+        return None
+    finally:
+        poster_path.unlink(missing_ok=True)
+
+
+def postprocess_video_file(downloaded: DownloadedVideo) -> ProcessedVideoFile:
+    diagnostics: dict[str, Any] = {
+        "input_mime": downloaded.mime,
+        "input_extension": downloaded.extension,
+        "declared_input_mime": downloaded.declared_mime,
+    }
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-    needs_remux = downloaded.mime != "video/mp4" or not input_faststart
+    output = _remux_video_if_needed(downloaded, ffmpeg, diagnostics)
     try:
-        if needs_remux and ffmpeg:
-            diagnostics["remux_attempted"] = True
-            remux_path = _temporary_video_path(".mp4")
-            try:
-                proc = subprocess.run(
-                    [
-                        ffmpeg,
-                        "-y",
-                        "-i",
-                        str(downloaded.path),
-                        "-c",
-                        "copy",
-                        "-movflags",
-                        "+faststart",
-                        str(remux_path),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                diagnostics["remux_error"] = f"ffmpeg timeout after {exc.timeout}s"
-            else:
-                if (
-                    proc.returncode == 0
-                    and remux_path.is_file()
-                    and remux_path.stat().st_size > 0
-                    and sniff_video_mime(_read_file_prefix(remux_path)) == "video/mp4"
-                ):
-                    output_path = remux_path
-                    output_mime = "video/mp4"
-                    output_extension = ".mp4"
-                    output_temporary = True
-                    diagnostics["remux_succeeded"] = True
-                else:
-                    diagnostics["remux_error"] = _ffmpeg_error(proc)
-            if not output_temporary and remux_path is not None:
-                remux_path.unlink(missing_ok=True)
-                remux_path = None
-        elif needs_remux:
-            diagnostics["ffmpeg_missing"] = True
-
-        metadata = probe_video(ffprobe, output_path) if ffprobe else {}
-        if not ffprobe:
-            diagnostics["ffprobe_missing"] = True
-        if ffmpeg:
-            poster_path = _temporary_video_path(".jpg")
-            try:
-                poster_proc = subprocess.run(
-                    [
-                        ffmpeg,
-                        "-y",
-                        "-ss",
-                        "0",
-                        "-i",
-                        str(output_path),
-                        "-frames:v",
-                        "1",
-                        "-q:v",
-                        "2",
-                        str(poster_path),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=60,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                diagnostics["poster_error"] = (
-                    f"ffmpeg poster timeout after {exc.timeout}s"
-                )
-            else:
-                if (
-                    poster_proc.returncode == 0
-                    and poster_path.is_file()
-                    and poster_path.stat().st_size > 0
-                ):
-                    poster_bytes = poster_path.read_bytes()
-                else:
-                    diagnostics["poster_error"] = _ffmpeg_error(poster_proc)
-        else:
-            diagnostics["ffmpeg_missing"] = True
-
+        metadata = _probe_processed_video(ffprobe, output.path, diagnostics)
+        poster_bytes = _extract_video_poster(ffmpeg, output.path, diagnostics)
         faststart = (
-            _looks_faststart_path(output_path) if output_mime == "video/mp4" else False
+            _looks_faststart_path(output.path) if output.mime == "video/mp4" else False
         )
-        sha256, size_bytes = hash_video_file(output_path)
+        sha256, size_bytes = hash_video_file(output.path)
         diagnostics.update(metadata)
         diagnostics.update(
             {
                 "faststart": faststart,
-                "output_mime": output_mime,
-                "output_extension": output_extension,
+                "output_mime": output.mime,
+                "output_extension": output.extension,
                 "size_bytes": size_bytes,
                 "sha256": sha256,
             }
         )
         return ProcessedVideoFile(
-            path=output_path,
-            mime=output_mime,
-            extension=output_extension,
+            path=output.path,
+            mime=output.mime,
+            extension=output.extension,
             size_bytes=size_bytes,
             sha256=sha256,
             poster_bytes=poster_bytes,
             faststart=faststart,
             metadata=diagnostics,
-            temporary=output_temporary,
+            temporary=output.temporary,
         )
     except BaseException:
-        if output_temporary:
-            output_path.unlink(missing_ok=True)
+        if output.temporary:
+            output.path.unlink(missing_ok=True)
         raise
-    finally:
-        if poster_path is not None:
-            poster_path.unlink(missing_ok=True)
 
 
 def postprocess_video_bytes(data: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -443,36 +497,54 @@ def postprocess_video_bytes(data: bytes) -> tuple[dict[str, Any], dict[str, Any]
 
 
 def probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-show_format",
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InvalidVideoArtifactError(
+            f"ffprobe execution failed: {exc}",
+            diagnostics={"probe_error": str(exc)[:1000]},
+        ) from exc
     if proc.returncode != 0:
-        return {"probe_error": proc.stderr.decode("utf-8", "replace")[-1000:]}
+        error = proc.stderr.decode("utf-8", "replace")[-1000:]
+        raise InvalidVideoArtifactError(
+            "ffprobe rejected the video artifact",
+            diagnostics={"probe_error": error},
+        )
     try:
         raw = json.loads(proc.stdout.decode("utf-8"))
     except json.JSONDecodeError:
-        return {"probe_error": "invalid ffprobe json"}
+        raise InvalidVideoArtifactError(
+            "ffprobe returned invalid JSON",
+            diagnostics={"probe_error": "invalid ffprobe json"},
+        )
     raw_streams = raw.get("streams") if isinstance(raw, dict) else None
     streams = raw_streams if isinstance(raw_streams, list) else []
     raw_format = raw.get("format") if isinstance(raw, dict) else None
     format_data = raw_format if isinstance(raw_format, dict) else {}
     video_stream = next(
         (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"),
-        {},
+        None,
     )
+    if video_stream is None:
+        raise InvalidVideoArtifactError(
+            "ffprobe found no video stream",
+            diagnostics={"probe_error": "no video stream", "probe": raw},
+        )
     audio_stream = next(
         (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "audio"),
         None,
@@ -582,6 +654,7 @@ def _looks_faststart_path(path: Path) -> bool:
 
 __all__ = [
     "DownloadedVideo",
+    "InvalidVideoArtifactError",
     "ProcessedVideoFile",
     "UnsupportedVideoMediaError",
     "VideoArtifactWriteResult",

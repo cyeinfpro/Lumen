@@ -69,6 +69,11 @@ from ..db import affected_rows, get_db
 from ..deps import CurrentUser, verify_csrf
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services.conversation_cleanup import (
+    cancel_conversation_memory_extractions as _cancel_conversation_memory_extractions,
+    conversation_wallet_exists as _conversation_wallet_exists,
+    release_conversation_generation_queue_state as _release_conversation_generation_queue_state,
+)
 
 
 router = APIRouter()
@@ -294,11 +299,6 @@ async def _release_conversation_task_hold(
     return tx is not None
 
 
-async def _conversation_wallet_exists(db: AsyncSession, user_id: str) -> bool:
-    wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
-    return wallet is not None
-
-
 async def _cancel_conversation_active_tasks(
     db: AsyncSession,
     *,
@@ -417,14 +417,6 @@ async def _cancel_conversation_active_tasks(
         "running_generation_ids": running_generation_ids,
         "streaming_completion_ids": streaming_completion_ids,
     }
-
-
-async def _release_conversation_generation_queue_state(
-    redis: Any, task_id: str
-) -> None:
-    from .tasks import _release_generation_queue_state
-
-    await _release_generation_queue_state(redis, task_id)
 
 
 async def _post_commit_conversation_task_cleanup(
@@ -707,6 +699,12 @@ async def delete_conversation(
         canceled_at=now,
         account_mode=getattr(user, "account_mode", "wallet"),
     )
+    memory_extractions_canceled = await _cancel_conversation_memory_extractions(
+        db,
+        conv_id=conv.id,
+        user_id=user.id,
+        canceled_at=now,
+    )
     await write_audit(
         db,
         event_type="conversation.delete",
@@ -718,6 +716,7 @@ async def delete_conversation(
             "images_deleted": deleted_images,
             "generations_canceled": task_cleanup["generations_canceled"],
             "completions_canceled": task_cleanup["completions_canceled"],
+            "memory_extractions_canceled": memory_extractions_canceled,
         },
         autocommit=False,
     )
@@ -2124,8 +2123,7 @@ async def compact_conversation(
     body = body or ManualCompactIn()
     conv = (
         await db.execute(
-            select(Conversation)
-            .where(
+            select(Conversation).where(
                 Conversation.id == conv_id,
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),

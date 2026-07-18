@@ -21,10 +21,12 @@ from pydantic import (
     model_validator,
 )
 
+from .billing_schemas import MoneyOut, WalletActivity24hOut, WalletOut
 from .constants import (
     MAX_MESSAGE_ATTACHMENTS,
     MAX_PROMPT_CHARS,
 )
+from .message_content import public_message_content
 from .sizing import AspectRatio as AspectRatioLiteral
 from .url_security import is_private_host
 from .video_asset_schemas import (
@@ -89,7 +91,7 @@ class BaseOut(BaseModel):
 class SignupIn(BaseModel):
     # EmailStr 依赖 pydantic[email]（apps/api 已声明）；触发 422 而非 500，比手写正则更严格。
     email: EmailStr
-    password: str = Field(max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     display_name: str = ""
     invite_token: str | None = None
 
@@ -340,6 +342,11 @@ class MessageOut(BaseOut):
     parent_message_id: str | None = None
     created_at: datetime
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def _strip_internal_content(cls, value: Any) -> dict[str, Any]:
+        return public_message_content(value)
+
 
 class PostMessageOut(BaseModel):
     user_message: MessageOut
@@ -525,6 +532,10 @@ class VideoOut(BaseOut):
     size_bytes: int | None = None
     faststart: bool | None = None
     created_at: datetime | None = None
+
+
+class VideoUploadOut(VideoOut):
+    created: bool
 
 
 class VideoTemporaryDownloadOut(BaseModel):
@@ -1252,19 +1263,6 @@ class AdminUserOut(BaseOut):
 
 
 # ---------- Billing / Wallet ----------
-
-
-class MoneyOut(BaseModel):
-    micro: int
-    rmb: str
-
-
-class WalletOut(BaseModel):
-    mode: Literal["wallet", "byok"]
-    balance: MoneyOut | None
-    hold: MoneyOut | None
-    low_balance_threshold: MoneyOut | None = None
-    frozen: bool = False
 
 
 class WalletTransactionOut(BaseOut):
@@ -2363,6 +2361,7 @@ __all__ = [
     "PostMessageIn",
     "PostMessageOut",
     "MessageOut",
+    "public_message_content",
     "ImageParamsIn",
     "ChatParamsIn",
     "AdvancedIn",
@@ -2421,6 +2420,7 @@ __all__ = [
     "VideoAssetCreateIn",
     "VideoAssetUpdateIn",
     "MoneyOut",
+    "WalletActivity24hOut",
     "WalletOut",
     "WalletTransactionOut",
     "WalletTransactionListOut",

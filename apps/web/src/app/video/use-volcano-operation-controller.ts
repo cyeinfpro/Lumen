@@ -22,6 +22,7 @@ import {
   volcanoOperationBlocksMutation,
   volcanoOperationIsRetryable,
   volcanoOperationLocksConflict,
+  volcanoOperationStartedAt,
   volcanoOperationStatusKind,
   volcanoOperationTimedOut,
 } from "./volcano-asset-domain";
@@ -298,17 +299,23 @@ export function useVolcanoOperationController({
         if (operation.id !== remoteOperationId) {
           operation = { ...operation, id: remoteOperationId };
         }
-        const operationStartedAt =
-          operationItem.operationStartedAt ?? Date.now();
+        const operationStartedAtWasMissing =
+          operationItem.operationStartedAt == null;
+        const operationStartedAt = volcanoOperationStartedAt(
+          operationItem.operationStartedAt,
+        );
+        const operationPatch: Partial<OperationItem> = {
+          remoteOperationId,
+          progressStage: operation.progress_stage,
+          retryAfterSeconds: operation.retry_after_seconds,
+          recovery: "resume",
+        };
+        if (operationStartedAtWasMissing) {
+          operationPatch.operationStartedAt = operationStartedAt;
+        }
         updateOperation(
           clientOperationId,
-          {
-            remoteOperationId,
-            operationStartedAt,
-            progressStage: operation.progress_stage,
-            retryAfterSeconds: operation.retry_after_seconds,
-            recovery: "resume",
-          },
+          operationPatch,
           runner.model,
         );
 
@@ -317,7 +324,7 @@ export function useVolcanoOperationController({
           !controller.signal.aborted &&
           isSessionActive(sessionId, runner.model)
         ) {
-          runner.onProgress?.(operation, sessionId);
+          runner.onProgress?.(operation, sessionId, operationStartedAt);
           const statusKind = volcanoOperationStatusKind(operation.status);
           if (statusKind === "succeeded") {
             if (!operation.result) {

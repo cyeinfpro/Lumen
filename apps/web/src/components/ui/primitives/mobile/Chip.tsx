@@ -29,7 +29,7 @@ export function Chip({
       pressScale="soft"
       haptic="light"
       aria-pressed={active}
-      onPress={onClick as (() => void) | undefined}
+      onClick={onClick}
       className={[
         "relative min-h-11 px-3 rounded-full gap-1.5",
         "text-caption leading-none whitespace-nowrap font-medium",

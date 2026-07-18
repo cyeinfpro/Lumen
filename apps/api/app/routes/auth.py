@@ -122,7 +122,44 @@ _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER = RateLimiter(
 _PASSWORD_RESET_CONFIRM_USER_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 3600, always_on=True
 )
-_PASSWORD_RESET_CLAIM_TTL_SECONDS = 60
+_CLAIM_PASSWORD_RESET_TOKEN_LUA = """
+local user_id = redis.call('GET', KEYS[1])
+if not user_id then
+  return {0, ''}
+end
+local ttl_ms = redis.call('PTTL', KEYS[1])
+if ttl_ms <= 0 then
+  return {0, ''}
+end
+if redis.call('EXISTS', KEYS[2]) ~= 0 then
+  return {2, ''}
+end
+redis.call('HSET', KEYS[2], 'owner', ARGV[1], 'user_id', user_id)
+redis.call('PEXPIRE', KEYS[2], ttl_ms)
+redis.call('DEL', KEYS[1])
+return {1, user_id}
+"""
+_RESTORE_PASSWORD_RESET_TOKEN_LUA = """
+if redis.call('HGET', KEYS[2], 'owner') ~= ARGV[1] then
+  return 0
+end
+local user_id = redis.call('HGET', KEYS[2], 'user_id')
+local ttl_ms = redis.call('PTTL', KEYS[2])
+if not user_id or ttl_ms <= 0 then
+  return 0
+end
+if redis.call('SET', KEYS[1], user_id, 'PX', ttl_ms, 'NX') then
+  redis.call('DEL', KEYS[2])
+  return 1
+end
+return -1
+"""
+_CONSUME_PASSWORD_RESET_CLAIM_LUA = """
+if redis.call('HGET', KEYS[1], 'owner') == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 _DEV_ENVS = {"dev", "development", "local", "test"}
 _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE = (
     "verification failed; please verify your API key again"
@@ -209,26 +246,63 @@ def _integrity_error_matches(exc: IntegrityError, markers: tuple[str, ...]) -> b
 
 
 async def _claim_password_reset_token(
-    redis: Any, claim_key: str, *, owner: str
-) -> bool:
-    claimed = await redis.set(
+    redis: Any,
+    token_key: str,
+    claim_key: str,
+    *,
+    owner: str,
+) -> str | None:
+    result = await redis.eval(
+        _CLAIM_PASSWORD_RESET_TOKEN_LUA,
+        2,
+        token_key,
         claim_key,
         owner,
-        ex=_PASSWORD_RESET_CLAIM_TTL_SECONDS,
-        nx=True,
     )
-    return claimed is not None and claimed is not False and claimed != 0
+    if not isinstance(result, (list, tuple)) or len(result) < 2:
+        raise RuntimeError("unexpected password reset claim response")
+    if int(result[0]) != 1:
+        return None
+    user_id = _redis_text(result[1])
+    if not user_id:
+        raise RuntimeError("password reset claim omitted user id")
+    return user_id
 
 
-async def _release_password_reset_claim(
-    redis: Any, claim_key: str, *, owner: str
+async def _restore_password_reset_token(
+    redis: Any,
+    token_key: str,
+    claim_key: str,
+    *,
+    owner: str,
+) -> bool:
+    result = await redis.eval(
+        _RESTORE_PASSWORD_RESET_TOKEN_LUA,
+        2,
+        token_key,
+        claim_key,
+        owner,
+    )
+    return int(result) == 1
+
+
+async def _consume_password_reset_claim(
+    redis: Any,
+    claim_key: str,
+    *,
+    owner: str,
 ) -> None:
     try:
-        raw = _redis_text(await redis.get(claim_key))
-        if raw == owner:
-            await redis.delete(claim_key)
+        await redis.eval(
+            _CONSUME_PASSWORD_RESET_CLAIM_LUA,
+            1,
+            claim_key,
+            owner,
+        )
     except Exception:
-        logger.warning("password_reset_claim_release_failed", exc_info=True)
+        # The original token was removed before the DB transaction began.
+        # Leaving this owner-bound claim to expire cannot make it reusable.
+        logger.warning("password_reset_claim_consume_failed", exc_info=True)
 
 
 def _is_dev_env() -> bool:
@@ -959,25 +1033,14 @@ async def password_reset_confirm(
     await _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER.check(
         redis, f"rl:pwd_reset_confirm:token:{hash_token(token)}"
     )
-    try:
-        raw_user_id = _redis_text(await redis.get(key))
-    except Exception as exc:
-        logger.error("password_reset_token_read_failed", exc_info=True)
-        raise _bad(
-            "reset_unavailable",
-            "password reset is temporarily unavailable",
-            503,
-        ) from exc
-    if not raw_user_id:
-        raise _bad("invalid_token", "reset token is invalid or expired", 400)
-    await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
-        redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
-    )
     claim_key = _password_reset_claim_key(token)
-    claim_owner = f"user:{raw_user_id}:{secrets.token_urlsafe(16)}"
+    claim_owner = secrets.token_urlsafe(24)
     try:
-        claim_acquired = await _claim_password_reset_token(
-            redis, claim_key, owner=claim_owner
+        raw_user_id = await _claim_password_reset_token(
+            redis,
+            key,
+            claim_key,
+            owner=claim_owner,
         )
     except Exception as exc:
         logger.error("password_reset_token_claim_failed", exc_info=True)
@@ -986,23 +1049,17 @@ async def password_reset_confirm(
             "password reset is temporarily unavailable",
             503,
         ) from exc
-    if not claim_acquired:
+    if not raw_user_id:
         raise _bad("invalid_token", "reset token is invalid or expired", 400)
-    try:
-        try:
-            consumed_user_id = _redis_text(await redis.getdel(key))
-        except Exception as exc:
-            logger.error("password_reset_token_consume_failed", exc_info=True)
-            raise _bad(
-                "reset_unavailable",
-                "password reset is temporarily unavailable",
-                503,
-            ) from exc
-        if consumed_user_id != raw_user_id:
-            raise _bad("invalid_token", "reset token is invalid or expired", 400)
 
+    try:
+        await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
+            redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
+        )
         user = (
-            await db.execute(select(User).where(User.id == raw_user_id).with_for_update())
+            await db.execute(
+                select(User).where(User.id == raw_user_id).with_for_update()
+            )
         ).scalar_one_or_none()
         if user is None or user.deleted_at is not None:
             raise _bad("invalid_token", "reset token is invalid or expired", 400)
@@ -1014,9 +1071,60 @@ async def password_reset_confirm(
             .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=now)
         )
+    except Exception:
+        rollback_succeeded = False
+        try:
+            await db.rollback()
+            rollback_succeeded = True
+        except Exception:
+            logger.error("password_reset_db_rollback_failed", exc_info=True)
+
+        if rollback_succeeded:
+            try:
+                restored = await _restore_password_reset_token(
+                    redis,
+                    key,
+                    claim_key,
+                    owner=claim_owner,
+                )
+            except Exception:
+                logger.error("password_reset_token_restore_failed", exc_info=True)
+            else:
+                if not restored:
+                    logger.error("password_reset_token_restore_rejected")
+        raise
+
+    try:
         await db.commit()
-    finally:
-        await _release_password_reset_claim(redis, claim_key, owner=claim_owner)
+    except Exception as exc:
+        # A commit exception does not prove the transaction failed: the database
+        # may have durably applied it before the client lost the acknowledgement.
+        # Never restore the already-claimed token across this uncertainty.
+        try:
+            await db.rollback()
+        except Exception:
+            logger.error("password_reset_db_rollback_failed", exc_info=True)
+        await _consume_password_reset_claim(
+            redis,
+            claim_key,
+            owner=claim_owner,
+        )
+        logger.error(
+            "password_reset_commit_outcome_uncertain",
+            extra={"user_id": raw_user_id},
+            exc_info=True,
+        )
+        raise _bad(
+            "reset_outcome_uncertain",
+            "password reset result is uncertain; request a new reset link before retrying",
+            503,
+        ) from exc
+
+    await _consume_password_reset_claim(
+        redis,
+        claim_key,
+        owner=claim_owner,
+    )
     return OkOut(ok=True)
 
 

@@ -24,6 +24,7 @@ import {
   volcanoOperationAssetResult,
   volcanoOperationBlocksMutation,
   volcanoOperationIsRetryable,
+  volcanoOperationStartedAt,
   volcanoOperationTimedOut,
   volcanoQuotaUsage,
   volcanoReservedQuotaCount,
@@ -316,7 +317,11 @@ export function useVolcanoUploadController({
                 { signal },
               );
             },
-            onProgress: (operation, operationSessionId) => {
+            onProgress: (
+              operation,
+              operationSessionId,
+              operationStartedAt,
+            ) => {
               updateUpload(
                 item.id,
                 {
@@ -324,8 +329,7 @@ export function useVolcanoUploadController({
                   operationId: operation.id,
                   operationStatus: operation.status,
                   progressStage: operation.progress_stage,
-                  operationStartedAt:
-                    queuedItem?.operationStartedAt ?? Date.now(),
+                  operationStartedAt,
                   operationRetryable:
                     volcanoOperationIsRetryable(operation),
                   retryAfterSeconds: operation.retry_after_seconds,
@@ -906,10 +910,9 @@ export function useVolcanoUploadController({
                   ? "failed"
                   : "processing",
             retryMode: "none",
-            operationStartedAt:
-              item.operationStartedAt ??
-              item.submissionStartedAt ??
-              Date.now(),
+            operationStartedAt: volcanoOperationStartedAt(
+              item.operationStartedAt ?? item.submissionStartedAt,
+            ),
             pollFailures: 0,
             error:
               kind === "failed"
@@ -1045,7 +1048,9 @@ export function useVolcanoUploadController({
           id,
           {
             phase: "processing",
-            operationStartedAt: Date.now(),
+            operationStartedAt: volcanoOperationStartedAt(
+              item.operationStartedAt,
+            ),
             pollFailures: 0,
             error: undefined,
           },

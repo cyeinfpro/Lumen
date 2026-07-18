@@ -47,6 +47,10 @@ import {
   type MemoryStagingOut,
   type MemoryType,
 } from "@/lib/apiClient";
+import {
+  userMemoryQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 
 const TYPE_OPTIONS: Array<{ value: MemoryType; label: string }> = [
   { value: "profile", label: "身份" },
@@ -89,6 +93,7 @@ function isEmptyFirstRun({
 
 export default function MemorySettingsPage() {
   const qc = useQueryClient();
+  const userScope = useUserQueryScope();
   const [selectedScope, setSelectedScope] = useState<string>("all");
   const [newScopeName, setNewScopeName] = useState("");
   const [newScopeEmoji, setNewScopeEmoji] = useState("");
@@ -102,29 +107,37 @@ export default function MemorySettingsPage() {
   const [showCapabilityModal, setShowCapabilityModal] = useState(false);
 
   const invalidate = () => {
-    void qc.invalidateQueries({ queryKey: ["me", "memory"] });
+    if (!userScope.enabled) return;
+    void qc.invalidateQueries({
+      queryKey: userMemoryQueryKeys.all(userScope.userId),
+    });
   };
 
   const settingsQ = useQuery({
-    queryKey: ["me", "memory", "settings"],
+    queryKey: userMemoryQueryKeys.settings(userScope.userId),
     queryFn: getMemorySettings,
+    enabled: userScope.enabled,
   });
   const scopesQ = useQuery({
-    queryKey: ["me", "memory", "scopes"],
+    queryKey: userMemoryQueryKeys.scopes(userScope.userId),
     queryFn: listMemoryScopes,
+    enabled: userScope.enabled,
   });
   const memoriesQ = useQuery({
-    queryKey: ["me", "memory", "items", selectedScope],
+    queryKey: userMemoryQueryKeys.items(userScope.userId, selectedScope),
     queryFn: () =>
       listMemories(selectedScope === "all" ? {} : { scope_id: selectedScope }),
+    enabled: userScope.enabled,
   });
   const stagingQ = useQuery({
-    queryKey: ["me", "memory", "staging"],
+    queryKey: userMemoryQueryKeys.staging(userScope.userId),
     queryFn: listMemoryStaging,
+    enabled: userScope.enabled,
   });
   const timelineQ = useQuery({
-    queryKey: ["me", "memory", "timeline"],
+    queryKey: userMemoryQueryKeys.timeline(userScope.userId),
     queryFn: () => listMemoryTimeline(),
+    enabled: userScope.enabled,
   });
 
   const scopes = useMemo(() => scopesQ.data ?? [], [scopesQ.data]);
@@ -135,6 +148,7 @@ export default function MemorySettingsPage() {
   // 用户尝试启用记忆 (disabled=false), 但服务端没 embedding provider:
   // 不发 mutate, 弹窗提示去 admin 配置.
   const requestEnableMemory = (next: boolean) => {
+    if (!userScope.enabled) return;
     if (!embeddingAvailable && next === true) {
       // 用户想 "启用" (off → on, 即 disabled: true → false), 但不可用.
       setShowCapabilityModal(true);
@@ -260,6 +274,7 @@ export default function MemorySettingsPage() {
   });
 
   const exportJson = async () => {
+    if (!userScope.enabled) return;
     const data = await exportMemories();
     const blob = new Blob([JSON.stringify(data, null, 2)], {
       type: "application/json",

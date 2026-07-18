@@ -95,7 +95,26 @@ async def test_sse_fallback_waits_for_inflight_dedupe_reservation(
 async def test_record_image_call_normalises_monotonic_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    redis = _FallbackRedis()
+    class AtomicRedis(_FallbackRedis):
+        async def eval(
+            self,
+            _script: str,
+            numkeys: int,
+            ts_key: str,
+            day_key: str,
+            member: str,
+            now: str,
+            ttl: str,
+            expire_at: str,
+        ) -> int:
+            assert numkeys == 2
+            self.zadd_calls.append((ts_key, {member: float(now)}))
+            self.expire_calls.append((ts_key, int(ttl)))
+            self.incr_calls.append(day_key)
+            self.expireat_calls.append((day_key, int(expire_at)))
+            return 1
+
+    redis = AtomicRedis()
     monkeypatch.setattr(account_limiter.time, "time", lambda: 1_700_000_000.0)
 
     await account_limiter.record_image_call(

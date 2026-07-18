@@ -2,6 +2,11 @@
 
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  AUTH_USER_QUERY_KEY,
+  userBillingQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { getMe, getPricing } from "@/lib/apiClient";
 import { qualityToFixedSize } from "@/lib/sizing";
 import type { AspectRatio, Quality } from "@/lib/types";
@@ -48,15 +53,19 @@ export function useComposerCostEstimate(input: {
   aspect: AspectRatio;
   count: number;
 }): ComposerCostEstimate {
+  const userScope = useUserQueryScope();
   const meQ = useQuery({
-    queryKey: ["me"],
+    queryKey: AUTH_USER_QUERY_KEY,
     queryFn: getMe,
     staleTime: 60_000,
     retry: false,
   });
-  const isWalletAccount = meQ.data?.account_mode === "wallet";
+  const isWalletAccount =
+    userScope.enabled &&
+    meQ.data?.id === userScope.userId &&
+    meQ.data.account_mode === "wallet";
   const pricingQ = useQuery({
-    queryKey: ["me", "pricing"],
+    queryKey: userBillingQueryKeys.pricing(userScope.userId),
     queryFn: getPricing,
     enabled: isWalletAccount,
     staleTime: 5 * 60_000,

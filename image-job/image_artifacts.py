@@ -109,16 +109,6 @@ class ImageArtifactFacade:
             return width, height, "jpeg"
         if fmt in {"png", "webp", "gif"}:
             return width, height, fmt
-
-        mime = (mime_type or "").split(";", 1)[0].strip().lower()
-        if mime == "image/jpeg":
-            return width, height, "jpeg"
-        if mime == "image/png":
-            return width, height, "png"
-        if mime == "image/webp":
-            return width, height, "webp"
-        if mime == "image/gif":
-            return width, height, "gif"
         return width, height, "bin"
 
     def job_image_dir(

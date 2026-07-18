@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import cached_property
-from importlib import import_module
 from typing import Any
 
 from sqlalchemy import (
@@ -29,9 +28,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .constants import DEFAULT_CHAT_MODEL
+from .memory_extraction_models import MemoryExtractionRun
+from .model_base import Base, SoftDeleteMixin, TimestampMixin, new_uuid7
 from .queue_metadata import completion_queue_metadata, generation_queue_metadata
 from .sqltypes import JsonType, StringListType
 
@@ -43,37 +44,6 @@ USER_API_CREDENTIAL_STATUSES: tuple[str, ...] = (
     "replaced",
     "revoked",
 )
-
-
-def new_uuid7() -> str:
-    # uuid7 在 Python 里返回 UUID；我们存字符串便于 JSON 直出。
-    uuid7 = import_module("uuid_extensions").uuid7
-    return str(uuid7())
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-# ---------- Mixins ----------
-
-
-class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-
-class SoftDeleteMixin:
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None
-    )
 
 
 # ---------- Users / Auth ----------
@@ -2202,7 +2172,9 @@ class OutboxDeadLetter(Base):
         DateTime(timezone=True), nullable=True
     )
 
+
 from . import canvas_models as _canvas_models  # noqa: E402,F401
+
 __all__ = [
     "Base",
     "User",
@@ -2215,6 +2187,7 @@ __all__ = [
     "UserMemory",
     "UserMemoryStaging",
     "MemoryAudit",
+    "MemoryExtractionRun",
     "Generation",
     "Completion",
     "Image",

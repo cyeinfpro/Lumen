@@ -44,6 +44,7 @@ import { ViewportImage } from "@/components/ui/ViewportImage";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 import { cn } from "@/lib/utils";
+import { tryCopyTextToClipboard } from "@/lib/clipboard";
 import { CompletionStatusLine } from "@/components/ui/chat/CompletionStatusLine";
 import type {
   AssistantMessage,
@@ -442,24 +443,27 @@ export function DesktopConversationCanvas({
           <DesktopSceneDivider
             index={scene.index}
             collapsed={isCollapsed}
+            controlsId={`scene-content-${scene.anchorId}`}
             onToggle={() => toggleCollapse(scene.anchorId)}
           />
-          {!isCollapsed && (
-            <div className="flex flex-col gap-4 px-2 pb-5">
-              {scene.user && <UserTurn msg={scene.user} />}
-              {scene.assistant && (
-                <AssistantTurn
-                  msg={scene.assistant}
-                  generations={generations}
-                  onEditImage={onEditImage}
-                  onRetryGen={onRetryGen}
-                  onRetryText={onRetryText}
-                  onRegenerate={onRegenerate}
-                  onOpenMenu={handleOpenMenu}
-                />
-              )}
-            </div>
-          )}
+          <div id={`scene-content-${scene.anchorId}`}>
+            {!isCollapsed && (
+              <div className="flex flex-col gap-4 px-2 pb-5">
+                {scene.user && <UserTurn msg={scene.user} />}
+                {scene.assistant && (
+                  <AssistantTurn
+                    msg={scene.assistant}
+                    generations={generations}
+                    onEditImage={onEditImage}
+                    onRetryGen={onRetryGen}
+                    onRetryText={onRetryText}
+                    onRegenerate={onRegenerate}
+                    onOpenMenu={handleOpenMenu}
+                  />
+                )}
+              </div>
+            )}
+          </div>
         </section>
       );
     },
@@ -594,7 +598,11 @@ function CopyButton({
 }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
-    void navigator.clipboard?.writeText(text).then(() => {
+    void tryCopyTextToClipboard(text).then((success) => {
+      if (!success) {
+        toast.error("复制失败");
+        return;
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     });
@@ -808,6 +816,15 @@ function areAssistantTurnPropsEqual(
   next: AssistantTurnProps,
 ): boolean {
   if (prev.msg !== next.msg) return false;
+  if (
+    prev.onEditImage !== next.onEditImage ||
+    prev.onRetryGen !== next.onRetryGen ||
+    prev.onRetryText !== next.onRetryText ||
+    prev.onRegenerate !== next.onRegenerate ||
+    prev.onOpenMenu !== next.onOpenMenu
+  ) {
+    return false;
+  }
   return (
     assistantGenerationsRenderSignature(prev.msg, prev.generations) ===
     assistantGenerationsRenderSignature(next.msg, next.generations)
@@ -868,10 +885,10 @@ const FinalImage = memo(function FinalImage({
     .join(" · ");
 
   const handleCopy = () => {
-    void navigator.clipboard
-      ?.writeText(gen.prompt)
-      .then(() => toast.success("已复制 prompt"))
-      .catch(() => toast.error("复制失败"));
+    void tryCopyTextToClipboard(gen.prompt).then((success) => {
+      if (success) toast.success("已复制 prompt");
+      else toast.error("复制失败");
+    });
   };
 
   const handleClick = () => {
@@ -1118,10 +1135,10 @@ function ImageContextMenuInner({
       label: "复制 prompt",
       icon: <Clipboard className="w-4 h-4" />,
       onSelect: () => {
-        void navigator.clipboard
-          ?.writeText(info.prompt)
-          .then(() => toast.success("已复制 prompt"))
-          .catch(() => toast.error("复制失败"));
+        void tryCopyTextToClipboard(info.prompt).then((success) => {
+          if (success) toast.success("已复制 prompt");
+          else toast.error("复制失败");
+        });
       },
     },
     {

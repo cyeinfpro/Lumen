@@ -18,7 +18,7 @@ def video_event_data(
     generation: VideoGeneration,
     **extra: Any,
 ) -> dict[str, Any]:
-    return {
+    canonical = {
         "video_generation_id": generation.id,
         "kind": "video_generation",
         "status": generation.status,
@@ -28,8 +28,11 @@ def video_event_data(
         "video_id": extra.pop("video_id", None),
         "error_code": generation.error_code,
         "error_message": generation.error_message,
-        **extra,
     }
+    canonical.update(
+        {key: value for key, value in extra.items() if key not in canonical}
+    )
+    return canonical
 
 
 def queue_video_event(

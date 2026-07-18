@@ -43,8 +43,6 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote, urlsplit
-
 import httpx
 from PIL import (
     Image as PILImage,
@@ -86,6 +84,7 @@ from .upstream_parts import (
     image_stream as upstream_image_stream,
     provider_selection as upstream_provider_selection,
     reference_images as upstream_reference_images,
+    request_targets as upstream_request_targets,
     responses as upstream_responses,
     responses_client as upstream_responses_client,
     retry_policy as upstream_retry_policy,
@@ -1241,58 +1240,16 @@ async def _extract_image_result(
     )
 
 
-def _api_base(base: str) -> str:
-    base = base.rstrip("/")
-    if base.endswith("/v1"):
-        return base
-    return base + "/v1"
-
-
-def _responses_url(base: str) -> str:
-    return _api_base(base) + "/responses"
-
-
-def _image_generations_url(base: str) -> str:
-    return _api_base(base) + "/images/generations"
-
-
-def _image_edits_url(base: str) -> str:
-    return _api_base(base) + "/images/edits"
-
-
-def _image_jobs_url(base: str) -> str:
-    return _api_base(base) + "/image-jobs"
-
-
-def _image_job_status_url(base: str, job_id: str) -> str:
-    return f"{_image_jobs_url(base)}/{quote(job_id, safe='')}"
-
-
-def _validate_image_job_base_url(raw_base: str) -> str:
-    base = (raw_base or "").strip().rstrip("/")
-    parts = urlsplit(base)
-    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-        raise UpstreamError(
-            "image job base URL must be an http or https URL with a hostname",
-            status_code=400,
-            error_code=EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    if parts.username or parts.password:
-        raise UpstreamError(
-            "image job base URL must not include credentials",
-            status_code=400,
-            error_code=EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    if parts.query or parts.fragment:
-        raise UpstreamError(
-            "image job base URL must not include query or fragment",
-            status_code=400,
-            error_code=EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    return base
+_validated_byok_target_for_request = (
+    upstream_request_targets._validated_byok_target_for_request
+)
+_api_base = upstream_request_targets._api_base
+_responses_url = upstream_request_targets._responses_url
+_image_generations_url = upstream_request_targets._image_generations_url
+_image_edits_url = upstream_request_targets._image_edits_url
+_image_jobs_url = upstream_request_targets._image_jobs_url
+_image_job_status_url = upstream_request_targets._image_job_status_url
+_validate_image_job_base_url = upstream_request_targets._validate_image_job_base_url
 
 
 async def _resolve_image_job_base_url() -> str:
@@ -1366,14 +1323,23 @@ async def _direct_generate_image_once(
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
+    pinned_target_override: Any | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
     proxy_url = await resolve_provider_proxy_url(proxy_override)
-    client = await (
-        _get_images_client(proxy_url) if proxy_url else _get_images_client()
-    )
     url = _image_generations_url(base_url_override)
+    pinned_target = (
+        None
+        if proxy_url
+        else _validated_byok_target_for_request(pinned_target_override, url)
+    )
+    if proxy_url:
+        client = await _get_images_client(proxy_url)
+    elif pinned_target is not None:
+        client = await _get_images_client(pinned_target=pinned_target)
+    else:
+        client = await _get_images_client()
     # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
     # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
     assert UPSTREAM_MODEL, "model must be set"
@@ -1526,6 +1492,7 @@ async def _direct_edit_image_once(
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
+    pinned_target_override: Any | None = None,
 ) -> list[tuple[str, str | None]]:
     """Image-to-image via direct `/v1/images/edits` (multipart) using gpt-image-2.
 
@@ -1588,17 +1555,25 @@ async def _direct_edit_image_once(
         files=files,
     )
     proxy_url = await resolve_provider_proxy_url(proxy_override)
+    pinned_target = (
+        None
+        if proxy_url
+        else _validated_byok_target_for_request(pinned_target_override, url)
+    )
     started = time.monotonic()
     _, read_timeout_s = await _image_request_timeout(size)
     try:
-        status, payload = await _curl_post_multipart(
-            url=url,
-            data=data,
-            files=files,
-            headers=headers,
-            timeout_s=read_timeout_s,
-            proxy_url=proxy_url,
-        )
+        request_kwargs: dict[str, Any] = {
+            "url": url,
+            "data": data,
+            "files": files,
+            "headers": headers,
+            "timeout_s": read_timeout_s,
+            "proxy_url": proxy_url,
+        }
+        if pinned_target is not None:
+            request_kwargs["pinned_target"] = pinned_target
+        status, payload = await _curl_post_multipart(**request_kwargs)
     except httpx.TimeoutException as exc:
         duration_ms = (time.monotonic() - started) * 1000.0
         _log_upstream_call(
@@ -1825,6 +1800,8 @@ async def _submit_and_wait_image_job(
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     proxy_url = await resolve_provider_proxy_url(proxy)
+    # image-job traffic targets the configured sidecar/internal origin. BYOK
+    # pins are only passed to direct supplier requests, never inherited here.
     client = await (
         _get_images_client(proxy_url) if proxy_url else _get_images_client()
     )

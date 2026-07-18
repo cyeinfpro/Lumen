@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -186,6 +187,128 @@ async def test_cancel_after_tool_image_settles_partial_image_usage(
     assert charged == [completion_row]
     assert released == []
     assert completion_row.tokens_in == 7
+    assert completion_row.tokens_out == 23
+    assert completion_row.image_output_tokens == 23
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_first_delta_charges_sent_request_input_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion_row = SimpleNamespace()
+    charged: list[Any] = []
+    released: list[str] = []
+    input_list = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "render a plan"}],
+        }
+    ]
+    instructions = "Keep the response concise."
+
+    async def charge(_session: Any, row: Any) -> None:
+        charged.append(row)
+
+    async def release(_session: Any, _row: Any, *, reason: str) -> None:
+        released.append(reason)
+
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    monkeypatch.setattr(completion.worker_billing, "charge_completion", charge)
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+
+    await completion._settle_cancelled_completion_billing(
+        object(),
+        completion_row,
+        has_partial=False,
+        input_list=input_list,
+        instructions=instructions,
+        accumulated_text="",
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        tool_images=[],
+        reserved_tool_image_budget_micro=0,
+        reason="cancelled",
+    )
+
+    expected = tool_images._estimate_completion_request_input_tokens(
+        input_list,
+        instructions=instructions,
+    )
+    assert charged == [completion_row]
+    assert released == []
+    assert completion_row.tokens_in == expected
+    assert completion_row.tokens_out == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tool_image_fallback_counts_top_level_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion_row = SimpleNamespace()
+    charged: list[Any] = []
+    instructions = "Keep every constraint visible to billing. " * 200
+
+    async def fallback_image_tokens(
+        _session: Any,
+        _completion: Any,
+        *,
+        budget_micro: int,
+    ) -> int:
+        assert budget_micro == 250
+        return 23
+
+    async def charge(_session: Any, row: Any) -> None:
+        charged.append(row)
+
+    async def release(_session: Any, _row: Any, *, reason: str) -> None:
+        raise AssertionError(f"partial tool usage must be charged: {reason}")
+
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    monkeypatch.setattr(
+        completion.completion_billing,
+        "fallback_completion_tool_image_tokens",
+        fallback_image_tokens,
+    )
+    monkeypatch.setattr(completion.worker_billing, "charge_completion", charge)
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+
+    await completion._settle_cancelled_completion_billing(
+        object(),
+        completion_row,
+        has_partial=True,
+        input_list=[],
+        instructions=instructions,
+        accumulated_text="",
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        tool_images=[{"image_id": "image-1"}],
+        reserved_tool_image_budget_micro=250,
+        reason="cancelled",
+    )
+
+    expected_input_tokens = len(
+        json.dumps(
+            {
+                "input": [],
+                "instructions": instructions,
+            },
+            ensure_ascii=False,
+        )
+    )
+    assert charged == [completion_row]
+    assert completion_row.tokens_in == expected_input_tokens
     assert completion_row.tokens_out == 23
     assert completion_row.image_output_tokens == 23
 

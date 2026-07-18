@@ -57,7 +57,6 @@ from lumen_core.schemas import (
     BillingSnapshotOut,
     BillingUsageByKindOut,
     BillingWindowOut,
-    MoneyOut,
     PricingImportIn,
     PricingRuleOut,
     PricingRulesOut,
@@ -90,6 +89,7 @@ from ..ratelimit import RateLimiter, client_ip
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
 from ..services.billing.errors import _http as _http
+from ..services.billing.pricing_units import BULK_RATE_UNITS as _BULK_RATE_UNITS
 from ..services.billing.pricing_values import (
     _ZERO_PRICE_ALLOWED_UNITS as _ZERO_PRICE_ALLOWED_UNITS,
     _bulk_multiplier_x10000 as _bulk_multiplier_x10000,
@@ -134,6 +134,11 @@ from ..services.billing.usage import (
     _usage_by_kind as _usage_by_kind,
     _usage_total as _usage_total,
 )
+from ..services.billing.wallet_activity import (
+    money_out as _money,
+    wallet_activity_24h as _wallet_activity_24h,
+    wallet_activity_window_end as _wallet_activity_window_end,
+)
 from ..services.billing_cache import BillingCacheService
 from ..services.idempotency import cache_json, get_cached_json
 from ..services.pricing_cache import (
@@ -168,19 +173,6 @@ _BILLING_WINDOWS: dict[str, timedelta] = {
 }
 MAX_ADMIN_ADJUST_MICRO = 1_000_000 * billing_core.MICRO_RMB
 MAX_ADMIN_NEGATIVE_BALANCE_MICRO = 100_000 * billing_core.MICRO_RMB
-_BULK_RATE_UNITS: dict[str, str] = {
-    "input": "per_1k_tokens_in",
-    "output": "per_1k_tokens_out",
-    "cache_read": "per_1k_tokens_cache_read",
-    "cache_creation": "per_1k_tokens_cache_creation",
-    "cache_creation_5m": "per_1k_tokens_cache_creation_5m",
-    "cache_creation_1h": "per_1k_tokens_cache_creation_1h",
-    "image_output": "per_1k_tokens_image_output",
-    "reasoning": "per_1k_tokens_reasoning",
-    "input_priority": "per_1k_tokens_input_priority",
-    "output_priority": "per_1k_tokens_output_priority",
-    "cache_read_priority": "per_1k_tokens_cache_read_priority",
-}
 
 
 def configure_billing_cache(service: BillingCacheService | None) -> None:
@@ -201,10 +193,6 @@ def _generate_redemption_secret() -> str:
 
 def _billing_http(exc: billing_core.BillingError) -> HTTPException:
     return _http(exc.code, exc.message, exc.status_code)
-
-
-def _money(amount_micro: int) -> MoneyOut:
-    return MoneyOut(**billing_core.money_dict(amount_micro))
 
 
 async def _lock_redemption_idempotency_key(
@@ -436,12 +424,18 @@ async def _wallet_out(db: AsyncSession, user: User) -> WalletOut:
     if wallet is None:
         raise _http("wallet_unavailable", "wallet is unavailable", 500)
     threshold = await _low_balance_threshold(db)
+    activity_24h = await _wallet_activity_24h(
+        db,
+        user.id,
+        now=_wallet_activity_window_end(),
+    )
     return WalletOut(
         mode="wallet",
         balance=_money(wallet.balance_micro),
         hold=_money(wallet.hold_micro),
         low_balance_threshold=_money(threshold),
         frozen=False,
+        activity_24h=activity_24h,
     )
 
 

@@ -1,10 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 
 import { ESLint } from "eslint";
 import ts from "typescript";
+
+import {
+  changedLinesForPath,
+  getGitChangeScope,
+  readFileAtRef,
+  repoRelativePath,
+} from "./git-change-scope.mjs";
 
 const MAX_COMPLEXITY = 15;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -12,50 +18,18 @@ const root = path.resolve(scriptDir, "..");
 const baselinePath = path.join(scriptDir, "complexity-baseline.json");
 const updateBaseline = process.argv.includes("--update-baseline");
 
-function gitChangedFiles() {
-  const run = (args) => {
-    try {
-      return execFileSync("git", args, {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((value) => value.replaceAll("\\", "/"));
-    } catch {
-      return [];
-    }
-  };
-
-  const working = new Set([
-    ...run(["diff", "--name-only", "--diff-filter=ACMR"]),
-    ...run(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]),
-  ]);
-  if (working.size > 0) return { files: working, baseRef: "HEAD" };
-  return {
-    files: new Set(
-      run(["diff", "--name-only", "--diff-filter=ACMR", "HEAD^", "HEAD"]),
+function loadPreviousBaseline(changeScope) {
+  const baselineRepoPath = repoRelativePath(
+    changeScope.repoRoot,
+    baselinePath,
+  );
+  return JSON.parse(
+    readFileAtRef(
+      changeScope.repoRoot,
+      changeScope.baseRef,
+      baselineRepoPath,
     ),
-    baseRef: "HEAD^",
-  };
-}
-
-function loadPreviousBaseline(baseRef, fallback) {
-  try {
-    const raw = execFileSync(
-      "git",
-      ["show", `${baseRef}:apps/web/scripts/complexity-baseline.json`],
-      {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+  );
 }
 
 function findingLabel(message) {
@@ -154,40 +128,15 @@ function findingFunctionRange(filePath, line, column) {
 
 const changedLineCache = new Map();
 
-function changedLinesForFile(baseRef, sourcePath) {
-  const cacheKey = `${baseRef}:${sourcePath}`;
+function findingChangedLines(changeScope, sourceRepoPath) {
+  const cacheKey = `${changeScope.baseRef}:${sourceRepoPath}`;
   const cached = changedLineCache.get(cacheKey);
   if (cached) return cached;
-
-  let diff = "";
-  try {
-    diff = execFileSync(
-      "git",
-      ["diff", "--unified=0", "--no-color", baseRef, "--", sourcePath],
-      {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
-  } catch {
-    changedLineCache.set(cacheKey, null);
-    return null;
-  }
-
-  const lines = new Set();
-  for (const rawLine of diff.split(/\r?\n/)) {
-    const match = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
-    if (!match) continue;
-    const start = Number.parseInt(match[1], 10);
-    const count = match[2] === undefined ? 1 : Number.parseInt(match[2], 10);
-    if (count === 0) {
-      lines.add(Math.max(1, start));
-      lines.add(Math.max(1, start + 1));
-      continue;
-    }
-    for (let line = start; line < start + count; line += 1) lines.add(line);
-  }
+  const lines = changedLinesForPath(
+    changeScope.repoRoot,
+    changeScope.baseRef,
+    sourceRepoPath,
+  );
   changedLineCache.set(cacheKey, lines);
   return lines;
 }
@@ -256,27 +205,27 @@ if (
 }
 
 const errors = [];
-const changed = gitChangedFiles();
-const changedFiles = changed.files;
-const previousBaseline = loadPreviousBaseline(changed.baseRef, baseline);
+const changeScope = getGitChangeScope({ startDir: root });
+const changedFiles = changeScope.files;
+const previousBaseline = loadPreviousBaseline(changeScope);
+const appRepoPath = repoRelativePath(changeScope.repoRoot, root);
 for (const [key, complexity] of Object.entries(current)) {
   const allowed = baseline.violations[key];
   const previousKey = previousBaselineAliases[key] ?? key;
   const previousAllowed = previousBaseline.violations?.[previousKey];
   const sourcePath = key.split("::", 1)[0];
-  const fileTouched =
-    changedFiles.has(`apps/web/${sourcePath}`) || changedFiles.has(sourcePath);
+  const sourceRepoPath = path.posix.join(appRepoPath, sourcePath);
+  const fileTouched = changedFiles.has(sourceRepoPath);
   const changedLines = fileTouched
-    ? changedLinesForFile(changed.baseRef, sourcePath)
+    ? findingChangedLines(changeScope, sourceRepoPath)
     : new Set();
   const range = findingRanges[key];
   const touched =
     fileTouched &&
-    (changedLines === null ||
-      (range !== undefined &&
-        [...changedLines].some(
-          (line) => line >= range.start && line <= range.end,
-        )));
+    range !== undefined &&
+    [...changedLines].some(
+      (line) => line >= range.start && line <= range.end,
+    );
   if (allowed === undefined) {
     errors.push(`new complexity violation: ${key} (${complexity})`);
   } else if (complexity > allowed) {

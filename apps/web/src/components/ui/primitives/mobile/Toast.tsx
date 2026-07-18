@@ -13,7 +13,7 @@ export function pushMobileToast(
   message: ReactNode,
   kind: MobileToastKind = "info",
 ) {
-  const title = typeof message === "string" ? message : "操作已更新";
+  const title = message;
   if (kind === "danger") toast.error(title);
   else if (kind === "warning") toast.warning(title);
   else if (kind === "success") toast.success(title);
