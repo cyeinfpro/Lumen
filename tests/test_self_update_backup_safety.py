@@ -430,6 +430,7 @@ def test_self_update_signal_rolls_back_all_replaced_files(
         lumen_self_update_scripts \
             {shlex.quote(str(target))} {COMMIT} 0 backup.sh restore.sh || rc=$?
         printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
+        exit "$rc"
         """,
         env=env,
     )
