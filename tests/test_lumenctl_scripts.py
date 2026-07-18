@@ -798,7 +798,11 @@ def test_install_ghcr_probe_uses_private_mktemp_and_cleans_up(
                     *) shift ;;
                 esac
             done
-            mode="$(stat -f '%Lp' "$out" 2>/dev/null || stat -c '%a' "$out")"
+            if mode="$(stat -c '%a' "$out" 2>/dev/null)"; then
+                :
+            else
+                mode="$(stat -f '%Lp' "$out")"
+            fi
             printf '%s|%s\\n' "$out" "$mode" > "$TEST_PROBE_META"
             printf '{{"tags":["latest"]}}\\n' > "$out"
             printf '200'
