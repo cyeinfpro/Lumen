@@ -112,14 +112,18 @@ import {
   actionLabel,
   formatDurationLabel,
   hasVideo,
-  isActiveVideo,
   isFailedHistoryVideo,
+  isVideoMaterializationPending,
   isTerminalVideo,
 } from "./video-task-model";
 import type {
   VideoGenerationWithVideo,
   VideoHistoryFilter,
 } from "./video-task-model";
+import {
+  startVideoActivePolling,
+  useVideoSettlingController,
+} from "./use-video-settling-controller";
 import {
   VideoPreviewDialog,
   VideoTaskDrawer,
@@ -145,6 +149,11 @@ import {
   imageReferencePreviewUrl,
   motionSafeScrollBehavior,
 } from "./video-page-utils";
+import {
+  filteredVideoHistoryItems,
+  hasPromptEnhancementPanel,
+  videoEstimateIssue,
+} from "./video-page-derived-state";
 
 const VIDEO_EVENTS = [
   "video.queued",
@@ -155,7 +164,6 @@ const VIDEO_EVENTS = [
   "video.failed",
   "video.canceled",
 ];
-const VIDEO_ACTIVE_POLL_MS = 2500;
 const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 const VIDEO_PROMPT_VARIANT_COUNT = 3;
 const VIDEO_HISTORY_PAGE_SIZE = 12;
@@ -417,15 +425,6 @@ function videoInputIssue({
   return null;
 }
 
-function videoEstimateIssue(
-  seedIsValid: boolean,
-  estimate: { tokens: number; micro: number } | null,
-): string | null {
-  if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
-  if (estimate === null) return "缺少预扣估算";
-  return null;
-}
-
 function videoSubmitDisabledReason({
   createPending,
   uploadPending,
@@ -483,25 +482,6 @@ function videoSubmitDisabledReason({
     videoEstimateIssue(seedIsValid, estimate) ??
     "可以提交"
   );
-}
-
-function filteredVideoHistoryItems(
-  historyFilter: VideoHistoryFilter,
-  settledItems: VideoGenerationOut[],
-  succeededItems: VideoGenerationOut[],
-  failedItems: VideoGenerationOut[],
-): VideoGenerationOut[] {
-  if (historyFilter === "succeeded") return succeededItems;
-  if (historyFilter === "failed") return failedItems;
-  return settledItems;
-}
-
-function hasPromptEnhancementPanel(
-  isEnhancing: boolean,
-  preview: string,
-  candidates: PromptEnhanceCandidate[],
-): boolean {
-  return isEnhancing || Boolean(preview.trim()) || candidates.length > 0;
 }
 
 export default function VideoPage() {
@@ -633,9 +613,33 @@ export default function VideoPage() {
     () => mergeById(historyItems, items),
     [historyItems, items],
   );
+  const {
+    version: videoSettlingVersion,
+    sync: syncVideoSettling,
+    isActive: isVideoSettlingActive,
+    canSchedule: canScheduleVideoRefresh,
+    enable: enableVideoSettling,
+    disable: disableVideoSettling,
+  } = useVideoSettlingController({
+    effectiveItems,
+    generationRefreshRequestsRef,
+    scheduledRefreshTimersRef,
+    pendingHistoryRefreshRef,
+  });
+
   const activeItems = useMemo(
-    () => effectiveItems.filter(isActiveVideo),
-    [effectiveItems],
+    () => {
+      // Checkpoint changes live in refs; the version invalidates this snapshot.
+      void videoSettlingVersion;
+      return effectiveItems
+        .filter((item) => isVideoSettlingActive(item))
+        .map((item) =>
+          isVideoMaterializationPending(item)
+            ? { ...item, progress_stage: "fetching" as const }
+            : item,
+        );
+    },
+    [effectiveItems, isVideoSettlingActive, videoSettlingVersion],
   );
   const seedIsValid = !seed.trim() || parseSeed(seed) !== null;
   const completedVideoItems = useMemo(
@@ -650,8 +654,14 @@ export default function VideoPage() {
     [completedVideoItems, selectedVideoId],
   );
   const settledHistoryItems = useMemo(
-    () => effectiveItems.filter((item) => !isActiveVideo(item)),
-    [effectiveItems],
+    () => {
+      // Keep history membership aligned with settling checkpoint changes.
+      void videoSettlingVersion;
+      return effectiveItems.filter(
+        (item) => !isVideoSettlingActive(item),
+      );
+    },
+    [effectiveItems, isVideoSettlingActive, videoSettlingVersion],
   );
   const succeededHistoryItems = useMemo(
     () => settledHistoryItems.filter((item) => item.status === "succeeded"),
@@ -706,6 +716,7 @@ export default function VideoPage() {
       ) {
         return false;
       }
+      syncVideoSettling(next);
       setItems((prev) => mergeById(prev, [next]));
       if (next.video) {
         prewarmVideoItem(next as VideoGenerationWithVideo);
@@ -724,7 +735,7 @@ export default function VideoPage() {
       }
       return true;
     },
-    [qc],
+    [qc, syncVideoSettling],
   );
 
   const refreshGenerationSafe = useCallback(
@@ -800,6 +811,7 @@ export default function VideoPage() {
   const scheduleGenerationRefresh = useCallback(
     (id: string, opts: GenerationRefreshScheduleOptions = {}) => {
       if (!id) return;
+      if (!canScheduleVideoRefresh(id)) return;
       if (opts.forceHistorySync) {
         pendingHistoryRefreshRef.current.add(id);
       }
@@ -823,6 +835,7 @@ export default function VideoPage() {
 
       const timer = window.setTimeout(() => {
         scheduledRefreshTimersRef.current.delete(id);
+        if (!canScheduleVideoRefresh(id)) return;
         lastRefreshAtRef.current.set(id, Date.now());
         const forceHistorySync = pendingHistoryRefreshRef.current.has(id);
         pendingHistoryRefreshRef.current.delete(id);
@@ -830,7 +843,7 @@ export default function VideoPage() {
       }, delayMs);
       scheduledRefreshTimersRef.current.set(id, timer);
     },
-    [refreshGenerationSafe],
+    [canScheduleVideoRefresh, refreshGenerationSafe],
   );
 
   useEffect(() => {
@@ -873,25 +886,14 @@ export default function VideoPage() {
   );
   useSSE(channels, handlers);
 
-  useEffect(() => {
-    const ids = activeItemIdsKey.split("|").filter(Boolean);
-    if (ids.length === 0) return;
-
-    let alive = true;
-    const poll = () => {
-      if (!alive) return;
-      for (const id of ids) scheduleGenerationRefresh(id);
-    };
-
-    const initialTimer = window.setTimeout(poll, 800);
-    const interval = window.setInterval(poll, VIDEO_ACTIVE_POLL_MS);
-
-    return () => {
-      alive = false;
-      window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
-    };
-  }, [activeItemIdsKey, scheduleGenerationRefresh]);
+  useEffect(
+    () =>
+      startVideoActivePolling(
+        activeItemIdsKey.split("|").filter(Boolean),
+        scheduleGenerationRefresh,
+      ),
+    [activeItemIdsKey, scheduleGenerationRefresh],
+  );
 
   useEffect(() => {
     const refreshVisibleTasks = () => {
@@ -1478,6 +1480,8 @@ export default function VideoPage() {
       }),
     onSuccess: (gen) => {
       terminalHistorySyncedRef.current.delete(gen.id);
+      enableVideoSettling(gen.id);
+      syncVideoSettling(gen);
       setItems((prev) => mergeById(prev, [gen]));
       setIsTaskPanelOpen(true);
       toast.success("任务已提交");
@@ -1518,6 +1522,8 @@ export default function VideoPage() {
         return;
       }
       terminalHistorySyncedRef.current.delete(gen.id);
+      enableVideoSettling(gen.id);
+      syncVideoSettling(gen);
       setItems((prev) => mergeById(prev, [gen]));
       setIsTaskPanelOpen(true);
       const createdNewTask = gen.id !== request.taskId;
@@ -1550,7 +1556,10 @@ export default function VideoPage() {
     mutationFn: deleteVideo,
     onSuccess: async (_data, videoId) => {
       for (const item of effectiveItems) {
-        if (item.video?.id === videoId) abortGenerationRefresh(item.id);
+        if (item.video?.id === videoId) {
+          disableVideoSettling(item.id);
+          abortGenerationRefresh(item.id);
+        }
       }
       setItems((prev) =>
         prev.map((item) =>

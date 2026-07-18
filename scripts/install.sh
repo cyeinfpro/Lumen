@@ -519,6 +519,7 @@ INSTALL_ORIGINAL_PREVIOUS_PRESENT=0
 INSTALL_ORIGINAL_PREVIOUS_TARGET=""
 INSTALL_ORIGINAL_RUNNING_SERVICES=""
 INSTALL_HOST_ARTIFACT_SNAPSHOT=""
+INSTALL_GHCR_PROBE_FILE=""
 
 snapshot_install_state() {
     local shared_env="${SHARED_DIR}/.env"
@@ -651,6 +652,10 @@ on_error() {
 cleanup_on_failure() {
     local rc=$?
     trap - EXIT INT TERM ERR
+    if [ -n "${INSTALL_GHCR_PROBE_FILE:-}" ]; then
+        rm -f "${INSTALL_GHCR_PROBE_FILE}" 2>/dev/null || true
+        INSTALL_GHCR_PROBE_FILE=""
+    fi
     if [ "${rc}" -ne 0 ]; then
         log_error "安装在阶段 [${INSTALL_PHASE:-unknown}] 失败，正在清理已启动的容器（数据卷与 shared/.env 保留）。"
         if [ "${#INSTALL_STARTED_SERVICES[@]}" -gt 0 ]; then
@@ -1763,10 +1768,28 @@ probe_ghcr_image_tag() {
     # GHCR public packages tags API（对未 token 也返回 200/404）
     api_url="https://ghcr.io/v2/cyeinfpro/lumen-api/tags/list"
     log_info "探测 ${api_url}（tag=${tag}）..."
-    local resp http_code
-    http_code="$(curl -fsS -o /tmp/lumen-ghcr-probe.$$ -w '%{http_code}' --max-time 10 "${api_url}" 2>/dev/null || echo "000")"
-    resp="$(cat /tmp/lumen-ghcr-probe.$$ 2>/dev/null || true)"
-    rm -f /tmp/lumen-ghcr-probe.$$
+    local resp http_code probe_file
+    if ! probe_file="$(umask 077; mktemp "${TMPDIR:-/tmp}/lumen-ghcr-probe.XXXXXXXXXX" 2>/dev/null)"; then
+        log_warn "无法创建安全的 GHCR 探测临时文件；跳过预探测，pull 阶段仍会校验镜像。"
+        emit_step_done
+        return 0
+    fi
+    INSTALL_GHCR_PROBE_FILE="${probe_file}"
+    chmod 0600 "${probe_file}" 2>/dev/null || {
+        rm -f "${probe_file}" 2>/dev/null || true
+        INSTALL_GHCR_PROBE_FILE=""
+        log_warn "无法收紧 GHCR 探测临时文件权限；跳过预探测。"
+        emit_step_done
+        return 0
+    }
+    if http_code="$(curl -fsS -o "${probe_file}" -w '%{http_code}' --max-time 10 "${api_url}" 2>/dev/null)"; then
+        :
+    else
+        http_code="000"
+    fi
+    resp="$(cat "${probe_file}" 2>/dev/null || true)"
+    rm -f "${probe_file}" 2>/dev/null || true
+    INSTALL_GHCR_PROBE_FILE=""
 
     if [ "${http_code}" = "200" ] && printf '%s' "${resp}" | grep -q "\"${tag}\""; then
         log_info "GHCR 上存在 tag=${tag}，使用配置值。"
@@ -2067,24 +2090,27 @@ run_bootstrap_admin() {
         elif grep -qiE 'already (exists|created)|duplicate key|user_already_exists|already_admin' "${_boot_log}"; then
             log_info "管理员账号 ${admin_email} 已存在（bootstrap 幂等跳过）。"
         else
-            log_warn "bootstrap 返回非零（rc=${_boot_rc}），可能是 DB 连接 / migration 漂移 / 校验失败。"
-            log_warn "  最近输出："
+            log_error "bootstrap 返回非零（rc=${_boot_rc}），未写入 LUMEN_BOOTSTRAPPED。"
+            log_error "  最近输出："
             tail -n 15 "${_boot_log}" | sed 's/^/    /' >&2
-            log_warn "  如确认账号已存在仅是 race，可登录后到管理面板验证；否则查 logs：docker compose logs --tail=120 migrate api"
+            log_error "  请检查：docker compose logs --tail=120 migrate api"
+            rm -f "${_boot_log}"
+            return "${_boot_rc}"
         fi
         rm -f "${_boot_log}"
     else
-        # mktemp 失败：退化为旧行为（不区分错误来源）
+        # 无法创建日志文件时仍 fail-closed；不能把未知失败误记为已完成。
         if ! LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
                 _install_compose --profile bootstrap run --rm \
                 -e "LUMEN_ADMIN_EMAIL=${admin_email}" \
                 -e "LUMEN_ADMIN_PASSWORD=${admin_pwd}" \
                 bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin; then
-            log_warn "bootstrap 返回非零。常见原因：管理员账号已存在；继续后续步骤。"
+            log_error "bootstrap 返回非零，且无法捕获日志确认幂等已存在；未写入 LUMEN_BOOTSTRAPPED。"
+            return 1
         fi
     fi
 
-    # 标记已 bootstrapped，避免重复运行
+    # 仅在成功或已确认账号存在时标记，避免失败重跑被永久跳过。
     if ! grep -q '^LUMEN_BOOTSTRAPPED=1' "${shared_env}"; then
         printf 'LUMEN_BOOTSTRAPPED=1\n' >> "${shared_env}"
     fi

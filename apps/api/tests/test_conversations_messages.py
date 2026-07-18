@@ -197,6 +197,27 @@ async def test_delete_conversation_soft_deletes_generated_images() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_conversation_memory_extractions_fences_active_runs() -> None:
+    db = _WriteDb(rowcount=2)
+    canceled_at = datetime.now(timezone.utc)
+
+    count = await conversations._cancel_conversation_memory_extractions(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        conv_id="conv-1",
+        user_id="user-1",
+        canceled_at=canceled_at,
+    )
+
+    assert count == 2
+    rendered = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    assert "UPDATE memory_extraction_runs" in rendered
+    assert "memory_extraction_runs.conversation_id" in rendered
+    assert "memory_extraction_runs.user_id" in rendered
+    assert "memory_extraction_runs.status IN" in rendered
+    assert "memory_extraction_runs.fence + " in rendered
+
+
+@pytest.mark.asyncio
 async def test_cancel_conversation_active_tasks_releases_only_queued_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -234,9 +255,7 @@ async def test_cancel_conversation_active_tasks_releases_only_queued_holds(
         error_code=None,
         error_message=None,
     )
-    db = _ActiveTaskDb(
-        [[gen_queued, gen_running], [comp_queued, comp_streaming]]
-    )
+    db = _ActiveTaskDb([[gen_queued, gen_running], [comp_queued, comp_streaming]])
     released: list[dict[str, Any]] = []
 
     async def release_conversation_task_hold(
@@ -571,10 +590,7 @@ async def test_list_messages_rejects_cursor_with_invalid_timestamp(
 @pytest.mark.asyncio
 async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> None:
     now = datetime.now(timezone.utc)
-    rows = [
-        _message(f"msg-{i}", now + timedelta(seconds=i))
-        for i in range(25, 0, -1)
-    ]
+    rows = [_message(f"msg-{i}", now + timedelta(seconds=i)) for i in range(25, 0, -1)]
     conv = SimpleNamespace(
         id="conv-1",
         default_system=None,
@@ -622,7 +638,9 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
 
 
 @pytest.mark.asyncio
-async def test_context_window_estimate_uses_message_id_at_equal_summary_timestamp() -> None:
+async def test_context_window_estimate_uses_message_id_at_equal_summary_timestamp() -> (
+    None
+):
     boundary_at = datetime.now(timezone.utc)
     messages = [
         _message("msg-c", boundary_at),
@@ -660,7 +678,9 @@ async def test_context_window_estimate_uses_message_id_at_equal_summary_timestam
 
 
 @pytest.mark.asyncio
-async def test_context_window_estimate_uses_summary_instead_of_counting_compacted_history() -> None:
+async def test_context_window_estimate_uses_summary_instead_of_counting_compacted_history() -> (
+    None
+):
     now = datetime.now(timezone.utc)
     old_blob = "old context " + ("x" * 35_000)
     recent_blob = "recent context " + ("y" * 350)
@@ -678,8 +698,7 @@ async def test_context_window_estimate_uses_summary_instead_of_counting_compacte
     messages[4].content = {"text": "original task"}
     by_id = {msg.id: msg for msg in messages}
     raw_history_tokens = sum(
-        conversations.estimate_message_tokens(msg.role, msg.content)
-        for msg in messages
+        conversations.estimate_message_tokens(msg.role, msg.content) for msg in messages
     )
     summary = {
         "version": 2,

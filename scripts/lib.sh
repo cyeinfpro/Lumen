@@ -194,6 +194,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 import difflib
+import os
 import sys
 import time
 
@@ -338,6 +339,7 @@ print("".join(diff), end="")
 if apply:
     backup = path.with_name(path.name + f".bak.{time.strftime('%Y%m%d%H%M%S', time.gmtime())}")
     backup.write_text("\n".join(original) + "\n", encoding="utf-8")
+    os.chmod(backup, 0o600)
     path.write_text("\n".join(changed) + "\n", encoding="utf-8")
     print(f"applied; backup={backup}")
 else:
@@ -861,31 +863,19 @@ lumen_redis_is_error_reply() {
     return 1
 }
 
-# 从 LUMEN_REPO_URL 对应的 GitHub raw 拉指定脚本到 scripts_dir，让管理脚本能"自我升级"。
-# 失败软降级（network/校验错只 WARN，不阻塞 caller）；TTL marker 防止短时间重复拉。
-#
-# 用法：
-#   lumen_self_update_scripts <scripts_dir> [branch] [ttl_sec] [files...]
-#
-# 默认参数：
-#   branch    = ${LUMEN_SELF_UPDATE_BRANCH:-main}
-#   ttl_sec   = ${LUMEN_SELF_UPDATE_TTL:-600}（10 分钟内复调直接 noop；0 / FORCE=1 强拉）
-#   files...  = lib.sh lib/runtime.sh lib/locking.sh lib/container_release.sh
-#               release_manifest_guard.py update_runner.py restore_runner.py
-#               backup.sh restore.sh update.sh lumenctl.sh
-#
-# 输出（全局变量；调用方据此决定后续动作）：
-#   LUMEN_SELF_UPDATE_RESULT     ok | skipped | failed | disabled
-#   LUMEN_SELF_UPDATE_CHANGED    "f1 f2 ..."（空格分隔；可空表示远端=本地）
-#   LUMEN_SELF_UPDATE_BACKUP_TS  YYYYMMDD-HHMMSS（备份后缀；仅 ok 时有效）
-#   LUMEN_SELF_UPDATE_SOURCE     raw URL base
-#
-# 环境变量：
-#   LUMEN_REPO_URL               默认 https://github.com/cyeinfpro/Lumen.git
-#   LUMEN_SELF_UPDATE_FORCE=1    突破 TTL 强制拉
-#   LUMEN_SELF_UPDATE=0          全局关闭（caller 自己另外暴露开关也可以）
-#
-# 返回值：始终 0（softfail；caller 看 LUMEN_SELF_UPDATE_RESULT 判定）。
+# Strict updater: only a release tag verified by its manifest or a 40-byte
+# commit may reach raw GitHub. Mutable branches must use the bootstrap wrapper.
+lumen_github_repo_slug() {
+    local repo_url="${1:-${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}}" owner_repo=""
+    case "${repo_url}" in
+        https://github.com/*) owner_repo="${repo_url#https://github.com/}" ;;
+        *) return 1 ;;
+    esac
+    owner_repo="${owner_repo%.git}"
+    [[ "${owner_repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+    printf '%s' "${owner_repo}"
+}
+
 lumen_validate_self_update_file() {
     local relative="$1"
     local path="$2"
@@ -923,14 +913,257 @@ PY
     esac
 }
 
+lumen_self_update_file_mode() {
+    case "${1:-}" in
+        backup.sh|restore.sh|update.sh|install.sh|uninstall.sh|lumenctl.sh|migrate_to_releases.sh)
+            printf '0755'
+            ;;
+        *)
+            printf '0644'
+            ;;
+    esac
+}
+
+# Install every changed script plus the update markers as one rollback unit.
+# The subshell owns signal traps, so caller traps are left untouched.
+lumen_self_update_install_transaction() (
+    scripts_dir="$1"
+    download_dir="$2"
+    backup_ts="$3"
+    commit_sha="$4"
+    all_files_list="$5"
+    changed_files_list="$6"
+    transaction_dir=""
+    committed=0
+    replacement_started=0
+    rollback_failed=0
+    f=""
+    target=""
+    target_dir=""
+    backup=""
+    stage=""
+    mode=""
+    index=0
+    marker=""
+    marker_stage=""
+    marker_backup=""
+    changed_files=()
+    targets=()
+    target_states=()
+    target_backups=()
+    target_stages=()
+    marker_paths=()
+    marker_states=()
+    marker_backups=()
+    marker_stages=()
+    visible_backups=()
+
+    while IFS= read -r f; do
+        [ -n "${f}" ] && changed_files+=("${f}")
+    done < "${changed_files_list}"
+
+    umask 077
+    transaction_dir="$(
+        mktemp -d "${scripts_dir}/.lumen-self-update.txn.XXXXXXXXXX" 2>/dev/null
+    )" || exit 1
+    if ! chmod 0700 "${transaction_dir}"; then
+        rm -rf "${transaction_dir}" 2>/dev/null || true
+        exit 1
+    fi
+    export LUMEN_SELF_UPDATE_TRANSACTION_PID="${BASHPID:-$$}"
+
+    # shellcheck disable=SC2329  # Invoked from rollback and EXIT traps.
+    _lumen_self_update_restore_path() {
+        local restore_path="$1"
+        local restore_state="$2"
+        local restore_backup="$3"
+        local restore_index="$4"
+        local restore_stage="${transaction_dir}/restore.${restore_index}"
+        case "${restore_state}" in
+            present)
+                if ! cp -a "${restore_backup}" "${restore_stage}" \
+                        || ! mv -f "${restore_stage}" "${restore_path}"; then
+                    rm -f "${restore_stage}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+            absent)
+                rm -f "${restore_path}" || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+
+    # shellcheck disable=SC2329  # Invoked from the EXIT trap.
+    _lumen_self_update_rollback() {
+        local i
+        rollback_failed=0
+        for ((i = ${#marker_paths[@]} - 1; i >= 0; i--)); do
+            if ! _lumen_self_update_restore_path \
+                    "${marker_paths[$i]}" \
+                    "${marker_states[$i]}" \
+                    "${marker_backups[$i]}" \
+                    "marker.${i}"; then
+                rollback_failed=1
+                log_warn "[self_update] marker 回滚失败：${marker_paths[$i]}"
+            fi
+        done
+        for ((i = ${#targets[@]} - 1; i >= 0; i--)); do
+            if ! _lumen_self_update_restore_path \
+                    "${targets[$i]}" \
+                    "${target_states[$i]}" \
+                    "${target_backups[$i]}" \
+                    "target.${i}"; then
+                rollback_failed=1
+                log_warn "[self_update] 脚本回滚失败：${targets[$i]}"
+            fi
+        done
+        return "${rollback_failed}"
+    }
+
+    # shellcheck disable=SC2329  # Installed as the EXIT trap below.
+    _lumen_self_update_finish() {
+        local rc=$?
+        local created_backup
+        trap - EXIT INT TERM HUP
+        if [ "${committed}" -ne 1 ]; then
+            if [ "${replacement_started}" -eq 1 ]; then
+                log_warn "[self_update] 安装事务失败，正在恢复全部 scripts 文件。"
+                if ! _lumen_self_update_rollback; then
+                    log_warn "[self_update] scripts 事务回滚不完整，拒绝继续运行。"
+                    rc=70
+                fi
+            else
+                for created_backup in \
+                        ${visible_backups[@]+"${visible_backups[@]}"}; do
+                    rm -f "${created_backup}" 2>/dev/null || true
+                done
+            fi
+        fi
+        rm -rf "${transaction_dir}" 2>/dev/null || true
+        exit "${rc}"
+    }
+
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap '_lumen_self_update_finish' EXIT
+
+    mkdir -p "${transaction_dir}/staged" "${transaction_dir}/markers" \
+        || exit 1
+
+    for f in ${changed_files[@]+"${changed_files[@]}"}; do
+        target="${scripts_dir}/${f}"
+        target_dir="$(dirname "${target}")"
+        if ! mkdir -p "${target_dir}"; then
+            log_warn "[self_update] 无法创建目标目录：${target_dir}。"
+            exit 1
+        fi
+        if [ -L "${target}" ] || { [ -e "${target}" ] && [ ! -f "${target}" ]; }; then
+            log_warn "[self_update] 目标不是普通文件：${target}。"
+            exit 1
+        fi
+
+        index=$((index + 1))
+        backup=""
+        if [ -f "${target}" ]; then
+            backup="${target}.bak.${backup_ts}"
+            if [ -e "${backup}" ] || [ -L "${backup}" ]; then
+                log_warn "[self_update] 备份路径已存在，拒绝覆盖：${backup}。"
+                exit 1
+            fi
+            if ! cp -a "${target}" "${backup}" \
+                    || ! cmp -s "${target}" "${backup}"; then
+                log_warn "[self_update] 备份失败，未开始替换：${target}。"
+                exit 1
+            fi
+            target_states+=("present")
+            target_backups+=("${backup}")
+            visible_backups+=("${backup}")
+        else
+            target_states+=("absent")
+            target_backups+=("")
+        fi
+
+        stage="${transaction_dir}/staged/$(printf '%04d' "${index}")"
+        mode="$(lumen_self_update_file_mode "${f}")"
+        if ! cp -a "${download_dir}/${f}" "${stage}" \
+                || ! chmod "${mode}" "${stage}" \
+                || ! lumen_validate_self_update_file "${f}" "${stage}"; then
+            log_warn "[self_update] staging/权限校验失败：${f}。"
+            exit 1
+        fi
+        targets+=("${target}")
+        target_stages+=("${stage}")
+    done
+
+    marker_paths=(
+        "${scripts_dir}/.lumen-self-update.files"
+        "${scripts_dir}/.lumen-self-update.source"
+        "${scripts_dir}/.lumen-self-update.last"
+    )
+    index=0
+    for marker in "${marker_paths[@]}"; do
+        index=$((index + 1))
+        if [ -L "${marker}" ] || { [ -e "${marker}" ] && [ ! -f "${marker}" ]; }; then
+            log_warn "[self_update] marker 不是普通文件：${marker}。"
+            exit 1
+        fi
+        marker_backup="${transaction_dir}/markers/original.${index}"
+        if [ -f "${marker}" ]; then
+            if ! cp -a "${marker}" "${marker_backup}"; then
+                log_warn "[self_update] marker 备份失败：${marker}。"
+                exit 1
+            fi
+            marker_states+=("present")
+            marker_backups+=("${marker_backup}")
+        else
+            marker_states+=("absent")
+            marker_backups+=("")
+        fi
+        marker_stage="${transaction_dir}/markers/staged.${index}"
+        case "${index}" in
+            1) sort -u "${all_files_list}" > "${marker_stage}" || exit 1 ;;
+            2) printf '%s\n' "${commit_sha}" > "${marker_stage}" || exit 1 ;;
+            3) date -u +%s > "${marker_stage}" || exit 1 ;;
+        esac
+        if ! chmod 0600 "${marker_stage}"; then
+            log_warn "[self_update] marker 权限设置失败：${marker}。"
+            exit 1
+        fi
+        marker_stages+=("${marker_stage}")
+    done
+
+    replacement_started=1
+    for ((index = 0; index < ${#targets[@]}; index++)); do
+        if ! mv -f "${target_stages[$index]}" "${targets[$index]}"; then
+            log_warn "[self_update] 替换失败：${targets[$index]}。"
+            exit 1
+        fi
+    done
+    for ((index = 0; index < ${#marker_paths[@]}; index++)); do
+        if ! mv -f "${marker_stages[$index]}" "${marker_paths[$index]}"; then
+            log_warn "[self_update] marker 提交失败：${marker_paths[$index]}。"
+            exit 1
+        fi
+    done
+
+    committed=1
+    exit 0
+)
+
 lumen_self_update_scripts() {
     LUMEN_SELF_UPDATE_RESULT=skipped
     LUMEN_SELF_UPDATE_CHANGED=""
     LUMEN_SELF_UPDATE_BACKUP_TS=""
     LUMEN_SELF_UPDATE_SOURCE=""
+    LUMEN_SELF_UPDATE_SOURCE_TAG=""
+    LUMEN_SELF_UPDATE_SOURCE_COMMIT=""
 
     local scripts_dir="${1:-}"
-    local branch="${2:-${LUMEN_SELF_UPDATE_BRANCH:-main}}"
+    local source_ref="${2:-${LUMEN_SELF_UPDATE_REF:-}}"
     local ttl_sec="${3:-${LUMEN_SELF_UPDATE_TTL:-600}}"
     if [ "$#" -gt 3 ]; then
         shift 3
@@ -942,18 +1175,16 @@ lumen_self_update_scripts() {
         lib/runtime.sh
         lib/locking.sh
         lib/container_release.sh
+        lib/release_layout.sh
     )
-    local python_helper_files=(
-        release_manifest_guard.py
-        update_runner.py
-        restore_runner.py
-    )
+    local python_helper_files=(release_manifest_guard.py update_runner.py restore_runner.py)
     if [ "${#files[@]}" -eq 0 ]; then
         files=(
             lib.sh
             lib/runtime.sh
             lib/locking.sh
             lib/container_release.sh
+            lib/release_layout.sh
             release_manifest_guard.py
             update_runner.py
             restore_runner.py
@@ -963,9 +1194,7 @@ lumen_self_update_scripts() {
             lumenctl.sh
         )
     else
-        # lib.sh、lib/*.sh 与 Python runners/guard 是一个版本单元。旧 stable
-        # updater 的显式清单只包含 shell 文件；自动补齐 helper，避免新 update.sh
-        # 在首跳 re-exec 后仍调用旧 release_manifest_guard.py。
+        # Facade/modules/runners are one version unit, including legacy callers.
         local requested include_modules=0 include_python_helpers=0 module helper present
         for requested in "${files[@]}"; do
             if [ "${requested}" = "lib.sh" ]; then
@@ -1007,9 +1236,7 @@ lumen_self_update_scripts() {
         fi
     fi
 
-    # Install dependencies before the facade/update entrypoints so an
-    # interrupted replacement cannot leave new shell code pointing at old or
-    # missing modules/helpers.
+    # Install dependencies before facade/update entrypoints.
     local ordered_files=()
     for module in "${module_files[@]}"; do
         for requested in "${files[@]}"; do
@@ -1058,8 +1285,75 @@ lumen_self_update_scripts() {
         return 0
     fi
 
+    local release_tag="" commit_sha="${LUMEN_SELF_UPDATE_COMMIT:-}"
+    if [[ "${source_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+        release_tag="${source_ref}"
+        local manifest_file="${LUMEN_SELF_UPDATE_MANIFEST_FILE:-}"
+        local manifest_tmp=""
+        if [ -z "${manifest_file}" ]; then
+            manifest_tmp="$(mktemp 2>/dev/null)" || {
+                LUMEN_SELF_UPDATE_RESULT=failed
+                return 0
+            }
+            if ! command -v lumen_fetch_release_manifest >/dev/null 2>&1 \
+                    || ! lumen_fetch_release_manifest "${release_tag}" "${manifest_tmp}"; then
+                rm -f "${manifest_tmp}" 2>/dev/null || true
+                log_warn "[self_update] 无法获取 ${release_tag} 的 release manifest，拒绝覆盖脚本。"
+                LUMEN_SELF_UPDATE_RESULT=failed
+                return 0
+            fi
+            manifest_file="${manifest_tmp}"
+        fi
+        local manifest_commit=""
+        manifest_commit="$(python3 - "${manifest_file}" "${release_tag}" <<'PY' 2>/dev/null || true
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+commit = payload.get("commit_sha")
+if payload.get("version") != sys.argv[2] or not isinstance(commit, str):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", commit):
+    raise SystemExit(1)
+print(commit)
+PY
+)"
+        [ -n "${manifest_tmp}" ] && rm -f "${manifest_tmp}" 2>/dev/null || true
+        if [ -z "${manifest_commit}" ] \
+                || { [ -n "${commit_sha}" ] && [ "${commit_sha}" != "${manifest_commit}" ]; }; then
+            log_warn "[self_update] ${release_tag} 的 release commit 无效或与预期不一致，拒绝覆盖脚本。"
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+        commit_sha="${manifest_commit}"
+    elif [[ "${source_ref}" =~ ^[0-9a-f]{40}$ ]]; then
+        if [ -n "${commit_sha}" ] && [ "${commit_sha}" != "${source_ref}" ]; then
+            log_warn "[self_update] commit 与 LUMEN_SELF_UPDATE_COMMIT 不一致，拒绝覆盖脚本。"
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+        commit_sha="${source_ref}"
+    elif [ -z "${source_ref}" ] && [[ "${commit_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+        :
+    else
+        log_warn "[self_update] source=${source_ref:-<empty>} 不是具体 release tag/commit；拒绝从可变 branch 覆盖脚本。"
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    fi
+    if [[ ! "${commit_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+        log_warn "[self_update] 未解析到有效的 40 位 release commit，拒绝覆盖脚本。"
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    fi
+    # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
+    LUMEN_SELF_UPDATE_SOURCE_TAG="${release_tag}"
+    LUMEN_SELF_UPDATE_SOURCE_COMMIT="${commit_sha}"
+
     local marker="${scripts_dir}/.lumen-self-update.last"
     local coverage_marker="${scripts_dir}/.lumen-self-update.files"
+    local source_marker="${scripts_dir}/.lumen-self-update.source"
     local coverage_complete=1
     if [ ! -f "${coverage_marker}" ]; then
         coverage_complete=0
@@ -1070,6 +1364,10 @@ lumen_self_update_scripts() {
                 break
             fi
         done
+    fi
+    if [ ! -f "${source_marker}" ] \
+            || [ "$(cat "${source_marker}" 2>/dev/null || true)" != "${commit_sha}" ]; then
+        coverage_complete=0
     fi
     if [ "${LUMEN_SELF_UPDATE_FORCE:-0}" != "1" ] \
             && [ "${coverage_complete}" -eq 1 ] \
@@ -1088,21 +1386,16 @@ lumen_self_update_scripts() {
     fi
 
     local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
-    local raw_base=""
-    case "${repo_url}" in
-        https://github.com/*)
-            local owner_repo="${repo_url#https://github.com/}"
-            owner_repo="${owner_repo%.git}"
-            raw_base="https://raw.githubusercontent.com/${owner_repo}/${branch}/scripts"
-            ;;
-    esac
-    if [ -z "${raw_base}" ]; then
+    local owner_repo="" raw_base=""
+    owner_repo="$(lumen_github_repo_slug "${repo_url}")" || true
+    if [ -z "${owner_repo}" ]; then
         if command -v log_warn >/dev/null 2>&1; then
             log_warn "[self_update] LUMEN_REPO_URL 不是 https://github.com/<owner>/<repo>(.git)：${repo_url}，跳过。"
         fi
         LUMEN_SELF_UPDATE_RESULT=failed
         return 0
     fi
+    raw_base="https://raw.githubusercontent.com/${owner_repo}/${commit_sha}/scripts"
     # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
     LUMEN_SELF_UPDATE_SOURCE="${raw_base}"
 
@@ -1168,7 +1461,9 @@ lumen_self_update_scripts() {
     local changed=""
     local library_changed=0
     local update_requested=0
-    local target target_dir
+    local changed_files=()
+    local all_files_list="${tmp_dir}/.all-files"
+    local changed_files_list="${tmp_dir}/.changed-files"
     for f in "${files[@]}"; do
         if [ "${f}" = "update.sh" ]; then
             update_requested=1
@@ -1176,34 +1471,47 @@ lumen_self_update_scripts() {
         fi
     done
     for f in "${files[@]}"; do
-        target="${scripts_dir}/${f}"
-        target_dir="$(dirname "${target}")"
-        if ! mkdir -p "${target_dir}"; then
-            if command -v log_warn >/dev/null 2>&1; then
-                log_warn "[self_update] 无法创建目标模块目录：${target_dir}，跳过 self-update。"
-            fi
-            rm -rf "${tmp_dir}" 2>/dev/null || true
-            LUMEN_SELF_UPDATE_RESULT=failed
-            return 0
-        fi
-        if [ -f "${target}" ] && cmp -s "${tmp_dir}/${f}" "${target}"; then
+        if [ -f "${scripts_dir}/${f}" ] \
+                && cmp -s "${tmp_dir}/${f}" "${scripts_dir}/${f}"; then
             continue
         fi
-        if [ -f "${target}" ]; then
-            cp -a "${target}" "${target}.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}" 2>/dev/null || true
-        fi
-        cp -a "${tmp_dir}/${f}" "${target}.new"
-        mv "${target}.new" "${target}"
+        changed_files+=("${f}")
         changed="${changed}${f} "
         case "${f}" in
             lib.sh|lib/*.sh) library_changed=1 ;;
         esac
     done
 
-    # Existing callers use changed-file tokens as their re-exec contract:
-    # lumenctl watches lib.sh, while update.sh watches update.sh. A module-only
-    # change still replaces already-sourced function definitions, so emit the
-    # corresponding dependency tokens without requiring caller changes.
+    if ! printf '%s\n' "${files[@]}" > "${all_files_list}" \
+            || ! printf '%s\n' \
+                ${changed_files[@]+"${changed_files[@]}"} > "${changed_files_list}"; then
+        rm -rf "${tmp_dir}" 2>/dev/null || true
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    fi
+
+    local transaction_rc=0
+    if lumen_self_update_install_transaction \
+            "${scripts_dir}" \
+            "${tmp_dir}" \
+            "${LUMEN_SELF_UPDATE_BACKUP_TS}" \
+            "${commit_sha}" \
+            "${all_files_list}" \
+            "${changed_files_list}"; then
+        :
+    else
+        transaction_rc=$?
+        rm -rf "${tmp_dir}" 2>/dev/null || true
+        LUMEN_SELF_UPDATE_RESULT=failed
+        case "${transaction_rc}" in
+            70|129|130|143)
+                return "${transaction_rc}"
+                ;;
+        esac
+        return 0
+    fi
+
+    # Preserve facade/update changed tokens used by caller re-exec contracts.
     if [ "${library_changed}" -eq 1 ]; then
         case " ${changed} " in
             *" lib.sh "*) ;;
@@ -1217,18 +1525,7 @@ lumen_self_update_scripts() {
         fi
     fi
 
-    # 关键脚本执行权限（只对仓库里本来就 +x 的）
-    local exec_f
-    for exec_f in backup.sh restore.sh update.sh install.sh uninstall.sh lumenctl.sh migrate_to_releases.sh; do
-        if [ -f "${scripts_dir}/${exec_f}" ]; then
-            chmod +x "${scripts_dir}/${exec_f}" 2>/dev/null || true
-        fi
-    done
-
-    # 清理过老的 *.bak.<ts>：每个文件最多保留 LUMEN_SELF_UPDATE_BAK_KEEP（默认 5）份。
-    # 时间戳格式 YYYYMMDD-HHMMSS 字典序==时间序，sort+head 取最旧的删除。
-    # 用 find 而不是 ls + glob：无匹配时 ls exit 非零会被 set -e + pipefail 误触 abort；
-    # find 无匹配仍 exit 0（dir 存在），更稳。
+    # 每个文件保留最近 N 份备份；find 无匹配时仍成功，兼容 set -e/pipefail。
     local max_keep="${LUMEN_SELF_UPDATE_BAK_KEEP:-5}"
     if [ "${max_keep}" -gt 0 ] 2>/dev/null; then
         local prune_f prune_dir prune_name total del_n
@@ -1248,13 +1545,6 @@ lumen_self_update_scripts() {
         done
     fi
 
-    local coverage_tmp="${coverage_marker}.tmp.$$"
-    if printf '%s\n' "${files[@]}" | sort -u > "${coverage_tmp}" 2>/dev/null; then
-        mv -f "${coverage_tmp}" "${coverage_marker}" 2>/dev/null || true
-    else
-        rm -f "${coverage_tmp}" 2>/dev/null || true
-    fi
-    date -u +%s > "${marker}" 2>/dev/null || true
     rm -rf "${tmp_dir}" 2>/dev/null || true
 
     # shellcheck disable=SC2034  # Public results consumed by sourcing callers.
@@ -1269,6 +1559,63 @@ lumen_self_update_scripts() {
         fi
     fi
     return 0
+}
+
+# Bootstrap-only branch boundary: GitHub API branch -> immutable commit.
+lumen_resolve_github_branch_commit() {
+    local branch="${1:-}" owner_repo="" body="" commit_sha="" proxy_url=""
+    [ "${#branch}" -le 128 ] || branch=""
+    case "${branch}" in
+        ''|.|..|/*|*/|.*|*.|*'..'*|*//*|*'@{'*|*[!A-Za-z0-9._/-]*)
+            log_warn "[self_update] 非法或不安全的 GitHub branch：${branch:-<empty>}。"
+            return 1
+            ;;
+    esac
+    owner_repo="$(lumen_github_repo_slug)" || { log_warn "[self_update] LUMEN_REPO_URL 不是受支持的 GitHub 仓库 URL。"; return 1; }
+    if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+        log_warn "[self_update] branch bootstrap 需要 curl 和 python3。"
+        return 1
+    fi
+    local curl_cmd=(curl -fsSL --connect-timeout 10 --max-time 30 -H
+        'Accept: application/vnd.github+json' --get --data-urlencode "sha=${branch}"
+        --data-urlencode "per_page=1")
+    proxy_url="$(lumen_effective_proxy_url "${SHARED_ENV:-}" 2>/dev/null || true)"
+    [ -z "${proxy_url}" ] || curl_cmd+=(--proxy "${proxy_url}")
+    body="$("${curl_cmd[@]}" "https://api.github.com/repos/${owner_repo}/commits" 2>/dev/null)" \
+        || { log_warn "[self_update] 无法通过 GitHub API 解析 branch=${branch}。"; return 1; }
+    commit_sha="$(python3 -c 'import json,re,sys; p=json.load(sys.stdin); s=p[0].get("sha","") if isinstance(p,list) and p else ""; print(s if isinstance(s,str) and re.fullmatch(r"[0-9a-f]{40}",s) else "")' \
+        <<<"${body}" 2>/dev/null || true)"
+    [[ "${commit_sha}" =~ ^[0-9a-f]{40}$ ]] \
+        || { log_warn "[self_update] GitHub API 未返回 branch=${branch} 的有效 40 位 commit。"; return 1; }
+    printf '%s' "${commit_sha}"
+}
+
+lumen_self_update_scripts_from_github_branch() {
+    # shellcheck disable=SC2034  # Public results consumed by sourcing callers.
+    LUMEN_SELF_UPDATE_RESULT=skipped LUMEN_SELF_UPDATE_CHANGED=""
+    # shellcheck disable=SC2034  # Public results consumed by sourcing callers.
+    LUMEN_SELF_UPDATE_BACKUP_TS="" LUMEN_SELF_UPDATE_SOURCE=""
+    # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
+    LUMEN_SELF_UPDATE_SOURCE_COMMIT=""
+    local scripts_dir="${1:-}" branch="${2:-${LUMEN_SELF_UPDATE_BRANCH:-main}}"
+    local ttl_sec="${3:-${LUMEN_SELF_UPDATE_TTL:-600}}" commit_sha="${LUMEN_SELF_UPDATE_COMMIT:-}"
+    shift "$(( $# < 3 ? $# : 3 ))"
+    [ "${LUMEN_SELF_UPDATE:-1}" != "0" ] \
+        || { LUMEN_SELF_UPDATE_RESULT=disabled; return 0; }
+    [ -n "${scripts_dir}" ] && [ -d "${scripts_dir}" ] || return 0
+    if [ -n "${commit_sha}" ] && [[ ! "${commit_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+        log_warn "[self_update] LUMEN_SELF_UPDATE_COMMIT 不是有效的 40 位 commit。"
+        # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    fi
+    commit_sha="${commit_sha:-$(lumen_resolve_github_branch_commit "${branch}")}" || {
+        # shellcheck disable=SC2034  # Public result consumed by sourcing callers.
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    }
+    log_info "[self_update] branch=${branch} 已固定到 commit=${commit_sha}。"
+    lumen_self_update_scripts "${scripts_dir}" "${commit_sha}" "${ttl_sec}" "$@"
 }
 
 lumen_effective_proxy_url() {
@@ -1382,261 +1729,6 @@ read_secret() {
 #   ${ROOT}/shared/worker-var/
 #   ${ROOT}/shared/web-next-cache/
 # ---------------------------------------------------------------------------
-
-# release id：UTC 时间 + sha7。按字典序排序即时间序，便于 cleanup 保留最近 N 个。
-lumen_release_id() {
-    local sha="${1:-unknown}"
-    # 截断到 7 位：与 git rev-parse --short 保持一致；不足 7 位时直接补字面量。
-    local short
-    short="$(printf '%s' "${sha}" | cut -c1-7)"
-    [ -n "${short}" ] || short="unknown"
-    # 加 PID 后缀避免同一秒内重跑时 release_id collide（rsync 会污染同一目录）。
-    printf '%sZ-%s-%s' "$(date -u +%Y%m%dT%H%M%S)" "${short}" "$$"
-}
-
-# 读取 ${ROOT}/current 当前指向的 release 目录的绝对路径。
-# 不是 symlink 时返回空串。
-lumen_release_current_path() {
-    local root="$1"
-    local cur="${root}/current"
-    [ -L "${cur}" ] || return 0
-    if command -v readlink >/dev/null 2>&1; then
-        # readlink -f 在 BSD 也可用（macOS 12+ 的 coreutils）；不行就回退到自己拼。
-        local target
-        target="$(readlink -f "${cur}" 2>/dev/null || true)"
-        if [ -n "${target}" ]; then
-            printf '%s' "${target}"
-            return 0
-        fi
-        target="$(readlink "${cur}" 2>/dev/null || true)"
-        case "${target}" in
-            /*) printf '%s' "${target}" ;;
-            '') ;;
-            *) printf '%s/%s' "${root}" "${target}" ;;
-        esac
-    fi
-}
-
-# 读取 ${ROOT}/current 指向 release 的 id（即目录名），不是 symlink 返回空串。
-lumen_release_current_id() {
-    local root="$1"
-    local target
-    target="$(lumen_release_current_path "${root}" || true)"
-    [ -n "${target}" ] || return 0
-    basename "${target}"
-}
-
-# 检测 GNU mv 是否支持 -T 选项（用于真正原子的 symlink 替换）。
-# 0 = 支持；1 = 不支持（macOS / BSD 默认）。
-lumen_mv_has_T() {
-    # `mv --version` GNU 才支持；BSD mv 会报 illegal option。
-    mv --version >/dev/null 2>&1 || return 1
-    # GNU mv 全部支持 -T（since coreutils 6.x）。
-    return 0
-}
-
-# lumen_atomic_replace_symlink <link_target> <link_path>
-# 跨平台原子替换 symlink。优先级：
-#   1. GNU `mv -T`（rename(2) syscall，POSIX 保证原子）
-#   2. python3 os.replace（也是 rename(2) 一次完成，BSD/macOS 上严格原子）
-#   3. `ln -sfn`（unlink+symlink 两步，存在 µs 级窗口；最后兜底）
-# link_target 是软链内容（通常相对路径如 "releases/<id>"）；link_path 是绝对路径。
-lumen_atomic_replace_symlink() {
-    local link_target="$1"
-    local link_path="$2"
-    local link_dir
-    link_dir="$(dirname "${link_path}")"
-    local link_name
-    link_name="$(basename "${link_path}")"
-    local tmp="${link_dir}/.${link_name}.tmp.$$"
-
-    rm -f "${tmp}" 2>/dev/null || true
-    if ! ln -s "${link_target}" "${tmp}"; then
-        return 1
-    fi
-
-    if lumen_mv_has_T; then
-        if mv -T "${tmp}" "${link_path}"; then
-            return 0
-        fi
-        rm -f "${tmp}" 2>/dev/null || true
-        return 1
-    fi
-
-    if command -v python3 >/dev/null 2>&1; then
-        # os.replace 直接 rename(2)，跨平台原子；目标是 symlink 本身（不解引用）。
-        if python3 -c "import os, sys; os.replace(sys.argv[1], sys.argv[2])" "${tmp}" "${link_path}" 2>/dev/null; then
-            return 0
-        fi
-    fi
-
-    # 最后兜底：ln -sfn。窗口极短，仅作 fallback。
-    rm -f "${tmp}" 2>/dev/null || true
-    ln -sfn "${link_target}" "${link_path}" 2>/dev/null || return 1
-    return 0
-}
-
-# lumen_release_atomic_switch <root> <new_id>
-# 原子地把 ${root}/current 切到 releases/<new_id>，并把旧 release 写入 ${root}/previous。
-# 注意：current/previous 都是相对软链（指 "releases/<id>"），便于整体迁移到不同前缀。
-lumen_release_atomic_switch() {
-    local root="$1"
-    local new_id="$2"
-    local old_id=""
-    old_id="$(lumen_release_current_id "${root}" || true)"
-
-    if [ -z "${new_id}" ]; then
-        log_error "lumen_release_atomic_switch：new_id 为空。"
-        return 1
-    fi
-    if [ ! -d "${root}/releases/${new_id}" ]; then
-        log_error "lumen_release_atomic_switch：不存在 releases/${new_id}。"
-        return 1
-    fi
-
-    if ! lumen_atomic_replace_symlink "releases/${new_id}" "${root}/current"; then
-        log_error "切换 ${root}/current → releases/${new_id} 失败。"
-        return 1
-    fi
-
-    # 更新 previous 软链（指向旧 release）。失败不致命。
-    if [ -n "${old_id}" ] && [ "${old_id}" != "${new_id}" ] \
-        && [ -d "${root}/releases/${old_id}" ]; then
-        lumen_atomic_replace_symlink "releases/${old_id}" "${root}/previous" 2>/dev/null || true
-    fi
-    return 0
-}
-
-# lumen_release_link_shared <release_dir> <shared_dir>
-# 把 shared 目录下的几条已知路径软链到 release 内对应位置。
-# 调用前 release 内的同名文件/目录如果存在会被备份到 .pre-link 后再删除（避免 ln 报错）。
-lumen_release_link_shared() {
-    local release_dir="$1"
-    local shared_dir="$2"
-    if [ ! -d "${release_dir}" ]; then
-        log_error "lumen_release_link_shared：release 目录不存在：${release_dir}"
-        return 1
-    fi
-    if [ ! -d "${shared_dir}" ]; then
-        log_error "lumen_release_link_shared：shared 目录不存在：${shared_dir}"
-        return 1
-    fi
-
-    # 四条软链。第二个字段为 shared 下的物理路径，第三个字段为 release 内目标路径。
-    # 用换行分隔，避开复杂关联数组（兼容 bash 3.2 / macOS）。
-    # .env 是 docker compose 启动 PostgreSQL / Redis 时读取的，release 是
-    # git clone 出来的纯净树没有 .env，必须从 shared 链入；否则 containers
-    # phase 会因为 "required variable DB_USER is missing a value" 失败。
-    local mapping="
-web-env/.env.local|apps/web/.env.local
-worker-var|apps/worker/var
-web-next-cache|apps/web/.next/cache
-.env|.env
-"
-    local line src_rel dst_rel src dst dst_parent
-    while IFS= read -r line; do
-        [ -n "${line}" ] || continue
-        src_rel="${line%%|*}"
-        dst_rel="${line#*|}"
-        src="${shared_dir}/${src_rel}"
-        dst="${release_dir}/${dst_rel}"
-        dst_parent="$(dirname "${dst}")"
-
-        # shared 下的源不存在则跳过（例如 .env.local 在某些环境可能没有）。
-        if [ ! -e "${src}" ] && [ ! -L "${src}" ]; then
-            log_warn "shared 中缺少 ${src_rel}，跳过软链 ${dst_rel}。"
-            continue
-        fi
-
-        mkdir -p "${dst_parent}" 2>/dev/null || true
-
-        # 若 release 内已经有同名实体，先移走（不删除，备份成 .pre-link.<ts>）。
-        if [ -e "${dst}" ] || [ -L "${dst}" ]; then
-            local backup
-            backup="${dst}.pre-link.$(date -u +%Y%m%d%H%M%S)"
-            if ! mv "${dst}" "${backup}" 2>/dev/null; then
-                # 兜底删除：通过 lumen_safe_rm_rf 拦截 / /usr 等系统目录路径
-                lumen_safe_rm_rf "${dst}" 2>/dev/null || true
-            fi
-        fi
-
-        if ! ln -s "${src}" "${dst}"; then
-            log_error "无法软链 ${dst} -> ${src}"
-            return 1
-        fi
-    done <<EOF
-${mapping}
-EOF
-    return 0
-}
-
-# lumen_release_cleanup_old <root> <keep>
-# 保留按字典序最新的 <keep> 个 release，其余删除。
-# 任何被 current/previous 指向的 release 都不会被删，即使它落在保留窗口外。
-lumen_release_cleanup_old() {
-    local root="$1"
-    local keep="${2:-5}"
-    local releases_dir="${root}/releases"
-    [ -d "${releases_dir}" ] || return 0
-
-    # 取出 current/previous 指向的 release id（仅 basename，避免跨平台
-    # readlink/canonical 路径不一致——macOS /tmp -> /private/tmp 等情况）。
-    local current_id previous_id
-    current_id="$(lumen_release_current_id "${root}" || true)"
-    previous_id=""
-    if [ -L "${root}/previous" ]; then
-        local prev_link
-        prev_link="$(readlink "${root}/previous" 2>/dev/null || true)"
-        if [ -n "${prev_link}" ]; then
-            previous_id="$(basename "${prev_link}")"
-        fi
-    fi
-
-    # 列出所有 release 子目录，按字典序倒排（最新的在前）。
-    local -a all_ids=()
-    local entry
-    for entry in "${releases_dir}"/*; do
-        [ -d "${entry}" ] || continue
-        all_ids+=("$(basename "${entry}")")
-    done
-    if [ "${#all_ids[@]}" -le "${keep}" ]; then
-        return 0
-    fi
-
-    # bash 3.2 没有 mapfile，用排序+逐行读。
-    local -a sorted=()
-    local id
-    while IFS= read -r id; do
-        sorted+=("${id}")
-    done < <(printf '%s\n' "${all_ids[@]}" | sort -r)
-
-    local kept=0
-    local target removed=0
-    for id in "${sorted[@]}"; do
-        target="${releases_dir}/${id}"
-        # 当前 current 或 previous 指向的，无条件保留。
-        if [ -n "${current_id}" ] && [ "${id}" = "${current_id}" ]; then
-            kept=$((kept+1))
-            continue
-        fi
-        if [ -n "${previous_id}" ] && [ "${id}" = "${previous_id}" ]; then
-            kept=$((kept+1))
-            continue
-        fi
-        if [ "${kept}" -lt "${keep}" ]; then
-            kept=$((kept+1))
-        else
-            # 删除。Linux 上 rm -rf 数百 MB 通常 < 1s。
-            if rm -rf "${target}" 2>/dev/null; then
-                removed=$((removed+1))
-            fi
-        fi
-    done
-    if [ "${removed}" -gt 0 ]; then
-        log_info "release cleanup：删除 ${removed} 个旧 release，保留 ${keep} 个。"
-    fi
-    return 0
-}
 
 # Docker Compose, image verification, release manifest, and image tag helpers
 # are loaded from lib/container_release.sh at the end of this facade.
@@ -1849,6 +1941,7 @@ _LUMEN_LIB_MODULES=(
     lib/runtime.sh
     lib/locking.sh
     lib/container_release.sh
+    lib/release_layout.sh
 )
 _LUMEN_LIB_MISSING=()
 for _LUMEN_LIB_MODULE in "${_LUMEN_LIB_MODULES[@]}"; do
@@ -1857,11 +1950,9 @@ for _LUMEN_LIB_MODULE in "${_LUMEN_LIB_MODULES[@]}"; do
     fi
 done
 
-# Transition compatibility: an older self-updater only knew about lib.sh. If it
-# installs this facade first, fetch the missing version-matched modules before
-# sourcing them. Normal checkouts/releases never enter this branch.
+# Older updaters fetched only lib.sh; bootstrap one commit-wide facade unit.
 if [ "${#_LUMEN_LIB_MISSING[@]}" -gt 0 ]; then
-    log_warn "lib.sh 缺少模块，尝试从同一脚本分支补齐：${_LUMEN_LIB_MISSING[*]}"
+    log_warn "lib.sh 缺少模块，尝试从固定 branch commit 补齐：${_LUMEN_LIB_MISSING[*]}"
     _LUMEN_LIB_FORCE_WAS_SET=0
     _LUMEN_LIB_FORCE_PREVIOUS=""
     if [ "${LUMEN_SELF_UPDATE_FORCE+x}" = "x" ]; then
@@ -1869,11 +1960,12 @@ if [ "${#_LUMEN_LIB_MISSING[@]}" -gt 0 ]; then
         _LUMEN_LIB_FORCE_PREVIOUS="${LUMEN_SELF_UPDATE_FORCE}"
     fi
     LUMEN_SELF_UPDATE_FORCE=1
-    lumen_self_update_scripts \
+    lumen_self_update_scripts_from_github_branch \
         "${_LUMEN_LIB_SCRIPTS_DIR}" \
         "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
         0 \
-        ${_LUMEN_LIB_MISSING[@]+"${_LUMEN_LIB_MISSING[@]}"}
+        lib.sh \
+        ${_LUMEN_LIB_MODULES[@]+"${_LUMEN_LIB_MODULES[@]}"}
     if [ "${_LUMEN_LIB_FORCE_WAS_SET}" -eq 1 ]; then
         LUMEN_SELF_UPDATE_FORCE="${_LUMEN_LIB_FORCE_PREVIOUS}"
     else

@@ -10,6 +10,7 @@ from starlette.requests import Request
 
 from app.routes import byok
 from lumen_core.byok import ByokCryptoError
+from lumen_core.schemas import UserApiCredentialUpdateIn
 
 
 class _Result:
@@ -72,6 +73,7 @@ def _supplier() -> SimpleNamespace:
         name="OpenAI",
         enabled=True,
         deleted_at=None,
+        user_bind_enabled=True,
     )
 
 
@@ -220,3 +222,130 @@ async def test_probe_credential_masks_decrypt_failure(
     assert audits
     assert audits[0]["event_type"] == "me.api_credential.probe.decrypt_failed"
     assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_put_credential_rate_limits_all_dimensions_before_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supplier = _supplier()
+    user = SimpleNamespace(id="user-1", email="user@example.test")
+    db_calls: list[tuple[str, str]] = []
+    limiter_calls: list[tuple[str, str]] = []
+    validation_seen: list[tuple[str, str]] = []
+
+    class Db:
+        async def get(self, _model: Any, object_id: str) -> Any:
+            db_calls.append(("get_supplier", object_id))
+            return supplier
+
+    class RecordingLimiter:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def check(self, _redis: Any, key: str) -> None:
+            limiter_calls.append((self.name, key))
+
+    async def fake_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            mode_enabled=True,
+            validation_model="gpt-test",
+            validation_timeout_ms=250,
+        )
+
+    async def fake_validate(
+        _db: Any,
+        _supplier: Any,
+        _api_key: str,
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        validation_seen.extend(limiter_calls)
+        return SimpleNamespace(
+            ok=False,
+            error_code="invalid_api_key",
+            http_status=401,
+        )
+
+    async def no_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(byok, "read_byok_settings", fake_settings)
+    monkeypatch.setattr(byok, "get_redis", lambda: object())
+    monkeypatch.setattr(
+        byok,
+        "api_key_rate_limit_hash",
+        lambda api_key: "key-hash" if api_key == "sk-test" else "wrong-hash",
+    )
+    monkeypatch.setattr(byok, "validate_api_key_with_supplier", fake_validate)
+    monkeypatch.setattr(byok, "write_audit_isolated", no_audit)
+    monkeypatch.setattr(byok, "_PROBE_IP_LIMITER", RecordingLimiter("ip"))
+    monkeypatch.setattr(byok, "_PROBE_USER_LIMITER", RecordingLimiter("user"))
+    monkeypatch.setattr(byok, "_PROBE_SUPPLIER_LIMITER", RecordingLimiter("supplier"))
+    monkeypatch.setattr(byok, "_PROBE_KEY_LIMITER", RecordingLimiter("key"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await byok.put_my_api_credential(
+            "supplier-1",
+            UserApiCredentialUpdateIn(api_key="sk-test"),
+            _request(),
+            user,  # type: ignore[arg-type]
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["error"]["code"] == "invalid_api_key"
+    assert db_calls == [("get_supplier", "supplier-1")]
+    assert limiter_calls == [
+        ("ip", "rl:byok:put:ip:203.0.113.9"),
+        ("user", "rl:byok:put:user:user-1"),
+        ("supplier", "rl:byok:put:supplier:supplier-1"),
+        ("key", "rl:byok:put:key:key-hash"),
+    ]
+    assert validation_seen == limiter_calls
+    assert "sk-test" not in limiter_calls[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_put_credential_rate_limit_blocks_upstream_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supplier = _supplier()
+    user = SimpleNamespace(id="user-1", email="user@example.test")
+    validation_calls = 0
+
+    class Db:
+        async def get(self, _model: Any, _object_id: str) -> Any:
+            return supplier
+
+    class BlockingLimiter:
+        async def check(self, _redis: Any, _key: str) -> None:
+            raise byok._http("rate_limited", "rate limited", 429)  # noqa: SLF001
+
+    async def fake_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            mode_enabled=True,
+            validation_model="gpt-test",
+            validation_timeout_ms=250,
+        )
+
+    async def fail_validate(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        nonlocal validation_calls
+        validation_calls += 1
+        raise AssertionError("upstream validation must not run when rate limited")
+
+    monkeypatch.setattr(byok, "read_byok_settings", fake_settings)
+    monkeypatch.setattr(byok, "get_redis", lambda: object())
+    monkeypatch.setattr(byok, "_PROBE_IP_LIMITER", BlockingLimiter())
+    monkeypatch.setattr(byok, "validate_api_key_with_supplier", fail_validate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await byok.put_my_api_credential(
+            "supplier-1",
+            UserApiCredentialUpdateIn(api_key="sk-test"),
+            _request(),
+            user,  # type: ignore[arg-type]
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 429
+    assert validation_calls == 0

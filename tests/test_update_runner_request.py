@@ -48,6 +48,9 @@ def test_update_runner_builds_fixed_environment_without_path_overrides(
     assert env["LUMEN_IMAGE_TAG"] == "v1.2.3"
     assert env["LUMEN_VERSION"] == "1.2.3"
     assert env["LUMEN_UPDATE_BUILD"] == "0"
+    assert env["LUMEN_UPDATE_FAST_BACKUP"] == "1"
+    assert env["LUMEN_UPDATE_REQUIRE_MIGRATION_BACKUP"] == "1"
+    assert "LUMEN_UPDATE_SKIP_BACKUP" not in env
     assert "LUMEN_UPDATE_ROOT" not in env
     assert "LUMEN_REPO_DIR" not in env
     assert "LUMEN_SOURCE_ROOT" not in env

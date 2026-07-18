@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
 import { useId, useRef } from "react";
 
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
@@ -139,6 +140,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
     rootRef: drawerRef,
     onClose,
   });
+  useBodyScrollLock(isDesktop && open);
 
   if (!isDesktop) {
     return (

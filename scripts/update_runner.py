@@ -133,6 +133,8 @@ def build_environment(request: dict[str, object]) -> dict[str, str]:
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LUMEN_UPDATE_NONINTERACTIVE": "1",
         "LUMEN_UPDATE_MODE": "fast",
+        "LUMEN_UPDATE_FAST_BACKUP": "1",
+        "LUMEN_UPDATE_REQUIRE_MIGRATION_BACKUP": "1",
         "LUMEN_UPDATE_GIT_PULL": "1",
         "LUMEN_UPDATE_BUILD": "0",
         "LUMEN_UPDATE_CHANNEL": str(request["channel"]),

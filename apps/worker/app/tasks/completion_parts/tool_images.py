@@ -1,4 +1,4 @@
-"""Completion image-tool decoding, persistence, billing, and publishing."""
+"""Completion event publishing, image-tool persistence, and billing helpers."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from PIL import Image as PILImage
 
 from lumen_core.constants import ImageSource
 from lumen_core.context_window import count_tokens
+from lumen_core.pricing import UsageTokens
 
 from ... import billing as worker_billing
 from ... import completion_billing, image_artifacts
@@ -22,6 +23,145 @@ from .tool_state import _IMAGE_GENERATION_TOOL_TYPE
 
 
 _decode_upstream_image_b64 = image_artifacts._decode_upstream_image_b64
+
+
+@dataclass(frozen=True)
+class CompletionEventHooks:
+    session_factory: Callable[[], Any]
+    stage_outbox_event: Callable[..., tuple[str, str, dict[str, Any]]]
+    raw_publish_event: Callable[..., Awaitable[None]]
+    new_event_id: Callable[[], str]
+    user_model: Any
+    conversation_model: Any
+    logger: Any
+
+
+def _completion_event_data(
+    payload: dict[str, Any],
+    *,
+    hooks: CompletionEventHooks,
+) -> dict[str, Any]:
+    event_data = dict(payload)
+    event_data.setdefault("event_id", hooks.new_event_id())
+    return event_data
+
+
+def _completion_event_payload(
+    task_id: str,
+    message_id: str,
+    attempt: int,
+    attempt_epoch: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "completion_id": task_id,
+        "message_id": message_id,
+        "attempt": attempt,
+        "attempt_epoch": attempt_epoch,
+        **extra,
+    }
+
+
+async def _stage_completion_memory_extract(
+    session: Any,
+    *,
+    feature_enabled: bool,
+    user_id: str,
+    conversation_id: str | None,
+    source_message_id: str | None,
+    assistant_message_id: str,
+    hooks: CompletionEventHooks,
+) -> tuple[str, str, dict[str, Any]] | None:
+    ids = (user_id, conversation_id, source_message_id, assistant_message_id)
+    if not feature_enabled or not all(
+        isinstance(value, str) and value for value in ids
+    ):
+        return None
+    user = await session.get(hooks.user_model, user_id)
+    conversation = await session.get(hooks.conversation_model, conversation_id)
+    if (
+        user is None
+        or conversation is None
+        or getattr(conversation, "user_id", None) != user_id
+        or bool(getattr(user, "memory_disabled", False))
+        or bool(getattr(user, "memory_paused", False))
+        or bool(getattr(conversation, "memory_disabled", False))
+    ):
+        return None
+    memory_event_id = f"memory-extract:{source_message_id}:{assistant_message_id}"
+    return hooks.stage_outbox_event(
+        session,
+        kind="memory_extract",
+        payload={
+            "task_id": assistant_message_id,
+            "event_id": memory_event_id,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "source_user_message_id": source_message_id,
+            "assistant_message_id": assistant_message_id,
+            "kind": "memory_extract",
+            "source": "completion_succeeded",
+        },
+    )
+
+
+def _stage_completion_event(
+    session: Any,
+    user_id: str,
+    channel: str,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    hooks: CompletionEventHooks,
+) -> tuple[str, str, dict[str, Any]]:
+    return hooks.stage_outbox_event(
+        session,
+        kind="sse",
+        payload={
+            "user_id": user_id,
+            "channel": channel,
+            "event_name": event,
+            "data": _completion_event_data(payload, hooks=hooks),
+        },
+    )
+
+
+async def _publish_completion_event(
+    redis: Any,
+    user_id: str,
+    channel: str,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    hooks: CompletionEventHooks,
+) -> None:
+    event_data = _completion_event_data(payload, hooks=hooks)
+    try:
+        await hooks.raw_publish_event(redis, user_id, channel, event, event_data)
+    except Exception as exc:  # noqa: BLE001
+        hooks.logger.warning(
+            "completion SSE publish deferred event=%s event_id=%s err=%s",
+            event,
+            event_data["event_id"],
+            exc,
+        )
+        try:
+            async with hooks.session_factory() as session:
+                _stage_completion_event(
+                    session,
+                    user_id,
+                    channel,
+                    event,
+                    event_data,
+                    hooks=hooks,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001
+            hooks.logger.exception(
+                "completion SSE redrive persist failed event=%s event_id=%s",
+                event,
+                event_data["event_id"],
+            )
 
 
 def _tool_image_dedupe_key(event: dict[str, Any], b64_image: str) -> str:
@@ -357,22 +497,214 @@ async def _store_completion_tool_image(
         return image_payload
 
 
+@dataclass
+class _CompletionUsageAccumulator:
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_creation_5m_tokens: int = 0
+    cache_creation_1h_tokens: int = 0
+    reasoning_tokens: int = 0
+    image_output_tokens: int = 0
+    _round_active: bool = False
+    _round_input_reported: bool = False
+    _round_output_reported: bool = False
+    _round_reasoning_reported: bool = False
+    _round_reasoning_usage_tokens: int = 0
+    _round_input_fallback_tokens: int = 0
+    _round_tool_output_tokens_start: int = 0
+
+    def start_round(
+        self,
+        *,
+        input_fallback_tokens: int,
+        tool_output_tokens: int = 0,
+    ) -> None:
+        self._round_active = True
+        self._round_input_reported = False
+        self._round_output_reported = False
+        self._round_reasoning_reported = False
+        self._round_reasoning_usage_tokens = 0
+        self._round_input_fallback_tokens = max(0, int(input_fallback_tokens or 0))
+        self._round_tool_output_tokens_start = max(0, int(tool_output_tokens or 0))
+
+    def record_usage(
+        self,
+        usage: UsageTokens,
+        *,
+        raw_usage: dict[str, Any] | None,
+    ) -> None:
+        current = usage.normalized()
+        (
+            input_reported,
+            output_reported,
+            reasoning_reported,
+        ) = _completion_usage_presence(raw_usage)
+        self._round_input_reported |= input_reported
+        self._round_output_reported |= output_reported
+        self._round_reasoning_reported |= reasoning_reported
+        self._round_reasoning_usage_tokens += current.reasoning_tokens
+        self.tokens_in += current.input_tokens
+        self.tokens_out += current.output_tokens
+        self.cache_read_tokens += current.cache_read_tokens
+        self.cache_creation_tokens += current.cache_creation_tokens
+        self.cache_creation_5m_tokens += current.cache_creation_5m_tokens
+        self.cache_creation_1h_tokens += current.cache_creation_1h_tokens
+        self.reasoning_tokens += current.reasoning_tokens
+        self.image_output_tokens += current.image_output_tokens
+
+    def finish_round(
+        self,
+        *,
+        output_text: str = "",
+        reasoning_text: str = "",
+        tool_output_tokens: int = 0,
+    ) -> None:
+        if not self._round_active:
+            return
+        if not self._round_input_reported:
+            self.tokens_in += self._round_input_fallback_tokens
+        reasoning_fallback = 0
+        if not self._round_reasoning_reported:
+            reasoning_fallback = _estimate_completion_text_tokens(reasoning_text)
+            self.reasoning_tokens += reasoning_fallback
+        if not self._round_output_reported:
+            self.tokens_out += _estimate_completion_text_tokens(output_text)
+            self.tokens_out += max(
+                0,
+                int(tool_output_tokens or 0) - self._round_tool_output_tokens_start,
+            )
+            self.tokens_out += self._round_reasoning_usage_tokens + reasoning_fallback
+        self._round_active = False
+        self._round_input_reported = False
+        self._round_output_reported = False
+        self._round_reasoning_reported = False
+        self._round_reasoning_usage_tokens = 0
+        self._round_input_fallback_tokens = 0
+        self._round_tool_output_tokens_start = 0
+
+    def values(self) -> tuple[int, ...]:
+        return (
+            self.tokens_in,
+            self.tokens_out,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+            self.cache_creation_5m_tokens,
+            self.cache_creation_1h_tokens,
+            self.reasoning_tokens,
+            self.image_output_tokens,
+        )
+
+    def model_values(self) -> dict[str, int]:
+        return dict(
+            zip(
+                (
+                    "tokens_in",
+                    "tokens_out",
+                    "cache_read_tokens",
+                    "cache_creation_tokens",
+                    "cache_creation_5m_tokens",
+                    "cache_creation_1h_tokens",
+                    "reasoning_tokens",
+                    "image_output_tokens",
+                ),
+                self.values(),
+                strict=True,
+            )
+        )
+
+    def apply_to(self, completion: Any) -> None:
+        for name, value in self.model_values().items():
+            setattr(completion, name, value)
+
+
+def _estimate_completion_request_input_tokens(
+    input_list: list[dict[str, Any]],
+    *,
+    instructions: str | None = None,
+) -> int:
+    if not input_list and instructions is None:
+        return 0
+    request_input: Any = input_list
+    if instructions is not None:
+        request_input = {
+            "input": input_list,
+            "instructions": instructions,
+        }
+    try:
+        return max(1, count_tokens(json.dumps(request_input, ensure_ascii=False)))
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _estimate_completion_text_tokens(text: str) -> int:
+    return max(1, count_tokens(text)) if text else 0
+
+
+def _estimate_completion_tool_output_tokens(tool_calls: list[dict[str, Any]]) -> int:
+    if not tool_calls:
+        return 0
+    try:
+        return max(1, count_tokens(json.dumps(tool_calls, ensure_ascii=False)))
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _completion_usage_presence(
+    raw_usage: dict[str, Any] | None,
+) -> tuple[bool, bool, bool]:
+    if not isinstance(raw_usage, dict):
+        return False, False, False
+
+    def present(*paths: tuple[str, ...]) -> bool:
+        for path in paths:
+            value: Any = raw_usage
+            for key in path:
+                if not isinstance(value, dict) or key not in value:
+                    break
+                value = value[key]
+            else:
+                if value is not None:
+                    return True
+        return False
+
+    return (
+        present(
+            ("input_tokens",),
+            ("prompt_tokens",),
+            ("promptTokenCount",),
+        ),
+        present(
+            ("output_tokens",),
+            ("completion_tokens",),
+            ("candidatesTokenCount",),
+        ),
+        present(
+            ("output_tokens_details", "reasoning_tokens"),
+            ("completion_tokens_details", "reasoning_tokens"),
+            ("reasoning_tokens",),
+        ),
+    )
+
+
 def _fallback_completion_usage_tokens(
     input_list: list[dict[str, Any]],
     output_text: str,
     *,
+    instructions: str | None = None,
     tokens_in: int,
     tokens_out: int,
 ) -> tuple[int, int]:
     next_in = tokens_in
     next_out = tokens_out
     if next_out <= 0 and output_text:
-        next_out = max(1, count_tokens(output_text))
-    if next_in <= 0 and input_list:
-        try:
-            next_in = max(1, count_tokens(json.dumps(input_list, ensure_ascii=False)))
-        except Exception:  # noqa: BLE001
-            next_in = 1
+        next_out = _estimate_completion_text_tokens(output_text)
+    if next_in <= 0:
+        next_in = _estimate_completion_request_input_tokens(
+            input_list,
+            instructions=instructions,
+        )
     return next_in, next_out
 
 
@@ -382,6 +714,8 @@ async def _settle_cancelled_completion_billing(
     *,
     has_partial: bool,
     input_list: list[dict[str, Any]] | None,
+    instructions: str | None = None,
+    usage_is_finalized: bool = False,
     accumulated_text: str,
     tokens_in: int,
     tokens_out: int,
@@ -437,7 +771,11 @@ async def _settle_cancelled_completion_billing(
         reasoning_tokens,
         image_output_tokens,
     )
-    if not has_partial and not any(value > 0 for value in usage_values):
+    if (
+        not has_partial
+        and input_list is None
+        and not any(value > 0 for value in usage_values)
+    ):
         await worker_billing.release_completion(
             session,
             completion,
@@ -445,14 +783,15 @@ async def _settle_cancelled_completion_billing(
         )
         return
 
-    if input_list is not None:
+    if input_list is not None and not usage_is_finalized:
         tokens_in, tokens_out = _fallback_completion_usage_tokens(
             input_list,
             accumulated_text,
+            instructions=instructions,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
         )
-    elif accumulated_text and tokens_out <= 0:
+    elif accumulated_text and tokens_out <= 0 and not usage_is_finalized:
         tokens_out = max(1, count_tokens(accumulated_text))
     if (
         tool_images

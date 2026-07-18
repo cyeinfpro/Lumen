@@ -20,6 +20,10 @@ import { logWarn } from "@/lib/logger";
 import type { Generation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { SPRING } from "@/lib/motion";
+import {
+  userTaskQueryKeys,
+  useUserQueryScope,
+} from "@/components/QueryProvider";
 import { TaskCenter } from "./tray/TaskCenter";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "./primitives/mobile/useModalLayer";
@@ -51,7 +55,7 @@ export function GlobalTaskTray() {
   const generations = useChatStore((s) => s.generations);
   const retryGeneration = useChatStore((s) => s.retryGeneration);
   const openLightbox = useUiStore((s) => s.openLightbox);
-  const userId = useChatStore((s) => s.currentUserId);
+  const userScope = useUserQueryScope();
 
   const active = useMemo(() => {
     const activeItems: Generation[] = [];
@@ -67,9 +71,9 @@ export function GlobalTaskTray() {
   const hasActive = active.length > 0;
   const activeCount = active.length;
   const recentTasks = useQuery({
-    queryKey: ["tasks", "recent", "presence"],
+    queryKey: userTaskQueryKeys.presence(userScope.userId),
     queryFn: ({ signal }) => listTasks({ limit: 20 }, { signal }),
-    enabled: Boolean(userId),
+    enabled: userScope.enabled,
     staleTime: 10_000,
     refetchInterval: taskTrayRefetchInterval(taskTrayMinimized, hasActive),
   });

@@ -54,6 +54,24 @@ async def _cancel_and_wait_tasks(
         raise
 
 
+def _completed_race_batch(
+    tasks: list[asyncio.Task[Any]],
+    done: set[asyncio.Task[Any]],
+) -> tuple[list[asyncio.Task[Any]], list[asyncio.Task[Any]]]:
+    ordered = [task for task in tasks if task in done]
+    successful = [
+        task for task in ordered if not task.cancelled() and task.exception() is None
+    ]
+    return ordered, successful
+
+
+def _simultaneous_bonus_tasks(
+    successful: list[asyncio.Task[Any]],
+    winner: asyncio.Task[Any],
+) -> set[asyncio.Task[Any]]:
+    return {task for task in successful if task is not winner}
+
+
 async def _race_responses_image(
     *,
     action: str,
@@ -377,7 +395,8 @@ async def _dual_race_image_action(
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for finished in done:
+            ordered_done, simultaneous_successes = _completed_race_batch(tasks, done)
+            for finished in ordered_done:
                 lane_name = lane_names[finished]
                 exc = finished.exception()
                 if exc is None:
@@ -388,6 +407,12 @@ async def _dual_race_image_action(
                         grace_seconds,
                     )
                     winner_yielded = True
+                    pending.update(
+                        _simultaneous_bonus_tasks(
+                            simultaneous_successes,
+                            finished,
+                        )
+                    )
                     for item in finished.result():
                         yield item
                     break
@@ -583,7 +608,8 @@ async def _dual_race_image_jobs_action(
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for finished in done:
+            ordered_done, simultaneous_successes = _completed_race_batch(tasks, done)
+            for finished in ordered_done:
                 lane_name = lane_names[finished]
                 exc = finished.exception()
                 if exc is None:
@@ -595,6 +621,12 @@ async def _dual_race_image_jobs_action(
                         grace_seconds,
                     )
                     winner_yielded = True
+                    pending.update(
+                        _simultaneous_bonus_tasks(
+                            simultaneous_successes,
+                            finished,
+                        )
+                    )
                     yield finished.result()
                     break
                 if isinstance(exc, facade.UpstreamCancelled):

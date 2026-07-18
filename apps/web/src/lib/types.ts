@@ -988,12 +988,18 @@ export interface MoneyOut {
   rmb: string;
 }
 
+export interface WalletActivity24hOut {
+  topup: MoneyOut;
+  spend: MoneyOut;
+}
+
 export interface WalletOut {
   mode: "wallet" | "byok";
   balance: MoneyOut | null;
   hold: MoneyOut | null;
   low_balance_threshold?: MoneyOut | null;
   frozen: boolean;
+  activity_24h?: WalletActivity24hOut;
 }
 
 export interface WalletTransactionOut {
@@ -1143,6 +1149,10 @@ export interface VideoOut {
   size_bytes?: number | null;
   faststart?: boolean | null;
   created_at?: string | null;
+}
+
+export interface VideoUploadOut extends VideoOut {
+  created: boolean;
 }
 
 export interface VideoTemporaryDownloadOut {

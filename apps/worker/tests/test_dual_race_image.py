@@ -70,6 +70,43 @@ async def test_dual_race_image2_wins_cancels_responses(
 
 
 @pytest.mark.asyncio
+async def test_dual_race_simultaneous_success_yields_second_result_as_bonus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+        return [("winner-img", None)]
+
+    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+        return ("bonus-img", None)
+
+    monkeypatch.setattr(upstream, "_direct_generate_image_with_failover", fake_image2)
+    monkeypatch.setattr(
+        upstream, "_responses_image_stream_with_failover", fake_responses
+    )
+
+    results = [
+        item
+        async for item in upstream._dual_race_image_action(
+            action="generate",
+            prompt="hi",
+            size="1024x1024",
+            images=None,
+            n=1,
+            quality="high",
+            output_format=None,
+            output_compression=None,
+            background=None,
+            moderation=None,
+            model=None,
+            progress_callback=None,
+            provider_override=None,
+        )
+    ]
+
+    assert results == [("winner-img", None), ("bonus-img", None)]
+
+
+@pytest.mark.asyncio
 async def test_dual_race_responses_wins_when_image2_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -338,6 +375,7 @@ async def test_resolve_route_dual_race_wins_over_image_jobs_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """旧 primary_route=dual_race 仍映射到兼容标签 dual_race。"""
+
     async def fake_resolve(key: str) -> str | None:
         if key == "image.primary_route":
             return "dual_race"
@@ -360,6 +398,7 @@ async def test_resolve_route_image_jobs_auto_when_provider_opted_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """旧兼容标签不再被 provider opt-in 全局升级成 image_jobs。"""
+
     async def fake_resolve(key: str) -> str | None:
         return None  # 没设全局
 
@@ -380,6 +419,7 @@ async def test_resolve_route_responses_default_no_provider_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """没设 dual_race 且 provider 没勾 image_jobs → 默认 responses。"""
+
     async def fake_resolve(key: str) -> str | None:
         return None
 
@@ -400,6 +440,7 @@ async def test_resolve_route_dual_race_falls_through_to_image2_responses_when_no
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """dual_race + 没 provider 勾 image_jobs → 仍返回 dual_race（让 caller 走 image2+responses）。"""
+
     async def fake_resolve(key: str) -> str | None:
         if key == "image.primary_route":
             return "dual_race"
@@ -437,7 +478,9 @@ async def test_dispatch_dual_race_uses_image_jobs_when_selected_provider_support
         image2_called = True
         return [("never", None)]
 
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         # 每条 lane 给一个明显的 fingerprint 以便断言
         await asyncio.sleep(0.01 if endpoint_override == "generations" else 0.05)
         return (f"img-from-{endpoint_override}", None)
@@ -611,7 +654,9 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_wrapped_failur
     async def fake_candidates(_provider_override: Any | None) -> list[Any]:
         return providers
 
-    async def fake_image_job(*, provider_override: Any, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, provider_override: Any, **_kw: Any
+    ) -> tuple[str, str | None]:
         calls.append(provider_override.name)
         if provider_override.name == "acc1":
             raise UpstreamError(
@@ -676,7 +721,9 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_safety_error(
     async def fake_candidates(_provider_override: Any | None) -> list[Any]:
         return providers
 
-    async def fake_image_job(*, provider_override: Any, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, provider_override: Any, **_kw: Any
+    ) -> tuple[str, str | None]:
         calls.append(provider_override.name)
         if provider_override.name == "acc1":
             raise UpstreamError(
@@ -766,7 +813,10 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """winner yield 后 loser 在 grace 内成功 → 二次 yield bonus 图。"""
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             # GHA runner CPU 抢占下 0.01 vs 0.05 的差距会被调度抖动颠倒,
             # 拉大到 0.05 vs 0.30 让 winner / bonus 顺序不依赖 scheduler.
@@ -778,7 +828,9 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
 
     monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job)
     monkeypatch.setattr(
-        upstream, "_DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 5.0,
+        upstream,
+        "_DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S",
+        5.0,
     )
 
     image_iter = upstream._dual_race_image_jobs_action(
@@ -802,11 +854,46 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
 
 
 @pytest.mark.asyncio
+async def test_image_jobs_dual_race_simultaneous_success_keeps_bonus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
+        return (f"{endpoint_override}-img", None)
+
+    monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job)
+
+    results = [
+        item
+        async for item in upstream._dual_race_image_jobs_action(
+            action="generate",
+            prompt="hi",
+            size="1024x1024",
+            images=None,
+            n=1,
+            quality="high",
+            output_format=None,
+            output_compression=None,
+            background=None,
+            moderation=None,
+            model=None,
+            progress_callback=None,
+        )
+    ]
+
+    assert results == [("generations-img", None), ("responses-img", None)]
+
+
+@pytest.mark.asyncio
 async def test_image_jobs_dual_race_loser_fails_silently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """winner 成功 / loser 在 grace 内失败 → 只 yield 一次（吞 loser 异常）。"""
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             await asyncio.sleep(0.01)
             return ("winner-img", None)
@@ -815,7 +902,9 @@ async def test_image_jobs_dual_race_loser_fails_silently(
 
     monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job)
     monkeypatch.setattr(
-        upstream, "_DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 5.0,
+        upstream,
+        "_DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S",
+        5.0,
     )
 
     image_iter = upstream._dual_race_image_jobs_action(
@@ -845,7 +934,9 @@ async def test_image_jobs_dual_race_loser_grace_timeout_cancels(
     """winner 完成 / loser 超过 grace → cancel 且静默吞，只 yield 一次。"""
     loser_cancelled = asyncio.Event()
 
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             await asyncio.sleep(0.01)
             return ("winner-img", None)
@@ -886,7 +977,10 @@ async def test_image_jobs_dual_race_both_lanes_fail_merged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """两路都失败 → 抛 fallback_lanes_failed，message 含两条 lane 标识。"""
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         raise UpstreamError(
             f"{endpoint_override} boom",
             error_code="all_direct_image_providers_failed",
@@ -929,7 +1023,9 @@ async def test_image_jobs_dual_race_4k_still_races_both_endpoints(
     """
     calls: list[str] = []
 
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         calls.append(endpoint_override)
         if endpoint_override == "generations":
             await asyncio.sleep(0.01)
@@ -970,7 +1066,9 @@ async def test_image_jobs_dual_race_caller_cancel_propagates(
     """一路抛 UpstreamCancelled → 透传，另一路被 finally 段 cancel。"""
     other_cancelled = asyncio.Event()
 
-    async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        *, endpoint_override: str, **_kw: Any
+    ) -> tuple[str, str | None]:
         if endpoint_override == "responses":
             raise UpstreamCancelled("caller cancelled")
         try:
@@ -1014,9 +1112,19 @@ async def test_image_jobs_dual_race_progress_only_from_generations_lane(
     ) -> tuple[str, str | None]:
         # 模拟 _image_job_with_failover success 推 provider_used + final_image + completed
         if progress_callback is not None:
-            await progress_callback({"type": "provider_used", "endpoint": endpoint_override, "provider": "p"})
-            await progress_callback({"type": "final_image", "endpoint_used": endpoint_override})
-            await progress_callback({"type": "completed", "endpoint_used": endpoint_override})
+            await progress_callback(
+                {
+                    "type": "provider_used",
+                    "endpoint": endpoint_override,
+                    "provider": "p",
+                }
+            )
+            await progress_callback(
+                {"type": "final_image", "endpoint_used": endpoint_override}
+            )
+            await progress_callback(
+                {"type": "completed", "endpoint_used": endpoint_override}
+            )
         await asyncio.sleep(0.01 if endpoint_override == "generations" else 0.05)
         return (f"img-{endpoint_override}", None)
 

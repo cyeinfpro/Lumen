@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2,
   FileText,
@@ -18,16 +19,21 @@ import {
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
 import { Button, IconButton } from "./primitives";
-import type { ConversationSummary, SystemPrompt } from "@/lib/apiClient";
 import {
+  getConversation,
+  type ConversationSummary,
+  type SystemPrompt,
+} from "@/lib/apiClient";
+import {
+  qk,
   useCreateSystemPromptMutation,
   useDeleteSystemPromptMutation,
-  useListConversationsQuery,
   usePatchConversationMutation,
   usePatchSystemPromptMutation,
   useSetDefaultSystemPromptMutation,
   useSystemPromptsQuery,
 } from "@/lib/queries";
+import { useUserQueryScope } from "@/components/QueryProvider";
 import { useChatStore } from "@/store/useChatStore";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "./primitives/mobile/useModalLayer";
@@ -44,6 +50,21 @@ interface SystemPromptManagerProps {
 }
 
 const EMPTY_PROMPT = "";
+
+function isPromptDialogOpen(embedded: boolean, open: boolean): boolean {
+  return embedded || open;
+}
+
+function useCurrentConversationQuery(currentConvId: string | null) {
+  const userScope = useUserQueryScope();
+  const conversationId = currentConvId ?? "";
+  return useQuery({
+    queryKey: qk.user(userScope.userId).conversationDetail(conversationId),
+    queryFn: () => getConversation(conversationId),
+    enabled: userScope.enabled && Boolean(currentConvId),
+    staleTime: 10_000,
+  });
+}
 
 function SystemPromptTrigger({
   compact,
@@ -144,26 +165,17 @@ export function SystemPromptManager({
   const currentConvId = useChatStore((s) => s.currentConvId);
   const embedded = mode === "embedded";
   const [open, setOpen] = useState(defaultOpen);
-  const dialogOpen = embedded || open;
+  const dialogOpen = isPromptDialogOpen(embedded, open);
 
   const promptsQuery = useSystemPromptsQuery({ enabled: dialogOpen });
-  const conversationsQuery = useListConversationsQuery(
-    { limit: 100 },
-    { enabled: dialogOpen || Boolean(currentConvId) },
-  );
+  const currentConversationQuery = useCurrentConversationQuery(currentConvId);
 
   const prompts = useMemo(
     () => promptsQuery.data?.items ?? [],
     [promptsQuery.data?.items],
   );
   const defaultId = promptsQuery.data?.default_id ?? null;
-  const currentConversation = useMemo(
-    () =>
-      (conversationsQuery.data?.items ?? []).find(
-        (conv) => conv.id === currentConvId,
-      ) ?? null,
-    [conversationsQuery.data?.items, currentConvId],
-  );
+  const currentConversation = currentConversationQuery.data ?? null;
   const activePrompt = useMemo(
     () => resolveActivePrompt(prompts, currentConversation, defaultId),
     [prompts, currentConversation, defaultId],

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import email.utils
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -8,7 +10,8 @@ from typing import Any
 import httpx
 import pytest
 
-from app import upstream
+from app import byok_runtime, upstream
+from lumen_core.url_security import PublicHttpTarget
 
 
 @pytest.mark.asyncio
@@ -282,6 +285,95 @@ async def test_curl_multipart_rc28_is_timeout(
             headers={},
             timeout_s=180,
         )
+
+
+@pytest.mark.asyncio
+async def test_curl_multipart_keeps_secrets_out_of_argv_and_uses_form_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Reader:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = list(chunks)
+
+        async def read(self, _size: int) -> bytes:
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.pid = 0
+            self.stdout = _Reader([b'{"ok":true}\n__HTTP_STATUS__:200'])
+            self.stderr = _Reader([])
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def fake_create_subprocess_exec(
+        *args: str,
+        **_kwargs: Any,
+    ) -> _Proc:
+        captured.setdefault("argv", []).append(args)
+        config_path = args[args.index("--config") + 1]
+        captured.setdefault("config_path", []).append(config_path)
+        captured.setdefault("config_mode", []).append(
+            stat.S_IMODE(os.stat(config_path).st_mode)
+        )
+        captured.setdefault("config", []).append(
+            open(  # noqa: SIM115
+                config_path,
+                encoding="utf-8",
+            ).read()
+        )
+        return _Proc()
+
+    monkeypatch.setattr(
+        upstream.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    target = PublicHttpTarget(
+        "https://example.invalid/v1",
+        ("203.0.113.20",),
+    )
+    token = byok_runtime.bind_byok_http_target(target)
+    try:
+        status, payload = await upstream._curl_post_multipart_using_paths(
+            url="https://example.invalid/v1/images/edits",
+            data={"prompt": "@/etc/passwd", "note": "<~/.ssh/id_rsa"},
+            staged_files=[],
+            headers={"Authorization": "Bearer sk-secret"},
+            timeout_s=30,
+            proxy_url="http://proxy-user:proxy-pass@proxy.example:8080",
+        )
+        direct_status, _ = await upstream._curl_post_multipart_using_paths(
+            url="https://example.invalid/v1/images/edits",
+            data={"prompt": "direct"},
+            staged_files=[],
+            headers={"Authorization": "Bearer sk-secret"},
+            timeout_s=30,
+        )
+    finally:
+        byok_runtime.reset_byok_http_target(token)
+
+    argv = tuple(str(arg) for arg in captured["argv"][0])
+    argv_text = "\0".join(argv)
+    assert status == 200
+    assert direct_status == 200
+    assert payload == {"ok": True}
+    assert "--form-string" in argv
+    assert "prompt=@/etc/passwd" in argv
+    assert "note=<~/.ssh/id_rsa" in argv
+    assert "sk-secret" not in argv_text
+    assert "proxy-pass" not in argv_text
+    assert captured["config_mode"] == [0o600, 0o600]
+    assert "Bearer sk-secret" in captured["config"][0]
+    assert "proxy-pass" in captured["config"][0]
+    assert "resolve =" not in captured["config"][0]
+    assert 'resolve = "example.invalid:443:203.0.113.20"' in captured["config"][1]
+    assert all(not os.path.exists(path) for path in captured["config_path"])
 
 
 def test_image_idempotency_key_uses_stable_file_fingerprints() -> None:

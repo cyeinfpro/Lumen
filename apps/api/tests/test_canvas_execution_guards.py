@@ -518,6 +518,64 @@ async def test_canvas_video_auto_model_skips_reference_image_only_provider(
     assert body.model == "image-and-video"
 
 
+@pytest.mark.asyncio
+async def test_canvas_video_auto_model_honors_duration_and_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_options(*_args, **_kwargs) -> VideoOptionsOut:
+        return VideoOptionsOut(
+            enabled=True,
+            models=[
+                VideoModelOptionOut(
+                    model="five-second-only",
+                    actions=["t2v"],
+                    resolutions=["720p"],
+                    durations_s=[5],
+                    durations_by_action_resolution={"t2v": {"720p": [5]}},
+                ),
+                VideoModelOptionOut(
+                    model="ten-second-compatible",
+                    actions=["t2v"],
+                    resolutions=["720p"],
+                    durations_s=[5, 10],
+                    durations_by_action_resolution={"t2v": {"720p": [5, 10]}},
+                ),
+            ],
+            durations_s=[5, 10],
+            resolutions=["720p"],
+            aspect_ratios=["16:9"],
+            generate_audio=True,
+            pricing=[],
+            hold_estimates={},
+        )
+
+    monkeypatch.setitem(_video_body.__globals__, "video_options", fake_options)
+    body = await _video_body(
+        None,  # type: ignore[arg-type]
+        user=SimpleNamespace(id="user-1", account_mode="wallet"),
+        resolved=ResolvedNode(
+            node={
+                "type": "video_text_generate",
+                "config": {
+                    "mode": "t2v",
+                    "model": None,
+                    "duration_s": 10,
+                    "resolution": "720p",
+                    "aspect_ratio": "16:9",
+                },
+            },
+            prompt="Create a ten second clip",
+            images_by_handle={},
+            videos_by_handle={},
+            snapshot={},
+        ),
+        idempotency_key="video-duration-auto-model",
+    )
+
+    assert body.model == "ten-second-compatible"
+    assert body.duration_s == 10
+
+
 def test_canvas_message_attachments_preserve_structured_roles() -> None:
     assert _canvas_message_attachments(
         ["source-image", "product-image"],

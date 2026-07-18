@@ -34,13 +34,14 @@ export function ServiceWorkerRegister() {
     }
 
     let cancelled = false;
+    let reloadRequested = false;
     let removeVisibilityListener: (() => void) | null = null;
 
     const onControllerChange = () => {
       // 新 SW 接管页面 → 重新加载，让用户拿到与新 SW 一致的资源版本。
-      // 避免在已经 reload 过的页面再 reload（某些极端场景会循环）。
-      if (sessionStorage.getItem("__lumen_sw_reloaded") === "1") return;
-      sessionStorage.setItem("__lumen_sw_reloaded", "1");
+      // 同一页面生命周期只响应一次；reload 后 guard 自动重置，后续版本仍可刷新。
+      if (reloadRequested) return;
+      reloadRequested = true;
       window.location.reload();
     };
 

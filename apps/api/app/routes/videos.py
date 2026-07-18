@@ -65,6 +65,7 @@ from lumen_core.schemas import (
     VideoReferenceMediaOut,
     VideoResolution,
     VideoTemporaryDownloadOut,
+    VideoUploadOut,
     normalize_asset_reference_url,
 )
 from lumen_core.url_security import is_private_host, resolve_public_http_target
@@ -896,12 +897,20 @@ async def _video_hold_estimates(db: AsyncSession) -> dict[str, Any]:
     return expand_video_duration_estimates(parsed)
 
 
-@router.post("/upload", response_model=VideoOut, dependencies=[Depends(verify_csrf)])
+def _video_upload_out(video: Video, *, created: bool) -> VideoUploadOut:
+    return VideoUploadOut(**_video_out(video).model_dump(), created=created)
+
+
+@router.post(
+    "/upload",
+    response_model=VideoUploadOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def upload_reference_video(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(...),
-) -> VideoOut:
+) -> VideoUploadOut:
     mime, ext = _reference_upload_ext(file)
     size, sha, header = await _inspect_reference_video_upload(file)
     if not _looks_like_reference_video(header):
@@ -953,11 +962,11 @@ async def upload_reference_video(
                 await asyncio.to_thread(_unlink_file_if_exists, repaired_path)
                 raise
             await db.refresh(existing)
-            return _video_out(existing)
+            return _video_upload_out(existing, created=False)
         _ensure_reference_video_access_token(existing)
         await db.commit()
         await db.refresh(existing)
-        return _video_out(existing)
+        return _video_upload_out(existing, created=False)
     count, total_bytes = (
         await db.execute(
             select(
@@ -1019,7 +1028,7 @@ async def upload_reference_video(
         await asyncio.to_thread(_unlink_file_if_exists, path)
         raise
     await db.refresh(video)
-    return _video_out(video)
+    return _video_upload_out(video, created=True)
 
 
 def _estimate_pairs(estimates: dict[str, Any]) -> tuple[list[int], list[str]]:

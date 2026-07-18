@@ -172,6 +172,7 @@ export function CanvasViewport({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const interactionActiveRef = useRef(false);
   const cancelledConnectionRef = useRef(false);
+  const cancelledResizeRef = useRef(false);
   const resizingNodeIdsRef = useRef(new Set<string>());
   const connectionDraftRef = useRef(connectionDraft);
   const instanceRef = useRef<ReactFlowInstance<CanvasFlowNode, Edge> | null>(
@@ -283,6 +284,9 @@ export function CanvasViewport({
 
   const startFrameResize = useCallback(
     (nodeId: string) => {
+      if (!resizingNodeIdsRef.current.has(nodeId)) {
+        cancelledResizeRef.current = false;
+      }
       resizingNodeIdsRef.current.add(nodeId);
       startInteraction();
     },
@@ -291,7 +295,9 @@ export function CanvasViewport({
 
   const commitFrameResize = useCallback(
     (nodeId: string, geometry: CanvasNodeGeometry) => {
-      if (!cancelledConnectionRef.current) {
+      const cancelled = cancelledResizeRef.current;
+      cancelledResizeRef.current = false;
+      if (!cancelled) {
         resizeNode(nodeId, geometry.size, geometry.position);
       }
       resizingNodeIdsRef.current.delete(nodeId);
@@ -1005,7 +1011,17 @@ export function CanvasViewport({
     [onReady],
   );
 
+  const markInteractionCancelled = useCallback(() => {
+    cancelledConnectionRef.current = true;
+    if (resizingNodeIdsRef.current.size > 0) {
+      cancelledResizeRef.current = true;
+    }
+  }, []);
+
   const cancelDomainInteraction = useCallback(() => {
+    if (resizingNodeIdsRef.current.size > 0) {
+      cancelledResizeRef.current = true;
+    }
     updateConnectionDraft(null);
     setTargetPickerOpen(false);
     resizingNodeIdsRef.current.clear();
@@ -1015,13 +1031,13 @@ export function CanvasViewport({
 
   const handleTouchCancel = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
-      cancelledConnectionRef.current = true;
+      markInteractionCancelled();
       event.currentTarget.ownerDocument.dispatchEvent(
         new Event("touchend", { bubbles: true, cancelable: true }),
       );
       cancelDomainInteraction();
     },
-    [cancelDomainInteraction],
+    [cancelDomainInteraction, markInteractionCancelled],
   );
 
   useEffect(
@@ -1049,12 +1065,8 @@ export function CanvasViewport({
       ref={viewportRef}
       className={styles.viewport}
       onDrop={handleDrop}
-      onPointerCancelCapture={() => {
-        cancelledConnectionRef.current = true;
-      }}
-      onTouchCancelCapture={() => {
-        cancelledConnectionRef.current = true;
-      }}
+      onPointerCancelCapture={markInteractionCancelled}
+      onTouchCancelCapture={markInteractionCancelled}
       onPointerCancel={(event) => {
         if (event.pointerType === "touch") return;
         cancelDomainInteraction();

@@ -1,6 +1,7 @@
 import { deepEqual, doesNotMatch, equal, match, ok } from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import ts from "typescript";
 
 import type {
   VideoGenerationOut,
@@ -28,6 +29,10 @@ const taskUiSource = readFileSync(
   new URL("./video-task-ui.tsx", import.meta.url),
   "utf8",
 );
+const settlingControllerSource = readFileSync(
+  new URL("./use-video-settling-controller.ts", import.meta.url),
+  "utf8",
+);
 const videoWorkbenchUiSource = readFileSync(
   new URL("./video-workbench-ui.tsx", import.meta.url),
   "utf8",
@@ -48,6 +53,7 @@ const source = [
   ),
   taskModelSource,
   taskUiSource,
+  settlingControllerSource,
   readFileSync(
     new URL("../../lib/videoEventSnapshot.ts", import.meta.url),
     "utf8",
@@ -64,6 +70,52 @@ const taskModelUrl = new URL("./video-task-model.ts", import.meta.url);
 const taskModel = (await import(
   taskModelUrl.href
 )) as typeof import("./video-task-model");
+const settlingControllerAst = ts.createSourceFile(
+  "use-video-settling-controller.ts",
+  settlingControllerSource,
+  ts.ScriptTarget.ES2022,
+  true,
+  ts.ScriptKind.TS,
+);
+const settlingPollingRuntimeSource = settlingControllerAst.statements
+  .filter((statement) => {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "startVideoActivePolling"
+    ) {
+      return true;
+    }
+    if (!ts.isVariableStatement(statement)) return false;
+    return statement.declarationList.declarations.some(
+      (declaration) =>
+        ts.isIdentifier(declaration.name) &&
+        (declaration.name.text === "VIDEO_ACTIVE_POLL_INITIAL_DELAY_MS" ||
+          declaration.name.text === "VIDEO_ACTIVE_POLL_INTERVAL_MS"),
+    );
+  })
+  .map((statement) => statement.getText(settlingControllerAst))
+  .join("\n");
+const settlingPollingRuntime = (await import(
+  `data:text/javascript;base64,${Buffer.from(
+    ts.transpileModule(settlingPollingRuntimeSource, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText,
+  ).toString("base64")}`
+)) as {
+  startVideoActivePolling: (
+    ids: readonly string[],
+    scheduleGenerationRefresh: (id: string) => void,
+    timerApi: {
+      setTimeout: (callback: () => void, delayMs: number) => number;
+      clearTimeout: (timer: number) => void;
+      setInterval: (callback: () => void, delayMs: number) => number;
+      clearInterval: (timer: number) => void;
+    },
+  ) => () => void;
+};
 
 type TestReference = VideoReferenceMediaIn & {
   label: string;
@@ -474,7 +526,52 @@ test("video task model preserves status, elapsed, and error semantics", () => {
     taskModel.isActiveVideo(
       taskFixture({ status: "succeeded", progress_stage: "fetching" }),
     ),
+    false,
+  );
+  equal(
+    taskModel.isActiveVideo(
+      taskFixture({ status: "succeeded", progress_stage: "finished" }),
+    ),
+    false,
+  );
+  const checkpoint = taskModel.createVideoSettlingCheckpoint(1_000, 100);
+  equal(
+    taskModel.isVideoSettlingActive(
+      taskFixture({ status: "succeeded", progress_stage: "finished" }),
+      checkpoint,
+      1_099,
+    ),
     true,
+  );
+  const expired = taskModel.ensureVideoSettlingCheckpoint(checkpoint, 1_100);
+  equal(expired.phase, "expired");
+  equal(
+    taskModel.isActiveVideo(
+      taskFixture({ status: "succeeded", progress_stage: "fetching" }),
+      checkpoint,
+      1_099,
+    ),
+    true,
+  );
+  equal(
+    taskModel.isActiveVideo(
+      taskFixture({ status: "succeeded", progress_stage: "fetching" }),
+      expired,
+      1_100,
+    ),
+    false,
+  );
+  equal(
+    taskModel.isVideoSettlingActive(
+      taskFixture({ status: "succeeded", progress_stage: "finished" }),
+      expired,
+      1_100,
+    ),
+    false,
+  );
+  deepEqual(
+    taskModel.ensureVideoSettlingCheckpoint(expired, 99_000),
+    expired,
   );
   equal(taskModel.isTerminalVideo(taskFixture({ status: "succeeded" })), true);
   equal(
@@ -503,6 +600,64 @@ test("video task model preserves status, elapsed, and error semantics", () => {
     title: "暂无失败记录",
     description: "当前任务完成后会进入历史。",
   });
+});
+
+test("video materialization settling is bounded and wired into active polling", () => {
+  match(taskModelSource, /VIDEO_SETTLING_TIMEOUT_MS = 60_000/);
+  match(taskModelSource, /phase: VideoSettlingPhase/);
+  match(pageSource, /useVideoSettlingController\(/);
+  match(pageSource, /syncVideoSettling\(next\)/);
+  match(pageSource, /isVideoSettlingActive\(item\)/);
+  match(
+    settlingControllerSource,
+    /isActiveVideo\(item, checkpointsRef\.current\.get\(item\.id\), nowMs\)/,
+  );
+  match(settlingControllerSource, /phase === "expired"/);
+  match(settlingControllerSource, /canSchedule/);
+  match(settlingControllerSource, /return useMemo\(/);
+  match(pageSource, /startVideoActivePolling\(/);
+  doesNotMatch(pageSource, /\[effectiveItems, videoSettling\]/);
+  doesNotMatch(pageSource, /\[refreshGenerationSafe, videoSettling\]/);
+});
+
+test("active video polling keeps the 800ms start and 2.5s cadence", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const timerApi = {
+    setTimeout: (callback: () => void, delayMs: number) =>
+      Number(setTimeout(callback, delayMs)),
+    clearTimeout: (timer: number) => clearTimeout(timer),
+    setInterval: (callback: () => void, delayMs: number) =>
+      Number(setInterval(callback, delayMs)),
+    clearInterval: (timer: number) => clearInterval(timer),
+  };
+  const scheduled: string[] = [];
+  const stop = settlingPollingRuntime.startVideoActivePolling(
+    ["task-a", "task-b"],
+    (id) => scheduled.push(id),
+    timerApi,
+  );
+
+  t.mock.timers.tick(799);
+  deepEqual(scheduled, []);
+  t.mock.timers.tick(1);
+  deepEqual(scheduled, ["task-a", "task-b"]);
+  t.mock.timers.tick(1699);
+  deepEqual(scheduled, ["task-a", "task-b"]);
+  t.mock.timers.tick(1);
+  deepEqual(scheduled, ["task-a", "task-b", "task-a", "task-b"]);
+  t.mock.timers.tick(2500);
+  deepEqual(scheduled, [
+    "task-a",
+    "task-b",
+    "task-a",
+    "task-b",
+    "task-a",
+    "task-b",
+  ]);
+
+  stop();
+  t.mock.timers.tick(5000);
+  equal(scheduled.length, 6);
 });
 
 test("video workspace keeps history reachable through a responsive task drawer", () => {

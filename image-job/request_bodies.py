@@ -1,4 +1,4 @@
-"""Bounded request-body and JSON parsing helpers for the image-job sidecar."""
+"""Bounded HTTP body, JSON, and SSE helpers for the image-job sidecar."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
+
+
+_STREAM_READ_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -164,3 +167,116 @@ async def read_request_body_bounded(
             )
         body.extend(chunk)
     return bytes(body)
+
+
+def stream_read_chunk_size(max_bytes: int) -> int:
+    return max(1, min(_STREAM_READ_CHUNK_BYTES, max_bytes + 1))
+
+
+def response_byte_iterator(
+    response: Any,
+    *,
+    max_bytes: int,
+    raw: bool = False,
+) -> Any:
+    factory = response.aiter_raw if raw else response.aiter_bytes
+    try:
+        return factory(chunk_size=stream_read_chunk_size(max_bytes))
+    except TypeError as exc:
+        if "chunk_size" not in str(exc):
+            raise
+        return factory()
+
+
+class SseLineDecoder:
+    """Incrementally decode SSE lines from bounded byte chunks."""
+
+    def __init__(self) -> None:
+        self._line = bytearray()
+        self._pending_cr = False
+
+    def _finish_line(self) -> str:
+        line = bytes(self._line).decode("utf-8", "replace")
+        self._line.clear()
+        return line
+
+    def feed(self, chunk: bytes) -> list[str]:
+        lines: list[str] = []
+        for value in chunk:
+            if self._pending_cr:
+                if value == 0x0A:
+                    lines.append(self._finish_line())
+                    self._pending_cr = False
+                    continue
+                lines.append(self._finish_line())
+                self._pending_cr = False
+
+            if value == 0x0D:
+                self._pending_cr = True
+            elif value == 0x0A:
+                lines.append(self._finish_line())
+            else:
+                self._line.append(value)
+        return lines
+
+    def finish(self) -> list[str]:
+        lines: list[str] = []
+        if self._pending_cr:
+            lines.append(self._finish_line())
+            self._pending_cr = False
+        if self._line:
+            lines.append(self._finish_line())
+        return lines
+
+
+async def read_download_body_bounded(
+    response: Any,
+    *,
+    max_bytes: int,
+    truncate: bool,
+) -> tuple[bytes, bool, int]:
+    body = bytearray()
+    async for chunk in response_byte_iterator(
+        response,
+        max_bytes=max_bytes,
+        raw=True,
+    ):
+        if not chunk:
+            continue
+        next_size = len(body) + len(chunk)
+        if next_size > max_bytes:
+            if truncate:
+                remaining = max_bytes - len(body)
+                if remaining > 0:
+                    body.extend(chunk[:remaining])
+            return bytes(body), True, next_size
+        body.extend(chunk)
+    return bytes(body), False, len(body)
+
+
+async def read_response_body_bounded(
+    response: Any,
+    *,
+    max_bytes: int,
+    truncate: bool,
+) -> tuple[bytes, bool, int]:
+    declared_size = parse_content_length(response.headers)
+    if declared_size is not None and declared_size > max_bytes:
+        return b"", True, declared_size
+
+    body = bytearray()
+    async for chunk in response_byte_iterator(
+        response,
+        max_bytes=max_bytes,
+    ):
+        if not chunk:
+            continue
+        next_size = len(body) + len(chunk)
+        if next_size > max_bytes:
+            if truncate:
+                remaining = max_bytes - len(body)
+                if remaining > 0:
+                    body.extend(chunk[:remaining])
+            return bytes(body), True, next_size
+        body.extend(chunk)
+    return bytes(body), False, len(body)

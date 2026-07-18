@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-11T16:47:29.844Z",
+  "generatedAt": "2026-07-18T06:34:29.421Z",
   "note": "Known frontend UI-governance debt. The checker fails only when current count exceeds a baseline count for the same fingerprint.",
   "findings": [
     {
@@ -36,62 +36,6 @@
       "count": 1
     },
     {
-      "key": "aria-live-error|src/components/ui/lightbox/MobileLightbox.tsx|aa6562cfe408e697",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/lightbox/MobileLightbox.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{imgStatus === \"error\" ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/lightbox/MobileLightbox.tsx|e2e1817a3d8bef5b",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/lightbox/MobileLightbox.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "actionNotice?.kind === \"error\" ? \"border-danger-border\" : \"border-white/12\",",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/poster-styles/PosterStyleJobsPanel.tsx|79613643ab718d3d",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/poster-styles/PosterStyleJobsPanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{job.error_message ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/ApparelWorkflowNewPage.tsx|4ba9062f0fc37dc0",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/ApparelWorkflowNewPage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{error ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/ApparelWorkflowNewPage.tsx|ef489e009f656461",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/ApparelWorkflowNewPage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{item.status === \"error\" ? (",
-      "count": 2
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/library/ModelLibraryJobsPanel.tsx|79613643ab718d3d",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/library/ModelLibraryJobsPanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{job.error_message ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/PosterWorkflowNewPage.tsx|4ba9062f0fc37dc0",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/PosterWorkflowNewPage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{error ? (",
-      "count": 1
-    },
-    {
       "key": "aria-live-error|src/components/ui/projects/stages/ModelCandidatesStage.tsx|b333fb87b255d86c",
       "rule": "aria-live-error",
       "path": "src/components/ui/projects/stages/ModelCandidatesStage.tsx",
@@ -113,102 +57,6 @@
       "path": "src/components/ui/projects/stages/ShowcaseGenerationStage.tsx",
       "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
       "snippet": "{stageError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/shell/DesktopStream.tsx|a85499c3a188fd39",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/shell/DesktopStream.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{query.isError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/shell/MobileStream.tsx|a85499c3a188fd39",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/shell/MobileStream.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{query.isError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/Sidebar.tsx|c25afedac917f028",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/Sidebar.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{list.isFetchNextPageError ? (",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/app/settings/memory/page.tsx|98375540cf208b87",
-      "rule": "hardcoded-dark",
-      "path": "src/app/settings/memory/page.tsx",
-      "message": "Hard-coded dark utility \"bg-black/20\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "className=\"mt-3 h-10 w-full rounded-[var(--radius-control)] border border-danger-border bg-black/20 px-3 text-sm text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/30 focus:border-danger\"",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/app/settings/memory/page.tsx|c30ac09e858cc78b",
-      "rule": "hardcoded-dark",
-      "path": "src/app/settings/memory/page.tsx",
-      "message": "Hard-coded dark utility \"bg-black/80\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "\"inline-block h-4 w-4 rounded-full bg-black/80 transition-transform\",",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/library/ModelLibraryBrowser.tsx|1966c514525f97af",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/library/ModelLibraryBrowser.tsx",
-      "message": "Hard-coded dark utility \"border-white/40\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": ": \"border-white/40 bg-black/35 text-white hover:bg-black/55\",",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/library/ModelLibraryBrowser.tsx|39564f07621858c2",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/library/ModelLibraryBrowser.tsx",
-      "message": "Hard-coded dark utility \"text-white\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": ": \"border-white/40 bg-black/35 text-white hover:bg-black/55\",",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/library/ModelLibraryJobsPanel.tsx|78fe2ecb542493f9",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/library/ModelLibraryJobsPanel.tsx",
-      "message": "Hard-coded dark utility \"text-white\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "<span className=\"pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/ProjectsIndex.tsx|7a55d322d9050d7d",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/ProjectsIndex.tsx",
-      "message": "Hard-coded dark utility \"hover:text-white\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "className=\"absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/ProjectsIndex.tsx|3035c3ba91e7229a",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/ProjectsIndex.tsx",
-      "message": "Hard-coded dark utility \"text-white/80\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "className=\"absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-",
-      "count": 1
-    },
-    {
-      "key": "hardcoded-dark|src/components/ui/projects/ProjectsIndex.tsx|ae445f5140ab9220",
-      "rule": "hardcoded-dark",
-      "path": "src/components/ui/projects/ProjectsIndex.tsx",
-      "message": "Hard-coded dark utility \"text-white/90\" must be semantic token UI or an allowlisted media/code/danger/scrim context.",
-      "snippet": "className=\"absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-",
-      "count": 1
-    },
-    {
-      "key": "mobile-dialog-shell|src/components/ui/projects/components/ModelLibraryDialog.tsx|27d3d8f38ff6b6dd",
-      "rule": "mobile-dialog-shell",
-      "path": "src/components/ui/projects/components/ModelLibraryDialog.tsx",
-      "message": "Fixed modal wrapper must use mobile-dialog-shell or be an allowlisted media/lightbox surface.",
-      "snippet": "className=\"fixed inset-0 z-[var(--z-dialog)] flex items-center justify-center bg-black/60 p-5 backdrop-blur-md\"",
       "count": 1
     }
   ]

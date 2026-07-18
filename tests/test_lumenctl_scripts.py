@@ -39,6 +39,13 @@ def lib_source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in (LIB, *LIB_MODULES))
 
 
+def bash_function_source(path: Path, name: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
+    assert match is not None, f"{name} not found in {path}"
+    return match.group(0)
+
+
 def script_env() -> dict[str, str]:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -152,6 +159,7 @@ def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
         "lib/container_release.sh": (
             "#!/usr/bin/env bash\nREMOTE_CONTAINER_RELEASE=1\n"
         ),
+        "lib/release_layout.sh": ("#!/usr/bin/env bash\nREMOTE_RELEASE_LAYOUT=1\n"),
         "release_manifest_guard.py": (
             "#!/usr/bin/env python3\nREMOTE_RELEASE_GUARD = 1\n"
         ),
@@ -201,8 +209,9 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         TEST_REMOTE_ROOT={shlex.quote(str(remote))}
         export PATH TEST_REMOTE_ROOT
         LUMEN_SELF_UPDATE=1
+        LUMEN_SELF_UPDATE_COMMIT={"a" * 40}
         LUMEN_REPO_URL=https://github.com/example/Lumen.git
-        lumen_self_update_scripts {shlex.quote(str(target))} main 0 lib.sh
+        lumen_self_update_scripts {shlex.quote(str(target))} {"a" * 40} 0 lib.sh
         printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
         printf 'changed=%s\\n' "$LUMEN_SELF_UPDATE_CHANGED"
         """
@@ -233,9 +242,10 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         TEST_REMOTE_ROOT={shlex.quote(str(remote))}
         export PATH TEST_REMOTE_ROOT
         LUMEN_SELF_UPDATE=1
+        LUMEN_SELF_UPDATE_COMMIT={"a" * 40}
         LUMEN_REPO_URL=https://github.com/example/Lumen.git
         lumen_self_update_scripts \
-            {shlex.quote(str(target))} main 0 lib.sh update.sh
+            {shlex.quote(str(target))} {"a" * 40} 0 lib.sh update.sh
         printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
         printf 'changed=%s\\n' "$LUMEN_SELF_UPDATE_CHANGED"
         """
@@ -263,20 +273,48 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         TEST_REMOTE_ROOT={shlex.quote(str(remote))}
         export PATH TEST_REMOTE_ROOT
         LUMEN_SELF_UPDATE=1
+        LUMEN_SELF_UPDATE_COMMIT={"a" * 40}
         LUMEN_REPO_URL=https://github.com/example/Lumen.git
         . {shlex.quote(str(bootstrap_scripts / "lib.sh"))}
         printf 'runtime=%s\\n' "$REMOTE_RUNTIME"
         printf 'locking=%s\\n' "$REMOTE_LOCKING"
         printf 'container=%s\\n' "$REMOTE_CONTAINER_RELEASE"
+        printf 'release_layout=%s\\n' "$REMOTE_RELEASE_LAYOUT"
         """
     )
 
     assert "runtime=2" in bootstrap.stdout
     assert "locking=1" in bootstrap.stdout
     assert "container=1" in bootstrap.stdout
+    assert "release_layout=1" in bootstrap.stdout
     assert (bootstrap_scripts / "lib" / "runtime.sh").is_file()
     assert (bootstrap_scripts / "lib" / "locking.sh").is_file()
     assert (bootstrap_scripts / "lib" / "container_release.sh").is_file()
+    assert (bootstrap_scripts / "lib" / "release_layout.sh").is_file()
+
+
+def test_self_update_rejects_mutable_branch_without_overwriting(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "scripts"
+    target.mkdir()
+    local_script = target / "update.sh"
+    local_script.write_text("#!/usr/bin/env bash\nLOCAL=1\n", encoding="utf-8")
+
+    result = assert_bash_ok(
+        f"""
+        . {shlex.quote(str(LIB))}
+        LUMEN_SELF_UPDATE=1
+        lumen_self_update_scripts {shlex.quote(str(target))} main 0 update.sh
+        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        """
+    )
+
+    assert "result=failed" in result.stdout
+    assert "拒绝从可变 branch 覆盖脚本" in result.stderr
+    assert local_script.read_text(encoding="utf-8") == (
+        "#!/usr/bin/env bash\nLOCAL=1\n"
+    )
 
 
 def test_self_update_validation_is_file_type_specific(tmp_path: Path) -> None:
@@ -655,6 +693,126 @@ def test_install_pull_failure_fallback_to_main_requires_opt_in() -> None:
     assert "fallback main 后仍失败" in text
     assert "main 镜像也未发布 → 使用 --build 本地构建" in text
     assert "stable 安装不会自动回退 main" in text
+
+
+def test_install_bootstrap_failure_does_not_mark_bootstrapped(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    env_file = shared / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    function = bash_function_source(INSTALL, "run_bootstrap_admin")
+
+    result = assert_bash_ok(
+        f"""
+        {function}
+        SHARED_DIR={shlex.quote(str(shared))}
+        LUMEN_NONINTERACTIVE=1
+        LUMEN_ADMIN_EMAIL=admin@example.com
+        LUMEN_ADMIN_PASSWORD=correct-horse-battery
+        emit_step_start() {{ :; }}
+        emit_step_done() {{ :; }}
+        emit_info() {{ :; }}
+        log_info() {{ :; }}
+        log_error() {{ printf '%s\\n' "$*" >&2; }}
+        _install_compose() {{
+            printf 'database unavailable\\n'
+            return 42
+        }}
+        rc=0
+        run_bootstrap_admin || rc=$?
+        test "$rc" -eq 42
+        ! grep -q '^LUMEN_BOOTSTRAPPED=1$' {shlex.quote(str(env_file))}
+        """
+    )
+
+    assert "未写入 LUMEN_BOOTSTRAPPED" in result.stderr
+
+
+def test_install_bootstrap_confirmed_existing_user_remains_idempotent(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    env_file = shared / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    function = bash_function_source(INSTALL, "run_bootstrap_admin")
+
+    assert_bash_ok(
+        f"""
+        {function}
+        SHARED_DIR={shlex.quote(str(shared))}
+        LUMEN_NONINTERACTIVE=1
+        LUMEN_ADMIN_EMAIL=admin@example.com
+        LUMEN_ADMIN_PASSWORD=correct-horse-battery
+        emit_step_start() {{ :; }}
+        emit_step_done() {{ :; }}
+        emit_info() {{ :; }}
+        log_info() {{ :; }}
+        log_error() {{ printf '%s\\n' "$*" >&2; }}
+        _install_compose() {{
+            printf 'user_already_exists\\n'
+            return 17
+        }}
+        run_bootstrap_admin
+        test "$(grep -c '^LUMEN_BOOTSTRAPPED=1$' {shlex.quote(str(env_file))})" -eq 1
+        """
+    )
+
+
+def test_install_ghcr_probe_uses_private_mktemp_and_cleans_up(
+    tmp_path: Path,
+) -> None:
+    temp_dir = tmp_path / "tmp"
+    shared = tmp_path / "shared"
+    meta = tmp_path / "probe.meta"
+    temp_dir.mkdir()
+    shared.mkdir()
+    (shared / ".env").write_text("", encoding="utf-8")
+    function = bash_function_source(INSTALL, "probe_ghcr_image_tag")
+
+    result = assert_bash_ok(
+        f"""
+        {function}
+        SHARED_DIR={shlex.quote(str(shared))}
+        TMPDIR={shlex.quote(str(temp_dir))}
+        TEST_PROBE_META={shlex.quote(str(meta))}
+        INSTALL_IMAGE_TAG_OVERRIDE=""
+        INSTALL_BUILD_FLAG=0
+        INSTALL_GHCR_PROBE_FILE=""
+        env_file_get() {{
+            case "$1" in
+                LUMEN_IMAGE_REGISTRY) printf 'ghcr.io/cyeinfpro' ;;
+                LUMEN_IMAGE_TAG) printf 'latest' ;;
+            esac
+        }}
+        emit_step_start() {{ :; }}
+        emit_step_done() {{ :; }}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        env_file_set() {{ :; }}
+        curl() {{
+            local out=""
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    -o) out="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            mode="$(stat -f '%Lp' "$out" 2>/dev/null || stat -c '%a' "$out")"
+            printf '%s|%s\\n' "$out" "$mode" > "$TEST_PROBE_META"
+            printf '{{"tags":["latest"]}}\\n' > "$out"
+            printf '200'
+        }}
+        probe_ghcr_image_tag
+        test -z "$INSTALL_GHCR_PROBE_FILE"
+        """
+    )
+
+    assert result.returncode == 0
+    probe_path, mode = meta.read_text(encoding="utf-8").strip().split("|", 1)
+    assert Path(probe_path).parent == temp_dir
+    assert mode == "600"
+    assert not Path(probe_path).exists()
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
@@ -1103,6 +1261,55 @@ def test_backup_script_records_service_marker_and_queues_retrigger() -> None:
     assert "Background save already in progress" in text
     assert 'docker_cp_redis "/data/dump.rdb"' in text
     assert "ERROR: redis $label missing" in text
+    assert "lumen_try_create_owned_lock_dir" in text
+    assert "BACKUP_LOCK_OWNER_TOKEN" in text
+    assert "lumen_release_owned_lock_dir" in text
+
+
+@pytest.mark.parametrize("max_keep", ["-1", "invalid", "1001"])
+def test_backup_rejects_unsafe_max_keep_before_docker_or_deletion(
+    tmp_path: Path,
+    max_keep: str,
+) -> None:
+    backup_root = tmp_path / "backup"
+    pg = backup_root / "pg" / "20260101-000000.pg.dump.gz"
+    redis = backup_root / "redis" / "20260101-000000.redis.tgz"
+    pg.parent.mkdir(parents=True)
+    redis.parent.mkdir(parents=True)
+    pg.write_bytes(b"keep-pg")
+    redis.write_bytes(b"keep-redis")
+    fakebin = tmp_path / "bin"
+    docker_called = tmp_path / "docker-called"
+    fakebin.mkdir()
+    docker = fakebin / "docker"
+    docker.write_text(
+        f"#!/usr/bin/env bash\ntouch {shlex.quote(str(docker_called))}\nexit 99\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "BACKUP_ROOT": str(backup_root),
+            "MAX_KEEP": max_keep,
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "backup.sh")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert pg.read_bytes() == b"keep-pg"
+    assert redis.read_bytes() == b"keep-redis"
+    assert not docker_called.exists()
+    assert "MAX_KEEP" in result.stdout
 
 
 def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> (
@@ -1646,10 +1853,8 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
         'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
     )
     assert 'REPO_DIR="${CURRENT_RELEASE}"' in text
-    assert (
-        "LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续"
-        in text
-    )
+    assert "非正式/rolling 更新未取得 image source；按显式兼容语义使用当前快照" in text
+    assert "正式 release 在无 .git 主机上不能禁用 immutable image source" in text
     assert "--exclude='/releases/'" in text
     assert "--exclude='/shared/'" in text
     # release/.env 是 -> shared/.env 的 symlink，docker compose 自动识别
@@ -1659,6 +1864,34 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     # 不再依赖宿主机 uv 配置 / git clone 流程
     assert "uv.toml" not in text
     assert "lumen_update_ensure_runtime_can_access_path" not in text
+
+
+def test_update_sources_are_bound_to_release_tags_or_commits() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+
+    assert "LUMEN_UPDATE_SCRIPTS_BRANCH" not in text
+    assert "LUMEN_SELF_UPDATE_SOURCE_COMMIT" in text
+    assert "LUMEN_UPDATE_GIT_REF 必须是具体 release tag 或 40 位 commit" in text
+    assert 'git rev-parse --verify "${GIT_REF}^{commit}"' in text
+    assert "git pull --ff-only" not in text
+    assert "拒绝从 branch 自更新" in text
+
+
+def test_release_migration_fails_closed_when_systemd_stop_fails() -> None:
+    text = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
+
+    assert 'if ! systemctl stop "${u}"; then' in text
+    assert "stop_failed=1" in text
+    assert "拒绝移动部署目录" in text
+    assert "失败（忽略，继续迁移）" not in text
+
+
+def test_env_example_documents_ssh_host_key_trust() -> None:
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert '"known_hosts_path":"/run/secrets/lumen_known_hosts"' in text
+    assert '"host_key_fingerprint":"SHA256:' in text
+    assert "建议 0600" in text
 
 
 def test_compose_db_env_vars_backfilled_from_database_url(tmp_path: Path) -> None:
@@ -1746,7 +1979,9 @@ def test_container_url_migration_dry_run_and_apply_are_allowlisted(
     assert "PUBLIC_BASE_URL=http://localhost:8000" in after
     assert "CORS_ALLOW_ORIGINS=http://localhost:3000" in after
     assert "WORKER_METRICS_BIND=127.0.0.1" in after
-    assert list(tmp_path.glob(".env.bak.*"))
+    backups = list(tmp_path.glob(".env.bak.*"))
+    assert backups
+    assert backups[0].stat().st_mode & 0o777 == 0o600
 
 
 def test_container_url_migration_rejects_unclassified_localhost_keys(
@@ -2100,6 +2335,54 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
     assert 'lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"' in code
 
 
+def test_update_cleanup_empty_filters_are_bash32_set_u_safe(
+    tmp_path: Path,
+) -> None:
+    source = UPDATE.read_text(encoding="utf-8")
+    start = source.index("run_update_cleanup() {")
+    end = source.index("\n}\n\n# Trap：", start) + len("\n}\n")
+    function = source[start:end]
+    docker_log = tmp_path / "docker.log"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+        set -u
+        {function}
+        ROOT={shlex.quote(str(tmp_path))}
+        LUMEN_UPDATE_MODE=standard
+        emit_start() {{ :; }}
+        emit_info() {{ :; }}
+        emit_done() {{ :; }}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        lumen_env_truthy() {{ return 1; }}
+        lumen_detect_docker_access() {{ return 0; }}
+        lumen_release_cleanup_old() {{ return 0; }}
+        lumen_docker() {{
+            printf '%s\\n' "$*" >> {shlex.quote(str(docker_log))}
+            return 0
+        }}
+        run_update_cleanup test
+        """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert docker_log.read_text(encoding="utf-8").splitlines() == [
+        "image prune -f",
+        "image prune -a -f",
+        "buildx version",
+        "buildx prune -f",
+    ]
+
+
 def test_update_script_defaults_to_fast_update_path() -> None:
     text = UPDATE.read_text(encoding="utf-8")
     code = _strip_shell_comments(text)
@@ -2408,11 +2691,76 @@ def test_lumen_with_lock_falls_back_to_mkdir_when_flock_missing(tmp_path: Path) 
           builtin command "$@"
         }}
         LUMEN_BACKUP_ROOT={lock_root}
-        lumen_with_lock update-test 30 bash -c 'printf locked'
+        lumen_with_lock update-test 30 bash -c \
+          'owner="$(find {lock_root / ".lumen-update.lock.d"} -path "*/.owner.*/owner" -type f)" &&
+           grep -q "^pid=" "$owner" &&
+           grep -q "^start_token=" "$owner" &&
+           printf locked'
         test ! -d {lock_root / ".lumen-update.lock.d"}
         """
     )
     assert result.stdout == "locked"
+
+
+def test_mkdir_lock_detects_reused_pid_without_unsafe_reclamation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    lock_dir = root / ".lumen-maintenance.lock.d"
+    root.mkdir()
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        command() {{
+          if [ "$1" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+            return 1
+          fi
+          builtin command "$@"
+        }}
+        lumen_pid_start_token() {{ printf 'token-%s\\n' "$1"; }}
+        mkdir {lock_dir}
+        printf 'pid=%s\\nstart_token=old-token\\nscript=old.sh\\n' "$$" \
+          > {lock_dir / "owner"}
+        ! lumen_try_acquire_lock {root} new.sh
+        test "${{LUMEN_LAST_LOCK_STALE:-0}}" = 1
+        test "${{LUMEN_LAST_LOCK_RECLAIMED:-0}}" = 0
+        grep -q "^pid=$$" {lock_dir / "owner"}
+        grep -q "^start_token=old-token" {lock_dir / "owner"}
+        grep -q "^script=old.sh" {lock_dir / "owner"}
+        test -d {lock_dir}
+        rm -rf {lock_dir}
+        """
+    )
+
+    assert result.returncode == 0
+
+
+def test_mkdir_lock_preserves_live_owner_with_matching_start_token(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    lock_dir = root / ".lumen-maintenance.lock.d"
+    root.mkdir()
+
+    assert_bash_ok(
+        f"""
+        . {LIB}
+        command() {{
+          if [ "$1" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+            return 1
+          fi
+          builtin command "$@"
+        }}
+        lumen_pid_start_token() {{ printf 'token-%s\\n' "$1"; }}
+        mkdir {lock_dir}
+        printf 'pid=%s\\nstart_token=token-%s\\nscript=active.sh\\n' "$$" "$$" \
+          > {lock_dir / "owner"}
+        ! lumen_try_acquire_lock {root} contender.sh
+        grep -q "^script=active.sh" {lock_dir / "owner"}
+        rm -rf {lock_dir}
+        """
+    )
 
 
 def test_lumen_with_lock_mkdir_busy_returns_operation_busy(tmp_path: Path) -> None:
@@ -2852,7 +3200,7 @@ esac
     test -f "${{DEPLOY_ROOT}}/current/docker-compose.yml"
     grep -q '^LUMEN_IMAGE_TAG=main$' "${{DEPLOY_ROOT}}/shared/.env"
     test "$(find "${{DEPLOY_ROOT}}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -ge 2
-    grep -q '不是 git 仓库；使用当前发布物快照继续' "${{LOG_DIR}}/update.err"
+    grep -q '非正式/rolling 更新未取得 image source；按显式兼容语义使用当前快照' "${{LOG_DIR}}/update.err"
     grep -q 'phase=migrate_db status=done' "${{LOG_DIR}}/update.out"
     grep -q 'phase=restart_services status=done' "${{LOG_DIR}}/update.out"
     grep -q 'phase=health_check status=done' "${{LOG_DIR}}/update.out"
@@ -3439,13 +3787,13 @@ def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     assert "docker buildx imagetools create" in workflow, (
         "expected merge-web to assemble multi-arch manifest list"
     )
-    assert "GITHUB_REF_NAME#v" in workflow, (
+    assert "release_tag#v" in workflow, (
         "tag builds should pass the product version without a leading v"
     )
     assert "workflow_dispatch.ref cannot create release semantics" in workflow
-    assert "needs: build-web" in workflow
-    assert "needs: [build, merge-web]" in workflow
-    assert "needs: quality-gate" in workflow
+    assert "needs: [resolve-ref, build-web]" in workflow
+    assert "needs: [resolve-ref, build, merge-web]" in workflow
+    assert "needs: [resolve-ref, quality-gate]" in workflow
     assert "type=semver,pattern=v{{version}}" in workflow
     assert "type=semver,pattern=v{{major}}.{{minor}}" in workflow
     assert "type=semver,pattern=v{{major}}" in workflow

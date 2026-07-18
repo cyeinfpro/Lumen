@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -485,6 +486,9 @@ async def test_events_logs_replay_failure_and_acloses_pubsub(
         def __init__(self) -> None:
             self.pubsub_obj = PubSub()
 
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return [("1710000000000-0", {})]
+
         async def xread(self, *_args: Any, **_kwargs: Any) -> None:
             raise RuntimeError("stream unavailable")
 
@@ -635,6 +639,9 @@ async def test_events_replay_uses_last_event_id_query(
             return None
 
     class Redis:
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return [("1710000000000-0", {})]
+
         def pubsub(self) -> PubSub:
             return PubSub()
 
@@ -681,6 +688,225 @@ async def test_events_replay_uses_last_event_id_query(
         pass
 
     assert seen == {"last_event_id": sane_event_id}
+
+
+@pytest.mark.asyncio
+async def test_events_replay_subscribes_before_high_water_and_deduplicates_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_id = int(time.time() * 1000)
+    last_event_id = f"{base_id - 1}-0"
+    replay_id = f"{base_id}-0"
+    high_water_id = f"{base_id + 1}-0"
+    live_id = f"{base_id + 2}-0"
+
+    def stream_fields(generation_id: str) -> dict[str, str]:
+        return {
+            "event": "generation.completed",
+            "data": json.dumps(
+                {
+                    "event": "generation.completed",
+                    "channel": "user:user-1",
+                    "data": {"generation_id": generation_id},
+                },
+                separators=(",", ":"),
+            ),
+        }
+
+    def pubsub_payload(stream_id: str, generation_id: str) -> str:
+        return json.dumps(
+            {
+                "event": "generation.completed",
+                "channel": "user:user-1",
+                "sse_id": stream_id,
+                "data": {"generation_id": generation_id},
+            },
+            separators=(",", ":"),
+        )
+
+    class PubSub:
+        def __init__(self) -> None:
+            self.messages = []
+            self.subscribed = False
+            self.unsubscribe_called = False
+            self.aclose_called = False
+
+        async def subscribe(self, *_channels: str) -> None:
+            self.subscribed = True
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            self.unsubscribe_called = True
+
+        async def aclose(self) -> None:
+            self.aclose_called = True
+
+        async def get_message(self, **_kwargs: Any) -> dict[str, str] | None:
+            if self.messages:
+                return self.messages.pop(0)
+            return None
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pubsub_obj = PubSub()
+            self.calls: list[str] = []
+
+        def pubsub(self) -> PubSub:
+            return self.pubsub_obj
+
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            assert self.pubsub_obj.subscribed is True
+            self.calls.append("xrevrange")
+            self.pubsub_obj.messages.extend(
+                [
+                    {
+                        "channel": "user:user-1",
+                        "data": pubsub_payload(high_water_id, "race"),
+                    },
+                    {
+                        "channel": "user:user-1",
+                        "data": pubsub_payload(live_id, "live"),
+                    },
+                ]
+            )
+            return [(high_water_id.encode("ascii"), {})]
+
+        async def xread(self, cursor: dict[str, str], **_kwargs: Any) -> list[Any]:
+            self.calls.append("xread")
+            assert cursor == {"events:user:user-1": last_event_id}
+            stream_key = "events:user:user-1"
+            return [
+                (
+                    stream_key,
+                    [
+                        (replay_id, stream_fields("replay")),
+                        (high_water_id, stream_fields("race")),
+                        # This entry was created after the captured high water.
+                        (live_id, stream_fields("live")),
+                    ],
+                )
+            ]
+
+    class Request:
+        headers = {"Last-Event-ID": last_event_id}
+        checks = 0
+
+        async def is_disconnected(self) -> bool:
+            self.checks += 1
+            return self.checks >= 3
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_acquire_sse_connection_slot(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
+    redis = Redis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(
+        events,
+        "_acquire_sse_connection_slot",
+        fake_acquire_sse_connection_slot,
+    )
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+
+    response = await events.events(
+        Request(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1",
+    )
+
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert [chunk["id"] for chunk in chunks] == [replay_id, high_water_id, live_id]
+    assert [json.loads(chunk["data"])["generation_id"] for chunk in chunks] == [
+        "replay",
+        "race",
+        "live",
+    ]
+    assert redis.calls == ["xrevrange", "xread"]
+    assert redis.pubsub_obj.unsubscribe_called is True
+    assert redis.pubsub_obj.aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_events_replay_cancellation_still_closes_pubsub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PubSub:
+        def __init__(self) -> None:
+            self.unsubscribe_called = False
+            self.aclose_called = False
+
+        async def subscribe(self, *_channels: str) -> None:
+            return None
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            self.unsubscribe_called = True
+
+        async def aclose(self) -> None:
+            self.aclose_called = True
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pubsub_obj = PubSub()
+
+        def pubsub(self) -> PubSub:
+            return self.pubsub_obj
+
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return [("1710000000000-0", {})]
+
+        async def xread(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            raise asyncio.CancelledError()
+
+    class Request:
+        headers = {"Last-Event-ID": f"{int(time.time() * 1000)}-0"}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_acquire_sse_connection_slot(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
+    redis = Redis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(
+        events,
+        "_acquire_sse_connection_slot",
+        fake_acquire_sse_connection_slot,
+    )
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+
+    response = await events.events(
+        Request(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await response.body_iterator.__anext__()
+
+    assert redis.pubsub_obj.unsubscribe_called is True
+    assert redis.pubsub_obj.aclose_called is True
 
 
 @pytest.mark.asyncio
@@ -837,6 +1063,99 @@ async def test_sse_replay_truncated_advances_cursor(
 
 
 @pytest.mark.asyncio
+async def test_events_closes_after_replay_truncation_before_live_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = int(time.time() * 1000)
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    async def fake_replay_connection_events(*_args: Any, **_kwargs: Any):
+        yield {
+            "id": f"{now_ms + 1}-0",
+            "event": "replay_truncated",
+            "data": json.dumps(
+                {
+                    "reason": "too_many_events",
+                    "limit": 2,
+                    "cursor": f"{now_ms + 1}-0",
+                }
+            ),
+        }
+
+    async def fake_acquire_sse_connection_slot(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    class PubSub:
+        def __init__(self) -> None:
+            self.get_message_calls = 0
+            self.unsubscribe_called = False
+            self.aclose_called = False
+
+        async def subscribe(self, *_channels: str) -> None:
+            return None
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            self.unsubscribe_called = True
+
+        async def aclose(self) -> None:
+            self.aclose_called = True
+
+        async def get_message(self, **_kwargs: Any) -> None:
+            self.get_message_calls += 1
+            raise AssertionError("truncated replay must close before live PubSub")
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pubsub_obj = PubSub()
+
+        async def time(self) -> tuple[int, int]:
+            return (now_ms // 1000, (now_ms % 1000) * 1000)
+
+        def pubsub(self) -> PubSub:
+            return self.pubsub_obj
+
+    class ConnectedRequest:
+        headers = {"Last-Event-ID": f"{now_ms}-0"}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    redis = Redis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(
+        events,
+        "_replay_connection_events",
+        fake_replay_connection_events,
+    )
+    monkeypatch.setattr(
+        events,
+        "_acquire_sse_connection_slot",
+        fake_acquire_sse_connection_slot,
+    )
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+
+    response = await events.events(
+        ConnectedRequest(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1",
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert len(chunks) == 1
+    assert chunks[0]["event"] == "replay_truncated"
+    assert redis.pubsub_obj.get_message_calls == 0
+    assert redis.pubsub_obj.unsubscribe_called is True
+    assert redis.pubsub_obj.aclose_called is True
+
+
+@pytest.mark.asyncio
 async def test_events_replay_uses_effective_subscription_channels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -868,6 +1187,9 @@ async def test_events_replay_uses_effective_subscription_channels(
             return None
 
     class Redis:
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return [("1710000000000-0", {})]
+
         def pubsub(self) -> PubSub:
             return PubSub()
 
@@ -931,6 +1253,9 @@ async def test_events_replay_validates_last_event_id_with_redis_time(
     class Redis:
         async def time(self) -> tuple[int, int]:
             return (1_720_000_001, 0)
+
+        async def xrevrange(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return [("1720000000000-0", {})]
 
         def pubsub(self) -> PubSub:
             return PubSub()

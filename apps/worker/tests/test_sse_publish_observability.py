@@ -5,7 +5,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from redis.exceptions import WatchError
 
+from app import db as worker_db
 from app import observability, sse_publish
 
 
@@ -83,6 +85,46 @@ class FakeRedis:
     async def expire(self, key: str, ttl: int) -> int:
         self.expirations.append((key, ttl))
         return 1
+
+
+class SimplePipeline:
+    def __init__(self, redis) -> None:
+        self.redis = redis
+        self.watched: dict[str, str | None] = {}
+        self.commands: list[tuple[str, tuple, dict]] = []
+
+    async def watch(self, *keys: str) -> None:
+        self.watched = {key: await self.redis.get(key) for key in keys}
+
+    async def get(self, key: str):
+        return await self.redis.get(key)
+
+    def multi(self) -> None:
+        return None
+
+    def delete(self, key: str) -> None:
+        self.commands.append(("delete", (key,), {}))
+
+    def set(self, key: str, value: str, **kwargs) -> None:
+        self.commands.append(("set", (key, value), kwargs))
+
+    def xadd(self, key: str, fields: dict, **kwargs) -> None:
+        self.commands.append(("xadd", (key, fields), kwargs))
+
+    def expire(self, key: str, ttl: int) -> None:
+        self.commands.append(("expire", (key, ttl), {}))
+
+    async def execute(self) -> list:
+        for key, watched_value in self.watched.items():
+            if await self.redis.get(key) != watched_value:
+                raise WatchError("watched owner changed")
+        return [
+            await getattr(self.redis, command)(*args, **kwargs)
+            for command, args, kwargs in self.commands
+        ]
+
+    async def reset(self) -> None:
+        return None
 
 
 def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch):
@@ -220,7 +262,12 @@ class GarnetLuaXaddRedis(FakeRedis):
         *_args: str,
     ):
         self.xadd_calls += 1
-        self.kv[dedupe_key] = ""
+        existing = self.kv.get(dedupe_key)
+        if existing is not None:
+            if sse_publish._has_stream_id(existing):
+                return existing
+            raise RuntimeError(sse_publish._DEDUPE_RESERVATION_PENDING_ERROR)
+        self.kv[dedupe_key] = _args[-1]
         raise RuntimeError("Unknown Redis command called from script")
 
     async def get(self, key: str) -> str | None:
@@ -246,6 +293,10 @@ class GarnetLuaXaddRedis(FakeRedis):
     async def delete(self, key: str) -> int:
         self.deleted.append(key)
         return 1 if self.kv.pop(key, None) is not None else 0
+
+    def pipeline(self, *, transaction: bool = True) -> SimplePipeline:
+        assert transaction is True
+        return SimplePipeline(self)
 
 
 class GarnetNoStreamRedis(GarnetLuaXaddRedis):
@@ -294,6 +345,10 @@ class FallbackStoreFailureRedis(FakeRedis):
             )
             if stream_key == key
         ]
+
+    def pipeline(self, *, transaction: bool = True) -> SimplePipeline:
+        assert transaction is True
+        return SimplePipeline(self)
 
 
 @pytest.mark.asyncio
@@ -361,7 +416,7 @@ async def test_publish_event_falls_back_when_lua_cannot_xadd() -> None:
 
     dedupe_key = next(iter(redis.kv))
     assert redis.xadd_calls == 2
-    assert redis.deleted == [dedupe_key]
+    assert redis.deleted == []
     assert redis.kv[dedupe_key] == "1710000000000-0"
     assert len(redis.stream_entries) == 1
     payload = json.loads(redis.published[0][1])
@@ -369,7 +424,7 @@ async def test_publish_event_falls_back_when_lua_cannot_xadd() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
+async def test_publish_event_raises_when_xadd_fails_even_if_dlq_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     persisted: dict = {}
@@ -386,18 +441,19 @@ async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
 
     redis = GarnetNoStreamRedis()
 
-    await sse_publish.publish_event(
-        redis,
-        "user-1",
-        "user:user-1",
-        "generation.progress",
-        {"generation_id": "gen-1"},
-    )
+    with pytest.raises(sse_publish.SSEPublishRetryableError) as exc_info:
+        await sse_publish.publish_event(
+            redis,
+            "user-1",
+            "user:user-1",
+            "generation.progress",
+            {"generation_id": "gen-1"},
+        )
 
     dedupe_key = next(iter(redis.kv))
     assert redis.xadd_calls == 6
-    assert redis.deleted == [dedupe_key, dedupe_key, dedupe_key]
-    assert redis.kv[dedupe_key] == ""
+    assert redis.deleted == [dedupe_key, dedupe_key]
+    assert redis.kv[dedupe_key].startswith(sse_publish._DEDUPE_RESERVATION_PREFIX)
     assert redis.stream_entries == []
     assert len(redis.dlq) == 1
     dlq_payload = json.loads(redis.dlq[0][1])
@@ -405,34 +461,299 @@ async def test_publish_event_omits_sse_id_when_stream_commands_are_missing(
     assert dlq_payload["recoverable"] is False
     assert dlq_payload["dlq_id"].startswith("dlq-")
     assert persisted["payload"]["envelope"]["dlq_id"] == dlq_payload["dlq_id"]
-    payload = json.loads(redis.published[0][1])
-    assert "sse_id" not in payload
-    assert payload["recoverable"] is False
-    assert payload["dlq_id"] == dlq_payload["dlq_id"]
+    assert redis.publish_calls == 0
+    assert exc_info.value.stream_key == "events:user:user-1"
+    assert exc_info.value.event_id == dlq_payload["event_id"]
+    assert exc_info.value.diagnostic_dlq_persisted is True
+
+
+def test_lua_xadd_establishes_stream_ttl_before_returning_stream_id() -> None:
+    lua = " ".join(sse_publish._XADD_IDEMPOTENT_LUA.split())
+
+    xadd_index = lua.index("local stream_id = redis.call( 'XADD'")
+    expire_index = lua.index("local ttl_set = redis.call('EXPIRE'")
+    store_index = lua.index("redis.call('SET', KEYS[2], stream_id")
+
+    assert xadd_index < expire_index < store_index
+    assert "redis.call('SET', KEYS[2], ARGV[8], 'NX', 'EX'" in lua
+    assert "redis.call('XDEL', KEYS[1], stream_id)" in lua
+
+
+class TransactionFallbackRedis(FakeRedis):
+    eval = None
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kv: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.kv.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        xx: bool = False,
+        ex: int | None = None,
+    ) -> bool:
+        _ = ex
+        if nx and key in self.kv:
+            return False
+        if xx and key not in self.kv:
+            return False
+        self.kv[key] = value
+        return True
+
+    async def delete(self, key: str) -> int:
+        return 1 if self.kv.pop(key, None) is not None else 0
+
+    async def pttl(self, _key: str) -> int:
+        return (
+            sse_publish._EVENTS_DEDUPE_TTL_SECONDS * 1000
+            - int(sse_publish._DEDUPE_RESERVATION_STALE_SECONDS * 1000)
+            - 1
+        )
+
+    async def xrevrange(self, key: str, *, count: int):
+        _ = count
+        return [
+            (f"1710000000000-{idx}", fields)
+            for idx, (stream_key, fields) in reversed(
+                list(enumerate(self.stream_entries))
+            )
+            if stream_key == key
+        ]
+
+    def pipeline(self, *, transaction: bool = True) -> SimplePipeline:
+        assert transaction is True
+        return SimplePipeline(self)
 
 
 @pytest.mark.asyncio
-async def test_publish_event_dlq_payload_uses_non_recoverable_dlq_id(monkeypatch):
+async def test_fallback_recovers_atomic_xadd_ttl_after_response_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AcceptedThenRaisedPipeline(SimplePipeline):
+        async def execute(self) -> list:
+            results = await super().execute()
+            if any(command == "xadd" for command, _args, _kwargs in self.commands):
+                if not self.redis.response_lost:
+                    self.redis.response_lost = True
+                    raise RuntimeError("connection dropped after EXEC")
+            return results
+
+    class Redis(TransactionFallbackRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.response_lost = False
+
+        def pipeline(self, *, transaction: bool = True) -> SimplePipeline:
+            assert transaction is True
+            return AcceptedThenRaisedPipeline(self)
+
+    monkeypatch.setattr(sse_publish, "_DEDUPE_RESERVATION_WAIT_SECONDS", 0.0)
+    redis = Redis()
+    kwargs = {
+        "stream_key": "events:user:user-1",
+        "event_name": "generation.progress",
+        "event_id": "evt-atomic",
+        "payload_json": json.dumps({"event_id": "evt-atomic"}),
+    }
+
+    with pytest.raises(RuntimeError, match="connection dropped after EXEC"):
+        await sse_publish._xadd_event_without_lua(
+            redis,
+            reservation_token="pending:first-owner",
+            **kwargs,
+        )
+
+    stream_id = await sse_publish._xadd_event_without_lua(
+        redis,
+        reclaim_empty_reservation=True,
+        reservation_token="pending:retry-owner",
+        **kwargs,
+    )
+
+    assert stream_id == "1710000000000-0"
+    assert len(redis.stream_entries) == 1
+    assert (
+        "events:user:user-1",
+        sse_publish.EVENTS_STREAM_TTL_SECONDS,
+    ) in redis.expirations
+
+
+@pytest.mark.asyncio
+async def test_stale_reclaim_compare_delete_preserves_new_owner_and_skips_xadd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OwnerSwitchPipeline(SimplePipeline):
+        async def get(self, key: str):
+            value = await super().get(key)
+            if not self.redis.owner_switched:
+                self.redis.owner_switched = True
+                self.redis.kv[key] = "pending:new-owner"
+            return value
+
+    class Redis(TransactionFallbackRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.owner_switched = False
+
+        def pipeline(self, *, transaction: bool = True) -> SimplePipeline:
+            assert transaction is True
+            return OwnerSwitchPipeline(self)
+
+    monkeypatch.setattr(sse_publish, "_DEDUPE_RESERVATION_WAIT_SECONDS", 0.0)
+    redis = Redis()
+    dedupe_key = "events:user:user-1:dedupe:evt-race"
+    redis.kv[dedupe_key] = "pending:stale-owner"
+
+    with pytest.raises(RuntimeError, match="reservation has no stream id"):
+        await sse_publish._xadd_event_without_lua(
+            redis,
+            stream_key="events:user:user-1",
+            event_name="generation.progress",
+            event_id="evt-race",
+            payload_json=json.dumps({"event_id": "evt-race"}),
+            reclaim_empty_reservation=True,
+        )
+
+    assert redis.kv[dedupe_key] == "pending:new-owner"
+    assert redis.xadd_calls == 0
+
+
+class FakeDlqSession:
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self.rows = rows
+        self.added: list = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+    def begin(self):
+        return self
+
+    async def execute(self, _stmt):
+        rows = self.rows
+
+        class Result:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return rows
+
+        return Result()
+
+    def add(self, row) -> None:
+        self.added.append(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "new_identity",
+    [
+        ("evt-distinct", "user-1", "user:user-1"),
+        ("evt-existing", "user-2", "user:user-1"),
+        ("evt-existing", "user-1", "task:task-2"),
+    ],
+)
+async def test_pg_dlq_dedupe_uses_event_id_user_and_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    new_identity: tuple[str, str, str],
+) -> None:
+    existing = SimpleNamespace(
+        payload={
+            "user_id": "user-1",
+            "channel": "user:user-1",
+            "envelope": {
+                "event": "generation.failed",
+                "event_id": "evt-existing",
+                "ts_ms": 1234,
+            },
+        }
+    )
+    session = FakeDlqSession([existing])
+    monkeypatch.setattr(worker_db, "SessionLocal", lambda: session)
+    event_id, user_id, channel = new_identity
+
+    persisted = await sse_publish._persist_sse_dlq(
+        event_name="generation.failed",
+        payload={
+            "user_id": user_id,
+            "channel": channel,
+            "envelope": {
+                "event": "generation.failed",
+                "event_id": event_id,
+                "ts_ms": 1234,
+            },
+        },
+        error_class="XADDFailed",
+        error_message="failed",
+    )
+
+    assert persisted is True
+    assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_pg_dlq_dedupe_skips_only_exact_stable_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "user_id": "user-1",
+        "channel": "user:user-1",
+        "envelope": {
+            "event": "generation.failed",
+            "event_id": "evt-same",
+            "ts_ms": 1234,
+        },
+    }
+    session = FakeDlqSession([SimpleNamespace(payload=payload)])
+    monkeypatch.setattr(worker_db, "SessionLocal", lambda: session)
+
+    persisted = await sse_publish._persist_sse_dlq(
+        event_name="generation.failed",
+        payload=payload,
+        error_class="XADDFailed",
+        error_message="failed",
+    )
+
+    assert persisted is True
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_publish_event_records_diagnostic_dlq_before_retryable_failure(
+    monkeypatch,
+):
     persisted: dict = {}
 
     async def fake_sleep(_delay: float) -> None:
         return None
 
-    async def fake_persist_sse_dlq(**kwargs) -> None:
+    async def fake_persist_sse_dlq(**kwargs) -> bool:
         persisted.update(kwargs)
+        return True
 
     monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(sse_publish, "_persist_sse_dlq", fake_persist_sse_dlq)
 
     redis = FakeRedis(xadd_failures=3)
 
-    await sse_publish.publish_event(
-        redis,
-        "user-1",
-        "user:user-1",
-        "generation.failed",
-        {"generation_id": "gen-1"},
-    )
+    with pytest.raises(sse_publish.SSEPublishRetryableError) as exc_info:
+        await sse_publish.publish_event(
+            redis,
+            "user-1",
+            "user:user-1",
+            "generation.failed",
+            {"generation_id": "gen-1"},
+        )
 
     assert len(redis.dlq) == 1
     payload = json.loads(redis.dlq[0][1])
@@ -441,10 +762,12 @@ async def test_publish_event_dlq_payload_uses_non_recoverable_dlq_id(monkeypatch
     assert payload["recoverable"] is False
     assert persisted["payload"]["envelope"]["dlq_id"] == payload["dlq_id"]
     assert len(payload["dlq_id"].split("-")) >= 3
+    assert redis.publish_calls == 0
+    assert exc_info.value.diagnostic_dlq_persisted is True
 
 
 @pytest.mark.asyncio
-async def test_publish_event_raises_when_all_durable_sinks_fail(monkeypatch):
+async def test_publish_event_reports_when_diagnostic_sinks_also_fail(monkeypatch):
     async def fake_sleep(_delay: float) -> None:
         return None
 
@@ -456,7 +779,7 @@ async def test_publish_event_raises_when_all_durable_sinks_fail(monkeypatch):
 
     redis = FakeRedis(xadd_failures=3, dlq_failures=1)
 
-    with pytest.raises(RuntimeError, match="no durable sink"):
+    with pytest.raises(sse_publish.SSEPublishRetryableError) as exc_info:
         await sse_publish.publish_event(
             redis,
             "user-1",
@@ -466,6 +789,56 @@ async def test_publish_event_raises_when_all_durable_sinks_fail(monkeypatch):
         )
 
     assert redis.publish_calls == 0
+    assert exc_info.value.diagnostic_dlq_persisted is False
+
+
+@pytest.mark.asyncio
+async def test_publish_event_retry_reuses_event_id_and_stream_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_persist_sse_dlq(**_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sse_publish, "_persist_sse_dlq", fake_persist_sse_dlq)
+    redis = FakeRedis(xadd_failures=3)
+    data = {"generation_id": "gen-1", "event_id": "evt-stable"}
+
+    with pytest.raises(sse_publish.SSEPublishRetryableError):
+        await sse_publish.publish_event(
+            redis,
+            "user-1",
+            "user:user-1",
+            "generation.progress",
+            data,
+        )
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        data,
+    )
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        data,
+    )
+
+    assert len(redis.stream_entries) == 1
+    assert redis.stream_entries[0][1]["event_id"] == "evt-stable"
+    successful_payloads = [json.loads(payload) for _channel, payload in redis.published]
+    assert [payload["event_id"] for payload in successful_payloads] == [
+        "evt-stable",
+        "evt-stable",
+    ]
+    assert successful_payloads[0]["sse_id"] == successful_payloads[1]["sse_id"]
 
 
 @pytest.mark.asyncio

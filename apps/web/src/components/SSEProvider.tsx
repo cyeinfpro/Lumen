@@ -14,9 +14,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { disposeChatStoreRuntime, useChatStore } from "@/store/useChatStore";
+import {
+  userConversationQueryKeys,
+  userMemoryQueryKeys,
+  userScopedQueryKey,
+} from "@/components/QueryProvider";
 import { getTask, type BackendCompletion } from "@/lib/apiClient";
 import { onOnlineRestore, startConnectivity } from "@/lib/connectivity";
 import { logError } from "@/lib/logger";
+import { qk } from "@/lib/queries/queryKeys";
 import { useSSE, type SSEHandlers } from "@/lib/useSSE";
 import type { AssistantMessage, Generation, Message } from "@/lib/types";
 
@@ -77,6 +83,7 @@ const MAX_SEEN_SSE_EVENT_IDS = 2_000;
 
 type SSEBroadcastPayload = {
   source: string;
+  sourceUserId: string | null;
   name: string;
   data: unknown;
   eventId?: string;
@@ -150,8 +157,15 @@ function payloadEventId(data: unknown, eventId?: string): string | null {
 function isSSEBroadcastPayload(value: unknown): value is SSEBroadcastPayload {
   if (!value || typeof value !== "object") return false;
   const raw = value as Partial<SSEBroadcastPayload>;
+  const hasSourceUserId = Object.prototype.hasOwnProperty.call(
+    raw,
+    "sourceUserId",
+  );
   return (
     typeof raw.source === "string" &&
+    hasSourceUserId &&
+    (raw.sourceUserId === null ||
+      (typeof raw.sourceUserId === "string" && raw.sourceUserId.length > 0)) &&
     typeof raw.name === "string" &&
     typeof raw.sentAt === "number"
   );
@@ -333,6 +347,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const taskInvalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const pendingTaskInvalidationUsersRef = useRef<Set<string | null>>(new Set());
 
   useEffect(() => {
     qcRef.current = qc;
@@ -344,10 +359,19 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     lastHydratedUserIdRef.current = null;
   }, [userId]);
 
-  const scheduleTaskInvalidation = useCallback(() => {
+  const scheduleTaskInvalidation = useCallback((scopeUserId: string | null) => {
+    pendingTaskInvalidationUsersRef.current.add(scopeUserId);
     if (taskInvalidationTimerRef.current) return;
     taskInvalidationTimerRef.current = setTimeout(() => {
       taskInvalidationTimerRef.current = null;
+      const scopeUserIds = [...pendingTaskInvalidationUsersRef.current];
+      pendingTaskInvalidationUsersRef.current.clear();
+      for (const scopeId of scopeUserIds) {
+        void qcRef.current.invalidateQueries({
+          queryKey: userScopedQueryKey(scopeId, ["tasks"]),
+        });
+      }
+      // Clear any legacy task keys left during the user-scoped cache migration.
       void qcRef.current.invalidateQueries({ queryKey: ["tasks"] });
     }, 500);
   }, []);
@@ -409,38 +433,44 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     useChatStore.getState().applySSEEvent(name, data);
 
     if (TASK_QUERY_EVENTS.has(name)) {
-      scheduleTaskInvalidation();
+      scheduleTaskInvalidation(userId);
     }
 
     if (name === "conv.renamed") {
-      qcRef.current.invalidateQueries({ queryKey: ["conversations"] });
+      qcRef.current.invalidateQueries({
+        queryKey: qk.user(userId).conversationsAll(),
+      });
       return;
     }
 
     if (name === "account_settings_updated") {
-      // 之前用 ["me", "memory"] / ["conversation"] 全前缀失效, 任意一次后端推
-      // 都会让 messages list / used-memories / context / scopes / staging /
-      // timeline / settings 七八个 query 一起 refetch — 切页面或后台 worker
-      // 写一条记忆都触发风暴, 是页面卡顿的主因.
-      // settings 事件只代表 user-level memory 开关变了, 精确刷 settings + scopes 即可.
-      qcRef.current.invalidateQueries({ queryKey: ["me", "memory", "settings"] });
-      qcRef.current.invalidateQueries({ queryKey: ["me", "memory", "scopes"] });
+      // This event only changes user-level memory settings. Keep the refresh
+      // inside the current user's private cache.
+      qcRef.current.invalidateQueries({
+        queryKey: userMemoryQueryKeys.settings(userId),
+      });
+      qcRef.current.invalidateQueries({
+        queryKey: userMemoryQueryKeys.scopes(userId),
+      });
       return;
     }
 
     if (name === "conversation.memory.updated") {
-      // 只刷这个 conv 的 used-memories,不动 messages / context / 别的 conv.
+      // Refresh only this conversation's used memories for the current user.
       const nextConvId =
         data && typeof data === "object" && "conversation_id" in data
           ? (data as { conversation_id?: unknown }).conversation_id
           : null;
       if (typeof nextConvId === "string" && nextConvId) {
         qcRef.current.invalidateQueries({
-          queryKey: ["conversation", nextConvId, "used-memories"],
+          queryKey: userConversationQueryKeys.usedMemories(
+            userId,
+            nextConvId,
+          ),
         });
       }
     }
-  }, [scheduleTaskInvalidation]);
+  }, [scheduleTaskInvalidation, userId]);
 
   const deliverSSEEvent = useCallback(
     (
@@ -449,6 +479,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       eventId?: string,
       opts?: { broadcast?: boolean; source?: "sse" | "broadcast" },
     ) => {
+      const sourceUserId = useChatStore.getState().currentUserId;
       const seenResult = markEventSeen(data, eventId);
       if (seenResult === "duplicate") return;
       if (seenResult === null && opts?.source === "broadcast") {
@@ -462,6 +493,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       try {
         broadcastRef.current?.postMessage({
           source: broadcastSourceId,
+          sourceUserId,
           name,
           data,
           eventId,
@@ -485,6 +517,8 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     channel.onmessage = (event: MessageEvent) => {
       const message = event.data;
       if (!isSSEBroadcastPayload(message)) return;
+      const receiverUserId = useChatStore.getState().currentUserId;
+      if (message.sourceUserId !== receiverUserId) return;
       if (message.source === broadcastSourceId) return;
       deliverSSEEvent(message.name, message.data, message.eventId, {
         broadcast: false,
@@ -711,6 +745,8 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     recoveryDisposedRef.current = false;
     recoveryLifecycleRef.current += 1;
+    const pendingTaskInvalidationUsers =
+      pendingTaskInvalidationUsersRef.current;
     const unsubscribeOnlineRestore = onOnlineRestore(() => {
       runRecovery("online-restore", true, false, "limited");
     });
@@ -724,6 +760,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
         clearTimeout(taskInvalidationTimerRef.current);
         taskInvalidationTimerRef.current = null;
       }
+      pendingTaskInvalidationUsers.clear();
       if (recoveryCooldownTimerRef.current) {
         clearTimeout(recoveryCooldownTimerRef.current);
         recoveryCooldownTimerRef.current = null;

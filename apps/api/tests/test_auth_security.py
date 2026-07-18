@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -66,6 +67,74 @@ class _Db:
 
     async def rollback(self):
         self.rolled_back = True
+
+
+class _PasswordResetRedis:
+    def __init__(
+        self,
+        token_key: str,
+        *,
+        user_id: str = "user-1",
+        ttl_ms: int = 120_000,
+    ) -> None:
+        self.tokens = {token_key: user_id}
+        self.token_ttls = {token_key: ttl_ms}
+        self.claims: dict[str, dict[str, str | int]] = {}
+        self.events: list[str] = []
+        self.claim_calls = 0
+        self.fail_consume_claim = False
+        self._lock = asyncio.Lock()
+
+    async def eval(self, script, _num_keys, *args):
+        if script not in {
+            auth._CLAIM_PASSWORD_RESET_TOKEN_LUA,
+            auth._RESTORE_PASSWORD_RESET_TOKEN_LUA,
+            auth._CONSUME_PASSWORD_RESET_CLAIM_LUA,
+        }:
+            return [1, 0]
+
+        async with self._lock:
+            if script == auth._CLAIM_PASSWORD_RESET_TOKEN_LUA:
+                self.claim_calls += 1
+                token_key, claim_key, owner = args
+                user_id = self.tokens.get(token_key)
+                ttl_ms = self.token_ttls.get(token_key, -2)
+                if user_id is None or ttl_ms <= 0:
+                    return [0, ""]
+                if claim_key in self.claims:
+                    return [2, ""]
+                self.claims[claim_key] = {
+                    "owner": owner,
+                    "user_id": user_id,
+                    "ttl_ms": ttl_ms,
+                }
+                self.tokens.pop(token_key)
+                self.token_ttls.pop(token_key)
+                self.events.append("redis.claim")
+                return [1, user_id]
+
+            if script == auth._RESTORE_PASSWORD_RESET_TOKEN_LUA:
+                token_key, claim_key, owner = args
+                claim = self.claims.get(claim_key)
+                if claim is None or claim["owner"] != owner:
+                    return 0
+                if token_key in self.tokens or int(claim["ttl_ms"]) <= 0:
+                    return -1
+                self.tokens[token_key] = str(claim["user_id"])
+                self.token_ttls[token_key] = int(claim["ttl_ms"])
+                self.claims.pop(claim_key)
+                self.events.append("redis.restore")
+                return 1
+
+            if self.fail_consume_claim:
+                raise RuntimeError("redis unavailable")
+            claim_key, owner = args
+            claim = self.claims.get(claim_key)
+            if claim is None or claim["owner"] != owner:
+                return 0
+            self.claims.pop(claim_key)
+            self.events.append("redis.consume_claim")
+            return 1
 
 
 def _request(method: str = "GET", session_id: str | None = None) -> Request:
@@ -491,9 +560,17 @@ async def test_signup_byok_email_check_ignores_soft_deleted_users(
 
 @pytest.mark.asyncio
 async def test_signup_rejects_weak_password() -> None:
+    # Keep exercising the route-level error envelope even when the shared
+    # schema rejects short passwords during request parsing.
+    weak_signup = SignupIn.model_construct(
+        email="new@example.com",
+        password="short",
+        display_name="",
+        invite_token=None,
+    )
     with pytest.raises(Exception) as excinfo:
         await auth.signup(
-            SignupIn(email="new@example.com", password="short"),
+            weak_signup,
             _request(method="POST"),
             Response(),
             _Db(),  # type: ignore[arg-type]
@@ -745,35 +822,9 @@ async def test_password_reset_request_deletes_token_when_email_task_crashes(
 async def test_password_reset_confirm_updates_password_and_revokes_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Redis:
-        def __init__(self) -> None:
-            self.deleted = []
-            self.values = {}
-
-        async def eval(self, *_args):
-            return [1, 0]
-
-        async def get(self, _key: str) -> str:
-            if _key in self.values:
-                return self.values[_key]
-            return "user-1"
-
-        async def set(self, key: str, value: str, *, ex: int, nx: bool) -> bool:
-            assert ex == auth._PASSWORD_RESET_CLAIM_TTL_SECONDS
-            assert nx is True
-            if key in self.values:
-                return False
-            self.values[key] = value
-            return True
-
-        async def delete(self, key: str) -> None:
-            self.deleted.append(key)
-            self.values.pop(key, None)
-
-        async def getdel(self, key: str) -> str:
-            # 路由切换到原子 GETDEL（Redis 6.2+）；mock 返回模拟值并记录 delete。
-            self.deleted.append(key)
-            return "user-1"
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
 
     class Db:
         def __init__(self) -> None:
@@ -792,9 +843,10 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
             return None
 
         async def commit(self) -> None:
+            assert token_key not in redis.tokens
+            redis.events.append("db.commit")
             self.committed = True
 
-    redis = Redis()
     db = Db()
 
     monkeypatch.setattr(auth, "get_redis", lambda: redis)
@@ -810,37 +862,286 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
     assert db.user.password_hash == "hashed:new-password"
     assert db.revoked_sessions is True
     assert db.committed is True
-    assert redis.deleted == [
-        auth._password_reset_key("reset-token"),
-        auth._password_reset_claim_key("reset-token"),
-    ]
+    assert token_key not in redis.tokens
+    assert claim_key not in redis.claims
+    assert redis.events == ["redis.claim", "db.commit", "redis.consume_claim"]
     assert "FOR UPDATE" in str(db.user_select).upper()
 
 
 @pytest.mark.asyncio
-async def test_password_reset_confirm_does_not_consume_token_before_user_rate_limit(
+async def test_password_reset_confirm_restores_token_when_execute_fails_before_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Redis:
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key, ttl_ms=87_654)
+
+    class Db:
         def __init__(self) -> None:
-            self.deleted = []
+            self.user = SimpleNamespace(
+                id="user-1", deleted_at=None, password_hash="old"
+            )
+            self.committed = False
+            self.rolled_back = False
 
-        async def eval(self, _lua, _keys, key: str, *_args):
-            if key == "rl:pwd_reset_confirm:user:user-1":
-                return [0, 1000]
-            return [1, 0]
+        async def execute(self, stmt):
+            if "auth_sessions" in str(stmt).lower():
+                raise RuntimeError("database unavailable before commit")
+            return _ScalarResult(self.user)
 
-        async def get(self, _key: str) -> str:
-            return "user-1"
+        async def commit(self) -> None:
+            self.committed = True
 
-        async def getdel(self, key: str) -> str:
-            self.deleted.append(key)
-            return "user-1"
+        async def rollback(self) -> None:
+            self.rolled_back = True
+            redis.events.append("db.rollback")
 
-    redis = Redis()
+    db = Db()
     monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth, "hash_password", lambda plain: f"hashed:{plain}")
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(RuntimeError, match="database unavailable before commit"):
+        await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert db.committed is False
+    assert db.rolled_back is True
+    assert redis.tokens[token_key] == "user-1"
+    assert redis.token_ttls[token_key] == 87_654
+    assert claim_key not in redis.claims
+    assert redis.events == [
+        "redis.claim",
+        "db.rollback",
+        "redis.restore",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_does_not_restore_token_when_commit_applies_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key, ttl_ms=87_654)
+
+    class Db:
+        def __init__(self) -> None:
+            self.user = SimpleNamespace(
+                id="user-1", deleted_at=None, password_hash="old"
+            )
+            self.sessions_revoked = False
+            self.persisted_password_hash = "old"
+            self.persisted_sessions_revoked = False
+            self.rolled_back = False
+
+        async def execute(self, stmt):
+            if "auth_sessions" not in str(stmt).lower():
+                return _ScalarResult(self.user)
+            self.sessions_revoked = True
+            return None
+
+        async def commit(self) -> None:
+            self.persisted_password_hash = self.user.password_hash
+            self.persisted_sessions_revoked = self.sessions_revoked
+            redis.events.append("db.commit_applied")
+            raise RuntimeError("commit acknowledgement lost")
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+            redis.events.append("db.rollback")
+
+    db = Db()
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth, "hash_password", lambda plain: f"hashed:{plain}")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"]["code"] == "reset_outcome_uncertain"
+    assert db.persisted_password_hash == "hashed:new-password"
+    assert db.persisted_sessions_revoked is True
+    assert db.rolled_back is True
+    assert token_key not in redis.tokens
+    assert claim_key not in redis.claims
+    assert redis.events == [
+        "redis.claim",
+        "db.commit_applied",
+        "db.rollback",
+        "redis.consume_claim",
+    ]
+    assert "password_reset_commit_outcome_uncertain" in caplog.text
+    assert "reset-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_password_reset_claim_restore_preserves_ttl_and_owner() -> None:
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key, ttl_ms=54_321)
+
+    claimed_user_id = await auth._claim_password_reset_token(  # noqa: SLF001
+        redis,
+        token_key,
+        claim_key,
+        owner="right-owner",
+    )
+
+    assert claimed_user_id == "user-1"
+    assert token_key not in redis.tokens
+    assert redis.claims[claim_key] == {
+        "owner": "right-owner",
+        "user_id": "user-1",
+        "ttl_ms": 54_321,
+    }
+    assert (
+        await auth._restore_password_reset_token(  # noqa: SLF001
+            redis,
+            token_key,
+            claim_key,
+            owner="wrong-owner",
+        )
+        is False
+    )
+    assert token_key not in redis.tokens
+    assert claim_key in redis.claims
+    assert (
+        await auth._restore_password_reset_token(  # noqa: SLF001
+            redis,
+            token_key,
+            claim_key,
+            owner="right-owner",
+        )
+        is True
+    )
+    assert redis.tokens[token_key] == "user-1"
+    assert redis.token_ttls[token_key] == 54_321
+    assert claim_key not in redis.claims
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_stays_consumed_when_redis_fails_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
+    redis.fail_consume_claim = True
+
+    class Db:
+        def __init__(self) -> None:
+            self.user = SimpleNamespace(
+                id="user-1", deleted_at=None, password_hash="old"
+            )
+            self.committed = False
+
+        async def execute(self, stmt):
+            if "auth_sessions" not in str(stmt).lower():
+                return _ScalarResult(self.user)
+            return None
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    db = Db()
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth, "hash_password", lambda plain: f"hashed:{plain}")
+
+    out = await auth.password_reset_confirm(
+        auth.PasswordResetConfirmIn(token="reset-token", new_password="new-password"),
+        _request(method="POST"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.ok is True
+    assert db.committed is True
+    assert token_key not in redis.tokens
+    assert claim_key in redis.claims
+    assert "password_reset_claim_consume_failed" in caplog.text
+    assert "reset-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_concurrent_submit_commits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_key = auth._password_reset_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
+    commit_count = 0
+
+    class Db:
+        def __init__(self) -> None:
+            self.user = SimpleNamespace(
+                id="user-1", deleted_at=None, password_hash="old"
+            )
+
+        async def execute(self, stmt):
+            if "auth_sessions" not in str(stmt).lower():
+                return _ScalarResult(self.user)
+            return None
+
+        async def commit(self) -> None:
+            nonlocal commit_count
+            commit_count += 1
+
+        async def rollback(self) -> None:
+            return None
+
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth, "hash_password", lambda plain: f"hashed:{plain}")
+
+    async def confirm(db: Db):
+        return await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            db,  # type: ignore[arg-type]
+        )
+
+    results = await asyncio.gather(
+        confirm(Db()),
+        confirm(Db()),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if isinstance(result, auth.OkOut)]
+    failures = [result for result in results if isinstance(result, HTTPException)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].detail["error"]["code"] == "invalid_token"
+    assert commit_count == 1
+    assert token_key not in redis.tokens
+
+
+@pytest.mark.asyncio
+async def test_password_reset_confirm_restores_token_after_user_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
+
+    async def reject_user(_redis, _key):
+        raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
+
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth._PASSWORD_RESET_CONFIRM_USER_LIMITER, "check", reject_user)
+
+    with pytest.raises(HTTPException) as excinfo:
         await auth.password_reset_confirm(
             auth.PasswordResetConfirmIn(
                 token="reset-token", new_password="new-password"
@@ -850,33 +1151,19 @@ async def test_password_reset_confirm_does_not_consume_token_before_user_rate_li
         )
 
     assert getattr(excinfo.value, "status_code", None) == 429
-    assert redis.deleted == []
+    assert redis.tokens[token_key] == "user-1"
+    assert claim_key not in redis.claims
 
 
 @pytest.mark.asyncio
-async def test_password_reset_confirm_token_limiter_runs_before_redis_read(
+async def test_password_reset_confirm_token_limiter_runs_before_atomic_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Redis:
-        def __init__(self) -> None:
-            self.reads = 0
-            self.deleted = []
-
-        async def eval(self, *_args):
-            return [1, 0]
-
-        async def get(self, _key: str) -> str:
-            self.reads += 1
-            return "user-1"
-
-        async def getdel(self, key: str) -> str:
-            self.deleted.append(key)
-            return "user-1"
-
     async def reject_token(_redis, _key):
         raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
 
-    redis = Redis()
+    token_key = auth._password_reset_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
     monkeypatch.setattr(auth, "get_redis", lambda: redis)
     monkeypatch.setattr(
         auth._PASSWORD_RESET_CONFIRM_TOKEN_LIMITER, "check", reject_token
@@ -892,36 +1179,22 @@ async def test_password_reset_confirm_token_limiter_runs_before_redis_read(
         )
 
     assert excinfo.value.status_code == 429
-    assert redis.reads == 0
-    assert redis.deleted == []
+    assert redis.claim_calls == 0
+    assert redis.tokens[token_key] == "user-1"
 
 
 @pytest.mark.asyncio
 async def test_password_reset_confirm_claim_conflict_does_not_consume_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Redis:
-        def __init__(self) -> None:
-            self.deleted = []
-
-        async def eval(self, *_args):
-            return [1, 0]
-
-        async def get(self, _key: str) -> str:
-            return "user-1"
-
-        async def set(self, _key: str, _value: str, *, ex: int, nx: bool) -> bool:
-            assert ex == auth._PASSWORD_RESET_CLAIM_TTL_SECONDS
-            assert nx is True
-            return False
-
-        async def getdel(self, _key: str) -> str:
-            raise AssertionError("contended reset token must not be consumed")
-
-        async def delete(self, key: str) -> None:
-            self.deleted.append(key)
-
-    redis = Redis()
+    token_key = auth._password_reset_key("reset-token")
+    claim_key = auth._password_reset_claim_key("reset-token")
+    redis = _PasswordResetRedis(token_key)
+    redis.claims[claim_key] = {
+        "owner": "other-owner",
+        "user_id": "user-1",
+        "ttl_ms": 120_000,
+    }
     monkeypatch.setattr(auth, "get_redis", lambda: redis)
 
     with pytest.raises(Exception) as excinfo:
@@ -935,7 +1208,8 @@ async def test_password_reset_confirm_claim_conflict_does_not_consume_token(
 
     assert getattr(excinfo.value, "status_code", None) == 400
     assert excinfo.value.detail["error"]["code"] == "invalid_token"
-    assert redis.deleted == []
+    assert redis.tokens[token_key] == "user-1"
+    assert redis.claims[claim_key]["owner"] == "other-owner"
 
 
 @pytest.mark.asyncio

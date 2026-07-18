@@ -2,12 +2,19 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 
+import {
+  fetchJsonWithTimeout,
+  PAGE_IDENTITY_EXPRESSION,
+  pageIdentityErrors,
+} from "./cdp-page-validation.mjs";
+
 const HOST = process.env.CDP_HOST ?? "http://127.0.0.1:9222";
 const BASE = process.env.APP_BASE_URL ?? "http://localhost:3000";
 const OUTPUT_DIR =
   process.env.MOBILE_UI_ARTIFACTS ?? "/tmp/lumen-mobile-ui";
 const CDP_TIMEOUT_MS = 15_000;
 const CDP_CLOSE_TIMEOUT_MS = 3_000;
+const HTTP_TIMEOUT_MS = 5_000;
 
 const pages = [
   "/",
@@ -39,14 +46,6 @@ const viewports = [
   { name: "mobile-landscape", width: 844, height: 390, scale: 2 },
   { name: "desktop", width: 1280, height: 900, scale: 1 },
 ];
-
-async function json(url, init) {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${url}`);
-  }
-  return response.json();
-}
 
 function send(ws, method, params = {}) {
   const id = ++send.id;
@@ -243,9 +242,10 @@ async function main() {
   let tab;
   let ws;
   try {
-    tab = await json(
+    tab = await fetchJsonWithTimeout(
       `${HOST}/json/new?${encodeURIComponent(`${BASE}/`)}`,
       { method: "PUT" },
+      { timeoutMs: HTTP_TIMEOUT_MS },
     );
     ws = new WebSocket(tab.webSocketDebuggerUrl);
     await waitForSocketOpen(ws);
@@ -261,8 +261,21 @@ async function main() {
         mobile: viewport.name.startsWith("mobile"),
       });
       for (const path of pages) {
-        await send(ws, "Page.navigate", { url: `${BASE}${path}` });
+        const requestedUrl = new URL(path, BASE).href;
+        const navigation = await send(ws, "Page.navigate", {
+          url: requestedUrl,
+        });
         await waitForPage(ws);
+        const identity = await evaluate(ws, PAGE_IDENTITY_EXPRESSION);
+        const identityErrors = [
+          ...(navigation.errorText
+            ? [`navigation failed: ${navigation.errorText}`]
+            : []),
+          ...pageIdentityErrors(requestedUrl, identity, {
+            expectedStatuses:
+              path === "/missing-mobile-route" ? [404] : [200],
+          }),
+        ];
         const inspection = await inspectPage(ws);
         const screenshot = await send(ws, "Page.captureScreenshot", {
           format: "png",
@@ -275,12 +288,20 @@ async function main() {
           Buffer.from(screenshot.data, "base64"),
         );
         const ok =
-          inspection.rootOverflow <= 2 && inspection.outliers.length === 0;
+          identityErrors.length === 0 &&
+          inspection.rootOverflow <= 2 &&
+          inspection.outliers.length === 0;
         if (!ok) {
-          failures.push({ viewport: viewport.name, path, ...inspection });
+          failures.push({
+            viewport: viewport.name,
+            requestedPath: path,
+            identity,
+            identityErrors,
+            ...inspection,
+          });
         }
         console.log(
-          `${ok ? "✓" : "✗"} ${viewport.name} ${path} -> ${inspection.path} overflow=${inspection.rootOverflow} outliers=${inspection.outliers.length}`,
+          `${ok ? "✓" : "✗"} ${viewport.name} ${path} -> ${identity.pathname} status=${identity.responseStatus} overflow=${inspection.rootOverflow} outliers=${inspection.outliers.length}`,
         );
       }
     }

@@ -141,9 +141,32 @@ async def test_reference_video_dedupe_repairs_missing_storage(
 
     repaired = tmp_path / existing.storage_key
     assert out.id == existing.id
+    assert out.created is False
     assert repaired.read_bytes() == payload
     assert db.committed is True
     assert db.rolled_back is False
+
+
+def test_video_upload_output_marks_new_assets() -> None:
+    row = SimpleNamespace(
+        id="video-new",
+        storage_key="u/user-1/vref/video-new/original.mp4",
+        poster_storage_key=None,
+        width=0,
+        height=0,
+        duration_ms=0,
+        fps=None,
+        has_audio=False,
+        mime="video/mp4",
+        size_bytes=123,
+        faststart=False,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    out = videos._video_upload_out(row, created=True)
+
+    assert out.id == "video-new"
+    assert out.created is True
 
 
 def test_reference_video_atomic_writer_streams_from_file_object(tmp_path: Path) -> None:

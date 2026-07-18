@@ -7,22 +7,27 @@ import { cn } from "@/lib/utils";
 interface DesktopSceneDividerProps {
   index: number;
   collapsed?: boolean;
+  controlsId?: string;
   onToggle?: () => void;
 }
 
 export function DesktopSceneDivider({
   index,
   collapsed,
+  controlsId,
   onToggle,
 }: DesktopSceneDividerProps) {
   const label = `Scene ${String(index).padStart(2, "0")}`;
   return (
-    <div
+    <button
+      type="button"
       className="mx-auto my-3 flex w-full max-w-[var(--content-composer)] items-center gap-3 select-none"
-      onDoubleClick={onToggle}
-      role="separator"
-      aria-label={label}
-      title="双击折叠/展开"
+      onClick={onToggle}
+      aria-label={
+        collapsed ? `${label}（已折叠，点击展开）` : `${label}（点击折叠）`
+      }
+      aria-expanded={!collapsed}
+      aria-controls={controlsId}
     >
       <span
         aria-hidden="true"
@@ -38,6 +43,6 @@ export function DesktopSceneDivider({
         aria-hidden="true"
         className="h-px flex-1 bg-[var(--border-subtle)]"
       />
-    </div>
+    </button>
   );
 }

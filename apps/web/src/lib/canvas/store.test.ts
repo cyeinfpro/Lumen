@@ -429,6 +429,10 @@ test("multi-selection survives changing the inspector primary node", () => {
     "prompt-1",
     "image-generate-1",
   ]);
+  assert.notEqual(
+    store.getState().selectedNodeIds[0],
+    store.getState().selectedNodeId,
+  );
 
   store
     .getState()

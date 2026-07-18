@@ -37,6 +37,19 @@ from lumen_core.models import (
 from ..db import get_db
 from ..deps import CurrentUser
 from ..redis_client import get_redis
+from ..services import event_replay as _event_replay
+
+
+_decode_replay_fields = _event_replay.decode_replay_fields
+_event_channels_from_payload = _event_replay.event_channels_from_payload
+_iter_replay_events_service = _event_replay.iter_replay_events
+_normalize_event_id = _event_replay.normalize_event_id
+_normalize_recoverable_sse_id = _event_replay.normalize_recoverable_sse_id
+_payload_with_sse_id = _event_replay.payload_with_sse_id
+_replay_payload_matches_channels = _event_replay.replay_payload_matches_channels
+_stream_high_water_id = _event_replay.stream_high_water_id
+_stream_id_parts = _event_replay.stream_id_parts
+_task_ids_from_payload = _event_replay.task_ids_from_payload
 
 
 router = APIRouter()
@@ -341,25 +354,6 @@ def _decode_pubsub_text(value: object) -> str | None:
     return None
 
 
-def _normalize_event_id(raw: object) -> str | None:
-    if raw is None or raw == "":
-        return None
-    return str(raw)
-
-
-def _normalize_recoverable_sse_id(raw: object) -> str | None:
-    value = _normalize_event_id(raw)
-    if value is None or len(value) > 64:
-        return None
-    parts = value.split("-")
-    if len(parts) != 2:
-        return None
-    ms_str, seq_str = parts
-    if not ms_str.isdigit() or not seq_str.isdigit():
-        return None
-    return value
-
-
 def _is_stream_command_unsupported(exc: Exception) -> bool:
     message = str(exc).lower()
     return (
@@ -455,176 +449,80 @@ async def _stream_id_for_pubsub_event(
     return str(raw)
 
 
-def _task_ids_from_payload(payload: dict) -> set[str]:
-    ids: set[str] = set()
-    for key in ("task_id", "generation_id", "completion_id", "video_generation_id"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            ids.add(value)
-    return ids
-
-
-def _event_channels_from_payload(payload: dict) -> set[str]:
-    channels: set[str] = set()
-    conv_id = payload.get("conversation_id")
-    if isinstance(conv_id, str) and conv_id:
-        channels.add(f"conv:{conv_id}")
-    channels.update(f"task:{task_id}" for task_id in _task_ids_from_payload(payload))
-    for key in ("storyboard_id", "storyboard_run_id", "workflow_run_id", "run_id"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            channels.add(f"storyboard:{value}")
-    return channels
-
-
-def _replay_payload_matches_channels(
-    payload: object,
-    *,
-    requested_channels: set[str],
-    include_user_channel: bool,
-    user_channel: str,
-    envelope_channel: str | None = None,
-) -> bool:
-    if not requested_channels:
-        return True
-    if envelope_channel:
-        if envelope_channel in requested_channels:
-            return True
-        if envelope_channel == user_channel:
-            return include_user_channel and user_channel in requested_channels
-        if envelope_channel.startswith(("conv:", "task:", "storyboard:")):
-            return False
-    if not isinstance(payload, dict):
-        return include_user_channel and user_channel in requested_channels
-
-    event_channels = _event_channels_from_payload(payload)
-    if event_channels:
-        return bool(event_channels & requested_channels)
-    # User-level notices are only replayed when the client explicitly asked for
-    # user:{id}; live subscriptions still include user:{id} for current notices.
-    return include_user_channel and user_channel in requested_channels
-
-
-def _replay_field(fields: dict, name: str) -> object | None:
-    value = fields.get(name)
-    if value is None:
-        value = fields.get(name.encode("utf-8"))
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
-def _decode_replay_fields(fields: object) -> tuple[str, object, str | None] | None:
-    if not isinstance(fields, dict):
-        return None
-    data = _replay_field(fields, "data")
-    event_name = _replay_field(fields, "event")
-    event_name = event_name if isinstance(event_name, str) else None
-    if not isinstance(data, str) or not data:
-        return None
-    try:
-        parsed = json.loads(data)
-    except Exception:
-        return event_name or "message", {"raw": data}, None
-    if not isinstance(parsed, dict):
-        return event_name or "message", parsed, None
-
-    ev_name = event_name or parsed.get("event") or "message"
-    if not isinstance(ev_name, str) or not ev_name:
-        ev_name = "message"
-    envelope_channel = parsed.get("channel")
-    envelope_channel = envelope_channel if isinstance(envelope_channel, str) else None
-    payload = parsed.get("data", parsed)
-    envelope_event_id = _normalize_event_id(parsed.get("event_id"))
-    if isinstance(payload, dict) and envelope_event_id is not None:
-        payload = {**payload}
-        payload.setdefault("event_id", envelope_event_id)
-    return ev_name, payload, envelope_channel
-
-
-def _payload_with_sse_id(payload: object, sse_id: str) -> dict:
-    if isinstance(payload, dict):
-        return {**payload, "msg_id": sse_id, "sse_id": sse_id}
-    return {"data": payload, "msg_id": sse_id, "sse_id": sse_id}
-
-
 async def _iter_replay_events(
     redis: object,
     *,
     stream_key: str,
     last_event_id: str,
+    replay_until_id: str | None = None,
     requested_channels: set[str],
     include_user_channel: bool,
     user_channel: str,
 ) -> AsyncIterator[dict]:
-    cursor = last_event_id
-    scanned = 0
+    async for event in _iter_replay_events_service(
+        redis,
+        stream_key=stream_key,
+        last_event_id=last_event_id,
+        replay_until_id=replay_until_id,
+        requested_channels=requested_channels,
+        include_user_channel=include_user_channel,
+        user_channel=user_channel,
+        batch_size=_REPLAY_BATCH_SIZE,
+        max_events=_REPLAY_MAX_EVENTS,
+    ):
+        yield event
 
-    while cursor and scanned < _REPLAY_MAX_EVENTS:
-        replay = await redis.xread(  # type: ignore[attr-defined]
-            {stream_key: cursor},
-            count=_REPLAY_BATCH_SIZE,
+
+def _remember_replayed_event(event: dict, replayed_sse_ids: set[str]) -> bool:
+    if event.get("event") == "replay_truncated":
+        return True
+    replay_id = _normalize_recoverable_sse_id(event.get("id"))
+    if replay_id is None:
+        return True
+    if replay_id in replayed_sse_ids:
+        return False
+    replayed_sse_ids.add(replay_id)
+    return True
+
+
+async def _replay_connection_events(
+    redis: object,
+    *,
+    stream_key: str,
+    last_event_id: str | None,
+    requested_channels: set[str],
+    include_user_channel: bool,
+    user_channel: str,
+    user_id: str,
+    replayed_sse_ids: set[str],
+) -> AsyncIterator[dict]:
+    if last_event_id is None:
+        return
+    try:
+        replay_until_id = await _stream_high_water_id(
+            redis,
+            stream_key=stream_key,
         )
-        entries: list[tuple[object, object]] = []
-        for _stream, batch in replay or []:
-            entries.extend(batch or [])
-
-        if not entries:
-            break
-
-        for msg_id_raw, fields in entries:
-            if isinstance(msg_id_raw, (bytes, bytearray)):
-                msg_id = msg_id_raw.decode("ascii", errors="replace")
-            else:
-                msg_id = str(msg_id_raw)
-            cursor = msg_id
-            scanned += 1
-
-            decoded = _decode_replay_fields(fields)
-            if decoded is None:
-                if scanned >= _REPLAY_MAX_EVENTS:
-                    break
-                continue
-            ev_name, payload, envelope_channel = decoded
-            if not _replay_payload_matches_channels(
-                payload,
-                requested_channels=requested_channels,
-                include_user_channel=include_user_channel,
-                user_channel=user_channel,
-                envelope_channel=envelope_channel,
-            ):
-                if scanned >= _REPLAY_MAX_EVENTS:
-                    break
-                continue
-
-            payload = _payload_with_sse_id(payload, msg_id)
-            yield {
-                "id": msg_id,
-                "event": ev_name,
-                "data": json.dumps(payload, separators=(",", ":")),
-            }
-
-            if scanned >= _REPLAY_MAX_EVENTS:
-                break
-
-        if len(entries) < _REPLAY_BATCH_SIZE:
-            break
-
-    if scanned >= _REPLAY_MAX_EVENTS:
+        if replay_until_id is None:
+            return
+        async for event in _iter_replay_events(
+            redis,
+            stream_key=stream_key,
+            last_event_id=last_event_id,
+            replay_until_id=replay_until_id,
+            requested_channels=requested_channels,
+            include_user_channel=include_user_channel,
+            user_channel=user_channel,
+        ):
+            if _remember_replayed_event(event, replayed_sse_ids):
+                yield event
+    except Exception:
         logger.warning(
-            "SSE replay capped stream=%s last_event_id=%s scanned=%s",
+            "sse replay failed user_id=%s stream_key=%s",
+            user_id,
             stream_key,
-            last_event_id,
-            scanned,
+            exc_info=True,
         )
-        data = {"reason": "too_many_events", "limit": _REPLAY_MAX_EVENTS}
-        if cursor:
-            data["cursor"] = cursor
-        yield {
-            "id": cursor,
-            "event": "replay_truncated",
-            "data": json.dumps(data, separators=(",", ":")),
-        }
 
 
 @router.get("/events")
@@ -684,40 +582,9 @@ async def events(
             slot_released = True
             await _release_sse_connection_slot(redis, connection_slot_key)
 
-        # 1) Replay from per-user stream since last_event_id (if provided).
-        # GEN-P0-7: `last_event_id` 必须是之前 XREAD 返回的原生 stream ID
-        # (`ms-seq`)，这样 XREAD 从它严格之后继续；绝不本地生成假 ID。
-        if last_event_id:
-            try:
-                async for event in _iter_replay_events(
-                    redis,
-                    stream_key=stream_key,
-                    last_event_id=last_event_id,
-                    requested_channels=replay_requested_channels,
-                    include_user_channel=include_user_channel,
-                    user_channel=user_channel,
-                ):
-                    yield event
-            except Exception:
-                # Replay failures shouldn't break the live stream.
-                logger.warning(
-                    "sse replay failed user_id=%s stream_key=%s",
-                    user.id,
-                    stream_key,
-                    exc_info=True,
-                )
-
-        # 2) Subscribe live.
-        # 用 try/finally 包裹 pubsub 全生命周期：
-        # - 客户端断开（is_disconnected）→ break 走 finally 清理；
-        # - 协程被取消（CancelledError，例如 ASGI 关闭、上游超时）→ finally 清理后 reraise，
-        #   绝不 swallow 取消信号，避免后台资源泄漏。
-        #
-        # image-stability-hardening §P2 invariant：客户端断开 **不可** 写 task cancel key。
-        # 浏览器关页面、4G/5G 切换、移动端 App 后台都属于"暂时失联"，但生图任务往往
-        # 已花了几十秒上游算力——若 SSE 断开就杀任务，用户重连后什么都没拿到等于沉没成本。
-        # cancel 必须显式：POST /tasks/generations/{id}/cancel（见 routes/tasks.py）。
-        # worker 端 _is_cancelled 仅读 Redis cancel key，本路由只做 pubsub 订阅，二者解耦。
+        # Subscribe before capturing the replay boundary so every publish after
+        # this point is either replayed up to the boundary or remains buffered
+        # for the live loop.
         pubsub = redis.pubsub()
         bridge_channels = _compaction_bridge_channels(valid)
         subscribed = [*valid, *bridge_channels.keys()]
@@ -737,8 +604,43 @@ async def events(
         last_keepalive = time.monotonic()
         last_upstream = time.monotonic()
         pending_compaction_started: dict[str, tuple[float, dict]] = {}
+        replayed_sse_ids: set[str] = set()
         try:
-            while True:
+            # Replay from the per-user stream only through the snapshot taken
+            # after subscribe. PubSub messages for that interval can therefore
+            # arrive again below; `replayed_sse_ids` suppresses that duplicate.
+            # GEN-P0-7: `last_event_id` 必须是之前 XREAD 返回的原生 stream ID
+            # (`ms-seq`)，这样 XREAD 从它严格之后继续；绝不本地生成假 ID。
+            continue_with_live_events = True
+            async for event in _replay_connection_events(
+                redis,
+                stream_key=stream_key,
+                last_event_id=last_event_id,
+                requested_channels=replay_requested_channels,
+                include_user_channel=include_user_channel,
+                user_channel=user_channel,
+                user_id=user.id,
+                replayed_sse_ids=replayed_sse_ids,
+            ):
+                yield event
+                continue_with_live_events = (
+                    event.get("event") != "replay_truncated"
+                )
+
+            # Keep the PubSub lifecycle inside try/finally:
+            # - client disconnects (is_disconnected) break into cleanup;
+            # - cancellation (for example ASGI shutdown or timeout) cleans up
+            #   and re-raises instead of being swallowed.
+            #
+            # image-stability-hardening §P2 invariant：客户端断开 **不可** 写 task cancel key。
+            # 浏览器关页面、4G/5G 切换、移动端 App 后台都属于"暂时失联"，但生图任务往往
+            # 已花了几十秒上游算力——若 SSE 断开就杀任务，用户重连后什么都没拿到等于沉没成本。
+            # cancel 必须显式：POST /tasks/generations/{id}/cancel（见 routes/tasks.py）。
+            # worker 端 _is_cancelled 仅读 Redis cancel key，本路由只做 pubsub 订阅，二者解耦。
+            # A replay_truncated event advances Last-Event-ID and closes this
+            # connection. The reconnect continues from that cursor before any
+            # live PubSub handoff, so captured backlog cannot be skipped.
+            while continue_with_live_events:
                 if await request.is_disconnected():
                     # 客户端已断开（浏览器关闭 / nginx 切断），主动退出 generator；
                     # finally 会负责 unsubscribe + close。
@@ -798,6 +700,7 @@ async def events(
                                     if channel_text
                                     else None
                                 )
+                                event_id: str | None = None
                                 if isinstance(payload, dict):
                                     event_id = await _stream_id_for_pubsub_event(
                                         redis,
@@ -820,6 +723,11 @@ async def events(
                                                 payload, separators=(",", ":")
                                             ),
                                         }
+                                if (
+                                    event_id is not None
+                                    and event_id in replayed_sse_ids
+                                ):
+                                    continue
                                 if phase == "started":
                                     pending_compaction_started[compaction_conv_id] = (
                                         time.monotonic()
@@ -867,6 +775,8 @@ async def events(
                                 payload=payload,
                                 channel=channel_text,
                             )
+                        if event_id is not None and event_id in replayed_sse_ids:
+                            continue
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
                         if event_id is not None:
                             payload = _payload_with_sse_id(payload, event_id)

@@ -82,7 +82,7 @@ function activeToolLabel(msg: AssistantMessage): CompletionStatus | null {
   return null;
 }
 
-function resolveCompletionStatus(
+export function resolveCompletionStatus(
   msg: AssistantMessage,
   now: number,
 ): CompletionStatus | null {
@@ -120,12 +120,13 @@ function resolveCompletionStatus(
       now,
       msg.stream_started_at ?? msg.created_at,
     );
-    const outputIdleMs = now - (msg.last_delta_at ?? streamStartedAt);
+    const lastDeltaAt = timestampOrNow(streamStartedAt, msg.last_delta_at);
+    const outputIdleMs = now - lastDeltaAt;
 
     if (hasText || hasGeneration) {
       if (outputIdleMs < STALLED_MS) return null;
       return {
-        label: `等待后续输出 ${secondsSince(now, msg.last_delta_at)}s`,
+        label: `等待后续输出 ${secondsSince(now, lastDeltaAt)}s`,
         tone: "warn",
         active: true,
       };
@@ -136,7 +137,7 @@ function resolveCompletionStatus(
       return {
         label:
           outputIdleMs >= STALLED_MS
-            ? `仍在思考 ${secondsSince(now, msg.last_delta_at ?? streamStartedAt)}s`
+            ? `仍在思考 ${secondsSince(now, lastDeltaAt)}s`
             : `正在思考 ${elapsed}s`,
         tone: outputIdleMs >= STALLED_MS ? "warn" : "active",
         active: true,

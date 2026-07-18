@@ -367,6 +367,16 @@ export function volcanoOperationTimedOut(
   return nowMs - startedAtMs >= Math.max(0, timeoutMs);
 }
 
+export function volcanoOperationStartedAt(
+  existingStartedAtMs: number | undefined,
+  fallbackMs = Date.now(),
+): number {
+  if (Number.isFinite(existingStartedAtMs)) {
+    return existingStartedAtMs as number;
+  }
+  return Number.isFinite(fallbackMs) ? fallbackMs : Date.now();
+}
+
 export function volcanoAssetIsSelectable(
   status: VideoAssetStatus | string,
 ): boolean {

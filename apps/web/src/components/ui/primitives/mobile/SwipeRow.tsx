@@ -10,6 +10,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -61,6 +62,7 @@ export function SwipeRow({
   const width = visibleActions.length * buttonWidth;
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const actionsId = useId();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const animationRef = useRef<{ stop: () => void } | null>(null);
 
@@ -151,13 +153,62 @@ export function SwipeRow({
     [visibleActions, width, resetTo, fullSwipeThreshold],
   );
 
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (visibleActions.length === 0) return;
+      if (event.key === "Escape") {
+        if (!actionsOpen) return;
+        event.preventDefault();
+        resetTo(0);
+        containerRef.current?.focus();
+        return;
+      }
+      if (event.target !== event.currentTarget) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        resetTo(-width);
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        if (!actionsOpen) return;
+        event.preventDefault();
+        resetTo(0);
+        return;
+      }
+      if (
+        event.key === "Enter" ||
+        event.key === " " ||
+        event.key === "Spacebar"
+      ) {
+        event.preventDefault();
+        resetTo(actionsOpen ? 0 : -width);
+      }
+    },
+    [actionsOpen, resetTo, visibleActions.length, width],
+  );
+
   return (
     <div
       ref={containerRef}
+      role="group"
+      aria-label={
+        actionsOpen
+          ? "行操作已展开，按 Escape 收起"
+          : "行操作，按左箭头或回车展开"
+      }
+      aria-keyshortcuts={
+        visibleActions.length > 0
+          ? "ArrowLeft ArrowRight Enter Space Escape"
+          : undefined
+      }
+      aria-controls={visibleActions.length > 0 ? actionsId : undefined}
+      tabIndex={visibleActions.length > 0 ? 0 : undefined}
+      onKeyDown={handleKeyDown}
       className={["relative overflow-hidden touch-pan-y", className].join(" ")}
     >
       {/* action 层 */}
       <div
+        id={actionsId}
         aria-hidden={!actionsOpen}
         inert={!actionsOpen ? true : undefined}
         className="absolute inset-y-0 right-0 flex"

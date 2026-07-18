@@ -98,18 +98,19 @@ export function PosterStyleDetailDrawer({
   // samples lightbox 适配
   const lightboxItems = useMemo<LightboxItem[]>(() => {
     if (!item) return [];
-    const samples = item.samples.length > 0
-      ? item.samples
-      : [
-          {
-            index: 0,
-            image_id: item.cover_image_id,
-            image_url: item.cover_image_url,
-            display_url: item.display_url,
-            thumb_url: item.thumb_url,
-          },
-        ];
-    return samples.map((sample) => ({
+    if (item.samples.length === 0) {
+      return [
+        {
+          id: `${item.id}#cover`,
+          url: item.cover_image_url,
+          thumbUrl: item.thumb_url ?? undefined,
+          previewUrl: item.display_url ?? item.cover_image_url,
+          prompt: item.title,
+          filename: item.download_filename ?? undefined,
+        },
+      ];
+    }
+    return item.samples.map((sample) => ({
       id: `${item.id}#${sample.index}`,
       url: sample.image_url,
       thumbUrl: sample.thumb_url ?? undefined,
@@ -155,8 +156,10 @@ export function PosterStyleDetailDrawer({
   };
 
   const openLightbox = () => {
-    if (lightboxItems.length === 0 || !activeSample) return;
-    const initialId = `${itemId}#${activeSample.index}`;
+    if (lightboxItems.length === 0) return;
+    const initialId = activeSample
+      ? `${itemId}#${activeSample.index}`
+      : `${itemId}#cover`;
     useUiStore.getState().openLightboxFromItems(lightboxItems, initialId, null);
   };
 

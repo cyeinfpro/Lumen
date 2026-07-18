@@ -180,7 +180,7 @@ def _int_or_none(value: Any) -> int | None:
             value = value[:-1].strip()
     try:
         parsed = int(float(value)) if isinstance(value, str) else int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed >= 0 else None
 
@@ -542,7 +542,7 @@ def _duration_usage_total_tokens(payload: dict[str, Any]) -> int | None:
         duration = Decimal(str(raw))
     except (InvalidOperation, ValueError):
         return None
-    if duration < 0:
+    if not duration.is_finite() or duration < 0:
         return None
     tokens = (duration * Decimal(VIDEO_BILLING_TOKENS_PER_SECOND)).quantize(
         Decimal("1"), rounding=ROUND_HALF_UP
@@ -568,14 +568,18 @@ def _provider_task_id(payload: dict[str, Any]) -> str | None:
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
-def _image_data_url(data: bytes, mime: str | None) -> str:
-    mime_value = (mime or "image/png").strip() or "image/png"
-    return f"data:{mime_value};base64,{base64.b64encode(data).decode('ascii')}"
-
-
 _OMNI_FALLBACK_IMAGE_MAX_BYTES = 64 * 1024 * 1024
 _SEEDANCE_INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 _VIDEO_FETCH_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_IMAGE_MIME_ALIASES = {
+    "image/gif": "image/gif",
+    "image/jpeg": "image/jpeg",
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+    "image/png": "image/png",
+    "image/webp": "image/webp",
+    "image/x-png": "image/png",
+}
 
 
 def _submit_headers(req: VideoSubmitRequest) -> dict[str, str]:
@@ -599,7 +603,7 @@ def _image_response_mime(response: httpx.Response, fallback: str | None) -> str 
             status_code=422,
             raw={"content_type": raw},
         )
-    return fallback_value if fallback_value.startswith("image/") else None
+    return fallback_value or None
 
 
 def _sniff_image_mime(data: bytes) -> str | None:
@@ -619,15 +623,81 @@ def _validated_image_data_url_mime(
     declared_mime: str | None,
     *,
     field: str,
+    max_bytes: int,
 ) -> str:
+    if not data:
+        raise VideoUpstreamError(
+            f"{field} image bytes are empty",
+            error_code="invalid_input",
+            status_code=422,
+        )
+    if len(data) > max_bytes:
+        raise VideoUpstreamError(
+            f"{field} image is too large",
+            error_code="invalid_input",
+            status_code=413,
+            raw={"actual_bytes": len(data), "max_bytes": max_bytes},
+        )
     sniffed = _sniff_image_mime(data)
-    if sniffed:
-        return sniffed
-    raise VideoUpstreamError(
-        f"{field} fallback image bytes are not a supported image",
-        error_code="invalid_input",
-        status_code=422,
-        raw={"content_type": declared_mime},
+    if not sniffed:
+        raise VideoUpstreamError(
+            f"{field} image bytes are not a supported image",
+            error_code="invalid_input",
+            status_code=422,
+            raw={"content_type": declared_mime},
+        )
+    declared_value = (
+        declared_mime.split(";", 1)[0].strip().lower()
+        if isinstance(declared_mime, str)
+        else ""
+    )
+    if declared_value:
+        normalized_declared = _IMAGE_MIME_ALIASES.get(declared_value)
+        if normalized_declared is None:
+            raise VideoUpstreamError(
+                f"{field} image MIME is not supported",
+                error_code="invalid_input",
+                status_code=422,
+                raw={
+                    "content_type": declared_mime,
+                    "detected_content_type": sniffed,
+                },
+            )
+        if normalized_declared != sniffed:
+            raise VideoUpstreamError(
+                f"{field} image MIME does not match image bytes",
+                error_code="invalid_input",
+                status_code=422,
+                raw={
+                    "content_type": declared_mime,
+                    "detected_content_type": sniffed,
+                },
+            )
+    return sniffed
+
+
+def _image_data_url(
+    data: bytes,
+    mime: str | None,
+    *,
+    field: str = "inline",
+    max_bytes: int = _SEEDANCE_INLINE_IMAGE_MAX_BYTES,
+) -> str:
+    mime_value = _validated_image_data_url_mime(
+        data,
+        mime,
+        field=field,
+        max_bytes=max_bytes,
+    )
+    return f"data:{mime_value};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _seedance_image_data_url(data: bytes, mime: str | None) -> str:
+    return _image_data_url(
+        data,
+        mime,
+        field="Seedance inline/reference",
+        max_bytes=_SEEDANCE_INLINE_IMAGE_MAX_BYTES,
     )
 
 
@@ -865,8 +935,12 @@ async def _fetch_image_url_as_data_url(
             error_code="invalid_input",
             status_code=422,
         )
-    mime = _validated_image_data_url_mime(data, mime, field=field)
-    return _image_data_url(data, mime)
+    return _image_data_url(
+        data,
+        mime,
+        field=field,
+        max_bytes=_OMNI_FALLBACK_IMAGE_MAX_BYTES,
+    )
 
 
 def _safety_identifier(user_id: str) -> str:
@@ -903,7 +977,7 @@ def _seedance_content(
         allow_input_image_url=allow_input_image_url,
         include_reference_order_prompt=include_reference_order_prompt,
         use_official_reference_names=use_official_reference_names,
-        image_data_url=_image_data_url,
+        image_data_url=_seedance_image_data_url,
         inline_image_max_bytes=_SEEDANCE_INLINE_IMAGE_MAX_BYTES,
         error_factory=VideoUpstreamError,
     )
@@ -1403,7 +1477,12 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
                 error_code="invalid_input",
                 status_code=422,
             )
-        return _image_data_url(item.data, item.mime)
+        return _image_data_url(
+            item.data,
+            item.mime,
+            field=field,
+            max_bytes=_OMNI_FALLBACK_IMAGE_MAX_BYTES,
+        )
 
     async def _media_data_url(self, item: VideoReferenceMedia, *, field: str) -> str:
         if item.kind != "image":
@@ -1413,7 +1492,12 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
                 status_code=422,
             )
         if item.data:
-            return _image_data_url(item.data, item.mime)
+            return _image_data_url(
+                item.data,
+                item.mime,
+                field=field,
+                max_bytes=_OMNI_FALLBACK_IMAGE_MAX_BYTES,
+            )
         if item.url:
             return await self._fetch_image_url_data_url(
                 item.url,
@@ -1475,7 +1559,14 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
                     error_code="invalid_input",
                     status_code=422,
                 )
-            return [_image_data_url(req.input_image_bytes, req.input_image_mime)]
+            return [
+                _image_data_url(
+                    req.input_image_bytes,
+                    req.input_image_mime,
+                    field="Omni Flash input",
+                    max_bytes=_OMNI_FALLBACK_IMAGE_MAX_BYTES,
+                )
+            ]
         if req.action == "reference":
             image_refs = self._reference_image_refs(req)
             return [
@@ -1493,7 +1584,14 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             return []
         if req.action == "i2v":
             if req.input_image_bytes:
-                return [_image_data_url(req.input_image_bytes, req.input_image_mime)]
+                return [
+                    _image_data_url(
+                        req.input_image_bytes,
+                        req.input_image_mime,
+                        field="Omni Flash input",
+                        max_bytes=_OMNI_FALLBACK_IMAGE_MAX_BYTES,
+                    )
+                ]
             if req.input_image_url:
                 return [
                     await self._fetch_image_url_data_url(
@@ -1802,13 +1900,16 @@ class DashScopeHappyHorseAdapter:
             _nested_get(raw, ("output", "progress"), ("progress",), ("percent",))
         )
         usage_tokens = _duration_usage_total_tokens(raw)
+        upstream_billable = _billable(raw)
         return PollResult(
             status=status,
             progress=progress,
             video_url=_video_url(raw),
             failure_class=_failure_class(raw),
             usage_total_tokens=usage_tokens,
-            upstream_billable=True if status == "succeeded" else _billable(raw),
+            upstream_billable=upstream_billable
+            if upstream_billable is not None
+            else (True if status == "succeeded" else None),
             raw=raw,
         )
 

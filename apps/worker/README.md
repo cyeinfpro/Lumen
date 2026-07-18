@@ -39,4 +39,5 @@ Image API 和 responses image tool。Fast 只把 responses 生图主模型切到
 以接近 PNG 的保真度；透明背景请求会强制走 PNG 并保留 alpha。
 
 流式期间只向前端发布轻量进度事件（fallback start / partial index / finalizing），不会把
-partial/final base64 写入 Redis 或 SSE。详见 `responses-image-integration-guide.md`。
+partial/final base64 写入 Redis 或 SSE。详见
+[responses-image-integration-guide.md](../../docs/responses-image-integration-guide.md)。

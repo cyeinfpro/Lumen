@@ -244,6 +244,32 @@ def _video_option_supports_reference_media(
     return all(count <= int(limits.get(kind, 0) or 0) for kind, count in counts.items())
 
 
+def _video_option_supports_duration(
+    option: Any,
+    *,
+    action: str,
+    resolution: str,
+    duration_s: int,
+    fallback_durations: list[int],
+) -> bool:
+    by_action_resolution = getattr(option, "durations_by_action_resolution", None)
+    if isinstance(by_action_resolution, dict):
+        action_resolutions = by_action_resolution.get(action)
+        if isinstance(action_resolutions, dict):
+            values = action_resolutions.get(resolution)
+            if isinstance(values, list) and values:
+                return duration_s in values
+    by_action = getattr(option, "durations_by_action", None)
+    if isinstance(by_action, dict):
+        values = by_action.get(action)
+        if isinstance(values, list) and values:
+            return duration_s in values
+    values = getattr(option, "durations_s", None)
+    if isinstance(values, list) and values:
+        return duration_s in values
+    return duration_s in fallback_durations
+
+
 async def _video_body(
     db: AsyncSession,
     *,
@@ -254,6 +280,15 @@ async def _video_body(
     config = resolved.node.get("config") or {}
     action = str(config.get("action") or config.get("mode") or "")
     resolution = str(config.get("resolution") or "720p")
+    try:
+        duration_s = int(config.get("duration_s") or config.get("duration") or 5)
+    except (TypeError, ValueError) as exc:
+        raise canvas_http(
+            "canvas_video_config_invalid",
+            "Canvas video node configuration is invalid",
+            422,
+            reason=str(exc),
+        ) from exc
     model = str(config.get("model") or "")
     if not model:
         options = await video_options(user, db)
@@ -263,6 +298,13 @@ async def _video_body(
             for option in options.models
             if action in option.actions
             and resolution in option.resolutions
+            and _video_option_supports_duration(
+                option,
+                action=action,
+                resolution=resolution,
+                duration_s=duration_s,
+                fallback_durations=options.durations_s,
+            )
             and _video_option_supports_reference_media(
                 option,
                 action=action,
@@ -272,10 +314,11 @@ async def _video_body(
         if not compatible:
             raise canvas_http(
                 "canvas_video_model_unavailable",
-                "no video model supports the selected mode, resolution, and reference media",
+                "no video model supports the selected mode, resolution, duration, and reference media",
                 422,
                 action=action,
                 resolution=resolution,
+                duration_s=duration_s,
                 reference_media=reference_counts,
             )
         model = compatible[0].model
@@ -304,9 +347,7 @@ async def _video_body(
                     else None
                 ),
                 "reference_media": reference_media,
-                "duration_s": int(
-                    config.get("duration_s") or config.get("duration") or 5
-                ),
+                "duration_s": duration_s,
                 "resolution": resolution,
                 "aspect_ratio": config.get("aspect_ratio") or "16:9",
                 "generate_audio": bool(config.get("generate_audio", False)),

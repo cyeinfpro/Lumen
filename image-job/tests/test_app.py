@@ -115,10 +115,11 @@ class _FakeSseResponse:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        _ = chunk_size
         for line in self._lines:
             await asyncio.sleep(0)
-            yield line
+            yield line.encode("utf-8") + b"\n"
 
 
 def test_responses_stream_partial_only_is_retryable_network_failure(
@@ -175,6 +176,59 @@ def test_responses_stream_final_image_succeeds() -> None:
 
     assert len(images) == 1
     assert images[0].data.startswith(b"\x89PNG")
+
+
+def test_responses_stream_flushes_unterminated_final_image_at_eof() -> None:
+    app = load_app_module()
+    final_b64 = _tiny_png_b64()
+    payload = (
+        'data: {"type":"response.output_item.done","item":'
+        '{"type":"image_generation_call","result":"'
+        + final_b64
+        + '"}}'
+    ).encode("utf-8")
+
+    class UnterminatedResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            _ = chunk_size
+            yield payload
+
+    images = asyncio.run(
+        app.extract_responses_stream_images(
+            UnterminatedResponse(),
+            SimpleNamespace(),
+            job_id="job_unterminated_final",
+        )
+    )
+
+    assert len(images) == 1
+    assert images[0].data.startswith(b"\x89PNG")
+
+
+def test_responses_stream_flushes_unterminated_done_marker_at_eof() -> None:
+    app = load_app_module()
+
+    class UnterminatedDoneResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            _ = chunk_size
+            yield b"data: [DONE]"
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.extract_responses_stream_images(
+                UnterminatedDoneResponse(),
+                SimpleNamespace(),
+                job_id="job_unterminated_done",
+            )
+        )
+
+    assert exc.value.upstream_body["saw_done"] is True
 
 
 def test_call_upstream_retries_responses_stream_interruption(monkeypatch) -> None:
@@ -242,7 +296,8 @@ def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def aiter_bytes(self):
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            _ = chunk_size
             yield response_content
 
     class _MultipartClient:

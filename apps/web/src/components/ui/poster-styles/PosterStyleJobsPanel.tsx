@@ -24,7 +24,7 @@ import {
   type PosterStyleJobOut,
   type PosterStyleJobStatus,
 } from "@/lib/apiClient";
-import { usePosterStyleJobsQuery } from "@/lib/queries";
+import type { PosterStyleJobsQueryResult } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "../projects/utils";
 
@@ -37,12 +37,16 @@ const STATUS_LABEL: Record<PosterStyleJobStatus, string> = {
 };
 
 export interface PosterStyleJobsPanelProps {
+  /** 页面级 jobs observer；保持切换到 browse 时继续轮询 */
+  jobs: PosterStyleJobsQueryResult;
   /** 点击"查看入库条目"时由父组件处理（通常是切到 browse tab + 高亮） */
   onOpenItem?: (itemId: string) => void;
 }
 
-export function PosterStyleJobsPanel({ onOpenItem }: PosterStyleJobsPanelProps) {
-  const jobs = usePosterStyleJobsQuery({ limit: 50 });
+export function PosterStyleJobsPanel({
+  jobs,
+  onOpenItem,
+}: PosterStyleJobsPanelProps) {
   const items = useMemo(() => jobs.data?.items ?? [], [jobs.data?.items]);
 
   const { running, finished } = useMemo(() => {

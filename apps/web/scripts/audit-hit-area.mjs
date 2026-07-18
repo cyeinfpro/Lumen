@@ -6,74 +6,139 @@
  *
  * 启发式判定：
  *   1. <button> / <a> / role="button" 元素
- *   2. 整文件未导入 <Pressable> / <MobileIconButton>
- *   3. className 里有 h-{小于 11} 的 Tailwind 且无 min-h-11+
+ *   2. 元素本身不是 <Pressable> / <MobileIconButton>
+ *   3. 静态或动态 className 分支里有小于 44px 的 h-*，且无无条件 min-h-11+
  *
  * 放行：在违规行或上一行加 `// @hit-area-ok: <reason>`
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { auditHitAreaSource } from "./jsx-quality-analysis.mjs";
+
 const __filename = fileURLToPath(import.meta.url);
-const ROOT = join(dirname(__filename), "..", "src");
+const APP_ROOT = join(dirname(__filename), "..");
+const ROOT = join(APP_ROOT, "src");
+const BASELINE_PATH = join(
+  APP_ROOT,
+  "scripts",
+  "hit-area-baseline.json",
+);
 const SKIP_DIRS = new Set(["node_modules", ".next", "dist"]);
 const TSX_EXT = /\.tsx?$/;
-
-const TAILWIND_H = { "h-8": 32, "h-9": 36, "h-10": 40 };
-const OK_NAMES = ["Pressable", "MobileIconButton"];
+const updateBaseline = process.argv.includes("--update-baseline");
 
 const violations = [];
 
+function normalizeSnippet(value) {
+  return value.trim().replace(/\s+/g, " ").slice(0, 320);
+}
+
+function stableHash(value) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
 function walk(dir) {
-  for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue;
-    const full = join(dir, name);
-    const st = statSync(full);
-    if (st.isDirectory()) walk(full);
-    else if (TSX_EXT.test(name)) scan(full);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (SKIP_DIRS.has(entry.name)) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full);
+    else if (TSX_EXT.test(entry.name)) scan(full);
   }
 }
 
 function scan(path) {
   const src = readFileSync(path, "utf8");
-  const importsOK = OK_NAMES.some((n) =>
-    new RegExp(`import[^;]*\\b${n}\\b`).test(src),
-  );
-  if (importsOK) return;
-
-  const openTagRe = /<(button|a)\b[^>]*>/g;
-  let m;
-  while ((m = openTagRe.exec(src)) !== null) {
-    const tag = m[0];
-    const line = src.slice(0, m.index).split("\n").length;
-
-    const beforeSrc = src.slice(0, m.index).split("\n").slice(-2).join("\n");
-    if (/@hit-area-ok/.test(beforeSrc)) continue;
-
-    const cn = (tag.match(/className=["'`]([^"'`]+)["'`]/)?.[1]) ?? "";
-    let tooSmall = false;
-    for (const tok of Object.keys(TAILWIND_H)) {
-      if (new RegExp(`(^|\\s)${tok}(\\s|$)`).test(cn) && !/min-h-1[1-9]/.test(cn)) {
-        tooSmall = true;
-        break;
-      }
-    }
-    if (tooSmall) {
-      violations.push(`${path}:${line} → ${tag.slice(0, 120)}`);
-    }
+  for (const finding of auditHitAreaSource(path, src)) {
+    const sourcePath = relative(APP_ROOT, path).replaceAll("\\", "/");
+    const snippet = normalizeSnippet(finding.snippet);
+    violations.push({
+      ...finding,
+      path: sourcePath,
+      snippet,
+      key: `${sourcePath}|${stableHash(`${finding.tag}|${snippet}`)}`,
+    });
   }
 }
 
 walk(ROOT);
 
-if (violations.length === 0) {
-  console.log("✓ 命中区审计通过：所有 <button> / <a> 要么 ≥44px 要么走 Pressable/MobileIconButton");
-  process.exit(0);
-} else {
-  console.log(`✗ 发现 ${violations.length} 条可能 <44px 的可点击元素：\n`);
-  for (const v of violations) console.log("  " + v);
-  console.log("\n修复：改走 <Pressable> / <MobileIconButton>，或改为 h-11+，或加 // @hit-area-ok 放行。");
-  process.exit(1);
+const grouped = new Map();
+for (const item of violations) {
+  const current = grouped.get(item.key);
+  if (current) {
+    current.count += 1;
+    current.lines.push(item.line);
+  } else {
+    grouped.set(item.key, { ...item, count: 1, lines: [item.line] });
+  }
 }
+const current = [...grouped.values()].sort((left, right) =>
+  left.path.localeCompare(right.path) ||
+  left.line - right.line ||
+  left.key.localeCompare(right.key),
+);
+
+if (updateBaseline) {
+  const payload = {
+    version: 1,
+    note:
+      "Known hit-area debt exposed when the scanner stopped treating a file-level Pressable/MobileIconButton import as a blanket exemption.",
+    findings: current.map(
+      ({ key, path, tag, snippet, count }) => ({
+        key,
+        path,
+        tag,
+        snippet,
+        count,
+      }),
+    ),
+  };
+  writeFileSync(BASELINE_PATH, `${JSON.stringify(payload, null, 2)}\n`);
+  console.log(
+    `Updated ${relative(process.cwd(), BASELINE_PATH)} with ${current.length} known fingerprints.`,
+  );
+  process.exit(0);
+}
+
+const baseline = existsSync(BASELINE_PATH)
+  ? JSON.parse(readFileSync(BASELINE_PATH, "utf8"))
+  : { version: 1, findings: [] };
+if (baseline.version !== 1 || !Array.isArray(baseline.findings)) {
+  throw new Error("Unsupported hit-area baseline");
+}
+const allowed = new Map(
+  baseline.findings.map((item) => [item.key, item.count ?? 1]),
+);
+const newItems = current.filter(
+  (item) => item.count > (allowed.get(item.key) ?? 0),
+);
+
+if (newItems.length === 0) {
+  console.log(
+    `✓ 命中区审计通过：无新增违规（${current.length} 个历史指纹）。`,
+  );
+  process.exit(0);
+}
+
+console.error(
+  `✗ 发现 ${newItems.length} 个新增的可能 <44px 点击区域指纹：\n`,
+);
+for (const item of newItems) {
+  const extra = item.count - (allowed.get(item.key) ?? 0);
+  console.error(
+    `  ${item.path}:${item.lines[0]} (+${extra}) → ${item.snippet.slice(0, 180)}`,
+  );
+}
+console.error(
+  "\n修复：改走 <Pressable> / <MobileIconButton>，或加 min-h-11+，或加 // @hit-area-ok 放行。",
+);
+process.exit(1);

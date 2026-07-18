@@ -6,8 +6,6 @@ import {
   CircleAlert,
 } from "lucide-react";
 import {
-  useRef,
-  useState,
   type ComponentType,
 } from "react";
 
@@ -15,14 +13,14 @@ import {
   billingModelForAction,
   durationOptionsForModel,
   estimateHoldMicro,
-  firstModelForAction,
   preferredDuration,
   preferredResolution,
   resolutionOptionsForModel,
   videoModelsForAction,
   videoUnavailableReasonMessage,
 } from "@/app/video/video-options-model";
-import { Button, Input, Textarea } from "@/components/ui/primitives";
+import { Button } from "@/components/ui/primitives";
+import { CANVAS_NOTE_MAX_CHARS } from "@/lib/canvas/constants";
 import {
   canvasVideoReferenceCounts,
   resolveCanvasTextOutput,
@@ -57,15 +55,15 @@ import {
   uniqueStrings,
   videoModeLabel,
 } from "./CanvasNodeConfigControls";
-
-const SELECT_CLASS =
-  "h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm text-[var(--fg-0)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-soft)] max-sm:min-h-11 max-sm:text-base";
-
-type SelectOption = {
-  value: string;
-  label: string;
-  disabled?: boolean;
-};
+import {
+  CommitInput,
+  CommitTextarea,
+  ConfigSection,
+  RangeField,
+  SelectField,
+  ToggleField,
+} from "./CanvasNodeConfigFields";
+import type { SelectOption } from "./CanvasNodeConfigFields";
 
 export interface CanvasNodeConfigEditorProps {
   node: CanvasNodeDefinition;
@@ -644,7 +642,7 @@ function imageFormatPatch(value: string): Record<string, unknown> {
   if (value === "png") {
     return { output_format: value, output_compression: null };
   }
-  return { output_format: value };
+  return { output_format: value, background: "opaque" };
 }
 
 function imageBackgroundPatch(value: string): Record<string, unknown> {
@@ -673,6 +671,7 @@ interface VideoEditorModel {
   action: VideoAction;
   fixedMode: ReturnType<typeof canvasFixedVideoMode>;
   compatibleModels: VideoOptionsOut["models"];
+  capabilityModels: VideoOptionsOut["models"];
   configuredModel: string;
   effectiveModel: string;
   currentResolution: string;
@@ -703,26 +702,27 @@ function buildVideoEditorModel(
     referenceCounts,
   );
   const configuredModel = String(node.config.model ?? "");
+  const configuredModelOption = compatibleModels.find(
+    (item) => item.model === configuredModel,
+  );
   const configuredModelAvailable =
-    !configuredModel ||
-    compatibleModels.some((item) => item.model === configuredModel);
-  const effectiveModel =
-    configuredModel && configuredModelAvailable
-      ? configuredModel
-      : firstModelForAction(videoOptions, action, referenceCounts);
+    !configuredModel || Boolean(configuredModelOption);
+  const capabilityModels = configuredModelOption
+    ? [configuredModelOption]
+    : compatibleModels;
   const currentResolution = String(node.config.resolution ?? "720p");
-  const availableResolutions = resolutionOptionsForModel(
+  const availableResolutions = videoResolutionOptionsForModels(
     videoOptions,
-    effectiveModel,
+    capabilityModels,
   );
   const effectiveResolution = currentOrPreferredResolution(
     currentResolution,
     availableResolutions,
   );
   const currentDuration = Number(node.config.duration_s ?? 5);
-  const availableDurations = durationOptionsForModel(
+  const availableDurations = videoDurationOptionsForModels(
     videoOptions,
-    effectiveModel,
+    capabilityModels,
     action,
     effectiveResolution,
   );
@@ -730,6 +730,14 @@ function buildVideoEditorModel(
     currentDuration,
     availableDurations,
   );
+  const effectiveModel =
+    selectVideoModelForParameters(
+      capabilityModels,
+      videoOptions,
+      action,
+      effectiveResolution,
+      effectiveDuration,
+    )?.model ?? "";
   const aspectOptions = videoAspectOptions(videoOptions, node);
   const capabilityIssue = videoCapabilityIssue({
     optionsLoaded: Boolean(videoOptions),
@@ -763,6 +771,7 @@ function buildVideoEditorModel(
     action,
     fixedMode,
     compatibleModels,
+    capabilityModels,
     configuredModel,
     effectiveModel,
     currentResolution,
@@ -963,6 +972,65 @@ function videoAspectValues(options: VideoOptionsOut | undefined): string[] {
     : VIDEO_ASPECT_OPTIONS.map((item) => item.value);
 }
 
+function videoResolutionOptionsForModels(
+  options: VideoOptionsOut | undefined,
+  models: VideoOptionsOut["models"],
+): string[] {
+  if (models.length === 0) return resolutionOptionsForModel(options, "");
+  return uniqueStrings(
+    models.flatMap((item) =>
+      resolutionOptionsForModel(options, item.model),
+    ),
+  );
+}
+
+function videoDurationOptionsForModels(
+  options: VideoOptionsOut | undefined,
+  models: VideoOptionsOut["models"],
+  action: VideoAction,
+  resolution: string,
+): number[] {
+  const candidates = models.length
+    ? models.filter((item) =>
+        resolutionOptionsForModel(options, item.model).includes(resolution),
+      )
+    : [];
+  const fallbackCandidates =
+    candidates.length > 0
+      ? candidates
+      : models.length > 0
+        ? models
+        : [{ model: "" } as VideoOptionsOut["models"][number]];
+  return uniqueNumbers(
+    fallbackCandidates.flatMap((item) =>
+      durationOptionsForModel(options, item.model, action, resolution),
+    ),
+  );
+}
+
+function selectVideoModelForParameters(
+  models: VideoOptionsOut["models"],
+  options: VideoOptionsOut | undefined,
+  action: VideoAction,
+  resolution: string,
+  duration: number,
+): VideoOptionsOut["models"][number] | undefined {
+  return models.find(
+    (item) =>
+      resolutionOptionsForModel(options, item.model).includes(resolution) &&
+      durationOptionsForModel(
+        options,
+        item.model,
+        action,
+        resolution,
+      ).includes(duration),
+  );
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return Array.from(new Set(values.filter(Number.isFinite)));
+}
+
 function videoCapabilityIssue(input: {
   optionsLoaded: boolean;
   optionsEnabled: boolean;
@@ -1069,15 +1137,17 @@ function videoModelPatch(
   options: VideoOptionsOut | undefined,
   model: VideoEditorModel,
 ): Record<string, unknown> {
-  const nextModel = value || model.compatibleModels[0]?.model || "";
-  const resolutions = resolutionOptionsForModel(options, nextModel);
+  const nextModels = value
+    ? model.compatibleModels.filter((item) => item.model === value)
+    : model.compatibleModels;
+  const resolutions = videoResolutionOptionsForModels(options, nextModels);
   const resolution = currentOrPreferredResolution(
     model.currentResolution,
     resolutions,
   );
-  const durations = durationOptionsForModel(
+  const durations = videoDurationOptionsForModels(
     options,
-    nextModel,
+    nextModels,
     model.action,
     resolution,
   );
@@ -1093,9 +1163,9 @@ function videoResolutionPatch(
   options: VideoOptionsOut | undefined,
   model: VideoEditorModel,
 ): Record<string, unknown> {
-  const durations = durationOptionsForModel(
+  const durations = videoDurationOptionsForModels(
     options,
-    model.effectiveModel,
+    model.capabilityModels,
     model.action,
     resolution,
   );
@@ -1114,7 +1184,7 @@ function NoteConfig({ node, patch }: CanvasNodeConfigEditorProps) {
       <CommitTextarea
         label="内容"
         value={String(node.config.text ?? "")}
-        maxLength={20_000}
+        maxLength={CANVAS_NOTE_MAX_CHARS}
         rows={8}
         placeholder="记录创作说明、审核意见或交付要求"
         onCommit={(text) => patch({ text })}
@@ -1251,229 +1321,3 @@ const CONFIG_EDITORS: Record<
   frame: FrameConfig,
   delivery: DeliveryConfig,
 };
-
-function ConfigSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="grid gap-3 border-b border-[var(--border)] p-4 last:border-0">
-      <h3 className="type-overline text-[var(--fg-2)]">{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly SelectOption[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="grid gap-1">
-      <span className="type-caption font-medium text-[var(--fg-1)]">
-        {label}
-      </span>
-      <select
-        className={SELECT_CLASS}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      >
-        {options.map((option) => (
-          <option
-            key={`${option.value}:${option.label}`}
-            value={option.value}
-            disabled={option.disabled}
-          >
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function RangeField({
-  label,
-  value,
-  min,
-  max,
-  step = 1,
-  suffix,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  suffix?: string;
-  onChange: (value: number) => void;
-}) {
-  const boundedValue = Math.min(Math.max(value, min), Math.max(min, max));
-  return (
-    <RangeFieldControl
-      key={`${boundedValue}:${min}:${max}:${step}`}
-      label={label}
-      value={boundedValue}
-      min={min}
-      max={max}
-      step={step}
-      suffix={suffix}
-      onChange={onChange}
-    />
-  );
-}
-
-function RangeFieldControl({
-  label,
-  value,
-  min,
-  max,
-  step,
-  suffix,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  suffix?: string;
-  onChange: (value: number) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  const committedRef = useRef(value);
-  const commit = () => {
-    if (draft === committedRef.current) return;
-    committedRef.current = draft;
-    onChange(draft);
-  };
-  return (
-    <label className="grid gap-2">
-      <span className="flex items-center justify-between gap-3 type-caption font-medium text-[var(--fg-1)]">
-        {label}
-        <span className="font-mono text-[var(--fg-0)]">
-          {draft}
-          {suffix}
-        </span>
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={Math.max(min, max)}
-        step={step}
-        value={draft}
-        onChange={(event) => setDraft(Number(event.currentTarget.value))}
-        onPointerUp={commit}
-        onKeyUp={commit}
-        onBlur={commit}
-        className="h-11 w-full cursor-pointer accent-[var(--accent)]"
-      />
-    </label>
-  );
-}
-
-function ToggleField({
-  label,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3">
-      <span className="type-body-sm text-[var(--fg-1)]">{label}</span>
-      <span className="relative inline-flex h-6 w-10 shrink-0">
-        <input
-          type="checkbox"
-          checked={checked}
-          disabled={disabled}
-          onChange={(event) => onChange(event.currentTarget.checked)}
-          className="peer sr-only"
-        />
-        <span className="absolute inset-0 rounded-full border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors peer-checked:border-[var(--accent-border)] peer-checked:bg-[var(--accent)] peer-disabled:cursor-not-allowed peer-disabled:opacity-50" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--fg-0)] shadow-[var(--shadow-1)] transition-transform peer-checked:translate-x-4" />
-      </span>
-    </label>
-  );
-}
-
-function CommitInput({
-  value,
-  onCommit,
-  ...props
-}: Omit<React.ComponentProps<typeof Input>, "value" | "defaultValue" | "onChange"> & {
-  value: string;
-  onCommit: (value: string) => void;
-}) {
-  return (
-    <Input
-      key={value}
-      {...props}
-      defaultValue={value}
-      onBlur={(event) => {
-        const nextValue = event.currentTarget.value.trim();
-        if (nextValue !== value) onCommit(nextValue);
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          event.currentTarget.blur();
-        }
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.currentTarget.value = value;
-          event.currentTarget.blur();
-        }
-      }}
-    />
-  );
-}
-
-function CommitTextarea({
-  value,
-  onCommit,
-  ...props
-}: Omit<
-  React.ComponentProps<typeof Textarea>,
-  "value" | "defaultValue" | "onChange"
-> & {
-  value: string;
-  onCommit: (value: string) => void;
-}) {
-  return (
-    <Textarea
-      key={value}
-      {...props}
-      defaultValue={value}
-      onBlur={(event) => {
-        const nextValue = event.currentTarget.value;
-        if (nextValue !== value) onCommit(nextValue);
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.currentTarget.value = value;
-          event.currentTarget.blur();
-        }
-      }}
-    />
-  );
-}

@@ -31,7 +31,11 @@ from app.background_removal.local_chroma import (
 )
 from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
 from app.tasks import generation
-from app.tasks.generation_parts import lifecycle, workflow_hooks
+from app.tasks.generation_parts import (
+    lifecycle,
+    queue as generation_queue,
+    workflow_hooks,
+)
 
 
 class FakeStorage:
@@ -95,8 +99,15 @@ class FakeRedis:
         self.zsets: dict[str, dict[str, float]] = {}
         self.enqueued: list[tuple[str, tuple, dict]] = []
 
-    async def set(self, key: str, value, nx: bool = False, ex: int | None = None):
-        _ = ex
+    async def set(
+        self,
+        key: str,
+        value,
+        nx: bool = False,
+        ex: int | None = None,
+        px: int | None = None,
+    ):
+        _ = ex, px
         if nx and key in self.store:
             return False
         self.store[key] = str(value)
@@ -150,6 +161,11 @@ class FakeRedis:
         _ = key, ttl
         return True
 
+    async def incrby(self, key: str, amount: int) -> int:
+        value = int(self.store.get(key, "0")) + int(amount)
+        self.store[key] = str(value)
+        return value
+
     async def eval(self, *args: Any) -> int:
         script = args[0]
         if script == generation._RELEASE_LEASE_LUA:
@@ -159,20 +175,80 @@ class FakeRedis:
                 await self.delete(key)
                 return 1
             return 0
+        if script == generation_queue.RENEW_IMAGE_QUEUE_LOCK_LUA:
+            key = args[2]
+            token = args[3]
+            return int(self.store.get(key) == token)
+        if script == generation_queue.CLEANUP_IMAGE_QUEUE_ACTIVE_LUA:
+            active_key, lock_key, token, now = args[2:6]
+            if self.store.get(lock_key) != token:
+                return -1
+            return await self.zremrangebyscore(active_key, "-inf", now)
+        if script == generation_queue.CLEANUP_IMAGE_QUEUE_PROVIDER_LUA:
+            provider_key, lock_key, token, now = args[2:6]
+            if self.store.get(lock_key) != token:
+                return -1
+            await self.zremrangebyscore(provider_key, "-inf", now)
+            return await self.zcard(provider_key)
+        if script == generation_queue.ADVANCE_IMAGE_QUEUE_CURSOR_LUA:
+            cursor_key, lock_key, token, steps = args[2:6]
+            if self.store.get(lock_key) != token:
+                return -1
+            return await self.incrby(cursor_key, int(steps))
+        if script == generation_queue.DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA:
+            key, lock_key, token = args[2:5]
+            if self.store.get(lock_key) != token:
+                return -1
+            return await self.delete(key)
+        if script == generation_queue.SET_IMAGE_QUEUE_VALUE_IF_OWNER_LUA:
+            key, lock_key, token, value, _ttl_ms = args[2:8]
+            if self.store.get(lock_key) != token:
+                return -1
+            await self.set(key, value)
+            return "OK"
+        if script == generation_queue.CLEAR_STALE_IMAGE_QUEUE_RESERVATION_LUA:
+            (
+                provider_key,
+                global_key,
+                task_provider_key,
+                lock_key,
+                token,
+                expected_provider,
+                task_id,
+                active_member,
+            ) = args[2:10]
+            if self.store.get(lock_key) != token:
+                return -1
+            if self.store.get(task_provider_key) != expected_provider:
+                return 0
+            await self.zrem(provider_key, task_id)
+            await self.zrem(global_key, active_member)
+            return await self.delete(task_provider_key)
         if script != generation._RESERVE_IMAGE_SLOT_LUA:
             raise NotImplementedError(script)
-        provider_zset = args[2]
-        global_zset = args[3]
-        task_provider_key = args[4]
-        not_before_key = args[5]
-        now = float(args[6])
-        expiry = float(args[7])
-        task_id = str(args[8])
-        provider_name = str(args[9])
-        provider_cap = int(args[10])
-        global_cap = int(args[11])
-        task_provider_ttl = int(args[12])
-        provider_zset_ttl = int(args[13])
+        (
+            provider_zset,
+            global_zset,
+            task_provider_key,
+            not_before_key,
+            lock_key,
+            cursor_key,
+            reservation_key,
+        ) = args[2:9]
+        now = float(args[9])
+        expiry = float(args[10])
+        task_id = str(args[11])
+        provider_name = str(args[12])
+        provider_cap = int(args[13])
+        global_cap = int(args[14])
+        task_provider_ttl = int(args[15])
+        provider_zset_ttl = int(args[16])
+        lock_token = str(args[17])
+        cursor_steps = int(args[18])
+        reservation_ttl = int(args[19])
+
+        if self.store.get(lock_key) != lock_token:
+            return -1
 
         await self.zremrangebyscore(provider_zset, "-inf", now)
         await self.zremrangebyscore(global_zset, "-inf", now)
@@ -183,8 +259,11 @@ class FakeRedis:
         await self.zadd(provider_zset, {task_id: expiry})
         await self.expire(provider_zset, provider_zset_ttl)
         await self.set(task_provider_key, provider_name, ex=task_provider_ttl)
+        await self.set(reservation_key, lock_token, ex=reservation_ttl)
         await self.zadd(global_zset, {task_id: expiry})
         await self.delete(not_before_key)
+        if cursor_steps > 0:
+            await self.incrby(cursor_key, cursor_steps)
         return 1
 
     async def enqueue_job(self, name: str, *args, **kwargs):
@@ -283,9 +362,14 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
     assert upstream_result < postprocess < storage_guard < storage_write
     assert storage_write < persistence_guard < attempt_fence < billing_guard
     assert billing_guard < settle < commit_guard < commit
-    assert "_await_with_lease_guard(" in source[
-        source.rindex("created_storage_keys =", 0, storage_write) : persistence_guard
-    ]
+    assert (
+        "_await_with_lease_guard("
+        in source[
+            source.rindex(
+                "created_storage_keys =", 0, storage_write
+            ) : persistence_guard
+        ]
+    )
 
 
 def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
@@ -861,47 +945,70 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
 
 
 @pytest.mark.asyncio
-async def test_image_queue_non_atomic_reserve_fallback_logs_warning(
+async def test_image_queue_reservation_survives_lock_release_failure(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from app import provider_pool
+    class ReleaseBrokenRedis(FakeRedis):
+        async def incrby(self, key: str, amount: int) -> int:
+            value = int(self.store.get(key, "0")) + int(amount)
+            self.store[key] = str(value)
+            return value
 
-    class NonAtomicRedis(FakeRedis):
-        eval = None
+        async def eval(self, *args: Any) -> int:
+            if args[0] == generation._RELEASE_LEASE_LUA:
+                raise RuntimeError("owner-CAS release unavailable")
+            return await super().eval(*args)
 
-    redis = NonAtomicRedis()
+    redis = ReleaseBrokenRedis()
+    provider = SimpleNamespace(
+        name="acc1",
+        base_url="https://upstream.test",
+        api_key="k1",
+        image_concurrency=1,
+    )
 
     async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
         return ["gen-1"]
-
-    class _Pool:
-        async def select(self, **kwargs):
-            assert kwargs["route"] == "image"
-            assert kwargs["task_id"] == "gen-1"
-            return [
-                SimpleNamespace(
-                    name="acc1",
-                    base_url="https://upstream.test",
-                    api_key="k1",
-                    image_concurrency=1,
-                )
-            ]
-
-    async def fake_get_pool():
-        return _Pool()
 
     monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
     monkeypatch.setattr(
         generation, "_ready_queued_generation_ids", fake_ready_generation_ids
     )
-    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
 
-    with caplog.at_level("WARNING", logger=generation.logger.name):
-        reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
+    with caplog.at_level("ERROR", logger=generation.logger.name):
+        reserved = await generation._reserve_image_queue_slot(
+            redis,
+            "gen-1",
+            provider_override=provider,
+        )
 
-    assert reserved is not None
-    assert "non-atomic fallback path" in caplog.text
+    assert reserved is provider
+    assert redis.store[generation._image_task_provider_key("gen-1")] == "acc1"
+    assert "gen-1" in redis.zsets[generation._image_provider_active_key("acc1")]
+    assert "gen-1" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert redis.store[generation._IMAGE_QUEUE_LANE_CURSOR_KEY] == "1"
+    assert "preserving critical-section result" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_image_queue_reserve_rejects_non_atomic_lock_release(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class NonAtomicRedis(FakeRedis):
+        eval = None
+
+    redis = NonAtomicRedis()
+
+    with caplog.at_level("ERROR", logger=generation.logger.name):
+        with pytest.raises(generation.UpstreamError) as exc_info:
+            await generation._reserve_image_queue_slot(redis, "gen-1")
+
+    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert exc_info.value.payload["retry_after"] > 0
+    assert "requires Redis EVAL or WATCH transaction" in str(exc_info.value)
+    assert "refused without atomic release support" in caplog.text
+    assert generation._IMAGE_QUEUE_LOCK_KEY not in redis.store
 
 
 @pytest.mark.asyncio
@@ -1052,6 +1159,10 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
 
     class _Session:
         committed = False
+        added: list[Any]
+
+        def __init__(self) -> None:
+            self.added = []
 
         async def __aenter__(self):
             return self
@@ -1070,24 +1181,32 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
                 return None
             return message
 
+        def add(self, row: Any) -> None:
+            self.added.append(row)
+
         async def commit(self) -> None:
             self.committed = True
 
     session = _Session()
 
-    async def fake_publish_event(redis, user_id, channel, event_name, data):
+    async def fake_deliver_generation_event(redis, delivery):
+        _event_id, _kind, payload = delivery
         published.append(
             {
                 "redis": redis,
-                "user_id": user_id,
-                "channel": channel,
-                "event_name": event_name,
-                "data": data,
+                "user_id": payload["user_id"],
+                "channel": payload["channel"],
+                "event_name": payload["event_name"],
+                "data": payload["data"],
             }
         )
 
     monkeypatch.setattr(generation, "SessionLocal", lambda: session)
-    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+    monkeypatch.setattr(
+        generation,
+        "_deliver_generation_event",
+        fake_deliver_generation_event,
+    )
 
     ok = await generation._mark_generation_attempt_failed(
         object(),
@@ -1687,9 +1806,7 @@ async def test_poster_workflow_hook_replaces_render_image_and_marks_ready() -> N
 
 def test_run_generation_records_workflows_before_billing_and_commit() -> None:
     source = inspect.getsource(generation.run_generation)
-    model_hook = source.index(
-        "await _maybe_record_model_library_generate_image("
-    )
+    model_hook = source.index("await _maybe_record_model_library_generate_image(")
     poster_hook = source.index("await _maybe_record_poster_workflow_image(", model_hook)
     style_hook = source.index(
         "await _maybe_record_poster_style_library_generate_image(",

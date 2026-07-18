@@ -8,7 +8,10 @@ PostgreSQL, while Redis provides dispatch, leases, counters, and event delivery.
 
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from arq import func
 from arq.connections import RedisSettings
@@ -26,6 +29,7 @@ from .observability import (
 )
 from .provider_pool import probe_providers
 from .services import billing_cache
+from .storage import storage
 from .tasks import auto_title as auto_title_tasks
 from .tasks import byok_retention as byok_retention_tasks
 from .tasks import canvas_execution_reconcile as canvas_reconcile_tasks
@@ -40,11 +44,30 @@ from .tasks import volcano_assets as volcano_asset_tasks
 from .upstream import close_client
 
 _startup_logger = logging.getLogger(__name__)
+_PROVIDER_CRON_TIMEOUT_S = 30.0
+
+
+async def _cleanup_resource(name: str, cleanup: Callable[[], Any]) -> None:
+    try:
+        result = cleanup()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:  # noqa: BLE001
+        _startup_logger.warning(
+            "worker cleanup failed resource=%s", name, exc_info=True
+        )
+
+
+async def _cleanup_resources() -> None:
+    await _cleanup_resource("billing_cache", billing_cache.shutdown)
+    await _cleanup_resource("upstream_client", close_client)
+    await _cleanup_resource("metrics_server", stop_metrics_server)
 
 
 async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
     try:
+        storage.ensure_ready()
         init_sentry(
             settings.sentry_dsn,
             settings.sentry_environment or settings.app_env,
@@ -59,32 +82,13 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         await billing_cache.configure(ctx.get("redis"))
     except Exception:
         _startup_logger.exception("worker startup failed; cleaning partial resources")
-        try:
-            await billing_cache.shutdown()
-        except Exception:  # noqa: BLE001
-            _startup_logger.warning(
-                "billing cache cleanup after startup failure failed", exc_info=True
-            )
-        try:
-            await close_client()
-        except Exception:  # noqa: BLE001
-            _startup_logger.warning(
-                "upstream client cleanup after startup failure failed", exc_info=True
-            )
-        try:
-            stop_metrics_server()
-        except Exception:  # noqa: BLE001
-            _startup_logger.warning(
-                "metrics server cleanup after startup failure failed", exc_info=True
-            )
+        await _cleanup_resources()
         raise
 
 
 async def _on_shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
-    """arq WorkerSettings.on_shutdown 钩子：清理 httpx 连接池。"""
-    await billing_cache.shutdown()
-    await close_client()
-    stop_metrics_server()
+    """arq WorkerSettings.on_shutdown 钩子：独立清理各项进程资源。"""
+    await _cleanup_resources()
 
 
 class WorkerSettings:
@@ -114,10 +118,14 @@ class WorkerSettings:
         + canvas_reconcile_tasks.cron_jobs
         + video_generation_tasks.cron_jobs
         + [
-            # run_at_startup=False：probe 内部对 provider 没强制 timeout，某个 provider TCP
-            # 长时间无响应时会把启动钩子卡死，导致整个 worker event loop 静默——cron 心跳停、
-            # job 队列不消费。让首轮 probe 等到第一次 30s tick，至少 worker 已经在跑。
-            cron(probe_providers, second={0, 30}, run_at_startup=False),
+            # provider probe 可能卡在 Redis、代理或上游 TCP；arq 的 cron timeout
+            # 负责取消该 job，避免它占住 cron 槽位和 worker event loop。
+            cron(
+                probe_providers,
+                second={0, 30},
+                run_at_startup=False,
+                timeout=_PROVIDER_CRON_TIMEOUT_S,
+            ),
             cron(
                 auto_title_tasks.reconcile_default_titles,
                 minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},

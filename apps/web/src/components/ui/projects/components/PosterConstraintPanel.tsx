@@ -5,11 +5,14 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
+import { useId, useRef } from "react";
 
+import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
-import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { InfoPanel } from "./StageFrame";
 import { jsonValue, stepOf } from "../utils";
 
@@ -91,12 +94,20 @@ interface PosterConstraintDrawerProps extends PosterConstraintPanelProps {
   onClose: () => void;
 }
 
-function DrawerHeader({ onClose }: { onClose: () => void }) {
+function DrawerHeader({
+  onClose,
+  titleId,
+}: {
+  onClose: () => void;
+  titleId: string;
+}) {
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
       <div className="min-w-0">
         <p className="type-page-kicker">Constraints</p>
-        <h2 className="type-section-title mt-1.5">项目约束</h2>
+        <h2 id={titleId} className="type-section-title mt-1.5">
+          项目约束
+        </h2>
       </div>
       <button
         type="button"
@@ -117,6 +128,14 @@ export function PosterConstraintDrawer({
 }: PosterConstraintDrawerProps) {
   const isMobile = useIsMobile();
   const isDesktop = isMobile !== true;
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+  const onDrawerKeyDown = useModalLayer({
+    open: isDesktop && open,
+    rootRef: drawerRef,
+    onClose,
+  });
+  useBodyScrollLock(isDesktop && open);
 
   if (!isDesktop) {
     return (
@@ -126,8 +145,8 @@ export function PosterConstraintDrawer({
         ariaLabel="项目约束面板"
         snapPoints={["80%", "60%"]}
       >
-        <DrawerHeader onClose={onClose} />
-        <div className="min-w-0 px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
+        <DrawerHeader onClose={onClose} titleId={titleId} />
+        <div className="mobile-dialog-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
           <PosterConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>
@@ -147,11 +166,14 @@ export function PosterConstraintDrawer({
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) onClose();
           }}
-          role="dialog"
-          aria-modal="true"
-          aria-label="项目约束面板"
         >
           <motion.aside
+            ref={drawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            tabIndex={-1}
+            onKeyDown={onDrawerKeyDown}
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
@@ -161,7 +183,7 @@ export function PosterConstraintDrawer({
               "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]",
             )}
           >
-            <DrawerHeader onClose={onClose} />
+            <DrawerHeader onClose={onClose} titleId={titleId} />
             <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-6">
               <PosterConstraintBody workflow={workflow} />
             </div>

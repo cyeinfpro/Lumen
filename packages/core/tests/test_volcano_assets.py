@@ -126,6 +126,43 @@ async def test_redis_quota_reservation_is_atomic_and_counts_other_jobs() -> None
 
 
 @pytest.mark.asyncio
+async def test_existing_quota_reservation_rechecks_current_hard_limit() -> None:
+    redis = _Redis([0, 0])
+
+    with pytest.raises(VolcanoAssetQuotaExceeded):
+        await reserve_volcano_asset_quota(
+            redis,
+            _key(),
+            resource="assets",
+            operation_id="operation-existing",
+            upstream_total=50,
+            limit=50,
+            now_ms=1_000_000,
+        )
+
+    script = str(redis.calls[0][0])
+    existing_branch = script.index("if existing then")
+    quota_branch = script.index("if upstream_total + other_reservations")
+    assert existing_branch < quota_branch
+    assert "other_reservations = math.max(0, reservations - 1)" in script
+
+
+@pytest.mark.asyncio
+async def test_existing_quota_reservation_excludes_itself_from_capacity() -> None:
+    redis = _Redis([1, 1])
+
+    await reserve_volcano_asset_quota(
+        redis,
+        _key(),
+        resource="assets",
+        operation_id="operation-existing",
+        upstream_total=48,
+        limit=50,
+        now_ms=1_000_000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_redis_quota_rejection_reports_upstream_and_reservations() -> None:
     redis = _Redis([0, 1])
 

@@ -34,6 +34,7 @@ REDIS_DIR="$BACKUP_ROOT/redis"
 # 排查窗口。改小到 40（≈ 6.7 天）容易出现"周末出去几天回来发现备份只剩
 # 一周"的情况。可在 systemd unit 或 .env 中覆盖。
 MAX_KEEP="${MAX_KEEP:-56}"
+MAX_KEEP_LIMIT=1000
 
 PG_CONTAINER="${PG_CONTAINER:-lumen-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
@@ -59,8 +60,36 @@ PG_OUT=""
 REDIS_OUT=""
 PG_TMP=""
 REDIS_TMP=""
+BACKUP_LOCK_OWNER_TOKEN=""
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
+
+validate_max_keep() {
+    local value="$MAX_KEEP"
+    local normalized
+    case "$value" in
+        ''|*[!0-9]*)
+            log "ERROR: MAX_KEEP must be a decimal integer from 1 to ${MAX_KEEP_LIMIT} (got: ${value})"
+            return 1
+            ;;
+    esac
+    normalized="$(printf '%s' "$value" | sed 's/^0*//')"
+    normalized="${normalized:-0}"
+    if [ "$normalized" -lt 1 ]; then
+        log "ERROR: MAX_KEEP must be at least 1; refusing to delete every backup (got: ${value})"
+        return 1
+    fi
+    if [ "${#normalized}" -gt "${#MAX_KEEP_LIMIT}" ] \
+            || [ "$normalized" -gt "$MAX_KEEP_LIMIT" ]; then
+        log "ERROR: MAX_KEEP exceeds safety limit ${MAX_KEEP_LIMIT} (got: ${value})"
+        return 1
+    fi
+    MAX_KEEP="$normalized"
+}
+
+if ! validate_max_keep; then
+    exit 2
+fi
 
 trigger_fingerprint() {
     local file="$1"
@@ -105,7 +134,10 @@ release_lock() {
         flock -u 7 2>/dev/null || true
         exec 7>&- 2>/dev/null || true
     elif [ "$LOCK_KIND" = "mkdir" ]; then
-        rm -rf "$LOCKDIR" 2>/dev/null || true
+        if ! lumen_release_owned_lock_dir \
+                "$LOCKDIR" "${BACKUP_LOCK_OWNER_TOKEN:-}"; then
+            log "WARN backup/restore lock owner changed; refusing removal: $LOCKDIR"
+        fi
     fi
 }
 
@@ -159,30 +191,18 @@ acquire_lock() {
         return 0
     fi
 
-    if mkdir "$LOCKDIR" 2>/dev/null; then
-        printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
+    if lumen_try_create_owned_lock_dir "$LOCKDIR" script "backup.sh"; then
+        BACKUP_LOCK_OWNER_TOKEN="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
         LOCK_KIND="mkdir"
         return 0
     fi
 
-    # mkdir 失败：stale-check（进程被 kill -9 后锁残留）。同 lib.sh 行为。
-    local _owner_pid="" _stale=0
-    if [ -f "$LOCKDIR/pid" ]; then
-        _owner_pid="$(cat "$LOCKDIR/pid" 2>/dev/null | tr -d '[:space:]')"
-        if [ -n "$_owner_pid" ] && ! kill -0 "$_owner_pid" 2>/dev/null; then
-            _stale=1
-        fi
+    local _owner_pid=""
+    _owner_pid="$(lumen_lock_owner_pid "$LOCKDIR")"
+    if [ "${LUMEN_LAST_LOCK_STALE:-0}" = "1" ]; then
+        log "ERROR: stale backup/restore lock detected (owner=${LUMEN_LAST_STALE_LOCK_PID:-${_owner_pid:-未知}}); refusing automatic removal"
+        log "ERROR: confirm no backup/restore process is running, then remove: $LOCKDIR"
     fi
-    if [ "$_stale" = "1" ]; then
-        log "WARN stale lock (owner pid=$_owner_pid 已死)，清理后重试"
-        rm -rf "$LOCKDIR" 2>/dev/null || true
-        if mkdir "$LOCKDIR" 2>/dev/null; then
-            printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
-            LOCK_KIND="mkdir"
-            return 0
-        fi
-    fi
-
     log "ERROR: another backup/restore is already running (lock: $LOCKDIR, owner=${_owner_pid:-未知})"
     exit 10
 }

@@ -37,7 +37,7 @@ Lifecycle commands:
   uninstall-lumen      卸载 Lumen（调用 scripts/uninstall.sh）
   rollback             回滚到 previous release（pull 旧 tag + compose up）
   version              输出 VERSION + 镜像 tag + git sha
-  bootstrap-scripts    应急：从 GitHub main 强制热替换 shell 脚本与 Python runners/guard
+  bootstrap-scripts    应急：解析 GitHub branch commit 后强制热替换运维脚本
                        （平时入口处自动 self-update，TTL=600s；本命令突破 TTL）
 
 Docker compose runtime:
@@ -390,6 +390,12 @@ run_lumen_script() {
     local script_name="$1"
     shift || true
     local script_path=""
+    # CLI/menu updates must obtain commit-proven release files on non-git hosts.
+    # The "-" expansion defaults only an unset variable and preserves 0/1/empty.
+    if [ "${script_name}" = "update.sh" ]; then
+        local LUMEN_UPDATE_GIT_PULL="${LUMEN_UPDATE_GIT_PULL-1}"
+        export LUMEN_UPDATE_GIT_PULL
+    fi
     log_step "执行 ${script_name}"
     if ! script_path="$(lumenctl_resolve_script "${script_name}")"; then
         if [ "${script_name}" = "install.sh" ]; then
@@ -2054,7 +2060,7 @@ lumenctl_command_needs_self_update() {
     return 1
 }
 
-# lumenctl 入口处的 self-update：拉 GitHub 最新 scripts/，更新到 SCRIPT_DIR；
+# lumenctl 入口处的 self-update：先把 GitHub branch 固定为 commit，再更新 SCRIPT_DIR；
 # 走 TTL 缓存（默认 600s）避免菜单反复打开就反复拉；网络/校验失败 → WARN 继续。
 # lumenctl.sh 或 lib.sh 自己变了 → re-exec lumenctl 让函数定义/逻辑生效。
 lumenctl_maybe_self_update() {
@@ -2076,7 +2082,7 @@ lumenctl_maybe_self_update() {
     log_info "[self-update] 检查远端 scripts/ 更新（branch=${LUMEN_SELF_UPDATE_BRANCH:-main}, TTL=${LUMEN_SELF_UPDATE_TTL:-600}s）..."
     log_info "[self-update] 跳过本次更新：LUMEN_LUMENCTL_SELF_UPDATE=0 bash scripts/lumenctl.sh ..."
 
-    lumen_self_update_scripts "${SCRIPT_DIR}" \
+    lumen_self_update_scripts_from_github_branch "${SCRIPT_DIR}" \
         "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
         "${LUMEN_SELF_UPDATE_TTL:-600}"
 
@@ -2109,7 +2115,7 @@ main() {
         # 应急：突破 TTL 强拉 scripts/（"我刚改了 scripts，想立刻生效"）
         bootstrap-scripts)
             LUMEN_SELF_UPDATE_FORCE=1 \
-                lumen_self_update_scripts "${SCRIPT_DIR}" \
+                lumen_self_update_scripts_from_github_branch "${SCRIPT_DIR}" \
                     "${LUMEN_SELF_UPDATE_BRANCH:-main}" 0
             case "${LUMEN_SELF_UPDATE_RESULT:-}" in
                 ok)

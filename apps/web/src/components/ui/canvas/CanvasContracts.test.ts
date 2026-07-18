@@ -24,6 +24,8 @@ const viewportControlsSource = source("./CanvasViewportControls.tsx");
 const paletteSource = source("./CanvasNodePalette.tsx");
 const clipboardSource = source("../../../lib/canvas/clipboard.ts");
 const querySource = source("../../../lib/queries/canvases.ts");
+const apiSource = source("../../../lib/api/canvases.ts");
+const constantsSource = source("../../../lib/canvas/constants.ts");
 const manifestSource = source("../../../app/manifest.ts");
 
 test("canvas fullscreen is distinct from fit view and keeps portal overlays available", () => {
@@ -72,11 +74,17 @@ test("canvas interactions cleanly settle drafts, cancellation, deletion, and res
   match(viewportSource, /onTouchCancelCapture/);
   match(
     viewportSource,
-    /if \(!cancelledConnectionRef\.current\) \{\s*resizeNode/,
+    /const cancelled = cancelledResizeRef\.current;\s*cancelledResizeRef\.current = false;\s*if \(!cancelled\) \{\s*resizeNode/,
   );
   match(
     viewportSource,
     /if \(cancelledConnectionRef\.current\) return;/,
+  );
+  match(viewportSource, /const cancelledResizeRef = useRef\(false\)/);
+  match(viewportSource, /cancelledResizeRef\.current = false/);
+  doesNotMatch(
+    viewportSource,
+    /if \(!cancelledConnectionRef\.current\) \{\s*resizeNode/,
   );
   match(viewportSource, /cancelDomainInteraction/);
   match(
@@ -189,12 +197,26 @@ test("canvas workbench exposes mature creation, navigation, and clipboard workfl
   match(workspaceSource, /CanvasShortcutsDialog/);
   match(workspaceToolsSource, /serializeCanvasSubgraph/);
   match(workspaceToolsSource, /parseCanvasSubgraph/);
+  match(
+    workspaceToolsSource,
+    /if \(typeof text === "string"\) \{\s*subgraph = parseCanvasSubgraph\(text\);\s*\}/,
+  );
+  doesNotMatch(workspaceToolsSource, /if \(parsed\) subgraph = parsed/);
   match(workspaceToolsSource, /autoLayoutDag/);
   match(workspaceToolsSource, /connectDraftToNewNode/);
   match(commandMenuSource, /role="combobox"/);
   match(commandMenuSource, /ArrowDown/);
   match(viewportControlsSource, /当前缩放比例/);
   match(clipboardSource, /CANVAS_CLIPBOARD_PREFIX/);
+});
+
+test("canvas commands track the store primary selection independently of selection order", () => {
+  match(
+    workspaceToolsSource,
+    /useStore\(store, \(state\) => state\.selectedNodeId\)/,
+  );
+  match(workspaceToolsSource, /selectedNodeId,\s*selectedCount/);
+  doesNotMatch(workspaceToolsSource, /node\.id === selectedNodeIds\[0\]/);
 });
 
 test("canvas catalog creation persists presets and filters quick connections by real ports", () => {
@@ -215,6 +237,38 @@ test("canvas mask uploads request strict server preflight", () => {
     nodeConfigEditorSource,
     /accept=\{isMask \? "image\/png" : "image\/png,image\/jpeg,image\/webp"\}/,
   );
+});
+
+test("canvas stale uploads and output selections are fenced", () => {
+  match(inspectorSource, /cleanupStaleCanvasAsset/);
+  match(inspectorSource, /shouldCleanupStaleCanvasAsset/);
+  match(inspectorSource, /asset\.id,\s*asset\.created,\s*request\.initialAssetId/);
+  match(inspectorSource, /createdByRequest &&\s*assetId\.trim\(\)\.length > 0/);
+  match(inspectorSource, /deleteCanvasUploadedAsset/);
+  match(apiSource, /selection_revision: selectionRevision/);
+  match(querySource, /queueRef = useRef\(new Map<string, Promise<void>>\(\)\)/);
+  match(querySource, /revisionRef = useRef\(new Map<string, number>\(\)\)/);
+  match(querySource, /previous\.catch\(\(\) => undefined\)/);
+});
+
+test("canvas video auto selection aggregates compatible capabilities", () => {
+  doesNotMatch(nodeConfigEditorSource, /firstModelForAction/);
+  match(nodeConfigEditorSource, /videoResolutionOptionsForModels/);
+  match(nodeConfigEditorSource, /videoDurationOptionsForModels/);
+  match(nodeConfigEditorSource, /selectVideoModelForParameters/);
+});
+
+test("canvas media and text editors preserve shared limits and fallbacks", () => {
+  match(nodeConfigEditorSource, /output_format: value, background: "opaque"/);
+  match(nodeConfigEditorSource, /CANVAS_NOTE_MAX_CHARS/);
+  match(nodesSource, /CANVAS_NOTE_MAX_CHARS/);
+  match(inspectorSource, /historyOutputPreviewSources/);
+  match(inspectorSource, /sourceIndex \+ 1/);
+  match(inspectorSource, /imageBinaryUrl/);
+  match(constantsSource, /CANVAS_NOTE_MAX_CHARS = 20_000/);
+  match(constantsSource, /normalizeCanvasNodeTitle/);
+  match(inspectorSource, /normalizeCanvasNodeTitle/);
+  match(nodesSource, /normalizeCanvasNodeTitle/);
 });
 
 test("image asset nodes accept direct paste, drop, and replacement uploads", () => {

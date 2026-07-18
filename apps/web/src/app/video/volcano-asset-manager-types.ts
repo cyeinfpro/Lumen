@@ -120,7 +120,11 @@ export type OperationRunner = {
   sessionId: number;
   prepare?: (signal: AbortSignal) => Promise<void>;
   submit: (signal: AbortSignal) => Promise<VideoAssetOperationOut>;
-  onProgress?: (operation: VideoAssetOperationOut, sessionId: number) => void;
+  onProgress?: (
+    operation: VideoAssetOperationOut,
+    sessionId: number,
+    operationStartedAt: number,
+  ) => void;
   onSucceeded: (
     result: VideoAssetOperationResult,
     operation: VideoAssetOperationOut,

@@ -58,7 +58,15 @@ async def load_submit_result(
     if raw is None:
         return None
     if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            logger.debug(
+                "video submit cache is not UTF-8 task=%s",
+                task_id,
+                exc_info=True,
+            )
+            return None
     if not isinstance(raw, str):
         return None
     try:

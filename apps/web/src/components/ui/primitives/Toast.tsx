@@ -4,7 +4,7 @@
 // 在任何组件/回调中调用；需要把 <ToastViewport /> 挂在 layout.tsx 里。
 // 自动 3s 消失，可带 action（一个按钮）。
 
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
@@ -32,7 +32,7 @@ interface ToastAction {
 interface ToastItem {
   id: string;
   tone: ToastTone;
-  title: string;
+  title: ReactNode;
   description?: string;
   durationMs: number;
   action?: ToastAction;
@@ -71,7 +71,7 @@ const useToastStore = create<ToastState>((set) => ({
 
 // 外部 API：`toast.success("已保存")` 等
 function make(tone: ToastTone) {
-  return (title: string, options?: { description?: string; durationMs?: number; action?: ToastAction }) =>
+  return (title: ReactNode, options?: { description?: string; durationMs?: number; action?: ToastAction }) =>
     useToastStore.getState().push({ tone, title, ...options });
 }
 

@@ -31,6 +31,7 @@ from lumen_core.video_providers import VideoProviderDefinition
 
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
+_JPEG_BYTES = b"\xff\xd8\xff\xe0fake-jpeg"
 
 
 def test_provider_task_path_segment_encodes_reserved_characters() -> None:
@@ -321,7 +322,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
             reference_media=[
                 VideoReferenceMedia(
                     kind="image",
-                    data=b"image",
+                    data=_PNG_BYTES,
                     mime="image/png",
                     label="图片 1",
                     ref_id="ref:image:1",
@@ -530,7 +531,7 @@ async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -
             reference_media=[
                 VideoReferenceMedia(
                     kind="image",
-                    data=b"image",
+                    data=_JPEG_BYTES,
                     mime="image/jpeg",
                     ref_id="ref:image:1",
                 ),
@@ -1272,7 +1273,7 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
                 VideoReferenceMedia(
                     kind="image",
                     url="https://lumen.example/api/images/reference/image-1/binary",
-                    data=b"image",
+                    data=_JPEG_BYTES,
                     mime="image/jpeg",
                 )
             ],
@@ -1286,7 +1287,9 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
     assert client.requests[0]["body"]["images"] == [
         "https://lumen.example/api/images/reference/image-1/binary"
     ]
-    assert client.requests[1]["body"]["images"] == ["data:image/jpeg;base64,aW1hZ2U="]
+    assert client.requests[1]["body"]["images"] == [
+        "data:image/jpeg;base64," + base64.b64encode(_JPEG_BYTES).decode("ascii")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1325,7 @@ async def test_unified_video_create_retries_string_invalid_url_error() -> None:
                 VideoReferenceMedia(
                     kind="image",
                     url="https://lumen.example/api/images/reference/image-1/binary",
-                    data=b"image",
+                    data=_JPEG_BYTES,
                     mime="image/jpeg",
                 )
             ],
@@ -1331,7 +1334,9 @@ async def test_unified_video_create_retries_string_invalid_url_error() -> None:
 
     assert result.provider_task_id == "omni-task-1"
     assert len(client.requests) == 2
-    assert client.requests[1]["body"]["images"] == ["data:image/jpeg;base64,aW1hZ2U="]
+    assert client.requests[1]["body"]["images"] == [
+        "data:image/jpeg;base64," + base64.b64encode(_JPEG_BYTES).decode("ascii")
+    ]
 
 
 @pytest.mark.asyncio

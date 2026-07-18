@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from redis.exceptions import WatchError
 
 from app import account_limiter, upstream
 
@@ -158,6 +159,161 @@ class FakeRedis:
                     await self.expireat(day_key, int(expire_at_raw))
                 return [1, ""]
         raise AssertionError(f"unexpected eval key count: {keys}")
+
+
+class TransactionalRedis:
+    eval = None
+
+    def __init__(self, *, barrier_method: str | None = None) -> None:
+        self.zsets: dict[str, dict[str, float]] = {}
+        self.kv: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
+        self.versions: dict[str, int] = {}
+        self.execute_lock = asyncio.Lock()
+        self.barrier_method = barrier_method
+        self.barrier = asyncio.Barrier(2) if barrier_method else None
+        self.barrier_entries = 0
+
+    async def zremrangebyscore(self, key: str, mn: float, mx: float) -> int:
+        zset = self.zsets.setdefault(key, {})
+        removed = [member for member, score in zset.items() if mn <= score <= mx]
+        for member in removed:
+            del zset[member]
+        if removed:
+            self.versions[key] = self.versions.get(key, 0) + 1
+        return len(removed)
+
+    def pipeline(self, *, transaction: bool = True) -> TransactionalPipeline:
+        assert transaction is True
+        return TransactionalPipeline(self)
+
+    async def wait_at(self, method: str) -> None:
+        barrier = self.barrier
+        if self.barrier_method != method or barrier is None:
+            return
+        self.barrier_entries += 1
+        if self.barrier_entries >= 2:
+            self.barrier_method = None
+        await barrier.wait()
+
+
+class TransactionalPipeline:
+    def __init__(self, redis: TransactionalRedis) -> None:
+        self.redis = redis
+        self.watched: dict[str, int] = {}
+        self.commands: list[tuple[Any, ...]] = []
+
+    async def watch(self, *keys: str) -> None:
+        self.watched = {key: self.redis.versions.get(key, 0) for key in keys}
+
+    async def zscore(self, key: str, member: str) -> float | None:
+        return self.redis.zsets.get(key, {}).get(member)
+
+    async def get(self, key: str) -> str | None:
+        value = self.redis.kv.get(key)
+        await self.redis.wait_at("get")
+        return value
+
+    async def zcard(self, key: str) -> int:
+        value = len(self.redis.zsets.get(key, {}))
+        await self.redis.wait_at("zcard")
+        return value
+
+    async def zrange(
+        self,
+        key: str,
+        start: int,
+        stop: int,
+        *,
+        withscores: bool = False,
+    ) -> list[Any]:
+        items = sorted(self.redis.zsets.get(key, {}).items(), key=lambda item: item[1])
+        selected = items[start:] if stop == -1 else items[start : stop + 1]
+        if withscores:
+            return selected
+        return [member for member, _score in selected]
+
+    def multi(self) -> None:
+        return None
+
+    def zadd(
+        self,
+        key: str,
+        mapping: dict[str, float],
+        *,
+        nx: bool = False,
+    ) -> None:
+        self.commands.append(("zadd", key, mapping, nx))
+
+    def expire(self, key: str, ttl: int) -> None:
+        self.commands.append(("expire", key, ttl))
+
+    def incr(self, key: str) -> None:
+        self.commands.append(("incr", key))
+
+    def expireat(self, key: str, expires_at: int) -> None:
+        self.commands.append(("expireat", key, expires_at))
+
+    def zrem(self, key: str, member: str) -> None:
+        self.commands.append(("zrem", key, member))
+
+    def decr(self, key: str) -> None:
+        self.commands.append(("decr", key))
+
+    def delete(self, key: str) -> None:
+        self.commands.append(("delete", key))
+
+    async def execute(self) -> list[int]:
+        async with self.redis.execute_lock:
+            if any(
+                self.redis.versions.get(key, 0) != version
+                for key, version in self.watched.items()
+            ):
+                raise WatchError("watched key changed")
+
+            results: list[int] = []
+            for command in self.commands:
+                op, key, *args = command
+                if op == "zadd":
+                    mapping, nx = args
+                    zset = self.redis.zsets.setdefault(key, {})
+                    added = 0
+                    for member, score in mapping.items():
+                        if nx and member in zset:
+                            continue
+                        added += int(member not in zset)
+                        zset[member] = float(score)
+                    results.append(added)
+                elif op == "expire":
+                    self.redis.expirations[key] = int(args[0])
+                    results.append(1)
+                elif op == "incr":
+                    value = int(self.redis.kv.get(key) or 0) + 1
+                    self.redis.kv[key] = str(value)
+                    results.append(value)
+                elif op == "expireat":
+                    self.redis.expirations[key] = int(args[0])
+                    results.append(1)
+                elif op == "zrem":
+                    member = str(args[0])
+                    zset = self.redis.zsets.get(key, {})
+                    removed = int(member in zset)
+                    zset.pop(member, None)
+                    results.append(removed)
+                elif op == "decr":
+                    value = int(self.redis.kv.get(key) or 0) - 1
+                    self.redis.kv[key] = str(value)
+                    results.append(value)
+                elif op == "delete":
+                    existed = key in self.redis.kv or key in self.redis.zsets
+                    self.redis.kv.pop(key, None)
+                    self.redis.zsets.pop(key, None)
+                    results.append(int(existed))
+                self.redis.versions[key] = self.redis.versions.get(key, 0) + 1
+            return results
+
+    async def reset(self) -> None:
+        return None
 
 
 # --- parse_rate_limit -------------------------------------------------------
@@ -452,6 +608,65 @@ async def test_release_quota_removes_unused_reservation_atomically() -> None:
     assert released is True
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
     day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert day_key not in redis.kv
+
+
+@pytest.mark.asyncio
+async def test_reserve_quota_without_eval_serializes_barrier_race() -> None:
+    redis = TransactionalRedis(barrier_method="zcard")
+    now = 1_700_000_000.0
+
+    results = await asyncio.gather(
+        account_limiter.reserve_quota(
+            redis,
+            "acc1",
+            rate_limit="1/min",
+            daily_quota=80,
+            task_id="task-1",
+            now=now,
+        ),
+        account_limiter.reserve_quota(
+            redis,
+            "acc1",
+            rate_limit="1/min",
+            daily_quota=80,
+            task_id="task-2",
+            now=now,
+        ),
+    )
+
+    assert sorted(result[0] for result in results) == [False, True]
+    assert len(redis.zsets["lumen:acct:acc1:image:ts"]) == 1
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert redis.kv[day_key] == "1"
+
+
+@pytest.mark.asyncio
+async def test_release_quota_without_eval_updates_daily_once_under_barrier() -> None:
+    redis = TransactionalRedis(barrier_method="get")
+    now = 1_700_000_000.0
+    ts_key = "lumen:acct:acc1:image:ts"
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    redis.zsets[ts_key] = {"task-1": now}
+    redis.kv[day_key] = "1"
+
+    released = await asyncio.gather(
+        account_limiter.release_quota(
+            redis,
+            "acc1",
+            "task-1",
+            reserved_at=now,
+        ),
+        account_limiter.release_quota(
+            redis,
+            "acc1",
+            "task-1",
+            reserved_at=now,
+        ),
+    )
+
+    assert sorted(released) == [False, True]
+    assert redis.zsets[ts_key] == {}
     assert day_key not in redis.kv
 
 

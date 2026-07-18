@@ -332,8 +332,12 @@ function GenerationTileComponent({
   }, [item.prompt]);
 
   const onLocate = useCallback(() => {
-    router.push(`/?scrollTo=${encodeURIComponent(item.message_id)}`);
-  }, [router, item.message_id]);
+    const query = new URLSearchParams({
+      conversationId: item.conversation_id,
+      scrollTo: item.message_id,
+    });
+    router.push(`/?${query.toString()}`);
+  }, [item.conversation_id, item.message_id, router]);
   const closeSheet = useCallback(() => setSheetOpen(false), []);
 
   const w = Math.max(1, item.image.width || 1);

@@ -1,6 +1,9 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import {
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Archive, Loader2 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -10,6 +13,7 @@ import {
   useCompactConversation,
   type CompactConversationApiResponse,
 } from "@/app/(chat)/_hooks/useCompactConversation";
+import { useUserQueryScope } from "@/components/QueryProvider";
 import { CompactionToast } from "@/components/ui/chat/CompactionToast";
 import { RollingTokenCounter } from "@/components/ui/chat/RollingTokenCounter";
 import { Button, IconButton } from "@/components/ui/primitives";
@@ -79,6 +83,29 @@ function stateOf(stats: ExtendedContextStats): ContextState {
   if (hasSummary) return "compressed";
   if (stats.truncated) return "truncated";
   return "full";
+}
+
+function refreshCompletedCompaction(
+  event: CompactionEvent,
+  convId: string | null | undefined,
+  userId: string | null | undefined,
+  queryClient: QueryClient,
+  onCompleted: () => void,
+) {
+  if (event.phase !== "completed" || !convId) return;
+  const userKeys = qk.user(userId);
+  onCompleted();
+  void queryClient.refetchQueries({
+    queryKey: userKeys.conversationContext(convId),
+  });
+  void queryClient.invalidateQueries({ queryKey: ["messages", convId] });
+  void queryClient.invalidateQueries({
+    queryKey: userKeys.conversationsAll(),
+  });
+}
+
+function compactingDataAttribute(active: boolean): "true" | undefined {
+  return active ? "true" : undefined;
 }
 
 function stateLabel(state: ContextState): string {
@@ -269,6 +296,7 @@ export function ContextWindowMeter({
   conversationId,
 }: ContextWindowMeterProps) {
   const storeConvId = useChatStore((s) => s.currentConvId);
+  const userScope = useUserQueryScope();
   const queryClient = useQueryClient();
   const retryCompact = useCompactConversation();
   const convId = conversationId ?? storeConvId;
@@ -277,16 +305,15 @@ export function ContextWindowMeter({
 
   const onCompactionEvent = useCallback(
     (event: CompactionEvent) => {
-      if (event.phase === "completed" && convId) {
-        setTrackedJob(null);
-        void queryClient.refetchQueries({
-          queryKey: qk.conversationContext(convId),
-        });
-        void queryClient.invalidateQueries({ queryKey: ["messages", convId] });
-        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      }
+      refreshCompletedCompaction(
+        event,
+        convId,
+        userScope.userId,
+        queryClient,
+        () => setTrackedJob(null),
+      );
     },
-    [convId, queryClient],
+    [convId, queryClient, userScope.userId],
   );
   const { active: eventActive, latest: latestCompaction } =
     useContextCompactionEvents(convId, onCompactionEvent, trackedJob);
@@ -387,7 +414,7 @@ export function ContextWindowMeter({
     return (
       <div
         className={cn("relative inline-flex shrink-0 items-center gap-1", className)}
-        data-compacting={isCompacting ? "true" : undefined}
+        data-compacting={compactingDataAttribute(isCompacting)}
       >
           <span
             role="meter"
@@ -448,7 +475,7 @@ export function ContextWindowMeter({
   return (
     <div
       className={cn("relative inline-flex shrink-0 items-center gap-1.5", className)}
-      data-compacting={isCompacting ? "true" : undefined}
+      data-compacting={compactingDataAttribute(isCompacting)}
     >
         <span
           role="meter"

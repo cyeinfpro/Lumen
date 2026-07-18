@@ -91,21 +91,26 @@ test("runtime upload limit falls back locally but accepts server defaults", () =
   match(store, /setMaxUploadSourceBytes\(defaults\.upload_max_source_bytes\)/);
 });
 
-test("authenticated bootstrap only clears chat identity for real logout states", () => {
+test("authenticated bootstrap delegates fail-closed identity recovery", () => {
   const bootstrap = source("src/components/RuntimeDefaultsBootstrap.tsx");
+  const identityRecovery = source(
+    "src/components/useIdentityRevalidation.ts",
+  );
 
-  match(bootstrap, /chatStore\.setCurrentUser\(meQuery\.data\.id\)/);
+  match(bootstrap, /useIdentityRevalidation\(\{/);
+  match(bootstrap, /setCurrentUser\(meQuery\.data\.id\)/);
   doesNotMatch(bootstrap, /hydrateActiveTasks/);
-  match(bootstrap, /useChatStore\.getState\(\)\.setCurrentUser\(null\)/);
   match(
-    bootstrap,
-    /error instanceof ApiError && error\.status === 401/,
+    identityRecovery,
+    /prepareUserIdentityRevalidation\(queryClient, state\.retainedUserId\)/,
   );
   match(
-    bootstrap,
-    /shouldClearChatIdentity\(isPublicAuthPath, meQuery\.error\)/,
+    identityRecovery,
+    /isUnauthorizedIdentityError\(error\)/,
   );
-  doesNotMatch(bootstrap, /meQuery\.isError/);
+  match(identityRecovery, /scheduleRetry\(\)/);
+  match(identityRecovery, /setCurrentUser\(null\)/);
+  doesNotMatch(identityRecovery, /query\.isError/);
 });
 
 test("upgrade and inpaint lazy UI keep visible recovery states", () => {

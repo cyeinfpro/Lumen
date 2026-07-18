@@ -64,14 +64,13 @@ async def test_dual_race_bonus_is_billable_and_settled_before_publish(
     ) -> list[str]:
         return [key for key, _data in files]
 
-    async def fake_publish_event(
-        redis: Any,
-        user_id: str,
-        channel: str,
-        event_name: str,
-        data: dict[str, Any],
+    async def fake_deliver_generation_events(
+        _redis: Any,
+        deliveries: list[tuple[str, str, dict[str, Any]]],
     ) -> None:
-        events.append((event_name, data))
+        assert session.committed is True
+        for _event_id, _kind, payload in deliveries:
+            events.append((payload["event_name"], payload["data"]))
 
     async def fake_settle_generation(
         _session: Any,
@@ -92,9 +91,7 @@ async def test_dual_race_bonus_is_billable_and_settled_before_publish(
     async def noop_delete_storage_keys(_keys: list[str]) -> None:
         return None
 
-    monkeypatch.setattr(
-        generation, "SessionLocal", lambda: _SessionLocal(session)
-    )
+    monkeypatch.setattr(generation, "SessionLocal", lambda: _SessionLocal(session))
     monkeypatch.setattr(
         generation, "_write_generation_files", fake_write_generation_files
     )
@@ -104,7 +101,11 @@ async def test_dual_race_bonus_is_billable_and_settled_before_publish(
         "_maybe_record_model_library_candidate_image",
         noop_record_candidate_image,
     )
-    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+    monkeypatch.setattr(
+        generation,
+        "_deliver_generation_events",
+        fake_deliver_generation_events,
+    )
     monkeypatch.setattr(generation.storage, "public_url", lambda key: f"/public/{key}")
     monkeypatch.setattr(
         generation.worker_billing, "settle_generation", fake_settle_generation
@@ -192,14 +193,12 @@ async def test_dual_race_bonus_settle_failure_does_not_commit_or_publish(
     ) -> list[str]:
         return [key for key, _data in files]
 
-    async def fake_publish_event(
-        redis: Any,
-        user_id: str,
-        channel: str,
-        event_name: str,
-        data: dict[str, Any],
+    async def fake_deliver_generation_events(
+        _redis: Any,
+        deliveries: list[tuple[str, str, dict[str, Any]]],
     ) -> None:
-        events.append((event_name, data))
+        for _event_id, _kind, payload in deliveries:
+            events.append((payload["event_name"], payload["data"]))
 
     async def fail_settle_generation(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("billing failed")
@@ -220,7 +219,11 @@ async def test_dual_race_bonus_settle_failure_does_not_commit_or_publish(
         "_maybe_record_model_library_candidate_image",
         noop_record_candidate_image,
     )
-    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+    monkeypatch.setattr(
+        generation,
+        "_deliver_generation_events",
+        fake_deliver_generation_events,
+    )
     monkeypatch.setattr(generation.storage, "public_url", lambda key: f"/public/{key}")
     monkeypatch.setattr(generation, "_delete_storage_keys", noop_delete_storage_keys)
     monkeypatch.setattr(

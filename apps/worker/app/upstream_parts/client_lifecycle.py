@@ -35,6 +35,27 @@ class _TimeoutConfig:
         )
 
 
+_pinned_clients: OrderedDict[
+    tuple[_TimeoutConfig, str, tuple[str, ...]],
+    httpx.AsyncClient,
+] = OrderedDict()
+_pinned_images_clients: OrderedDict[
+    tuple[_TimeoutConfig, str, tuple[str, ...]],
+    httpx.AsyncClient,
+] = OrderedDict()
+
+
+def _pinned_client_key(
+    timeout_config: _TimeoutConfig,
+    target: Any,
+) -> tuple[_TimeoutConfig, str, tuple[str, ...]]:
+    return (
+        timeout_config,
+        str(target.url),
+        tuple(str(ip) for ip in target.resolved_ips),
+    )
+
+
 class _TrackedStreamContext:
     def __init__(self, client: "_TrackedAsyncClient", inner: Any) -> None:
         self._client = client
@@ -140,6 +161,7 @@ def _build_client(
     timeout_config: _TimeoutConfig | None = None,
     *,
     proxy_url: str | None = None,
+    pinned_target: Any | None = None,
 ) -> httpx.AsyncClient:
     """Build the shared JSON client without base URL or authorization state."""
     facade = _facade()
@@ -149,12 +171,19 @@ def _build_client(
         read=settings.upstream_read_timeout_s,
         write=settings.upstream_write_timeout_s,
     )
+    if proxy_url is not None and pinned_target is not None:
+        raise ValueError("proxy and pinned target are mutually exclusive")
+    client_kwargs: dict[str, Any] = {
+        "timeout": timeout_config.to_httpx(),
+        "headers": {"content-type": "application/json"},
+        "proxy": proxy_url,
+        "follow_redirects": False,
+        "trust_env": False,
+    }
+    if pinned_target is not None:
+        client_kwargs["transport"] = facade.pinned_async_http_transport(pinned_target)
     return facade._TrackedAsyncClient(
-        timeout=timeout_config.to_httpx(),
-        headers={"content-type": "application/json"},
-        proxy=proxy_url,
-        follow_redirects=False,
-        trust_env=False,
+        **client_kwargs,
     )
 
 
@@ -162,6 +191,7 @@ def _build_images_client(
     timeout_config: _TimeoutConfig | None = None,
     *,
     proxy_url: str | None = None,
+    pinned_target: Any | None = None,
 ) -> httpx.AsyncClient:
     """Build the Images API client without a default content-type header."""
     facade = _facade()
@@ -171,12 +201,17 @@ def _build_images_client(
         read=settings.upstream_read_timeout_s,
         write=settings.upstream_write_timeout_s,
     )
-    return facade._TrackedAsyncClient(
-        timeout=timeout_config.to_httpx(),
-        proxy=proxy_url,
-        follow_redirects=False,
-        trust_env=False,
-    )
+    if proxy_url is not None and pinned_target is not None:
+        raise ValueError("proxy and pinned target are mutually exclusive")
+    client_kwargs: dict[str, Any] = {
+        "timeout": timeout_config.to_httpx(),
+        "proxy": proxy_url,
+        "follow_redirects": False,
+        "trust_env": False,
+    }
+    if pinned_target is not None:
+        client_kwargs["transport"] = facade.pinned_async_http_transport(pinned_target)
+    return facade._TrackedAsyncClient(**client_kwargs)
 
 
 def _cache_proxied_client(
@@ -253,9 +288,15 @@ async def _close_retired_clients_now() -> None:
         await facade._aclose_client_cancel_safe(client)
 
 
-async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
+async def _get_client(
+    proxy_url: str | None = None,
+    *,
+    pinned_target: Any | None = None,
+) -> httpx.AsyncClient:
     facade = _facade()
     timeout_config = await facade._resolve_timeout_config()
+    if proxy_url is not None and pinned_target is not None:
+        raise ValueError("proxy and pinned target are mutually exclusive")
     if proxy_url:
         key = (timeout_config, proxy_url)
         evicted: list[httpx.AsyncClient] = []
@@ -267,6 +308,26 @@ async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
             client = facade._build_client(timeout_config, proxy_url=proxy_url)
             evicted = facade._cache_proxied_client(
                 facade._proxied_clients,
+                key,
+                client,
+            )
+        for evicted_client in evicted:
+            facade._schedule_delayed_aclose(evicted_client)
+        return client
+    if pinned_target is not None:
+        key = _pinned_client_key(timeout_config, pinned_target)
+        evicted = []
+        async with facade._client_lock:
+            client = _pinned_clients.get(key)
+            if client is not None:
+                _pinned_clients.move_to_end(key)
+                return client
+            client = facade._build_client(
+                timeout_config,
+                pinned_target=pinned_target,
+            )
+            evicted = facade._cache_proxied_client(
+                _pinned_clients,
                 key,
                 client,
             )
@@ -289,9 +350,15 @@ async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
     return shared_client
 
 
-async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
+async def _get_images_client(
+    proxy_url: str | None = None,
+    *,
+    pinned_target: Any | None = None,
+) -> httpx.AsyncClient:
     facade = _facade()
     timeout_config = await facade._resolve_timeout_config()
+    if proxy_url is not None and pinned_target is not None:
+        raise ValueError("proxy and pinned target are mutually exclusive")
     if proxy_url:
         key = (timeout_config, proxy_url)
         evicted: list[httpx.AsyncClient] = []
@@ -306,6 +373,26 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
             )
             evicted = facade._cache_proxied_client(
                 facade._proxied_images_clients,
+                key,
+                client,
+            )
+        for evicted_client in evicted:
+            facade._schedule_delayed_aclose(evicted_client)
+        return client
+    if pinned_target is not None:
+        key = _pinned_client_key(timeout_config, pinned_target)
+        evicted = []
+        async with facade._images_client_lock:
+            client = _pinned_images_clients.get(key)
+            if client is not None:
+                _pinned_images_clients.move_to_end(key)
+                return client
+            client = facade._build_images_client(
+                timeout_config,
+                pinned_target=pinned_target,
+            )
+            evicted = facade._cache_proxied_client(
+                _pinned_images_clients,
                 key,
                 client,
             )
@@ -344,6 +431,8 @@ async def close_client() -> None:
             facade._client_timeout_config = None
         clients.extend(facade._proxied_clients.values())
         facade._proxied_clients.clear()
+        clients.extend(_pinned_clients.values())
+        _pinned_clients.clear()
     for client in clients:
         await facade._aclose_client_cancel_safe(client)
 
@@ -355,6 +444,8 @@ async def close_client() -> None:
             facade._images_client_timeout_config = None
         image_clients.extend(facade._proxied_images_clients.values())
         facade._proxied_images_clients.clear()
+        image_clients.extend(_pinned_images_clients.values())
+        _pinned_images_clients.clear()
     for client in image_clients:
         await facade._aclose_client_cancel_safe(client)
     await facade.close_provider_proxy_tunnels()

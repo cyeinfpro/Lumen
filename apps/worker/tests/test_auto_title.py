@@ -45,7 +45,7 @@ def test_is_default_title(title: str | None, expected: bool) -> None:
 
 def test_parse_response_text_from_done_event() -> None:
     sse = (
-        'event: response.output_text.done\n'
+        "event: response.output_text.done\n"
         'data: {"type":"response.output_text.done","text":"我的标题"}\n\n'
     )
     assert auto_title._parse_response_text(sse, "text/event-stream") == "我的标题"
@@ -54,11 +54,11 @@ def test_parse_response_text_from_done_event() -> None:
 def test_parse_response_text_from_delta_only() -> None:
     """关键 bug 修复：上游只发 delta + completed 时也能拿到 title。"""
     sse = (
-        'event: response.output_text.delta\n'
+        "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"前端"}\n\n'
-        'event: response.output_text.delta\n'
+        "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"重构"}\n\n'
-        'event: response.completed\n'
+        "event: response.completed\n"
         'data: {"type":"response.completed","response":{}}\n\n'
     )
     assert auto_title._parse_response_text(sse, "text/event-stream") == "前端重构"
@@ -67,9 +67,9 @@ def test_parse_response_text_from_delta_only() -> None:
 def test_parse_response_text_done_takes_precedence_over_delta() -> None:
     """done 事件给的完整 text 优先于 delta 拼接（两者偶有 tokenizer 误差）。"""
     sse = (
-        'event: response.output_text.delta\n'
+        "event: response.output_text.delta\n"
         'data: {"type":"response.output_text.delta","delta":"半个"}\n\n'
-        'event: response.output_text.done\n'
+        "event: response.output_text.done\n"
         'data: {"type":"response.output_text.done","text":"完整标题"}\n\n'
     )
     assert auto_title._parse_response_text(sse, "text/event-stream") == "完整标题"
@@ -77,7 +77,7 @@ def test_parse_response_text_done_takes_precedence_over_delta() -> None:
 
 def test_parse_response_text_from_content_part_done() -> None:
     sse = (
-        'event: response.content_part.done\n'
+        "event: response.content_part.done\n"
         'data: {"type":"response.content_part.done","part":{"type":"output_text","text":"标题 X"}}\n\n'
     )
     assert auto_title._parse_response_text(sse, "text/event-stream") == "标题 X"
@@ -86,7 +86,7 @@ def test_parse_response_text_from_content_part_done() -> None:
 def test_parse_response_text_from_response_completed_output() -> None:
     """没 done 没 delta，只有 completed 里嵌套的 output：仍能解析。"""
     sse = (
-        'event: response.completed\n'
+        "event: response.completed\n"
         'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Aha"}]}]}}\n\n'
     )
     assert auto_title._parse_response_text(sse, "text/event-stream") == "Aha"
@@ -96,17 +96,13 @@ def test_parse_response_text_falls_back_to_json() -> None:
     """上游切回 application/json 时退化到整体解析。"""
     json_body = '{"output":[{"content":[{"text":"非流式标题"}]}]}'
     assert (
-        auto_title._parse_response_text(json_body, "application/json")
-        == "非流式标题"
+        auto_title._parse_response_text(json_body, "application/json") == "非流式标题"
     )
 
 
 def test_parse_response_text_uses_top_level_output_text() -> None:
     json_body = '{"output_text":"顶层标题"}'
-    assert (
-        auto_title._parse_response_text(json_body, "application/json")
-        == "顶层标题"
-    )
+    assert auto_title._parse_response_text(json_body, "application/json") == "顶层标题"
 
 
 def test_parse_response_text_returns_empty_when_nothing_parseable() -> None:
@@ -260,7 +256,7 @@ async def test_call_upstream_retries_within_provider_on_retriable(
     [
         ("我的标题", "我的标题"),
         ("「项目重构」", "项目重构"),
-        ("\"标题\"", "标题"),
+        ('"标题"', "标题"),
         ("标题：前端优化", "前端优化"),
         ("Title: Refactor", "Refactor"),
         ("a" * 30, "a" * 24),  # 长度 24 上限
@@ -513,6 +509,65 @@ async def test_auto_title_conversation_applies_total_timeout(
     await auto_title.auto_title_conversation({"redis": object()}, "conv-1")
 
 
+@pytest.mark.asyncio
+async def test_auto_title_conditional_update_does_not_overwrite_user_rename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[Any] = []
+
+    class _ReadSession:
+        async def __aenter__(self) -> "_ReadSession":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, model: Any, object_id: str) -> Any:
+            if model is Conversation:
+                return Conversation(id=object_id, user_id="user-1", title="")
+            return None
+
+    class _UpdateResult:
+        rowcount = 0
+
+    class _WriteSession:
+        async def __aenter__(self) -> "_WriteSession":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def execute(self, statement: Any) -> _UpdateResult:
+            statements.append(statement)
+            return _UpdateResult()
+
+        async def commit(self) -> None:
+            raise AssertionError("stale auto-title update must not commit")
+
+    sessions = iter((_ReadSession(), _WriteSession()))
+
+    async def fake_build_summary(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+    async def fake_call(_input: list[dict[str, Any]]) -> str:
+        return "自动标题"
+
+    async def must_not_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("stale auto-title update must not publish rename")
+
+    monkeypatch.setattr(auto_title, "SessionLocal", lambda: next(sessions))
+    monkeypatch.setattr(auto_title, "_build_summary", fake_build_summary)
+    monkeypatch.setattr(auto_title, "_call_upstream", fake_call)
+    monkeypatch.setattr(auto_title, "publish_event", must_not_publish)
+
+    await auto_title.auto_title_conversation({"redis": object()}, "conv-1")
+
+    assert len(statements) == 1
+    sql = str(statements[0])
+    assert "UPDATE conversations" in sql
+    assert "conversations.title IS NULL" in sql
+
+
 # --- _call_upstream 失败日志包含尝试列表 ------------------------------------
 
 
@@ -530,9 +585,7 @@ async def test_call_upstream_logs_attempted_providers_on_total_failure(
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
 
-    async def boom(
-        _input: list[dict[str, Any]], *, base_url: str, api_key: str
-    ) -> str:
+    async def boom(_input: list[dict[str, Any]], *, base_url: str, api_key: str) -> str:
         raise auto_title.UpstreamError(
             "down", error_code="server_error", status_code=503
         )

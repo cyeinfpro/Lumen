@@ -61,7 +61,7 @@ function pressableVisualState(
       opacity: "var(--op-press)",
     };
   }
-  return { scale: 1, opacity: 1 };
+  return { scale: 1, opacity: undefined };
 }
 
 function pressableHitClasses(
@@ -199,11 +199,18 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
     opacity,
   } as React.CSSProperties;
 
-  const mergedStyle = (style?: React.CSSProperties): React.CSSProperties => ({
-    ...style,
-    transform: [style?.transform, pressStyle.transform].filter(Boolean).join(" "),
-    opacity: pressStyle.opacity,
-  });
+  const mergedStyle = (style?: React.CSSProperties): React.CSSProperties => {
+    const nextStyle: React.CSSProperties = {
+      ...style,
+      transform: [style?.transform, pressStyle.transform]
+        .filter(Boolean)
+        .join(" "),
+    };
+    if (pressStyle.opacity !== undefined) {
+      nextStyle.opacity = pressStyle.opacity;
+    }
+    return nextStyle;
+  };
 
   if (as === "a") {
     const {

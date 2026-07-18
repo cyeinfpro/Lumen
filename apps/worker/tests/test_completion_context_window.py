@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -13,9 +14,11 @@ os.environ.setdefault(
 )
 
 from app.tasks import completion
+from app.tasks.completion_parts import tool_images
 from lumen_core.constants import Role
 from lumen_core.context_window import SUMMARY_KIND, SUMMARY_VERSION
 from lumen_core.models import Conversation, Message
+from lumen_core.pricing import UsageTokens
 
 
 class _Result:
@@ -179,7 +182,9 @@ async def test_context_window_truncates_by_token_budget_from_oldest_side(
             return 0
         return default
 
-    monkeypatch.setattr(completion.runtime_settings, "resolve_int", _disable_compression)
+    monkeypatch.setattr(
+        completion.runtime_settings, "resolve_int", _disable_compression
+    )
     # Keep token counting deterministic across tiktoken cold/warm CI runs.
     monkeypatch.setattr(completion, "count_tokens", lambda text: len(text or "") // 2)
     monkeypatch.setattr(completion, "estimate_system_prompt_tokens", lambda _prompt: 0)
@@ -237,8 +242,318 @@ async def test_compression_injects_sticky_and_existing_summary(
     assert "[EARLIER_CONTEXT_SUMMARY]" in joined
     assert "compressed old facts" in joined
     assert "current question" in joined
-    assert completion.compose_summary_guardrail() in joined
+    assert "system prompt" not in joined
+    instructions = completion._instructions_with_summary_guardrail(
+        "system prompt",
+        enabled=True,
+    )
+    assert completion.compose_summary_guardrail() in instructions
     assert "old detail " not in joined
+
+
+@pytest.mark.asyncio
+async def test_custom_system_prompt_is_sent_once_and_estimated_once() -> None:
+    prompt = "custom system prompt"
+    summary_text = "compressed facts"
+    packed = completion.PackedContext(
+        input_list=[],
+        estimated_tokens=0,
+        summary_used=True,
+        summary_created=False,
+        summary_up_to_message_id="msg-001",
+        sticky_used=False,
+        included_messages_count=0,
+        truncated_without_summary=False,
+        fallback_reason=None,
+        summary_tokens=completion.count_tokens(summary_text),
+        _system_prompt=prompt,
+        _summary_text=summary_text,
+    )
+
+    input_list = await completion._build_input_from_packed_context(object(), packed)
+    instructions = completion._instructions_with_summary_guardrail(prompt, enabled=True)
+    body = {"input": input_list, "instructions": instructions}
+
+    assert str(body).count(prompt) == 1
+    assert all(item.get("role") != "system" for item in input_list)
+    assert completion._estimate_system_prompt_tokens_once(instructions) == (
+        completion.estimate_system_prompt_tokens(instructions)
+        - completion.estimate_text_tokens(instructions)
+    )
+
+
+def test_fallback_usage_estimate_counts_top_level_instructions_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    input_list = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "short request"}],
+        }
+    ]
+    instructions = "Follow this billing-sensitive instruction. " * 200
+
+    input_only_tokens, _ = completion._fallback_completion_usage_tokens(
+        input_list,
+        "",
+        tokens_in=0,
+        tokens_out=0,
+    )
+    request_tokens, _ = completion._fallback_completion_usage_tokens(
+        input_list,
+        "",
+        instructions=instructions,
+        tokens_in=0,
+        tokens_out=0,
+    )
+
+    legacy_payload = json.dumps(input_list, ensure_ascii=False)
+    request_payload = json.dumps(
+        {
+            "input": input_list,
+            "instructions": instructions,
+        },
+        ensure_ascii=False,
+    )
+    assert input_only_tokens == len(legacy_payload)
+    assert request_tokens == len(request_payload)
+    assert request_tokens - input_only_tokens == len(request_payload) - len(
+        legacy_payload
+    )
+
+
+def _finish_usage_round(
+    accumulator: tool_images._CompletionUsageAccumulator,
+    *,
+    input_floor: int,
+    raw_usage: dict[str, Any] | None,
+    usage: UsageTokens | None = None,
+    output_text: str = "",
+    reasoning_text: str = "",
+    tool_tokens_before: int = 0,
+    tool_tokens_after: int = 0,
+) -> None:
+    accumulator.start_round(
+        input_fallback_tokens=input_floor,
+        tool_output_tokens=tool_tokens_before,
+    )
+    accumulator.record_usage(
+        usage or UsageTokens(0, 0),
+        raw_usage=raw_usage,
+    )
+    accumulator.finish_round(
+        output_text=output_text,
+        reasoning_text=reasoning_text,
+        tool_output_tokens=tool_tokens_after,
+    )
+
+
+def _tool_limit_input_floors() -> tuple[int, int]:
+    body = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "research this"}],
+            }
+        ],
+        "instructions": "Use tools only when needed.",
+        "tools": [{"type": "web_search"}],
+    }
+    fallback_body = completion._tool_limited_completion_body(body)
+    return (
+        tool_images._estimate_completion_request_input_tokens(
+            body["input"],
+            instructions=body["instructions"],
+        ),
+        tool_images._estimate_completion_request_input_tokens(
+            fallback_body["input"],
+            instructions=fallback_body["instructions"],
+        ),
+    )
+
+
+def test_tool_limit_usage_fills_missing_first_round_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    first_floor, second_floor = _tool_limit_input_floors()
+    usage = tool_images._CompletionUsageAccumulator()
+
+    _finish_usage_round(
+        usage,
+        input_floor=first_floor,
+        raw_usage={},
+        output_text="first",
+        reasoning_text="think",
+        tool_tokens_before=2,
+        tool_tokens_after=7,
+    )
+    _finish_usage_round(
+        usage,
+        input_floor=second_floor,
+        raw_usage={
+            "input_tokens": 37,
+            "output_tokens": 11,
+            "output_tokens_details": {"reasoning_tokens": 3},
+        },
+        usage=UsageTokens(
+            input_tokens=37,
+            output_tokens=11,
+            cache_read_tokens=5,
+            reasoning_tokens=3,
+        ),
+        output_text="reported-second",
+        reasoning_text="reported-reasoning",
+        tool_tokens_before=7,
+        tool_tokens_after=20,
+    )
+
+    assert usage.tokens_in == first_floor + 37
+    assert usage.tokens_out == len("first") + len("think") + 5 + 11
+    assert usage.cache_read_tokens == 5
+    assert usage.reasoning_tokens == len("think") + 3
+
+
+def test_tool_limit_usage_fills_missing_second_round_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    first_floor, second_floor = _tool_limit_input_floors()
+    usage = tool_images._CompletionUsageAccumulator()
+
+    _finish_usage_round(
+        usage,
+        input_floor=first_floor,
+        raw_usage={
+            "input_tokens": 29,
+            "output_tokens": 7,
+            "reasoning_tokens": 2,
+        },
+        usage=UsageTokens(
+            input_tokens=29,
+            output_tokens=7,
+            reasoning_tokens=2,
+        ),
+        output_text="reported-first",
+        reasoning_text="reported-thinking",
+    )
+    _finish_usage_round(
+        usage,
+        input_floor=second_floor,
+        raw_usage={},
+        output_text="second",
+    )
+
+    assert usage.tokens_in == 29 + second_floor
+    assert usage.tokens_out == 7 + len("second")
+    assert usage.reasoning_tokens == 2
+
+
+def test_tool_limit_usage_fills_both_rounds_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    first_floor, second_floor = _tool_limit_input_floors()
+    usage = tool_images._CompletionUsageAccumulator()
+
+    _finish_usage_round(
+        usage,
+        input_floor=first_floor,
+        raw_usage={},
+        output_text="first",
+    )
+    _finish_usage_round(
+        usage,
+        input_floor=second_floor,
+        raw_usage=None,
+        output_text="second",
+    )
+
+    assert usage.tokens_in == first_floor + second_floor
+    assert usage.tokens_out == len("first") + len("second")
+    assert second_floor > first_floor
+
+
+@pytest.mark.parametrize(
+    (
+        "first_raw",
+        "first_usage",
+        "second_raw",
+        "second_usage",
+        "expected_input",
+        "expected_output",
+    ),
+    [
+        (
+            {"input_tokens": 4},
+            UsageTokens(4, 0),
+            {"output_tokens": 6},
+            UsageTokens(0, 6),
+            4 + 202,
+            len("first") + 6,
+        ),
+        (
+            {"output_tokens": 6},
+            UsageTokens(0, 6),
+            {"input_tokens": 4},
+            UsageTokens(4, 0),
+            101 + 4,
+            6 + len("second"),
+        ),
+    ],
+)
+def test_partial_usage_fields_fallback_per_round_in_both_orders(
+    monkeypatch: pytest.MonkeyPatch,
+    first_raw: dict[str, Any],
+    first_usage: UsageTokens,
+    second_raw: dict[str, Any],
+    second_usage: UsageTokens,
+    expected_input: int,
+    expected_output: int,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    usage = tool_images._CompletionUsageAccumulator()
+    _finish_usage_round(
+        usage,
+        input_floor=101,
+        raw_usage=first_raw,
+        usage=first_usage,
+        output_text="first",
+    )
+    _finish_usage_round(
+        usage,
+        input_floor=202,
+        raw_usage=second_raw,
+        usage=second_usage,
+        output_text="second",
+    )
+
+    assert usage.tokens_in == expected_input
+    assert usage.tokens_out == expected_output
+
+
+def test_explicit_zero_usage_fields_do_not_trigger_same_dimension_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_images, "count_tokens", len)
+    usage = tool_images._CompletionUsageAccumulator()
+
+    _finish_usage_round(
+        usage,
+        input_floor=101,
+        raw_usage={
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+        output_text="visible",
+        reasoning_text="thought",
+    )
+
+    assert usage.tokens_in == 0
+    assert usage.tokens_out == 0
+    assert usage.reasoning_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -286,9 +601,7 @@ async def test_manual_summary_is_used_even_below_auto_trigger(
 
     assert packed.summary_used is True
     assert packed.summary_up_to_message_id == old_u.id
-    texts = _texts(
-        await completion._build_input_from_packed_context(session, packed)
-    )
+    texts = _texts(await completion._build_input_from_packed_context(session, packed))
     joined = "\n".join(texts)
     assert "compressed old facts" in joined
     assert "recent question" in joined
@@ -372,7 +685,9 @@ async def test_summary_service_keeps_commit_ownership_after_extraction(
             assert row is conversation
 
         async def commit(self) -> None:
-            raise AssertionError("completion context loader must not own summary commit")
+            raise AssertionError(
+                "completion context loader must not own summary commit"
+            )
 
     class SummaryService:
         @staticmethod

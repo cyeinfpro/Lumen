@@ -1,6 +1,62 @@
 import pytest
 
 
+def test_wallet_out_defaults_byok_activity_to_zero() -> None:
+    from lumen_core.schemas import WalletOut
+
+    wallet = WalletOut(mode="byok", balance=None, hold=None)
+
+    assert wallet.activity_24h.topup.micro == 0
+    assert wallet.activity_24h.topup.rmb == "0"
+    assert wallet.activity_24h.spend.micro == 0
+    assert wallet.activity_24h.spend.rmb == "0"
+
+
+def test_signup_password_requires_eight_characters() -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import SignupIn
+
+    valid = SignupIn(email="user@example.com", password="12345678")
+
+    assert valid.password == "12345678"
+    with pytest.raises(ValidationError):
+        SignupIn(email="user@example.com", password="1234567")
+
+
+def test_message_out_strips_reserved_internal_content_but_keeps_memory_writes() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from lumen_core.schemas import MessageOut, public_message_content
+
+    content = {
+        "text": "public",
+        "memory_writes": [{"kind": "added", "id": "memory-1"}],
+        "_memory_extraction": {"owner": "internal-owner", "fence": 9},
+        "_future_internal": {"secret": True},
+    }
+    projected = public_message_content(content)
+    message = MessageOut.model_validate(
+        SimpleNamespace(
+            id="message-1",
+            conversation_id="conversation-1",
+            role="assistant",
+            content=content,
+            intent="chat",
+            status="succeeded",
+            parent_message_id="source-1",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    assert projected == message.content
+    assert message.content["text"] == "public"
+    assert message.content["memory_writes"] == [{"kind": "added", "id": "memory-1"}]
+    assert "_memory_extraction" not in message.content
+    assert "_future_internal" not in message.content
+
+
 def test_provider_stats_schemas_are_exported():
     namespace: dict[str, object] = {}
     exec("from lumen_core.schemas import *", namespace)

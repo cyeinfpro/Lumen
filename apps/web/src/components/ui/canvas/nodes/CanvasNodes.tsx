@@ -26,6 +26,10 @@ import {
   videoBinaryUrl,
 } from "@/lib/apiClient";
 import {
+  CANVAS_NOTE_MAX_CHARS,
+  normalizeCanvasNodeTitle,
+} from "@/lib/canvas/constants";
+import {
   CANVAS_NODE_SPECS,
   findMatchingCanvasNodeCatalogItem,
   isCanvasExecutableNodeType,
@@ -363,13 +367,11 @@ function InlineNodeTitle({
       cancelBlurRef.current = false;
       return;
     }
-    const title = draft.trim().slice(0, 80);
-    if (!title) {
-      setDraft(definition.title);
-      return;
-    }
+    const title = normalizeCanvasNodeTitle(draft, definition.title);
     setDraft(title);
-    data.onUpdateTitle?.(definition.id, title);
+    if (title !== definition.title) {
+      data.onUpdateTitle?.(definition.id, title);
+    }
   };
 
   useEffect(() => {
@@ -765,7 +767,7 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
       data-canvas-inline-editor
       readOnly={editingDisabled}
       tabIndex={editingDisabled ? -1 : undefined}
-      maxLength={isPrompt ? MAX_PROMPT_CHARS : 2000}
+      maxLength={isPrompt ? MAX_PROMPT_CHARS : CANVAS_NOTE_MAX_CHARS}
       aria-label={
         locked
           ? "提示词内容已锁定"

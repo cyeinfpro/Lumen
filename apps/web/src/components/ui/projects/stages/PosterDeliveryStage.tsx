@@ -7,6 +7,7 @@ import { Check, Copy, Download, FolderPlus } from "lucide-react";
 import Image from "next/image";
 import { useState } from "react";
 
+import { useUserQueryScope } from "@/components/QueryProvider";
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
@@ -43,6 +44,8 @@ const ASPECT_TO_CLASS: Record<string, string> = {
 };
 
 export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
+  const userScope = useUserQueryScope();
+  const userKeys = qk.user(userScope.userId);
   const renders = (workflow.poster_renders ?? []).filter(
     (render) => render.image_id,
   );
@@ -65,10 +68,10 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
           source_step_key: "delivery",
           label: "海报交付",
         }),
-      }),
+    }),
     onSuccess: (data) => {
-      queryClient.setQueryData(qk.workflow(workflow.id), data);
-      queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      queryClient.setQueryData(userKeys.workflow(workflow.id), data);
+      queryClient.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       toast.success("海报成品已加入项目素材");
     },
     onError: (error) => {

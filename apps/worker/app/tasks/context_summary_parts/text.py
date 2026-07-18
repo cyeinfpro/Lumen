@@ -193,7 +193,28 @@ def message_to_summary_line(
     return "\n".join(parts)
 
 
-def local_fallback_summary_text(
+def _select_fallback_source_prefix(
+    lines: Sequence[str],
+    *,
+    source_budget: int,
+    truncate_fn: Callable[[str, int], str],
+) -> list[str]:
+    selected: list[str] = []
+    used = 0
+    for line in lines:
+        remaining = source_budget - used - 2
+        if remaining < 200:
+            break
+        item = truncate_fn(line, min(1200, remaining))
+        cost = len(item) + 2
+        if used + cost > source_budget:
+            break
+        selected.append(item)
+        used += cost
+    return selected
+
+
+def build_local_fallback_summary(
     *,
     previous_summary: str | None,
     messages: Sequence[Message],
@@ -202,14 +223,17 @@ def local_fallback_summary_text(
     image_captions: Mapping[str, str] | None,
     message_to_line: Callable[..., str],
     truncate_fn: Callable[[str, int], str],
-) -> str | None:
+) -> tuple[str | None, int]:
     lines = [
         message_to_line(message, image_captions=image_captions) for message in messages
     ]
     if not lines and not previous_summary:
-        return None
+        return None, 0
 
-    budget_chars = max(2000, target_tokens * 4)
+    budget_chars = min(
+        max(2000, target_tokens * 4),
+        max(1000, int(target_tokens * 1.5 * 4)),
+    )
     parts: list[str] = [
         "## Earlier Context Summary",
         "### Local Fallback",
@@ -225,41 +249,47 @@ def local_fallback_summary_text(
     if extra_instruction and extra_instruction.strip():
         parts.extend(["### Additional Hints From User", extra_instruction.strip()])
 
-    source_budget = max(1000, budget_chars - sum(len(part) for part in parts) - 400)
-    selected: list[str] = []
-    used = 0
-    prefix_count = min(6, len(lines))
-    for line in lines[:prefix_count]:
-        item = truncate_fn(line, 1200)
-        cost = len(item) + 2
-        if used + cost > source_budget:
-            break
-        selected.append(item)
-        used += cost
+    source_budget = max(0, budget_chars - sum(len(part) for part in parts) - 400)
+    selected = _select_fallback_source_prefix(
+        lines,
+        source_budget=source_budget,
+        truncate_fn=truncate_fn,
+    )
 
-    remaining_budget = source_budget - used
-    suffix: list[str] = []
-    for line in reversed(lines[prefix_count:]):
-        item = truncate_fn(line, 1200)
-        cost = len(item) + 2
-        if suffix and used + cost > source_budget:
-            break
-        if not suffix and cost > remaining_budget:
-            item = truncate_fn(item, max(200, remaining_budget))
-            cost = len(item) + 2
-        if used + cost > source_budget:
-            break
-        suffix.append(item)
-        used += cost
-    suffix.reverse()
+    def render() -> str:
+        source_parts = ["### Source Messages"]
+        omitted = max(0, len(lines) - len(selected))
+        if omitted > 0:
+            source_parts.append(
+                f"[{omitted} later source messages deferred by local fallback budget]"
+            )
+        source_parts.extend(selected)
+        return "\n\n".join(part for part in [*parts, *source_parts] if part)
 
-    omitted = max(0, len(lines) - len(selected) - len(suffix))
-    parts.append("### Source Messages")
-    if omitted > 0:
-        parts.append(
-            f"[{omitted} older source messages omitted by local fallback budget]"
-        )
-    parts.extend(selected)
-    parts.extend(suffix)
-    text = "\n\n".join(part for part in parts if part)
-    return truncate_fn(text, budget_chars)
+    text = render()
+    while selected and len(text) > budget_chars:
+        selected.pop()
+        text = render()
+    return truncate_fn(text, budget_chars), len(selected)
+
+
+def local_fallback_summary_text(
+    *,
+    previous_summary: str | None,
+    messages: Sequence[Message],
+    target_tokens: int,
+    extra_instruction: str | None,
+    image_captions: Mapping[str, str] | None,
+    message_to_line: Callable[..., str],
+    truncate_fn: Callable[[str, int], str],
+) -> str | None:
+    text, _covered_message_count = build_local_fallback_summary(
+        previous_summary=previous_summary,
+        messages=messages,
+        target_tokens=target_tokens,
+        extra_instruction=extra_instruction,
+        image_captions=image_captions,
+        message_to_line=message_to_line,
+        truncate_fn=truncate_fn,
+    )
+    return text

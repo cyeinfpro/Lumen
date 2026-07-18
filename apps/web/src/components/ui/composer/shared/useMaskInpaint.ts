@@ -97,6 +97,7 @@ export function useMaskInpaint() {
         // 把 mask 当成普通图片上传（mask 是 PNG，service 已支持）
         const file = new File([m.blob], "mask.png", { type: "image/png" });
         const uploaded = await apiUploadImage(file, { signal: ctl.signal });
+        if (uploadControllerRef.current !== ctl) return;
         setMask({
           image_id: uploaded.id,
           preview_data_url: m.preview_data_url,
@@ -105,13 +106,15 @@ export function useMaskInpaint() {
         pushMobileToast("已设置局部修改 mask", "success");
         setOpen(false);
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (isAbortError(err) || uploadControllerRef.current !== ctl) return;
         logError(err, { scope: "composer", code: "mask_upload_failed" });
         const msg = err instanceof Error ? err.message : "mask 上传失败";
         pushMobileToast(msg, "danger");
       } finally {
-        if (uploadControllerRef.current === ctl) uploadControllerRef.current = null;
-        setSubmitting(false);
+        if (uploadControllerRef.current === ctl) {
+          uploadControllerRef.current = null;
+          setSubmitting(false);
+        }
       }
     },
     [setMask],

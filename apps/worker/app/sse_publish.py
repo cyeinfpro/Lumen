@@ -12,11 +12,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
 import uuid
 from typing import Any
+
+from redis.exceptions import WatchError
 
 from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
@@ -30,21 +33,29 @@ logger = logging.getLogger(__name__)
 # 24h 粗略上限——redis 的 MAXLEN ~ 是近似修剪
 _EVENTS_DLQ_MAXLEN = 1000
 _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
+_DEDUPE_RESERVATION_PREFIX = "pending:"
 _DEDUPE_RESERVATION_PENDING_ERROR = "sse dedupe reservation has no stream id"
+_STREAM_TTL_NOT_ESTABLISHED_ERROR = "sse stream ttl was not established"
 _DEDUPE_RESERVATION_WAIT_SECONDS = 0.25
 _DEDUPE_RESERVATION_POLL_SECONDS = 0.025
 _DEDUPE_RESERVATION_STALE_SECONDS = 2.0
 _DEDUPE_RECOVERY_SCAN_COUNT = 100
+_TRANSACTION_RETRIES = 3
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
 _XADD_IDEMPOTENT_LUA = """
 local existing = redis.call('GET', KEYS[2])
-if existing and existing ~= '' then
+local function is_reservation(value)
+  return value == '' or string.sub(value, 1, string.len(ARGV[7])) == ARGV[7]
+end
+if existing and not is_reservation(existing) then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
   return existing
 end
-local reserved = redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))
+local reserved = redis.call('SET', KEYS[2], ARGV[8], 'NX', 'EX', tonumber(ARGV[5]))
 if not reserved then
   existing = redis.call('GET', KEYS[2])
-  if existing and existing ~= '' then
+  if existing and not is_reservation(existing) then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
     return existing
   end
   return redis.error_reply('sse dedupe reservation has no stream id')
@@ -63,9 +74,37 @@ local stream_id = redis.call(
   'event_id',
   ARGV[1]
 )
+local ttl_set = redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+if ttl_set ~= 1 then
+  redis.call('XDEL', KEYS[1], stream_id)
+  redis.call('DEL', KEYS[2])
+  return redis.error_reply('sse stream ttl was not established')
+end
 redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
 return stream_id
 """
+
+
+class SSEPublishRetryableError(RuntimeError):
+    """The event has no durable replay-stream entry and must be retried."""
+
+    def __init__(
+        self,
+        *,
+        stream_key: str,
+        event_id: str,
+        diagnostic_dlq_persisted: bool,
+    ) -> None:
+        self.stream_key = stream_key
+        self.event_id = event_id
+        self.diagnostic_dlq_persisted = diagnostic_dlq_persisted
+        dlq_status = "recorded" if diagnostic_dlq_persisted else "failed"
+        super().__init__(
+            "publish_event: durable replay stream unavailable "
+            f"for {stream_key} event_id={event_id}; caller must retry "
+            f"(diagnostic_dlq={dlq_status})"
+        )
+
 
 # GEN-P2 ts_ms 单调：仅保证当前 worker 进程内 last value。多 API/worker
 # 进程间不可比较；前端需要用 Redis stream id 做 replay cursor / 严格排序，
@@ -125,9 +164,8 @@ def _decode_redis_value(value: Any) -> str:
 def _has_stream_id(value: Any) -> bool:
     if value is None:
         return False
-    if isinstance(value, bytes):
-        return value != b""
-    return str(value) != ""
+    decoded = _decode_redis_value(value)
+    return decoded != "" and not decoded.startswith(_DEDUPE_RESERVATION_PREFIX)
 
 
 def _is_dedupe_reservation_pending(exc: Exception) -> bool:
@@ -136,16 +174,11 @@ def _is_dedupe_reservation_pending(exc: Exception) -> bool:
 
 def _is_lua_xadd_unsupported(exc: Exception) -> bool:
     message = str(exc).lower()
-    return (
-        "unknown redis command called from script" in message
-        or (
-            "xadd" in message
-            and "script" in message
-            and (
-                "unknown" in message
-                or "unsupported" in message
-                or "not allowed" in message
-            )
+    return "unknown redis command called from script" in message or (
+        "xadd" in message
+        and "script" in message
+        and (
+            "unknown" in message or "unsupported" in message or "not allowed" in message
         )
     )
 
@@ -162,11 +195,18 @@ def _is_stream_command_unsupported(exc: Exception) -> bool:
 
 
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
+    existing = await _read_dedupe_value(redis, dedupe_key)
+    if not _has_stream_id(existing):
+        return None
+    return existing
+
+
+async def _read_dedupe_value(redis: Any, dedupe_key: str) -> str | None:
     get_fn = getattr(redis, "get", None)
     if not callable(get_fn):
         return None
     existing = await get_fn(dedupe_key)
-    if not _has_stream_id(existing):
+    if existing is None:
         return None
     return _decode_redis_value(existing)
 
@@ -285,32 +325,111 @@ async def _wait_for_dedupe_stream_id(
         await asyncio.sleep(min(_DEDUPE_RESERVATION_POLL_SECONDS, remaining))
 
 
-async def _reserve_dedupe_key(redis: Any, dedupe_key: str) -> bool:
+async def _reserve_dedupe_key(
+    redis: Any,
+    dedupe_key: str,
+    owner_token: str,
+) -> bool:
     set_fn = getattr(redis, "set", None)
     if not callable(set_fn):
-        return True
+        return False
     return bool(
         await set_fn(
             dedupe_key,
-            "",
+            owner_token,
             nx=True,
             ex=_EVENTS_DEDUPE_TTL_SECONDS,
         )
     )
 
 
+async def _reset_pipeline(pipe: Any) -> None:
+    reset_fn = getattr(pipe, "reset", None)
+    if not callable(reset_fn):
+        return
+    result = reset_fn()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _transaction_pipeline(redis: Any) -> Any:
+    pipeline_fn = getattr(redis, "pipeline", None)
+    if not callable(pipeline_fn):
+        raise RuntimeError(
+            "redis transactional pipeline required when Lua XADD is unavailable"
+        )
+    return pipeline_fn(transaction=True)
+
+
+async def _compare_delete_reservation(
+    redis: Any,
+    *,
+    dedupe_key: str,
+    owner_token: str,
+) -> bool:
+    """Delete a stale reservation only while its exact owner token is unchanged."""
+    for _attempt in range(_TRANSACTION_RETRIES):
+        pipe: Any | None = None
+        try:
+            pipe = _transaction_pipeline(redis)
+            await pipe.watch(dedupe_key)
+            current = await pipe.get(dedupe_key)
+            if current is None or _decode_redis_value(current) != owner_token:
+                return False
+            pipe.multi()
+            pipe.delete(dedupe_key)
+            results = await pipe.execute()
+            return bool(results and results[0])
+        except WatchError:
+            continue
+        finally:
+            if pipe is not None:
+                await _reset_pipeline(pipe)
+    return False
+
+
 async def _store_dedupe_stream_id(
-    redis: Any, *, dedupe_key: str, stream_id: str
-) -> None:
+    redis: Any,
+    *,
+    dedupe_key: str,
+    stream_id: str,
+    owner_token: str | None = None,
+) -> bool:
     set_fn = getattr(redis, "set", None)
     if not callable(set_fn):
-        return
+        return False
+    if owner_token is not None:
+        for _attempt in range(_TRANSACTION_RETRIES):
+            pipe: Any | None = None
+            try:
+                pipe = _transaction_pipeline(redis)
+                await pipe.watch(dedupe_key)
+                current = await pipe.get(dedupe_key)
+                if current is None or _decode_redis_value(current) != owner_token:
+                    return False
+                pipe.multi()
+                pipe.set(
+                    dedupe_key,
+                    stream_id,
+                    xx=True,
+                    ex=_EVENTS_DEDUPE_TTL_SECONDS,
+                )
+                results = await pipe.execute()
+                return bool(results and results[0])
+            except WatchError:
+                continue
+            finally:
+                if pipe is not None:
+                    await _reset_pipeline(pipe)
+        return False
     try:
-        await set_fn(
-            dedupe_key,
-            stream_id,
-            xx=True,
-            ex=_EVENTS_DEDUPE_TTL_SECONDS,
+        return bool(
+            await set_fn(
+                dedupe_key,
+                stream_id,
+                xx=True,
+                ex=_EVENTS_DEDUPE_TTL_SECONDS,
+            )
         )
     except TypeError:
         await set_fn(dedupe_key, stream_id)
@@ -324,6 +443,47 @@ async def _store_dedupe_stream_id(
                     dedupe_key,
                     exc,
                 )
+        return True
+
+
+async def _xadd_with_transactional_ttl(
+    redis: Any,
+    *,
+    stream_key: str,
+    dedupe_key: str,
+    owner_token: str,
+    event_name: str,
+    event_id: str,
+    payload_json: str,
+) -> str:
+    pipe: Any | None = None
+    try:
+        pipe = _transaction_pipeline(redis)
+        await pipe.watch(dedupe_key)
+        current = await pipe.get(dedupe_key)
+        if current is None or _decode_redis_value(current) != owner_token:
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
+        pipe.multi()
+        pipe.xadd(
+            stream_key,
+            {
+                "event": event_name,
+                "data": payload_json,
+                "event_id": event_id,
+            },
+            maxlen=EVENTS_STREAM_MAXLEN,
+            approximate=True,
+        )
+        pipe.expire(stream_key, EVENTS_STREAM_TTL_SECONDS)
+        results = await pipe.execute()
+    except WatchError as exc:
+        raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR) from exc
+    finally:
+        if pipe is not None:
+            await _reset_pipeline(pipe)
+    if not results or len(results) < 2 or not results[1]:
+        raise RuntimeError(_STREAM_TTL_NOT_ESTABLISHED_ERROR)
+    return _decode_redis_value(results[0])
 
 
 async def _xadd_event_without_lua(
@@ -334,13 +494,21 @@ async def _xadd_event_without_lua(
     event_id: str,
     payload_json: str,
     reclaim_empty_reservation: bool = False,
+    reservation_token: str | None = None,
 ) -> str:
     dedupe_key = f"{stream_key}:dedupe:{event_id}"
-    existing = await _read_dedupe_stream_id(redis, dedupe_key)
-    if existing is not None:
-        return existing
+    owner_token = reservation_token or (
+        f"{_DEDUPE_RESERVATION_PREFIX}{uuid.uuid4().hex}"
+    )
+    current = await _read_dedupe_value(redis, dedupe_key)
+    if _has_stream_id(current):
+        return current or ""
 
-    reserved = await _reserve_dedupe_key(redis, dedupe_key)
+    reserved = current == owner_token or await _reserve_dedupe_key(
+        redis,
+        dedupe_key,
+        owner_token,
+    )
     if not reserved:
         existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
         if existing is not None:
@@ -357,36 +525,51 @@ async def _xadd_event_without_lua(
             raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
         if not await _reservation_stale_enough_to_reclaim(redis, dedupe_key):
             raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        delete_fn = getattr(redis, "delete", None)
-        if callable(delete_fn):
-            await delete_fn(dedupe_key)
-            reserved = await _reserve_dedupe_key(redis, dedupe_key)
+        stale_owner = await _read_dedupe_value(redis, dedupe_key)
+        if stale_owner is None or _has_stream_id(stale_owner):
+            existing = await _read_dedupe_stream_id(redis, dedupe_key)
+            if existing is not None:
+                return existing
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
+        if not await _compare_delete_reservation(
+            redis,
+            dedupe_key=dedupe_key,
+            owner_token=stale_owner,
+        ):
+            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
+        reserved = await _reserve_dedupe_key(redis, dedupe_key, owner_token)
         if not reserved:
             existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
             if existing is not None:
                 return existing
             raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-
-    try:
-        stream_id = await redis.xadd(
-            stream_key,
-            {
-                "event": event_name,
-                "data": payload_json,
-                "event_id": event_id,
-            },
-            maxlen=EVENTS_STREAM_MAXLEN,
-            approximate=True,
+        # The previous owner may have completed XADD immediately before its token
+        # was compare-deleted. Re-scan after takeover before issuing another XADD.
+        recovered = await _recover_dedupe_stream_id(
+            redis,
+            stream_key=stream_key,
+            dedupe_key=dedupe_key,
+            event_id=event_id,
         )
-    except Exception as exc:  # noqa: BLE001
-        if _is_stream_command_unsupported(exc):
-            raise RuntimeError(
-                "redis stream xadd unsupported; cannot create recoverable sse id"
-            ) from exc
-        raise
-    decoded = _decode_redis_value(stream_id)
-    await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
-    return decoded
+        if recovered is not None:
+            return recovered
+
+    stream_id = await _xadd_with_transactional_ttl(
+        redis,
+        stream_key=stream_key,
+        dedupe_key=dedupe_key,
+        owner_token=owner_token,
+        event_name=event_name,
+        event_id=event_id,
+        payload_json=payload_json,
+    )
+    await _store_dedupe_stream_id(
+        redis,
+        dedupe_key=dedupe_key,
+        stream_id=stream_id,
+        owner_token=owner_token,
+    )
+    return stream_id
 
 
 async def _xadd_event_once(
@@ -398,6 +581,7 @@ async def _xadd_event_once(
     payload_json: str,
 ) -> str:
     event_id = str(envelope["event_id"])
+    reservation_token = f"{_DEDUPE_RESERVATION_PREFIX}{uuid.uuid4().hex}"
     eval_fn = getattr(redis, "eval", None)
     if not callable(eval_fn):
         return await _xadd_event_without_lua(
@@ -406,6 +590,7 @@ async def _xadd_event_once(
             event_name=event_name,
             event_id=event_id,
             payload_json=payload_json,
+            reservation_token=reservation_token,
         )
     try:
         stream_id = await eval_fn(
@@ -418,6 +603,9 @@ async def _xadd_event_once(
             payload_json,
             str(EVENTS_STREAM_MAXLEN),
             str(_EVENTS_DEDUPE_TTL_SECONDS),
+            str(EVENTS_STREAM_TTL_SECONDS),
+            _DEDUPE_RESERVATION_PREFIX,
+            reservation_token,
         )
     except Exception as exc:  # noqa: BLE001
         if _is_dedupe_reservation_pending(exc):
@@ -445,6 +633,7 @@ async def _xadd_event_once(
             event_id=event_id,
             payload_json=payload_json,
             reclaim_empty_reservation=True,
+            reservation_token=reservation_token,
         )
     if isinstance(stream_id, bytes):
         return stream_id.decode("ascii", errors="replace")
@@ -466,10 +655,15 @@ async def publish_event(
         channel: PubSub 通道名——使用 `task_channel(id)` 或 `user_channel(uid)` 计算
         event_name: `lumen_core.constants.EV_*`
         data: 事件 payload（一定是 dict，不塞 None / bytes）
+
+    Raises:
+        SSEPublishRetryableError: durable replay stream 未返回事件 ID。诊断 DLQ
+            是否写入成功都不代表源事件已消费，调用方必须保留并重试源事件。
     """
     stream_key = f"{EVENTS_STREAM_PREFIX}{user_id}"
     envelope = await _envelope(event_name, channel, data)
     stream_id: str | None = None
+    last_xadd_error: Exception | None = None
 
     for attempt in range(3):
         payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
@@ -483,8 +677,12 @@ async def publish_event(
                 envelope=envelope,
                 payload_json=payload_json,
             )
+            if not _has_stream_id(stream_id):
+                raise RuntimeError("XADD returned no durable stream id")
             break
         except Exception as exc:  # noqa: BLE001
+            last_xadd_error = exc
+            stream_id = None
             logger.warning(
                 "publish_event: XADD failed key=%s attempt=%d err=%s",
                 stream_key,
@@ -494,10 +692,7 @@ async def publish_event(
             if attempt < len(_XADD_RETRY_DELAYS_SECONDS):
                 await asyncio.sleep(_XADD_RETRY_DELAYS_SECONDS[attempt])
 
-    if stream_id is not None:
-        await _refresh_stream_ttl(redis, stream_key)
-        envelope["sse_id"] = stream_id
-    else:
+    if stream_id is None:
         envelope["dlq_id"] = f"dlq-{envelope['ts_ms']}-{uuid.uuid4().hex[:12]}"
         envelope["recoverable"] = False
         redis_dlq_ok = False
@@ -528,8 +723,22 @@ async def publish_event(
             error_class="XADDFailed",
             error_message=f"all retries failed for stream {stream_key}",
         )
-        if not redis_dlq_ok and not pg_dlq_ok:
-            raise RuntimeError(f"publish_event: no durable sink for {stream_key}")
+        diagnostic_dlq_persisted = redis_dlq_ok or pg_dlq_ok
+        logger.error(
+            "publish_event: durable replay unavailable key=%s event_id=%s "
+            "diagnostic_dlq_persisted=%s",
+            stream_key,
+            envelope["event_id"],
+            diagnostic_dlq_persisted,
+        )
+        raise SSEPublishRetryableError(
+            stream_key=stream_key,
+            event_id=str(envelope["event_id"]),
+            diagnostic_dlq_persisted=diagnostic_dlq_persisted,
+        ) from last_xadd_error
+
+    await _refresh_stream_ttl(redis, stream_key)
+    envelope["sse_id"] = stream_id
 
     payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
 
@@ -564,9 +773,8 @@ async def _persist_sse_dlq(
 ) -> bool:
     """把彻底失败的 SSE 发布事件写入 PG outbox_dead_letter（独立事务）。
 
-    P3-9: insert 前用可恢复 sse_id（如有）和 ts_ms 做 dedupe。XADD 全部重试失败后
-    该路径可能被外层 publisher 重新触发（network jitter），不去重会导致 DLQ 重复
-    行膨胀，监控告警重复触发。dedupe 走 PG 一次 SELECT，命中则跳过。
+    XADD 全部重试失败后，该路径可能被外层 publisher 重新触发。仅使用发布方提供的
+    稳定身份 event_id + user_id + channel 去重，不能用 ts_ms 推断事件相同。
     """
     from sqlalchemy import select
 
@@ -574,20 +782,17 @@ async def _persist_sse_dlq(
 
     raw_envelope = payload.get("envelope")
     envelope = raw_envelope if isinstance(raw_envelope, dict) else {}
-    sse_id: str | None = None
-    ts_ms: int | None = None
-    raw_id = envelope.get("sse_id")
-    if isinstance(raw_id, str):
-        sse_id = raw_id
-    raw_ts = envelope.get("ts_ms")
-    if isinstance(raw_ts, int):
-        ts_ms = raw_ts
+    raw_event_id = envelope.get("event_id")
+    event_id = str(raw_event_id) if raw_event_id not in (None, "") else None
+    raw_user_id = payload.get("user_id")
+    user_id = str(raw_user_id) if raw_user_id not in (None, "") else None
+    raw_channel = payload.get("channel")
+    channel = str(raw_channel) if raw_channel not in (None, "") else None
 
     try:
         async with SessionLocal() as session, session.begin():
-            # 仅在能拿到稳定身份（sse_id / ts_ms）时做 dedupe 查；缺失则直接写
-            # 避免误丢弃。最多扫描近 200 行同类型 DLQ 找重复，避免大表全扫。
-            if sse_id is not None or ts_ms is not None:
+            # 缺少完整稳定身份时直接写，避免用时间戳或事件名误丢不同事件。
+            if event_id is not None and user_id is not None and channel is not None:
                 stmt = (
                     select(OutboxDeadLetter)
                     .where(
@@ -608,22 +813,21 @@ async def _persist_sse_dlq(
                     )
                     if not isinstance(row_env, dict):
                         continue
-                    if sse_id is not None and row_env.get("sse_id") == sse_id:
-                        duplicate = True
-                        break
                     if (
-                        ts_ms is not None
-                        and row_env.get("ts_ms") == ts_ms
-                        and row_env.get("event") == envelope.get("event")
+                        str(row_env.get("event_id")) == event_id
+                        and str(row_payload.get("user_id")) == user_id
+                        and str(row_payload.get("channel")) == channel
                     ):
                         duplicate = True
                         break
                 if duplicate:
                     logger.info(
-                        "publish_event: PG DLQ dedup hit event=%s sse_id=%s ts_ms=%s",
+                        "publish_event: PG DLQ dedup hit event=%s event_id=%s "
+                        "user_id=%s channel=%s",
                         event_name,
-                        sse_id,
-                        ts_ms,
+                        event_id,
+                        user_id,
+                        channel,
                     )
                     return True
 
@@ -644,4 +848,4 @@ async def _persist_sse_dlq(
         return False
 
 
-__all__ = ["publish_event"]
+__all__ = ["SSEPublishRetryableError", "publish_event"]

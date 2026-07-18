@@ -160,31 +160,57 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
         "await _g.worker_billing.release_generation(",
         cancel_update,
     )
-    cancel_commit = cancelled.index("await session.commit()", cancel_release)
+    cancel_stage = cancelled.index(
+        "failure_delivery = _g._stage_generation_event(",
+        cancel_release,
+    )
+    cancel_event = cancelled.index("_g.EV_GEN_FAILED", cancel_stage)
+    cancel_commit = cancelled.index("await session.commit()", cancel_event)
     cancel_flush = cancelled.index(
         "await _g.worker_billing.flush_balance_cache_refreshes(session)",
         cancel_commit,
     )
-    cancel_publish = cancelled.index("_g.EV_GEN_FAILED", cancel_flush)
-    assert cancel_update < cancel_release < cancel_commit < cancel_flush < cancel_publish
+    cancel_deliver = cancelled.index(
+        "await _g._deliver_generation_event(redis, failure_delivery)",
+        cancel_flush,
+    )
+    assert (
+        cancel_update
+        < cancel_release
+        < cancel_stage
+        < cancel_event
+        < cancel_commit
+        < cancel_flush
+        < cancel_deliver
+    )
 
     success_update = succeeded.index("_g._generation_attempt_update(")
     success_settle = succeeded.index(
         "await _g.worker_billing.settle_generation(",
         success_update,
     )
-    success_commit = succeeded.index("await session.commit()", success_settle)
+    success_stage = succeeded.index(
+        "success_delivery = _g._stage_generation_event(",
+        success_settle,
+    )
+    success_event = succeeded.index("_g.EV_GEN_SUCCEEDED", success_stage)
+    success_commit = succeeded.index("await session.commit()", success_event)
     success_flush = succeeded.index(
         "await _g.worker_billing.flush_balance_cache_refreshes(session)",
         success_commit,
     )
-    success_publish = succeeded.index("_g.EV_GEN_SUCCEEDED", success_flush)
+    success_deliver = succeeded.index(
+        "await _g._deliver_generation_event(redis, success_delivery)",
+        success_flush,
+    )
     assert (
         success_update
         < success_settle
+        < success_stage
+        < success_event
         < success_commit
         < success_flush
-        < success_publish
+        < success_deliver
     )
 
     cancel_source = inspect.getsource(lifecycle.finalize_running_generation_cancel)
@@ -193,18 +219,28 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
         "await _g.worker_billing.release_generation(",
         running_update,
     )
-    running_commit = cancel_source.index("await session.commit()", running_release)
+    running_stage = cancel_source.index(
+        "failure_delivery = _g._stage_generation_event(",
+        running_release,
+    )
+    running_event = cancel_source.index("_g.EV_GEN_FAILED", running_stage)
+    running_commit = cancel_source.index("await session.commit()", running_event)
     running_flush = cancel_source.index(
         "await _g.worker_billing.flush_balance_cache_refreshes(session)",
         running_commit,
     )
-    running_publish = cancel_source.index("_g.EV_GEN_FAILED", running_flush)
+    running_deliver = cancel_source.index(
+        "await _g._deliver_generation_event(redis, failure_delivery)",
+        running_flush,
+    )
     assert (
         running_update
         < running_release
+        < running_stage
+        < running_event
         < running_commit
         < running_flush
-        < running_publish
+        < running_deliver
     )
 
 
@@ -268,11 +304,18 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     source = inspect.getsource(persistence.handle_dual_race_bonus_image)
 
     settle = source.index("_g.worker_billing.settle_generation")
-    commit = source.index("await session.commit()", settle)
+    attached_stage = source.index(
+        "attached_delivery = _g._stage_generation_event", settle
+    )
+    attached = source.index("_g.EV_GEN_ATTACHED", attached_stage)
+    succeeded_stage = source.index(
+        "success_delivery = _g._stage_generation_event",
+        attached,
+    )
+    succeeded = source.index("_g.EV_GEN_SUCCEEDED", succeeded_stage)
+    commit = source.index("await session.commit()", succeeded)
     flush = source.index("flush_balance_cache_refreshes", commit)
-    publish = source.index("await _g.publish_event", flush)
-    attached = source.index("_g.EV_GEN_ATTACHED", publish)
-    succeeded = source.index("_g.EV_GEN_SUCCEEDED", attached)
+    deliver = source.index("await _g._deliver_generation_events", flush)
 
-    assert settle < commit < flush < publish
-    assert attached < succeeded
+    assert settle < attached_stage < attached < succeeded_stage < succeeded
+    assert succeeded < commit < flush < deliver

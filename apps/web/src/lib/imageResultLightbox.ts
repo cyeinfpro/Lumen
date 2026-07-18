@@ -10,9 +10,9 @@ import type { GeneratedImage, Generation } from "@/lib/types";
 
 type ImageResultLightboxOptions = {
   prompt?: string;
-  url?: string;
-  previewUrl?: string;
-  thumbUrl?: string;
+  url?: string | null;
+  previewUrl?: string | null;
+  thumbUrl?: string | null;
   type?: string;
   source?: string;
   sourceType?: string;
@@ -75,6 +75,29 @@ function isoFromMaybeMs(value: number | string | null | undefined): string | und
     return new Date(value).toISOString();
   }
   return undefined;
+}
+
+function validMediaUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim();
+  if (!candidate || /^(?:null|undefined)$/i.test(candidate)) return null;
+  if (/^data:image\//i.test(candidate)) return candidate;
+  try {
+    const parsed = new URL(candidate, "https://lumen.invalid");
+    return ["http:", "https:", "blob:"].includes(parsed.protocol)
+      ? candidate
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstMediaUrl(...candidates: unknown[]): string | null {
+  for (const candidate of candidates) {
+    const url = validMediaUrl(candidate);
+    if (url) return url;
+  }
+  return null;
 }
 
 function explainabilityMetadata(
@@ -166,16 +189,12 @@ function mediaUrls(
   options: ImageResultLightboxOptions,
 ): Pick<LightboxItem, "url" | "previewUrl" | "thumbUrl"> {
   return {
-    url: options.url ?? imageBinaryUrl(image.id),
+    url: firstMediaUrl(options.url) ?? imageBinaryUrl(image.id),
     previewUrl:
-      options.previewUrl ??
-      image.display_url ??
-      image.preview_url ??
+      firstMediaUrl(options.previewUrl, image.display_url, image.preview_url) ??
       imageVariantUrl(image.id, "display2048"),
     thumbUrl:
-      options.thumbUrl ??
-      image.thumb_url ??
-      image.preview_url ??
+      firstMediaUrl(options.thumbUrl, image.thumb_url, image.preview_url) ??
       imageVariantUrl(image.id, "thumb256"),
   };
 }

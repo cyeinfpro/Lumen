@@ -291,6 +291,7 @@ async def _responses_image_stream_with_retry(
     base_url_override: str | None = None,
     api_key_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
+    pinned_target_override: Any | None = None,
     user_id: str | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
@@ -325,6 +326,8 @@ async def _responses_image_stream_with_retry(
             }
             if proxy_override is not None:
                 kwargs["proxy_override"] = proxy_override
+            if pinned_target_override is not None:
+                kwargs["pinned_target_override"] = pinned_target_override
             if output_format is not None:
                 kwargs["output_format"] = output_format
             if output_compression is not None:

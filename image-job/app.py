@@ -83,6 +83,9 @@ _load_json_bytes = _request_bodies_module.load_json_bytes
 _download_content_length = _request_bodies_module.parse_content_length
 parse_json_bytes = _request_bodies_module.parse_json_bytes
 _read_request_body_bounded = _request_bodies_module.read_request_body_bounded
+_read_download_body_bounded = _request_bodies_module.read_download_body_bounded
+_read_response_body_bounded = _request_bodies_module.read_response_body_bounded
+_SseLineDecoder = _request_bodies_module.SseLineDecoder
 _validate_json_shape = _request_bodies_module.validate_json_shape
 
 
@@ -633,52 +636,6 @@ def _is_responses_error_terminal(event: Any) -> bool:
     return str(event.get("type", "")) in _RESPONSES_ERROR_TERMINAL_EVENTS
 
 
-async def _read_download_body_bounded(
-    response: Any,
-    *,
-    max_bytes: int,
-    truncate: bool,
-) -> tuple[bytes, bool, int]:
-    body = bytearray()
-    async for chunk in response.aiter_raw():
-        if not chunk:
-            continue
-        next_size = len(body) + len(chunk)
-        if next_size > max_bytes:
-            if truncate:
-                remaining = max_bytes - len(body)
-                if remaining > 0:
-                    body.extend(chunk[:remaining])
-            return bytes(body), True, next_size
-        body.extend(chunk)
-    return bytes(body), False, len(body)
-
-
-async def _read_response_body_bounded(
-    response: Any,
-    *,
-    max_bytes: int,
-    truncate: bool,
-) -> tuple[bytes, bool, int]:
-    declared_size = _download_content_length(response.headers)
-    if declared_size is not None and declared_size > max_bytes:
-        return b"", True, declared_size
-
-    body = bytearray()
-    async for chunk in response.aiter_bytes():
-        if not chunk:
-            continue
-        next_size = len(body) + len(chunk)
-        if next_size > max_bytes:
-            if truncate:
-                remaining = max_bytes - len(body)
-                if remaining > 0:
-                    body.extend(chunk[:remaining])
-            return bytes(body), True, next_size
-        body.extend(chunk)
-    return bytes(body), False, len(body)
-
-
 async def download_image_url(
     client: httpx.AsyncClient,
     url: str,
@@ -1122,6 +1079,7 @@ async def extract_responses_stream_images(
     cache: dict[str, ImageCandidate] = {}
     budget = ImageCandidateBudget()
     event_lines: list[str] = []
+    line_decoder = _SseLineDecoder()
     events_seen = 0
     bytes_seen = 0
     partial_candidates: list[ImageCandidate] = []
@@ -1155,11 +1113,26 @@ async def extract_responses_stream_images(
         else:
             final_candidates.extend(extracted)
 
-    line_iter = resp.aiter_lines()
+    async def handle_line(line: str) -> None:
+        nonlocal event_lines, events_seen, saw_done
+        if line == "":
+            data = _sse_data_from_lines(event_lines)
+            event_lines = []
+            obj = _try_parse_sse_data(data or "")
+            if obj is None:
+                if data and data.strip() == "[DONE]":
+                    saw_done = True
+                return
+            events_seen += 1
+            await handle_event(obj)
+            return
+        event_lines.append(line)
+
+    byte_iter = resp.aiter_bytes()
     while True:
         try:
-            line = await asyncio.wait_for(
-                line_iter.__anext__(), timeout=RESPONSES_STREAM_IDLE_TIMEOUT_S
+            chunk = await asyncio.wait_for(
+                byte_iter.__anext__(), timeout=RESPONSES_STREAM_IDLE_TIMEOUT_S
             )
         except StopAsyncIteration:
             break
@@ -1178,8 +1151,10 @@ async def extract_responses_stream_images(
                 outcome_uncertain=True,
                 error_class=ERROR_CLASS_NETWORK,
             ) from None
-        bytes_seen += len(line) + 1
-        if bytes_seen > RESPONSES_STREAM_MAX_BYTES:
+        if not chunk:
+            continue
+        next_bytes_seen = bytes_seen + len(chunk)
+        if next_bytes_seen > RESPONSES_STREAM_MAX_BYTES:
             raise JobFailure(
                 "Responses stream exceeded sidecar byte budget before final image",
                 upstream_status=resp.status_code,
@@ -1188,32 +1163,19 @@ async def extract_responses_stream_images(
                 outcome_uncertain=True,
                 error_class=ERROR_CLASS_NETWORK,
             )
+        bytes_seen = next_bytes_seen
         now = time.monotonic()
         if now - last_touch >= JOB_HEARTBEAT_INTERVAL_S:
             await touch_running(job_id)
             last_touch = now
 
-        if line == "":
-            data = _sse_data_from_lines(event_lines)
-            event_lines = []
-            obj = _try_parse_sse_data(data or "")
-            if obj is None:
-                if data and data.strip() == "[DONE]":
-                    saw_done = True
-                continue
-            events_seen += 1
-            await handle_event(obj)
-            continue
-        event_lines.append(line)
+        for line in line_decoder.feed(chunk):
+            await handle_line(line)
 
+    for line in line_decoder.finish():
+        await handle_line(line)
     if event_lines:
-        data = _sse_data_from_lines(event_lines)
-        obj = _try_parse_sse_data(data or "")
-        if obj is not None:
-            events_seen += 1
-            await handle_event(obj)
-        elif data and data.strip() == "[DONE]":
-            saw_done = True
+        await handle_line("")
 
     if final_candidates:
         return final_candidates
@@ -2119,6 +2081,11 @@ _REF_MIME_EXT: dict[str, str] = {
     "image/jpg": "jpg",
     "image/webp": "webp",
 }
+_REF_FORMAT_MIME: dict[str, str] = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
 
 
 def _refs_public_url(token: str, ext: str) -> str:
@@ -2143,7 +2110,8 @@ _write_ref_sync = _reference_persistence.write_ref
 async def upload_reference(request: Request) -> dict[str, Any]:
     """接收参考图 raw bytes，返回公网 URL。
 
-    Body：raw 图片 bytes（PNG / JPEG / WebP），由 Content-Type 决定扩展名。
+    Body：raw 图片 bytes（PNG / JPEG / WebP）。Content-Type 只做允许性校验；
+    落盘扩展名和实际 MIME 以 Pillow 识别的格式为准。
     Auth：与其他端点一致（Authorization: Bearer <api_key>）；同一 auth 下同 sha256
         复用已有 URL，不同 auth 会生成不同 token，避免跨 key 共享 bearer URL。
     幂等：同 auth + 同 sha256 复用已有 URL；不重复写盘。
@@ -2163,12 +2131,19 @@ async def upload_reference(request: Request) -> dict[str, Any]:
             detail=f"unsupported content-type {mime!r}; expected image/png|jpeg|webp",
         )
     try:
-        width, height, fmt = await asyncio.to_thread(image_metadata, raw, mime)
+        width, height, fmt = await asyncio.to_thread(image_metadata, raw, None)
     except JobFailure as exc:
         status_code = exc.upstream_status if exc.upstream_status in {400, 413} else 400
         raise HTTPException(status_code=status_code, detail=exc.error) from exc
     if width is None or height is None or fmt == "bin":
         raise HTTPException(status_code=400, detail="reference is not a valid image")
+    actual_mime = _REF_FORMAT_MIME.get(fmt)
+    if actual_mime is None:
+        raise HTTPException(
+            status_code=400,
+            detail="reference is not a supported image format",
+        )
+    ext = _REF_MIME_EXT[actual_mime]
 
     sha = hashlib.sha256(raw).hexdigest()
     existing = await asyncio.to_thread(_existing_ref_sync, auth_digest, sha)

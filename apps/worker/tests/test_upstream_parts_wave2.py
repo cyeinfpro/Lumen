@@ -8,7 +8,13 @@ import httpx
 import pytest
 
 from app import upstream
-from app.upstream_parts import image_stream, reference_images, responses_client
+from app.upstream_parts import (
+    image_stream,
+    reference_images,
+    request_targets,
+    responses_client,
+)
+from lumen_core.url_security import PublicHttpTarget
 
 
 def test_wave2_modules_are_exposed_through_upstream_facade() -> None:
@@ -35,6 +41,46 @@ def test_wave2_modules_are_exposed_through_upstream_facade() -> None:
     assert upstream.stream_completion is responses_client.stream_completion
     assert upstream.responses_call is not responses_client.responses_call
     assert upstream.responses_call.__module__ == "app.upstream"
+    for name in (
+        "_api_base",
+        "_responses_url",
+        "_image_generations_url",
+        "_image_edits_url",
+        "_image_jobs_url",
+        "_image_job_status_url",
+        "_validate_image_job_base_url",
+        "_validated_byok_target_for_request",
+    ):
+        assert getattr(upstream, name) is getattr(request_targets, name)
+
+
+def test_request_target_helpers_preserve_encoding_and_byok_origin_checks() -> None:
+    assert (
+        upstream._image_job_status_url(
+            "https://image-job.example/v1/",
+            "job/with space",
+        )
+        == "https://image-job.example/v1/image-jobs/job%2Fwith%20space"
+    )
+
+    target = PublicHttpTarget(
+        "https://byok.example/v1",
+        ("203.0.113.20",),
+    )
+    assert (
+        upstream._validated_byok_target_for_request(
+            target,
+            "https://byok.example/v1/responses",
+        )
+        is target
+    )
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        upstream._validated_byok_target_for_request(
+            target,
+            "https://other.example/v1/responses",
+        )
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.error_code == "upstream_invalid_request"
 
 
 def test_reference_limits_are_read_from_late_bound_facade(
@@ -95,9 +141,7 @@ async def test_reference_url_live_uses_resolved_target_and_pinned_transport(
     monkeypatch.setattr(upstream, "pinned_async_http_transport", fake_pinned)
     monkeypatch.setattr(upstream.httpx, "AsyncClient", FakeClient)
 
-    assert await upstream._reference_url_is_live(
-        "https://user.example/reference.webp"
-    )
+    assert await upstream._reference_url_is_live("https://user.example/reference.webp")
     assert seen["resolved"] == (
         "https://user.example/reference.webp",
         True,
@@ -282,3 +326,55 @@ async def test_completion_client_uses_current_validation_sort_and_sse_facades(
         "interruption_error_code": upstream._TEXT_STREAM_INTERRUPTED_ERROR_CODE,
         "proxy_url": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_byok_completion_forwards_validated_target_only_for_direct_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = PublicHttpTarget(
+        "https://byok.example/v1",
+        ("203.0.113.20",),
+    )
+    runtime = SimpleNamespace(
+        name="user:test:123",
+        base_url=target.url,
+        api_key="sk-test",
+        proxy=None,
+        _byok_http_target=target,
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_iter_runtime(**kwargs: Any):
+        captured.update(kwargs)
+        yield {"type": "response.completed", "response": {"id": "response-1"}}
+
+    monkeypatch.setattr(upstream, "_iter_sse_with_runtime", fake_iter_runtime)
+    monkeypatch.setattr(
+        upstream,
+        "resolve_provider_proxy_url",
+        lambda _proxy: _async_value(None),
+    )
+
+    events = [
+        event
+        async for event in upstream.stream_completion(
+            {"model": "gpt-test", "input": []},
+            runtime_override=runtime,
+        )
+    ]
+
+    assert captured["pinned_target"] is target
+    assert events[-1]["type"] == "response.completed"
+    assert (
+        responses_client._runtime_pinned_target(
+            runtime,
+            base=target.url,
+            proxy_url="http://proxy.example:8080",
+        )
+        is None
+    )
+
+
+async def _async_value(value: Any) -> Any:
+    return value

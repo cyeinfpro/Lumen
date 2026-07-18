@@ -23,7 +23,7 @@ import {
   X,
 } from "lucide-react";
 import Image from "next/image";
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
@@ -96,6 +96,22 @@ export function PosterStyleBrowser({
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [detailItemId, setDetailItemId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let pendingItemId: string | null = null;
+    try {
+      pendingItemId =
+        window.sessionStorage.getItem("posterStyle.openItemId")?.trim() || null;
+      window.sessionStorage.removeItem("posterStyle.openItemId");
+    } catch {
+      return;
+    }
+    if (!pendingItemId) return;
+    const frame = window.requestAnimationFrame(() => {
+      setDetailItemId(pendingItemId);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   const libraryQuery = usePosterStylesQuery({
     category,

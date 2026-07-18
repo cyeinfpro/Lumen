@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 
+import {
+  fetchJsonWithTimeout,
+  PAGE_IDENTITY_EXPRESSION,
+  pageIdentityErrors,
+} from "./cdp-page-validation.mjs";
+
 const HOST = process.env.CDP_HOST ?? "http://127.0.0.1:9222";
-const BASE = "http://localhost:3000";
+const BASE = process.env.APP_BASE_URL ?? "http://localhost:3000";
 const CDP_TIMEOUT_MS = 15_000;
 const CDP_CLOSE_TIMEOUT_MS = 3_000;
+const HTTP_TIMEOUT_MS = 5_000;
 
 const pages = [
   "/",
@@ -28,12 +35,6 @@ const viewports = [
   { name: "mobile", width: 390, height: 844 },
   { name: "desktop", width: 1280, height: 900 },
 ];
-
-async function json(url, init) {
-  const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${url}`);
-  return res.json();
-}
 
 function send(ws, method, params = {}) {
   const id = ++send.id;
@@ -165,9 +166,19 @@ async function runCase(ws, viewport, path) {
     deviceScaleFactor: viewport.name === "mobile" ? 3 : 1,
     mobile: viewport.name === "mobile",
   });
-  await send(ws, "Page.navigate", { url: `${BASE}${path}` });
+  const requestedUrl = new URL(path, BASE).href;
+  const navigation = await send(ws, "Page.navigate", {
+    url: requestedUrl,
+  });
   await waitForLoad(ws);
   await new Promise((resolve) => setTimeout(resolve, 250));
+  const identity = await evaluate(ws, PAGE_IDENTITY_EXPRESSION);
+  const identityErrors = [
+    ...(navigation.errorText
+      ? [`navigation failed: ${navigation.errorText}`]
+      : []),
+    ...pageIdentityErrors(requestedUrl, identity),
+  ];
 
   const result = await evaluate(
     ws,
@@ -201,16 +212,22 @@ async function runCase(ws, viewport, path) {
       };
     })()`,
   );
-  return result;
+  return {
+    requestedPath: path,
+    identity,
+    identityErrors,
+    ...result,
+  };
 }
 
 async function main() {
   let tab;
   let ws;
   try {
-    tab = await json(
+    tab = await fetchJsonWithTimeout(
       `${HOST}/json/new?${encodeURIComponent(`${BASE}/`)}`,
       { method: "PUT" },
+      { timeoutMs: HTTP_TIMEOUT_MS },
     );
     ws = new WebSocket(tab.webSocketDebuggerUrl);
     await waitForSocketOpen(ws);
@@ -226,11 +243,16 @@ async function main() {
 
     let failed = false;
     for (const result of results) {
-      const ok = result.changed || result.scrollableCount === 0;
+      const ok =
+        result.identityErrors.length === 0 &&
+        (result.changed || result.scrollableCount === 0);
       if (!ok) failed = true;
       console.log(
-        `${ok ? "✓" : "✗"} ${result.viewport} ${result.path} scrollables=${result.scrollableCount} changed=${result.changed} maxDelta=${result.maxDelta}`,
+        `${ok ? "✓" : "✗"} ${result.viewport} ${result.requestedPath} -> ${result.identity.pathname} status=${result.identity.responseStatus} scrollables=${result.scrollableCount} changed=${result.changed} maxDelta=${result.maxDelta}`,
       );
+      if (result.identityErrors.length > 0) {
+        console.error(`  ${result.identityErrors.join("; ")}`);
+      }
     }
     if (failed) throw new Error("scroll verification failed");
   } finally {

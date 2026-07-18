@@ -63,8 +63,17 @@ from .context_summary_parts.common import (
     utc_now as _utc_now,
 )
 from .context_summary_parts.messages import (
-    loaded_summary_prefix as _loaded_summary_prefix,
+    loaded_summary_prefix as _loaded_summary_prefix,  # noqa: F401
     uncaptioned_image_ids as _uncaptioned_image_ids,
+)
+from .context_summary_parts.results import (
+    SummaryGenerationResult as _SummaryGenerationResult,
+    SummaryRequest as _SummaryRequest,
+    SummaryTiming as _SummaryTiming,
+    effective_summary_window as _effective_summary_window,
+    normalize_summary_coverage as _normalize_summary_coverage,
+    summary_event_payload as _summary_event_payload,
+    worker_compact_summary_payload as _worker_compact_summary_payload,
 )
 from .context_summary_parts.segments import (
     bounded_summary_segments as _bounded_summary_segments_impl,
@@ -73,6 +82,7 @@ from .context_summary_parts.segments import (
     summary_segments_by_budget as _summary_segments_by_budget,
 )
 from .context_summary_parts.text import (
+    build_local_fallback_summary as _build_local_fallback_summary_impl,
     extract_code_anchors as _extract_code_anchors,  # noqa: F401
     local_fallback_summary_text as _local_fallback_summary_text_impl,
     looks_like_file_read as _looks_like_file_read,  # noqa: F401
@@ -134,6 +144,22 @@ end
 return 0
 """
 
+_RELEASE_MANUAL_COMPACT_ACTIVE_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return 0
+end
+local owner = raw
+local ok, payload = pcall(cjson.decode, raw)
+if ok and type(payload) == 'table' then
+  owner = payload['job_id']
+end
+if owner == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
 _SUMMARY_INSTRUCTIONS = """你是 Lumen 的上下文压缩器。把较早对话压缩成后续回答可用的历史摘要。
 
 必须保留：
@@ -180,7 +206,9 @@ def _message_to_summary_line(
     )
 
 
-async def _message_position(session: Any, message_id: str) -> tuple[datetime, str] | None:
+async def _message_position(
+    session: Any, message_id: str
+) -> tuple[datetime, str] | None:
     msg = await session.get(Message, message_id)
     if msg is None:
         return None
@@ -258,8 +286,7 @@ async def _caption_images_for_summary(
         rows = list(
             (
                 await session.execute(
-                    select(Image)
-                    .where(
+                    select(Image).where(
                         Image.id.in_(image_ids),
                         Image.deleted_at.is_(None),
                     )
@@ -437,7 +464,9 @@ async def _call_summary_upstream(
 
     instructions = _SUMMARY_INSTRUCTIONS
     if extra_instruction and extra_instruction.strip():
-        instructions += f"\n\n### Additional Hints From User\n{extra_instruction.strip()}"
+        instructions += (
+            f"\n\n### Additional Hints From User\n{extra_instruction.strip()}"
+        )
 
     last_exc: BaseException | None = None
     started = time.monotonic()
@@ -544,13 +573,17 @@ def _bounded_summary_segments(
     )
 
 
-async def _safe_set_partial(redis: Any, conv_id: str, text: str, segment_index: int) -> None:
+async def _safe_set_partial(
+    redis: Any, conv_id: str, text: str, segment_index: int
+) -> None:
     if redis is None:
         return
     try:
         await redis.set(
             f"context:summary:partial:{conv_id}",
-            json.dumps({"segment_index": segment_index, "text": text}, ensure_ascii=False),
+            json.dumps(
+                {"segment_index": segment_index, "text": text}, ensure_ascii=False
+            ),
             ex=_PARTIAL_TTL_S,
         )
     except Exception as exc:  # noqa: BLE001
@@ -563,7 +596,9 @@ async def _safe_delete_partial(redis: Any, conv_id: str) -> None:
     try:
         await redis.delete(f"context:summary:partial:{conv_id}")
     except Exception as exc:  # noqa: BLE001
-        logger.debug("context_summary.partial_delete_failed conv=%s err=%r", conv_id, exc)
+        logger.debug(
+            "context_summary.partial_delete_failed conv=%s err=%r", conv_id, exc
+        )
 
 
 def _manual_compact_job_key(*, user_id: str, conv_id: str, job_id: str) -> str:
@@ -604,11 +639,12 @@ async def _safe_release_manual_compact_active(
         return
     key = _manual_compact_active_key(user_id=user_id, conv_id=conv_id)
     try:
-        raw = await redis.get(key)
-        data = json.loads(_redis_text(raw)) if raw else None
-        if isinstance(data, dict) and data.get("job_id") not in {None, job_id}:
-            return
-        await redis.delete(key)
+        await redis.eval(
+            _RELEASE_MANUAL_COMPACT_ACTIVE_LUA,
+            1,
+            key,
+            job_id,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("manual_compact.active_release_failed key=%s err=%r", key, exc)
 
@@ -628,7 +664,9 @@ async def _segment_and_summarize(
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
     coverage: _SummaryCoverage | None = None,
 ) -> str | None:
-    lines = [_message_to_summary_line(m, image_captions=image_captions) for m in messages]
+    lines = [
+        _message_to_summary_line(m, image_captions=image_captions) for m in messages
+    ]
     if not lines and not previous_summary:
         return None
 
@@ -709,7 +747,9 @@ async def _segment_and_summarize(
     return last_committable_summary
 
 
-async def _publish_compaction_event(redis: Any, conv_id: str, payload: dict[str, Any]) -> None:
+async def _publish_compaction_event(
+    redis: Any, conv_id: str, payload: dict[str, Any]
+) -> None:
     if redis is None:
         return
     try:
@@ -857,7 +897,9 @@ async def record_summary_metrics(
         logger.debug("context_summary.prom_counter_failed conv=%s err=%r", conv_id, exc)
 
 
-def _observe_compaction_duration(*, trigger: str, outcome: str, elapsed_s: float) -> None:
+def _observe_compaction_duration(
+    *, trigger: str, outcome: str, elapsed_s: float
+) -> None:
     """Record prometheus histogram for compaction duration.
 
     Why: lock_busy 是没真正干活的快速失败，调用方不应在该分支调用本函数；只在
@@ -896,7 +938,9 @@ async def _acquire_summary_lock(
                 return _SummaryLock("redis", token)
             return None
         except Exception as exc:  # noqa: BLE001
-            logger.warning("context_summary.redis_lock_failed conv=%s err=%s", conv_id, exc)
+            logger.warning(
+                "context_summary.redis_lock_failed conv=%s err=%s", conv_id, exc
+            )
             # Redis-backed workers must fail closed here. Falling back to a
             # session-level PostgreSQL advisory lock holds one connection from
             # the main business pool across the upstream summary call and can
@@ -930,7 +974,9 @@ async def _acquire_summary_lock(
         return None
 
 
-async def _release_summary_lock(redis: Any, conv_id: str, lock: _SummaryLock | None) -> None:
+async def _release_summary_lock(
+    redis: Any, conv_id: str, lock: _SummaryLock | None
+) -> None:
     if lock is None:
         return
     if lock.kind == "pg" and lock.pg_connection is not None and lock.pg_key:
@@ -1016,13 +1062,16 @@ async def _renew_summary_lock_loop(
                     lock.lost_reason = "expired" if value is None else "stolen"
                     logger.warning(
                         "context_summary.lock_renew_lost conv=%s holder=%s reason=%s",
-                        conv_id, value, lock.lost_reason,
+                        conv_id,
+                        value,
+                        lock.lost_reason,
                     )
                     return
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "context_summary.lock_renew_failed conv=%s err=%s",
-                    conv_id, exc,
+                    conv_id,
+                    exc,
                 )
     except asyncio.CancelledError:
         raise
@@ -1036,7 +1085,9 @@ async def _read_current_summary(session: Any, conv_id: str) -> dict[str, Any] | 
         summary = row.summary_jsonb
         return summary if isinstance(summary, dict) else None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("context_summary.read_current_failed conv=%s err=%s", conv_id, exc)
+        logger.warning(
+            "context_summary.read_current_failed conv=%s err=%s", conv_id, exc
+        )
         return None
 
 
@@ -1077,13 +1128,17 @@ async def _cas_write_summary(
             except Exception:  # noqa: BLE001
                 pass
             return False
-        current_summary = current.summary_jsonb if isinstance(current.summary_jsonb, dict) else None
+        current_summary = (
+            current.summary_jsonb if isinstance(current.summary_jsonb, dict) else None
+        )
         if isinstance(current_summary, dict) and is_summary_usable(current_summary):
             current_raw = current_summary.get("up_to_created_at")
             new_raw = summary.get("up_to_created_at")
             if isinstance(current_raw, str) and isinstance(new_raw, str):
                 try:
-                    current_dt = datetime.fromisoformat(current_raw.replace("Z", "+00:00"))
+                    current_dt = datetime.fromisoformat(
+                        current_raw.replace("Z", "+00:00")
+                    )
                     new_dt = datetime.fromisoformat(new_raw.replace("Z", "+00:00"))
                     current_id = current_summary.get("up_to_message_id")
                     new_id = summary.get("up_to_message_id")
@@ -1115,82 +1170,6 @@ async def _cas_write_summary(
         return False
 
 
-@dataclass(frozen=True)
-class _SummaryRequest:
-    conv_id: str
-    boundary: Any
-    boundary_id: str
-    boundary_dt: datetime
-    settings: Any
-    target_tokens: int
-    input_budget: int
-    summary_timeout_s: float
-    model: str
-    circuit_threshold: int
-    extra_instruction: str | None
-    extra_hash: str | None
-    existing_summary: dict[str, Any] | None
-    previous_summary_text: str | None
-    loaded: LoadedSummaryMessages
-    trigger: str
-    force: bool
-
-
-@dataclass(frozen=True)
-class _SummaryTiming:
-    started_at: datetime
-    started_monotonic: float
-
-
-@dataclass(frozen=True)
-class _SummaryGenerationResult:
-    text: str
-    loaded: LoadedSummaryMessages
-    coverage: _SummaryCoverage
-    fallback_reason: str | None
-
-
-def _summary_event_payload(
-    request: _SummaryRequest,
-    timing: _SummaryTiming,
-    *,
-    phase: str,
-    ok: bool | None,
-    fallback_reason: str | None,
-    progress: tuple[int, int] | None = None,
-    public: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "conversation_id": request.conv_id,
-        "phase": phase,
-        "trigger": request.trigger,
-        "started_at": timing.started_at.isoformat(),
-        "completed_at": _utc_now().isoformat() if phase == "completed" else None,
-        "elapsed_ms": (
-            int((time.monotonic() - timing.started_monotonic) * 1000)
-            if phase == "completed"
-            else None
-        ),
-        "ok": ok,
-        "fallback_reason": fallback_reason,
-    }
-    if progress is not None:
-        payload["progress"] = {
-            "current_segment": progress[0],
-            "total_segments": progress[1],
-        }
-    if public is not None:
-        payload["stats"] = {
-            "summary_tokens": public["summary_tokens"],
-            "source_message_count": public["source_message_count"],
-            "source_token_estimate": public["source_token_estimate"],
-            "image_caption_count": public["image_caption_count"],
-            "tokens_freed": public["tokens_freed"],
-            "summary_up_to_message_id": public["summary_up_to_message_id"],
-        }
-    return payload
-
-
 async def _attach_summary_image_captions(
     session: Any,
     request: _SummaryRequest,
@@ -1211,20 +1190,6 @@ async def _attach_summary_image_captions(
     )
 
 
-def _normalize_summary_coverage(
-    summary_text: str | None,
-    coverage: _SummaryCoverage,
-    loaded: LoadedSummaryMessages,
-) -> None:
-    # Older monkeypatches return a successful string without the coverage object.
-    if (
-        summary_text
-        and coverage.covered_message_count == 0
-        and coverage.partial_reason is None
-    ):
-        coverage.covered_message_count = len(loaded.messages)
-
-
 async def _report_summary_generation_failure(
     request: _SummaryRequest,
     timing: _SummaryTiming,
@@ -1242,9 +1207,7 @@ async def _report_summary_generation_failure(
         conv_id=request.conv_id,
         trigger=request.trigger,
         outcome="failed",
-        circuit_threshold_percent=(
-            None if circuit_open else request.circuit_threshold
-        ),
+        circuit_threshold_percent=(None if circuit_open else request.circuit_threshold),
     )
     await _publish_compaction_event(
         redis,
@@ -1309,13 +1272,16 @@ async def _generate_summary_result(
             success=False,
             threshold_percent=request.circuit_threshold,
         )
-    summary_text = _local_fallback_summary_text(
+    summary_text, fallback_covered_count = _build_local_fallback_summary_impl(
         previous_summary=request.previous_summary_text,
         messages=loaded.messages,
         target_tokens=request.target_tokens,
         extra_instruction=request.extra_instruction,
         image_captions=loaded.image_captions,
+        message_to_line=_message_to_summary_line,
+        truncate_fn=_truncate,
     )
+    coverage.covered_message_count = fallback_covered_count
     fallback_reason = (
         "circuit_open_local_fallback" if circuit_open else "local_fallback"
     )
@@ -1338,27 +1304,6 @@ async def _generate_summary_result(
         coverage,
         fallback_reason,
     )
-
-
-def _effective_summary_window(
-    request: _SummaryRequest,
-    generated: _SummaryGenerationResult,
-) -> tuple[LoadedSummaryMessages, str, datetime] | None:
-    if (
-        generated.fallback_reason
-        not in {"partial_segment_failure", "segment_limit"}
-        or generated.coverage.covered_message_count >= len(generated.loaded.messages)
-    ):
-        return generated.loaded, request.boundary_id, request.boundary_dt
-
-    effective_loaded = _loaded_summary_prefix(
-        generated.loaded,
-        generated.coverage.covered_message_count,
-    )
-    if not effective_loaded.messages:
-        return None
-    covered_boundary = effective_loaded.messages[-1]
-    return effective_loaded, str(covered_boundary.id), covered_boundary.created_at
 
 
 def _normalize_summary_output(
@@ -1762,7 +1707,9 @@ async def ensure_context_summary(
         60,
     )
     extra_hash = _extra_instruction_hash(extra_instruction)
-    existing_summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else None
+    existing_summary = (
+        conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else None
+    )
     usable_existing_summary = (
         existing_summary
         if existing_summary is not None and is_summary_usable(existing_summary)
@@ -1853,36 +1800,6 @@ async def ensure_context_summary(
         lock,
         circuit_open=circuit_open,
     )
-
-
-def _worker_compact_summary_payload(
-    *,
-    result: dict[str, Any],
-    conv: Conversation,
-) -> dict[str, Any]:
-    summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else {}
-    summary_tokens = int(result.get("summary_tokens") or 0)
-    source_token_estimate = int(result.get("source_token_estimate") or 0)
-    raw_tokens_freed = result.get("tokens_freed")
-    tokens_freed = (
-        int(raw_tokens_freed)
-        if raw_tokens_freed is not None
-        else max(0, source_token_estimate - summary_tokens)
-    )
-    return {
-        "summary_created": bool(result.get("summary_created")),
-        "summary_used": bool(result.get("summary_used", True)),
-        "summary_up_to_message_id": result.get("summary_up_to_message_id"),
-        "summary_up_to_created_at": result.get("summary_up_to_created_at"),
-        "tokens": summary_tokens,
-        "source_message_count": int(result.get("source_message_count") or 0),
-        "source_token_estimate": source_token_estimate,
-        "image_caption_count": int(result.get("image_caption_count") or 0),
-        "tokens_freed": tokens_freed,
-        "fallback_reason": result.get("fallback_reason"),
-        "compressed_at": summary.get("compressed_at"),
-        "status": result.get("status"),
-    }
 
 
 async def manual_compact_conversation(

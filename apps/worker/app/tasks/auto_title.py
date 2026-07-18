@@ -22,15 +22,19 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 
-from lumen_core.constants import EV_CONV_RENAMED, GenerationErrorCode as EC, conv_channel
+from lumen_core.constants import (
+    EV_CONV_RENAMED,
+    GenerationErrorCode as EC,
+    conv_channel,
+)
 from lumen_core.models import Conversation, Message
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
 
 import httpx
 
-from ..db import SessionLocal
+from ..db import SessionLocal, affected_rows
 from ..sse_publish import publish_event
 from ..upstream import UpstreamError, _auth_headers
 
@@ -67,12 +71,12 @@ _TITLE_HTTP_TIMEOUT_S = 30.0
 _TITLE_TOTAL_TIMEOUT_S = 75.0
 
 # 巡检相关
-_RECONCILE_LOOKBACK_HOURS = 24       # 只扫近 24h 内的会话，避免遍历全表
-_RECONCILE_STABLE_AFTER_S = 60       # last_activity_at < now - 60s 才算"已稳定"
-_RECONCILE_BATCH_LIMIT = 50          # 单轮最多 enqueue 50 个，限速
+_RECONCILE_LOOKBACK_HOURS = 24  # 只扫近 24h 内的会话，避免遍历全表
+_RECONCILE_STABLE_AFTER_S = 60  # last_activity_at < now - 60s 才算"已稳定"
+_RECONCILE_BATCH_LIMIT = 50  # 单轮最多 enqueue 50 个，限速
 _DEFAULT_RECONCILE_INTERVAL_S = 300  # 5 分钟一次
 _RECONCILE_LOCK_KEY = "lumen:auto_title:reconcile:lock"
-_RECONCILE_LOCK_TTL_S = 60           # 锁 TTL 必须比单轮巡检最坏耗时长（实测 < 5s）
+_RECONCILE_LOCK_TTL_S = 60  # 锁 TTL 必须比单轮巡检最坏耗时长（实测 < 5s）
 _AUTO_TITLE_JOB_PREFIX = "lumen:auto_title:"
 
 # 定义"默认 / 待生成"的 title 占位集合，DB 查询和 Python 校验共享一份真相源。
@@ -98,6 +102,18 @@ def _is_default_title(title: str | None) -> bool:
         return True
     # 历史/手动占位
     return t in set(_DEFAULT_TITLE_PLACEHOLDERS)
+
+
+def _default_title_condition() -> Any:
+    return or_(
+        Conversation.title.is_(None),
+        func.trim(Conversation.title).in_(_DEFAULT_TITLE_PLACEHOLDERS),
+    )
+
+
+def _mark_title_confirmed(conversation_id: str) -> None:
+    with _title_cache_lock:
+        _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
 
 
 async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
@@ -132,8 +148,7 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
                 )
             ).scalar_one_or_none()
             if row is None or not _is_default_title(row):
-                with _title_cache_lock:
-                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+                _mark_title_confirmed(conversation_id)
                 return
         # enqueue 异步任务，避免阻塞 worker 当前任务收尾
         await redis.enqueue_job(
@@ -142,7 +157,9 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
             _job_id=f"{_AUTO_TITLE_JOB_PREFIX}{conversation_id}",
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("maybe_enqueue_auto_title failed conv=%s err=%s", conversation_id, exc)
+        logger.warning(
+            "maybe_enqueue_auto_title failed conv=%s err=%s", conversation_id, exc
+        )
 
 
 def _extract_text(content: dict[str, Any] | None) -> str:
@@ -220,7 +237,12 @@ def _parse_response_text(text: str, content_type: str) -> str:
     accumulated_delta = ""
     done_text = ""
 
-    is_sse = "text/event-stream" in content_type or text.startswith("event:") or "\ndata:" in text or text.startswith("data:")
+    is_sse = (
+        "text/event-stream" in content_type
+        or text.startswith("event:")
+        or "\ndata:" in text
+        or text.startswith("data:")
+    )
     if is_sse:
         for line in text.splitlines():
             if not line.startswith("data:"):
@@ -253,10 +275,10 @@ def _parse_response_text(text: str, content_type: str) -> str:
                 # 兜底：从 response.output[].content[].text 提取完整文本
                 resp_obj = ev.get("response")
                 if isinstance(resp_obj, dict) and not done_text:
-                    for item in (resp_obj.get("output") or []):
+                    for item in resp_obj.get("output") or []:
                         if not isinstance(item, dict):
                             continue
-                        for part in (item.get("content") or []):
+                        for part in item.get("content") or []:
                             if isinstance(part, dict):
                                 t = part.get("text")
                                 if isinstance(t, str) and t.strip():
@@ -276,10 +298,10 @@ def _parse_response_text(text: str, content_type: str) -> str:
     except (json.JSONDecodeError, ValueError):
         return ""
     if isinstance(payload, dict):
-        for item in (payload.get("output") or []):
+        for item in payload.get("output") or []:
             if not isinstance(item, dict):
                 continue
-            for part in (item.get("content") or []):
+            for part in item.get("content") or []:
                 if isinstance(part, dict):
                     t = part.get("text")
                     if isinstance(t, str) and t.strip():
@@ -350,9 +372,7 @@ async def _call_upstream_one(
             error_code=EC.UPSTREAM_ERROR.value,
             status_code=resp.status_code,
         )
-    return _parse_response_text(
-        resp.text or "", resp.headers.get("content-type", "")
-    )
+    return _parse_response_text(resp.text or "", resp.headers.get("content-type", ""))
 
 
 async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
@@ -409,9 +429,7 @@ async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
                     )
                     raise exc
                 if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
-                    await asyncio.sleep(
-                        _PER_PROVIDER_RETRY_BACKOFF_S * (2 ** attempt)
-                    )
+                    await asyncio.sleep(_PER_PROVIDER_RETRY_BACKOFF_S * (2**attempt))
     if last_exc is not None:
         # 失败摘要：让运维一眼看到尝试了哪些号、最后死在什么错。message 截短
         # 避免大 stack trace 撑爆 log。
@@ -470,8 +488,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
             if conv is None:
                 return
             if not _is_default_title(conv.title):
-                with _title_cache_lock:
-                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+                _mark_title_confirmed(conversation_id)
                 return  # 用户可能手动改过；尊重用户
             user_id = conv.user_id
             input_list = await _build_summary(session, conversation_id)
@@ -496,23 +513,17 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
 
         # 写库
         async with SessionLocal() as session:
-            # 再次幂等检查（双重安全）
-            row = (
-                await session.execute(
-                    select(Conversation.title).where(
-                        Conversation.id == conversation_id
-                    )
-                )
-            ).scalar_one_or_none()
-            if not _is_default_title(row):
-                with _title_cache_lock:
-                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
-                return
-            await session.execute(
+            result = await session.execute(
                 update(Conversation)
-                .where(Conversation.id == conversation_id)
+                .where(
+                    Conversation.id == conversation_id,
+                    _default_title_condition(),
+                )
                 .values(title=title)
             )
+            if affected_rows(result) != 1:
+                _mark_title_confirmed(conversation_id)
+                return
             await session.commit()
 
         # 推 SSE conv.renamed 给前端 sidebar 实时刷新
@@ -525,10 +536,11 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
                 {"conversation_id": conversation_id, "title": title},
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("auto_title publish_event failed conv=%s err=%s", conversation_id, exc)
+            logger.warning(
+                "auto_title publish_event failed conv=%s err=%s", conversation_id, exc
+            )
 
-        with _title_cache_lock:
-            _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+        _mark_title_confirmed(conversation_id)
         logger.info("auto_title set conv=%s title=%r", conversation_id, title)
     except Exception as exc:  # noqa: BLE001
         # 不抛异常以免触发 arq 重试（一次失败就算了）
@@ -583,14 +595,11 @@ async def reconcile_default_titles(ctx: dict[str, Any]) -> int:
     try:
         async with SessionLocal() as session:
             # 子查询：该会话至少有 1 条 succeeded user 消息
-            has_user_msg = (
-                exists()
-                .where(
-                    and_(
-                        Message.conversation_id == Conversation.id,
-                        Message.role == "user",
-                        Message.status == "succeeded",
-                    )
+            has_user_msg = exists().where(
+                and_(
+                    Message.conversation_id == Conversation.id,
+                    Message.role == "user",
+                    Message.status == "succeeded",
                 )
             )
             stmt = (
@@ -598,10 +607,7 @@ async def reconcile_default_titles(ctx: dict[str, Any]) -> int:
                 .where(
                     Conversation.last_activity_at >= lookback_start,
                     Conversation.last_activity_at <= stable_before,
-                    or_(
-                        Conversation.title.is_(None),
-                        Conversation.title.in_(_DEFAULT_TITLE_PLACEHOLDERS),
-                    ),
+                    _default_title_condition(),
                     Conversation.archived.is_(False),
                     has_user_msg,
                 )

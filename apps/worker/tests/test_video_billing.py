@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import video_billing
+from app import video_artifacts, video_billing
+from app.tasks import video_generation
+from app.video_upstream import PollResult
 from lumen_core.models import VideoGeneration
 
 
@@ -258,9 +260,7 @@ async def test_resolve_video_billing_uses_mini_model_from_upstream_model(
 ) -> None:
     session = FakeSession()
     generation = _generation()
-    generation.upstream_request = {
-        "upstream_model": "doubao-seedance-2-0-mini-260615"
-    }
+    generation.upstream_request = {"upstream_model": "doubao-seedance-2-0-mini-260615"}
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def held_amount_for_ref(*_args, **_kwargs) -> int:
@@ -422,6 +422,92 @@ async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
     assert calls[0][1]["idempotency_key"] == "video_generation:release:video-gen-1"
     assert calls[0][1]["meta"]["billing_decision"] == "upstream_not_billable_release"
     assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 10_000}
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_charges_invalid_artifact_after_upstream_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    operations: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle_cost(
+        _session,
+        *,
+        model: str,
+        action: str,
+        actual_total_tokens: int,
+        resolution: str | None = None,
+        pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
+    ) -> int:
+        assert (model, action, actual_total_tokens) == ("seedance-2.0", "t2v", 42_000)
+        assert resolution == "720p"
+        assert pricing_variant == "t2v_720p"
+        assert estimated_micro == 1_000
+        return 420
+
+    async def settle(_session, user_id: str, **kwargs):
+        operations.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-420, balance_after=9_580, hold_after=0)
+
+    async def release(*_args, **_kwargs):
+        pytest.fail("billable upstream success must not release the video hold")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(video_billing.billing_core, "release", release)
+
+    poll = video_generation._invalid_video_artifact_poll(  # noqa: SLF001
+        PollResult(
+            status="succeeded",
+            usage_total_tokens=42_000,
+            upstream_billable=True,
+            raw={"provider_state": "succeeded"},
+        ),
+        video_artifacts.InvalidVideoArtifactError(
+            "no video stream",
+            diagnostics={"probe_error": "no video stream"},
+        ),
+    )
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result=poll,
+        reason=poll.raw["reason"],
+    )
+
+    assert poll.upstream_billable is True
+    assert poll.raw["reason"] == "invalid_video_artifact_after_upstream_success"
+    assert resolution.decision == "failure_usage_settle"
+    assert resolution.actual_micro == 420
+    assert resolution.actual_tokens == 42_000
+    assert resolution.released is False
+    assert [operation for operation, _details in operations] == ["settle"]
+    assert operations[0][1]["actual_micro"] == 420
+    assert operations[0][1]["meta"]["billing_decision"] == "failure_usage_settle"
+    assert operations[0][1]["meta"]["actual_tokens"] == 42_000
+    assert (
+        operations[0][1]["meta"]["reason"]
+        == "invalid_video_artifact_after_upstream_success"
+    )
 
 
 @pytest.mark.asyncio

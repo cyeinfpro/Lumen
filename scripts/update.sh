@@ -106,6 +106,11 @@ NEW_ID=""
 NEW_RELEASE=""
 PREVIOUS_TAG=""
 TARGET_TAG=""
+RELEASE_SOURCE_COMMIT=""
+RELEASE_SOURCE_COMMIT_PROOF=""
+RELEASE_EXPECTED_COMMIT=""
+RELEASE_SOURCE_API_IMAGE=""
+RELEASE_SOURCE_MANIFEST_CACHE=""
 ROLLBACK_DONE=0
 UPDATE_STATE_COMMITTED=0
 UPDATE_STATE_SNAPSHOT_READY=0
@@ -117,6 +122,14 @@ UPDATE_ORIGINAL_CURRENT_TARGET=""
 UPDATE_ORIGINAL_PREVIOUS_PRESENT=0
 UPDATE_ORIGINAL_PREVIOUS_TARGET=""
 UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+UPDATE_RESTORE_POINT_TIMESTAMP=""
+UPDATE_RESTORE_POINT_PG=""
+UPDATE_RESTORE_POINT_REDIS=""
+UPDATE_RESTORE_POINT_PG_SIZE=""
+UPDATE_RESTORE_POINT_REDIS_SIZE=""
+UPDATE_MIGRATION_STARTED=0
+UPDATE_MIGRATION_VERIFIED=0
+UPDATE_RESTORE_BOUNDARY_LOGGED=0
 LUMEN_UPDATE_MODE="$(printf '%s' "${LUMEN_UPDATE_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
 case "${LUMEN_UPDATE_MODE}" in
     fast)
@@ -224,6 +237,324 @@ lumen_env_truthy() {
     esac
 }
 
+update_requires_migration_restore_point() {
+    if lumen_env_truthy "${LUMEN_UPDATE_SKIP_BACKUP:-0}"; then
+        return 1
+    fi
+    if [ -n "${LUMEN_UPDATE_REQUIRE_MIGRATION_BACKUP+x}" ]; then
+        lumen_env_truthy "${LUMEN_UPDATE_REQUIRE_MIGRATION_BACKUP}"
+        return
+    fi
+    # The admin fallback path can invoke update.sh directly instead of going
+    # through update_runner.py. Treat all non-interactive updates as protected
+    # unless a trusted caller explicitly overrides the policy.
+    lumen_env_truthy "${LUMEN_UPDATE_NONINTERACTIVE:-0}"
+}
+
+snapshot_update_backup_files() {
+    local backup_root="$1"
+    local output_file="$2"
+    python3 - "${backup_root}" "${output_file}" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+backup_root = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+signatures = {}
+for directory, pattern in (
+    (backup_root / "pg", re.compile(r"[0-9]{8}-[0-9]{6}\.pg\.dump\.gz")),
+    (backup_root / "redis", re.compile(r"[0-9]{8}-[0-9]{6}\.redis\.tgz")),
+):
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        continue
+    except OSError:
+        raise SystemExit(1)
+    for path in entries:
+        if not pattern.fullmatch(path.name):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            raise SystemExit(1)
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        signatures[str(path.relative_to(backup_root))] = [
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ]
+
+try:
+    output_path.write_text(
+        json.dumps(signatures, sort_keys=True), encoding="utf-8"
+    )
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+verify_update_restore_point() {
+    local output_file="$1"
+    local backup_root="$2"
+    local started_epoch="$3"
+    local baseline_file="$4"
+    local fields=""
+    if ! fields="$(python3 - \
+            "${output_file}" \
+            "${backup_root}" \
+            "${started_epoch}" \
+            "${baseline_file}" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+output_path = Path(sys.argv[1])
+backup_root = Path(sys.argv[2])
+try:
+    started_epoch = int(sys.argv[3])
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    baseline = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(baseline, dict):
+    raise SystemExit(1)
+
+payload = None
+for line in reversed(lines):
+    try:
+        candidate = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(candidate, dict) and {
+        "timestamp",
+        "pg_size",
+        "redis_size",
+    }.issubset(candidate):
+        payload = candidate
+        break
+if payload is None:
+    raise SystemExit(1)
+
+timestamp = payload.get("timestamp")
+pg_size = payload.get("pg_size")
+redis_size = payload.get("redis_size")
+if not isinstance(timestamp, str) or not re.fullmatch(
+    r"[0-9]{8}-[0-9]{6}", timestamp
+):
+    raise SystemExit(1)
+for size in (pg_size, redis_size):
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise SystemExit(1)
+
+try:
+    timestamp_epoch = datetime.strptime(
+        timestamp, "%Y%m%d-%H%M%S"
+    ).replace(tzinfo=timezone.utc).timestamp()
+except ValueError:
+    raise SystemExit(1)
+if timestamp_epoch < started_epoch - 1 or timestamp_epoch > time.time() + 5:
+    raise SystemExit(1)
+
+paths = (
+    (backup_root / "pg" / f"{timestamp}.pg.dump.gz", pg_size),
+    (backup_root / "redis" / f"{timestamp}.redis.tgz", redis_size),
+)
+for path, expected_size in paths:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise SystemExit(1)
+    if not stat.S_ISREG(info.st_mode) or info.st_size != expected_size:
+        raise SystemExit(1)
+    signature = [
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    ]
+    relative = str(path.relative_to(backup_root))
+    if baseline.get(relative) == signature:
+        raise SystemExit(1)
+
+values = (
+    timestamp,
+    str(paths[0][0]),
+    str(paths[1][0]),
+    str(pg_size),
+    str(redis_size),
+)
+if any("\t" in value or "\n" in value for value in values):
+    raise SystemExit(1)
+print("\t".join(values))
+PY
+    )"; then
+        return 1
+    fi
+
+    local timestamp=""
+    local pg_path=""
+    local redis_path=""
+    local pg_size=""
+    local redis_size=""
+    IFS=$'\t' read -r timestamp pg_path redis_path pg_size redis_size <<< "${fields}"
+    if [ -z "${timestamp}" ] || [ -z "${pg_path}" ] || [ -z "${redis_path}" ]; then
+        return 1
+    fi
+    UPDATE_RESTORE_POINT_TIMESTAMP="${timestamp}"
+    UPDATE_RESTORE_POINT_PG="${pg_path}"
+    UPDATE_RESTORE_POINT_REDIS="${redis_path}"
+    UPDATE_RESTORE_POINT_PG_SIZE="${pg_size}"
+    UPDATE_RESTORE_POINT_REDIS_SIZE="${redis_size}"
+    return 0
+}
+
+run_update_backup_preflight() {
+    local backup_script=""
+    if [ -x "${SCRIPT_DIR}/backup.sh" ]; then
+        backup_script="${SCRIPT_DIR}/backup.sh"
+    elif [ -n "${CURRENT_RELEASE}" ] \
+            && [ -x "${CURRENT_RELEASE}/scripts/backup.sh" ]; then
+        backup_script="${CURRENT_RELEASE}/scripts/backup.sh"
+    fi
+    if [ -z "${backup_script}" ]; then
+        log_error "[backup_preflight] 找不到 backup.sh，无法生成本轮恢复点。"
+        return 1
+    fi
+
+    local output_file=""
+    local baseline_file=""
+    mkdir -p "${UPDATE_LOG_DIR}"
+    output_file="$(
+        mktemp "${UPDATE_LOG_DIR}/.update-backup.${OPERATION_ID}.XXXXXX" 2>/dev/null
+    )" || {
+        log_error "[backup_preflight] 无法创建备份校验输出文件。"
+        return 1
+    }
+    baseline_file="$(
+        mktemp "${UPDATE_LOG_DIR}/.update-backup-baseline.${OPERATION_ID}.XXXXXX" \
+            2>/dev/null
+    )" || {
+        rm -f "${output_file}" 2>/dev/null || true
+        log_error "[backup_preflight] 无法创建备份基线文件。"
+        return 1
+    }
+    chmod 0600 "${output_file}" "${baseline_file}" 2>/dev/null || {
+        rm -f "${output_file}" "${baseline_file}" 2>/dev/null || true
+        log_error "[backup_preflight] 无法收紧备份校验输出文件权限。"
+        return 1
+    }
+    if ! snapshot_update_backup_files "${UPDATE_LOG_DIR}" "${baseline_file}"; then
+        rm -f "${output_file}" "${baseline_file}" 2>/dev/null || true
+        log_error "[backup_preflight] 无法记录备份前文件签名基线。"
+        return 1
+    fi
+
+    local backup_started_epoch=""
+    local backup_rc=1
+    local tee_rc=1
+    local pipe_status=()
+    backup_started_epoch="$(date +%s)"
+    log_info "[backup_preflight] 调用 ${backup_script}（BACKUP_ROOT=${UPDATE_LOG_DIR}）"
+    # LUMEN_BACKUP_FORCE=1：调用方已持有同一把维护锁。
+    set +e
+    LUMEN_ENV_FILE="${SHARED_ENV}" \
+        LUMEN_BACKUP_ROOT="${UPDATE_LOG_DIR}" \
+        BACKUP_ROOT="${UPDATE_LOG_DIR}" \
+        LUMEN_BACKUP_FORCE=1 \
+        DB_USER="$(lumen_env_value DB_USER "${SHARED_ENV}")" \
+        DB_NAME="$(lumen_env_value DB_NAME "${SHARED_ENV}")" \
+        REDIS_PASSWORD="$(lumen_env_value REDIS_PASSWORD "${SHARED_ENV}")" \
+        bash "${backup_script}" | tee "${output_file}"
+    pipe_status=("${PIPESTATUS[@]}")
+    set -e
+    backup_rc="${pipe_status[0]:-1}"
+    tee_rc="${pipe_status[1]:-1}"
+    if [ "${backup_rc}" -ne 0 ] || [ "${tee_rc}" -ne 0 ]; then
+        rm -f "${output_file}" "${baseline_file}" 2>/dev/null || true
+        log_error "[backup_preflight] 备份失败（backup_rc=${backup_rc}, tee_rc=${tee_rc}），拒绝继续。"
+        log_error "[backup_preflight] 已使用 env 文件：${SHARED_ENV}"
+        log_error "[backup_preflight] 请查看上方 backup 日志中的 pg_dump/redis 具体错误。"
+        return 1
+    fi
+    if ! verify_update_restore_point \
+            "${output_file}" \
+            "${UPDATE_LOG_DIR}" \
+            "${backup_started_epoch}" \
+            "${baseline_file}"; then
+        rm -f "${output_file}" "${baseline_file}" 2>/dev/null || true
+        log_error "[backup_preflight] backup.sh 返回成功，但未找到本轮新生成且大小匹配的 PG/Redis 成对恢复点。"
+        log_error "[backup_preflight] 拒绝把人工预备份或旧文件当成本轮迁移恢复边界。"
+        return 1
+    fi
+    rm -f "${output_file}" "${baseline_file}" 2>/dev/null || true
+
+    log_info "[backup_preflight] 本轮恢复点已验证：timestamp=${UPDATE_RESTORE_POINT_TIMESTAMP}"
+    log_info "  PostgreSQL: ${UPDATE_RESTORE_POINT_PG} (${UPDATE_RESTORE_POINT_PG_SIZE} bytes)"
+    log_info "  Redis:      ${UPDATE_RESTORE_POINT_REDIS} (${UPDATE_RESTORE_POINT_REDIS_SIZE} bytes)"
+    emit_info backup_preflight backup_script "${backup_script}"
+    emit_info backup_preflight restore_point "${UPDATE_RESTORE_POINT_TIMESTAMP}"
+    emit_info backup_preflight pg_path "${UPDATE_RESTORE_POINT_PG}"
+    emit_info backup_preflight redis_path "${UPDATE_RESTORE_POINT_REDIS}"
+    return 0
+}
+
+guard_migration_restore_point() {
+    if [ -n "${UPDATE_RESTORE_POINT_TIMESTAMP}" ]; then
+        log_info "[migrate_db] 使用本轮已验证恢复点 ${UPDATE_RESTORE_POINT_TIMESTAMP} 作为数据库回滚边界。"
+        emit_info migrate_db restore_point "${UPDATE_RESTORE_POINT_TIMESTAMP}"
+        emit_info migrate_db restore_point_pg "${UPDATE_RESTORE_POINT_PG}"
+        emit_info migrate_db restore_point_redis "${UPDATE_RESTORE_POINT_REDIS}"
+        return 0
+    fi
+    if update_requires_migration_restore_point; then
+        log_error "[migrate_db] 后台/受保护更新缺少本轮可验证恢复点；拒绝停止旧服务或执行 Alembic。"
+        emit_warn migrate_db "missing_required_restore_point"
+        return 1
+    fi
+    log_warn "[migrate_db] 本轮没有可验证恢复点；按显式 fast/skip 语义继续。"
+    log_warn "[migrate_db] 若迁移已启动，应用 release 回滚不会回滚数据库。"
+    emit_warn migrate_db "missing_restore_point_explicit_override"
+    return 0
+}
+
+log_update_restore_boundary() {
+    local phase="${1:-update}"
+    if [ "${UPDATE_RESTORE_BOUNDARY_LOGGED}" -eq 1 ]; then
+        return 0
+    fi
+    UPDATE_RESTORE_BOUNDARY_LOGGED=1
+    if [ -n "${UPDATE_RESTORE_POINT_TIMESTAMP}" ]; then
+        log_error "[${phase}] 本轮恢复点：timestamp=${UPDATE_RESTORE_POINT_TIMESTAMP}"
+        log_error "[${phase}]   PostgreSQL=${UPDATE_RESTORE_POINT_PG}"
+        log_error "[${phase}]   Redis=${UPDATE_RESTORE_POINT_REDIS}"
+    else
+        log_error "[${phase}] 本轮恢复点：<none>（显式 fast/skip override）。"
+    fi
+    if [ "${UPDATE_MIGRATION_VERIFIED}" -eq 1 ]; then
+        log_error "[${phase}] 回滚边界：数据库已迁移并验证到目标 head；自动 release/env/服务回滚不会回滚数据库。"
+        log_error "[${phase}] 如需数据库回退，必须使用上述恢复点走受控 restore，不能只切换 current。"
+    elif [ "${UPDATE_MIGRATION_STARTED}" -eq 1 ]; then
+        log_error "[${phase}] 回滚边界：Alembic 已启动但未验证到目标 head，数据库可能已部分变更。"
+        log_error "[${phase}] 自动回滚仅覆盖 release/env/服务；数据库恢复必须使用上述恢复点。"
+    else
+        log_warn "[${phase}] 回滚边界：Alembic 尚未启动，数据库未被本轮迁移修改。"
+    fi
+}
+
 sed_replacement_escape() {
     printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
 }
@@ -256,6 +587,159 @@ release_version_for_target() {
         return 0
     fi
     return 1
+}
+
+release_commit_is_valid() {
+    printf '%s\n' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+release_manifest_commit_for_tag() {
+    local manifest_file="${1:-}"
+    local release_tag="${2:-}"
+    [ -f "${manifest_file}" ] || return 1
+    python3 - "${manifest_file}" "${release_tag}" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+commit = payload.get("commit_sha")
+if payload.get("schema_version") != 1 or payload.get("version") != sys.argv[2]:
+    raise SystemExit(1)
+if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+    raise SystemExit(1)
+print(commit)
+PY
+}
+
+release_manifest_immutable_image_for_service() {
+    local manifest_file="${1:-}"
+    local release_tag="${2:-}"
+    local service="${3:-}"
+    [ -f "${manifest_file}" ] || return 1
+    python3 - "${manifest_file}" "${release_tag}" "${service}" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+tag = sys.argv[2]
+service = sys.argv[3]
+images = payload.get("images")
+image = images.get(service) if isinstance(images, dict) else None
+immutable_ref = image.get("immutable_ref") if isinstance(image, dict) else None
+expected_prefix = f"ghcr.io/cyeinfpro/lumen-{service}@sha256:"
+if payload.get("schema_version") != 1 or payload.get("version") != tag:
+    raise SystemExit(1)
+if not isinstance(immutable_ref, str) or not immutable_ref.startswith(expected_prefix):
+    raise SystemExit(1)
+if not re.fullmatch(r"ghcr\.io/cyeinfpro/lumen-[a-z]+@sha256:[0-9a-f]{64}", immutable_ref):
+    raise SystemExit(1)
+print(immutable_ref)
+PY
+}
+
+prepare_official_release_source_manifest() {
+    local release_tag="${1:-}"
+    local output="${2:-}"
+    local commit_sha=""
+    local api_image=""
+    if ! lumen_fetch_release_manifest "${release_tag}" "${output}"; then
+        log_error "[fetch_release] 无法取得 ${release_tag} 的官方 release manifest。"
+        return 1
+    fi
+    commit_sha="$(
+        release_manifest_commit_for_tag "${output}" "${release_tag}" 2>/dev/null \
+            || true
+    )"
+    api_image="$(
+        release_manifest_immutable_image_for_service \
+            "${output}" "${release_tag}" api 2>/dev/null || true
+    )"
+    if ! release_commit_is_valid "${commit_sha}" || [ -z "${api_image}" ]; then
+        log_error "[fetch_release] ${release_tag} manifest 缺少有效源码 commit 或 API immutable image。"
+        return 1
+    fi
+    RELEASE_EXPECTED_COMMIT="${commit_sha}"
+    RELEASE_SOURCE_API_IMAGE="${api_image}"
+    emit_info fetch_release expected_source_commit "${commit_sha}"
+    emit_info fetch_release source_image "${api_image}"
+    return 0
+}
+
+discard_release_source_manifest_cache() {
+    if [ -n "${RELEASE_SOURCE_MANIFEST_CACHE:-}" ]; then
+        rm -f "${RELEASE_SOURCE_MANIFEST_CACHE}" 2>/dev/null || true
+    fi
+    RELEASE_SOURCE_MANIFEST_CACHE=""
+}
+
+record_release_source_commit() {
+    local candidate="${1:-}"
+    local proof="${2:-unknown}"
+    if ! release_commit_is_valid "${candidate}"; then
+        return 1
+    fi
+    if [ -n "${RELEASE_SOURCE_COMMIT:-}" ] \
+            && [ "${RELEASE_SOURCE_COMMIT}" != "${candidate}" ]; then
+        log_error "[fetch_release] 源码 commit 证明冲突：${RELEASE_SOURCE_COMMIT} (${RELEASE_SOURCE_COMMIT_PROOF:-unknown}) != ${candidate} (${proof})"
+        return 1
+    fi
+    if [ -n "${RELEASE_EXPECTED_COMMIT:-}" ] \
+            && [ "${RELEASE_EXPECTED_COMMIT}" != "${candidate}" ]; then
+        log_error "[fetch_release] 源码 commit 与官方 release manifest 不一致：source=${candidate} expected=${RELEASE_EXPECTED_COMMIT} proof=${proof}"
+        return 1
+    fi
+    RELEASE_SOURCE_COMMIT="${candidate}"
+    if [ -z "${RELEASE_SOURCE_COMMIT_PROOF:-}" ]; then
+        RELEASE_SOURCE_COMMIT_PROOF="${proof}"
+    fi
+    return 0
+}
+
+release_image_revision_commit() {
+    local image="${1:-}"
+    local revision=""
+    [ -n "${image}" ] || return 1
+    revision="$(docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+        "${image}" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+    release_commit_is_valid "${revision}" || return 1
+    printf '%s\n' "${revision}"
+}
+
+verify_release_source_manifest_binding() {
+    local manifest_file="${1:-}"
+    local release_tag="${2:-}"
+    local manifest_commit=""
+    manifest_commit="$(release_manifest_commit_for_tag \
+        "${manifest_file}" "${release_tag}" 2>/dev/null || true)"
+    if ! release_commit_is_valid "${manifest_commit}"; then
+        log_error "[set_image_tag] ${release_tag} manifest 缺少有效的 40 位 commit_sha。"
+        return 1
+    fi
+    if ! release_commit_is_valid "${RELEASE_SOURCE_COMMIT:-}"; then
+        log_error "[set_image_tag] 无法证明待发布源码对应 ${release_tag} 的 40 位 commit；拒绝混用未绑定源码与正式 release 镜像。"
+        return 1
+    fi
+    if [ "${RELEASE_SOURCE_COMMIT}" != "${manifest_commit}" ]; then
+        log_error "[set_image_tag] 源码 commit 与 release manifest 不一致：source=${RELEASE_SOURCE_COMMIT} manifest=${manifest_commit} tag=${release_tag}"
+        return 1
+    fi
+    log_info "[set_image_tag] 源码 commit 已绑定 release manifest：${manifest_commit} (${RELEASE_SOURCE_COMMIT_PROOF:-unknown})"
+    return 0
 }
 
 compose_up_service_fast() {
@@ -696,6 +1180,7 @@ run_update_cleanup() {
     fi
 
     local CLEANUP_DANGLING_H CLEANUP_IMAGES_H CLEANUP_CACHE_H
+    local filter_args=()
     CLEANUP_DANGLING_H="${LUMEN_CLEANUP_DANGLING_HOURS:-${cleanup_dangling_default}}"
     CLEANUP_IMAGES_H="${LUMEN_CLEANUP_IMAGES_HOURS:-${cleanup_images_default}}"
     CLEANUP_CACHE_H="${LUMEN_CLEANUP_CACHE_HOURS:-${cleanup_cache_default}}"
@@ -720,7 +1205,8 @@ run_update_cleanup() {
         # 1. dangling layers — 几乎 0 风险。
         filter_args=()
         while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_DANGLING_H}")
-        if ! lumen_docker image prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+        if ! lumen_docker image prune -f \
+                ${filter_args[@]+"${filter_args[@]}"} >/dev/null 2>&1; then
             log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
         else
             emit_info cleanup dangling_pruned "hours=${CLEANUP_DANGLING_H}"
@@ -730,7 +1216,8 @@ run_update_cleanup() {
         # containers, so this does not remove the current deployment.
         filter_args=()
         while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_IMAGES_H}")
-        if ! lumen_docker image prune -a -f "${filter_args[@]}" >/dev/null 2>&1; then
+        if ! lumen_docker image prune -a -f \
+                ${filter_args[@]+"${filter_args[@]}"} >/dev/null 2>&1; then
             log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
         else
             emit_info cleanup unused_images_pruned "hours=${CLEANUP_IMAGES_H}"
@@ -740,7 +1227,8 @@ run_update_cleanup() {
         if lumen_docker buildx version >/dev/null 2>&1; then
             filter_args=()
             while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_CACHE_H}")
-            if ! lumen_docker buildx prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+            if ! lumen_docker buildx prune -f \
+                    ${filter_args[@]+"${filter_args[@]}"} >/dev/null 2>&1; then
                 log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
             else
                 emit_info cleanup buildx_cache_pruned "hours=${CLEANUP_CACHE_H}"
@@ -767,7 +1255,8 @@ snapshot_update_state() {
     fi
     UPDATE_ENV_SNAPSHOT="$(mktemp "${SHARED_DIR}/.env.update.XXXXXX")" \
         || return 1
-    if ! cp -p "${SHARED_ENV}" "${UPDATE_ENV_SNAPSHOT}"; then
+    if ! cp -p "${SHARED_ENV}" "${UPDATE_ENV_SNAPSHOT}" \
+            || ! chmod 0600 "${UPDATE_ENV_SNAPSHOT}"; then
         rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
         UPDATE_ENV_SNAPSHOT=""
         return 1
@@ -892,8 +1381,13 @@ on_err() {
         return 0
     fi
     UPDATE_ERROR_HANDLED=1
+    discard_release_source_manifest_cache
     lumen_step_finalize_failure "${rc}"
     log_error "更新失败：返回码 ${rc}"
+    if [ -n "${UPDATE_RESTORE_POINT_TIMESTAMP}" ] \
+            || [ "${UPDATE_MIGRATION_STARTED}" -eq 1 ]; then
+        log_update_restore_boundary update
+    fi
     if [ "${ROLLBACK_DONE}" -eq 0 ]; then
         ROLLBACK_DONE=1
         if [ "${UPDATE_STATE_COMMITTED}" -eq 0 ] \
@@ -933,9 +1427,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase: self_update_scripts
-# 从 GitHub 拉最新 scripts/ 替换 current release 里的对应文件，让 backup_preflight
-# 等后续阶段直接用上仓库 main 的 bash 修复，避免"修一个 scripts/ bug 必须等下次
-# update 才生效"的鸡蛋问题。
+# 只从 current release 的具体 vX.Y.Z tag/manifest commit 同步 scripts/。
+# main/latest/branch 都跳过，避免可变 ref 仅经语法检查后覆盖正在执行的脚本。
 #
 # 位置：必须在 check phase 之前 —— 否则当 current_tag == target_tag（pinned tag noop）
 # 时 check 会 SKIP_TO_CLEANUP return，self_update_scripts 永远跑不到。
@@ -954,9 +1447,19 @@ elif [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}/scripts" ]; then
     log_info "[self_update_scripts] 不是 release 布局（CURRENT_RELEASE 为空），跳过。"
     emit_done self_update_scripts 0
 else
+    SELF_UPDATE_REF="${LUMEN_UPDATE_SCRIPTS_REF:-}"
+    if [ -z "${SELF_UPDATE_REF}" ] && [ -f "${CURRENT_RELEASE}/.image-tag" ]; then
+        SELF_UPDATE_REF="$(head -n1 "${CURRENT_RELEASE}/.image-tag" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if ! printf '%s\n' "${SELF_UPDATE_REF}" \
+            | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+        log_info "[self_update_scripts] current release 没有具体 release tag，拒绝从 branch 自更新。"
+        emit_info self_update_scripts source_ref "${SELF_UPDATE_REF:-<none>}"
+        emit_done self_update_scripts 0
+    else
     lumen_self_update_scripts \
         "${CURRENT_RELEASE}/scripts" \
-        "${LUMEN_UPDATE_SCRIPTS_BRANCH:-main}" \
+        "${SELF_UPDATE_REF}" \
         60 \
         lib.sh \
         release_manifest_guard.py update_runner.py restore_runner.py \
@@ -965,11 +1468,12 @@ else
         ok)
             if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
                 emit_info self_update_scripts source "${LUMEN_SELF_UPDATE_SOURCE}"
+                emit_info self_update_scripts commit "${LUMEN_SELF_UPDATE_SOURCE_COMMIT}"
                 emit_info self_update_scripts changed "${LUMEN_SELF_UPDATE_CHANGED}"
                 emit_info self_update_scripts backup_suffix ".bak.${LUMEN_SELF_UPDATE_BACKUP_TS}"
                 # update.sh 自己变化 → re-exec 新版
                 case " ${LUMEN_SELF_UPDATE_CHANGED} " in
-                    *" update.sh "*)
+                    *" update.sh "*|*" lib.sh "*)
                         local self_update_hops="${LUMEN_UPDATE_SELF_UPDATED:-0}"
                         case "${self_update_hops}" in
                             ''|*[!0-9]*) self_update_hops=0 ;;
@@ -996,6 +1500,7 @@ else
             emit_done self_update_scripts 0
             ;;
     esac
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1269,42 +1774,23 @@ emit_done preflight 0
 
 # ---------------------------------------------------------------------------
 # Phase: backup_preflight
-# 默认强制；只有 LUMEN_UPDATE_SKIP_BACKUP=1 才跳过。失败 abort。
+# 后台非交互与 standard 默认强制；人工 fast 保留显式跳过语义。
+# 实际执行后必须验证本轮新生成的 PG/Redis 成对恢复点。
 # ---------------------------------------------------------------------------
 emit_start backup_preflight
 
-if [ "${LUMEN_UPDATE_SKIP_BACKUP:-0}" = "1" ]; then
+if lumen_env_truthy "${LUMEN_UPDATE_SKIP_BACKUP:-0}"; then
     log_warn "[backup_preflight] LUMEN_UPDATE_SKIP_BACKUP=1，跳过备份（强烈不推荐）。"
     emit_warn backup_preflight "skipped_by_env"
     emit_done backup_preflight 0
-elif [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ "${LUMEN_UPDATE_FAST_BACKUP:-0}" != "1" ]; then
+elif [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
+        && ! lumen_env_truthy "${LUMEN_UPDATE_FAST_BACKUP:-0}" \
+        && ! update_requires_migration_restore_point; then
     log_warn "[backup_preflight] fast 模式默认跳过备份；需要强制备份请设置 LUMEN_UPDATE_FAST_BACKUP=1 或 LUMEN_UPDATE_MODE=standard。"
     emit_warn backup_preflight "skipped_by_fast_mode"
     emit_done backup_preflight 0
 else
-    BACKUP_SCRIPT=""
-    if [ -x "${SCRIPT_DIR}/backup.sh" ]; then
-        BACKUP_SCRIPT="${SCRIPT_DIR}/backup.sh"
-    elif [ -n "${CURRENT_RELEASE}" ] && [ -x "${CURRENT_RELEASE}/scripts/backup.sh" ]; then
-        BACKUP_SCRIPT="${CURRENT_RELEASE}/scripts/backup.sh"
-    fi
-    if [ -z "${BACKUP_SCRIPT}" ]; then
-        log_error "[backup_preflight] 找不到 backup.sh，无法生成备份；如需跳过，显式 export LUMEN_UPDATE_SKIP_BACKUP=1（不推荐）。"
-        emit_fail backup_preflight 1
-        exit 1
-    fi
-    log_info "[backup_preflight] 调用 ${BACKUP_SCRIPT}（BACKUP_ROOT=${UPDATE_LOG_DIR}）"
-    # LUMEN_BACKUP_FORCE=1：跳过 backup.sh 内的维护锁 try-acquire（本进程已持有同一把维护锁）。
-    if ! LUMEN_ENV_FILE="${SHARED_ENV}" LUMEN_BACKUP_ROOT="${UPDATE_LOG_DIR}" BACKUP_ROOT="${UPDATE_LOG_DIR}" \
-            LUMEN_BACKUP_FORCE=1 \
-            DB_USER="$(lumen_env_value DB_USER "${SHARED_ENV}")" \
-            DB_NAME="$(lumen_env_value DB_NAME "${SHARED_ENV}")" \
-            REDIS_PASSWORD="$(lumen_env_value REDIS_PASSWORD "${SHARED_ENV}")" \
-            bash "${BACKUP_SCRIPT}"; then
-        emit_info backup_preflight backup_script "${BACKUP_SCRIPT}"
-        log_error "[backup_preflight] 备份失败 → abort（不允许无备份继续，4K 任务环境死规则）。"
-        log_error "[backup_preflight] 已使用 env 文件：${SHARED_ENV}"
-        log_error "[backup_preflight] 请查看上方 backup 日志中的 pg_dump/redis 具体错误。"
+    if ! run_update_backup_preflight; then
         emit_fail backup_preflight 1
         exit 1
     fi
@@ -1338,11 +1824,12 @@ emit_info fetch_release repo_dir "${REPO_DIR}"
 try_image_extract_release() {
     local tag="${1:-main}"
     local out_dir="$2"
+    local immutable_image="${3:-}"
     if ! command -v docker >/dev/null 2>&1; then
         return 1
     fi
     local registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
-    local image="${registry}/lumen-api:${tag}"
+    local image="${immutable_image:-${registry}/lumen-api:${tag}}"
     if [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
             && ! lumen_image_tag_is_rolling "${tag}" \
             && docker image inspect "${image}" >/dev/null 2>&1; then
@@ -1378,12 +1865,29 @@ try_image_extract_release() {
     [ "${rc}" = "0" ] || return 1
     test -f "${out_dir}/docker-compose.yml" || return 1
     test -d "${out_dir}/scripts" || return 1
+    local image_commit=""
+    image_commit="$(release_image_revision_commit "${image}" 2>/dev/null || true)"
+    if [ -n "${image_commit}" ]; then
+        if ! record_release_source_commit \
+                "${image_commit}" "image:${image}:org.opencontainers.image.revision"; then
+            return 1
+        fi
+        emit_info fetch_release source_commit "${image_commit}"
+    elif [ -n "${RELEASE_EXPECTED_COMMIT:-}" ]; then
+        log_warn "[fetch_release] ${image} 缺少有效 OCI revision，不能证明 release 源码。"
+        return 1
+    fi
     return 0
 }
 
 sync_main_fallback_release() {
     local source_dir="" source_ref="" extracted_dir=""
     local staged_release="${NEW_RELEASE}.main.$$"
+    RELEASE_SOURCE_COMMIT=""
+    RELEASE_SOURCE_COMMIT_PROOF=""
+    RELEASE_EXPECTED_COMMIT=""
+    RELEASE_SOURCE_API_IMAGE=""
+    discard_release_source_manifest_cache
     extracted_dir="${ROOT}/.update-main-source.$$"
     rm -rf "${staged_release}" "${extracted_dir}" 2>/dev/null || true
 
@@ -1398,9 +1902,15 @@ sync_main_fallback_release() {
             return 1
         fi
         source_dir="${REPO_DIR}"
-        source_ref="refs/remotes/origin/main"
+        source_ref="$(cd "${REPO_DIR}" \
+            && git rev-parse --verify "refs/remotes/origin/main^{commit}")"
+        if ! record_release_source_commit "${source_ref}" "git:refs/remotes/origin/main"; then
+            log_error "[fetch_release] fallback main 源码 commit 无效。"
+            rm -rf "${extracted_dir}" 2>/dev/null || true
+            return 1
+        fi
         RELEASE_SOURCE_IMAGE_EXTRACT=0
-        emit_info fetch_release fallback_source "git_origin_main"
+        emit_info fetch_release fallback_source "git_origin_main@${source_ref}"
     else
         log_error "[fetch_release] 镜像已回退 main，但无法取得匹配的 main 源码。"
         rm -rf "${extracted_dir}" 2>/dev/null || true
@@ -1430,27 +1940,70 @@ sync_main_fallback_release() {
     return 0
 }
 
-if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
-    if ! command -v git >/dev/null 2>&1; then
-        log_error "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但缺少 git。"
+RELEASE_SOURCE_REF=""
+RELEASE_SOURCE_IMAGE_EXTRACT=0
+if [ -n "${TARGET_RELEASE_TAG}" ] \
+        && [ "${UPDATE_IMAGE_REGISTRY%/}" = "ghcr.io/cyeinfpro" ]; then
+    RELEASE_SOURCE_MANIFEST_CACHE="$(
+        mktemp "${ROOT}/.release-source-manifest.XXXXXXXXXX" 2>/dev/null
+    )" || {
+        log_error "[fetch_release] 无法创建 release source manifest 临时文件。"
+        emit_fail fetch_release 1
+        exit 1
+    }
+    if ! prepare_official_release_source_manifest \
+            "${TARGET_RELEASE_TAG}" "${RELEASE_SOURCE_MANIFEST_CACHE}"; then
         emit_fail fetch_release 1
         exit 1
     fi
+fi
+
+# Official releases on non-git hosts always refresh from the manifest's
+# immutable API image. This path is independent of LUMEN_UPDATE_GIT_PULL.
+if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ ! -d "${REPO_DIR}/.git" ]; then
+    if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" = "1" ]; then
+        log_error "[fetch_release] 正式 release 在无 .git 主机上不能禁用 immutable image source；拒绝使用当前快照。"
+        emit_fail fetch_release 1
+        exit 1
+    fi
+    IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
+    if ! try_image_extract_release \
+            "${TARGET_TAG}" \
+            "${IMAGE_EXTRACT_DIR}" \
+            "${RELEASE_SOURCE_API_IMAGE}"; then
+        log_error "[fetch_release] 无法从 ${RELEASE_SOURCE_API_IMAGE} 取得 commit-proven 发布物。"
+        emit_fail fetch_release 1
+        exit 1
+    fi
+    REPO_DIR="${IMAGE_EXTRACT_DIR}"
+    RELEASE_SOURCE_IMAGE_EXTRACT=1
+    RELEASE_SOURCE_REF="${RELEASE_SOURCE_COMMIT}"
+    emit_info fetch_release source "immutable_image_extract"
+    log_info "[fetch_release] 已从 immutable image 提取代码到 ${REPO_DIR}"
+fi
+
+if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if [ ! -d "${REPO_DIR}/.git" ]; then
-        IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
-        # CI smoke tests set LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1 to skip the
-        # network-y docker pull and exercise the legacy snapshot-only branch.
-        RELEASE_SOURCE_IMAGE_EXTRACT=0
-        if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" != "1" ] && \
-           try_image_extract_release "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
-            REPO_DIR="${IMAGE_EXTRACT_DIR}"
-            RELEASE_SOURCE_IMAGE_EXTRACT=1
-            emit_info fetch_release source "image_extract"
-            log_info "[fetch_release] 已从 image 提取代码到 ${REPO_DIR}"
-        else
-            log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
+        if [ "${RELEASE_SOURCE_IMAGE_EXTRACT}" != "1" ]; then
+            IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
+            if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" != "1" ] \
+                    && try_image_extract_release \
+                        "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
+                REPO_DIR="${IMAGE_EXTRACT_DIR}"
+                RELEASE_SOURCE_IMAGE_EXTRACT=1
+                RELEASE_SOURCE_REF="${RELEASE_SOURCE_COMMIT}"
+                emit_info fetch_release source "image_extract"
+                log_info "[fetch_release] 已从 image 提取代码到 ${REPO_DIR}"
+            else
+                log_warn "[fetch_release] 非正式/rolling 更新未取得 image source；按显式兼容语义使用当前快照。"
+            fi
         fi
     else
+        if ! command -v git >/dev/null 2>&1; then
+            log_error "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但缺少 git。"
+            emit_fail fetch_release 1
+            exit 1
+        fi
         GIT_REF="${LUMEN_UPDATE_GIT_REF:-${TARGET_RELEASE_TAG}}"
         log_info "[fetch_release] git fetch in ${REPO_DIR}"
         if ! ( cd "${REPO_DIR}" && git fetch --quiet --all --prune --tags ); then
@@ -1458,24 +2011,51 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
             emit_fail fetch_release 1
             exit 1
         fi
-        if [ -n "${GIT_REF}" ]; then
-            if ! ( cd "${REPO_DIR}" && git rev-parse --verify --quiet "${GIT_REF}^{commit}" >/dev/null ); then
-                log_error "[fetch_release] git ref ${GIT_REF} 不存在。"
-                emit_fail fetch_release 1
-                exit 1
-            fi
-        else
-            # 默认 fast-forward 当前分支
-            local_branch=""
-            local_branch="$(cd "${REPO_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-            if [ -n "${local_branch}" ] && [ "${local_branch}" != "HEAD" ]; then
-                ( cd "${REPO_DIR}" && git pull --ff-only --quiet ) || \
-                    log_warn "[fetch_release] git pull --ff-only 失败（可能已 detached），忽略。"
-            fi
+        if [ -n "${LUMEN_UPDATE_GIT_REF:-}" ] \
+                && ! printf '%s\n' "${GIT_REF}" \
+                    | grep -Eq '^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'; then
+            log_error "[fetch_release] LUMEN_UPDATE_GIT_REF 必须是具体 release tag 或 40 位 commit，拒绝可变 branch：${GIT_REF}"
+            emit_fail fetch_release 1
+            exit 1
         fi
+        if [ -z "${GIT_REF}" ]; then
+            GIT_REF="refs/remotes/origin/main"
+        fi
+        RELEASE_SOURCE_REF="$(cd "${REPO_DIR}" \
+            && git rev-parse --verify "${GIT_REF}^{commit}" 2>/dev/null || true)"
+        if ! printf '%s\n' "${RELEASE_SOURCE_REF}" | grep -Eq '^[0-9a-f]{40}$'; then
+            log_error "[fetch_release] 无法把 ${GIT_REF} 解析为不可变 commit。"
+            emit_fail fetch_release 1
+            exit 1
+        fi
+        emit_info fetch_release source_commit "${RELEASE_SOURCE_REF}"
     fi
 fi
-RELEASE_SOURCE_REF="${LUMEN_UPDATE_GIT_REF:-${TARGET_RELEASE_TAG}}"
+if [ -z "${RELEASE_SOURCE_REF}" ]; then
+    RELEASE_SOURCE_REF="${TARGET_RELEASE_TAG}"
+fi
+
+if [ -d "${REPO_DIR}/.git" ] && [ -n "${RELEASE_SOURCE_REF}" ]; then
+    RELEASE_SOURCE_GIT_COMMIT="$(cd "${REPO_DIR}" \
+        && git rev-parse --verify "${RELEASE_SOURCE_REF}^{commit}" 2>/dev/null || true)"
+    if release_commit_is_valid "${RELEASE_SOURCE_GIT_COMMIT}"; then
+        if ! record_release_source_commit \
+                "${RELEASE_SOURCE_GIT_COMMIT}" "git:${RELEASE_SOURCE_REF}"; then
+            emit_fail fetch_release 1
+            exit 1
+        fi
+    elif [ -n "${RELEASE_EXPECTED_COMMIT}" ]; then
+        log_error "[fetch_release] 无法从本地 git 解析 ${RELEASE_SOURCE_REF} 的 immutable commit。"
+        emit_fail fetch_release 1
+        exit 1
+    fi
+fi
+if [ -n "${RELEASE_EXPECTED_COMMIT}" ] \
+        && ! release_commit_is_valid "${RELEASE_SOURCE_COMMIT}"; then
+    log_error "[fetch_release] 正式 release 未取得可验证源码 commit；拒绝继续。"
+    emit_fail fetch_release 1
+    exit 1
+fi
 
 # 新 release id + 目录
 NEW_ID="releases-$(date -u +%Y%m%d-%H%M%S)"
@@ -1607,11 +2187,28 @@ if lumen_release_manifest_required "${TARGET_TAG}" \
             emit_info set_image_tag release_alias "${TARGET_TAG}->${RELEASE_MANIFEST_TAG}"
         fi
         RELEASE_MANIFEST_FILE="${NEW_RELEASE}/release-manifest.json"
-        if ! lumen_fetch_release_manifest "${RELEASE_MANIFEST_TAG}" "${RELEASE_MANIFEST_FILE}"; then
+        if [ -n "${RELEASE_SOURCE_MANIFEST_CACHE}" ] \
+                && [ "${RELEASE_MANIFEST_TAG}" = "${TARGET_RELEASE_TAG}" ]; then
+            if ! mv -f \
+                    "${RELEASE_SOURCE_MANIFEST_CACHE}" "${RELEASE_MANIFEST_FILE}"; then
+                log_error "[set_image_tag] 无法提交已校验的 release manifest。"
+                emit_fail set_image_tag 1
+                exit 1
+            fi
+            RELEASE_SOURCE_MANIFEST_CACHE=""
+        elif ! lumen_fetch_release_manifest \
+                "${RELEASE_MANIFEST_TAG}" "${RELEASE_MANIFEST_FILE}"; then
             log_error "[set_image_tag] 无法获取或校验 ${RELEASE_MANIFEST_TAG} 的 release-manifest.json。"
             emit_fail set_image_tag 1
             exit 1
         fi
+        if ! verify_release_source_manifest_binding \
+                "${RELEASE_MANIFEST_FILE}" "${RELEASE_MANIFEST_TAG}"; then
+            emit_fail set_image_tag 1
+            exit 1
+        fi
+        emit_info set_image_tag source_commit "${RELEASE_SOURCE_COMMIT}"
+        emit_info set_image_tag source_commit_proof "${RELEASE_SOURCE_COMMIT_PROOF}"
         emit_info set_image_tag release_manifest "verified"
     fi
 fi
@@ -1905,6 +2502,10 @@ fi
 _stopped_old_services=0
 if [ "${MIGRATE_NEEDED}" = "0" ]; then
     :
+elif ! guard_migration_restore_point; then
+    log_update_restore_boundary migrate_db
+    emit_fail migrate_db 1
+    exit 1
 elif [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ]; then
     log_info "[migrate_db] LUMEN_UPDATE_BLUE_GREEN=1：保持旧 api/worker 运行，依赖 expand-then-contract 迁移闸门。"
     emit_info migrate_db old_services "kept_running_blue_green"
@@ -1919,6 +2520,7 @@ fi
 
 _migrate_run_failed=0
 if [ "${MIGRATE_NEEDED}" = "1" ]; then
+    UPDATE_MIGRATION_STARTED=1
     if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
         _migrate_run_failed=1
     fi
@@ -1945,6 +2547,7 @@ if [ "${MIGRATE_NEEDED}" = "1" ] && { [ "${_migrate_run_failed}" = "1" ] \
     log_error "  expected head=${_alembic_heads:-<空>}"
     log_error "  原始 docker compose run rc：${_migrate_run_failed}（0=看起来 success，但 verify 不通过仍 fail-fast）"
     log_error "  根据 §11.3 / §17.6：不切 current、不重启新版本业务容器。"
+    log_update_restore_boundary migrate_db
     # 关键修复：如果之前 stop 了旧 api/worker/tgbot，migrate 失败后必须把它们用旧
     # release 起回来，否则业务停摆 — 旧 schema 与旧代码兼容，仍可正常服务。
     if [ "${_stopped_old_services}" = "1" ] && [ -n "${CURRENT_ID:-}" ] && [ -d "${ROOT}/releases/${CURRENT_ID}" ]; then
@@ -1973,6 +2576,7 @@ if [ "${MIGRATE_NEEDED}" = "1" ] && { [ "${_migrate_run_failed}" = "1" ] \
     exit 1
 fi
 if [ "${MIGRATE_NEEDED}" = "1" ]; then
+    UPDATE_MIGRATION_VERIFIED=1
     emit_done migrate_db 0
 fi
 
@@ -2141,6 +2745,9 @@ blue_green_stop_green() {
 if [ "${_restart_ok}" = "1" ]; then
     :
 else
+    if [ "${UPDATE_MIGRATION_STARTED}" -eq 1 ]; then
+        log_update_restore_boundary restart_services
+    fi
     if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -n "${_shift_script:-}" ]; then
         log_warn "[restart_services] 蓝绿路径失败，仅在 blue 健康且流量切回成功后停止 green。"
         if blue_green_restore_blue_traffic; then
@@ -2253,7 +2860,7 @@ emit_done restart_services 0
 
 # ---------------------------------------------------------------------------
 # Phase: health_check
-# HTTP healthz + Compose 状态。失败 → emit fail，不自动回滚（DB 已 migrate）。
+# HTTP healthz + Compose 状态。失败 → emit fail；是否迁移过由状态日志明确区分。
 # ---------------------------------------------------------------------------
 emit_start health_check
 
@@ -2280,7 +2887,13 @@ fi
 
 if [ "${HEALTH_FAIL}" -eq 1 ]; then
     log_error "[health_check] 健康检查失败；新代码已上线但状态异常。"
-    log_error "  数据库迁移已应用，**不自动回滚**——请执行："
+    if [ "${UPDATE_MIGRATION_VERIFIED}" -eq 1 ]; then
+        log_update_restore_boundary health_check
+        log_error "  数据库迁移已应用，**不自动回滚**——请执行："
+    else
+        log_warn "  本轮未执行数据库迁移，数据库无需恢复；应用 release 已切换，仍不自动回滚。"
+        log_error "  请执行："
+    fi
     log_error "    cd ${CURRENT_LINK}"
     log_error "    COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=120 api worker web"
     log_error "    COMPOSE_PROJECT_NAME=lumen docker compose ps"

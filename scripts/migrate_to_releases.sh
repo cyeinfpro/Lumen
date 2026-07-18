@@ -82,18 +82,70 @@ check_idempotent() {
     fi
 }
 
+restore_stopped_services() {
+    local restore_failed=0
+    local u=""
+    [ "$#" -gt 0 ] || return 0
+
+    log_warn "stop 阶段失败，恢复此前已停止的 lumen unit。"
+    for u in "$@"; do
+        if systemctl start "${u}"; then
+            log_warn "已恢复 ${u}"
+        else
+            log_error "恢复 ${u} 失败，请立即检查 journalctl -u ${u}"
+            restore_failed=1
+        fi
+    done
+    if [ "${restore_failed}" -ne 0 ]; then
+        log_error "至少一个此前已停止的 lumen unit 未能恢复。"
+        return 1
+    fi
+    return 0
+}
+
 stop_services() {
     log_info "停止 lumen 服务（lumen-tgbot, lumen-web, lumen-worker, lumen-api）"
     if command -v systemctl >/dev/null 2>&1; then
-        # 顺序无要求，stop 全部即可；忽略未安装的 unit。
+        local -a stopped_units=()
+        local -a restore_units=()
+        local u=""
+        local was_active=0
+        local i=0
+        local stop_failed=0
         for u in lumen-tgbot.service lumen-web.service lumen-worker.service lumen-api.service; do
             if systemctl list-unit-files "${u}" --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "${u}"; then
-                systemctl stop "${u}" 2>/dev/null || log_warn "stop ${u} 失败（忽略，继续迁移）"
+                was_active=0
+                if systemctl is-active --quiet "${u}" 2>/dev/null; then
+                    was_active=1
+                fi
+                if ! systemctl stop "${u}"; then
+                    log_error "stop ${u} 失败。"
+                    stop_failed=1
+                    if [ "${was_active}" -eq 1 ] \
+                            && ! systemctl is-active --quiet "${u}" 2>/dev/null; then
+                        stopped_units+=("${u}")
+                    fi
+                    for ((i=${#stopped_units[@]} - 1; i >= 0; i--)); do
+                        restore_units+=("${stopped_units[$i]}")
+                    done
+                    if ! restore_stopped_services "${restore_units[@]}"; then
+                        log_error "stop 失败后的服务恢复不完整。"
+                    fi
+                    break
+                fi
+                if [ "${was_active}" -eq 1 ]; then
+                    stopped_units+=("${u}")
+                fi
             fi
         done
+        if [ "${stop_failed}" -ne 0 ]; then
+            log_error "至少一个 lumen systemd unit 未能停止；拒绝移动部署目录。"
+            return 1
+        fi
     else
         log_warn "未发现 systemctl，跳过 stop 步骤（请确认服务未在运行）。"
     fi
+    return 0
 }
 
 move_to_release() {
@@ -355,27 +407,41 @@ start_services() {
         return 0
     fi
     log_info "启动 lumen 服务（lumen-api, lumen-worker, lumen-web, lumen-tgbot）"
+    local start_failed=0
+    local u=""
     for u in lumen-api.service lumen-worker.service lumen-web.service lumen-tgbot.service; do
         if systemctl list-unit-files "${u}" --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "${u}"; then
             if ! systemctl start "${u}"; then
                 log_error "启动 ${u} 失败，请检查 journalctl -u ${u}"
+                start_failed=1
             fi
         fi
     done
+    if [ "${start_failed}" -ne 0 ]; then
+        log_error "至少一个 lumen systemd unit 启动失败。"
+        return 1
+    fi
+    return 0
 }
 
 main() {
     require_root_or_writable
     check_idempotent
     log_info "开始把 ${ROOT} 迁移为 release + symlink 布局"
-    stop_services
+    if ! stop_services; then
+        log_error "服务停止阶段失败；部署目录保持原状，迁移结果为失败。"
+        return 1
+    fi
     move_to_release
     create_current_symlink
     extract_to_shared
     write_initial_release_metadata
     fix_ownership
     deploy_systemd_units
-    start_services
+    if ! start_services; then
+        log_error "release 布局已创建，但服务启动不完整；迁移结果为失败。"
+        return 1
+    fi
     log_info "迁移完成"
     log_info "  ROOT:        ${ROOT}"
     log_info "  current ->   releases/${INITIAL_ID}"

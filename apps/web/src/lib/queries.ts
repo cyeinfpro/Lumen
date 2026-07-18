@@ -15,6 +15,7 @@ import {
   type UseMutationOptions,
   type UseQueryOptions,
 } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 import {
   addAllowedEmail,
@@ -27,7 +28,6 @@ import {
   createStoryboard,
   createStoryboardAsset,
   createStoryboardShot,
-  createSystemPrompt,
   createApparelModelLibraryItem,
   deleteAdminUser,
   deleteConversation,
@@ -37,7 +37,6 @@ import {
   deleteApparelModelLibraryJob,
   deleteApparelModelLibraryItem,
   deleteMyAccount,
-  deleteSystemPrompt,
   deleteWorkflow,
   generateAllStoryboardKeyframes,
   generateApparelModelLibrary,
@@ -58,11 +57,9 @@ import {
   listStoryboards,
   listInviteLinks,
   listMySessions,
-  listSystemPrompts,
   patchConversation,
   patchStoryboard,
   patchStoryboardShot,
-  patchSystemPrompt,
   patchWorkflow,
   patchProviderEnabled,
   approveModelCandidate,
@@ -88,7 +85,6 @@ import {
   revokeMySession,
   moveStoryboardShot,
   setAdminUserPassword,
-  setDefaultSystemPrompt,
   getAdminModels,
   getProviders,
   getProviderStats,
@@ -146,15 +142,11 @@ import {
   type StoryboardShotCreateIn,
   type StoryboardShotPatchIn,
   type StoryboardSubmitShotIn,
-  type CreateSystemPromptIn,
-  type PatchSystemPromptIn,
   type ModelCandidatesIn,
   type ModelLibraryAgeSegment,
   type ModelLibraryAppearance,
   type ModelLibrarySource,
   type ReviseWorkflowImageIn,
-  type SystemPrompt,
-  type SystemPromptListResponse,
   type WorkflowRun,
   type WorkflowRunListResponse,
   type UploadedImage,
@@ -207,143 +199,24 @@ import {
   type StorageTestIn,
   type StorageTestResultOut,
 } from "./api/storage";
+import { qk } from "./queries/queryKeys";
+import {
+  isUserScopedQueryKeyForUser,
+  privateQueryEnabled,
+  useCurrentUserQueryClient,
+  useCurrentUserQueryKeys,
+} from "./queries/privateQueryScope";
 
-// ——— Query keys ———
-export const qk = {
-  allowedEmails: () => ["admin", "allowed_emails"] as const,
-  adminUserHistory: (userId: string) =>
-    ["admin", "users", userId, "history"] as const,
-  adminRequestEvents: (params?: {
-    limit?: number;
-    kind?: "all" | "generation" | "completion";
-    status?: string;
-    range?: "24h" | "7d" | "30d";
-  }) => ["admin", "request_events", params ?? {}] as const,
-  myShares: () => ["me", "shares"] as const,
-  inviteLinks: () => ["admin", "invite_links"] as const,
-  publicInvite: (token: string) => ["invite", token] as const,
-  systemSettings: () => ["admin", "settings"] as const,
-  adminModels: () => ["admin", "models"] as const,
-  providers: () => ["admin", "providers"] as const,
-  videoProviders: () => ["admin", "providers", "video"] as const,
-  providerStats: () => ["admin", "providers", "stats"] as const,
-  adminProxies: () => ["admin", "proxies"] as const,
-  adminUpdateStatus: () => ["admin", "update", "status"] as const,
-  adminUpdateVersion: () => ["admin", "update", "version"] as const,
-  adminUpdateCheck: (force: boolean) =>
-    ["admin", "update", "check", { force }] as const,
-  adminReleases: () => ["admin", "releases"] as const,
-  adminStorage: () => ["admin", "storage"] as const,
-  systemPrompts: () => ["system_prompts"] as const,
-  mySessions: () => ["me", "sessions"] as const,
-  conversations: (opts?: ListConversationsOpts) =>
-    ["conversations", opts ?? {}] as const,
-  conversationsInfinite: (params?: { limit?: number; q?: string }) =>
-    ["conversations", "infinite", params ?? {}] as const,
-  conversationContext: (convId: string) =>
-    ["conversations", convId, "context"] as const,
-  workflows: (params?: { type?: string; limit?: number }) =>
-    ["workflows", params ?? {}] as const,
-  workflow: (id: string) => ["workflows", id] as const,
-  storyboards: (params?: { cursor?: string | null; limit?: number }) =>
-    ["storyboards", params ?? {}] as const,
-  storyboard: (id: string) => ["storyboards", id] as const,
-  apparelModelLibrary: (params?: {
-    age_segment?: ModelLibraryAgeSegment;
-    source?: "all" | ModelLibrarySource;
-    appearance?: ModelLibraryAppearance;
-    q?: string;
-  }) => ["workflows", "apparel_model_library", params ?? {}] as const,
-  apparelModelLibraryJobs: () =>
-    ["workflows", "apparel_model_library", "jobs"] as const,
-};
+export { qk };
+export {
+  useCreateSystemPromptMutation,
+  useDeleteSystemPromptMutation,
+  usePatchSystemPromptMutation,
+  useSetDefaultSystemPromptMutation,
+  useSystemPromptsQuery,
+} from "./queries/systemPrompts";
 
 // ——— Queries ———
-
-// ——— System Prompts ———
-export function useSystemPromptsQuery(
-  options?: Omit<
-    UseQueryOptions<SystemPromptListResponse>,
-    "queryKey" | "queryFn"
-  >,
-) {
-  return useQuery<SystemPromptListResponse>({
-    queryKey: qk.systemPrompts(),
-    queryFn: listSystemPrompts,
-    ...options,
-  });
-}
-
-export function useCreateSystemPromptMutation(
-  options?: Omit<
-    UseMutationOptions<SystemPrompt, Error, CreateSystemPromptIn>,
-    "mutationFn"
-  >,
-) {
-  const qc = useQueryClient();
-  return useMutation<SystemPrompt, Error, CreateSystemPromptIn>({
-    mutationFn: createSystemPrompt,
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.systemPrompts() });
-      qc.invalidateQueries({ queryKey: ["me"] });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
-
-interface PatchSystemPromptVars extends PatchSystemPromptIn {
-  id: string;
-}
-
-export function usePatchSystemPromptMutation(
-  options?: Omit<
-    UseMutationOptions<SystemPrompt, Error, PatchSystemPromptVars>,
-    "mutationFn"
-  >,
-) {
-  const qc = useQueryClient();
-  return useMutation<SystemPrompt, Error, PatchSystemPromptVars>({
-    mutationFn: ({ id, ...body }) => patchSystemPrompt(id, body),
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.systemPrompts() });
-      qc.invalidateQueries({ queryKey: ["me"] });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
-
-export function useDeleteSystemPromptMutation(
-  options?: Omit<UseMutationOptions<void, Error, string>, "mutationFn">,
-) {
-  const qc = useQueryClient();
-  return useMutation<void, Error, string>({
-    mutationFn: deleteSystemPrompt,
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.systemPrompts() });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
-      qc.invalidateQueries({ queryKey: ["me"] });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
-
-export function useSetDefaultSystemPromptMutation(
-  options?: Omit<UseMutationOptions<SystemPrompt, Error, string>, "mutationFn">,
-) {
-  const qc = useQueryClient();
-  return useMutation<SystemPrompt, Error, string>({
-    mutationFn: setDefaultSystemPrompt,
-    ...options,
-    onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.systemPrompts() });
-      qc.invalidateQueries({ queryKey: ["me"] });
-      options?.onSuccess?.(data, vars, onMutateResult, ctx);
-    },
-  });
-}
 
 export function useAllowedEmailsQuery(
   options?: Omit<
@@ -490,6 +363,7 @@ export function useCreateShareMutation(
     "mutationFn"
   >,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<ShareOut, Error, CreateShareVars>({
     mutationFn: (vars) =>
@@ -499,7 +373,7 @@ export function useCreateShareMutation(
       }),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.myShares() });
+      qc.invalidateQueries({ queryKey: userKeys.myShares() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -511,6 +385,7 @@ export function useCreateMultiShareMutation(
     "mutationFn"
   >,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<ShareOut, Error, CreateMultiShareVars>({
     mutationFn: (vars) =>
@@ -520,7 +395,7 @@ export function useCreateMultiShareMutation(
       }),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.myShares() });
+      qc.invalidateQueries({ queryKey: userKeys.myShares() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -776,10 +651,11 @@ export function useTestProxyMutation(
   const qc = useQueryClient();
   return useMutation<ProxyTestOut, Error, { name: string; target?: string }>({
     mutationFn: ({ name, target }) => testAdminProxy(name, target),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.adminProxies() });
-    },
     ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.adminProxies() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }
 
@@ -792,10 +668,11 @@ export function useTestAllProxiesMutation(
   const qc = useQueryClient();
   return useMutation<ProxyTestOut[], Error, string | undefined>({
     mutationFn: (target) => testAllAdminProxies(target),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.adminProxies() });
-    },
     ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.adminProxies() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }
 
@@ -808,12 +685,13 @@ export function useUpdateAdminProxiesMutation(
   const qc = useQueryClient();
   return useMutation<ProxyListOut, Error, ProviderProxyIn[]>({
     mutationFn: (items) => updateAdminProxies(items),
-    onSuccess: () => {
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
       // proxies 改了之后 ProvidersPanel 的 dropdown 需要刷新
       qc.invalidateQueries({ queryKey: qk.adminProxies() });
       qc.invalidateQueries({ queryKey: qk.providers() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
-    ...options,
   });
 }
 
@@ -958,22 +836,25 @@ export function useMySessionsQuery(
     "queryKey" | "queryFn"
   >,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<{ items: SessionOut[] }>({
-    queryKey: qk.mySessions(),
+    queryKey: userKeys.mySessions(),
     queryFn: listMySessions,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
 export function useRevokeMySessionMutation(
   options?: Omit<UseMutationOptions<void, Error, string>, "mutationFn">,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: (id: string) => revokeMySession(id),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.mySessions() });
+      qc.invalidateQueries({ queryKey: userKeys.mySessions() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1001,10 +882,12 @@ export function useListConversationsQuery(
     "queryKey" | "queryFn"
   >,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<ConversationListResponse>({
-    queryKey: qk.conversations(opts),
+    queryKey: userKeys.conversations(opts),
     queryFn: () => listConversations(opts),
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
@@ -1012,24 +895,31 @@ export function useListConversationsInfiniteQuery(params?: {
   limit?: number;
   q?: string;
 }) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   const limit = params?.limit ?? 30;
   const q = params?.q;
   return useInfiniteQuery<
     ConversationListResponse,
     Error,
     InfiniteData<ConversationListResponse, string | undefined>,
-    readonly ["conversations", "infinite", { limit: number; q?: string }],
-    string | undefined
-  >({
-    queryKey: [
+    readonly [
+      "user",
+      string,
       "conversations",
       "infinite",
-      { limit, ...(q ? { q } : {}) },
-    ] as const,
+      { limit: number; q?: string },
+    ],
+    string | undefined
+  >({
+    queryKey: userKeys.conversationsInfinite({
+      limit,
+      ...(q ? { q } : {}),
+    }),
     queryFn: ({ pageParam }) =>
       listConversations({ limit, q, cursor: pageParam }),
     initialPageParam: undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: userScope.enabled,
   });
 }
 
@@ -1043,12 +933,13 @@ export function useCreateConversationMutation(
     "mutationFn"
   >,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<ConversationSummary, Error, CreateConversationIn | void>({
     mutationFn: (body) => createConversation(body ?? {}),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: userKeys.conversationsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1064,21 +955,36 @@ export function usePatchConversationMutation(
     "mutationFn"
   >,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<ConversationSummary, Error, PatchConversationVars>({
     mutationFn: ({ id, ...rest }) => patchConversation(id, rest),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       // 仅 invalidate 列表页（含 infinite）和该单条 detail；避免冲掉 messages / 其它无关 query
-      qc.invalidateQueries({ queryKey: ["conversations", "infinite"] });
+      qc.invalidateQueries({
+        queryKey: userKeys.conversationsInfiniteAll(),
+      });
+      qc.invalidateQueries({
+        queryKey: userKeys.conversationDetail(vars.id),
+      });
+      qc.invalidateQueries({
+        queryKey: userKeys.conversationContext(vars.id),
+      });
       qc.invalidateQueries({ queryKey: ["stream", "feed"] });
       qc.invalidateQueries({
-        queryKey: ["conversations"],
+        queryKey: userKeys.conversationsAll(),
         exact: false,
         predicate: (q) => {
           const key = q.queryKey;
-          // qk.conversations(opts) → ["conversations", opts]
-          return Array.isArray(key) && key[0] === "conversations" && key[1] !== "infinite";
+          // userKeys.conversations(opts) → ["user", userId, "conversations", opts]
+          return (
+            Array.isArray(key) &&
+            key[0] === "user" &&
+            key[1] === userKeys.conversationsAll()[1] &&
+            key[2] === "conversations" &&
+            typeof key[3] === "object"
+          );
         },
       });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
@@ -1089,12 +995,13 @@ export function usePatchConversationMutation(
 export function useDeleteConversationMutation(
   options?: Omit<UseMutationOptions<void, Error, string>, "mutationFn">,
 ) {
+  const { userKeys } = useCurrentUserQueryKeys();
   const qc = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: (id) => deleteConversation(id),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: userKeys.conversationsAll() });
       qc.invalidateQueries({ queryKey: ["stream", "feed"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
@@ -1105,12 +1012,17 @@ export function useConversationContextQuery(
   convId: string | null | undefined,
   options?: Omit<UseQueryOptions<ConversationContextStats>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<ConversationContextStats>({
-    queryKey: qk.conversationContext(convId ?? ""),
+    queryKey: userKeys.conversationContext(convId ?? ""),
     queryFn: () => getConversationContext(convId as string),
-    enabled: typeof convId === "string" && convId.length > 0,
     staleTime: 10_000,
     ...options,
+    enabled: privateQueryEnabled(
+      userScope.enabled,
+      options?.enabled,
+      typeof convId === "string" && convId.length > 0,
+    ),
   });
 }
 
@@ -1122,8 +1034,9 @@ export function useWorkflowsQuery(
   params: { type?: string; limit?: number } = {},
   options?: Omit<UseQueryOptions<WorkflowRunListResponse>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<WorkflowRunListResponse>({
-    queryKey: qk.workflows(params),
+    queryKey: userKeys.workflows(params),
     queryFn: () => listWorkflows(params),
     staleTime: 10_000,
     // 列表里有运行中项目时 30s 兜底刷新；否则不轮询（focus 时仍会刷）
@@ -1134,6 +1047,7 @@ export function useWorkflowsQuery(
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
@@ -1141,10 +1055,10 @@ export function useWorkflowQuery(
   id: string | null | undefined,
   options?: Omit<UseQueryOptions<WorkflowRun>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<WorkflowRun>({
-    queryKey: qk.workflow(id ?? ""),
+    queryKey: userKeys.workflow(id ?? ""),
     queryFn: () => getWorkflow(id as string),
-    enabled: typeof id === "string" && id.length > 0,
     // running 5s、needs_review 30s 兜底（避免外部状态翻面后用户感知延迟）；其余不轮询
     refetchInterval: (query) => {
       const status = query.state.data?.status;
@@ -1155,6 +1069,11 @@ export function useWorkflowQuery(
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     ...options,
+    enabled: privateQueryEnabled(
+      userScope.enabled,
+      options?.enabled,
+      typeof id === "string" && id.length > 0,
+    ),
   });
 }
 
@@ -1164,12 +1083,12 @@ export function useCreateApparelWorkflowMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<CreateApparelWorkflowOut, Error, CreateApparelWorkflowIn>({
     mutationFn: createApparelWorkflow,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1182,13 +1101,13 @@ interface PatchWorkflowVars extends PatchWorkflowIn {
 export function usePatchWorkflowMutation(
   options?: Omit<UseMutationOptions<WorkflowRun, Error, PatchWorkflowVars>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, PatchWorkflowVars>({
     mutationFn: ({ id, ...body }) => patchWorkflow(id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(data.id), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(data.id), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1197,13 +1116,13 @@ export function usePatchWorkflowMutation(
 export function useDeleteWorkflowMutation(
   options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<{ ok: boolean }, Error, string>({
     mutationFn: (id) => deleteWorkflow(id),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.removeQueries({ queryKey: qk.workflow(vars) });
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.removeQueries({ queryKey: userKeys.workflow(vars) });
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1213,8 +1132,9 @@ export function useStoryboardsQuery(
   params: { cursor?: string | null; limit?: number } = {},
   options?: Omit<UseQueryOptions<StoryboardListResponse>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<StoryboardListResponse>({
-    queryKey: qk.storyboards(params),
+    queryKey: userKeys.storyboards(params),
     queryFn: () => listStoryboards(params),
     staleTime: 10_000,
     refetchInterval: (query) => {
@@ -1223,6 +1143,7 @@ export function useStoryboardsQuery(
     },
     refetchOnWindowFocus: true,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
@@ -1230,10 +1151,10 @@ export function useStoryboardQuery(
   id: string | null | undefined,
   options?: Omit<UseQueryOptions<StoryboardRun>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<StoryboardRun>({
-    queryKey: qk.storyboard(id ?? ""),
+    queryKey: userKeys.storyboard(id ?? ""),
     queryFn: () => getStoryboard(id as string),
-    enabled: typeof id === "string" && id.length > 0,
     staleTime: 5_000,
     refetchInterval: (query) => {
       const item = query.state.data;
@@ -1247,6 +1168,11 @@ export function useStoryboardQuery(
     },
     refetchOnWindowFocus: true,
     ...options,
+    enabled: privateQueryEnabled(
+      userScope.enabled,
+      options?.enabled,
+      typeof id === "string" && id.length > 0,
+    ),
   });
 }
 
@@ -1255,18 +1181,18 @@ function useStoryboardRunMutation<TVars>(
   mutationFn: (vars: TVars) => Promise<StoryboardRun>,
   options?: Omit<UseMutationOptions<StoryboardRun, Error, TVars>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<StoryboardRun, Error, TVars>({
     mutationFn,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.storyboard(data.id), data);
-      qc.invalidateQueries({ queryKey: ["storyboards"] });
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.storyboard(data.id), data);
+      qc.invalidateQueries({ queryKey: userKeys.storyboardsAll() });
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
     onSettled: (data, error, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.storyboard(storyboardId) });
+      qc.invalidateQueries({ queryKey: userKeys.storyboard(storyboardId) });
       options?.onSettled?.(data, error, vars, onMutateResult, ctx);
     },
   });
@@ -1275,14 +1201,14 @@ function useStoryboardRunMutation<TVars>(
 export function useCreateStoryboardMutation(
   options?: Omit<UseMutationOptions<StoryboardRun, Error, StoryboardCreateIn>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<StoryboardRun, Error, StoryboardCreateIn>({
     mutationFn: createStoryboard,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.storyboard(data.id), data);
-      qc.invalidateQueries({ queryKey: ["storyboards"] });
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.storyboard(data.id), data);
+      qc.invalidateQueries({ queryKey: userKeys.storyboardsAll() });
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1520,13 +1446,13 @@ export function useApproveProductAnalysisMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, Record<string, unknown>>({
     mutationFn: (corrections) => approveProductAnalysis(workflowId, corrections),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1539,13 +1465,13 @@ export function useCreateModelCandidatesMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, ModelCandidatesIn>({
     mutationFn: (body) => createModelCandidates(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1562,7 +1488,7 @@ export function useApproveModelCandidateMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     WorkflowRun,
     Error,
@@ -1572,8 +1498,8 @@ export function useApproveModelCandidateMutation(
       approveModelCandidate(workflowId, candidate_id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1583,13 +1509,13 @@ export function useReopenModelSelectionMutation(
   workflowId: string,
   options?: Omit<UseMutationOptions<WorkflowRun, Error, void>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, void>({
     mutationFn: () => reopenModelSelection(workflowId),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1599,13 +1525,13 @@ export function useCreateAccessoryPreviewsMutation(
   workflowId: string,
   options?: Omit<UseMutationOptions<WorkflowRun, Error, AccessoryPreviewIn>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, AccessoryPreviewIn>({
     mutationFn: (body) => createAccessoryPreviews(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1615,13 +1541,13 @@ export function useSaveAccessorySelectionMutation(
   workflowId: string,
   options?: Omit<UseMutationOptions<WorkflowRun, Error, AccessorySelectionIn>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, AccessorySelectionIn>({
     mutationFn: (body) => saveAccessorySelection(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1634,13 +1560,13 @@ export function useCreateShowcaseImagesMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, CreateShowcaseImagesIn>({
     mutationFn: (body) => createShowcaseImages(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1657,7 +1583,7 @@ export function useReviseWorkflowImageMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     WorkflowRun,
     Error,
@@ -1667,8 +1593,8 @@ export function useReviseWorkflowImageMutation(
       reviseWorkflowImage(workflowId, image_id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1678,13 +1604,13 @@ export function useCompleteWorkflowDeliveryMutation(
   workflowId: string,
   options?: Omit<UseMutationOptions<WorkflowRun, Error, void>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, void>({
     mutationFn: () => completeWorkflowDelivery(workflowId),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1702,11 +1628,13 @@ export function useApparelModelLibraryQuery(
     "queryKey" | "queryFn"
   >,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<ApparelModelLibraryListResponse>({
-    queryKey: qk.apparelModelLibrary(params),
+    queryKey: userKeys.apparelModelLibrary(params),
     queryFn: () => listApparelModelLibrary(params),
     staleTime: 15_000,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
@@ -1716,12 +1644,12 @@ export function useSyncApparelModelLibraryPresetsMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<Awaited<ReturnType<typeof syncApparelModelLibraryPresets>>, Error, void>({
     mutationFn: () => syncApparelModelLibraryPresets(),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1733,12 +1661,12 @@ export function useCreateApparelModelLibraryItemMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryItem, Error, ApparelModelLibraryItemCreateIn>({
     mutationFn: createApparelModelLibraryItem,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1747,12 +1675,12 @@ export function useCreateApparelModelLibraryItemMutation(
 export function useDeleteApparelModelLibraryItemMutation(
   options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<{ ok: boolean }, Error, string>({
     mutationFn: deleteApparelModelLibraryItem,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1764,12 +1692,12 @@ export function useDeleteApparelModelLibraryItemsMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryBatchDeleteOut, Error, string[]>({
     mutationFn: deleteApparelModelLibraryItems,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1782,13 +1710,13 @@ export function useSelectApparelModelLibraryItemMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, ApparelModelLibrarySelectIn>({
     mutationFn: (body) => selectApparelModelLibraryItem(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1802,13 +1730,13 @@ export function useSaveModelCandidateToLibraryMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryItem, Error, ModelCandidateSaveToLibraryIn>({
     mutationFn: (body) => saveModelCandidateToLibrary(workflowId, candidateId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
-      qc.invalidateQueries({ queryKey: qk.workflow(workflowId) });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
+      qc.invalidateQueries({ queryKey: userKeys.workflow(workflowId) });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1831,12 +1759,12 @@ export function useGenerateApparelModelLibraryMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryJob, Error, ApparelModelLibraryGenerateIn>({
     mutationFn: generateApparelModelLibrary,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryJobs() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1849,8 +1777,9 @@ export function useApparelModelLibraryJobsQuery(
     "queryKey" | "queryFn"
   >,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<ApparelModelLibraryJobsList>({
-    queryKey: [...qk.apparelModelLibraryJobs(), params ?? {}] as const,
+    queryKey: userKeys.apparelModelLibraryJobsList(params),
     queryFn: () => getApparelModelLibraryJobs(params),
     // 5s 轮询只在确实有进行中任务时开启；历史页很重，空跑会放大卡顿。
     refetchInterval: (query) =>
@@ -1863,19 +1792,29 @@ export function useApparelModelLibraryJobsQuery(
     refetchOnWindowFocus: true,
     staleTime: 2_000,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
 export function useApparelModelLibraryJobsInfiniteQuery(params?: { limit?: number }) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   const limit = params?.limit ?? 30;
   return useInfiniteQuery<
     ApparelModelLibraryJobsList,
     Error,
     InfiniteData<ApparelModelLibraryJobsList, number>,
-    readonly ["workflows", "apparel_model_library", "jobs", "infinite", { limit: number }],
+    readonly [
+      "user",
+      string,
+      "workflows",
+      "apparel_model_library",
+      "jobs",
+      "infinite",
+      { limit: number },
+    ],
     number
   >({
-    queryKey: [...qk.apparelModelLibraryJobs(), "infinite", { limit }] as const,
+    queryKey: userKeys.apparelModelLibraryJobsInfinite({ limit }),
     queryFn: ({ pageParam }) =>
       getApparelModelLibraryJobs({ limit, offset: pageParam }),
     initialPageParam: 0,
@@ -1890,6 +1829,7 @@ export function useApparelModelLibraryJobsInfiniteQuery(params?: { limit?: numbe
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     staleTime: 2_000,
+    enabled: userScope.enabled,
   });
 }
 
@@ -1901,14 +1841,14 @@ export function useSaveApparelModelLibraryJobItemMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryItem, Error, ApparelModelLibrarySaveJobItemIn>({
     mutationFn: (body) =>
       saveApparelModelLibraryJobItem(workflowRunId, imageId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryJobs() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1917,12 +1857,12 @@ export function useSaveApparelModelLibraryJobItemMutation(
 export function useDeleteApparelModelLibraryJobMutation(
   options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<{ ok: boolean }, Error, string>({
     mutationFn: deleteApparelModelLibraryJob,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryJobs() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1934,12 +1874,12 @@ export function useClearApparelModelLibraryJobsMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<{ ok: boolean; deleted: number }, Error, void>({
     mutationFn: () => clearApparelModelLibraryJobs(),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryJobs() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -1952,12 +1892,12 @@ export function useAutoTagApparelModelLibraryItemMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<ApparelModelLibraryAutoTagOut, Error, void>({
     mutationFn: () => autoTagApparelModelLibraryItem(itemId),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: userKeys.apparelModelLibraryLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2018,7 +1958,6 @@ import {
   triggerPosterStyleAutoTag,
   type PosterStyleAutoTagOut,
   type PosterStyleBatchDeleteOut,
-  type PosterStyleCategoryFilter,
   type PosterStyleGenerateIn,
   type PosterStyleGenerateOut,
   type PosterStyleItem,
@@ -2027,38 +1966,28 @@ import {
   type PosterStyleListOpts,
   type PosterStyleListOut,
   type PosterStylePatchIn,
-  type PosterStyleSourceFilter,
   type PosterStyleSyncOut,
 } from "./apiClient";
 
-// Query keys（与 apparelModelLibrary 命名风格对齐）
-const posterStyleKeys = {
-  all: () => ["poster-styles"] as const,
-  list: (params?: PosterStyleListOpts) =>
-    ["poster-styles", "list", params ?? {}] as const,
-  detail: (id: string) => ["poster-styles", "detail", id] as const,
-  jobs: (params?: PosterStyleJobsOpts) =>
-    ["poster-styles", "jobs", params ?? {}] as const,
-};
-
 export function usePosterStylesQuery(
-  params: {
-    category?: PosterStyleCategoryFilter;
-    source?: PosterStyleSourceFilter;
-    q?: string;
-    tags?: string[];
-    limit?: number;
-    offset?: number;
-  } = {},
+  params: PosterStyleListOpts = {},
   options?: Omit<UseQueryOptions<PosterStyleListOut>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<PosterStyleListOut>({
-    queryKey: posterStyleKeys.list(params),
+    queryKey: userKeys.posterStyles(params),
     queryFn: () => listPosterStyles(params),
-    // keep previous data 由 React Query v5 通过 placeholderData 实现
-    placeholderData: (prev) => prev,
+    // React Query v5 的 previous data 可能来自上一个用户的 observer。
+    placeholderData: (previous, previousQuery) =>
+      isUserScopedQueryKeyForUser(
+        previousQuery?.queryKey ?? [],
+        userScope.userId,
+      )
+        ? previous
+        : undefined,
     staleTime: 15_000,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
 }
 
@@ -2066,12 +1995,36 @@ export function usePosterStyleQuery(
   id: string,
   options?: Omit<UseQueryOptions<PosterStyleItem>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<PosterStyleItem>({
-    queryKey: posterStyleKeys.detail(id),
+    queryKey: userKeys.posterStyle(id),
     queryFn: () => getPosterStyle(id),
-    enabled: Boolean(id),
     staleTime: 30_000,
     ...options,
+    enabled: privateQueryEnabled(
+      userScope.enabled,
+      options?.enabled,
+      Boolean(id),
+    ),
+  });
+}
+
+function posterStyleJobsHaveTerminalTransition(
+  previous: PosterStyleJobsOut | undefined,
+  current: PosterStyleJobsOut | undefined,
+): boolean {
+  if (!previous || !current) return false;
+  const currentStatuses = new Map(
+    current.items.map((job) => [job.job_id, job.status] as const),
+  );
+  return previous.items.some((job) => {
+    if (job.status !== "queued" && job.status !== "running") return false;
+    const currentStatus = currentStatuses.get(job.job_id);
+    return (
+      currentStatus === "succeeded" ||
+      currentStatus === "failed" ||
+      currentStatus === "partial"
+    );
   });
 }
 
@@ -2079,8 +2032,15 @@ export function usePosterStyleJobsQuery(
   params: PosterStyleJobsOpts = {},
   options?: Omit<UseQueryOptions<PosterStyleJobsOut>, "queryKey" | "queryFn">,
 ) {
-  return useQuery<PosterStyleJobsOut>({
-    queryKey: posterStyleKeys.jobs(params),
+  const {
+    queryClient: qc,
+    userScope,
+    userKeys,
+  } = useCurrentUserQueryClient();
+  const previousJobsRef = useRef<PosterStyleJobsOut | undefined>(undefined);
+  const previousJobsUserIdRef = useRef(userScope.userId);
+  const jobsQuery = useQuery<PosterStyleJobsOut>({
+    queryKey: userKeys.posterStyleJobs(params),
     queryFn: () => listPosterStyleJobs(params),
     // 智能轮询：jobs 列表里只要有 running/queued 就 5s 刷一次，否则 30s
     refetchInterval: (query) => {
@@ -2095,8 +2055,37 @@ export function usePosterStyleJobsQuery(
     refetchOnWindowFocus: true,
     staleTime: 2_000,
     ...options,
+    enabled: privateQueryEnabled(userScope.enabled, options?.enabled),
   });
+
+  useEffect(() => {
+    if (previousJobsUserIdRef.current === userScope.userId) return;
+    previousJobsUserIdRef.current = userScope.userId;
+    previousJobsRef.current = undefined;
+  }, [userScope.userId]);
+
+  useEffect(() => {
+    const currentJobs = jobsQuery.data;
+    if (!currentJobs) return;
+    const previousJobs = previousJobsRef.current;
+    previousJobsRef.current = currentJobs;
+    if (!posterStyleJobsHaveTerminalTransition(previousJobs, currentJobs)) return;
+
+    // A terminal jobs snapshot is only visible after the worker transaction commits.
+    // Updating the ref first makes repeated terminal polls a no-op.
+    const scopedKeys = qk.user(userScope.userId);
+    void Promise.all([
+      qc.invalidateQueries({ queryKey: scopedKeys.posterStyleLists() }),
+      qc.invalidateQueries({ queryKey: scopedKeys.posterStyleDetails() }),
+    ]);
+  }, [jobsQuery.data, qc, userScope.userId]);
+
+  return jobsQuery;
 }
+
+export type PosterStyleJobsQueryResult = ReturnType<
+  typeof usePosterStyleJobsQuery
+>;
 
 export function usePatchPosterStyleMutation(
   options?: Omit<
@@ -2108,7 +2097,7 @@ export function usePatchPosterStyleMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     PosterStyleItem,
     Error,
@@ -2117,8 +2106,8 @@ export function usePatchPosterStyleMutation(
     mutationFn: ({ id, body }) => patchPosterStyle(id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(posterStyleKeys.detail(vars.id), data);
-      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      qc.setQueryData(userKeys.posterStyle(vars.id), data);
+      qc.invalidateQueries({ queryKey: userKeys.posterStylesAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2127,12 +2116,12 @@ export function usePatchPosterStyleMutation(
 export function useDeletePosterStyleMutation(
   options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<{ ok: boolean }, Error, string>({
     mutationFn: deletePosterStyle,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStylesAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2144,12 +2133,12 @@ export function useBatchDeletePosterStylesMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<PosterStyleBatchDeleteOut, Error, string[]>({
     mutationFn: batchDeletePosterStyles,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStylesAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2158,12 +2147,12 @@ export function useBatchDeletePosterStylesMutation(
 export function useSyncPosterStylePresetsMutation(
   options?: Omit<UseMutationOptions<PosterStyleSyncOut, Error, void>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<PosterStyleSyncOut, Error, void>({
     mutationFn: () => syncPosterStylePresets(),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStylesAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2175,13 +2164,13 @@ export function useGeneratePosterStyleMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<PosterStyleGenerateOut, Error, PosterStyleGenerateIn>({
     mutationFn: generatePosterStyle,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.jobs() });
-      qc.invalidateQueries({ queryKey: posterStyleKeys.list() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStyleJobs() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStyleLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2191,13 +2180,13 @@ export function useTriggerPosterStyleAutoTagMutation(
   itemId: string,
   options?: Omit<UseMutationOptions<PosterStyleAutoTagOut, Error, void>, "mutationFn">,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<PosterStyleAutoTagOut, Error, void>({
     mutationFn: () => triggerPosterStyleAutoTag(itemId),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: posterStyleKeys.detail(itemId) });
-      qc.invalidateQueries({ queryKey: posterStyleKeys.list() });
+      qc.invalidateQueries({ queryKey: userKeys.posterStyle(itemId) });
+      qc.invalidateQueries({ queryKey: userKeys.posterStyleLists() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2205,7 +2194,7 @@ export function useTriggerPosterStyleAutoTagMutation(
 
 // ============================================================================
 // Poster Design Workflow hooks
-// 与 useWorkflowQuery 共用 qk.workflow，只是聚合层用 alias 暴露给海报 detail 页。
+// 与 useWorkflowQuery 共用当前用户的 workflow key，只是聚合层用 alias 暴露给海报 detail 页。
 // ============================================================================
 
 // 智能轮询：running 5s / needs_review 30s。逻辑等同 useWorkflowQuery。
@@ -2213,10 +2202,10 @@ export function usePosterWorkflowQuery(
   id: string | null | undefined,
   options?: Omit<UseQueryOptions<WorkflowRun>, "queryKey" | "queryFn">,
 ) {
+  const { userScope, userKeys } = useCurrentUserQueryKeys();
   return useQuery<WorkflowRun>({
-    queryKey: qk.workflow(id ?? ""),
+    queryKey: userKeys.workflow(id ?? ""),
     queryFn: () => getWorkflow(id as string),
-    enabled: typeof id === "string" && id.length > 0,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       if (status === "running") return 5_000;
@@ -2226,6 +2215,11 @@ export function usePosterWorkflowQuery(
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     ...options,
+    enabled: privateQueryEnabled(
+      userScope.enabled,
+      options?.enabled,
+      typeof id === "string" && id.length > 0,
+    ),
   });
 }
 
@@ -2239,7 +2233,7 @@ export function useCreatePosterDesignWorkflowMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     PosterDesignWorkflowCreateOut,
     Error,
@@ -2248,7 +2242,7 @@ export function useCreatePosterDesignWorkflowMutation(
     mutationFn: createPosterDesignWorkflow,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2261,13 +2255,13 @@ export function useApproveCopyAnalysisMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, CopyAnalysisApproveIn>({
     mutationFn: (body) => approveCopyAnalysis(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2280,13 +2274,13 @@ export function useCreatePosterMastersMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, PosterMastersCreateIn | void>({
     mutationFn: (body) => createPosterMasters(workflowId, body ?? {}),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2303,7 +2297,7 @@ export function useApprovePosterMasterMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     WorkflowRun,
     Error,
@@ -2313,8 +2307,8 @@ export function useApprovePosterMasterMutation(
       approvePosterMaster(workflowId, master_id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2327,13 +2321,13 @@ export function useCreatePosterRendersMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<WorkflowRun, Error, PosterRendersCreateIn>({
     mutationFn: (body) => createPosterRenders(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2350,7 +2344,7 @@ export function useRevisePosterRenderMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     WorkflowRun,
     Error,
@@ -2360,8 +2354,8 @@ export function useRevisePosterRenderMutation(
       revisePosterRender(workflowId, render_id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
@@ -2378,7 +2372,7 @@ export function useInpaintPosterRenderMutation(
     "mutationFn"
   >,
 ) {
-  const qc = useQueryClient();
+  const { queryClient: qc, userKeys } = useCurrentUserQueryClient();
   return useMutation<
     WorkflowRun,
     Error,
@@ -2388,8 +2382,8 @@ export function useInpaintPosterRenderMutation(
       inpaintPosterRender(workflowId, render_id, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.setQueryData(qk.workflow(workflowId), data);
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      qc.setQueryData(userKeys.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: userKeys.workflowsAll() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

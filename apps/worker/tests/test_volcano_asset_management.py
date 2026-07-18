@@ -32,12 +32,16 @@ from apps.worker.tests.volcano_asset_test_support import (
 def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tasks import volcano_assets
 
-    async def read(_operation: dict[str, Any]) -> dict[str, Any] | None:
+    async def read(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
         return None
 
     async def write(
         _operation: dict[str, Any],
         _asset: dict[str, Any],
+        **_kwargs: Any,
     ) -> None:
         return None
 
@@ -88,12 +92,16 @@ async def test_worker_update_group_recovers_success_receipt_after_redis_loss(
     async def provider_for(_operation: dict[str, Any]) -> VideoProviderDefinition:
         return provider
 
-    async def read(_operation: dict[str, Any]) -> dict[str, Any] | None:
+    async def read(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
         return receipt
 
     async def write(
         _operation: dict[str, Any],
         result: dict[str, Any],
+        **_kwargs: Any,
     ) -> None:
         nonlocal receipt
         receipt = volcano_assets._receipt_result(_operation, result)
@@ -647,11 +655,25 @@ def test_success_receipt_is_bound_to_exact_provider_route() -> None:
         "project_name": "project-a",
     }
 
-    details = volcano_assets._success_receipt_details(operation, result)
+    fence = SimpleNamespace(
+        details=lambda: {
+            "lock_token": "worker-1",
+            "attempt": 1,
+            "fencing": 7,
+        }
+    )
+    details = volcano_assets._success_receipt_details(
+        operation,
+        result,
+        fence=fence,
+    )
 
     assert details["provider_name"] == operation["provider_name"]
     assert details["region"] == operation["region"]
     assert details["provider_binding"] == operation["provider_binding"]
+    assert details["lock_token"] == "worker-1"
+    assert details["attempt"] == 1
+    assert details["fencing"] == 7
     assert volcano_assets._receipt_binding_matches(operation, details) is True
     for field in ("provider_name", "region", "provider_binding"):
         legacy_or_mismatched = dict(details)
@@ -710,9 +732,22 @@ async def test_legacy_receipt_cannot_satisfy_new_provider_binding(
             return existing
 
     monkeypatch.setattr(volcano_assets, "SessionLocal", Session)
+    fence = SimpleNamespace(
+        fencing=1,
+        lock_token="worker-1",
+        details=lambda: {
+            "lock_token": "worker-1",
+            "attempt": 1,
+            "fencing": 1,
+        },
+    )
 
     with pytest.raises(RuntimeError, match="success receipt conflicts"):
-        await volcano_assets._write_success_receipt(operation, result)
+        await volcano_assets._write_success_receipt(
+            operation,
+            result,
+            fence=fence,
+        )
 
 
 def test_reference_token_reuses_unexpired_value() -> None:

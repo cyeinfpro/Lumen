@@ -8,9 +8,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  getGitChangeScope,
+  repoRelativePath,
+} from "./git-change-scope.mjs";
+import { findMobileDialogIssues } from "./jsx-quality-analysis.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const APP_ROOT = join(dirname(__filename), "..");
@@ -31,32 +36,6 @@ const LIVE_REGION_RE = /\b(?:role=(?:"|')?(?:alert|status)|aria-live=)/;
 
 const files = [];
 const findings = [];
-
-function gitChangedFiles() {
-  const run = (args) => {
-    try {
-      return execFileSync("git", args, {
-        cwd: APP_ROOT,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((path) => path.replaceAll("\\", "/"));
-    } catch {
-      return [];
-    }
-  };
-
-  const working = new Set([
-    ...run(["diff", "--name-only", "--diff-filter=ACMR"]),
-    ...run(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]),
-  ]);
-  if (working.size > 0) return working;
-  return new Set(
-    run(["diff", "--name-only", "--diff-filter=ACMR", "HEAD^", "HEAD"]),
-  );
-}
 
 function walk(dir) {
   for (const name of readdirSync(dir)) {
@@ -170,59 +149,15 @@ function scanDarkUtilities(path, lines) {
   }
 }
 
-function isModalOverlayContext(context) {
-  return (
-    /\bfixed\b/.test(context) &&
-    /\binset-0\b/.test(context) &&
-    /(?:^|\s)z-(?:50|40|30|\[\d+\]|\[var\(--z-(?:dialog|modal|tray)\)\])(?=\s|["'`)}]|$)/.test(
-      context,
-    )
-  );
-}
-
-function isInteractiveModalShell(context) {
-  return /\b(?:flex|grid|items-|justify-|p-\d|px-|py-|sm:items|md:items|section|form|aside)\b/.test(
-    context,
-  );
-}
-
-function isMobileDialogMediaException(path) {
-  return /(?:lightbox|maskcanvas|inpaint|imagepreviewmodal|share\/\[token\]\/sharecontentclient)/i.test(
-    path,
-  );
-}
-
-function scanMobileDialogs(path, src, lines) {
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!/\bfixed\b/.test(lines[i])) continue;
-    const localContext = lineContext(lines, i, 1);
-    const looksLikeStandaloneScrim =
-      /\bbg-black/.test(lines[i]) &&
-      !/\b(?:flex|grid|items-|justify-|p-\d|px-|py-)\b/.test(localContext);
-    if (looksLikeStandaloneScrim) continue;
-    const context = lineContext(lines, i, 5);
-    if (!isModalOverlayContext(context)) continue;
-    if (!isInteractiveModalShell(context)) continue;
-    if (isMobileDialogMediaException(path)) continue;
-    if (!/\bmobile-dialog-shell\b/.test(context)) {
-      addFinding(
-        "mobile-dialog-shell",
-        path,
-        i + 1,
-        "Fixed modal wrapper must use mobile-dialog-shell or be an allowlisted media/lightbox surface.",
-        lines[i],
-      );
-      continue;
-    }
-    if (!/\bmobile-dialog-(?:panel|sheet)\b/.test(src)) {
-      addFinding(
-        "mobile-dialog-panel",
-        path,
-        i + 1,
-        "mobile-dialog-shell must be paired with mobile-dialog-panel or mobile-dialog-sheet.",
-        lines[i],
-      );
-    }
+function scanMobileDialogs(path, src) {
+  for (const issue of findMobileDialogIssues(path, src)) {
+    addFinding(
+      issue.rule,
+      path,
+      issue.line,
+      issue.message,
+      issue.snippet,
+    );
   }
 }
 
@@ -391,7 +326,7 @@ for (const full of files) {
   const path = relative(APP_ROOT, full).replaceAll("\\", "/");
   const lines = src.split(/\r?\n/);
   scanDarkUtilities(path, lines);
-  scanMobileDialogs(path, src, lines);
+  scanMobileDialogs(path, src);
   scanErrorLiveRegions(path, lines);
 }
 scanSharedA11yContracts(APP_ROOT);
@@ -406,10 +341,11 @@ if (updateBaseline) {
 
 const baseline = loadBaseline();
 const { newItems, knownItems, reducedCount } = compareToBaseline(current, baseline);
-const changedFiles = gitChangedFiles();
+const changeScope = getGitChangeScope({ startDir: APP_ROOT });
+const changedFiles = changeScope.files;
+const appRepoPath = repoRelativePath(changeScope.repoRoot, APP_ROOT);
 const touchedKnownItems = knownItems.filter(
-  (item) =>
-    changedFiles.has(`apps/web/${item.path}`) || changedFiles.has(item.path),
+  (item) => changedFiles.has(`${appRepoPath}/${item.path}`),
 );
 
 const byRule = new Map();

@@ -21,6 +21,58 @@ import { cn } from "@/lib/utils";
 import { useElementBlockSize } from "@/hooks/useElementBlockSize";
 import { useConversationRouteSync } from "./useConversationRouteSync";
 
+type ScrollToAutoScrollGate = {
+  targetId: string;
+  locatedAtMessageCount: number;
+  resumed: boolean;
+} | null;
+
+function nextScrollToAutoScrollGate({
+  current,
+  targetId,
+  targetReady,
+  messageCount,
+}: {
+  current: ScrollToAutoScrollGate;
+  targetId: string | null;
+  targetReady: boolean;
+  messageCount: number;
+}): {
+  next: ScrollToAutoScrollGate;
+  suppress: boolean;
+  forceResume: boolean;
+} {
+  if (!targetId) {
+    return { next: null, suppress: false, forceResume: false };
+  }
+  if (!targetReady) {
+    return { next: null, suppress: true, forceResume: false };
+  }
+  if (!current || current.targetId !== targetId) {
+    return {
+      next: {
+        targetId,
+        locatedAtMessageCount: messageCount,
+        resumed: false,
+      },
+      suppress: true,
+      forceResume: false,
+    };
+  }
+  if (!current.resumed && messageCount > current.locatedAtMessageCount) {
+    return {
+      next: { ...current, resumed: true },
+      suppress: false,
+      forceResume: true,
+    };
+  }
+  return {
+    next: current,
+    suppress: !current.resumed,
+    forceResume: false,
+  };
+}
+
 export function MobileStudio() {
   const messages = useChatStore((s) => s.messages);
   const generations = useChatStore((s) => s.generations);
@@ -62,6 +114,10 @@ export function MobileStudio() {
   );
   const search = useSearchParams();
   const scrollTo = search.get("scrollTo");
+  const scrollTargetReady = useMemo(
+    () => Boolean(scrollTo && messages.some((message) => message.id === scrollTo)),
+    [messages, scrollTo],
+  );
   const scrollSignature = useMemo(() => {
     const last = messages[messages.length - 1];
     if (!last) return "empty";
@@ -100,6 +156,7 @@ export function MobileStudio() {
   const stickToBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const previousScrollTopRef = useRef(0);
+  const scrollToAutoScrollGateRef = useRef<ScrollToAutoScrollGate>(null);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -132,16 +189,26 @@ export function MobileStudio() {
   }, [currentConvId]);
 
   useEffect(() => {
-    if (scrollTo) return; // deep-link 定位时不干扰
     const el = scrollRef.current;
     if (!el) return;
+    const autoScrollGate = nextScrollToAutoScrollGate({
+      current: scrollToAutoScrollGateRef.current,
+      targetId: scrollTo,
+      targetReady: scrollTargetReady,
+      messageCount: messages.length,
+    });
+    if (autoScrollGate.suppress) {
+      scrollToAutoScrollGateRef.current = autoScrollGate.next;
+      return;
+    }
     if (messages.length === 0) {
+      scrollToAutoScrollGateRef.current = autoScrollGate.next;
       requestAnimationFrame(() => {
         el.scrollTo({ top: 0, behavior: "auto" });
       });
       return;
     }
-    if (!stickToBottomRef.current) return;
+    if (!stickToBottomRef.current && !autoScrollGate.forceResume) return;
     const activeElement = document.activeElement;
     if (
       activeElement instanceof HTMLElement &&
@@ -149,6 +216,11 @@ export function MobileStudio() {
       el.contains(activeElement)
     ) {
       return;
+    }
+    scrollToAutoScrollGateRef.current = autoScrollGate.next;
+    if (autoScrollGate.forceResume) {
+      stickToBottomRef.current = true;
+      userScrolledUpRef.current = false;
     }
     const prefersReduced =
       typeof window !== "undefined" &&
@@ -167,6 +239,7 @@ export function MobileStudio() {
     messages.length,
     scrollSignature,
     scrollTo,
+    scrollTargetReady,
   ]);
 
   const isEmpty = messages.length === 0;

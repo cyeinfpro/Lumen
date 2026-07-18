@@ -17,6 +17,7 @@
 
 import { useMutation, useQueryClient, type UseMutationOptions } from "@tanstack/react-query";
 
+import { useUserQueryScope } from "@/components/QueryProvider";
 import {
   ApiError,
   compactConversation,
@@ -110,7 +111,9 @@ export function useCompactConversation(
     "mutationFn"
   >,
 ) {
+  const userScope = useUserQueryScope();
   const qc = useQueryClient();
+  const userKeys = qk.user(userScope.userId);
 
   return useMutation<CompactConversationApiResponse, Error, CompactConversationVars>({
     mutationFn: async ({ conversationId, extra_instruction, force = true }) => {
@@ -125,10 +128,12 @@ export function useCompactConversation(
       if (data.status === "ok") {
         // 让下一次 chat 拿到最新摘要：会话上下文统计需主动 refetch（顶栏 token 计量器即时刷新），消息列表/会话列表交给 active observers 自动拉取。
         void qc.refetchQueries({
-          queryKey: qk.conversationContext(vars.conversationId),
+          queryKey: userKeys.conversationContext(vars.conversationId),
         });
         void qc.invalidateQueries({ queryKey: ["messages", vars.conversationId] });
-        void qc.invalidateQueries({ queryKey: ["conversations"] });
+        void qc.invalidateQueries({
+          queryKey: userKeys.conversationsAll(),
+        });
       }
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },

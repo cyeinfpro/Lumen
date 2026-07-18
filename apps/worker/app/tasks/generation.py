@@ -68,7 +68,7 @@ from lumen_core.constants import (
     EV_GEN_QUEUED,
     EV_GEN_RETRYING,
     EV_GEN_STARTED,
-    EV_GEN_SUCCEEDED,
+    EV_GEN_SUCCEEDED as EV_GEN_SUCCEEDED,
     GenerationAction,
     GenerationErrorCode as EC,
     GenerationStage,
@@ -126,7 +126,6 @@ from ..retry import (
     is_moderation_block,
     is_retriable as is_retriable,
 )
-from ..sse_publish import publish_event
 from ..storage import StorageDiskFullError as StorageDiskFullError
 from ..storage import storage
 from ..upstream import (
@@ -144,6 +143,7 @@ from ..upstream import (
     push_image_retry_attempt,
 )
 from .generation_parts import diagnostics as _generation_diagnostics
+from .generation_parts import event_delivery as _generation_event_delivery
 from .generation_parts import lease as _generation_lease
 from .generation_parts import lifecycle as _generation_lifecycle
 from .generation_parts import persistence as _generation_persistence
@@ -158,6 +158,17 @@ from .state import is_generation_terminal
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("lumen.worker.generation")
+
+_stage_generation_event = _generation_event_delivery.stage_generation_event
+_stage_generation_success_event = (
+    _generation_event_delivery.stage_generation_success_event
+)
+_stage_generation_failure_event = (
+    _generation_event_delivery.stage_generation_failure_event
+)
+_deliver_generation_events = _generation_event_delivery.deliver_generation_events
+_deliver_generation_event = _generation_event_delivery.deliver_generation_event
+publish_event = _generation_event_delivery.publish_event
 
 
 def _generation_facade_globals() -> dict[str, Any]:
@@ -2094,7 +2105,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         image_metadata["generation_diagnostics"] = generation_diagnostics
         if revised_prompt:
             image_metadata["revised_prompt"] = revised_prompt
-
         # --- 写 DB ---
         conversation_id_for_title: str | None = None
         parent_upstream_request_for_bonus: dict[str, Any] | None = None
@@ -2337,36 +2347,24 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     lease_lost,
                     "cancelled before success commit",
                 )
+                success_delivery = _stage_generation_success_event(
+                    session,
+                    user_id,
+                    channel,
+                    generation_id=task_id,
+                    message_id=message_id,
+                    image_id=image_id,
+                    actual_size=f"{width}x{height}",
+                    mime=orig_mime,
+                    image_url=storage.public_url(key_orig),
+                    filename=model_metadata.get("suggested_filename"),
+                    image_payload_meta=_compact_image_payload_meta(image_metadata),
+                    diagnostics=generation_diagnostics,
+                )
                 await session.commit()
                 await worker_billing.flush_balance_cache_refreshes(session)
 
-        # --- publish succeeded ---
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_GEN_SUCCEEDED,
-            {
-                "generation_id": task_id,
-                "message_id": message_id,
-                "images": [
-                    {
-                        "image_id": image_id,
-                        "from_generation_id": task_id,
-                        "actual_size": f"{width}x{height}",
-                        "mime": orig_mime,
-                        "url": storage.public_url(key_orig),
-                        "display_url": f"/api/images/{image_id}/variants/display2048",
-                        "preview_url": f"/api/images/{image_id}/variants/preview1024",
-                        "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                        "filename": model_metadata.get("suggested_filename"),
-                        **_compact_image_payload_meta(image_metadata),
-                    }
-                ],
-                "final_size": f"{width}x{height}",
-                "diagnostics": generation_diagnostics,
-            },
-        )
+        await _deliver_generation_event(redis, success_delivery)
         _task_outcome = "succeeded"
 
         if batch_extra_pairs:
@@ -2839,6 +2837,18 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         gen_failed,
                         reason=err_code,
                     )
+                failure_delivery = _stage_generation_failure_event(
+                    session,
+                    user_id,
+                    channel,
+                    generation_id=task_id,
+                    message_id=message_id,
+                    code=err_code,
+                    message=err_msg,
+                    diagnostics=error_diagnostics,
+                    safe_error_summary=safe_error_summary,
+                    error_details=error_details,
+                )
                 await session.commit()
                 await worker_billing.flush_balance_cache_refreshes(session)
         except _StaleGenerationAttempt as stale_exc:
@@ -2851,22 +2861,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             _task_outcome = "stale_attempt"
             return
 
-        await publish_event(
-            redis,
-            user_id,
-            channel,
-            EV_GEN_FAILED,
-            {
-                "generation_id": task_id,
-                "message_id": message_id,
-                "code": err_code,
-                "message": err_msg,
-                "retriable": False,
-                "diagnostics": error_diagnostics,
-                "safe_error_summary": safe_error_summary,
-                **({"error_details": error_details} if error_details else {}),
-            },
-        )
+        await _deliver_generation_event(redis, failure_delivery)
 
     finally:
         # image_iter.aclose() 改在 _critical_release_cleanup 内 await（见下方），

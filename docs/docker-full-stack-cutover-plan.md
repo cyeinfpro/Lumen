@@ -32,16 +32,26 @@
 
 切到 Docker 完整栈后，最佳更新流程应收敛为”拉取预构建镜像 + 显式迁移 + 原地重建容器”：
 
-```bash
+```text
+校验 /opt/lumen/shared/.env 和当前 postgres/redis 容器
+LUMEN_ENV_FILE=/opt/lumen/shared/.env \
+  bash /opt/lumen/current/scripts/backup.sh  # 必须在 fetch/改 tag/停库之前
 git pull 或 release clone
+把新 release 的 .env 链到 /opt/lumen/shared/.env
 写入 LUMEN_IMAGE_TAG 到 shared/.env       # §6.4.1
-bash scripts/backup.sh                    # §11.3.1 backup_preflight
 docker compose pull
 docker compose up -d --wait postgres redis
 docker compose run --rm migrate           # 失败 fail-fast，不继续
 docker compose up -d --wait api worker web tgbot
 健康检查
 ```
+
+这段是切换或 standard 更新的安全顺序。现行后台 runner 使用 fast 模式，
+`backup_preflight` 默认会跳过，且 runner 请求不允许注入
+`LUMEN_UPDATE_FAST_BACKUP`；后台更新前必须显式执行上面的备份。受信任的宿主机
+shell 手工更新可设置 `LUMEN_UPDATE_FAST_BACKUP=1` 或使用 standard 模式。
+`backup.sh` 只备份 PostgreSQL + Redis，不包含 `storage/`；完整切换还必须按 §16
+处理文件存储快照。
 
 没有可用预构建镜像时，才回退到服务器本地 `docker compose build`。宿主机长期只需要稳定运行 Docker 和 nginx。
 
@@ -304,7 +314,10 @@ tests/test_lumenctl_scripts.py
 deploy/systemd/lumen-update-runner.service
 ```
 
-`lumen-update-runner.service` 当前写死 `Environment=LUMEN_UPDATE_BUILD=1`，切换后必须改为 `LUMEN_UPDATE_BUILD=0`，否则后台一键更新仍会触发宿主机 build，与本方案"减少宿主依赖"目标相悖。详见 §12.3。
+现行 `lumen-update-runner.service` 不再加载可写环境文件，而是执行
+`scripts/update_runner.py`；runner 校验受限请求后固定设置
+`LUMEN_UPDATE_BUILD=0`。不要恢复从 API 可写目录加载环境变量的旧设计，详见
+§12.3。
 
 不需要修改：
 
@@ -466,13 +479,14 @@ LUMEN_IMAGE_TAG=v1.2
 | --- | --- | --- |
 | 一键安装脚本 | 探测 GHCR 上的 `latest`/`main`，或用户参数 `--image-tag=vX.Y.Z` | `.env` 创建时 |
 | `scripts/update.sh`（命令行） | 读 `LUMEN_UPDATE_CHANNEL` + 查 GitHub Releases API（pinned 时取用户配置） | `clone new release` 之后、`docker compose pull` 之前；写入 `shared/.env` 中的 `LUMEN_IMAGE_TAG` 单行 |
-| 后台一键更新 | API 调 `release/check` 已确定的目标版本作为入参 | 写入 `/opt/lumendata/backup/.update.env`，由 `lumen-update-runner.service` 的 `EnvironmentFile=` 加载 |
+| 后台一键更新 | API 调 `release/check` 已确定的目标版本作为入参 | API 原子写入 `${LUMEN_BACKUP_ROOT}/.update.request.json`；`scripts/update_runner.py` 校验普通文件、大小、时效、字段白名单和 `v*`/`main` tag 后构造固定环境，再执行 `/opt/lumen/current/scripts/update.sh` |
 
 写入约束：
 
 - 只允许覆盖 `LUMEN_IMAGE_TAG` 一行，不允许碰其他 `.env` 字段
 - 写入后必须 `grep -E '^LUMEN_IMAGE_TAG=' .env` 校验唯一存在
 - 失败回滚（§18.1）也走同一入口：把 `LUMEN_IMAGE_TAG` 改回上一已知好版本，再 `pull && up -d`
+- 严禁 `source ${LUMEN_BACKUP_ROOT}/.update.env`，也不得把 API 可写目录下的文件配置为特权 unit 的 `EnvironmentFile=`；该目录只能承载 runner 会逐字段校验的数据请求
 
 ### 6.5 预构建触发机制
 
@@ -1158,12 +1172,13 @@ cleanup
 默认发布更新流程：
 
 ```text
-clone new release
+check / preflight   (读取当前 /opt/lumen/shared/.env)
+backup_preflight    (必须在 fetch_release / set_image_tag 之前)
+fetch_release
 link shared (含 .env)
-validate .env
 set_image_tag       (写入 LUMEN_IMAGE_TAG 到 shared/.env，见 §6.4.1)
-backup_preflight    (强制 PG dump，§11.3.1)
-docker compose pull
+pull_images
+check_storage
 docker compose up -d --wait postgres redis
 docker compose run --rm migrate
 switch current
@@ -1175,9 +1190,17 @@ cleanup
 
 注意顺序：
 
+- `backup_preflight` 必须读取更新前的 `${ROOT}/shared/.env`，并在
+  `fetch_release`、`set_image_tag` 和停止数据库之前完成；现行 `update.sh` 会显式传入
+  `LUMEN_ENV_FILE=${ROOT}/shared/.env` 与实际 `LUMEN_BACKUP_ROOT`
+- 后台 runner 固定 `LUMEN_UPDATE_MODE=fast`，fast 模式默认跳过
+  `backup_preflight`，且请求白名单不接受 `LUMEN_UPDATE_FAST_BACKUP`；后台更新前按
+  §16 手工生成并校验成对备份。只有受信任的宿主机 shell 更新才能显式设置该变量
 - `set_image_tag` 必须在 `pull` 之前。`LUMEN_IMAGE_TAG` 由 update channel + GitHub Releases 决定（§6.4.1）；不写就会 pull 旧 tag，看起来"成功"但版本未变
-- `migrate` 必须在 `current` 切换前或切换后都可以执行；推荐在新 release 目录内先执行
-- **迁移失败则 fail-fast，不切 `current`、不重启业务容器**——旧容器继续跑旧代码，DB schema 也没改坏
+- `migrate_db` 在新 release 目录内、切换 `current` 之前执行，并在命令返回后再次核对
+  Alembic current/head；非蓝绿路径会先停旧 `api/worker/tgbot`，失败时尝试用旧 release
+  重新拉起
+- **迁移失败则 fail-fast，不切 `current`、不启动新版本业务容器**
 - 切换后执行 `compose up -d`，确保容器使用新 release 的 compose 文件和新镜像
 - 只有显式 `LUMEN_UPDATE_BUILD=1` 时才执行 `docker compose build`
 - 如果 migration 是非向前兼容的（罕见），整个流程必须改为"先停旧 API/Worker → migrate → 起新 API/Worker"，并接受短暂全站 503；这种情况必须在 PR 描述里显式标注，CI 也应有 lint 检查（参考 §11.6）
@@ -1201,12 +1224,13 @@ cleanup
 | `lock` | 获取全局更新锁 | 已被占则返回 `system_operation_busy` + `retry_after`，直接退出 |
 | `check` | 检查当前版本和目标版本 | 失败直接退出；`current == target` 时跳过后续 |
 | `preflight` | 检查 Docker、磁盘（默认要求 ≥ 5GB 余量）、`.env` 关键字段、数据目录权限 | 失败直接退出 |
-| `backup_preflight` | **默认强制**调用 `scripts/backup.sh`（PG dump + redis snapshot）。仅当 `LUMEN_UPDATE_SKIP_BACKUP=1` 时跳过；失败默认 abort | 失败 abort（无备份不允许更新——4K 任务环境下这是死规则） |
+| `backup_preflight` | standard 模式调用 `scripts/backup.sh` 生成同 timestamp 的 PG + Redis 备份；fast 模式仅在受信任 shell 设置 `LUMEN_UPDATE_FAST_BACKUP=1` 时执行，`LUMEN_UPDATE_SKIP_BACKUP=1` 始终跳过 | 实际执行后失败 abort；后台 runner 的请求不能开启该变量，因此切换 SOP 不得依赖它 |
 | `fetch_release` | 拉 compose/release 元数据，确认目标 tag 在 GHCR 上存在 | 失败直接退出 |
 | `set_image_tag` | 把目标 `LUMEN_IMAGE_TAG` 写入 `shared/.env` 唯一一行，校验 grep 唯一存在 | 失败直接退出 |
-| `pull_images` | `docker compose pull` | 失败保持旧服务运行；提示检查 GHCR / 代理（§10.5） |
+| `pull_images` | standard 显式 `docker compose pull`；fast 对已存在的固定 tag 可延后到逐服务 `up --pull missing` | 失败保持旧服务运行；提示检查 GHCR / 代理（§10.5） |
+| `check_storage` | 在停旧业务容器和切 `current` 前验证 `LUMEN_DATA_ROOT` 已挂载且可写 | 失败保持旧服务运行 |
 | `start_infra` | 启动 postgres/redis 并等待 healthy | 失败保持旧服务运行 |
-| `migrate_db` | 执行 Alembic `upgrade head` | **失败 abort，不切 `current`、不重启业务服务**（fail-fast 死规则） |
+| `migrate_db` | 需要迁移时先停旧业务服务，执行 Alembic `upgrade head`，再验证 current=head | **失败 abort，不切 `current`、不启动新版本；尝试恢复旧服务** |
 | `switch` | 更新 `current` symlink；`previous` 指向旧 release | 失败回滚 symlink |
 | `restart_services` | `docker compose up -d --wait api worker web` | 失败自动尝试 `LUMEN_IMAGE_TAG=<previous>` 重新 up |
 | `health_check` | API `/healthz` + Web `/` + Worker redis ping | 失败提示 §18 rollback 命令 |
@@ -1340,22 +1364,35 @@ Updater
 
 #### 12.3.1 现行触发链（保留）
 
-API 容器 `/admin/update` 写 `/opt/lumendata/backup/.update.trigger` → `lumen-update.path` 的 `PathChanged` 触发 `lumen-update-runner.service`。**整条链不依赖 sudo**，API 在 sandbox 内只需要对 `/opt/lumendata/backup` 有写权限。
+API 容器 `/admin/update` 写 `${LUMEN_BACKUP_ROOT}/.update.trigger` →
+`lumen-update.path` 的 `PathChanged` 触发 `lumen-update-runner.service`。模板默认路径是
+`/opt/lumendata/backup`，`install.sh` / `update.sh` 会按有效
+`LUMEN_BACKUP_ROOT` 渲染安装后的 unit。**整条链不依赖 sudo**，API 在 sandbox 内只
+需要对该备份目录有写权限。
 
-切容器后这条链继续可用：API 容器把 `/opt/lumendata/backup` 作为 bind mount 挂进来即可写 trigger。
+切容器后这条链继续可用：API 容器把有效 `LUMEN_BACKUP_ROOT` 作为 bind mount
+挂进来即可写 trigger。
 
-#### 12.3.2 必须修改的 unit 字段
+#### 12.3.2 现行 unit 与请求边界
 
-当前 `lumen-update-runner.service` 写死了：
+现行 unit 直接执行固定路径 runner：
 
 ```ini
-Environment=LUMEN_UPDATE_GIT_PULL=1
-Environment=LUMEN_UPDATE_BUILD=1
+WorkingDirectory=/opt/lumen/current
+ExecStart=/usr/bin/env timeout --preserve-status --kill-after=300s 7200s \
+  python3 /opt/lumen/current/scripts/update_runner.py
 ```
 
-切到预构建镜像后，**`LUMEN_UPDATE_BUILD=1` 必须改为 `LUMEN_UPDATE_BUILD=0`**，否则后台一键更新仍会走 `docker compose build`，与 §11.3.2 "pull 优先，build 兜底" 矛盾。`LUMEN_UPDATE_GIT_PULL=1` 保留——release 目录布局未变。
+API 只在 `${LUMEN_BACKUP_ROOT}` 下原子写入 `.update.request.json` 和
+`.update.trigger`。`update_runner.py` 使用 `O_NOFOLLOW` 打开请求，要求它是小型普通
+文件，并校验 schema、字段白名单、5 分钟时效、代理 URL 及目标 tag。runner 只接受
+`v*` 或 `main`，随后按固定白名单构造更新环境，其中
+`LUMEN_UPDATE_BUILD=0`、`LUMEN_UPDATE_GIT_PULL=1` 和脚本路径均不可由请求覆盖。
 
-如需保留 build 能力作为兜底（pull 失败时本地构建），通过 `EnvironmentFile=/opt/lumendata/backup/.update.env` 让 API 在写 trigger 时按需注入 `LUMEN_UPDATE_BUILD=1`，而不是在 unit 里写死。
+`${LUMEN_BACKUP_ROOT}` 对 API 可写，必须按不可信输入处理。严禁直接
+`source .update.env`，也严禁在特权 unit 中增加指向该目录的
+`EnvironmentFile=`。需要本地 build 兜底时，应由受信任的宿主机管理员从 shell
+显式运行更新命令，而不是通过 API 请求注入任意环境变量。
 
 #### 12.3.3 备选 sudo 触发（不推荐，仅作兜底）
 
@@ -1665,27 +1702,34 @@ sudo setfacl -R -d -m u:10001:rwx /opt/lumendata/backup
 - `lumen-pg`
 - `lumen-redis`
 
-如果保持容器名不变，备份脚本大体可以继续工作。
-
-需要检查：
+备份脚本要求这两个容器仍在运行。它先生成 PostgreSQL custom dump，再触发并等待
+Redis BGSAVE，最后只在两个产物都有效时保留同一个 timestamp 的备份点。需要检查：
 
 - `docker exec lumen-pg pg_dump ...`
 - `docker exec lumen-redis redis-cli ...`
 - Redis 数据路径仍为 `/data`
 - Postgres 数据卷仍挂载 `/var/lib/postgresql/data`
 
-切换前必须先做一次备份：
+切换前必须从已安装 release 显式指定共享配置，并在停止 PG/Redis 之前执行：
 
 ```bash
-bash scripts/backup.sh
+cd /opt/lumen/current
+docker compose ps postgres redis
+LUMEN_ENV_FILE=/opt/lumen/shared/.env bash scripts/backup.sh
 ```
 
-并确认输出：
+只有脚本最后输出 `backup <timestamp> complete` 和 JSON 结果才算完成。确认实际
+`LUMEN_BACKUP_ROOT` 下存在同 timestamp 的两个非空且可解包文件：
 
 ```text
-/opt/lumendata/backup/pg/<timestamp>.pg.dump.gz
-/opt/lumendata/backup/redis/<timestamp>.redis.tgz
+${LUMEN_BACKUP_ROOT}/pg/<timestamp>.pg.dump.gz
+${LUMEN_BACKUP_ROOT}/redis/<timestamp>.redis.tgz
 ```
+
+`backup.sh` **不备份 `${LUMEN_DATA_ROOT}/storage`**。如果
+`LUMEN_BACKUP_ROOT` 与待切换、卸载或重挂载的 `LUMEN_DATA_ROOT` 位于同一文件系统，
+这两个数据库产物也不是独立灾备：切换前必须把成对产物复制到另一块本地盘或独立远端
+存储，并另外对 `storage/` 做文件系统、NAS 或对象存储级快照。
 
 ## 17. 一次性切换实施步骤
 
@@ -1710,27 +1754,31 @@ bash scripts/backup.sh
 迁移 SOP：
 
 ```bash
-# 1. 完整停掉旧栈，确保 PG/Redis 没有写操作
+# 1. 保持旧 PG/Redis 运行，先生成逻辑备份
 cd /opt/lumen/current   # 或当前部署目录
+docker compose ps postgres redis
+LUMEN_ENV_FILE=/opt/lumen/shared/.env bash scripts/backup.sh
+
+# 2. 按 §16 验证同 timestamp 的 PG/Redis 成对产物；
+#    若 backup 与待迁移数据同挂载，先复制到独立存储，并单独快照 storage/
+
+# 3. 备份验证完成后再完整停掉旧栈，冻结 named volume
 docker compose down
 
-# 2. 备份现有数据（双保险）
-bash scripts/backup.sh
-
-# 3. 记录现有 volume 名，确认非空
+# 4. 记录现有 volume 名，确认非空
 OLD_PG_VOL="$(docker volume ls -q | grep '_lumen_pg_data$' | head -n1)"
 OLD_REDIS_VOL="$(docker volume ls -q | grep '_lumen_redis_data$' | head -n1)"
 test -n "$OLD_PG_VOL" -a -n "$OLD_REDIS_VOL" || { echo "未找到旧 volume，请人工确认"; exit 1; }
 docker run --rm -v "$OLD_PG_VOL":/src alpine du -sh /src
 docker run --rm -v "$OLD_REDIS_VOL":/src alpine du -sh /src
 
-# 4. 创建 bind mount 目标目录与权限（§15.2）
+# 5. 创建 bind mount 目标目录与权限（§15.2）
 sudo mkdir -p /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 sudo chown -R 999:999 /var/lib/lumen-data/postgres
 sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 
-# 5. 拷贝（保留属主和权限）
+# 6. 拷贝（保留属主和权限）
 docker run --rm \
   -v "$OLD_PG_VOL":/src:ro \
   -v /var/lib/lumen-data/postgres:/dst \
@@ -1740,16 +1788,19 @@ docker run --rm \
   -v /var/lib/lumen-data/redis:/dst \
   alpine sh -c "cp -a /src/. /dst/"
 
-# 6. 校验关键文件存在
+# 7. 校验关键文件存在
 sudo test -f /var/lib/lumen-data/postgres/PG_VERSION || { echo "PG 数据未就位"; exit 1; }
 sudo ls /var/lib/lumen-data/redis/ | grep -E '\.(rdb|aof)$' || echo "redis 数据未就位（如果是首次部署可忽略）"
 
-# 7. 启动新栈（COMPOSE_PROJECT_NAME=lumen，bind mount 生效）
+# 8. 启动新栈（COMPOSE_PROJECT_NAME=lumen，bind mount 生效）
 COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait postgres redis
 
-# 8. 业务验证后再删除旧 volume（强烈建议保留至少一周）
+# 9. 业务验证后再删除旧 volume（强烈建议保留至少一周）
 # docker volume rm "$OLD_PG_VOL" "$OLD_REDIS_VOL"
 ```
+
+不要把 `docker compose down` 放到 `backup.sh` 前面；脚本通过 `docker exec` 访问
+`lumen-pg` / `lumen-redis`，容器已停时不会产生可用备份。
 
 如果用户只切 project name 不切 bind mount（简化迁移），可以用 `external: true` 引用旧 volume，但长期不推荐；本方案不在默认路径中支持这种半切状态。
 
@@ -1776,8 +1827,12 @@ docker volume ls | grep lumen
 ### 17.2 备份
 
 ```bash
-bash scripts/backup.sh
+cd /opt/lumen/current
+LUMEN_ENV_FILE=/opt/lumen/shared/.env bash scripts/backup.sh
 ```
+
+完成 §16 的成对文件校验、独立副本和 `storage/` 快照后，才能继续停旧运行时或切换
+挂载。
 
 记录当前 release：
 
@@ -1874,12 +1929,14 @@ sudo systemctl disable --now lumen-api lumen-worker lumen-web lumen-tgbot
 
 ```bash
 # 1. 切回旧 release 目录
+ROOT=/opt/lumen
+cd "${ROOT}"
 ln -sfn releases/<old-id> current
-cd current
+cd "${ROOT}/current"
 
 # 2. 把 LUMEN_IMAGE_TAG 改回上一已知好版本（§6.4.1 同入口）
-#    旧 tag 通常存在 .update.env 历史日志里，或从 GHCR tag 列表挑选
-sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=<old-tag>|' shared/.env
+#    优先读取 releases/<old-id>/.image-tag；没有时再查更新日志或 GHCR tag
+sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=<old-tag>|' "${ROOT}/shared/.env"
 
 # 3. 拉旧镜像并重启业务容器
 COMPOSE_PROJECT_NAME=lumen docker compose pull
@@ -2110,7 +2167,7 @@ docker compose --profile tgbot up -d tgbot
 | `/opt/lumendata` 全局 chown 10001 | postgres(uid 999) / redis(uid 999) 启动失败 | §15.2 按服务分别 chown |
 | `WEB_BIND_HOST=0.0.0.0` 默认值 | 绕过 nginx 直连 3000，frps 隧道架构下出网 | §8.3 默认 `127.0.0.1` |
 | `LUMEN_IMAGE_TAG` 未在 pull 前写入 | pull 拉到旧 tag，更新看似成功实际未变 | §6.4.1 + §11.3.1 `set_image_tag` 阶段 |
-| `lumen-update-runner.service` 写死 `LUMEN_UPDATE_BUILD=1` | 后台一键更新仍触发宿主 build | §12.3.2 改 `0`，build 仅经 EnvironmentFile 注入 |
+| 特权 runner 加载 API 可写目录下的 `.update.env` | 环境变量、代理或执行路径可被越权注入 | §12.3.2 只允许校验后的 `.update.request.json`；unit 禁止该目录的 `EnvironmentFile=` |
 | `stop_grace_period` 默认 10s | `compose up -d --force-recreate` 中断进行中的 4K 任务 | §8.5 worker `1830s`，逐服务显式声明 |
 | Web standalone 配置不完整 | Web 容器启动失败 | 先用非 standalone 方案，§19 加冒烟用例 |
 | Bot 无 token 导致 compose wait 失败 | 主栈启动失败 | §5 / §21.5 放 profile |
@@ -2121,7 +2178,8 @@ docker compose --profile tgbot up -d tgbot
 | 单架构镜像（amd64）部署到 arm64 | 无法启动 | §6.5 GitHub Actions 引入 buildx matrix（本期可先 amd64-only，但需写入 README） |
 | `redis-entrypoint.sh` 漏挂载 | redis 回到无密码状态 | §6.2 / §8.4 显式声明挂载 |
 | Worker `running` ≠ `healthy` | redis URL 错配但容器仍 up | §13.3 加 `python -c redis.ping` healthcheck |
-| `backup_preflight` 未强制 | 4K 任务环境下回滚无依据 | §11.3.1 默认强制 PG dump，仅 `LUMEN_UPDATE_SKIP_BACKUP=1` 跳过 |
+| 把后台 fast 更新误认为一定会备份 | 更新后缺少可恢复的 PG/Redis 时间点 | §11.3.1 明确 runner 默认跳过且请求不能开启备份；后台更新前手工备份 |
+| 只保留与数据同挂载的 PG/Redis 备份，且未快照 `storage/` | 挂载切换或存储故障时备份与图片一起丢失 | §16 校验成对产物、复制到独立存储，并单独快照 `storage/` |
 
 ## 23. 完成标准
 
@@ -2137,7 +2195,7 @@ docker compose --profile tgbot up -d tgbot
 - `bash scripts/lumenctl.sh update-lumen` 不再执行宿主机 `uv sync / npm ci / systemctl restart lumen-*`
 - `bash scripts/uninstall.sh` 能停止完整 Compose 栈
 - README 和 deploy 文档不再把 systemd 作为默认运行方式
-- `lumen-update-runner.service` 中 `LUMEN_UPDATE_BUILD=0`（§12.3.2）
+- `scripts/update_runner.py` 固定 `LUMEN_UPDATE_BUILD=0`，且特权 unit 不加载 API 可写目录下的 `EnvironmentFile=`（§12.3.2）
 - 4K 长任务在 `docker compose up -d --force-recreate` 期间不被中断（验证 worker `stop_grace_period: 1830s`）
 - bind mount 目录属主对应 §15.2 的服务-uid 表
 - `LUMEN_IMAGE_TAG` 在更新流程的 `set_image_tag` 阶段被正确写入（验证 `shared/.env` diff）
