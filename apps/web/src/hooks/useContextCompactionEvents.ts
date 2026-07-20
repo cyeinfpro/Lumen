@@ -90,10 +90,34 @@ function asTrigger(value: unknown): CompactionTrigger {
   return value === "manual" ? "manual" : "auto";
 }
 
+function compactionEventSource(raw: UnknownRecord): UnknownRecord {
+  return isRecord(raw.payload) ? { ...raw, ...raw.payload } : raw;
+}
+
+function compactionProgress(value: unknown): CompactionEvent["progress"] {
+  if (!isRecord(value)) return undefined;
+  return {
+    currentSegment: asNumber(value.currentSegment) ?? 0,
+    totalSegments: asNumber(value.totalSegments) ?? 0,
+  };
+}
+
+function compactionStats(value: unknown): CompactionEvent["stats"] {
+  if (!isRecord(value)) return undefined;
+  return {
+    summaryTokens: asNumber(value.summaryTokens) ?? 0,
+    sourceMessageCount: asNumber(value.sourceMessageCount) ?? 0,
+    sourceTokenEstimate: asNumber(value.sourceTokenEstimate) ?? 0,
+    imageCaptionCount: asNumber(value.imageCaptionCount) ?? 0,
+    tokensFreed: asNumber(value.tokensFreed) ?? 0,
+    summaryUpToMessageId: asString(value.summaryUpToMessageId) ?? "",
+  };
+}
+
 function parseCompactionEvent(raw: unknown): CompactionEvent | null {
   if (!isRecord(raw)) return null;
 
-  const source = isRecord(raw.payload) ? { ...raw, ...raw.payload } : raw;
+  const source = compactionEventSource(raw);
   if (source.kind !== EVENT_KIND) return null;
 
   const payload = camelCasePayload(source);
@@ -104,24 +128,6 @@ function parseCompactionEvent(raw: unknown): CompactionEvent | null {
   const startedAt = asString(payload.startedAt);
   if (!conversationId || !phase || !startedAt) return null;
 
-  const progress = isRecord(payload.progress)
-    ? {
-        currentSegment: asNumber(payload.progress.currentSegment) ?? 0,
-        totalSegments: asNumber(payload.progress.totalSegments) ?? 0,
-      }
-    : undefined;
-
-  const stats = isRecord(payload.stats)
-    ? {
-        summaryTokens: asNumber(payload.stats.summaryTokens) ?? 0,
-        sourceMessageCount: asNumber(payload.stats.sourceMessageCount) ?? 0,
-        sourceTokenEstimate: asNumber(payload.stats.sourceTokenEstimate) ?? 0,
-        imageCaptionCount: asNumber(payload.stats.imageCaptionCount) ?? 0,
-        tokensFreed: asNumber(payload.stats.tokensFreed) ?? 0,
-        summaryUpToMessageId: asString(payload.stats.summaryUpToMessageId) ?? "",
-      }
-    : undefined;
-
   return {
     conversationId,
     phase,
@@ -131,8 +137,8 @@ function parseCompactionEvent(raw: unknown): CompactionEvent | null {
     elapsedMs: asNumber(payload.elapsedMs),
     ok: asBoolean(payload.ok),
     fallbackReason: asString(payload.fallbackReason),
-    progress,
-    stats,
+    progress: compactionProgress(payload.progress),
+    stats: compactionStats(payload.stats),
   };
 }
 

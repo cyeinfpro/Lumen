@@ -310,172 +310,50 @@ export function ByokPanel() {
   const settingsBusy = saveSettingsMut.isPending;
   const settingsDirty = Object.keys(settingsDraft).length > 0;
   const loading = settingsQ.isLoading || suppliersQ.isLoading;
-  const retentionHideDays =
-    settingsDraft.retention_hide_days ?? settings?.retention_hide_days ?? 3;
-  const retentionDeleteDays =
-    settingsDraft.retention_delete_days ?? settings?.retention_delete_days ?? 7;
-  const retentionInvalid = Boolean(
-    effectiveSettings?.retention_hide_enabled &&
-      effectiveSettings?.retention_delete_enabled &&
-      retentionDeleteDays < retentionHideDays,
-  );
+  const {
+    hideDays: retentionHideDays,
+    deleteDays: retentionDeleteDays,
+    invalid: retentionInvalid,
+  } = retentionStateFor(settingsDraft, settings, effectiveSettings);
+
+  const saveSupplier = (supplier: ApiSupplierTemplateOut) => {
+    const body = supplierDrafts[supplier.id] ?? supplierToDraft(supplier);
+    const urlErr = validateBaseUrl(body.base_url);
+    if (urlErr) {
+      setSupplierUrlErrors((current) => ({ ...current, [supplier.id]: urlErr }));
+      return;
+    }
+    patchSupplier.mutate({ id: supplier.id, body });
+  };
+
+  const probeSupplier = (supplier: ApiSupplierTemplateOut) => {
+    probeMut.mutate({
+      id: supplier.id,
+      api_key: (supplierDrafts[supplier.id]?.probe_key ?? "").trim(),
+    });
+  };
 
   return (
     <div className="space-y-6">
       <Overview mode={currentMode} supplierCount={suppliers.length} activeCredentials={totalActive} loading={loading} />
 
-      <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
-        <header className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
-          <ShieldCheck className="w-3.5 h-3.5" />
-          BYOK 模式
-        </header>
-        <p className="text-xs text-[var(--fg-2)]">
-          按业务场景一键配置；下方「高级覆盖」可手动微调 3 个原始开关。
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {MODE_DEFS.map((def) => (
-            <ModeCard key={def.value} def={def} active={currentMode === def.value} onSelect={() => setMode(def.value)} />
-          ))}
-        </div>
-        {currentMode === null && (
-          <p className="flex items-start gap-2 text-xs text-[var(--color-lumen-amber)]/90">
-            <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
-            当前是自定义组合（未匹配预设模式），点上方任意卡片可重置。
-          </p>
-        )}
-
-        <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
-          <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
-            <span>高级覆盖（手动改 3 个原始开关）</span>
-            <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-[var(--border-subtle)]">
-            {ADVANCED_TOGGLES.map(({ key, label, hint, requiresMode }) => {
-              const modeOn = Boolean(effectiveSettings?.mode_enabled);
-              const disabled = requiresMode && !modeOn;
-              const checked = Boolean(
-                (effectiveSettings as Record<string, boolean | undefined> | undefined)?.[key],
-              );
-              return (
-                <ToggleRow
-                  key={key}
-                  label={label}
-                  hint={disabled ? "需先开启 BYOK 总开关" : hint}
-                  checked={checked}
-                  disabled={disabled}
-                  onChange={(v) => setSettingsDraft((cur) => ({ ...cur, [key]: v }))}
-                />
-              );
-            })}
-          </div>
-        </details>
-
-        <div className="space-y-2">
-          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">验证设置</div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <FieldText
-              label="验证模型"
-              hint="发随机算术题给上游验证 Key（建议 gpt-5.4）"
-              value={settingsDraft.validation_model ?? settings?.validation_model ?? ""}
-              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, validation_model: v }))}
-              placeholder="gpt-5.4"
-            />
-            <FieldNumber
-              label="验证超时 (ms)"
-              hint={`单次验证 HTTP 请求超时，${TIMEOUT_MIN_MS}-${TIMEOUT_MAX_MS}（默认 15000）`}
-              min={TIMEOUT_MIN_MS}
-              max={TIMEOUT_MAX_MS}
-              value={settingsDraft.validation_timeout_ms ?? settings?.validation_timeout_ms ?? 15000}
-              onChange={(v) =>
-                setSettingsDraft((cur) => ({ ...cur, validation_timeout_ms: clampInt(v, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS) }))
-              }
-            />
-            <FieldNumber
-              label="Token TTL (秒)"
-              hint={`验证完到注册间的最大间隔，${TTL_MIN_S}-${TTL_MAX_S}（默认 900 = 15min）`}
-              min={TTL_MIN_S}
-              max={TTL_MAX_S}
-              value={settingsDraft.pending_token_ttl_seconds ?? settings?.pending_token_ttl_seconds ?? 900}
-              onChange={(v) =>
-                setSettingsDraft((cur) => ({ ...cur, pending_token_ttl_seconds: clampInt(v, TTL_MIN_S, TTL_MAX_S) }))
-              }
-            />
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">数据保留</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <ToggleRow
-              label="超过窗口后用户侧隐藏"
-              hint="仅影响 BYOK 用户；管理员仍可在删除前查看。"
-              checked={Boolean(effectiveSettings?.retention_hide_enabled ?? true)}
-              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, retention_hide_enabled: v }))}
-            />
-            <ToggleRow
-              label="自动软删除过期数据"
-              hint="危险操作，默认关闭；开启后 worker 会按删除窗口软删除 BYOK 过期数据。"
-              checked={Boolean(effectiveSettings?.retention_delete_enabled ?? false)}
-              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, retention_delete_enabled: v }))}
-            />
-            <FieldNumber
-              label="隐藏窗口（天）"
-              hint="默认 3 天；关闭隐藏开关时不生效。"
-              min={1}
-              max={3650}
-              value={retentionHideDays}
-              onChange={(v) =>
-                setSettingsDraft((cur) => ({
-                  ...cur,
-                  retention_hide_days: clampInt(v, 1, 3650),
-                }))
-              }
-            />
-            <FieldNumber
-              label="删除窗口（天）"
-              hint="默认 7 天；关闭自动删除时不生效。"
-              min={1}
-              max={3650}
-              value={retentionDeleteDays}
-              onChange={(v) =>
-                setSettingsDraft((cur) => ({
-                  ...cur,
-                  retention_delete_days: clampInt(v, 1, 3650),
-                }))
-              }
-            />
-          </div>
-          {retentionInvalid && (
-            <p className="flex items-start gap-2 text-xs text-[var(--danger)]">
-              <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
-              删除窗口不能小于隐藏窗口。
-            </p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3 flex-wrap">
-          <Button
-            variant="primary"
-            size="md"
-            onClick={() => saveSettingsMut.mutate()}
-            disabled={settingsBusy || !settingsDirty || retentionInvalid}
-            loading={settingsBusy}
-            leftIcon={!settingsBusy ? <Save className="w-4 h-4" /> : undefined}
-          >
-            保存系统设置
-          </Button>
-          {settingsDirty && (
-            <Button
-              variant="link"
-              size="sm"
-              onClick={() => setSettingsDraft({})}
-              className="text-[var(--fg-2)] no-underline hover:underline"
-            >
-              丢弃改动
-            </Button>
-          )}
-        </div>
-      </section>
+      <ByokSystemSettingsSection
+        currentMode={currentMode}
+        effectiveSettings={effectiveSettings}
+        draft={settingsDraft}
+        settings={settings}
+        hideDays={retentionHideDays}
+        deleteDays={retentionDeleteDays}
+        retentionInvalid={retentionInvalid}
+        busy={settingsBusy}
+        dirty={settingsDirty}
+        onSetMode={setMode}
+        onPatch={(patch) =>
+          setSettingsDraft((current) => ({ ...current, ...patch }))
+        }
+        onSave={() => saveSettingsMut.mutate()}
+        onDiscard={() => setSettingsDraft({})}
+      />
 
       <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
         <header className="flex items-center justify-between gap-3 flex-wrap">
@@ -545,56 +423,424 @@ export function ByokPanel() {
         )}
       </section>
 
-      <section className="space-y-3">
-        <header className="flex items-center justify-between gap-3 px-1">
-          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
-            已有供应商 · {suppliers.length}
-          </div>
-        </header>
-        {suppliers.length === 0 ? (
-          <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-white/[0.02] py-10 text-center text-sm text-[var(--fg-1)]">
-            还没有供应商模板，使用上方「新供应商」创建。
-          </div>
-        ) : (
-          suppliers.map((supplier) => (
-            <SupplierRow
-              key={supplier.id}
-              supplier={supplier}
-              open={openSupplierId === supplier.id}
-              onToggle={() =>
-                setOpenSupplierId((curr) => (curr === supplier.id ? null : supplier.id))
-              }
-              draft={supplierDrafts[supplier.id] ?? supplierToDraft(supplier)}
-              urlError={supplierUrlErrors[supplier.id] ?? null}
-              onChange={(next) => setSupplierDrafts((cur) => ({ ...cur, [supplier.id]: next }))}
-              onUrlBlur={(err) => setSupplierUrlErrors((cur) => ({ ...cur, [supplier.id]: err }))}
-              onSave={() => {
-                const body = supplierDrafts[supplier.id] ?? supplierToDraft(supplier);
-                const urlErr = validateBaseUrl(body.base_url);
-                if (urlErr) {
-                  setSupplierUrlErrors((cur) => ({ ...cur, [supplier.id]: urlErr }));
-                  return;
-                }
-                patchSupplier.mutate({ id: supplier.id, body });
-              }}
-              onProbe={() =>
-                probeMut.mutate({
-                  id: supplier.id,
-                  api_key: (supplierDrafts[supplier.id]?.probe_key ?? "").trim(),
-                })
-              }
-              probeLabel={probeResult[supplier.id]}
-              busy={patchSupplier.isPending || probeMut.isPending}
-            />
-          ))
-        )}
-      </section>
+      <ByokSupplierList
+        suppliers={suppliers}
+        openSupplierId={openSupplierId}
+        supplierDrafts={supplierDrafts}
+        supplierUrlErrors={supplierUrlErrors}
+        probeResult={probeResult}
+        busy={patchSupplier.isPending || probeMut.isPending}
+        onToggle={(id) =>
+          setOpenSupplierId((current) => (current === id ? null : id))
+        }
+        onChange={(id, draft) =>
+          setSupplierDrafts((current) => ({ ...current, [id]: draft }))
+        }
+        onUrlBlur={(id, urlError) =>
+          setSupplierUrlErrors((current) => ({ ...current, [id]: urlError }))
+        }
+        onSave={saveSupplier}
+        onProbe={probeSupplier}
+      />
+      <ByokNotices
+        error={error}
+        saved={saved}
+        onClearError={() => setError(null)}
+        onClearSaved={() => setSaved(null)}
+      />
+    </div>
+  );
+}
 
+function retentionStateFor(
+  draft: ByokSettingsPatchIn,
+  settings: ByokSettingsOut | undefined,
+  effective: ByokSettingsOut | undefined,
+) {
+  const hideDays = draft.retention_hide_days ?? settings?.retention_hide_days ?? 3;
+  const deleteDays =
+    draft.retention_delete_days ?? settings?.retention_delete_days ?? 7;
+  const invalid = Boolean(
+    effective?.retention_hide_enabled &&
+      effective?.retention_delete_enabled &&
+      deleteDays < hideDays,
+  );
+  return { hideDays, deleteDays, invalid };
+}
+
+function ByokModeSettings({
+  currentMode,
+  effectiveSettings,
+  onSetMode,
+  onPatch,
+}: {
+  currentMode: ByokMode | null;
+  effectiveSettings: ByokSettingsOut | undefined;
+  onSetMode: (mode: ByokMode) => void;
+  onPatch: (patch: ByokSettingsPatchIn) => void;
+}) {
+  return (
+    <>
+      <header className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        <ShieldCheck className="w-3.5 h-3.5" />
+        BYOK 模式
+      </header>
+      <p className="text-xs text-[var(--fg-2)]">
+        按业务场景一键配置；下方「高级覆盖」可手动微调 3 个原始开关。
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {MODE_DEFS.map((def) => (
+          <ModeCard
+            key={def.value}
+            def={def}
+            active={currentMode === def.value}
+            onSelect={() => onSetMode(def.value)}
+          />
+        ))}
+      </div>
+      {currentMode === null && (
+        <p className="flex items-start gap-2 text-xs text-[var(--color-lumen-amber)]/90">
+          <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
+          当前是自定义组合（未匹配预设模式），点上方任意卡片可重置。
+        </p>
+      )}
+      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
+        <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
+          <span>高级覆盖（手动改 3 个原始开关）</span>
+          <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-[var(--border-subtle)]">
+          {ADVANCED_TOGGLES.map(({ key, label, hint, requiresMode }) => {
+            const modeOn = Boolean(effectiveSettings?.mode_enabled);
+            const disabled = requiresMode && !modeOn;
+            const checked = Boolean(
+              (effectiveSettings as Record<string, boolean | undefined> | undefined)?.[
+                key
+              ],
+            );
+            return (
+              <ToggleRow
+                key={key}
+                label={label}
+                hint={disabled ? "需先开启 BYOK 总开关" : hint}
+                checked={checked}
+                disabled={disabled}
+                onChange={(value) => onPatch({ [key]: value })}
+              />
+            );
+          })}
+        </div>
+      </details>
+    </>
+  );
+}
+
+function ByokValidationSettings({
+  draft,
+  settings,
+  onPatch,
+}: {
+  draft: ByokSettingsPatchIn;
+  settings: ByokSettingsOut | undefined;
+  onPatch: (patch: ByokSettingsPatchIn) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        验证设置
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <FieldText
+          label="验证模型"
+          hint="发随机算术题给上游验证 Key（建议 gpt-5.4）"
+          value={draft.validation_model ?? settings?.validation_model ?? ""}
+          onChange={(value) => onPatch({ validation_model: value })}
+          placeholder="gpt-5.4"
+        />
+        <FieldNumber
+          label="验证超时 (ms)"
+          hint={`单次验证 HTTP 请求超时，${TIMEOUT_MIN_MS}-${TIMEOUT_MAX_MS}（默认 15000）`}
+          min={TIMEOUT_MIN_MS}
+          max={TIMEOUT_MAX_MS}
+          value={
+            draft.validation_timeout_ms ?? settings?.validation_timeout_ms ?? 15000
+          }
+          onChange={(value) =>
+            onPatch({
+              validation_timeout_ms: clampInt(
+                value,
+                TIMEOUT_MIN_MS,
+                TIMEOUT_MAX_MS,
+              ),
+            })
+          }
+        />
+        <FieldNumber
+          label="Token TTL (秒)"
+          hint={`验证完到注册间的最大间隔，${TTL_MIN_S}-${TTL_MAX_S}（默认 900 = 15min）`}
+          min={TTL_MIN_S}
+          max={TTL_MAX_S}
+          value={
+            draft.pending_token_ttl_seconds ??
+            settings?.pending_token_ttl_seconds ??
+            900
+          }
+          onChange={(value) =>
+            onPatch({
+              pending_token_ttl_seconds: clampInt(
+                value,
+                TTL_MIN_S,
+                TTL_MAX_S,
+              ),
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function ByokRetentionSettings({
+  effectiveSettings,
+  hideDays,
+  deleteDays,
+  invalid,
+  onPatch,
+}: {
+  effectiveSettings: ByokSettingsOut | undefined;
+  hideDays: number;
+  deleteDays: number;
+  invalid: boolean;
+  onPatch: (patch: ByokSettingsPatchIn) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        数据保留
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <ToggleRow
+          label="超过窗口后用户侧隐藏"
+          hint="仅影响 BYOK 用户；管理员仍可在删除前查看。"
+          checked={Boolean(effectiveSettings?.retention_hide_enabled ?? true)}
+          onChange={(value) => onPatch({ retention_hide_enabled: value })}
+        />
+        <ToggleRow
+          label="自动软删除过期数据"
+          hint="危险操作，默认关闭；开启后 worker 会按删除窗口软删除 BYOK 过期数据。"
+          checked={Boolean(effectiveSettings?.retention_delete_enabled ?? false)}
+          onChange={(value) => onPatch({ retention_delete_enabled: value })}
+        />
+        <FieldNumber
+          label="隐藏窗口（天）"
+          hint="默认 3 天；关闭隐藏开关时不生效。"
+          min={1}
+          max={3650}
+          value={hideDays}
+          onChange={(value) =>
+            onPatch({ retention_hide_days: clampInt(value, 1, 3650) })
+          }
+        />
+        <FieldNumber
+          label="删除窗口（天）"
+          hint="默认 7 天；关闭自动删除时不生效。"
+          min={1}
+          max={3650}
+          value={deleteDays}
+          onChange={(value) =>
+            onPatch({ retention_delete_days: clampInt(value, 1, 3650) })
+          }
+        />
+      </div>
+      {invalid && (
+        <p className="flex items-start gap-2 text-xs text-[var(--danger)]">
+          <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
+          删除窗口不能小于隐藏窗口。
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ByokSettingsActions({
+  busy,
+  dirty,
+  retentionInvalid,
+  onSave,
+  onDiscard,
+}: {
+  busy: boolean;
+  dirty: boolean;
+  retentionInvalid: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 flex-wrap">
+      <Button
+        variant="primary"
+        size="md"
+        onClick={onSave}
+        disabled={busy || !dirty || retentionInvalid}
+        loading={busy}
+        leftIcon={!busy ? <Save className="w-4 h-4" /> : undefined}
+      >
+        保存系统设置
+      </Button>
+      {dirty && (
+        <Button
+          variant="link"
+          size="sm"
+          onClick={onDiscard}
+          className="text-[var(--fg-2)] no-underline hover:underline"
+        >
+          丢弃改动
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function ByokSystemSettingsSection({
+  currentMode,
+  effectiveSettings,
+  draft,
+  settings,
+  hideDays,
+  deleteDays,
+  retentionInvalid,
+  busy,
+  dirty,
+  onSetMode,
+  onPatch,
+  onSave,
+  onDiscard,
+}: {
+  currentMode: ByokMode | null;
+  effectiveSettings: ByokSettingsOut | undefined;
+  draft: ByokSettingsPatchIn;
+  settings: ByokSettingsOut | undefined;
+  hideDays: number;
+  deleteDays: number;
+  retentionInvalid: boolean;
+  busy: boolean;
+  dirty: boolean;
+  onSetMode: (mode: ByokMode) => void;
+  onPatch: (patch: ByokSettingsPatchIn) => void;
+  onSave: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
+      <ByokModeSettings
+        currentMode={currentMode}
+        effectiveSettings={effectiveSettings}
+        onSetMode={onSetMode}
+        onPatch={onPatch}
+      />
+      <ByokValidationSettings
+        draft={draft}
+        settings={settings}
+        onPatch={onPatch}
+      />
+      <ByokRetentionSettings
+        effectiveSettings={effectiveSettings}
+        hideDays={hideDays}
+        deleteDays={deleteDays}
+        invalid={retentionInvalid}
+        onPatch={onPatch}
+      />
+      <ByokSettingsActions
+        busy={busy}
+        dirty={dirty}
+        retentionInvalid={retentionInvalid}
+        onSave={onSave}
+        onDiscard={onDiscard}
+      />
+    </section>
+  );
+}
+
+function ByokSupplierList({
+  suppliers,
+  openSupplierId,
+  supplierDrafts,
+  supplierUrlErrors,
+  probeResult,
+  busy,
+  onToggle,
+  onChange,
+  onUrlBlur,
+  onSave,
+  onProbe,
+}: {
+  suppliers: ApiSupplierTemplateOut[];
+  openSupplierId: string | null;
+  supplierDrafts: Record<string, SupplierDraft>;
+  supplierUrlErrors: Record<string, string | null>;
+  probeResult: Record<string, string>;
+  busy: boolean;
+  onToggle: (id: string) => void;
+  onChange: (id: string, draft: SupplierDraft) => void;
+  onUrlBlur: (id: string, error: string | null) => void;
+  onSave: (supplier: ApiSupplierTemplateOut) => void;
+  onProbe: (supplier: ApiSupplierTemplateOut) => void;
+}) {
+  return (
+    <section className="space-y-3">
+      <header className="flex items-center justify-between gap-3 px-1">
+        <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
+          已有供应商 · {suppliers.length}
+        </div>
+      </header>
+      {suppliers.length === 0 ? (
+        <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-white/[0.02] py-10 text-center text-sm text-[var(--fg-1)]">
+          还没有供应商模板，使用上方「新供应商」创建。
+        </div>
+      ) : (
+        suppliers.map((supplier) => (
+          <SupplierRow
+            key={supplier.id}
+            supplier={supplier}
+            open={openSupplierId === supplier.id}
+            onToggle={() => onToggle(supplier.id)}
+            draft={supplierDrafts[supplier.id] ?? supplierToDraft(supplier)}
+            urlError={supplierUrlErrors[supplier.id] ?? null}
+            onChange={(draft) => onChange(supplier.id, draft)}
+            onUrlBlur={(error) => onUrlBlur(supplier.id, error)}
+            onSave={() => onSave(supplier)}
+            onProbe={() => onProbe(supplier)}
+            probeLabel={probeResult[supplier.id]}
+            busy={busy}
+          />
+        ))
+      )}
+    </section>
+  );
+}
+
+function ByokNotices({
+  error,
+  saved,
+  onClearError,
+  onClearSaved,
+}: {
+  error: string | null;
+  saved: string | null;
+  onClearError: () => void;
+  onClearSaved: () => void;
+}) {
+  return (
+    <>
       {error && (
         <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
           <AlertCircle className="mt-0.5 w-4 h-4 shrink-0" />
           <span className="flex-1">{error}</span>
-          <button type="button" onClick={() => setError(null)} className="type-caption text-danger/80 hover:text-danger">
+          <button
+            type="button"
+            onClick={onClearError}
+            className="type-caption text-danger/80 hover:text-danger"
+          >
             {copy.action.close}
           </button>
         </div>
@@ -605,14 +851,14 @@ export function ByokPanel() {
           <span className="flex-1">{saved}</span>
           <button
             type="button"
-            onClick={() => setSaved(null)}
+            onClick={onClearSaved}
             className="type-caption text-success/80 hover:text-success"
           >
             {copy.action.close}
           </button>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -943,7 +1189,9 @@ function FieldText({
         }
       />
       {error ? (
-        <span className="text-[11px] text-danger">{error}</span>
+        <span role="alert" aria-live="assertive" className="text-[11px] text-danger">
+          {error}
+        </span>
       ) : hint ? (
         <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>
       ) : null}

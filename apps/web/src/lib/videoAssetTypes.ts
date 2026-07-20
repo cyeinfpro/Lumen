@@ -1,4 +1,4 @@
-import type { VideoProviderKind } from "./types";
+import type { VideoProviderKind } from "./videoProviderTypes";
 
 export type VideoAssetType = "Image" | "Video";
 export type VideoAssetStatus = "Active" | "Processing" | "Failed";

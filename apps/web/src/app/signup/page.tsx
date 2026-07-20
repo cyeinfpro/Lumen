@@ -73,6 +73,10 @@ function resolveSupplierId(
   return supplierId || selectedSupplierId || "";
 }
 
+type PublicApiSupplier = Awaited<
+  ReturnType<typeof listPublicApiSuppliers>
+>["items"][number];
+
 export default function SignupPage() {
   const router = useRouter();
   const suppliersQ = useQuery({
@@ -187,185 +191,339 @@ export default function SignupPage() {
             <p className="type-body">连接你的 API Key 后继续注册。</p>
           </header>
 
-          <section className="page-section grid gap-4 !pt-0">
-            <div className="type-label flex items-center gap-2">
-              <KeyRound className="w-3.5 h-3.5" />
-              连接 API Key
-            </div>
-            {suppliersQ.isError && (
-              <div
-                role="alert"
-                aria-live="assertive"
-                className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
-              >
-                <span>供应商列表加载失败</span>
-                <button
-                  type="button"
-                  onClick={() => void suppliersQ.refetch()}
-                  disabled={suppliersQ.isFetching}
-                  className="inline-flex items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
-                >
-                  {suppliersQ.isFetching ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <RefreshCw className="w-3.5 h-3.5" />
-                  )}
-                  重试
-                </button>
-              </div>
-            )}
-            <label className="auth-field">
-              <span className="type-label">供应商</span>
-              <select
-                id="signup-supplier"
-                name="supplier"
-                value={activeSupplierId}
-                disabled={disabled || verifying || Boolean(verificationToken)}
-                onChange={(e) => setSupplierId(e.target.value)}
-                className="auth-control px-3"
-              >
-                {suppliers.length === 0 ? (
-                  <option value="">暂无可用供应商</option>
-                ) : (
-                  suppliers.map((supplier) => (
-                    <option key={supplier.id} value={supplier.id}>
-                      {supplier.name} · {supplier.validation_model}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-            <label className="auth-field">
-              <span className="type-label">API Key</span>
-              <div className="relative">
-                <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
-                <input
-                  id="signup-api-key"
-                  name="api-key"
-                  type="password"
-                  value={apiKey}
-                  disabled={verifying || Boolean(verificationToken)}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-..."
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  enterKeyHint="next"
-                  className="auth-control pl-10 pr-3"
-                />
-              </div>
-            </label>
-            <button
-              type="button"
-              onClick={onVerify}
-              disabled={disabled || verifying || Boolean(verificationToken)}
-              aria-busy={verifying}
-              className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)] disabled:opacity-50"
-            >
-              {verifying ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : verificationToken ? (
-                <Check className="w-4 h-4 text-success" />
-              ) : (
-                <KeyRound className="w-4 h-4" />
-              )}
-              {verificationToken ? `已验证 ${keyHint}` : "验证 Key"}
-            </button>
-          </section>
+          <ApiKeyVerificationSection
+            suppliers={suppliers}
+            activeSupplierId={activeSupplierId}
+            apiKey={apiKey}
+            verificationToken={verificationToken}
+            keyHint={keyHint}
+            disabled={disabled}
+            verifying={verifying}
+            suppliersError={suppliersQ.isError}
+            suppliersFetching={suppliersQ.isFetching}
+            onRetry={() => void suppliersQ.refetch()}
+            onSupplierChange={setSupplierId}
+            onApiKeyChange={setApiKey}
+            onVerify={() => void onVerify()}
+          />
 
-          <form onSubmit={onCreate} className="page-section auth-form">
-            <div className="type-label flex items-center gap-2">
-              <Mail className="w-3.5 h-3.5" />
-              创建账号
-            </div>
-            <label className="auth-field">
-              <span className="type-label">邮箱</span>
-              <input
-                id="signup-email"
-                name="email"
-                type="email"
-                disabled={submitting}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
-                autoComplete="email"
-                inputMode="email"
-                autoCapitalize="none"
-                autoCorrect="off"
-                enterKeyHint="next"
-                className="auth-control px-3"
-              />
-            </label>
-            <div className="auth-field">
-              <label htmlFor="signup-password" className="type-label">
-                密码
-              </label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
-                <input
-                  id="signup-password"
-                  name="password"
-                  type={showPassword ? "text" : "password"}
-                  disabled={submitting}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="至少 8 位密码"
-                  autoComplete="new-password"
-                  enterKeyHint="next"
-                  className="auth-control pl-10 pr-12"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((value) => !value)}
-                  disabled={submitting}
-                  className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
-                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-            <label className="auth-field">
-              <span className="type-label">确认密码</span>
-              <input
-                id="signup-confirm-password"
-                name="password-confirmation"
-                type={showPassword ? "text" : "password"}
-                disabled={submitting}
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                placeholder="再次输入密码"
-                autoComplete="new-password"
-                enterKeyHint="done"
-                className="auth-control px-3"
-              />
-            </label>
-
-            {error && (
-              <div
-                role="alert"
-                aria-live="assertive"
-                className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
-              >
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={submitting || !verificationToken}
-              aria-busy={submitting}
-              className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
-            >
-              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "创建账号"}
-              {!submitting && <ArrowRight className="w-4 h-4" />}
-            </button>
-          </form>
+          <SignupAccountForm
+            email={email}
+            password={password}
+            confirm={confirm}
+            showPassword={showPassword}
+            submitting={submitting}
+            verificationToken={verificationToken}
+            error={error}
+            onSubmit={onCreate}
+            onEmailChange={setEmail}
+            onPasswordChange={setPassword}
+            onConfirmChange={setConfirm}
+            onTogglePassword={() => setShowPassword((value) => !value)}
+          />
         </div>
       </main>
     </div>
+  );
+}
+
+function ApiKeyVerificationSection({
+  suppliers,
+  activeSupplierId,
+  apiKey,
+  verificationToken,
+  keyHint,
+  disabled,
+  verifying,
+  suppliersError,
+  suppliersFetching,
+  onRetry,
+  onSupplierChange,
+  onApiKeyChange,
+  onVerify,
+}: {
+  suppliers: PublicApiSupplier[];
+  activeSupplierId: string;
+  apiKey: string;
+  verificationToken: string;
+  keyHint: string;
+  disabled: boolean;
+  verifying: boolean;
+  suppliersError: boolean;
+  suppliersFetching: boolean;
+  onRetry: () => void;
+  onSupplierChange: (value: string) => void;
+  onApiKeyChange: (value: string) => void;
+  onVerify: () => void;
+}) {
+  const controlsDisabled = disabled || verifying || Boolean(verificationToken);
+
+  return (
+    <section className="page-section grid gap-4 !pt-0">
+      <div className="type-label flex items-center gap-2">
+        <KeyRound className="w-3.5 h-3.5" />
+        连接 API Key
+      </div>
+      <SupplierLoadError
+        visible={suppliersError}
+        fetching={suppliersFetching}
+        onRetry={onRetry}
+      />
+      <label className="auth-field">
+        <span className="type-label">供应商</span>
+        <select
+          id="signup-supplier"
+          name="supplier"
+          value={activeSupplierId}
+          disabled={controlsDisabled}
+          onChange={(event) => onSupplierChange(event.target.value)}
+          className="auth-control px-3"
+        >
+          {suppliers.length === 0 ? (
+            <option value="">暂无可用供应商</option>
+          ) : (
+            suppliers.map((supplier) => (
+              <option key={supplier.id} value={supplier.id}>
+                {supplier.name} · {supplier.validation_model}
+              </option>
+            ))
+          )}
+        </select>
+      </label>
+      <label className="auth-field">
+        <span className="type-label">API Key</span>
+        <div className="relative">
+          <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
+          <input
+            id="signup-api-key"
+            name="api-key"
+            type="password"
+            value={apiKey}
+            disabled={verifying || Boolean(verificationToken)}
+            onChange={(event) => onApiKeyChange(event.target.value)}
+            placeholder="sk-..."
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="next"
+            className="auth-control pl-10 pr-3"
+          />
+        </div>
+      </label>
+      <button
+        type="button"
+        onClick={onVerify}
+        disabled={controlsDisabled}
+        aria-busy={verifying}
+        className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)] disabled:opacity-50"
+      >
+        <VerificationButtonContent
+          verifying={verifying}
+          verificationToken={verificationToken}
+          keyHint={keyHint}
+        />
+      </button>
+    </section>
+  );
+}
+
+function SupplierLoadError({
+  visible,
+  fetching,
+  onRetry,
+}: {
+  visible: boolean;
+  fetching: boolean;
+  onRetry: () => void;
+}) {
+  if (!visible) return null;
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
+    >
+      <span>供应商列表加载失败</span>
+      <button
+        type="button"
+        onClick={onRetry}
+        disabled={fetching}
+        className="inline-flex items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
+      >
+        {fetching ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="w-3.5 h-3.5" />
+        )}
+        重试
+      </button>
+    </div>
+  );
+}
+
+function VerificationButtonContent({
+  verifying,
+  verificationToken,
+  keyHint,
+}: {
+  verifying: boolean;
+  verificationToken: string;
+  keyHint: string;
+}) {
+  if (verifying) {
+    return (
+      <>
+        <Loader2 className="w-4 h-4 animate-spin" />
+        验证 Key
+      </>
+    );
+  }
+  if (verificationToken) {
+    return (
+      <>
+        <Check className="w-4 h-4 text-success" />
+        已验证 {keyHint}
+      </>
+    );
+  }
+  return (
+    <>
+      <KeyRound className="w-4 h-4" />
+      验证 Key
+    </>
+  );
+}
+
+function SignupAccountForm({
+  email,
+  password,
+  confirm,
+  showPassword,
+  submitting,
+  verificationToken,
+  error,
+  onSubmit,
+  onEmailChange,
+  onPasswordChange,
+  onConfirmChange,
+  onTogglePassword,
+}: {
+  email: string;
+  password: string;
+  confirm: string;
+  showPassword: boolean;
+  submitting: boolean;
+  verificationToken: string;
+  error: string | null;
+  onSubmit: (event: React.FormEvent) => void;
+  onEmailChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onConfirmChange: (value: string) => void;
+  onTogglePassword: () => void;
+}) {
+  const passwordInputType = showPassword ? "text" : "password";
+
+  return (
+    <form onSubmit={onSubmit} className="page-section auth-form">
+      <div className="type-label flex items-center gap-2">
+        <Mail className="w-3.5 h-3.5" />
+        创建账号
+      </div>
+      <label className="auth-field">
+        <span className="type-label">邮箱</span>
+        <input
+          id="signup-email"
+          name="email"
+          type="email"
+          disabled={submitting}
+          value={email}
+          onChange={(event) => onEmailChange(event.target.value)}
+          placeholder="name@example.com"
+          autoComplete="email"
+          inputMode="email"
+          autoCapitalize="none"
+          autoCorrect="off"
+          enterKeyHint="next"
+          className="auth-control px-3"
+        />
+      </label>
+      <div className="auth-field">
+        <label htmlFor="signup-password" className="type-label">
+          密码
+        </label>
+        <div className="relative">
+          <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
+          <input
+            id="signup-password"
+            name="password"
+            type={passwordInputType}
+            disabled={submitting}
+            value={password}
+            onChange={(event) => onPasswordChange(event.target.value)}
+            placeholder="至少 8 位密码"
+            autoComplete="new-password"
+            enterKeyHint="next"
+            className="auth-control pl-10 pr-12"
+          />
+          <button
+            type="button"
+            onClick={onTogglePassword}
+            disabled={submitting}
+            className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+            aria-label={showPassword ? "隐藏密码" : "显示密码"}
+          >
+            {showPassword ? (
+              <EyeOff className="w-4 h-4" />
+            ) : (
+              <Eye className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+      </div>
+      <label className="auth-field">
+        <span className="type-label">确认密码</span>
+        <input
+          id="signup-confirm-password"
+          name="password-confirmation"
+          type={passwordInputType}
+          disabled={submitting}
+          value={confirm}
+          onChange={(event) => onConfirmChange(event.target.value)}
+          placeholder="再次输入密码"
+          autoComplete="new-password"
+          enterKeyHint="done"
+          className="auth-control px-3"
+        />
+      </label>
+
+      {error ? (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      <button
+        type="submit"
+        disabled={submitting || !verificationToken}
+        aria-busy={submitting}
+        className="type-control inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] disabled:opacity-50"
+      >
+        {submitting ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : (
+          <>
+            创建账号
+            <ArrowRight className="w-4 h-4" />
+          </>
+        )}
+      </button>
+    </form>
   );
 }
 

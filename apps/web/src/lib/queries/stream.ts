@@ -12,7 +12,7 @@ import {
   type InfiniteData,
   useInfiniteQuery,
 } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/apiClient";
+import { apiFetch } from "@/lib/api/http";
 
 // ---------- types ----------
 

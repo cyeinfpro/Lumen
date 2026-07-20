@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -32,14 +31,15 @@ from lumen_core.schemas import (
 
 from ..db import get_db
 from ..deps import AdminUser
-from .providers import _read_providers
+from ..services.admin_model_cache import (
+    get_cached_admin_models,
+    invalidate_admin_models_cache,
+)
+from ..services.provider_config import read_providers as _read_providers
 
 router = APIRouter(prefix="/admin", tags=["admin-models"])
 
 _MODELS_TIMEOUT_S = 5.0
-_CACHE_TTL_S = 60.0
-_CACHE_LOCK = asyncio.Lock()
-_CACHE: tuple[float, AdminModelsOut] | None = None
 
 
 def _models_url(base_url: str) -> str:
@@ -98,14 +98,11 @@ async def _build_models_response(db: AsyncSession) -> AdminModelsOut:
     providers, _proxies, parse_errors = build_effective_provider_config(
         raw_providers=raw,
         legacy_base_url=(
-            os.environ.get("UPSTREAM_BASE_URL")
-            or DEFAULT_LEGACY_PROVIDER_BASE_URL
+            os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
         ),
         legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
     )
-    enabled = [
-        p for p in providers if p.enabled and endpoint_kind_allowed(p, "models")
-    ]
+    enabled = [p for p in providers if p.enabled and endpoint_kind_allowed(p, "models")]
     results = await asyncio.gather(
         *[_fetch_provider_models(provider) for provider in enabled],
         return_exceptions=False,
@@ -113,8 +110,7 @@ async def _build_models_response(db: AsyncSession) -> AdminModelsOut:
 
     providers_by_model: dict[str, set[str]] = {}
     errors: list[AdminModelsErrorOut] = [
-        AdminModelsErrorOut(provider="config", message=err)
-        for err in parse_errors
+        AdminModelsErrorOut(provider="config", message=err) for err in parse_errors
     ]
     for provider_name, model_ids, error in results:
         if error:
@@ -139,24 +135,7 @@ async def list_admin_models(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminModelsOut:
-    global _CACHE
-    now = time.monotonic()
-    cached = _CACHE
-    if cached is not None and cached[0] > now:
-        return cached[1]
-
-    async with _CACHE_LOCK:
-        cached = _CACHE
-        if cached is not None and cached[0] > now:
-            return cached[1]
-        data = await _build_models_response(db)
-        _CACHE = (now + _CACHE_TTL_S, data)
-        return data
-
-
-def invalidate_admin_models_cache() -> None:
-    global _CACHE
-    _CACHE = None
+    return await get_cached_admin_models(db, _build_models_response)
 
 
 __all__ = ["router", "invalidate_admin_models_cache"]

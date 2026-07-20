@@ -999,6 +999,87 @@ function TaskRowActions({
   );
 }
 
+function taskRowVideoItem(
+  item: VideoGenerationOut,
+): VideoGenerationWithVideo | null {
+  return hasVideo(item) ? item : null;
+}
+
+function taskRowCanDownload(
+  item: VideoGenerationOut,
+  videoItem: VideoGenerationWithVideo | null,
+): boolean {
+  if (videoItem) return true;
+  return activeVideoTemporaryDownload(item) != null;
+}
+
+function taskRowContainerClass(active: boolean, selected: boolean): string {
+  return active || selected
+    ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
+    : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60";
+}
+
+function TaskRowProgress({
+  item,
+  active,
+  progressScale,
+}: {
+  item: VideoGenerationOut;
+  active: boolean;
+  progressScale: number;
+}) {
+  const reduceMotion = useReducedMotion();
+  const progressClass = active
+    ? "bg-[var(--accent)]"
+    : item.status === "succeeded"
+      ? "bg-[var(--success)]"
+      : "bg-[var(--fg-3)]";
+  return (
+    <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
+      <motion.div
+        className={cn(
+          "h-full w-full origin-left rounded-full",
+          progressClass,
+        )}
+        initial={false}
+        animate={{ scaleX: progressScale }}
+        transition={{
+          duration: reduceMotion ? 0 : DURATION.normal,
+          ease: EASE.develop,
+        }}
+      />
+    </div>
+  );
+}
+
+function TaskRowPreview({
+  item,
+  selected,
+  showPreview,
+  onPreview,
+}: {
+  item: VideoGenerationWithVideo | null;
+  selected: boolean;
+  showPreview: boolean;
+  onPreview?: () => void;
+}) {
+  if (!showPreview || !item || !onPreview) return null;
+  return (
+    <VideoPosterButton
+      item={item}
+      selected={selected}
+      onPreview={onPreview}
+    />
+  );
+}
+
+function TaskRowError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <TaskErrorDetails raw={message} summary={taskErrorSummary(message)} />
+  );
+}
+
 function TaskRow({
   item,
   onCancel,
@@ -1025,23 +1106,16 @@ function TaskRow({
   const active = isActiveVideo(item);
   const progress = progressForItem(item);
   const progressScale = Math.max(0, Math.min(1, progress / 100));
-  const reduceMotion = useReducedMotion();
   const copy = stageCopy(item);
-  const videoItem = hasVideo(item) ? item : null;
+  const videoItem = taskRowVideoItem(item);
   const retryable = isFailedHistoryVideo(item);
-  const canDownload =
-    videoItem != null || activeVideoTemporaryDownload(item) != null;
+  const canDownload = taskRowCanDownload(item, videoItem);
   const elapsedLabel = taskElapsedLabel(item);
-  const errorSummary = item.error_message
-    ? taskErrorSummary(item.error_message)
-    : null;
   return (
     <article
       className={cn(
         "relative overflow-hidden rounded-[var(--radius-card)] border p-3 transition-colors hover:border-[var(--border)]",
-        active || selected
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60",
+        taskRowContainerClass(active, selected),
       )}
     >
       {(active || selected) && (
@@ -1061,27 +1135,18 @@ function TaskRow({
         </div>
         <StatusPill item={item} />
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
-        <motion.div
-          className={cn(
-            "h-full w-full origin-left rounded-full",
-            active ? "bg-[var(--accent)]" : item.status === "succeeded" ? "bg-[var(--success)]" : "bg-[var(--fg-3)]",
-          )}
-          initial={false}
-          animate={{ scaleX: progressScale }}
-          transition={{ duration: reduceMotion ? 0 : DURATION.normal, ease: EASE.develop }}
-        />
-      </div>
-      {showPreview && videoItem && onPreview && (
-        <VideoPosterButton
-          item={videoItem}
-          selected={selected}
-          onPreview={onPreview}
-        />
-      )}
-      {item.error_message && errorSummary && (
-        <TaskErrorDetails raw={item.error_message} summary={errorSummary} />
-      )}
+      <TaskRowProgress
+        item={item}
+        active={active}
+        progressScale={progressScale}
+      />
+      <TaskRowPreview
+        item={videoItem}
+        selected={selected}
+        showPreview={showPreview}
+        onPreview={onPreview}
+      />
+      <TaskRowError message={item.error_message ?? null} />
       <TaskRowActions
         item={item}
         active={active}

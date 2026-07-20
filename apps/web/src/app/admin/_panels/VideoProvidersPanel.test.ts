@@ -17,10 +17,13 @@ const rulesSource = readFileSync(
   "utf8",
 );
 const source = `${panelSource}\n${domainSource}\n${rulesSource}`;
-const queriesSource = readFileSync(
-  new URL("../../../lib/queries.ts", import.meta.url),
-  "utf8",
-);
+const queriesSource = [
+  readFileSync(new URL("../../../lib/queries.ts", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../../../lib/queries/admin.ts", import.meta.url),
+    "utf8",
+  ),
+].join("\n");
 const rulesUrl = new URL("./videoProviderAssetRules.ts", import.meta.url);
 const { evaluateVolcanoAssetCredentials } = (await import(
   rulesUrl.href

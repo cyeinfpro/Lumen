@@ -1,12 +1,14 @@
 import type {
   ApparelModelLibraryJobsOpts,
-  ListConversationsOpts,
   ModelLibraryAgeSegment,
   ModelLibraryAppearance,
   ModelLibrarySource,
+} from "../api/workflows";
+import type { ListConversationsOpts } from "../api/conversations";
+import type {
   PosterStyleJobsOpts,
   PosterStyleListOpts,
-} from "../apiClient";
+} from "../api/posterStyles";
 
 const UNKNOWN_USER_QUERY_SCOPE = "__identity_unknown__";
 

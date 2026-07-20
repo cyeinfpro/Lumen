@@ -5,6 +5,7 @@ import binascii
 import io
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -297,6 +298,65 @@ async def cleanup_storage_on_error(
         raise
 
 
+@dataclass(slots=True)
+class BonusGenerationContext:
+    redis: Any
+    user_id: str
+    channel: str
+    parent_task_id: str
+    parent_idempotency_key: str
+    parent_upstream_request: dict[str, Any] | None
+    message_id: str
+    action: str
+    model: str
+    prompt: str
+    size_requested: str
+    aspect_ratio: str
+    input_image_ids: list[str]
+    primary_input_image_id: str | None
+    references: list[tuple[str, bytes]]
+    image_request_options: dict[str, Any]
+    b64_result: str
+    revised_prompt: str | None
+    upstream_provider: str | None
+    upstream_actual_route: str | None
+    upstream_actual_source: str | None
+    upstream_actual_endpoint: str | None
+    billing_meta: dict[str, Any] | None
+    idempotency_suffix: str
+    extra_upstream_fields: dict[str, Any] | None
+    record_model_library_candidate: bool
+    settle_billing: bool
+    log_label: str
+
+
+@dataclass(slots=True)
+class BonusImageArtifact:
+    bonus_generation_id: str
+    image_id: str
+    raw_image: bytes
+    sha256: str
+    orig_mime: str
+    width: int
+    height: int
+    blurhash: str | None
+    display_bytes: bytes
+    display_size: tuple[int, int]
+    preview_bytes: bytes
+    preview_size: tuple[int, int]
+    thumb_bytes: bytes
+    thumb_size: tuple[int, int]
+    transparent_alpha_recovered: bool
+    transparent_qc_payload: dict[str, Any] | None
+    transparent_provider: str | None
+    image_metadata: dict[str, Any]
+    billing_meta: dict[str, Any]
+    key_orig: str
+    key_display: str
+    key_preview: str
+    key_thumb: str
+
+
 async def handle_dual_race_bonus_image(
     *,
     redis: Any,
@@ -329,79 +389,135 @@ async def handle_dual_race_bonus_image(
     log_label: str = "dual_race bonus",
 ) -> bool:
     """Persist and publish a separately billed bonus generation."""
-    if not b64_result:
+    context = BonusGenerationContext(
+        redis=redis,
+        user_id=user_id,
+        channel=channel,
+        parent_task_id=parent_task_id,
+        parent_idempotency_key=parent_idempotency_key,
+        parent_upstream_request=parent_upstream_request,
+        message_id=message_id,
+        action=action,
+        model=model,
+        prompt=prompt,
+        size_requested=size_requested,
+        aspect_ratio=aspect_ratio,
+        input_image_ids=input_image_ids,
+        primary_input_image_id=primary_input_image_id,
+        references=references,
+        image_request_options=image_request_options,
+        b64_result=b64_result,
+        revised_prompt=revised_prompt,
+        upstream_provider=upstream_provider,
+        upstream_actual_route=upstream_actual_route,
+        upstream_actual_source=upstream_actual_source,
+        upstream_actual_endpoint=upstream_actual_endpoint,
+        billing_meta=billing_meta,
+        idempotency_suffix=idempotency_suffix,
+        extra_upstream_fields=extra_upstream_fields,
+        record_model_library_candidate=record_model_library_candidate,
+        settle_billing=settle_billing,
+        log_label=log_label,
+    )
+    artifact = await _prepare_bonus_artifact(context)
+    if artifact is None:
         return False
+    created_keys = await _write_bonus_files(context, artifact)
+    if created_keys is None:
+        return False
+    deliveries = await _persist_bonus_generation(
+        context,
+        artifact,
+        created_keys,
+    )
+    if deliveries is None:
+        return False
+    await _g._deliver_generation_events(redis, deliveries)
+    _g.logger.info(
+        "%s image done: parent=%s bonus=%s",
+        log_label,
+        parent_task_id,
+        artifact.bonus_generation_id,
+    )
+    return True
 
+
+async def _prepare_bonus_artifact(
+    context: BonusGenerationContext,
+) -> BonusImageArtifact | None:
+    if not context.b64_result:
+        return None
+    raw_image = _decode_bonus_image(context)
+    if raw_image is None or _bonus_sha_echoed(context, raw_image):
+        return None
+    processed = await _postprocess_bonus_image(context, raw_image)
+    if processed is None:
+        return None
+    billing_meta = _bonus_billing_meta(context)
+    if billing_meta is None:
+        return None
+    return _build_bonus_artifact(context, processed, billing_meta)
+
+
+def _decode_bonus_image(
+    context: BonusGenerationContext,
+) -> bytes | None:
     try:
-        raw_image = _g._decode_upstream_image_b64(b64_result)
+        return _g._decode_upstream_image_b64(context.b64_result)
     except binascii.Error:
         _g.logger.warning(
             "%s base64 decode failed parent=%s",
-            log_label,
-            parent_task_id,
+            context.log_label,
+            context.parent_task_id,
         )
+        return None
+
+
+def _bonus_sha_echoed(
+    context: BonusGenerationContext,
+    raw_image: bytes,
+) -> bool:
+    if context.action != _g.GenerationAction.EDIT.value:
         return False
     sha = _g._sha256(raw_image)
+    echoed = any(sha == reference_sha for reference_sha, _raw in context.references)
+    if echoed:
+        _g.logger.info(
+            "%s sha echoed reference parent=%s; skip",
+            context.log_label,
+            context.parent_task_id,
+        )
+    return echoed
 
-    if action == _g.GenerationAction.EDIT.value:
-        if any(sha == ref_sha for ref_sha, _raw in references):
-            _g.logger.info(
-                "%s sha echoed reference parent=%s; skip",
-                log_label,
-                parent_task_id,
-            )
-            return False
 
-    transparent_requested = image_request_options.get("background") == "transparent"
+async def _postprocess_bonus_image(
+    context: BonusGenerationContext,
+    raw_image: bytes,
+) -> Any | None:
     try:
-        processed_image = await _g._postprocess_raw_generated_image(
+        return await _g._postprocess_raw_generated_image(
             raw_image,
-            prompt=prompt,
-            transparent_requested=transparent_requested,
+            prompt=context.prompt,
+            transparent_requested=(
+                context.image_request_options.get("background") == "transparent"
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         _g.logger.warning(
             "%s pillow decode failed parent=%s err=%r",
-            log_label,
-            parent_task_id,
+            context.log_label,
+            context.parent_task_id,
             exc,
         )
-        return False
-    raw_image = processed_image.raw_image
-    sha = processed_image.sha256
-    orig_format = processed_image.orig_format
-    width = processed_image.width
-    height = processed_image.height
-    blurhash_str = processed_image.blurhash
-    display_bytes = processed_image.display.bytes
-    display_size = processed_image.display.size
-    preview_bytes = processed_image.preview.bytes
-    preview_size = processed_image.preview.size
-    thumb_bytes = processed_image.thumb.bytes
-    thumb_size = processed_image.thumb.size
-    transparent_alpha_recovered = processed_image.transparent_alpha_recovered
-    transparent_qc_payload = processed_image.transparent_qc_payload
-    transparent_provider = processed_image.transparent_provider
+        return None
 
-    bonus_generation_id = _g.new_uuid7()
-    image_id = _g.new_uuid7()
-    orig_ext_by_format = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}
-    orig_mime_by_format = {
-        "PNG": "image/png",
-        "WEBP": "image/webp",
-        "JPEG": "image/jpeg",
-    }
-    orig_extension = orig_ext_by_format[orig_format]
-    orig_mime = orig_mime_by_format[orig_format]
-    model_metadata = _g._model_image_metadata_from_request(
-        image_id=image_id,
-        mime=orig_mime,
-        request=parent_upstream_request,
-        prompt=prompt,
-    )
-    result_billing_meta: dict[str, Any] = (
-        dict(billing_meta)
-        if billing_meta is not None
+
+def _bonus_billing_meta(
+    context: BonusGenerationContext,
+) -> dict[str, Any] | None:
+    result = (
+        dict(context.billing_meta)
+        if context.billing_meta is not None
         else {
             "is_dual_race_bonus": True,
             "billing_free": False,
@@ -409,294 +525,417 @@ async def handle_dual_race_bonus_image(
             "billing_policy": "dual_race_loser_settled_separately",
         }
     )
-    if result_billing_meta.get("billing_free") is not True and not settle_billing:
+    if result.get("billing_free") is not True and not context.settle_billing:
         _g.logger.warning(
             "%s missing settle_billing for billable image parent=%s",
-            log_label,
-            parent_task_id,
+            context.log_label,
+            context.parent_task_id,
         )
-        return False
-    image_metadata: dict[str, Any] = {
-        **model_metadata,
-        **result_billing_meta,
-    }
-    if model_metadata:
-        try:
-            with PILImage.open(io.BytesIO(raw_image)) as image:
-                image.load()
-                raw_image = _g._maybe_embed_model_image_metadata_bytes(
-                    image=image,
-                    fmt=orig_format,
-                    raw_image=raw_image,
-                    metadata=model_metadata,
-                )
-            sha = _g._sha256(raw_image)
-        except Exception as exc:  # noqa: BLE001
-            _g.logger.info(
-                "%s model metadata embed skipped parent=%s err=%s",
-                log_label,
-                parent_task_id,
-                exc,
-            )
-    key_orig = f"u/{user_id}/g/{bonus_generation_id}/orig.{orig_extension}"
-    key_display = f"u/{user_id}/g/{bonus_generation_id}/display2048.webp"
-    key_preview = f"u/{user_id}/g/{bonus_generation_id}/preview1024.webp"
-    key_thumb = f"u/{user_id}/g/{bonus_generation_id}/thumb256.jpg"
+        return None
+    return result
 
+
+def _build_bonus_artifact(
+    context: BonusGenerationContext,
+    processed: Any,
+    billing_meta: dict[str, Any],
+) -> BonusImageArtifact:
+    bonus_generation_id = _g.new_uuid7()
+    image_id = _g.new_uuid7()
+    extension, mime = _bonus_format(processed.orig_format)
+    model_metadata = _g._model_image_metadata_from_request(
+        image_id=image_id,
+        mime=mime,
+        request=context.parent_upstream_request,
+        prompt=context.prompt,
+    )
+    raw_image, sha = _embed_bonus_metadata(
+        context,
+        processed.raw_image,
+        processed.sha256,
+        processed.orig_format,
+        model_metadata,
+    )
+    return BonusImageArtifact(
+        bonus_generation_id=bonus_generation_id,
+        image_id=image_id,
+        raw_image=raw_image,
+        sha256=sha,
+        orig_mime=mime,
+        width=processed.width,
+        height=processed.height,
+        blurhash=processed.blurhash,
+        display_bytes=processed.display.bytes,
+        display_size=processed.display.size,
+        preview_bytes=processed.preview.bytes,
+        preview_size=processed.preview.size,
+        thumb_bytes=processed.thumb.bytes,
+        thumb_size=processed.thumb.size,
+        transparent_alpha_recovered=processed.transparent_alpha_recovered,
+        transparent_qc_payload=processed.transparent_qc_payload,
+        transparent_provider=processed.transparent_provider,
+        image_metadata={**model_metadata, **billing_meta},
+        billing_meta=billing_meta,
+        key_orig=(f"u/{context.user_id}/g/{bonus_generation_id}/orig.{extension}"),
+        key_display=(f"u/{context.user_id}/g/{bonus_generation_id}/display2048.webp"),
+        key_preview=(f"u/{context.user_id}/g/{bonus_generation_id}/preview1024.webp"),
+        key_thumb=(f"u/{context.user_id}/g/{bonus_generation_id}/thumb256.jpg"),
+    )
+
+
+def _bonus_format(orig_format: str) -> tuple[str, str]:
+    return (
+        {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}[orig_format],
+        {
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+            "JPEG": "image/jpeg",
+        }[orig_format],
+    )
+
+
+def _embed_bonus_metadata(
+    context: BonusGenerationContext,
+    raw_image: bytes,
+    sha: str,
+    orig_format: str,
+    model_metadata: dict[str, Any],
+) -> tuple[bytes, str]:
+    if not model_metadata:
+        return raw_image, sha
     try:
-        created_storage_keys = await _g._write_generation_files(
+        with PILImage.open(io.BytesIO(raw_image)) as image:
+            image.load()
+            raw_image = _g._maybe_embed_model_image_metadata_bytes(
+                image=image,
+                fmt=orig_format,
+                raw_image=raw_image,
+                metadata=model_metadata,
+            )
+        return raw_image, _g._sha256(raw_image)
+    except Exception as exc:  # noqa: BLE001
+        _g.logger.info(
+            "%s model metadata embed skipped parent=%s err=%s",
+            context.log_label,
+            context.parent_task_id,
+            exc,
+        )
+        return raw_image, sha
+
+
+async def _write_bonus_files(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> list[str] | None:
+    try:
+        return await _g._write_generation_files(
             [
-                (key_orig, raw_image),
-                (key_display, display_bytes),
-                (key_preview, preview_bytes),
-                (key_thumb, thumb_bytes),
+                (artifact.key_orig, artifact.raw_image),
+                (artifact.key_display, artifact.display_bytes),
+                (artifact.key_preview, artifact.preview_bytes),
+                (artifact.key_thumb, artifact.thumb_bytes),
             ]
         )
     except Exception as exc:  # noqa: BLE001
         _g.logger.warning(
             "%s storage write failed parent=%s err=%r",
-            log_label,
-            parent_task_id,
+            context.log_label,
+            context.parent_task_id,
             exc,
         )
-        return False
+        return None
 
+
+async def _persist_bonus_generation(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+    created_storage_keys: list[str],
+) -> list[Any] | None:
     try:
         async with _g._cleanup_storage_on_error(created_storage_keys):
             async with _g.SessionLocal() as session:
-                suffix = idempotency_suffix or ":b"
-                bonus_idempotency_key = (
-                    f"{parent_idempotency_key[: max(1, 64 - len(suffix))]}{suffix}"
+                upstream_request = _bonus_upstream_request(context, artifact)
+                bonus_row = _add_bonus_rows(
+                    session,
+                    context,
+                    artifact,
+                    upstream_request,
                 )
-                bonus_upstream_request: dict[str, Any] = dict(
-                    parent_upstream_request or {}
+                await _attach_bonus_image_to_message(
+                    session,
+                    context,
+                    artifact,
                 )
-                bonus_upstream_request.update(image_request_options)
-                bonus_upstream_request["size_actual"] = f"{width}x{height}"
-                bonus_upstream_request["mime"] = orig_mime
-                bonus_upstream_request.update(result_billing_meta)
-                bonus_upstream_request["parent_generation_id"] = parent_task_id
-                if extra_upstream_fields:
-                    bonus_upstream_request.update(extra_upstream_fields)
-                if upstream_provider:
-                    bonus_upstream_request["provider"] = upstream_provider
-                    bonus_upstream_request["actual_provider"] = upstream_provider
-                    bonus_upstream_request["request_event_provider"] = upstream_provider
-                else:
-                    bonus_upstream_request.pop("provider", None)
-                    bonus_upstream_request.pop("actual_provider", None)
-                    bonus_upstream_request.pop("request_event_provider", None)
-                if upstream_actual_route:
-                    bonus_upstream_request["actual_route"] = upstream_actual_route
-                if upstream_actual_source:
-                    bonus_upstream_request["actual_source"] = upstream_actual_source
-                if upstream_actual_endpoint:
-                    bonus_upstream_request["actual_endpoint"] = upstream_actual_endpoint
-                if transparent_alpha_recovered:
-                    bonus_upstream_request["transparent_alpha_recovered"] = True
-                if transparent_qc_payload is not None:
-                    bonus_upstream_request["transparent_qc"] = transparent_qc_payload
-                if transparent_provider is not None:
-                    bonus_upstream_request["transparent_pipeline_provider"] = (
-                        transparent_provider
-                    )
-                if revised_prompt:
-                    bonus_upstream_request["revised_prompt"] = revised_prompt
-
-                now = datetime.now(timezone.utc)
-                bonus_row = _g.Generation(
-                    id=bonus_generation_id,
-                    message_id=message_id,
-                    user_id=user_id,
-                    action=action,
-                    model=model,
-                    prompt=prompt,
-                    size_requested=size_requested,
-                    aspect_ratio=aspect_ratio,
-                    input_image_ids=list(input_image_ids),
-                    primary_input_image_id=primary_input_image_id,
-                    upstream_request=bonus_upstream_request,
-                    status=_g.GenerationStatus.SUCCEEDED.value,
-                    progress_stage=_g.GenerationStage.FINALIZING.value,
-                    attempt=0,
-                    idempotency_key=bonus_idempotency_key,
-                    started_at=now,
-                    finished_at=now,
-                    upstream_pixels=width * height,
+                await _record_bonus_model_candidate(
+                    session,
+                    context,
+                    artifact.image_id,
                 )
-                session.add(bonus_row)
-
-                image_row = _g.Image(
-                    id=image_id,
-                    user_id=user_id,
-                    owner_generation_id=bonus_generation_id,
-                    source=_g.ImageSource.GENERATED.value,
-                    parent_image_id=(
-                        primary_input_image_id
-                        if action == _g.GenerationAction.EDIT.value
-                        else None
-                    ),
-                    storage_key=key_orig,
-                    mime=orig_mime,
-                    width=width,
-                    height=height,
-                    size_bytes=len(raw_image),
-                    sha256=sha,
-                    blurhash=blurhash_str,
-                    visibility="private",
-                    metadata_jsonb=image_metadata,
-                )
-                session.add(image_row)
-                session.add(
-                    _g.ImageVariant(
-                        image_id=image_id,
-                        kind="display2048",
-                        storage_key=key_display,
-                        width=display_size[0],
-                        height=display_size[1],
-                    )
-                )
-                session.add(
-                    _g.ImageVariant(
-                        image_id=image_id,
-                        kind="preview1024",
-                        storage_key=key_preview,
-                        width=preview_size[0],
-                        height=preview_size[1],
-                    )
-                )
-                session.add(
-                    _g.ImageVariant(
-                        image_id=image_id,
-                        kind="thumb256",
-                        storage_key=key_thumb,
-                        width=thumb_size[0],
-                        height=thumb_size[1],
-                    )
-                )
-
-                message = await session.get(_g.Message, message_id)
-                if message is not None:
-                    content = dict(message.content or {})
-                    images_list = list(content.get("images") or [])
-                    images_list.append(
-                        {
-                            "image_id": image_id,
-                            "from_generation_id": bonus_generation_id,
-                            "width": width,
-                            "height": height,
-                            "mime": orig_mime,
-                            "url": _g.storage.public_url(key_orig),
-                            "display_url": (
-                                f"/api/images/{image_id}/variants/display2048"
-                            ),
-                            "preview_url": (
-                                f"/api/images/{image_id}/variants/preview1024"
-                            ),
-                            "thumb_url": (f"/api/images/{image_id}/variants/thumb256"),
-                            "filename": image_metadata.get("suggested_filename"),
-                            **result_billing_meta,
-                        }
-                    )
-                    content["images"] = images_list
-                    message.content = content
-
-                if record_model_library_candidate:
-                    try:
-                        await _g._maybe_record_model_library_candidate_image(
-                            session=session,
-                            user_id=user_id,
-                            parent_upstream_request=(parent_upstream_request or {}),
-                            bonus_image_id=image_id,
-                        )
-                    except (TimeoutError, asyncio.CancelledError):
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        _g.logger.warning(
-                            "model_library candidate hook failed parent=%s err=%s",
-                            parent_task_id,
-                            exc,
-                        )
-
-                if settle_billing:
+                if context.settle_billing:
                     await _g.worker_billing.settle_generation(
                         session,
                         bonus_row,
-                        width=width,
-                        height=height,
+                        width=artifact.width,
+                        height=artifact.height,
                         image_count=1,
                     )
-                attached_delivery = _g._stage_generation_event(
+                deliveries = _stage_bonus_events(
                     session,
-                    user_id,
-                    channel,
-                    _g.EV_GEN_ATTACHED,
-                    {
-                        "message_id": message_id,
-                        "generation_id": bonus_generation_id,
-                        "parent_generation_id": parent_task_id,
-                        "action": action,
-                        "prompt": prompt,
-                        "size_requested": size_requested,
-                        "aspect_ratio": aspect_ratio,
-                        "input_image_ids": list(input_image_ids),
-                        "primary_input_image_id": primary_input_image_id,
-                        **result_billing_meta,
-                    },
-                )
-                success_delivery = _g._stage_generation_event(
-                    session,
-                    user_id,
-                    channel,
-                    _g.EV_GEN_SUCCEEDED,
-                    {
-                        "generation_id": bonus_generation_id,
-                        "message_id": message_id,
-                        "images": [
-                            {
-                                "image_id": image_id,
-                                "from_generation_id": bonus_generation_id,
-                                "actual_size": f"{width}x{height}",
-                                "mime": orig_mime,
-                                "url": _g.storage.public_url(key_orig),
-                                "display_url": (
-                                    f"/api/images/{image_id}/variants/display2048"
-                                ),
-                                "preview_url": (
-                                    f"/api/images/{image_id}/variants/preview1024"
-                                ),
-                                "thumb_url": (
-                                    f"/api/images/{image_id}/variants/thumb256"
-                                ),
-                                "filename": image_metadata.get("suggested_filename"),
-                                **result_billing_meta,
-                            }
-                        ],
-                        "final_size": f"{width}x{height}",
-                        **result_billing_meta,
-                    },
+                    context,
+                    artifact,
                 )
                 await session.commit()
-                if settle_billing:
+                if context.settle_billing:
                     await _g.worker_billing.flush_balance_cache_refreshes(session)
+        return deliveries
     except Exception as exc:  # noqa: BLE001
         _g.logger.warning(
             "%s DB write failed parent=%s err=%r",
-            log_label,
-            parent_task_id,
+            context.log_label,
+            context.parent_task_id,
             exc,
         )
-        return False
+        return None
 
-    await _g._deliver_generation_events(
-        redis,
-        [attached_delivery, success_delivery],
-    )
 
-    _g.logger.info(
-        "%s image done: parent=%s bonus=%s",
-        log_label,
-        parent_task_id,
-        bonus_generation_id,
+def _bonus_upstream_request(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> dict[str, Any]:
+    request = dict(context.parent_upstream_request or {})
+    request.update(context.image_request_options)
+    request.update(
+        {
+            "size_actual": f"{artifact.width}x{artifact.height}",
+            "mime": artifact.orig_mime,
+            **artifact.billing_meta,
+            "parent_generation_id": context.parent_task_id,
+        }
     )
-    return True
+    if context.extra_upstream_fields:
+        request.update(context.extra_upstream_fields)
+    _apply_bonus_provider_fields(request, context)
+    _apply_bonus_optional_fields(request, context, artifact)
+    return request
+
+
+def _apply_bonus_provider_fields(
+    request: dict[str, Any],
+    context: BonusGenerationContext,
+) -> None:
+    if context.upstream_provider:
+        request["provider"] = context.upstream_provider
+        request["actual_provider"] = context.upstream_provider
+        request["request_event_provider"] = context.upstream_provider
+        return
+    request.pop("provider", None)
+    request.pop("actual_provider", None)
+    request.pop("request_event_provider", None)
+
+
+def _apply_bonus_optional_fields(
+    request: dict[str, Any],
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> None:
+    optional = {
+        "actual_route": context.upstream_actual_route,
+        "actual_source": context.upstream_actual_source,
+        "actual_endpoint": context.upstream_actual_endpoint,
+        "transparent_qc": artifact.transparent_qc_payload,
+        "transparent_pipeline_provider": artifact.transparent_provider,
+        "revised_prompt": context.revised_prompt,
+    }
+    for key, value in optional.items():
+        if value is not None:
+            request[key] = value
+    if artifact.transparent_alpha_recovered:
+        request["transparent_alpha_recovered"] = True
+
+
+def _add_bonus_rows(
+    session: Any,
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+    upstream_request: dict[str, Any],
+) -> Any:
+    now = datetime.now(timezone.utc)
+    bonus_row = _g.Generation(
+        id=artifact.bonus_generation_id,
+        message_id=context.message_id,
+        user_id=context.user_id,
+        action=context.action,
+        model=context.model,
+        prompt=context.prompt,
+        size_requested=context.size_requested,
+        aspect_ratio=context.aspect_ratio,
+        input_image_ids=list(context.input_image_ids),
+        primary_input_image_id=context.primary_input_image_id,
+        upstream_request=upstream_request,
+        status=_g.GenerationStatus.SUCCEEDED.value,
+        progress_stage=_g.GenerationStage.FINALIZING.value,
+        attempt=0,
+        idempotency_key=_bonus_idempotency_key(context),
+        started_at=now,
+        finished_at=now,
+        upstream_pixels=artifact.width * artifact.height,
+    )
+    session.add(bonus_row)
+    session.add(
+        _g.Image(
+            id=artifact.image_id,
+            user_id=context.user_id,
+            owner_generation_id=artifact.bonus_generation_id,
+            source=_g.ImageSource.GENERATED.value,
+            parent_image_id=(
+                context.primary_input_image_id
+                if context.action == _g.GenerationAction.EDIT.value
+                else None
+            ),
+            storage_key=artifact.key_orig,
+            mime=artifact.orig_mime,
+            width=artifact.width,
+            height=artifact.height,
+            size_bytes=len(artifact.raw_image),
+            sha256=artifact.sha256,
+            blurhash=artifact.blurhash,
+            visibility="private",
+            metadata_jsonb=artifact.image_metadata,
+        )
+    )
+    _add_bonus_variants(session, artifact)
+    return bonus_row
+
+
+def _bonus_idempotency_key(context: BonusGenerationContext) -> str:
+    suffix = context.idempotency_suffix or ":b"
+    prefix_limit = max(1, 64 - len(suffix))
+    return f"{context.parent_idempotency_key[:prefix_limit]}{suffix}"
+
+
+def _add_bonus_variants(
+    session: Any,
+    artifact: BonusImageArtifact,
+) -> None:
+    for kind, storage_key, size in (
+        ("display2048", artifact.key_display, artifact.display_size),
+        ("preview1024", artifact.key_preview, artifact.preview_size),
+        ("thumb256", artifact.key_thumb, artifact.thumb_size),
+    ):
+        session.add(
+            _g.ImageVariant(
+                image_id=artifact.image_id,
+                kind=kind,
+                storage_key=storage_key,
+                width=size[0],
+                height=size[1],
+            )
+        )
+
+
+async def _attach_bonus_image_to_message(
+    session: Any,
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> None:
+    message = await session.get(_g.Message, context.message_id)
+    if message is None:
+        return
+    content = dict(message.content or {})
+    images = list(content.get("images") or [])
+    images.append(_bonus_image_payload(context, artifact))
+    content["images"] = images
+    message.content = content
+
+
+def _bonus_image_payload(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> dict[str, Any]:
+    return {
+        "image_id": artifact.image_id,
+        "from_generation_id": artifact.bonus_generation_id,
+        "width": artifact.width,
+        "height": artifact.height,
+        "mime": artifact.orig_mime,
+        "url": _g.storage.public_url(artifact.key_orig),
+        "display_url": (f"/api/images/{artifact.image_id}/variants/display2048"),
+        "preview_url": (f"/api/images/{artifact.image_id}/variants/preview1024"),
+        "thumb_url": f"/api/images/{artifact.image_id}/variants/thumb256",
+        "filename": artifact.image_metadata.get("suggested_filename"),
+        **artifact.billing_meta,
+    }
+
+
+async def _record_bonus_model_candidate(
+    session: Any,
+    context: BonusGenerationContext,
+    image_id: str,
+) -> None:
+    if not context.record_model_library_candidate:
+        return
+    try:
+        await _g._maybe_record_model_library_candidate_image(
+            session=session,
+            user_id=context.user_id,
+            parent_upstream_request=(context.parent_upstream_request or {}),
+            bonus_image_id=image_id,
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _g.logger.warning(
+            "model_library candidate hook failed parent=%s err=%s",
+            context.parent_task_id,
+            exc,
+        )
+
+
+def _stage_bonus_events(
+    session: Any,
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> list[Any]:
+    attached = _g._stage_generation_event(
+        session,
+        context.user_id,
+        context.channel,
+        _g.EV_GEN_ATTACHED,
+        {
+            "message_id": context.message_id,
+            "generation_id": artifact.bonus_generation_id,
+            "parent_generation_id": context.parent_task_id,
+            "action": context.action,
+            "prompt": context.prompt,
+            "size_requested": context.size_requested,
+            "aspect_ratio": context.aspect_ratio,
+            "input_image_ids": list(context.input_image_ids),
+            "primary_input_image_id": context.primary_input_image_id,
+            **artifact.billing_meta,
+        },
+    )
+    succeeded = _g._stage_generation_event(
+        session,
+        context.user_id,
+        context.channel,
+        _g.EV_GEN_SUCCEEDED,
+        {
+            "generation_id": artifact.bonus_generation_id,
+            "message_id": context.message_id,
+            "images": [_bonus_success_image_payload(context, artifact)],
+            "final_size": f"{artifact.width}x{artifact.height}",
+            **artifact.billing_meta,
+        },
+    )
+    return [attached, succeeded]
+
+
+def _bonus_success_image_payload(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> dict[str, Any]:
+    payload = _bonus_image_payload(context, artifact)
+    payload.pop("width")
+    payload.pop("height")
+    payload["actual_size"] = f"{artifact.width}x{artifact.height}"
+    return payload

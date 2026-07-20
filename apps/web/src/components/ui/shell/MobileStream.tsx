@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { useReducedMotion } from "framer-motion";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -74,6 +75,60 @@ function reportShareResult(
 
 function hasActiveSelection(selectionMode: boolean, selectedCount: number): boolean {
   return selectionMode || selectedCount > 0;
+}
+
+function shouldShowOverview(
+  isLoading: boolean,
+  hasError: boolean,
+  itemCount: number,
+  hasFilters: boolean,
+  query: string,
+): boolean {
+  return !isLoading && !hasError && (itemCount > 0 || hasFilters || Boolean(query.trim()));
+}
+
+function MobileStreamFeedState({
+  hasError,
+  errorMessage,
+  onRetry,
+  isLoading,
+  isEmptyAll,
+  hasFilters,
+  isEmptyFiltered,
+  searchValue,
+  onClear,
+  children,
+}: {
+  hasError: boolean;
+  errorMessage?: string;
+  onRetry: () => void;
+  isLoading: boolean;
+  isEmptyAll: boolean;
+  hasFilters: boolean;
+  isEmptyFiltered: boolean;
+  searchValue: string;
+  onClear: () => void;
+  children: ReactNode;
+}) {
+  if (hasError) {
+    return (
+      <div role="alert" aria-live="assertive">
+        <StreamErrorState message={errorMessage} onRetry={onRetry} />
+      </div>
+    );
+  }
+  if (isLoading) return <StreamLoadingState />;
+  if (isEmptyAll) {
+    return hasFilters ? (
+      <StreamNoResultsState onClear={onClear} />
+    ) : (
+      <StreamNeverState />
+    );
+  }
+  if (isEmptyFiltered) {
+    return <StreamNoResultsState searchValue={searchValue} onClear={onClear} />;
+  }
+  return children;
 }
 
 export function MobileStream() {
@@ -248,6 +303,14 @@ export function MobileStream() {
   const isEmptyAll = !isLoading && items.length === 0;
   const isEmptyFiltered =
     !isLoading && items.length > 0 && filteredItems.length === 0;
+  const hasFilters = hasAnyFilter(filters);
+  const showOverview = shouldShowOverview(
+    isLoading,
+    query.isError,
+    items.length,
+    hasFilters,
+    q,
+  );
 
   const onToggleSearch = useCallback(() => {
     setSearchOpen((v) => {
@@ -291,7 +354,7 @@ export function MobileStream() {
         total={total}
         promptCount={promptCount}
         searchActive={searchOpen}
-        filterActive={filterOpen || hasAnyFilter(filters)}
+        filterActive={filterOpen || hasFilters}
         onToggleSearch={onToggleSearch}
         onToggleFilter={onToggleFilter}
       />
@@ -322,13 +385,13 @@ export function MobileStream() {
               }}
             />
             <FilterBar
-              open={filterOpen || hasAnyFilter(filters)}
+              open={filterOpen || hasFilters}
               filters={filters}
               onChange={(next) => applyFilters(next)}
               onClear={clearFilters}
             />
 
-            {!isLoading && !query.isError && (items.length > 0 || hasAnyFilter(filters) || q.trim()) && (
+            {showOverview && (
               <StreamOverview
                 total={total}
                 loaded={items.length}
@@ -352,26 +415,19 @@ export function MobileStream() {
               />
             )}
 
-            {query.isError ? (
-              <div role="alert" aria-live="assertive">
-                <StreamErrorState
-                  message={query.error?.message}
-                  onRetry={() => {
-                    void query.refetch();
-                  }}
-                />
-              </div>
-            ) : isLoading ? (
-              <StreamLoadingState />
-            ) : isEmptyAll ? (
-              hasAnyFilter(filters) ? (
-                <StreamNoResultsState onClear={clearAllControls} />
-              ) : (
-                <StreamNeverState />
-              )
-            ) : isEmptyFiltered ? (
-              <StreamNoResultsState searchValue={q} onClear={clearAllControls} />
-            ) : (
+            <MobileStreamFeedState
+              hasError={query.isError}
+              errorMessage={query.error?.message}
+              onRetry={() => {
+                void query.refetch();
+              }}
+              isLoading={isLoading}
+              isEmptyAll={isEmptyAll}
+              hasFilters={hasFilters}
+              isEmptyFiltered={isEmptyFiltered}
+              searchValue={q}
+              onClear={clearAllControls}
+            >
               <GenerationMasonry
                 items={filteredItems}
                 feed={filteredItems}
@@ -380,7 +436,7 @@ export function MobileStream() {
                 onToggleSelect={toggleSelectedImage}
                 highlightId={highlightId}
               />
-            )}
+            </MobileStreamFeedState>
 
             <div ref={sentinelRef} aria-hidden className="h-8" />
             {isFetchingNextPage && (

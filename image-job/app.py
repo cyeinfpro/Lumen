@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import hashlib
 import hmac
@@ -18,8 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Iterable
-from urllib.parse import urljoin
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -57,8 +55,12 @@ _request_bodies_module = _load_local_module("request_bodies")
 _image_url_security_module = _load_local_module("image_url_security")
 _job_persistence_module = _load_local_module("job_persistence")
 _image_artifacts_module = _load_local_module("image_artifacts")
+_image_candidates_module = _load_local_module("image_candidates")
+_upstream_runtime_module = _load_local_module("upstream_runtime")
 
 ImageArtifactFacade = _image_artifacts_module.ImageArtifactFacade
+ImageCandidate = _image_candidates_module.ImageCandidate
+ImageCandidateFacade = _image_candidates_module.ImageCandidateFacade
 PublicImageDownloadTarget = _image_url_security_module.PublicImageDownloadTarget
 ImageDownloadResolutionError = _image_url_security_module.ImageDownloadResolutionError
 pinned_async_http_transport = _image_url_security_module.pinned_async_http_transport
@@ -87,6 +89,7 @@ _read_download_body_bounded = _request_bodies_module.read_download_body_bounded
 _read_response_body_bounded = _request_bodies_module.read_response_body_bounded
 _SseLineDecoder = _request_bodies_module.SseLineDecoder
 _validate_json_shape = _request_bodies_module.validate_json_shape
+UpstreamFacade = _upstream_runtime_module.UpstreamFacade
 
 
 ALLOWED_FIXED_ENDPOINTS = _runtime_config.ALLOWED_FIXED_ENDPOINTS
@@ -162,15 +165,6 @@ ERROR_CLASS_NO_IMAGE = "no_image"  # 200 but no image extractable — switch end
 ERROR_CLASS_IMAGE_SAVE = "image_save"  # save/decode failure — switch provider
 ERROR_CLASS_INTERNAL = "internal"  # sidecar bug — switch provider
 ERROR_CLASS_VALIDATION = "validation"  # bad input from caller — terminal
-
-_IMAGE_DOWNLOAD_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES = 64 * 1024
-
-
-@dataclass
-class ImageCandidate:
-    data: bytes
-    mime_type: str | None = None
 
 
 @dataclass
@@ -496,717 +490,89 @@ row_to_response = _job_persistence.row_to_response
 
 # --- Image decoding / extraction --------------------------------------------
 
-_IMAGE_SIGNATURES: tuple[bytes, ...] = (
-    b"\xff\xd8\xff",  # JPEG
-    b"\x89PNG\r\n\x1a\n",  # PNG
-    b"GIF87a",
-    b"GIF89a",
-    b"RIFF",  # WEBP container starts with RIFF
-    b"BM",  # BMP (rare but harmless)
-    b"\x00\x00\x00\x0cftypheic",  # HEIC (offset 0)
-    b"\x00\x00\x00\x18ftypheic",
+_IMAGE_SIGNATURES = _image_candidates_module._IMAGE_SIGNATURES
+_IMAGE_DOWNLOAD_REDIRECT_STATUSES = (
+    _image_candidates_module._IMAGE_DOWNLOAD_REDIRECT_STATUSES
+)
+_IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES = (
+    _image_candidates_module._IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES
+)
+_RESPONSES_PARTIAL_TYPE_HINT = _image_candidates_module._RESPONSES_PARTIAL_TYPE_HINT
+_RESPONSES_SUCCESS_TERMINAL_EVENTS = (
+    _image_candidates_module._RESPONSES_SUCCESS_TERMINAL_EVENTS
+)
+_RESPONSES_ERROR_TERMINAL_EVENTS = (
+    _image_candidates_module._RESPONSES_ERROR_TERMINAL_EVENTS
 )
 
-
-def looks_like_image(data: bytes) -> bool:
-    if len(data) < 8:
-        return False
-    if any(data.startswith(sig) for sig in _IMAGE_SIGNATURES):
-        return True
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return True
-    if b"ftyp" in data[:32]:
-        return True
-    return False
-
-
-def _candidate_size_error(max_bytes: int) -> JobFailure:
-    if max_bytes < MAX_IMAGE_BYTES:
-        return JobFailure(
-            f"上游图片总字节超过限制（max {MAX_TOTAL_IMAGE_BYTES}）",
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        )
-    return JobFailure(
-        f"上游单图超过大小限制（max {MAX_IMAGE_BYTES}）",
-        error_class=ERROR_CLASS_IMAGE_SAVE,
-    )
-
-
-def decode_data_url(
-    value: str,
-    *,
-    max_bytes: int | None = None,
-) -> ImageCandidate | None:
-    if not value.startswith("data:image/") or "," not in value:
-        return None
-    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
-    header, encoded = value.split(",", 1)
-    mime_type = header.removeprefix("data:").split(";", 1)[0]
-    is_b64 = ";base64" in header
-    if is_b64:
-        data = _b64_decode(encoded, max_bytes=effective_max)
-        if data is None:
-            return None
-    else:
-        data = encoded.encode("utf-8", "replace")
-    if len(data) > effective_max:
-        raise _candidate_size_error(effective_max)
-    if not looks_like_image(data):
-        return None
-    return ImageCandidate(data, mime_type)
-
-
-def _b64_decode(value: str, *, max_bytes: int | None = None) -> bytes | None:
-    compact = "".join(value.split())
-    if not compact:
-        return None
-    pad = len(compact) % 4
-    if pad:
-        compact += "=" * (4 - pad)
-    padding = len(compact) - len(compact.rstrip("="))
-    decoded_size = len(compact) // 4 * 3 - min(padding, 2)
-    if max_bytes is not None and decoded_size > max_bytes:
-        raise _candidate_size_error(max_bytes)
-    try:
-        return base64.b64decode(compact, validate=True)
-    except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
-        return None
-
-
-def decode_base64(value: str, *, max_bytes: int | None = None) -> bytes | None:
-    value = value.strip()
-    if not value:
-        return None
-    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
-    if value.startswith("data:image/"):
-        candidate = decode_data_url(value, max_bytes=effective_max)
-        return candidate.data if candidate else None
-    data = _b64_decode(value, max_bytes=effective_max)
-    if data is None:
-        return None
-    if len(data) > effective_max:
-        raise _candidate_size_error(effective_max)
-    if not looks_like_image(data):
-        return None
-    return data
-
-
-def object_image_context(value: dict[str, Any]) -> bool:
-    type_value = str(value.get("type", "")).lower()
-    mime_value = str(value.get("mimeType") or value.get("mime_type") or "").lower()
-    if "image" in type_value or mime_value.startswith("image/"):
-        return True
-    keys = {str(k) for k in value.keys()}
-    return bool({"b64_json", "inlineData", "inline_data", "partial_image_b64"} & keys)
-
-
-# OpenAI Responses API streams a sequence of events. Partial-image events deliver
-# progressively-refined previews (b64) before the final image; if we extract them
-# all we end up storing 3+ near-duplicates that sha256 dedupe can't catch (each
-# partial differs by a few bytes). The sidecar only needs the final image.
-_RESPONSES_PARTIAL_TYPE_HINT = ".partial_image"
-
-# image-stability-hardening §P0：兼容网关常见 terminal 事件名。
-# 成功 terminal：response.completed / response.done。
-# 错误 terminal：response.failed / response.incomplete / error。
-# 旧版只识别 ``response.failed`` + ``error``，response.incomplete 会被当成"流提前结束"
-# 错判为可重试 network 错（实际是 incomplete_details，重试仍会 incomplete）。
-_RESPONSES_SUCCESS_TERMINAL_EVENTS = frozenset({"response.completed", "response.done"})
-_RESPONSES_ERROR_TERMINAL_EVENTS = frozenset(
-    {"response.failed", "response.incomplete", "error"}
-)
-
-
-def _is_responses_partial_event(event: Any) -> bool:
-    if not isinstance(event, dict):
-        return False
-    event_type = str(event.get("type", ""))
-    return _RESPONSES_PARTIAL_TYPE_HINT in event_type
-
-
-def _is_responses_success_terminal(event: Any) -> bool:
-    if not isinstance(event, dict):
-        return False
-    return str(event.get("type", "")) in _RESPONSES_SUCCESS_TERMINAL_EVENTS
-
-
-def _is_responses_error_terminal(event: Any) -> bool:
-    if not isinstance(event, dict):
-        return False
-    return str(event.get("type", "")) in _RESPONSES_ERROR_TERMINAL_EVENTS
-
-
-async def download_image_url(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    cache: dict[str, ImageCandidate],
-    max_bytes: int | None = None,
-    retry_requires_idempotency: bool = True,
-) -> ImageCandidate | None:
-    effective_max = MAX_IMAGE_BYTES if max_bytes is None else max_bytes
-    candidate_url = url.strip()
-    if candidate_url.startswith("data:image/"):
-        return decode_data_url(candidate_url, max_bytes=effective_max)
-    if not candidate_url.lower().startswith(("http://", "https://")):
-        return None
-    cached = cache.get(url)
-    if cached is not None:
-        return cached
-    _ = client
-    current_url = candidate_url
-    try:
-        redirects = 0
-        while True:
-            try:
-                target = await resolve_public_image_download_target(current_url)
-            except ImageDownloadResolutionError as exc:
-                raise JobFailure(
-                    f"下载上游图片失败: {exc}",
-                    retryable=True,
-                    retry_requires_idempotency=retry_requires_idempotency,
-                    outcome_uncertain=retry_requires_idempotency,
-                    error_class=ERROR_CLASS_NETWORK,
-                ) from exc
-            except ValueError as exc:
-                prefix = (
-                    "图片重定向目标不允许下载" if redirects else "图片 URL 不允许下载"
-                )
-                raise JobFailure(
-                    f"{prefix}: {exc}",
-                    upstream_status=400,
-                    error_class=ERROR_CLASS_VALIDATION,
-                ) from exc
-
-            async with _new_pinned_image_download_client(target) as download_client:
-                async with download_client.stream(
-                    "GET",
-                    target.url,
-                    follow_redirects=False,
-                ) as resp:
-                    if resp.status_code in _IMAGE_DOWNLOAD_REDIRECT_STATUSES:
-                        location = (resp.headers.get("location") or "").strip()
-                        if not location:
-                            raise JobFailure(
-                                "上游图片重定向缺少 Location",
-                                upstream_status=resp.status_code,
-                                error_class=ERROR_CLASS_UPSTREAM_4XX,
-                            )
-                        if redirects >= MAX_IMAGE_URL_REDIRECTS:
-                            raise JobFailure(
-                                "上游图片重定向次数过多",
-                                upstream_status=resp.status_code,
-                                error_class=ERROR_CLASS_UPSTREAM_4XX,
-                            )
-                        redirects += 1
-                        current_url = urljoin(target.url, location)
-                        continue
-
-                    if not 200 <= resp.status_code < 300:
-                        error_limit = min(
-                            MAX_IMAGE_BYTES,
-                            _IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES,
-                        )
-                        declared_size = _download_content_length(resp.headers)
-                        if declared_size is not None and declared_size > error_limit:
-                            err_content = b""
-                            body_truncated = True
-                        else:
-                            (
-                                err_content,
-                                body_truncated,
-                                _received_bytes,
-                            ) = await _read_download_body_bounded(
-                                resp,
-                                max_bytes=error_limit,
-                                truncate=True,
-                            )
-                        upstream_body: Any = body_preview(err_content)
-                        if body_truncated:
-                            upstream_body = {
-                                "preview": upstream_body,
-                                "truncated": True,
-                            }
-                        ec = (
-                            ERROR_CLASS_UPSTREAM_5XX
-                            if resp.status_code >= 500
-                            else ERROR_CLASS_UPSTREAM_4XX
-                        )
-                        raise JobFailure(
-                            f"下载上游图片失败 HTTP {resp.status_code}",
-                            upstream_status=resp.status_code,
-                            upstream_body=upstream_body,
-                            retryable=resp.status_code >= 500,
-                            retry_requires_idempotency=retry_requires_idempotency,
-                            outcome_uncertain=(
-                                resp.status_code >= 500 and retry_requires_idempotency
-                            ),
-                            error_class=ec,
-                        )
-
-                    declared_size = _download_content_length(resp.headers)
-                    if declared_size is not None and declared_size > effective_max:
-                        raise JobFailure(
-                            "上游图片超过大小限制（Content-Length 预检）",
-                            upstream_status=resp.status_code,
-                            error_class=ERROR_CLASS_IMAGE_SAVE,
-                        )
-                    (
-                        content,
-                        body_truncated,
-                        _received_bytes,
-                    ) = await _read_download_body_bounded(
-                        resp,
-                        max_bytes=effective_max,
-                        truncate=False,
-                    )
-                    if body_truncated:
-                        failure = _candidate_size_error(effective_max)
-                        failure.upstream_status = resp.status_code
-                        raise failure
-                    content_type = resp.headers.get("content-type")
-                    break
-    except JobFailure:
-        raise
-    except (httpx.HTTPError, OSError) as exc:
-        raise JobFailure(
-            f"下载上游图片失败: {exc.__class__.__name__}: {exc}",
-            retryable=True,
-            retry_requires_idempotency=retry_requires_idempotency,
-            outcome_uncertain=retry_requires_idempotency,
-            error_class=ERROR_CLASS_NETWORK,
-        ) from exc
-    candidate = ImageCandidate(content, content_type)
-    cache[url] = candidate
-    cache[current_url] = candidate
-    return candidate
-
-
-async def extract_candidates(
-    value: Any,
-    client: httpx.AsyncClient,
-    *,
-    image_context: bool = False,
-    cache: dict[str, ImageCandidate] | None = None,
-    budget: ImageCandidateBudget | None = None,
-) -> list[ImageCandidate]:
-    if cache is None:
-        cache = {}
-    if budget is None:
-        budget = ImageCandidateBudget()
-    candidates: list[ImageCandidate] = []
-    if isinstance(value, list):
-        for item in value:
-            candidates.extend(
-                await extract_candidates(
-                    item,
-                    client,
-                    image_context=image_context,
-                    cache=cache,
-                    budget=budget,
-                )
-            )
-        return candidates
-    if not isinstance(value, dict):
-        return candidates
-
-    context = image_context or object_image_context(value)
-
-    for inline_key in ("inlineData", "inline_data"):
-        inline = value.get(inline_key)
-        if isinstance(inline, dict) and isinstance(inline.get("data"), str):
-            data = decode_base64(
-                inline["data"],
-                max_bytes=budget.next_max_bytes(),
-            )
-            if data is not None:
-                candidates.append(
-                    budget.record(
-                        ImageCandidate(
-                            data,
-                            inline.get("mimeType") or inline.get("mime_type"),
-                        )
-                    )
-                )
-
-    for key, item in value.items():
-        if key in {"inlineData", "inline_data"}:
-            continue
-        if isinstance(item, str):
-            if key in {
-                "b64_json",
-                "image_b64",
-                "image_base64",
-                "base64_image",
-                "partial_image_b64",
-            }:
-                data = decode_base64(item, max_bytes=budget.next_max_bytes())
-                if data is not None:
-                    candidates.append(
-                        budget.record(
-                            ImageCandidate(
-                                data,
-                                value.get("mimeType") or value.get("mime_type"),
-                            )
-                        )
-                    )
-            elif key in {"result", "data"} and context:
-                data = decode_base64(item, max_bytes=budget.next_max_bytes())
-                if data is not None:
-                    candidates.append(
-                        budget.record(
-                            ImageCandidate(
-                                data,
-                                value.get("mimeType") or value.get("mime_type"),
-                            )
-                        )
-                    )
-            elif key in {"url", "image_url"}:
-                downloaded = await download_image_url(
-                    client,
-                    item,
-                    cache=cache,
-                    max_bytes=budget.next_max_bytes(),
-                )
-                if downloaded is not None:
-                    candidates.append(budget.record(downloaded))
-        elif isinstance(item, (dict, list)):
-            candidates.extend(
-                await extract_candidates(
-                    item,
-                    client,
-                    image_context=context,
-                    cache=cache,
-                    budget=budget,
-                )
-            )
-
-    return candidates
-
-
-def parse_sse_json_objects(text: str) -> list[Any]:
-    objects: list[Any] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line.removeprefix("data:").strip()
-        if not data or data == "[DONE]":
-            continue
-        parsed = parse_json_bytes(data.encode("utf-8"))
-        if parsed is not None:
-            objects.append(parsed)
-    return objects
-
-
-def _try_parse_sse_data(data: str) -> Any | None:
-    data = data.strip()
-    if not data or data == "[DONE]":
-        return None
-    return parse_json_bytes(data.encode("utf-8"))
-
-
-def _sse_data_from_lines(lines: list[str]) -> str | None:
-    parts: list[str] = []
-    for raw in lines:
-        if raw.startswith("data:"):
-            data = raw[5:]
-            if data.startswith(" "):
-                data = data[1:]
-            parts.append(data)
-    if not parts:
-        return None
-    return "\n".join(parts)
-
-
-def _contains_result_key(value: Any) -> bool:
-    stack = [value]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            if "result" in current:
-                return True
-            stack.extend(current.values())
-        elif isinstance(current, list):
-            stack.extend(current)
-    return False
-
-
-def _first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        event_type = str(event.get("type") or "")
-        if event_type == "error" and isinstance(event.get("error"), dict):
-            return event["error"]
-        if event_type == "response.failed":
-            response = event.get("response")
-            if isinstance(response, dict):
-                error = response.get("error")
-                if isinstance(error, dict):
-                    return error
-            return {
-                "type": "response_failed",
-                "code": "response_failed",
-                "message": "Responses stream ended with response.failed",
-            }
-        # image-stability-hardening §P0：response.incomplete 也是 terminal error
-        # 形态。typical payload：{"type":"response.incomplete","response":{
-        # "incomplete_details":{"reason":"max_output_tokens"}}}。旧版漏识别 →
-        # 当作"流提前结束"按 network 重试 → 反复 incomplete 烧配额。
-        if event_type == "response.incomplete":
-            response = event.get("response")
-            if isinstance(response, dict):
-                detail = response.get("incomplete_details") or response.get("error")
-                if isinstance(detail, dict):
-                    out = dict(detail)
-                    out.setdefault("type", "response_incomplete")
-                    out.setdefault("code", "response_incomplete")
-                    return out
-            return {
-                "type": "response_incomplete",
-                "code": "response_incomplete",
-                "message": "Responses stream ended with response.incomplete",
-            }
-    return None
-
-
-def _classify_stream_error(error: dict[str, Any]) -> str:
-    code = str(error.get("code") or "").lower()
-    error_type = str(error.get("type") or "").lower()
-    message = str(error.get("message") or "").lower()
-    joined = " ".join((code, error_type, message))
-    if (
-        "moderation" in joined
-        or "safety" in joined
-        or error_type.endswith("_user_error")
-    ):
-        return ERROR_CLASS_VALIDATION
-    if "invalid" in joined or "bad_request" in joined or "bad request" in joined:
-        return ERROR_CLASS_UPSTREAM_4XX
-    return ERROR_CLASS_UPSTREAM_5XX
-
-
-def _stream_error_message(error: dict[str, Any]) -> str:
-    code = str(error.get("code") or error.get("type") or "stream_error")
-    message = str(
-        error.get("message") or "Responses stream failed before returning an image"
-    )
-    return f"上游流式错误 {code}: {message}"
-
-
-async def extract_response_images(
-    resp: httpx.Response,
-    client: httpx.AsyncClient,
-    *,
-    budget: ImageCandidateBudget | None = None,
-) -> list[ImageCandidate]:
-    if budget is None:
-        budget = ImageCandidateBudget()
-    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if content_type.startswith("image/"):
-        budget.next_max_bytes()
-        return [budget.record(ImageCandidate(resp.content, content_type))]
-
-    parsed = parse_json_bytes(resp.content)
-    if parsed is not None:
-        stream_error = _first_stream_error([parsed])
-        if stream_error is not None:
-            raise JobFailure(
-                _stream_error_message(stream_error),
-                upstream_status=resp.status_code,
-                upstream_body=body_preview(resp.content),
-                error_class=_classify_stream_error(stream_error),
-            )
-        return await extract_candidates(parsed, client, budget=budget)
-
-    text = resp.content.decode("utf-8", "replace")
-    cache: dict[str, ImageCandidate] = {}
-    events = parse_sse_json_objects(text)
-    stream_error = _first_stream_error(events)
-    if stream_error is not None:
-        raise JobFailure(
-            _stream_error_message(stream_error),
-            upstream_status=resp.status_code,
-            upstream_body=body_preview(resp.content),
-            error_class=_classify_stream_error(stream_error),
-        )
-    has_terminal = any(
-        isinstance(ev, dict)
-        and not _is_responses_partial_event(ev)
-        and _contains_result_key(ev)
-        for ev in events
-    )
-    candidates: list[ImageCandidate] = []
-    for obj in events:
-        # When a stream contains a terminal event (response.completed or
-        # image_generation_call.completed), drop partial-image previews so we
-        # only keep the final image. If no terminal event was emitted, fall
-        # back to whatever partial frames we have — better one image than none.
-        if has_terminal and _is_responses_partial_event(obj):
-            continue
-        candidates.extend(
-            await extract_candidates(
-                obj,
-                client,
-                cache=cache,
-                budget=budget,
-            )
-        )
-    return candidates
-
-
-async def extract_responses_stream_images(
-    resp: httpx.Response,
-    client: httpx.AsyncClient,
-    *,
-    job_id: str,
-) -> list[ImageCandidate]:
-    """Consume a /v1/responses SSE stream and return only final image candidates.
-
-    Partial-image frames are progress previews. If the stream ends before a final
-    image appears, treat it as a network-style interruption so the caller can
-    retry or fail over instead of saving a partial preview as the result.
-
-    image-stability-hardening §P0 加固：
-    - 行级 idle timeout（``RESPONSES_STREAM_IDLE_TIMEOUT_S``，默认 60s）：上游 TCP
-      仍活但流卡住的场景下，过去只能等 client 全局 timeout 才放手；现在 idle
-      超过阈值即抛 retryable JobFailure，sidecar 资源（连接 / fd / 内存）立刻释放。
-    - 显式跟踪 ``response.completed`` / ``response.done`` 作为成功 terminal：流
-      结束但已收到成功 terminal + final image 时算正常完成；只缺 final 而 terminal
-      已到的极少数兼容网关也能识别（避免错判 retryable）。
-    """
-    cache: dict[str, ImageCandidate] = {}
-    budget = ImageCandidateBudget()
-    event_lines: list[str] = []
-    line_decoder = _SseLineDecoder()
-    events_seen = 0
-    bytes_seen = 0
-    partial_candidates: list[ImageCandidate] = []
-    final_candidates: list[ImageCandidate] = []
-    saw_done = False
-    saw_success_terminal = False
-    last_touch = time.monotonic()
-
-    async def handle_event(obj: Any) -> None:
-        nonlocal partial_candidates, final_candidates, saw_success_terminal
-        stream_error = _first_stream_error([obj])
-        if stream_error is not None:
-            raise JobFailure(
-                _stream_error_message(stream_error),
-                upstream_status=resp.status_code,
-                upstream_body=stream_error,
-                error_class=_classify_stream_error(stream_error),
-            )
-        if _is_responses_success_terminal(obj):
-            saw_success_terminal = True
-        extracted = await extract_candidates(
-            obj,
+_image_candidates = ImageCandidateFacade(
+    max_image_bytes=lambda: MAX_IMAGE_BYTES,
+    max_total_image_bytes=lambda: MAX_TOTAL_IMAGE_BYTES,
+    max_image_url_redirects=lambda: MAX_IMAGE_URL_REDIRECTS,
+    responses_stream_idle_timeout_s=lambda: RESPONSES_STREAM_IDLE_TIMEOUT_S,
+    responses_stream_max_bytes=lambda: RESPONSES_STREAM_MAX_BYTES,
+    job_heartbeat_interval_s=lambda: JOB_HEARTBEAT_INTERVAL_S,
+    error_class_network=lambda: ERROR_CLASS_NETWORK,
+    error_class_upstream_4xx=lambda: ERROR_CLASS_UPSTREAM_4XX,
+    error_class_upstream_5xx=lambda: ERROR_CLASS_UPSTREAM_5XX,
+    error_class_image_save=lambda: ERROR_CLASS_IMAGE_SAVE,
+    error_class_validation=lambda: ERROR_CLASS_VALIDATION,
+    job_failure=lambda error, **kwargs: JobFailure(error, **kwargs),
+    job_failure_type=JobFailure,
+    image_candidate=lambda data, mime_type=None: ImageCandidate(data, mime_type),
+    budget_factory=lambda: ImageCandidateBudget(),
+    parse_json_bytes=lambda data: parse_json_bytes(data),
+    body_preview=lambda data: body_preview(data),
+    download_content_length=lambda headers: _download_content_length(headers),
+    read_download_body_bounded=(
+        lambda response, **kwargs: _read_download_body_bounded(response, **kwargs)
+    ),
+    new_pinned_image_download_client=(
+        lambda target: _new_pinned_image_download_client(target)
+    ),
+    resolve_public_image_download_target=(
+        lambda url: resolve_public_image_download_target(url)
+    ),
+    image_download_resolution_error=ImageDownloadResolutionError,
+    touch_running=lambda job_id: touch_running(job_id),
+    download_image_url_fn=(
+        lambda client, url, **kwargs: download_image_url(
             client,
-            cache=cache,
-            budget=budget,
+            url,
+            **kwargs,
         )
-        if not extracted:
-            return
-        if _is_responses_partial_event(obj):
-            partial_candidates.extend(extracted)
-        else:
-            final_candidates.extend(extracted)
-
-    async def handle_line(line: str) -> None:
-        nonlocal event_lines, events_seen, saw_done
-        if line == "":
-            data = _sse_data_from_lines(event_lines)
-            event_lines = []
-            obj = _try_parse_sse_data(data or "")
-            if obj is None:
-                if data and data.strip() == "[DONE]":
-                    saw_done = True
-                return
-            events_seen += 1
-            await handle_event(obj)
-            return
-        event_lines.append(line)
-
-    byte_iter = resp.aiter_bytes()
-    while True:
-        try:
-            chunk = await asyncio.wait_for(
-                byte_iter.__anext__(), timeout=RESPONSES_STREAM_IDLE_TIMEOUT_S
-            )
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            raise JobFailure(
-                f"Responses stream idle for {RESPONSES_STREAM_IDLE_TIMEOUT_S:.0f}s",
-                upstream_status=resp.status_code,
-                upstream_body={
-                    "events_seen": events_seen,
-                    "partial_images_seen": len(partial_candidates),
-                    "bytes_seen": bytes_seen,
-                    "saw_success_terminal": saw_success_terminal,
-                },
-                retryable=True,
-                retry_requires_idempotency=True,
-                outcome_uncertain=True,
-                error_class=ERROR_CLASS_NETWORK,
-            ) from None
-        if not chunk:
-            continue
-        next_bytes_seen = bytes_seen + len(chunk)
-        if next_bytes_seen > RESPONSES_STREAM_MAX_BYTES:
-            raise JobFailure(
-                "Responses stream exceeded sidecar byte budget before final image",
-                upstream_status=resp.status_code,
-                retryable=True,
-                retry_requires_idempotency=True,
-                outcome_uncertain=True,
-                error_class=ERROR_CLASS_NETWORK,
-            )
-        bytes_seen = next_bytes_seen
-        now = time.monotonic()
-        if now - last_touch >= JOB_HEARTBEAT_INTERVAL_S:
-            await touch_running(job_id)
-            last_touch = now
-
-        for line in line_decoder.feed(chunk):
-            await handle_line(line)
-
-    for line in line_decoder.finish():
-        await handle_line(line)
-    if event_lines:
-        await handle_line("")
-
-    if final_candidates:
-        return final_candidates
-
-    # No final image. Do not save partial previews as "successful" output.
-    detail = {
-        "events_seen": events_seen,
-        "partial_images_seen": len(partial_candidates),
-        "saw_done": saw_done,
-        "saw_success_terminal": saw_success_terminal,
-        "bytes_seen": bytes_seen,
-    }
-    if partial_candidates:
-        raise JobFailure(
-            "Responses stream ended after partial images but before final image",
-            upstream_status=resp.status_code,
-            upstream_body=detail,
-            retryable=True,
-            retry_requires_idempotency=True,
-            outcome_uncertain=True,
-            error_class=ERROR_CLASS_NETWORK,
+    ),
+    extract_candidates_fn=(
+        lambda value, client, **kwargs: extract_candidates(
+            value,
+            client,
+            **kwargs,
         )
-    raise JobFailure(
-        "Responses stream ended before returning an image",
-        upstream_status=resp.status_code,
-        upstream_body=detail,
-        retryable=True,
-        retry_requires_idempotency=True,
-        outcome_uncertain=True,
-        error_class=ERROR_CLASS_NETWORK,
-    )
+    ),
+    sse_line_decoder_factory=lambda: _SseLineDecoder(),
+)
+
+
+looks_like_image = _image_candidates.looks_like_image
+_candidate_size_error = _image_candidates.candidate_size_error
+decode_data_url = _image_candidates.decode_data_url
+_b64_decode = _image_candidates.b64_decode
+decode_base64 = _image_candidates.decode_base64
+object_image_context = _image_candidates.object_image_context
+_is_responses_partial_event = _image_candidates.is_responses_partial_event
+_is_responses_success_terminal = _image_candidates.is_responses_success_terminal
+_is_responses_error_terminal = _image_candidates.is_responses_error_terminal
+download_image_url = _image_candidates.download_image_url
+extract_candidates = _image_candidates.extract_candidates
+parse_sse_json_objects = _image_candidates.parse_sse_json_objects
+_try_parse_sse_data = _image_candidates.try_parse_sse_data
+_sse_data_from_lines = _image_candidates.sse_data_from_lines
+_contains_result_key = _image_candidates.contains_result_key
+_first_stream_error = _image_candidates.first_stream_error
+_classify_stream_error = _image_candidates.classify_stream_error
+_stream_error_message = _image_candidates.stream_error_message
+extract_response_images = _image_candidates.extract_response_images
+extract_responses_stream_images = _image_candidates.extract_responses_stream_images
 
 
 _image_artifacts = ImageArtifactFacade(
@@ -1266,311 +632,69 @@ materialize_edit_input_files = _image_artifacts.materialize_edit_input_files
 
 # --- Upstream call -----------------------------------------------------------
 
-
-def _classify_httpx_error(exc: httpx.HTTPError) -> bool:
-    return isinstance(
-        exc,
-        (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.ReadError,
-            httpx.RemoteProtocolError,
-            httpx.PoolTimeout,
-            httpx.WriteError,
-            httpx.WriteTimeout,
-        ),
-    )
-
-
-def _httpx_error_requires_idempotency(exc: httpx.HTTPError) -> bool:
-    return not isinstance(
-        exc,
-        (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.PoolTimeout,
-        ),
-    )
-
-
-def _is_retryable_job_failure(exc: JobFailure) -> bool:
-    if exc.retryable:
-        return True
-    if exc.error_class == ERROR_CLASS_NETWORK:
-        return True
-    if exc.error_class == ERROR_CLASS_UPSTREAM_5XX:
-        return True
-    return False
-
-
-def _mark_post_dispatch_failure(exc: JobFailure) -> JobFailure:
-    if _is_retryable_job_failure(exc) and (
-        exc.retry_requires_idempotency or exc.error_class == ERROR_CLASS_UPSTREAM_5XX
-    ):
-        exc.retry_requires_idempotency = True
-        exc.outcome_uncertain = True
-    return exc
-
-
-def _retry_budget_for_failure(exc: JobFailure, *, endpoint: str) -> int:
-    if exc.error_class == ERROR_CLASS_NETWORK and endpoint == "/v1/responses":
-        return max(RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX)
-    if exc.error_class == ERROR_CLASS_NETWORK:
-        return RETRY_NETWORK_MAX
-    if exc.error_class == ERROR_CLASS_UPSTREAM_5XX:
-        return RETRY_UPSTREAM_5XX_MAX
-    return 0
-
-
-async def _raise_upstream_http_error(resp: httpx.Response) -> None:
-    content, truncated, _received = await _read_response_body_bounded(
-        resp,
-        max_bytes=MAX_UPSTREAM_ERROR_BODY_BYTES,
-        truncate=True,
-    )
-    upstream_body: Any = body_preview(content)
-    if truncated:
-        upstream_body = {
-            "preview": upstream_body,
-            "truncated": True,
-        }
-    is_5xx = resp.status_code >= 500
-    raise JobFailure(
-        f"上游返回 HTTP {resp.status_code}",
-        upstream_status=resp.status_code,
-        upstream_body=upstream_body,
-        retryable=is_5xx,
-        retry_requires_idempotency=is_5xx,
-        outcome_uncertain=is_5xx,
-        error_class=(ERROR_CLASS_UPSTREAM_5XX if is_5xx else ERROR_CLASS_UPSTREAM_4XX),
-    )
-
-
-async def _extract_non_stream_response_images(
-    resp: httpx.Response,
-    client: httpx.AsyncClient,
-) -> list[ImageCandidate]:
-    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    is_direct_image = content_type.startswith("image/")
-    body_limit = (
-        min(MAX_UPSTREAM_RESPONSE_BYTES, MAX_IMAGE_BYTES)
-        if is_direct_image
-        else MAX_UPSTREAM_RESPONSE_BYTES
-    )
-    content, truncated, _received = await _read_response_body_bounded(
-        resp,
-        max_bytes=body_limit,
-        truncate=False,
-    )
-    if truncated:
-        limit_name = "单图" if is_direct_image else "非流式响应"
-        raise JobFailure(
-            f"上游{limit_name}超过大小限制（max {body_limit} bytes）",
-            upstream_status=resp.status_code,
-            retry_requires_idempotency=True,
-            outcome_uncertain=True,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
+_upstream = UpstreamFacade(
+    http_client=lambda: _http_client,
+    upstream_base_url=lambda: UPSTREAM_BASE_URL,
+    upstream_idempotency_guaranteed=lambda: UPSTREAM_IDEMPOTENCY_GUARANTEED,
+    retry_network_max=lambda: RETRY_NETWORK_MAX,
+    retry_responses_stream_max=lambda: RETRY_RESPONSES_STREAM_MAX,
+    retry_upstream_5xx_max=lambda: RETRY_UPSTREAM_5XX_MAX,
+    retry_backoff_s=lambda: RETRY_BACKOFF_S,
+    max_upstream_error_body_bytes=lambda: MAX_UPSTREAM_ERROR_BODY_BYTES,
+    max_upstream_response_bytes=lambda: MAX_UPSTREAM_RESPONSE_BYTES,
+    max_image_bytes=lambda: MAX_IMAGE_BYTES,
+    error_class_network=lambda: ERROR_CLASS_NETWORK,
+    error_class_upstream_4xx=lambda: ERROR_CLASS_UPSTREAM_4XX,
+    error_class_upstream_5xx=lambda: ERROR_CLASS_UPSTREAM_5XX,
+    error_class_no_image=lambda: ERROR_CLASS_NO_IMAGE,
+    error_class_image_save=lambda: ERROR_CLASS_IMAGE_SAVE,
+    error_class_internal=lambda: ERROR_CLASS_INTERNAL,
+    job_failure=lambda error, **kwargs: JobFailure(error, **kwargs),
+    job_failure_type=JobFailure,
+    parse_json_bytes=lambda data: parse_json_bytes(data),
+    body_preview=lambda data: body_preview(data),
+    read_response_body_bounded=(
+        lambda response, **kwargs: _read_response_body_bounded(response, **kwargs)
+    ),
+    extract_response_images=(
+        lambda response, client, **kwargs: extract_response_images(
+            response,
+            client,
+            **kwargs,
         )
-    buffered = httpx.Response(
-        resp.status_code,
-        headers=resp.headers,
-        content=content,
-    )
-    return await extract_response_images(buffered, client)
-
-
-async def _call_upstream_once(
-    row: sqlite3.Row,
-    *,
-    url: str,
-    headers: dict[str, str],
-    body: dict[str, Any],
-    endpoint: str,
-    image_edit_input_transport: str = "url",
-) -> tuple[int, list[dict[str, Any]]]:
-    assert _http_client is not None
-    request_headers = headers
-    request_kwargs: dict[str, Any]
-    if endpoint == "/v1/images/edits" and image_edit_input_transport == "file":
-        multipart_headers = dict(headers)
-        multipart_headers.pop("Content-Type", None)
-        data, files = await materialize_edit_input_files(_http_client, body)
-        request_headers = multipart_headers
-        request_kwargs = {
-            "data": data,
-            "files": files,
-        }
-    else:
-        request_kwargs = {"json": body}
-
-    async with _http_client.stream(
-        "POST",
-        url,
-        headers=request_headers,
-        **request_kwargs,
-    ) as resp:
-        status_code = resp.status_code
-        if resp.status_code >= 400:
-            await _raise_upstream_http_error(resp)
-
-        content_type = resp.headers.get("content-type", "").lower()
-        if endpoint == "/v1/responses" and "text/event-stream" in content_type:
-            try:
-                candidates = await extract_responses_stream_images(
-                    resp,
-                    _http_client,
-                    job_id=row["job_id"],
-                )
-            except JobFailure as exc:
-                raise _mark_post_dispatch_failure(exc)
-            except httpx.HTTPError:
-                raise
-            except Exception as exc:
-                raise JobFailure(
-                    f"解析上游流式响应失败: {exc.__class__.__name__}: {exc}",
-                    upstream_status=resp.status_code,
-                    retry_requires_idempotency=True,
-                    outcome_uncertain=True,
-                    error_class=ERROR_CLASS_IMAGE_SAVE,
-                ) from exc
-        else:
-            try:
-                candidates = await _extract_non_stream_response_images(
-                    resp,
-                    _http_client,
-                )
-            except JobFailure as exc:
-                raise _mark_post_dispatch_failure(exc)
-            except httpx.HTTPError:
-                raise
-            except Exception as exc:
-                raise JobFailure(
-                    f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
-                    upstream_status=resp.status_code,
-                    retry_requires_idempotency=True,
-                    outcome_uncertain=True,
-                    error_class=ERROR_CLASS_IMAGE_SAVE,
-                ) from exc
-
-    if not candidates:
-        # Most common cause: caller asked /v1/images/generations against a
-        # provider that only speaks /v1/responses (or vice versa). Surface
-        # `no_image` so the caller can switch endpoint, not just provider.
-        raise JobFailure(
-            "上游没有返回可保存的图片",
-            upstream_status=status_code,
-            error_class=ERROR_CLASS_NO_IMAGE,
+    ),
+    extract_responses_stream_images=(
+        lambda response, client, **kwargs: extract_responses_stream_images(
+            response,
+            client,
+            **kwargs,
         )
-    try:
-        images = await save_images(
-            row["job_id"], row["created_at"], row["retention_days"], candidates
-        )
-    except JobFailure:
-        raise
-    except Exception as exc:
-        raise JobFailure(
-            f"保存图片失败: {exc.__class__.__name__}: {exc}",
-            upstream_status=status_code,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        ) from exc
-    if not images:
-        raise JobFailure(
-            "没有保存任何图片",
-            upstream_status=status_code,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        )
-    return status_code, images
+    ),
+    materialize_edit_input_files=(
+        lambda client, body: materialize_edit_input_files(client, body)
+    ),
+    materialize_edit_input_urls=(
+        lambda row, body: materialize_edit_input_urls(row, body)
+    ),
+    save_images=lambda *args, **kwargs: save_images(*args, **kwargs),
+    normalize_image_edit_input_transport=(
+        lambda value: normalize_image_edit_input_transport(value)
+    ),
+    upstream_idempotency_key=lambda job_id: upstream_idempotency_key(job_id),
+    call_upstream_once_fn=(lambda row, **kwargs: _call_upstream_once(row, **kwargs)),
+    log=LOG,
+)
 
 
-async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
-    if _http_client is None:
-        raise JobFailure("HTTP client not ready", error_class=ERROR_CLASS_INTERNAL)
-    payload = parse_json_bytes(row["payload_json"].encode("utf-8"))
-    if not isinstance(payload, dict):
-        raise JobFailure(
-            "job payload is not valid strict JSON",
-            error_class=ERROR_CLASS_INTERNAL,
-        )
-    auth_header = row["auth_header"]
-    if not auth_header:
-        raise JobFailure(
-            "job is missing Authorization header", error_class=ERROR_CLASS_INTERNAL
-        )
-
-    endpoint = payload["endpoint"]
-    url = f"{UPSTREAM_BASE_URL}{endpoint}"
-    headers = {
-        "Authorization": auth_header,
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream, image/*",
-        "Accept-Encoding": "identity",
-        "Idempotency-Key": upstream_idempotency_key(row["job_id"]),
-    }
-
-    body = payload["body"]
-    image_edit_input_transport = normalize_image_edit_input_transport(
-        payload.get("image_edit_input_transport")
-    )
-    if endpoint == "/v1/images/edits" and isinstance(body, dict):
-        if image_edit_input_transport == "url":
-            body = await materialize_edit_input_urls(row, body)
-
-    max_budget = max(
-        RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX, RETRY_UPSTREAM_5XX_MAX
-    )
-    for attempt in range(max_budget + 1):
-        try:
-            return await _call_upstream_once(
-                row,
-                url=url,
-                headers=headers,
-                body=body,
-                endpoint=endpoint,
-                image_edit_input_transport=image_edit_input_transport,
-            )
-        except httpx.HTTPError as exc:
-            requires_idempotency = _httpx_error_requires_idempotency(exc)
-            failure = JobFailure(
-                f"上游请求失败: {exc.__class__.__name__}: {exc}",
-                retryable=_classify_httpx_error(exc),
-                retry_requires_idempotency=requires_idempotency,
-                outcome_uncertain=requires_idempotency,
-                error_class=ERROR_CLASS_NETWORK,
-            )
-        except JobFailure as exc:
-            failure = exc
-
-        retry_budget = _retry_budget_for_failure(failure, endpoint=endpoint)
-        retryable = _is_retryable_job_failure(failure)
-        requires_idempotency = (
-            failure.retry_requires_idempotency
-            or failure.error_class == ERROR_CLASS_UPSTREAM_5XX
-        )
-        if retryable and requires_idempotency and not UPSTREAM_IDEMPOTENCY_GUARANTEED:
-            failure.retry_suppressed = attempt < retry_budget
-            if failure.retry_suppressed:
-                LOG.warning(
-                    "image job %s automatic retry suppressed endpoint=%s class=%s; "
-                    "upstream idempotency is not guaranteed",
-                    row["job_id"],
-                    endpoint,
-                    failure.error_class,
-                )
-            raise failure
-        if attempt < retry_budget and retryable:
-            LOG.warning(
-                "image job %s upstream retryable failure, retry %d/%d endpoint=%s class=%s: %s",
-                row["job_id"],
-                attempt + 1,
-                retry_budget,
-                endpoint,
-                failure.error_class,
-                failure.error,
-            )
-            await asyncio.sleep(RETRY_BACKOFF_S * (2**attempt))
-            continue
-        raise failure
+_classify_httpx_error = _upstream.classify_httpx_error
+_httpx_error_requires_idempotency = _upstream.httpx_error_requires_idempotency
+_is_retryable_job_failure = _upstream.is_retryable_job_failure
+_mark_post_dispatch_failure = _upstream.mark_post_dispatch_failure
+_retry_budget_for_failure = _upstream.retry_budget_for_failure
+_raise_upstream_http_error = _upstream.raise_upstream_http_error
+_extract_non_stream_response_images = _upstream.extract_non_stream_response_images
+_call_upstream_once = _upstream.call_upstream_once
+call_upstream = _upstream.call_upstream
 
 
 # --- Worker loop -------------------------------------------------------------

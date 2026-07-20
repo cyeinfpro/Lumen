@@ -104,11 +104,115 @@ _RETRIABLE_ERROR_CODES: frozenset[str] = frozenset(
     }
 )
 
+_REFERENCE_DOWNLOAD_MARKERS = (
+    "timeout while downloading",
+    "failed to download",
+    "could not download",
+)
+_RATE_LIMIT_MARKERS = (
+    "rate_limit_exceeded",
+    "rate_limit_error",
+    "rate_limited",
+    "rate_limit:",
+    "too many requests",
+    "too_many_requests",
+    "concurrency limit exceeded",
+    "concurrency_limit_exceeded",
+    "concurrency_limit_error",
+)
+_UPSTREAM_WRAPPED_FAILURE_MARKERS = (
+    "all upstream providers failed",
+    "upstream providers failed",
+    "all 1 upstream providers failed",
+    "responses fallback failed",
+    "fallback lanes",
+    "response.failed",
+    "no upstream account",
+)
+_TERMINAL_HTTP_STATUSES = {400, 401, 403, 404, 422}
+_EXPLICIT_RATE_LIMIT_CODES = {
+    EC.RATE_LIMIT_ERROR.value,
+    EC.RATE_LIMIT_EXCEEDED.value,
+}
+
 
 @dataclass(frozen=True)
 class RetryDecision:
     retriable: bool
     reason: str
+
+
+def _matches(message: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in message for marker in markers)
+
+
+def _terminal_decision(
+    err_code: str | None,
+    http_status: int | None,
+    message: str,
+) -> RetryDecision | None:
+    if err_code in _TERMINAL_ERROR_CODES:
+        return RetryDecision(False, f"terminal error_code={err_code}")
+    if _matches(message, _MODERATION_MESSAGE_MARKERS):
+        return RetryDecision(False, "terminal safety_policy")
+    if "pixel budget" in message or "invalid size" in message:
+        return RetryDecision(False, "terminal pixel_budget")
+    if http_status not in _TERMINAL_HTTP_STATUSES:
+        return None
+    if err_code in _EXPLICIT_RATE_LIMIT_CODES or _matches(
+        message,
+        _RATE_LIMIT_MARKERS,
+    ):
+        return None
+    return RetryDecision(False, f"terminal http={http_status}")
+
+
+def _transient_decision(
+    err_code: str | None,
+    http_status: int | None,
+    message: str,
+) -> RetryDecision | None:
+    if (
+        "concurrency limit exceeded" in message
+        or "rate limit" in message
+        or "rate_limit" in message
+        or "too many requests" in message
+        or http_status == 429
+    ):
+        return RetryDecision(True, "rate_limited")
+    if _matches(message, _UPSTREAM_WRAPPED_FAILURE_MARKERS):
+        return RetryDecision(True, "retriable upstream_wrapped_failure")
+    if err_code in _RETRIABLE_ERROR_CODES:
+        return RetryDecision(True, f"retriable error_code={err_code}")
+    if http_status is None:
+        return RetryDecision(True, "retriable network_error")
+    if 500 <= http_status < 600:
+        return RetryDecision(True, f"retriable http={http_status}")
+    if err_code in (EC.NO_IMAGE_RETURNED.value, EC.TOOL_CHOICE_DOWNGRADE.value):
+        return RetryDecision(True, f"retriable {err_code}")
+    return None
+
+
+def _stream_failure_decision(
+    err_code: str | None,
+    http_status: int | None,
+    has_partial: bool,
+) -> RetryDecision | None:
+    if err_code == EC.STREAM_INTERRUPTED.value:
+        if not has_partial:
+            return RetryDecision(True, "retriable stream_interrupted no_partial")
+        if http_status is None:
+            return RetryDecision(True, "retriable stream_interrupted text_partial")
+        return RetryDecision(False, "terminal stream_interrupted with_partial")
+    if err_code == EC.SSE_CURL_FAILED.value:
+        if not has_partial:
+            return RetryDecision(True, "retriable sse_curl_failed no_partial")
+        return RetryDecision(False, "terminal sse_curl_failed with_partial")
+    if err_code == EC.BAD_RESPONSE.value:
+        if not has_partial:
+            return RetryDecision(True, "retriable bad_response no_partial")
+        return RetryDecision(False, "terminal bad_response with_partial")
+    return None
 
 
 def is_retriable(
@@ -131,111 +235,25 @@ def is_retriable(
 
     # 上游 reference 下载超时通常会被包装成 invalid_value，但本质是网络/供应链抖动。
     # 命中后应换 provider / endpoint 重试，而不是把用户输入判成终态错误。
-    if (
-        "timeout while downloading" in msg
-        or "failed to download" in msg
-        or "could not download" in msg
-    ):
+    if _matches(msg, _REFERENCE_DOWNLOAD_MARKERS):
         return RetryDecision(True, "retriable upstream_reference_download_timeout")
 
     # 1) terminal 优先于 retriable（pixel budget / 上传图超限 / 参数错）
-    if err_code in _TERMINAL_ERROR_CODES:
-        return RetryDecision(False, f"terminal error_code={err_code}")
-    if any(marker in msg for marker in _MODERATION_MESSAGE_MARKERS):
-        return RetryDecision(False, "terminal safety_policy")
-    if "pixel budget" in msg or "invalid size" in msg:
-        return RetryDecision(False, "terminal pixel_budget")
-    if http_status is not None and http_status in (400, 401, 403, 404, 422):
-        if err_code not in {EC.RATE_LIMIT_ERROR.value, EC.RATE_LIMIT_EXCEEDED.value}:
-            # Treat explicit rate-limit codes as transient even if a gateway
-            # reports them with a bad 4xx status, but do not let arbitrary
-            # "rate limit" wording in a 400 payload override terminal input
-            # failures.
-            #
-            # 关键字救援：部分网关把 rate_limit / concurrency / too_many_requests
-            # 包装成 status=400 + body 含 "rate_limit_exceeded" 等。早决策若直接
-            # terminal 会吃掉下方的 retriable 关键字分支。命中任一 marker 就放行
-            # 到后续逻辑，由 keyword / 429 / err_code 分支判 retriable。
-            #
-            # 注意：marker 只匹配确凿的 rate-limit 形态，避免误把
-            # `bad request: rate limit field is invalid` 这类描述性文案误放行——
-            # 见 test_http_400_rate_limit_wording_without_code_is_terminal。
-            _rate_markers = (
-                "rate_limit_exceeded",
-                "rate_limit_error",
-                "rate_limited",
-                "rate_limit:",
-                "too many requests",
-                "too_many_requests",
-                "concurrency limit exceeded",
-                "concurrency_limit_exceeded",
-                "concurrency_limit_error",
-            )
-            if not any(marker in msg for marker in _rate_markers):
-                return RetryDecision(False, f"terminal http={http_status}")
+    terminal = _terminal_decision(err_code, http_status, msg)
+    if terminal is not None:
+        return terminal
 
     # 2) retriable signals — 关键词优先，其次 status_code
-    if (
-        "concurrency limit exceeded" in msg
-        or "rate limit" in msg
-        or "rate_limit" in msg
-        or "too many requests" in msg
-    ):
-        return RetryDecision(True, "rate_limited")
-    if http_status == 429:
-        return RetryDecision(True, "rate_limited")
-    # sub2api / provider 层的失败包装：单 provider 时 `all 1 upstream providers failed`
-    # 会被 generation 直接当 terminal 抛给用户；按文档建议纳入 retriable，让 task 层
-    # 走 RETRY_BACKOFF_SECONDS 退避后再试一次（多半是临时账号容量问题）。
-    if (
-        "all upstream providers failed" in msg
-        or "upstream providers failed" in msg
-        or "all 1 upstream providers failed" in msg
-        or "responses fallback failed" in msg
-        or "fallback lanes" in msg
-        or "response.failed" in msg
-        or "no upstream account" in msg
-    ):
-        return RetryDecision(True, "retriable upstream_wrapped_failure")
-    if err_code in _RETRIABLE_ERROR_CODES:
-        return RetryDecision(True, f"retriable error_code={err_code}")
-    if http_status is None:
-        # 网络错 / 未拿到响应
-        return RetryDecision(True, "retriable network_error")
-    if 500 <= http_status < 600:
-        return RetryDecision(True, f"retriable http={http_status}")
+    transient = _transient_decision(err_code, http_status, msg)
+    if transient is not None:
+        return transient
 
-    # 3) `tool_choice=required` 降级成文本（no image_generation_call in output）
-    if err_code in (EC.NO_IMAGE_RETURNED.value, EC.TOOL_CHOICE_DOWNGRADE.value):
-        return RetryDecision(True, f"retriable {err_code}")
+    # 3) 流中断按是否已经产生 partial 区分，避免重复消耗图片配额。
+    stream_failure = _stream_failure_decision(err_code, http_status, has_partial)
+    if stream_failure is not None:
+        return stream_failure
 
-    # 4) SSE 断流。图片 partial 已开始消耗生图配额，保守 terminal；文本 partial
-    #    中断通常只是 HTTP/SSE 断链，允许任务层重试。当前 completion 路径用
-    #    http_status=None 标记这类本地网络中断，image Responses 流会带 200。
-    if err_code == EC.STREAM_INTERRUPTED.value and not has_partial:
-        return RetryDecision(True, "retriable stream_interrupted no_partial")
-    if err_code == EC.STREAM_INTERRUPTED.value and has_partial and http_status is None:
-        return RetryDecision(True, "retriable stream_interrupted text_partial")
-    if err_code == EC.STREAM_INTERRUPTED.value and has_partial:
-        # 有图片 partial 仍然失败——保守不重试（图已被部分渲染，再来一遍可能拿到不同图）
-        return RetryDecision(False, "terminal stream_interrupted with_partial")
-
-    # curl 子进程级故障（rc=28 超时 / rc=7 连接失败 / 空响应等）和上面 SSE 断流对称处理：
-    # 没收到 partial 就值得再试一次；已经开始渲染了就别白花配额。
-    if err_code == EC.SSE_CURL_FAILED.value and not has_partial:
-        return RetryDecision(True, "retriable sse_curl_failed no_partial")
-    if err_code == EC.SSE_CURL_FAILED.value and has_partial:
-        return RetryDecision(False, "terminal sse_curl_failed with_partial")
-
-    # bad_response：上游 HTTP 200 但 base64 解码失败 / PNG 头损坏 / PIL 解不开。
-    # 大多数是 SSE 流中途截断或上游账号偶发吐坏 chunk，retry 通常会好；
-    # 与 stream_interrupted 对称按 has_partial 区分，避免已渲染图重复烧配额。
-    if err_code == EC.BAD_RESPONSE.value and not has_partial:
-        return RetryDecision(True, "retriable bad_response no_partial")
-    if err_code == EC.BAD_RESPONSE.value and has_partial:
-        return RetryDecision(False, "terminal bad_response with_partial")
-
-    # 5) 兜底：未识别 → 不重试（保守，避免烧钱 / 烧配额）
+    # 4) 兜底：未识别 → 不重试（保守，避免烧钱 / 烧配额）
     return RetryDecision(False, f"unknown err_code={err_code} http={http_status}")
 
 

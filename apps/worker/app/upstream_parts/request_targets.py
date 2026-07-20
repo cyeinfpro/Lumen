@@ -17,7 +17,7 @@ def _validated_byok_target_for_request(
     target: Any | None,
     url: str,
 ) -> Any | None:
-    from ..byok_runtime import validate_byok_http_target
+    from ..provider_runtime.byok_context import validate_byok_http_target
 
     try:
         return validate_byok_http_target(target, url)

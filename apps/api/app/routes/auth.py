@@ -245,6 +245,148 @@ def _integrity_error_matches(exc: IntegrityError, markers: tuple[str, ...]) -> b
     return any(marker in text for marker in markers)
 
 
+async def _reject_byok_signup(
+    *,
+    request: Request,
+    email: str,
+    password: str,
+    reason: str,
+    code: str,
+    message: str,
+    status_code: int,
+) -> None:
+    verify_password(_DUMMY_PASSWORD_HASH, password)
+    await write_audit_isolated(
+        event_type="auth.signup.byok.fail",
+        actor_email=email,
+        actor_ip_hash=request_ip_hash(request),
+        details={"reason": reason},
+    )
+    raise _bad(code, message, status_code)
+
+
+async def _validated_byok_pending(
+    db: AsyncSession,
+    *,
+    request: Request,
+    email: str,
+    password: str,
+    token: str,
+) -> tuple[PendingApiKeyVerification, datetime]:
+    existing = (
+        await db.execute(
+            select(User).where(User.email == email, User.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason="email_taken_masked_as_invalid_token",
+            code="invalid_verification_token",
+            message=_BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
+            status_code=400,
+        )
+
+    token_hash = verification_token_hash(token)
+    pending = (
+        await db.execute(
+            select(PendingApiKeyVerification)
+            .where(PendingApiKeyVerification.token_hash == token_hash)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if (
+        pending is None
+        or pending.consumed_at is not None
+        or ensure_utc(pending.expires_at) <= now
+    ):
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason="invalid_verification_token",
+            code="invalid_verification_token",
+            message=_BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
+            status_code=400,
+        )
+    return pending, now
+
+
+async def _byok_signup_access(
+    db: AsyncSession,
+    *,
+    body: SignupByokIn,
+    request: Request,
+    email: str,
+    password: str,
+    now: datetime,
+    bypasses_allowlist: bool,
+) -> tuple[AllowedEmail | None, InviteLink | None, str]:
+    allow = (
+        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
+    ).scalar_one_or_none()
+    if bypasses_allowlist or allow is not None:
+        return allow, None, "member"
+    if not body.invite_token:
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason="email_not_invited",
+            code="email_not_invited",
+            message="this email is not on the invite allowlist",
+            status_code=403,
+        )
+
+    invite_row = (
+        await db.execute(
+            select(InviteLink, User)
+            .join(User, User.id == InviteLink.created_by, isouter=True)
+            .where(InviteLink.token == body.invite_token)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).first()
+    invite = invite_row[0] if invite_row is not None else None
+    invite_creator = invite_row[1] if invite_row is not None else None
+    if invite is None:
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason="invalid_invite",
+            code="invalid_invite",
+            message="invite token not found",
+            status_code=403,
+        )
+    reason = _invite_validity_reason(invite, now, invite_creator)
+    if reason is not None:
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason=reason,
+            code="invalid_invite",
+            message=f"invite is {reason}",
+            status_code=403,
+        )
+    if invite.email is not None and invite.email.lower() != email:
+        await _reject_byok_signup(
+            request=request,
+            email=email,
+            password=password,
+            reason="invite_email_mismatch",
+            code="invite_email_mismatch",
+            message="this invite is bound to a different email",
+            status_code=403,
+        )
+    return allow, invite, invite.role or "member"
+
+
 async def _claim_password_reset_token(
     redis: Any,
     token_key: str,
@@ -696,117 +838,22 @@ async def signup_byok(
     # pending token is *not consumed* in either failure path so a legitimate
     # user who got the token via a different account can still finish signup
     # by changing the email.
-    existing = (
-        await db.execute(
-            select(User).where(User.email == email, User.deleted_at.is_(None))
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        verify_password(_DUMMY_PASSWORD_HASH, body.password)
-        await write_audit_isolated(
-            event_type="auth.signup.byok.fail",
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"reason": "email_taken_masked_as_invalid_token"},
-        )
-        raise _bad(
-            "invalid_verification_token",
-            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
-            400,
-        )
-
-    token_hash = verification_token_hash(token)
-    pending = (
-        await db.execute(
-            select(PendingApiKeyVerification)
-            .where(PendingApiKeyVerification.token_hash == token_hash)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-    now = datetime.now(timezone.utc)
-    if (
-        pending is None
-        or pending.consumed_at is not None
-        or ensure_utc(pending.expires_at) <= now
-    ):
-        verify_password(_DUMMY_PASSWORD_HASH, body.password)
-        await write_audit_isolated(
-            event_type="auth.signup.byok.fail",
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"reason": "invalid_verification_token"},
-        )
-        raise _bad(
-            "invalid_verification_token",
-            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
-            400,
-        )
-
-    allow = (
-        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
-    ).scalar_one_or_none()
-    invite: InviteLink | None = None
-    role = "member"
-
-    if not byok_settings.byok_signup_bypasses_allowlist and not allow:
-        if not body.invite_token:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            await write_audit_isolated(
-                event_type="auth.signup.byok.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "email_not_invited"},
-            )
-            raise _bad(
-                "email_not_invited",
-                "this email is not on the invite allowlist",
-                403,
-            )
-        invite_row = (
-            await db.execute(
-                select(InviteLink, User)
-                .join(User, User.id == InviteLink.created_by, isouter=True)
-                .where(InviteLink.token == body.invite_token)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).first()
-        invite = invite_row[0] if invite_row is not None else None
-        invite_creator = invite_row[1] if invite_row is not None else None
-        if invite is None:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            await write_audit_isolated(
-                event_type="auth.signup.byok.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "invalid_invite"},
-            )
-            raise _bad("invalid_invite", "invite token not found", 403)
-        reason = _invite_validity_reason(invite, now, invite_creator)
-        if reason is not None:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            await write_audit_isolated(
-                event_type="auth.signup.byok.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": reason},
-            )
-            raise _bad("invalid_invite", f"invite is {reason}", 403)
-        if invite.email is not None and invite.email.lower() != email:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            await write_audit_isolated(
-                event_type="auth.signup.byok.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "invite_email_mismatch"},
-            )
-            raise _bad(
-                "invite_email_mismatch",
-                "this invite is bound to a different email",
-                403,
-            )
-        role = invite.role or "member"
+    pending, now = await _validated_byok_pending(
+        db,
+        request=request,
+        email=email,
+        password=body.password,
+        token=token,
+    )
+    allow, invite, role = await _byok_signup_access(
+        db,
+        body=body,
+        request=request,
+        email=email,
+        password=body.password,
+        now=now,
+        bypasses_allowlist=byok_settings.byok_signup_bypasses_allowlist,
+    )
 
     user = User(
         email=email,

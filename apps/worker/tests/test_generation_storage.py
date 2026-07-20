@@ -34,6 +34,7 @@ from app.tasks import generation
 from app.tasks.generation_parts import (
     lifecycle,
     queue as generation_queue,
+    success as generation_success,
     workflow_hooks,
 )
 
@@ -338,38 +339,59 @@ async def test_cancel_after_upstream_result_aborts_before_local_finalize() -> No
 
 
 def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None:
-    source = inspect.getsource(generation.run_generation)
-    upstream_result = source.index('"cancelled after upstream result"')
-    postprocess = source.index("_postprocess_raw_generated_image(", upstream_result)
-    storage_guard = source.index('"cancelled before storage write"', postprocess)
-    storage_write = source.index("_write_generation_files(", storage_guard)
-    persistence_guard = source.index(
-        '"cancelled before generation persistence"',
+    orchestration = inspect.getsource(generation_success.finalize_generation_success)
+    validate = orchestration.index("_validate_result_and_publish_finalizing(")
+    postprocess = orchestration.index("_postprocess_generated_image(", validate)
+    storage = orchestration.index("_write_artifact_files(", postprocess)
+    persist = orchestration.index("_persist_generation_success(", storage)
+    assert validate < postprocess < storage < persist
+
+    validation_source = inspect.getsource(
+        generation_success._validate_result_and_publish_finalizing
+    )
+    assert '"cancelled after upstream result"' in validation_source
+    assert "_postprocess_raw_generated_image(" in inspect.getsource(
+        generation_success._postprocess_generated_image
+    )
+
+    storage_source = inspect.getsource(generation_success._write_artifact_files)
+    storage_guard = storage_source.index('"cancelled before storage write"')
+    storage_write = storage_source.index(
+        "_write_generation_files(",
+        storage_guard,
+    )
+    lease_guard = storage_source.rindex(
+        "_await_with_lease_guard(",
+        0,
         storage_write,
     )
-    attempt_fence = source.index(
-        "await _ensure_generation_attempt_current(",
+    assert storage_guard < lease_guard < storage_write
+
+    persistence_source = inspect.getsource(
+        generation_success._persist_generation_success
+    )
+    persistence_guard = persistence_source.index(
+        '"cancelled before generation persistence"'
+    )
+    attempt_fence = persistence_source.index(
+        "_ensure_generation_attempt_current(",
         persistence_guard,
     )
-    billing_guard = source.index(
+    billing_guard = persistence_source.index(
         '"cancelled before billing settlement"',
         attempt_fence,
     )
-    settle = source.index("await worker_billing.settle_generation(", billing_guard)
-    commit_guard = source.index('"cancelled before success commit"', settle)
-    commit = source.index("await session.commit()", commit_guard)
-
-    assert upstream_result < postprocess < storage_guard < storage_write
-    assert storage_write < persistence_guard < attempt_fence < billing_guard
-    assert billing_guard < settle < commit_guard < commit
-    assert (
-        "_await_with_lease_guard("
-        in source[
-            source.rindex(
-                "created_storage_keys =", 0, storage_write
-            ) : persistence_guard
-        ]
+    settle = persistence_source.index(
+        "worker_billing.settle_generation(",
+        billing_guard,
     )
+    commit_guard = persistence_source.index(
+        '"cancelled before success commit"',
+        settle,
+    )
+    commit = persistence_source.index("await session.commit()", commit_guard)
+    assert persistence_guard < attempt_fence < billing_guard
+    assert billing_guard < settle < commit_guard < commit
 
 
 def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
@@ -1805,17 +1827,28 @@ async def test_poster_workflow_hook_replaces_render_image_and_marks_ready() -> N
 
 
 def test_run_generation_records_workflows_before_billing_and_commit() -> None:
-    source = inspect.getsource(generation.run_generation)
-    model_hook = source.index("await _maybe_record_model_library_generate_image(")
-    poster_hook = source.index("await _maybe_record_poster_workflow_image(", model_hook)
-    style_hook = source.index(
-        "await _maybe_record_poster_style_library_generate_image(",
+    hook_source = inspect.getsource(generation_success._record_success_hooks)
+    model_hook = hook_source.index("_maybe_record_model_library_generate_image")
+    poster_hook = hook_source.index(
+        "_maybe_record_poster_workflow_image",
+        model_hook,
+    )
+    style_hook = hook_source.index(
+        "_maybe_record_poster_style_library_generate_image",
         poster_hook,
     )
-    settle = source.index("await worker_billing.settle_generation(", style_hook)
-    commit = source.index("await session.commit()", settle)
+    assert model_hook < poster_hook < style_hook
 
-    assert model_hook < poster_hook < style_hook < settle < commit
+    persistence_source = inspect.getsource(
+        generation_success._persist_generation_success
+    )
+    hooks = persistence_source.index("_record_success_hooks(")
+    settle = persistence_source.index(
+        "worker_billing.settle_generation(",
+        hooks,
+    )
+    commit = persistence_source.index("await session.commit()", settle)
+    assert hooks < settle < commit
 
 
 @pytest.mark.asyncio

@@ -342,25 +342,12 @@ export function TelegramPanel() {
         >
           {updateMut.isPending ? copy.state.saving : dirty ? "保存修改" : "无修改"}
         </Button>
-        {savedAt && !restartPrompt && (
-          <motion.span
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-1 type-caption text-success"
-          >
-            <Check className="w-3 h-3" /> {copy.state.saved}
-          </motion.span>
-        )}
-        {restartHint && (
-          <span className="inline-flex items-center gap-1 type-caption text-info">
-            <RotateCw className="w-3 h-3" /> {restartHint}
-          </span>
-        )}
-        {error && (
-          <span className="inline-flex items-center gap-1 type-caption text-danger">
-            <AlertCircle className="w-3 h-3" /> {error}
-          </span>
-        )}
+        <TelegramSaveFeedback
+          savedAt={savedAt}
+          restartPrompt={restartPrompt}
+          restartHint={restartHint}
+          error={error}
+        />
       </div>
 
       {/* 保存后弹窗：是否立即重启 bot */}
@@ -374,6 +361,42 @@ export function TelegramPanel() {
         )}
       </AnimatePresence>
     </section>
+  );
+}
+
+function TelegramSaveFeedback({
+  savedAt,
+  restartPrompt,
+  restartHint,
+  error,
+}: {
+  savedAt: number | null;
+  restartPrompt: boolean;
+  restartHint: string | null;
+  error: string | null;
+}) {
+  return (
+    <>
+      {savedAt && !restartPrompt && (
+        <motion.span
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="inline-flex items-center gap-1 type-caption text-success"
+        >
+          <Check className="w-3 h-3" /> {copy.state.saved}
+        </motion.span>
+      )}
+      {restartHint && (
+        <span className="inline-flex items-center gap-1 type-caption text-info">
+          <RotateCw className="w-3 h-3" /> {restartHint}
+        </span>
+      )}
+      {error && (
+        <span className="inline-flex items-center gap-1 type-caption text-danger">
+          <AlertCircle className="w-3 h-3" /> {error}
+        </span>
+      )}
+    </>
   );
 }
 

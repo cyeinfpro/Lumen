@@ -29,6 +29,10 @@ echo
 echo "==> python complexity budget"
 uv run python scripts/check_complexity.py
 
+echo
+echo "==> python architecture budget"
+uv run python scripts/check_architecture.py
+
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
        [ -x "apps/web/node_modules/.bin/tsc" ] &&

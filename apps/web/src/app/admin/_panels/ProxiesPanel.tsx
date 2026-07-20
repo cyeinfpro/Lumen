@@ -313,131 +313,278 @@ export function ProxiesPanel() {
       </div>
 
       {/* 工具栏 */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {!isEditing ? (
-          <>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={startEdit}
-              leftIcon={<Edit3 className="w-3.5 h-3.5" />}
-            >
-              编辑代理列表
-            </Button>
-            <Button
-              variant="secondary"
-              size="md"
-              onClick={onTestAll}
-              disabled={testAll.isPending || (q.data?.items ?? []).length === 0}
-              loading={testAll.isPending}
-              leftIcon={!testAll.isPending ? <Zap className="w-3.5 h-3.5" /> : undefined}
-            >
-              {testAll.isPending ? "全部测试中" : "全部测一遍"}
-            </Button>
-            <Button
-              variant="secondary"
-              size="md"
-              onClick={() => void q.refetch()}
-              leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
-            >
-              刷新
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={onSaveProxies}
-              disabled={updateProxiesMut.isPending}
-              loading={updateProxiesMut.isPending}
-              leftIcon={!updateProxiesMut.isPending ? <Save className="w-3.5 h-3.5" /> : undefined}
-            >
-              {updateProxiesMut.isPending ? copy.state.saving : "保存代理列表"}
-            </Button>
-            <Button
-              variant="secondary"
-              size="md"
-              onClick={cancelEdit}
-              disabled={updateProxiesMut.isPending}
-              leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
-            >
-              {copy.action.cancel}
-            </Button>
-            <Button
-              variant="secondary"
-              size="md"
-              onClick={addProxy}
-              leftIcon={<Plus className="w-3.5 h-3.5" />}
-            >
-              加一个代理
-            </Button>
-            {editError && (
-              <span className="inline-flex items-center gap-1 type-caption text-danger">
-                <AlertCircle className="w-3 h-3" /> {editError}
-              </span>
-            )}
-          </>
-        )}
-      </div>
+      <ProxyToolbar
+        isEditing={isEditing}
+        hasProxies={(q.data?.items ?? []).length > 0}
+        testingAll={testAll.isPending}
+        saving={updateProxiesMut.isPending}
+        editError={editError}
+        onStartEdit={startEdit}
+        onTestAll={() => void onTestAll()}
+        onRefresh={() => void q.refetch()}
+        onSave={() => void onSaveProxies()}
+        onCancel={cancelEdit}
+        onAdd={addProxy}
+      />
 
       {/* 列表（只读 / 编辑） */}
       <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
-        {q.isLoading ? (
-          <div className="p-6 space-y-3">
-            {[1, 2].map((i) => (
-              <div key={i} className="h-16 bg-white/5 rounded-[var(--radius-card)] animate-pulse" />
-            ))}
-          </div>
-        ) : q.isError ? (
-          <ErrorBlock
-            message={q.error?.message ?? "加载失败"}
-            onRetry={() => void q.refetch()}
-          />
-        ) : isEditing ? (
-          drafts!.length === 0 ? (
-            <EmptyBlock
-              title="还没有代理"
-              description="点「加一个代理」添加第一条。"
-            />
-          ) : (
-            <ul className="divide-y divide-white/5">
-              {drafts!.map((d, idx) => (
-                <ProxyEditRow
-                  key={d._key}
-                  draft={d}
-                  onChange={(patch) => updateDraft(idx, patch)}
-                  onDelete={() => removeDraft(idx)}
-                  confirmingDelete={confirmDeleteIdx === idx}
-                  onConfirmDelete={(v) => setConfirmDeleteIdx(v ? idx : null)}
-                />
-              ))}
-            </ul>
-          )
-        ) : (q.data?.items ?? []).length === 0 ? (
-          <EmptyBlock
-            title="代理池为空"
-            description="点「编辑代理列表」添加第一条。"
-          />
-        ) : (
-          <ul className="divide-y divide-white/5">
-            {(q.data?.items ?? []).map((p) => (
-              <ProxyViewRow
-                key={p.name}
-                proxy={p}
-                testResult={testResultOf[p.name]}
-                testing={testingName === p.name && testOne.isPending}
-                onTest={() => void onTestOne(p.name)}
-              />
-            ))}
-          </ul>
-        )}
+        <ProxyList
+          loading={q.isLoading}
+          error={q.isError ? q.error : null}
+          isEditing={isEditing}
+          drafts={drafts}
+          proxies={q.data?.items ?? []}
+          confirmDeleteIdx={confirmDeleteIdx}
+          testResultOf={testResultOf}
+          testingName={testingName}
+          testing={testOne.isPending}
+          onRetry={() => void q.refetch()}
+          onChange={updateDraft}
+          onDelete={removeDraft}
+          onConfirmDelete={setConfirmDeleteIdx}
+          onTest={(name) => void onTestOne(name)}
+        />
       </div>
 
       <p className="text-xs text-[var(--fg-2)] px-1">
         提示：测试只会发一个空请求验证代理通路，不会消耗 API 配额。
       </p>
     </section>
+  );
+}
+
+function ProxyToolbar({
+  isEditing,
+  hasProxies,
+  testingAll,
+  saving,
+  editError,
+  onStartEdit,
+  onTestAll,
+  onRefresh,
+  onSave,
+  onCancel,
+  onAdd,
+}: {
+  isEditing: boolean;
+  hasProxies: boolean;
+  testingAll: boolean;
+  saving: boolean;
+  editError: string | null;
+  onStartEdit: () => void;
+  onTestAll: () => void;
+  onRefresh: () => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onAdd: () => void;
+}) {
+  if (!isEditing) {
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button
+          variant="primary"
+          size="md"
+          onClick={onStartEdit}
+          leftIcon={<Edit3 className="w-3.5 h-3.5" />}
+        >
+          编辑代理列表
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
+          onClick={onTestAll}
+          disabled={testingAll || !hasProxies}
+          loading={testingAll}
+          leftIcon={!testingAll ? <Zap className="w-3.5 h-3.5" /> : undefined}
+        >
+          {testingAll ? "全部测试中" : "全部测一遍"}
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
+          onClick={onRefresh}
+          leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
+        >
+          刷新
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <Button
+        variant="primary"
+        size="md"
+        onClick={onSave}
+        disabled={saving}
+        loading={saving}
+        leftIcon={!saving ? <Save className="w-3.5 h-3.5" /> : undefined}
+      >
+        {saving ? copy.state.saving : "保存代理列表"}
+      </Button>
+      <Button
+        variant="secondary"
+        size="md"
+        onClick={onCancel}
+        disabled={saving}
+        leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
+      >
+        {copy.action.cancel}
+      </Button>
+      <Button
+        variant="secondary"
+        size="md"
+        onClick={onAdd}
+        leftIcon={<Plus className="w-3.5 h-3.5" />}
+      >
+        加一个代理
+      </Button>
+      {editError && (
+        <span className="inline-flex items-center gap-1 type-caption text-danger">
+          <AlertCircle className="w-3 h-3" /> {editError}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ProxyDraftList({
+  drafts,
+  confirmDeleteIdx,
+  onChange,
+  onDelete,
+  onConfirmDelete,
+}: {
+  drafts: Draft[];
+  confirmDeleteIdx: number | null;
+  onChange: (index: number, patch: Partial<Draft>) => void;
+  onDelete: (index: number) => void;
+  onConfirmDelete: (index: number | null) => void;
+}) {
+  if (drafts.length === 0) {
+    return (
+      <EmptyBlock
+        title="还没有代理"
+        description="点「加一个代理」添加第一条。"
+      />
+    );
+  }
+  return (
+    <ul className="divide-y divide-white/5">
+      {drafts.map((draft, index) => (
+        <ProxyEditRow
+          key={draft._key}
+          draft={draft}
+          onChange={(patch) => onChange(index, patch)}
+          onDelete={() => onDelete(index)}
+          confirmingDelete={confirmDeleteIdx === index}
+          onConfirmDelete={(value) => onConfirmDelete(value ? index : null)}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function ProxyReadList({
+  proxies,
+  testResultOf,
+  testingName,
+  testing,
+  onTest,
+}: {
+  proxies: ProxyHealthOut[];
+  testResultOf: Record<string, ProxyTestOut>;
+  testingName: string | null;
+  testing: boolean;
+  onTest: (name: string) => void;
+}) {
+  if (proxies.length === 0) {
+    return (
+      <EmptyBlock
+        title="代理池为空"
+        description="点「编辑代理列表」添加第一条。"
+      />
+    );
+  }
+  return (
+    <ul className="divide-y divide-white/5">
+      {proxies.map((proxy) => (
+        <ProxyViewRow
+          key={proxy.name}
+          proxy={proxy}
+          testResult={testResultOf[proxy.name]}
+          testing={testingName === proxy.name && testing}
+          onTest={() => onTest(proxy.name)}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function ProxyList({
+  loading,
+  error,
+  isEditing,
+  drafts,
+  proxies,
+  confirmDeleteIdx,
+  testResultOf,
+  testingName,
+  testing,
+  onRetry,
+  onChange,
+  onDelete,
+  onConfirmDelete,
+  onTest,
+}: {
+  loading: boolean;
+  error: Error | null;
+  isEditing: boolean;
+  drafts: Draft[] | null;
+  proxies: ProxyHealthOut[];
+  confirmDeleteIdx: number | null;
+  testResultOf: Record<string, ProxyTestOut>;
+  testingName: string | null;
+  testing: boolean;
+  onRetry: () => void;
+  onChange: (index: number, patch: Partial<Draft>) => void;
+  onDelete: (index: number) => void;
+  onConfirmDelete: (index: number | null) => void;
+  onTest: (name: string) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="p-6 space-y-3">
+        {[1, 2].map((index) => (
+          <div
+            key={index}
+            className="h-16 bg-white/5 rounded-[var(--radius-card)] animate-pulse"
+          />
+        ))}
+      </div>
+    );
+  }
+  if (error) return <ErrorBlock message={error.message || "加载失败"} onRetry={onRetry} />;
+  if (isEditing) {
+    return (
+      <ProxyDraftList
+        drafts={drafts ?? []}
+        confirmDeleteIdx={confirmDeleteIdx}
+        onChange={onChange}
+        onDelete={onDelete}
+        onConfirmDelete={onConfirmDelete}
+      />
+    );
+  }
+  return (
+    <ProxyReadList
+      proxies={proxies}
+      testResultOf={testResultOf}
+      testingName={testingName}
+      testing={testing}
+      onTest={onTest}
+    />
   );
 }
 

@@ -168,94 +168,204 @@ function MasterCard({
   onApprove: () => void;
 }) {
   const image = findImageById(workflow, master.image_id);
+  const presentation = masterCardPresentation(master);
+
+  return (
+    <li className="group relative">
+      <MasterCardMedia
+        image={image}
+        master={master}
+        presentation={presentation}
+        onPreview={onPreview}
+      />
+      <MasterCardMeta master={master} presentation={presentation} />
+      <MasterCardAction
+        approving={approving}
+        hasImage={Boolean(image)}
+        presentation={presentation}
+        onApprove={onApprove}
+      />
+    </li>
+  );
+}
+
+interface MasterCardPresentation {
+  buttonLabel: string;
+  isFailed: boolean;
+  isGenerating: boolean;
+  isReady: boolean;
+  isSelected: boolean;
+  statusLabel: string;
+}
+
+function masterCardPresentation(master: PosterMaster): MasterCardPresentation {
   const isGenerating = master.status === "generating";
   const isFailed = master.status === "failed";
   const isSelected = master.status === "selected";
   const isReady = master.status === "ready";
+  return {
+    buttonLabel: isSelected
+      ? "已选定"
+      : isGenerating
+        ? "生成中"
+        : "选定此版本",
+    isFailed,
+    isGenerating,
+    isReady,
+    isSelected,
+    statusLabel: isSelected
+      ? "已选"
+      : isReady
+        ? "可选"
+        : isFailed
+          ? "失败"
+          : "生成中",
+  };
+}
 
+function MasterCardMedia({
+  image,
+  master,
+  presentation,
+  onPreview,
+}: {
+  image?: BackendImageMeta;
+  master: PosterMaster;
+  presentation: MasterCardPresentation;
+  onPreview: (
+    image: BackendImageMeta,
+    list: BackendImageMeta[],
+    index: number,
+  ) => void;
+}) {
   return (
-    <li className="group relative">
-      <button
-        type="button"
-        onClick={() => {
-          if (image) onPreview(image, [image], 0);
-        }}
-        disabled={!image}
+    <button
+      type="button"
+      onClick={() => {
+        if (image) onPreview(image, [image], 0);
+      }}
+      disabled={!image}
+      className={cn(
+        "relative block aspect-square w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        presentation.isSelected &&
+          "ring-1 ring-inset ring-[var(--border-amber)]",
+      )}
+    >
+      {image ? (
+        <Image
+          src={imageSrc(image)}
+          alt={`母版候选 ${master.candidate_index}`}
+          fill
+          sizes="(max-width: 768px) 50vw, 260px"
+          unoptimized
+          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
+        />
+      ) : (
+        <MasterCardPlaceholder presentation={presentation} />
+      )}
+      <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
+        N°{String(master.candidate_index).padStart(2, "0")}
+      </span>
+      {presentation.isSelected ? (
+        <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
+          <Check className="h-3 w-3" />
+          已选定
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function MasterCardPlaceholder({
+  presentation,
+}: {
+  presentation: MasterCardPresentation;
+}) {
+  if (presentation.isGenerating) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+        <Loader2 className="h-5 w-5 animate-spin" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+          生成中
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+      <span
         className={cn(
-          "relative block aspect-square w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          isSelected && "ring-1 ring-inset ring-[var(--border-amber)]",
+          "font-mono text-[10px] uppercase tracking-[0.18em]",
+          presentation.isFailed
+            ? "text-[var(--danger)]"
+            : "text-[var(--fg-3)]",
         )}
       >
-        {image ? (
-          <Image
-            src={imageSrc(image)}
-            alt={`母版候选 ${master.candidate_index}`}
-            fill
-            sizes="(max-width: 768px) 50vw, 260px"
-            unoptimized
-            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
-          />
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
-            {isGenerating ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                  生成中
-                </span>
-              </>
-            ) : isFailed ? (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
-                生成失败
-              </span>
-            ) : (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                等待中
-              </span>
-            )}
-          </div>
+        {presentation.isFailed ? "生成失败" : "等待中"}
+      </span>
+    </div>
+  );
+}
+
+function MasterCardMeta({
+  master,
+  presentation,
+}: {
+  master: PosterMaster;
+  presentation: MasterCardPresentation;
+}) {
+  return (
+    <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
+      <p
+        className={cn(
+          "text-[15px] font-semibold leading-tight tracking-tight transition-colors",
+          presentation.isSelected
+            ? "text-[var(--amber-300)]"
+            : "text-[var(--fg-0)]",
         )}
+      >
+        候选 {master.candidate_index}
+      </p>
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {presentation.statusLabel}
+      </span>
+    </div>
+  );
+}
 
-        <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
-          N°{String(master.candidate_index).padStart(2, "0")}
-        </span>
-
-        {isSelected ? (
-          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
-            <Check className="h-3 w-3" />
-            已选定
-          </span>
-        ) : null}
-      </button>
-
-      <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
-        <p
-          className={cn(
-            "text-[15px] font-semibold leading-tight tracking-tight transition-colors",
-            isSelected ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
-          )}
-        >
-          候选 {master.candidate_index}
-        </p>
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          {isSelected ? "已选" : isReady ? "可选" : isFailed ? "失败" : "生成中"}
-        </span>
-      </div>
-
-      <div className="mt-3">
-        <Button
-          variant={isSelected ? "secondary" : "primary"}
-          fullWidth
-          disabled={!image || isGenerating || isFailed}
-          loading={approving && !isSelected && isReady}
-          onClick={onApprove}
-          leftIcon={
-            isSelected ? <Check className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />
-          }
-        >
-          {isSelected ? "已选定" : isGenerating ? "生成中" : "选定此版本"}
-        </Button>
-      </div>
-    </li>
+function MasterCardAction({
+  approving,
+  hasImage,
+  presentation,
+  onApprove,
+}: {
+  approving: boolean;
+  hasImage: boolean;
+  presentation: MasterCardPresentation;
+  onApprove: () => void;
+}) {
+  return (
+    <div className="mt-3">
+      <Button
+        variant={presentation.isSelected ? "secondary" : "primary"}
+        fullWidth
+        disabled={
+          !hasImage || presentation.isGenerating || presentation.isFailed
+        }
+        loading={
+          approving && !presentation.isSelected && presentation.isReady
+        }
+        onClick={onApprove}
+        leftIcon={
+          presentation.isSelected ? (
+            <Check className="h-4 w-4" />
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )
+        }
+      >
+        {presentation.buttonLabel}
+      </Button>
+    </div>
   );
 }

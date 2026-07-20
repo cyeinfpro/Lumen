@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from ..routes._showcase_shot_pool import ShotClass, ShotVariant, Template
+from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant, Template
 from .showcase_runtime import runtime as _runtime
 
 

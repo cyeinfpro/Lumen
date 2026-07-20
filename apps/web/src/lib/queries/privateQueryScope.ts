@@ -9,7 +9,7 @@ import {
 import {
   isUserScopedQueryKeyForUser,
   useUserQueryScope,
-} from "@/components/QueryProvider";
+} from "@/lib/queries/userScope";
 import { qk } from "./queryKeys";
 
 export { isUserScopedQueryKeyForUser };

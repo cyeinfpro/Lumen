@@ -10,6 +10,7 @@ GET /events?channels=task:abc,conv:xyz,user:me
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import json
 import logging
 import time
@@ -243,97 +244,157 @@ async def _validate_channels(
 ) -> list[str]:
     """Ensure every requested channel is owned by this user. Silently drop unknown
     formats. Raise 403 if a known channel belongs to someone else."""
-    parsed: list[tuple[str, str, str]] = []
-    conv_refs: set[str] = set()
-    task_refs: set[str] = set()
-    storyboard_refs: set[str] = set()
+    request = _parse_channel_request(channels, user_id)
+    ownership = await _load_channel_ownership(request, user_id, db)
+    return _authorized_channels(request.parsed, ownership)
 
+
+@dataclass
+class _ChannelRequest:
+    parsed: list[tuple[str, str, str]] = field(default_factory=list)
+    conversation_ids: set[str] = field(default_factory=set)
+    task_ids: set[str] = field(default_factory=set)
+    storyboard_ids: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _ChannelOwnership:
+    conversation_ids: set[str]
+    task_ids: set[str]
+    storyboard_ids: set[str]
+
+
+def _parse_channel(
+    raw: str,
+    user_id: str,
+) -> tuple[str, str, str] | None:
+    channel = raw.strip()
+    if not channel or ":" not in channel:
+        return None
+    prefix, _, ref = channel.partition(":")
+    if prefix not in {"user", "conv", "task", "storyboard"}:
+        return None
+    if prefix == "user" and ref != user_id:
+        raise _http("forbidden_channel", f"cannot subscribe to user:{ref}", 403)
+    return channel, prefix, ref
+
+
+def _parse_channel_request(channels: list[str], user_id: str) -> _ChannelRequest:
+    request = _ChannelRequest()
     for raw in channels:
-        ch = raw.strip()
-        if not ch or ":" not in ch:
+        parsed = _parse_channel(raw, user_id)
+        if parsed is None:
             continue
-        prefix, _, ref = ch.partition(":")
-        if prefix == "user":
-            if ref != user_id:
-                raise _http("forbidden_channel", f"cannot subscribe to user:{ref}", 403)
-            parsed.append((ch, prefix, ref))
-        elif prefix == "conv":
-            parsed.append((ch, prefix, ref))
-            conv_refs.add(ref)
-        elif prefix == "task":
-            parsed.append((ch, prefix, ref))
-            task_refs.add(ref)
-        elif prefix == "storyboard":
-            parsed.append((ch, prefix, ref))
-            storyboard_refs.add(ref)
-        else:
-            # unknown channel prefix — drop silently
-            continue
+        request.parsed.append(parsed)
+        _remember_channel_reference(request, parsed)
+    return request
 
-    owned_convs: set[str] = set()
-    if conv_refs:
+
+def _remember_channel_reference(
+    request: _ChannelRequest,
+    parsed: tuple[str, str, str],
+) -> None:
+    _channel, prefix, ref = parsed
+    if prefix == "conv":
+        request.conversation_ids.add(ref)
+    elif prefix == "task":
+        request.task_ids.add(ref)
+    elif prefix == "storyboard":
+        request.storyboard_ids.add(ref)
+
+
+async def _owned_conversation_ids(
+    db: AsyncSession,
+    conversation_ids: set[str],
+    user_id: str,
+) -> set[str]:
+    if not conversation_ids:
+        return set()
+    rows = await db.execute(
+        select(Conversation.id).where(
+            Conversation.id.in_(conversation_ids),
+            Conversation.user_id == user_id,
+            Conversation.deleted_at.is_(None),
+        )
+    )
+    return set(rows.scalars().all())
+
+
+async def _owned_task_ids(
+    db: AsyncSession,
+    task_ids: set[str],
+    user_id: str,
+) -> set[str]:
+    if not task_ids:
+        return set()
+    owned: set[str] = set()
+    for model in (Generation, Completion, VideoGeneration):
         rows = await db.execute(
-            select(Conversation.id).where(
-                Conversation.id.in_(conv_refs),
-                Conversation.user_id == user_id,
-                Conversation.deleted_at.is_(None),
+            select(model.id).where(
+                model.id.in_(task_ids),
+                model.user_id == user_id,
             )
         )
-        owned_convs = set(rows.scalars().all())
+        owned.update(rows.scalars().all())
+    return owned
 
-    owned_tasks: set[str] = set()
-    if task_refs:
-        gen_rows = await db.execute(
-            select(Generation.id).where(
-                Generation.id.in_(task_refs), Generation.user_id == user_id
-            )
+
+async def _owned_storyboard_ids(
+    db: AsyncSession,
+    storyboard_ids: set[str],
+    user_id: str,
+) -> set[str]:
+    if not storyboard_ids:
+        return set()
+    rows = await db.execute(
+        select(WorkflowRun.id).where(
+            WorkflowRun.id.in_(storyboard_ids),
+            WorkflowRun.user_id == user_id,
+            WorkflowRun.type == "storyboard",
+            WorkflowRun.deleted_at.is_(None),
         )
-        owned_tasks.update(gen_rows.scalars().all())
+    )
+    return set(rows.scalars().all())
 
-        completion_rows = await db.execute(
-            select(Completion.id).where(
-                Completion.id.in_(task_refs), Completion.user_id == user_id
-            )
-        )
-        owned_tasks.update(completion_rows.scalars().all())
 
-        video_rows = await db.execute(
-            select(VideoGeneration.id).where(
-                VideoGeneration.id.in_(task_refs),
-                VideoGeneration.user_id == user_id,
-            )
-        )
-        owned_tasks.update(video_rows.scalars().all())
+async def _load_channel_ownership(
+    request: _ChannelRequest,
+    user_id: str,
+    db: AsyncSession,
+) -> _ChannelOwnership:
+    conversation_ids = await _owned_conversation_ids(
+        db,
+        request.conversation_ids,
+        user_id,
+    )
+    task_ids = await _owned_task_ids(db, request.task_ids, user_id)
+    storyboard_ids = await _owned_storyboard_ids(
+        db,
+        request.storyboard_ids,
+        user_id,
+    )
+    return _ChannelOwnership(conversation_ids, task_ids, storyboard_ids)
 
-    owned_storyboards: set[str] = set()
-    if storyboard_refs:
-        storyboard_rows = await db.execute(
-            select(WorkflowRun.id).where(
-                WorkflowRun.id.in_(storyboard_refs),
-                WorkflowRun.user_id == user_id,
-                WorkflowRun.type == "storyboard",
-                WorkflowRun.deleted_at.is_(None),
-            )
-        )
-        owned_storyboards = set(storyboard_rows.scalars().all())
 
-    clean: list[str] = []
-    for ch, prefix, ref in parsed:
-        if prefix == "user":
-            clean.append(ch)
-        elif prefix == "conv":
-            if ref not in owned_convs:
-                raise _http("forbidden_channel", f"conv {ref} not owned", 403)
-            clean.append(ch)
-        elif prefix == "task":
-            if ref not in owned_tasks:
-                raise _http("forbidden_channel", f"task {ref} not owned", 403)
-            clean.append(ch)
-        elif prefix == "storyboard":
-            if ref not in owned_storyboards:
-                raise _http("forbidden_channel", f"storyboard {ref} not owned", 403)
-            clean.append(ch)
-    return clean
+def _authorized_channel(
+    parsed: tuple[str, str, str],
+    ownership: _ChannelOwnership,
+) -> str:
+    channel, prefix, ref = parsed
+    if prefix == "conv" and ref not in ownership.conversation_ids:
+        raise _http("forbidden_channel", f"conv {ref} not owned", 403)
+    if prefix == "task" and ref not in ownership.task_ids:
+        raise _http("forbidden_channel", f"task {ref} not owned", 403)
+    if prefix == "storyboard" and ref not in ownership.storyboard_ids:
+        raise _http("forbidden_channel", f"storyboard {ref} not owned", 403)
+    return channel
+
+
+def _authorized_channels(
+    parsed_channels: list[tuple[str, str, str]],
+    ownership: _ChannelOwnership,
+) -> list[str]:
+    return [_authorized_channel(parsed, ownership) for parsed in parsed_channels]
 
 
 def _compaction_bridge_channels(channels: list[str]) -> dict[str, str]:
@@ -525,6 +586,425 @@ async def _replay_connection_events(
         )
 
 
+@dataclass(frozen=True)
+class _ChannelSelection:
+    requested: list[str]
+    client_requested: list[str]
+    user_channel: str
+
+
+@dataclass
+class _EventStreamState:
+    request: Request
+    redis: Any
+    user_id: str
+    valid_channels: list[str]
+    replay_channels: set[str]
+    include_user_channel: bool
+    user_channel: str
+    stream_key: str
+    last_event_id: str | None
+    connection_slot: SseConnectionSlot | None
+    last_keepalive: float = field(default_factory=time.monotonic)
+    last_upstream: float = field(default_factory=time.monotonic)
+    pending_compaction: dict[str, tuple[float, dict]] = field(default_factory=dict)
+    replayed_sse_ids: set[str] = field(default_factory=set)
+
+
+def _channel_selection(channels: str, user_id: str) -> _ChannelSelection:
+    client_requested = list(
+        dict.fromkeys(c.strip() for c in channels.split(",") if c.strip())
+    )
+    user_channel = f"user:{user_id}"
+    requested = list(client_requested or [user_channel])
+    return _ChannelSelection(requested, client_requested, user_channel)
+
+
+def _validate_channel_limit(selection: _ChannelSelection) -> None:
+    requested = selection.requested
+    if len(requested) > MAX_SSE_CHANNELS:
+        raise _http(
+            "too_many_channels",
+            f"cannot subscribe to more than {MAX_SSE_CHANNELS} channels",
+            400,
+            {
+                "max_channels": MAX_SSE_CHANNELS,
+                "requested_count": len(selection.client_requested),
+                "effective_count": len(requested),
+            },
+        )
+
+
+def _replay_channel_selection(
+    valid: list[str],
+    selection: _ChannelSelection,
+) -> set[str]:
+    replay_requested_channels = set(valid)
+    if (
+        selection.client_requested
+        and selection.user_channel not in selection.client_requested
+    ):
+        replay_requested_channels.discard(selection.user_channel)
+    return replay_requested_channels
+
+
+async def _resolved_last_event_id(
+    redis: Any,
+    request: Request,
+    last_event_id_query: str | None,
+) -> str | None:
+    raw = request.headers.get("Last-Event-ID") or last_event_id_query
+    # Why: Last-Event-ID is attacker-controlled; an unsanitised value can
+    # advance XREAD's cursor past the entire backlog so the client silently
+    # misses real events. Require strict `ms-seq` shape and a sane age window
+    # measured with Redis server time, because Redis Stream IDs are minted by
+    # Redis and the API process clock may move independently.
+    now_ms = await _redis_time_ms(redis) if raw is not None else None
+    return _sanitize_last_event_id(
+        raw,
+        now_ms=now_ms,
+    )
+
+
+async def _event_stream_state(
+    request: Request,
+    user_id: str,
+    db: AsyncSession,
+    channels: str,
+    last_event_id_query: str | None,
+) -> _EventStreamState:
+    selection = _channel_selection(channels, user_id)
+    _validate_channel_limit(selection)
+    valid = await _validate_channels(selection.requested, user_id, db)
+    replay_channels = _replay_channel_selection(valid, selection)
+    redis = get_redis()
+    last_event_id = await _resolved_last_event_id(
+        redis,
+        request,
+        last_event_id_query,
+    )
+    connection_slot = await _acquire_sse_connection_slot(redis, user_id)
+    return _EventStreamState(
+        request=request,
+        redis=redis,
+        user_id=user_id,
+        valid_channels=valid,
+        replay_channels=replay_channels,
+        include_user_channel=selection.user_channel in replay_channels,
+        user_channel=selection.user_channel,
+        stream_key=f"{EVENTS_STREAM_PREFIX}{user_id}",
+        last_event_id=last_event_id,
+        connection_slot=connection_slot,
+    )
+
+
+async def _subscribe_pubsub(
+    pubsub: Any,
+    subscribed: list[str],
+    user_id: str,
+) -> None:
+    try:
+        await pubsub.subscribe(*subscribed)
+    except Exception:
+        logger.warning(
+            "sse pubsub subscribe failed user_id=%s channels=%d",
+            user_id,
+            len(subscribed),
+            exc_info=True,
+        )
+        raise
+
+
+async def _cleanup_pubsub(
+    state: _EventStreamState,
+    pubsub: Any,
+    subscribed: list[str],
+    *,
+    subscription_started: bool,
+) -> None:
+    if subscription_started:
+        try:
+            await pubsub.unsubscribe(*subscribed)
+        except Exception:
+            logger.warning("sse pubsub unsubscribe failed", exc_info=True)
+    await pubsub.aclose()
+    if state.connection_slot is not None:
+        await _release_sse_connection_slot(state.redis, state.connection_slot)
+
+
+def _expired_compaction_events(state: _EventStreamState) -> list[dict]:
+    now = time.monotonic()
+    expired = [
+        conversation_id
+        for conversation_id, (deadline, _event) in state.pending_compaction.items()
+        if deadline <= now
+    ]
+    return [
+        state.pending_compaction.pop(conversation_id)[1] for conversation_id in expired
+    ]
+
+
+def _pubsub_timeout(state: _EventStreamState) -> float:
+    if not state.pending_compaction:
+        return 1.0
+    next_deadline = min(
+        deadline for deadline, _event in state.pending_compaction.values()
+    )
+    return max(0.0, min(1.0, next_deadline - time.monotonic()))
+
+
+def _decoded_live_event(data: object) -> tuple[dict | None, str, object] | None:
+    data_text = _decode_pubsub_text(data)
+    if data_text is None:
+        return None
+    try:
+        parsed = json.loads(data_text)
+        event_name = parsed.get("event", "message")
+        payload = parsed.get("data", parsed)
+    except Exception:
+        return None, "message", {"raw": data_text}
+    return parsed, event_name, payload
+
+
+def _live_event_ids(parsed: dict | None) -> tuple[str | None, str | None]:
+    event_id = _normalize_recoverable_sse_id(
+        parsed.get("sse_id") if isinstance(parsed, dict) else None
+    )
+    envelope_event_id = _normalize_event_id(
+        parsed.get("event_id") if isinstance(parsed, dict) else None
+    )
+    return event_id, envelope_event_id
+
+
+def _payload_with_event_ids(
+    payload: object,
+    event_id: str | None,
+    envelope_event_id: str | None,
+) -> object:
+    if event_id is not None:
+        payload = _payload_with_sse_id(payload, event_id)
+    if envelope_event_id is None:
+        return payload
+    if not isinstance(payload, dict):
+        return {"data": payload, "event_id": envelope_event_id}
+    if "event_id" in payload:
+        return payload
+    return {**payload, "event_id": envelope_event_id}
+
+
+def _live_sse_event(
+    event_name: str,
+    payload: object,
+    event_id: str | None,
+) -> dict:
+    event = {
+        "event": event_name,
+        "data": json.dumps(payload, separators=(",", ":")),
+    }
+    if event_id is not None:
+        event["id"] = event_id
+    return event
+
+
+async def _standard_pubsub_events(
+    state: _EventStreamState,
+    message: dict,
+) -> list[dict]:
+    decoded = _decoded_live_event(message.get("data"))
+    if decoded is None:
+        return []
+    parsed, event_name, payload = decoded
+    event_id, envelope_event_id = _live_event_ids(parsed)
+    if event_id is None:
+        event_id = await _stream_id_for_pubsub_event(
+            state.redis,
+            stream_key=state.stream_key,
+            event_name=event_name,
+            envelope_event_id=envelope_event_id,
+            payload=payload,
+            channel=_decode_pubsub_text(message.get("channel")),
+        )
+    if event_id is not None and event_id in state.replayed_sse_ids:
+        return []
+    payload = _payload_with_event_ids(payload, event_id, envelope_event_id)
+    state.last_upstream = time.monotonic()
+    return [_live_sse_event(event_name, payload, event_id)]
+
+
+def _parsed_sse_payload(event: dict) -> dict | None:
+    try:
+        payload = json.loads(event["data"])
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _persisted_compaction_event(
+    state: _EventStreamState,
+    event: dict,
+    payload: dict | None,
+    public_channel: str | None,
+) -> tuple[dict, str | None]:
+    if payload is None:
+        return event, None
+    event_id = await _stream_id_for_pubsub_event(
+        state.redis,
+        stream_key=state.stream_key,
+        event_name=_COMPACTION_EVENT,
+        envelope_event_id=_normalize_event_id(payload.get("event_id")),
+        payload=payload,
+        channel=public_channel,
+    )
+    if not event_id:
+        return event, event_id
+    payload = _payload_with_sse_id(payload, event_id)
+    return {
+        "id": event_id,
+        "event": _COMPACTION_EVENT,
+        "data": json.dumps(payload, separators=(",", ":")),
+    }, event_id
+
+
+def _compaction_message(
+    message: dict,
+) -> tuple[str, dict] | None:
+    conversation_id = _compaction_conv_id(message.get("channel"))
+    data_text = _decode_pubsub_text(message.get("data"))
+    if not conversation_id or not data_text:
+        return None
+    event = _format_compaction_sse(
+        data_text,
+        expected_conv_id=conversation_id,
+    )
+    if event is None:
+        return None
+    return conversation_id, event
+
+
+async def _compaction_pubsub_events(
+    state: _EventStreamState,
+    message: dict,
+    bridge_channels: dict[str, str],
+) -> list[dict]:
+    decoded = _compaction_message(message)
+    if decoded is None:
+        return []
+    conversation_id, event = decoded
+    payload = _parsed_sse_payload(event)
+    channel_text = _decode_pubsub_text(message.get("channel"))
+    public_channel = bridge_channels.get(channel_text) if channel_text else None
+    event, event_id = await _persisted_compaction_event(
+        state,
+        event,
+        payload,
+        public_channel,
+    )
+    if event_id is not None and event_id in state.replayed_sse_ids:
+        return []
+    phase = payload.get("phase") if payload is not None else None
+    if phase == "started":
+        state.pending_compaction[conversation_id] = (
+            time.monotonic() + _COMPACTION_MERGE_WINDOW_SECONDS,
+            event,
+        )
+        return []
+    if phase in {"progress", "completed"}:
+        state.pending_compaction.pop(conversation_id, None)
+    state.last_upstream = time.monotonic()
+    return [event]
+
+
+async def _pubsub_events(
+    state: _EventStreamState,
+    message: dict,
+    bridge_channels: dict[str, str],
+) -> list[dict]:
+    if _is_compaction_channel(message.get("channel"), bridge_channels):
+        return await _compaction_pubsub_events(state, message, bridge_channels)
+    return await _standard_pubsub_events(state, message)
+
+
+async def _heartbeat_events(state: _EventStreamState) -> list[dict]:
+    now = time.monotonic()
+    events: list[dict] = []
+    if now - state.last_keepalive >= _KEEPALIVE_INTERVAL_SECONDS:
+        state.last_keepalive = now
+        if state.connection_slot is not None:
+            await _refresh_sse_connection_slot(state.redis, state.connection_slot)
+        events.append({"event": "keepalive", "data": "{}"})
+    if now - state.last_upstream >= _IDLE_HEARTBEAT_INTERVAL_SECONDS:
+        state.last_upstream = now
+        events.append(
+            {
+                "event": "idle",
+                "data": json.dumps(
+                    {"type": "idle", "ts": int(time.time())},
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return events
+
+
+async def _live_events(
+    state: _EventStreamState,
+    pubsub: Any,
+    bridge_channels: dict[str, str],
+) -> AsyncIterator[dict]:
+    # A disconnect only closes the subscription. Task cancellation remains an
+    # explicit API action so temporary network loss does not kill paid work.
+    while not await state.request.is_disconnected():
+        for event in _expired_compaction_events(state):
+            yield event
+        message = await pubsub.get_message(
+            ignore_subscribe_messages=True,
+            timeout=_pubsub_timeout(state),
+        )
+        if message is not None:
+            for event in await _pubsub_events(state, message, bridge_channels):
+                yield event
+        for event in await _heartbeat_events(state):
+            yield event
+
+
+async def _event_stream(state: _EventStreamState) -> AsyncIterator[dict]:
+    # Subscribe before taking the replay high-water mark. Messages published
+    # during replay stay buffered in PubSub and are deduplicated by stream id.
+    pubsub = state.redis.pubsub()
+    bridge_channels = _compaction_bridge_channels(state.valid_channels)
+    subscribed = [*state.valid_channels, *bridge_channels.keys()]
+    subscription_started = False
+    try:
+        await _subscribe_pubsub(pubsub, subscribed, state.user_id)
+        subscription_started = True
+        continue_with_live_events = True
+        async for event in _replay_connection_events(
+            state.redis,
+            stream_key=state.stream_key,
+            last_event_id=state.last_event_id,
+            requested_channels=state.replay_channels,
+            include_user_channel=state.include_user_channel,
+            user_channel=state.user_channel,
+            user_id=state.user_id,
+            replayed_sse_ids=state.replayed_sse_ids,
+        ):
+            yield event
+            if event.get("event") == "replay_truncated":
+                continue_with_live_events = False
+        if continue_with_live_events:
+            async for event in _live_events(state, pubsub, bridge_channels):
+                yield event
+    except asyncio.CancelledError:
+        raise
+    finally:
+        await _cleanup_pubsub(
+            state,
+            pubsub,
+            subscribed,
+            subscription_started=subscription_started,
+        )
+
+
 @router.get("/events")
 async def events(
     request: Request,
@@ -533,303 +1013,11 @@ async def events(
     channels: str = Query(default=""),
     last_event_id_query: str | None = Query(default=None, alias="last_event_id"),
 ) -> EventSourceResponse:
-    client_requested = list(
-        dict.fromkeys(c.strip() for c in channels.split(",") if c.strip())
+    state = await _event_stream_state(
+        request,
+        user.id,
+        db,
+        channels,
+        last_event_id_query,
     )
-    user_channel = f"user:{user.id}"
-    requested = list(client_requested or [user_channel])
-    if len(requested) > MAX_SSE_CHANNELS:
-        raise _http(
-            "too_many_channels",
-            f"cannot subscribe to more than {MAX_SSE_CHANNELS} channels",
-            400,
-            {
-                "max_channels": MAX_SSE_CHANNELS,
-                "requested_count": len(client_requested),
-                "effective_count": len(requested),
-            },
-        )
-    valid = await _validate_channels(requested, user.id, db)
-    replay_requested_channels = set(valid)
-    if client_requested and user_channel not in client_requested:
-        replay_requested_channels.discard(user_channel)
-    include_user_channel = user_channel in replay_requested_channels
-
-    redis = get_redis()
-    last_event_id = request.headers.get("Last-Event-ID") or last_event_id_query
-    # Why: Last-Event-ID is attacker-controlled; an unsanitised value can
-    # advance XREAD's cursor past the entire backlog so the client silently
-    # misses real events. Require strict `ms-seq` shape and a sane age window
-    # measured with Redis server time, because Redis Stream IDs are minted by
-    # Redis and the API process clock may move independently.
-    last_event_id_now_ms = (
-        await _redis_time_ms(redis) if last_event_id is not None else None
-    )
-    last_event_id = _sanitize_last_event_id(
-        last_event_id,
-        now_ms=last_event_id_now_ms,
-    )
-    stream_key = f"{EVENTS_STREAM_PREFIX}{user.id}"
-    connection_slot_key = await _acquire_sse_connection_slot(redis, user.id)
-
-    async def gen() -> AsyncIterator[dict]:
-        slot_released = False
-
-        async def release_slot_once() -> None:
-            nonlocal slot_released
-            if connection_slot_key is None or slot_released:
-                return
-            slot_released = True
-            await _release_sse_connection_slot(redis, connection_slot_key)
-
-        # Subscribe before capturing the replay boundary so every publish after
-        # this point is either replayed up to the boundary or remains buffered
-        # for the live loop.
-        pubsub = redis.pubsub()
-        bridge_channels = _compaction_bridge_channels(valid)
-        subscribed = [*valid, *bridge_channels.keys()]
-        try:
-            await pubsub.subscribe(*subscribed)
-        except Exception:
-            logger.warning(
-                "sse pubsub subscribe failed user_id=%s channels=%d",
-                user.id,
-                len(subscribed),
-                exc_info=True,
-            )
-            await pubsub.aclose()
-            await release_slot_once()
-            raise
-
-        last_keepalive = time.monotonic()
-        last_upstream = time.monotonic()
-        pending_compaction_started: dict[str, tuple[float, dict]] = {}
-        replayed_sse_ids: set[str] = set()
-        try:
-            # Replay from the per-user stream only through the snapshot taken
-            # after subscribe. PubSub messages for that interval can therefore
-            # arrive again below; `replayed_sse_ids` suppresses that duplicate.
-            # GEN-P0-7: `last_event_id` 必须是之前 XREAD 返回的原生 stream ID
-            # (`ms-seq`)，这样 XREAD 从它严格之后继续；绝不本地生成假 ID。
-            continue_with_live_events = True
-            async for event in _replay_connection_events(
-                redis,
-                stream_key=stream_key,
-                last_event_id=last_event_id,
-                requested_channels=replay_requested_channels,
-                include_user_channel=include_user_channel,
-                user_channel=user_channel,
-                user_id=user.id,
-                replayed_sse_ids=replayed_sse_ids,
-            ):
-                yield event
-                continue_with_live_events = (
-                    event.get("event") != "replay_truncated"
-                )
-
-            # Keep the PubSub lifecycle inside try/finally:
-            # - client disconnects (is_disconnected) break into cleanup;
-            # - cancellation (for example ASGI shutdown or timeout) cleans up
-            #   and re-raises instead of being swallowed.
-            #
-            # image-stability-hardening §P2 invariant：客户端断开 **不可** 写 task cancel key。
-            # 浏览器关页面、4G/5G 切换、移动端 App 后台都属于"暂时失联"，但生图任务往往
-            # 已花了几十秒上游算力——若 SSE 断开就杀任务，用户重连后什么都没拿到等于沉没成本。
-            # cancel 必须显式：POST /tasks/generations/{id}/cancel（见 routes/tasks.py）。
-            # worker 端 _is_cancelled 仅读 Redis cancel key，本路由只做 pubsub 订阅，二者解耦。
-            # A replay_truncated event advances Last-Event-ID and closes this
-            # connection. The reconnect continues from that cursor before any
-            # live PubSub handoff, so captured backlog cannot be skipped.
-            while continue_with_live_events:
-                if await request.is_disconnected():
-                    # 客户端已断开（浏览器关闭 / nginx 切断），主动退出 generator；
-                    # finally 会负责 unsubscribe + close。
-                    break
-
-                now = time.monotonic()
-                expired_started = [
-                    conv_id
-                    for conv_id, (
-                        deadline,
-                        _event,
-                    ) in pending_compaction_started.items()
-                    if deadline <= now
-                ]
-                for conv_id in expired_started:
-                    _deadline, event = pending_compaction_started.pop(conv_id)
-                    yield event
-
-                # Why: default 1.0s instead of 0.25s — at 0.25s every idle
-                # SSE connection wakes 4× per second just to spin the loop,
-                # which scales poorly with many subscribers. A 1-second
-                # baseline still satisfies our keep-alive cadence; when
-                # `pending_compaction_started` carries a tighter deadline,
-                # narrow the timeout dynamically.
-                timeout = 1.0
-                if pending_compaction_started:
-                    next_deadline = min(
-                        deadline
-                        for deadline, _event in pending_compaction_started.values()
-                    )
-                    timeout = max(0.0, min(timeout, next_deadline - time.monotonic()))
-
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=timeout
-                )
-                if msg is not None:
-                    data = msg.get("data")
-                    channel = msg.get("channel")
-                    if _is_compaction_channel(channel, bridge_channels):
-                        data_text = _decode_pubsub_text(data)
-                        compaction_conv_id = _compaction_conv_id(channel)
-                        if data_text and compaction_conv_id:
-                            out = _format_compaction_sse(
-                                data_text,
-                                expected_conv_id=compaction_conv_id,
-                            )
-                            if out is not None:
-                                try:
-                                    payload = json.loads(out["data"])
-                                    phase = payload.get("phase")
-                                except Exception:
-                                    payload = None
-                                    phase = None
-                                channel_text = _decode_pubsub_text(channel)
-                                public_channel = (
-                                    bridge_channels.get(channel_text)
-                                    if channel_text
-                                    else None
-                                )
-                                event_id: str | None = None
-                                if isinstance(payload, dict):
-                                    event_id = await _stream_id_for_pubsub_event(
-                                        redis,
-                                        stream_key=stream_key,
-                                        event_name=_COMPACTION_EVENT,
-                                        envelope_event_id=_normalize_event_id(
-                                            payload.get("event_id")
-                                        ),
-                                        payload=payload,
-                                        channel=public_channel,
-                                    )
-                                    if isinstance(event_id, str) and event_id:
-                                        payload = _payload_with_sse_id(
-                                            payload, event_id
-                                        )
-                                        out = {
-                                            "id": event_id,
-                                            "event": _COMPACTION_EVENT,
-                                            "data": json.dumps(
-                                                payload, separators=(",", ":")
-                                            ),
-                                        }
-                                if (
-                                    event_id is not None
-                                    and event_id in replayed_sse_ids
-                                ):
-                                    continue
-                                if phase == "started":
-                                    pending_compaction_started[compaction_conv_id] = (
-                                        time.monotonic()
-                                        + _COMPACTION_MERGE_WINDOW_SECONDS,
-                                        out,
-                                    )
-                                else:
-                                    if phase in {"progress", "completed"}:
-                                        pending_compaction_started.pop(
-                                            compaction_conv_id,
-                                            None,
-                                        )
-                                    # 任何 upstream 数据都要刷新 idle 计时
-                                    last_upstream = time.monotonic()
-                                    yield out
-                        continue
-
-                    if isinstance(data, (bytes, bytearray)):
-                        data = data.decode("utf-8", errors="replace")
-                    if isinstance(data, str):
-                        try:
-                            parsed = json.loads(data)
-                            ev_name = parsed.get("event", "message")
-                            payload = parsed.get("data", parsed)
-                        except Exception:
-                            parsed = None
-                            ev_name = "message"
-                            payload = {"raw": data}
-                        # GEN-P0-7: publisher 在 XADD 之后把 stream msg_id 写进 envelope.sse_id
-                        # 再 PUBLISH。这里只透传 Redis Stream 形态的 id，避免浏览器
-                        # 把 live/dlq 等不可回放 id 当成 Last-Event-ID。
-                        event_id = _normalize_recoverable_sse_id(
-                            parsed.get("sse_id") if isinstance(parsed, dict) else None
-                        )
-                        envelope_event_id = _normalize_event_id(
-                            parsed.get("event_id") if isinstance(parsed, dict) else None
-                        )
-                        channel_text = _decode_pubsub_text(channel)
-                        if event_id is None:
-                            event_id = await _stream_id_for_pubsub_event(
-                                redis,
-                                stream_key=stream_key,
-                                event_name=ev_name,
-                                envelope_event_id=envelope_event_id,
-                                payload=payload,
-                                channel=channel_text,
-                            )
-                        if event_id is not None and event_id in replayed_sse_ids:
-                            continue
-                        # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
-                        if event_id is not None:
-                            payload = _payload_with_sse_id(payload, event_id)
-                        if envelope_event_id is not None:
-                            if isinstance(payload, dict):
-                                if "event_id" not in payload:
-                                    payload = {**payload, "event_id": envelope_event_id}
-                            else:
-                                payload = {
-                                    "data": payload,
-                                    "event_id": envelope_event_id,
-                                }
-                        out = {
-                            "event": ev_name,
-                            "data": json.dumps(payload, separators=(",", ":")),
-                        }
-                        if event_id is not None:
-                            out["id"] = event_id
-                        # 真实的 upstream 业务事件，刷新 idle 计时
-                        last_upstream = time.monotonic()
-                        yield out
-
-                # 注释级 keepalive，每 15s 一次（防 nginx idle 关闭、保活 TCP）
-                now = time.monotonic()
-                if now - last_keepalive >= _KEEPALIVE_INTERVAL_SECONDS:
-                    last_keepalive = now
-                    if connection_slot_key is not None:
-                        await _refresh_sse_connection_slot(redis, connection_slot_key)
-                    yield {"event": "keepalive", "data": "{}"}
-
-                # idle 心跳：60s 内 upstream 无任何数据时，发一个 JSON `idle` 事件，
-                # 让前端能区分 “在线但空闲” 与 “在线且有业务流”，
-                # 也方便观察 nginx buffering 异常（前端能收到 keepalive 但收不到 idle 不应发生）。
-                if now - last_upstream >= _IDLE_HEARTBEAT_INTERVAL_SECONDS:
-                    last_upstream = now
-                    yield {
-                        "event": "idle",
-                        "data": json.dumps(
-                            {"type": "idle", "ts": int(time.time())},
-                            separators=(",", ":"),
-                        ),
-                    }
-        except asyncio.CancelledError:
-            # 不要 swallow：必须先走 finally 清理 pubsub，再把取消信号 reraise。
-            raise
-        finally:
-            # Why: pubsub holds an underlying redis connection; ensure it is
-            # released even on cancel/exception so we don't leak per-client.
-            try:
-                await pubsub.unsubscribe(*subscribed)
-            except Exception:
-                logger.warning("sse pubsub unsubscribe failed", exc_info=True)
-            await pubsub.aclose()
-            await release_slot_once()
-
-    return EventSourceResponse(gen())
+    return EventSourceResponse(_event_stream(state))

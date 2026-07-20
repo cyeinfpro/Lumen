@@ -66,6 +66,7 @@ from . import (
 from . import (
     volcano_asset_dispatch as _dispatch_parts,
 )
+from .volcano_asset_runtime import VolcanoAssetRuntimeContext
 from .volcano_assets_parts.receipts import (
     AIGC_GROUP_TYPE as _AIGC_GROUP_TYPE,
     LEGACY_SUCCESS_RECEIPT_EVENT as _LEGACY_SUCCESS_RECEIPT_EVENT,  # noqa: F401
@@ -84,6 +85,11 @@ from .volcano_assets_parts.receipts import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_CONTEXT = VolcanoAssetRuntimeContext(globals().__getitem__)
+_action_parts.install_runtime(_RUNTIME_CONTEXT)
+_create_parts.install_runtime(_RUNTIME_CONTEXT)
+_dispatch_parts.install_runtime(_RUNTIME_CONTEXT)
 
 _REFERENCE_TOKEN_TTL = timedelta(hours=24)
 _JOB_NAME = "process_volcano_asset_operation"

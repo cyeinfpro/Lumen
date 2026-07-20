@@ -81,16 +81,24 @@ interface FormState {
   password: string; // "" 表示保留旧密码
 }
 
+function backendFor(cfg: StorageConfigOut | undefined): Backend {
+  return cfg?.backend === "smb" ? "smb" : "local";
+}
+
+function localRootFor(cfg: StorageConfigOut | undefined): string {
+  return cfg?.local?.root || cfg?.status?.target || DEFAULT_LOCAL_ROOT;
+}
+
+function smbPortFor(cfg: StorageConfigOut | undefined): string {
+  return cfg?.smb?.port ? String(cfg.smb.port) : "";
+}
+
 function deriveInitialForm(cfg: StorageConfigOut | undefined): FormState {
-  // backend 为空字符串（host 还没初始化）时默认本地
-  const backendRaw = cfg?.backend;
-  const backend: Backend = backendRaw === "smb" ? "smb" : "local";
   return {
-    backend,
-    localRoot:
-      cfg?.local?.root || cfg?.status?.target || DEFAULT_LOCAL_ROOT,
+    backend: backendFor(cfg),
+    localRoot: localRootFor(cfg),
     host: cfg?.smb?.host ?? "",
-    port: cfg?.smb?.port ? String(cfg.smb.port) : "",
+    port: smbPortFor(cfg),
     share: cfg?.smb?.share ?? "",
     subpath: cfg?.smb?.subpath ?? "",
     username: cfg?.smb?.username ?? "",
@@ -535,6 +543,183 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
 // 状态卡
 // ————————————————————————————————————————————
 
+type StorageTone = "ok" | "warning" | "pending";
+
+function storageTone(
+  applying: boolean,
+  status: StorageConfigOut["status"],
+): StorageTone {
+  if (applying) return "pending";
+  if (status?.disabled) return "warning";
+  return status?.mounted ? "ok" : "warning";
+}
+
+function storageToneClasses(tone: StorageTone): string {
+  switch (tone) {
+    case "ok":
+      return "border-success-border bg-success-soft text-success";
+    case "warning":
+      return "border-warning-border bg-warning-soft text-warning";
+    default:
+      return "border-info-border bg-info-soft text-info";
+  }
+}
+
+function storageHeadLine(
+  applying: boolean,
+  status: StorageConfigOut["status"],
+): string {
+  if (applying) return "正在应用…";
+  if (!status) return "host 还未上报状态";
+  if (status.disabled) return "已强制回退到本地默认路径";
+  return status.mounted ? "存储已就绪" : "存储未挂载";
+}
+
+function storageModeLabel(backend: StorageConfigOut["backend"]): string {
+  if (backend === "smb") return "SMB";
+  if (backend === "local") return "本机目录";
+  return "未配置";
+}
+
+function StorageToneIcon({ tone }: { tone: StorageTone }) {
+  if (tone === "ok") return <CheckCircle2 className="h-4 w-4" />;
+  if (tone === "warning") return <AlertTriangle className="h-4 w-4" />;
+  return <Loader2 className="h-4 w-4 animate-spin" />;
+}
+
+function StorageStatusHeader({
+  cfg,
+  applying,
+  tone,
+}: {
+  cfg: StorageConfigOut;
+  applying: boolean;
+  tone: StorageTone;
+}) {
+  const status = cfg.status;
+  return (
+    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+      <div className="flex min-w-0 items-start gap-3">
+        <div
+          className={cn(
+            "flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
+            storageToneClasses(tone),
+          )}
+        >
+          <StorageToneIcon tone={tone} />
+        </div>
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-[var(--fg-0)]">
+              {storageHeadLine(applying, status)}
+            </span>
+            <span
+              className={cn(
+                "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
+                storageToneClasses(tone),
+              )}
+            >
+              {storageModeLabel(cfg.backend)}
+            </span>
+            {status?.disabled && (
+              <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
+                禁用 flag 已生效
+              </span>
+            )}
+          </div>
+          {status && (
+            <div className="text-xs leading-5 text-[var(--fg-1)]">
+              target{" "}
+              <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
+                {status.target || "—"}
+              </code>{" "}
+              · fstype{" "}
+              <span className="font-mono text-[var(--fg-0)]">
+                {status.fstype || "—"}
+              </span>
+              {status.source && (
+                <>
+                  {" "}
+                  · source{" "}
+                  <span className="font-mono break-all text-[var(--fg-0)]">
+                    {status.source}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2 text-[11px]">
+        {status?.updated_at != null && (
+          <Badge tone="muted">更新 {formatTs(status.updated_at)}</Badge>
+        )}
+        {cfg.last_apply && (
+          <Badge tone={applyStatusTone(cfg.last_apply.status)}>
+            上次应用 {applyStatusLabel(cfg.last_apply.status)}
+          </Badge>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function applyStatusTone(
+  status: "ok" | "fail" | "pending",
+): "ok" | "fail" | "info" {
+  if (status === "ok") return "ok";
+  if (status === "fail") return "fail";
+  return "info";
+}
+
+function ApplyActivityIcon({ status }: { status: "ok" | "fail" | "pending" }) {
+  if (status === "ok") {
+    return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
+  }
+  if (status === "fail") {
+    return <XCircle className="h-3.5 w-3.5 text-danger" />;
+  }
+  return <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />;
+}
+
+function TestActivityIcon({ status }: { status: "ok" | "fail" }) {
+  return status === "ok" ? (
+    <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+  ) : (
+    <XCircle className="h-3.5 w-3.5 text-danger" />
+  );
+}
+
+function StorageActivity({
+  lastApply,
+  lastTest,
+}: {
+  lastApply: StorageConfigOut["last_apply"];
+  lastTest: StorageConfigOut["last_test"];
+}) {
+  if (!lastApply?.message && !lastTest) return null;
+  return (
+    <div className="mt-4 grid gap-3 md:grid-cols-2">
+      {lastApply?.message && (
+        <SubLine
+          icon={<ApplyActivityIcon status={lastApply.status} />}
+          label="上次应用"
+          detail={lastApply.message}
+          ts={lastApply.finished_at || lastApply.started_at}
+        />
+      )}
+      {lastTest && (
+        <SubLine
+          icon={<TestActivityIcon status={lastTest.status} />}
+          label="上次测试"
+          detail={lastTest.message}
+          ts={lastTest.tested_at}
+        />
+      )}
+    </div>
+  );
+}
+
 function StatusCard({
   cfg,
   applying,
@@ -542,41 +727,7 @@ function StatusCard({
   cfg: StorageConfigOut;
   applying: boolean;
 }) {
-  const status = cfg.status;
-  const lastApply = cfg.last_apply;
-  const lastTest = cfg.last_test;
-
-  // 模式判定：applying > status.disabled > status.mounted
-  const tone = applying
-    ? "pending"
-    : status?.disabled
-      ? "warning"
-      : status?.mounted
-        ? "ok"
-        : "warning";
-
-  const toneClasses: Record<typeof tone, string> = {
-    ok: "border-success-border bg-success-soft text-success",
-    warning: "border-warning-border bg-warning-soft text-warning",
-    pending: "border-info-border bg-info-soft text-info",
-  };
-
-  const headLine = applying
-    ? "正在应用…"
-    : status == null
-      ? "host 还未上报状态"
-      : status.disabled
-        ? "已强制回退到本地默认路径"
-        : status.mounted
-          ? "存储已就绪"
-          : "存储未挂载";
-
-  const modeLabel =
-    cfg.backend === "smb"
-      ? "SMB"
-      : cfg.backend === "local"
-        ? "本机目录"
-        : "未配置";
+  const tone = storageTone(applying, cfg.status);
 
   return (
     <div
@@ -585,124 +736,8 @@ function StatusCard({
         "border-[var(--border)]",
       )}
     >
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <div
-            className={cn(
-              "flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
-              tone === "ok"
-                ? "border-success-border bg-success-soft text-success"
-                : tone === "warning"
-                  ? "border-warning-border bg-warning-soft text-warning"
-                  : "border-info-border bg-info-soft text-info",
-            )}
-          >
-            {tone === "ok" ? (
-              <CheckCircle2 className="h-4 w-4" />
-            ) : tone === "warning" ? (
-              <AlertTriangle className="h-4 w-4" />
-            ) : (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            )}
-          </div>
-          <div className="min-w-0 space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium text-[var(--fg-0)]">
-                {headLine}
-              </span>
-              <span
-                className={cn(
-                  "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
-                  toneClasses[tone],
-                )}
-              >
-                {modeLabel}
-              </span>
-              {status?.disabled && (
-                <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
-                  禁用 flag 已生效
-                </span>
-              )}
-            </div>
-            {status && (
-              <div className="text-xs leading-5 text-[var(--fg-1)]">
-                target{" "}
-                <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
-                  {status.target || "—"}
-                </code>{" "}
-                · fstype{" "}
-                <span className="font-mono text-[var(--fg-0)]">
-                  {status.fstype || "—"}
-                </span>
-                {status.source && (
-                  <>
-                    {" "}
-                    · source{" "}
-                    <span className="font-mono break-all text-[var(--fg-0)]">
-                      {status.source}
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2 text-[11px]">
-          {status?.updated_at != null && (
-            <Badge tone="muted">
-              更新 {formatTs(status.updated_at)}
-            </Badge>
-          )}
-          {lastApply && (
-            <Badge
-              tone={
-                lastApply.status === "ok"
-                  ? "ok"
-                  : lastApply.status === "fail"
-                    ? "fail"
-                    : "info"
-              }
-            >
-              上次应用 {applyStatusLabel(lastApply.status)}
-            </Badge>
-          )}
-        </div>
-      </div>
-
-      {(lastApply?.message || lastTest) && (
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {lastApply?.message && (
-            <SubLine
-              icon={
-                lastApply.status === "ok" ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-                ) : lastApply.status === "fail" ? (
-                  <XCircle className="h-3.5 w-3.5 text-danger" />
-                ) : (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />
-                )
-              }
-              label="上次应用"
-              detail={lastApply.message}
-              ts={lastApply.finished_at || lastApply.started_at}
-            />
-          )}
-          {lastTest && (
-            <SubLine
-              icon={
-                lastTest.status === "ok" ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-                ) : (
-                  <XCircle className="h-3.5 w-3.5 text-danger" />
-                )
-              }
-              label="上次测试"
-              detail={lastTest.message}
-              ts={lastTest.tested_at}
-            />
-          )}
-        </div>
-      )}
+      <StorageStatusHeader cfg={cfg} applying={applying} tone={tone} />
+      <StorageActivity lastApply={cfg.last_apply} lastTest={cfg.last_test} />
     </div>
   );
 }

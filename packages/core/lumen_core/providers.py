@@ -412,70 +412,95 @@ def _parse_proxy_alias_string(
     return values[0][1] if values else None
 
 
-def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefinition:
+def _provider_name(item: dict[str, Any], index: int) -> str:
     name = item.get("name")
     if not isinstance(name, str) or not name.strip():
-        name = f"provider-{index}"
-    base_url = item.get("base_url", "")
-    if not isinstance(base_url, str) or not base_url.strip():
-        raise ValueError(f"provider {name}: base_url is required")
-    enabled = _parse_bool(item.get("enabled"), default=True, field="enabled")
+        return f"provider-{index}"
+    return name.strip()
+
+
+def _provider_api_key(
+    item: dict[str, Any],
+    *,
+    provider_name: str,
+    enabled: bool,
+) -> str:
     api_key = item.get("api_key", "")
     if not isinstance(api_key, str):
-        raise ValueError(f"provider {name}: api_key must be a string")
-    if enabled and not api_key.strip():
-        raise ValueError(f"provider {name}: api_key is required")
-    priority = _parse_priority(item.get("priority", 0))
-    weight = _parse_weight(item.get("weight", 1))
-    purposes = normalize_provider_purposes(item.get("purposes"))
-    rate_limit_raw = item.get("image_rate_limit")
-    image_rate_limit: str | None = None
-    if isinstance(rate_limit_raw, str) and rate_limit_raw.strip():
-        image_rate_limit = rate_limit_raw.strip()
-    quota_raw = item.get("image_daily_quota")
-    image_daily_quota: int | None = None
-    if isinstance(quota_raw, (int, str)) and str(quota_raw).strip():
-        try:
-            quota_int = int(quota_raw)
-            if quota_int > 0:
-                image_daily_quota = quota_int
-        except (TypeError, ValueError):
-            image_daily_quota = None
-    proxy_name = _parse_optional_str(item.get("proxy") or item.get("proxy_name"))
+        raise ValueError(f"provider {provider_name}: api_key must be a string")
+    api_key = api_key.strip()
+    if enabled and not api_key:
+        raise ValueError(f"provider {provider_name}: api_key is required")
+    return api_key
+
+
+def _positive_optional_int(raw: Any) -> int | None:
+    if not isinstance(raw, (int, str)) or not str(raw).strip():
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _image_jobs_endpoint(item: dict[str, Any]) -> tuple[str, bool]:
     raw_endpoint = item.get("image_jobs_endpoint")
-    if isinstance(raw_endpoint, str):
-        normalized_endpoint = raw_endpoint.strip().lower()
-    else:
-        normalized_endpoint = "auto"
-    if normalized_endpoint not in IMAGE_JOBS_ENDPOINT_VALUES:
-        normalized_endpoint = "auto"
+    endpoint = raw_endpoint.strip().lower() if isinstance(raw_endpoint, str) else "auto"
+    if endpoint not in IMAGE_JOBS_ENDPOINT_VALUES:
+        endpoint = "auto"
     raw_lock = item.get("image_jobs_endpoint_lock", False)
     parsed_lock = _parse_optional_bool(raw_lock)
     if raw_lock not in (None, "") and parsed_lock is None:
         raise ValueError("image_jobs_endpoint_lock must be a boolean")
-    if parsed_lock and normalized_endpoint == "auto":
+    if parsed_lock and endpoint == "auto":
         raise ValueError(
             "image_jobs_endpoint_lock requires image_jobs_endpoint to be responses or generations"
         )
-    image_jobs_endpoint_lock = bool(parsed_lock)
-    raw_base = item.get("image_jobs_base_url")
-    image_jobs_base_url = ""
-    if isinstance(raw_base, str):
-        candidate = raw_base.strip().rstrip("/")
-        if candidate:
-            image_jobs_base_url = candidate
+    return endpoint, bool(parsed_lock)
+
+
+def _normalized_optional_base_url(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().rstrip("/")
+
+
+def _image_concurrency(raw: Any) -> int:
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefinition:
+    name = _provider_name(item, index)
+    base_url = item.get("base_url", "")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ValueError(f"provider {name}: base_url is required")
+    enabled = _parse_bool(item.get("enabled"), default=True, field="enabled")
+    api_key = _provider_api_key(item, provider_name=name, enabled=enabled)
+    priority = _parse_priority(item.get("priority", 0))
+    weight = _parse_weight(item.get("weight", 1))
+    purposes = normalize_provider_purposes(item.get("purposes"))
+    rate_limit_raw = item.get("image_rate_limit")
+    image_rate_limit = (
+        rate_limit_raw.strip()
+        if isinstance(rate_limit_raw, str) and rate_limit_raw.strip()
+        else None
+    )
+    image_daily_quota = _positive_optional_int(item.get("image_daily_quota"))
+    proxy_name = _parse_optional_str(item.get("proxy") or item.get("proxy_name"))
+    normalized_endpoint, image_jobs_endpoint_lock = _image_jobs_endpoint(item)
+    image_jobs_base_url = _normalized_optional_base_url(item.get("image_jobs_base_url"))
     image_edit_input_transport = normalize_image_edit_input_transport(
         item.get("image_edit_input_transport")
     )
-    raw_conc = item.get("image_concurrency", 1)
-    try:
-        image_concurrency = max(1, int(raw_conc))
-    except (TypeError, ValueError):
-        image_concurrency = 1
+    image_concurrency = _image_concurrency(item.get("image_concurrency", 1))
     return ProviderDefinition(
-        name=name.strip(),
+        name=name,
         base_url=base_url.strip().rstrip("/"),
-        api_key=api_key.strip(),
+        api_key=api_key,
         priority=priority,
         weight=weight,
         enabled=enabled,
@@ -1035,11 +1060,9 @@ def _copy_known_hosts_snapshot(
     try:
         copied = _copy_file_descriptor(source_fd, snapshot_fd)
         final_stat = os.fstat(source_fd)
-        if (
-            copied != source_stat.st_size
-            or _known_hosts_stat_signature(final_stat)
-            != _known_hosts_stat_signature(source_stat)
-        ):
+        if copied != source_stat.st_size or _known_hosts_stat_signature(
+            final_stat
+        ) != _known_hosts_stat_signature(source_stat):
             raise _known_hosts_file_error(
                 proxy,
                 path,
@@ -1212,133 +1235,191 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
 
 
+def _running_ssh_tunnel(key: str) -> _SshTunnel | None:
+    tunnel = _SSH_TUNNELS.get(key)
+    if tunnel is None or tunnel.process.returncode is not None:
+        return None
+    return tunnel
+
+
+async def _close_stale_ssh_tunnels(
+    proxy: ProviderProxyDefinition,
+    current_key: str,
+) -> None:
+    for old_key, tunnel in list(_SSH_TUNNELS.items()):
+        if old_key == current_key or not old_key.startswith(f"{proxy.name}\x1f"):
+            continue
+        _SSH_TUNNELS.pop(old_key, None)
+        await _terminate_process(tunnel.process)
+
+
+def _ssh_tunnel_command(
+    ssh_bin: str,
+    proxy: ProviderProxyDefinition,
+    *,
+    local_port: int,
+    known_hosts_path: str,
+) -> list[str]:
+    target = f"{proxy.username}@{proxy.host}" if proxy.username else proxy.host
+    command = [
+        ssh_bin,
+        "-N",
+        "-D",
+        f"127.0.0.1:{local_port}",
+        "-p",
+        str(proxy.port),
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_path}",
+        "-o",
+        f"GlobalKnownHostsFile={os.devnull}",
+        "-o",
+        "UpdateHostkeys=no",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]
+    if proxy.password:
+        command.extend(
+            [
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "PasswordAuthentication=yes",
+                "-o",
+                "KbdInteractiveAuthentication=yes",
+                "-o",
+                "PreferredAuthentications=password,keyboard-interactive,publickey",
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "PasswordAuthentication=no",
+            ]
+        )
+    if proxy.private_key_path:
+        command.extend(["-i", proxy.private_key_path])
+    command.extend(["--", target])
+    return command
+
+
+def _ssh_password_command(
+    command: list[str],
+    proxy: ProviderProxyDefinition,
+) -> tuple[list[str], dict[str, str] | None, str | None, str | None]:
+    if not proxy.password:
+        return command, None, None, None
+    password_file = _write_secret_file(proxy.password)
+    sshpass_bin = shutil.which("sshpass")
+    if sshpass_bin:
+        return (
+            [sshpass_bin, "-f", password_file, *command],
+            os.environ.copy(),
+            None,
+            password_file,
+        )
+    askpass_path = _write_ssh_askpass_helper()
+    env = os.environ.copy()
+    env["SSH_ASKPASS"] = askpass_path
+    env["SSH_ASKPASS_REQUIRE"] = "force"
+    env.setdefault("DISPLAY", "localhost:0")
+    env["LUMEN_SSH_PASSWORD_FILE"] = password_file
+    return command, env, askpass_path, password_file
+
+
+async def _wait_for_ssh_tunnel(
+    proc: asyncio.subprocess.Process,
+    local_port: int,
+) -> tuple[str | None, str]:
+    for _ in range(_SSH_TUNNEL_READY_CHECKS):
+        if proc.returncode is not None:
+            stderr = await _read_process_stderr(proc)
+            return None, f"exited with {proc.returncode}: {stderr}".strip()
+        if await _local_port_accepts(local_port):
+            return f"socks5h://127.0.0.1:{local_port}", ""
+        await asyncio.sleep(0.1)
+    stderr = await _read_process_stderr(proc)
+    return None, f"timed out waiting for local SOCKS port: {stderr}".strip()
+
+
+async def _start_ssh_tunnel_attempt(
+    proxy: ProviderProxyDefinition,
+    *,
+    ssh_bin: str,
+    key: str,
+) -> tuple[str | None, str]:
+    (
+        known_hosts_path,
+        temporary_known_hosts_path,
+    ) = await _prepare_ssh_host_key_verification(proxy)
+    proc: asyncio.subprocess.Process | None = None
+    tunnel_started = False
+    askpass_path = None
+    password_file = None
+    try:
+        local_port = _free_local_port()
+        command = _ssh_tunnel_command(
+            ssh_bin,
+            proxy,
+            local_port=local_port,
+            known_hosts_path=known_hosts_path,
+        )
+        command, env, askpass_path, password_file = _ssh_password_command(
+            command,
+            proxy,
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        url, error = await _wait_for_ssh_tunnel(proc, local_port)
+        if url is not None:
+            _SSH_TUNNELS[key] = _SshTunnel(url=url, process=proc)
+            tunnel_started = True
+        return url, error
+    finally:
+        if proc is not None and not tunnel_started:
+            await _terminate_process(proc)
+        _unlink_quietly(askpass_path)
+        _unlink_quietly(password_file)
+        _unlink_quietly(temporary_known_hosts_path)
+
+
 async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
     ssh_bin = shutil.which("ssh")
     if not ssh_bin:
         raise RuntimeError("ssh binary not found; cannot start ssh proxy")
     key = _ssh_tunnel_key(proxy)
-    existing = _SSH_TUNNELS.get(key)
-    if existing and existing.process.returncode is None:
+    existing = _running_ssh_tunnel(key)
+    if existing is not None:
         return existing.url
 
     async with _SSH_TUNNEL_LOCK:
-        existing = _SSH_TUNNELS.get(key)
-        if existing and existing.process.returncode is None:
+        existing = _running_ssh_tunnel(key)
+        if existing is not None:
             return existing.url
-        for old_key, tunnel in list(_SSH_TUNNELS.items()):
-            if old_key == key:
-                continue
-            if old_key.startswith(f"{proxy.name}\x1f"):
-                _SSH_TUNNELS.pop(old_key, None)
-                await _terminate_process(tunnel.process)
+        await _close_stale_ssh_tunnels(proxy, key)
 
         last_error = ""
         for _attempt in range(_SSH_TUNNEL_START_ATTEMPTS):
-            (
-                known_hosts_path,
-                temporary_known_hosts_path,
-            ) = await _prepare_ssh_host_key_verification(proxy)
-            proc: asyncio.subprocess.Process | None = None
-            tunnel_started = False
-            askpass_path = None
-            password_file = None
-            try:
-                local_port = _free_local_port()
-                target = (
-                    f"{proxy.username}@{proxy.host}" if proxy.username else proxy.host
-                )
-                cmd = [
-                    ssh_bin,
-                    "-N",
-                    "-D",
-                    f"127.0.0.1:{local_port}",
-                    "-p",
-                    str(proxy.port),
-                    "-o",
-                    "ExitOnForwardFailure=yes",
-                    "-o",
-                    "StrictHostKeyChecking=yes",
-                    "-o",
-                    f"UserKnownHostsFile={known_hosts_path}",
-                    "-o",
-                    f"GlobalKnownHostsFile={os.devnull}",
-                    "-o",
-                    "UpdateHostkeys=no",
-                    "-o",
-                    "ServerAliveInterval=30",
-                    "-o",
-                    "ServerAliveCountMax=3",
-                ]
-                if proxy.password:
-                    cmd.extend(
-                        [
-                            "-o",
-                            "BatchMode=no",
-                            "-o",
-                            "PasswordAuthentication=yes",
-                            "-o",
-                            "KbdInteractiveAuthentication=yes",
-                            "-o",
-                            "PreferredAuthentications=password,keyboard-interactive,publickey",
-                        ]
-                    )
-                else:
-                    cmd.extend(
-                        [
-                            "-o",
-                            "BatchMode=yes",
-                            "-o",
-                            "PasswordAuthentication=no",
-                        ]
-                    )
-                if proxy.private_key_path:
-                    cmd.extend(["-i", proxy.private_key_path])
-                cmd.extend(["--", target])
-
-                env = None
-                sshpass_bin = shutil.which("sshpass") if proxy.password else None
-                if proxy.password:
-                    password_file = _write_secret_file(proxy.password)
-                if proxy.password and sshpass_bin and password_file:
-                    cmd = [sshpass_bin, "-f", password_file, *cmd]
-                    env = os.environ.copy()
-                elif proxy.password:
-                    askpass_path = _write_ssh_askpass_helper()
-                    env = os.environ.copy()
-                    env["SSH_ASKPASS"] = askpass_path
-                    env["SSH_ASKPASS_REQUIRE"] = "force"
-                    env.setdefault("DISPLAY", "localhost:0")
-                    env["LUMEN_SSH_PASSWORD_FILE"] = str(password_file)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-                for _ in range(_SSH_TUNNEL_READY_CHECKS):
-                    if proc.returncode is not None:
-                        stderr = await _read_process_stderr(proc)
-                        last_error = f"exited with {proc.returncode}: {stderr}".strip()
-                        break
-                    if await _local_port_accepts(local_port):
-                        url = f"socks5h://127.0.0.1:{local_port}"
-                        _SSH_TUNNELS[key] = _SshTunnel(url=url, process=proc)
-                        tunnel_started = True
-                        return url
-                    await asyncio.sleep(0.1)
-                else:
-                    stderr = await _read_process_stderr(proc)
-                    last_error = (
-                        f"timed out waiting for local SOCKS port: {stderr}".strip()
-                    )
-            finally:
-                if proc is not None and not tunnel_started:
-                    await _terminate_process(proc)
-                _unlink_quietly(askpass_path)
-                _unlink_quietly(password_file)
-                _unlink_quietly(temporary_known_hosts_path)
+            url, last_error = await _start_ssh_tunnel_attempt(
+                proxy,
+                ssh_bin=ssh_bin,
+                key=key,
+            )
+            if url is not None:
+                return url
 
         raise RuntimeError(
             f"ssh proxy {proxy.name} failed to start after "

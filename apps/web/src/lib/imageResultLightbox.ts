@@ -4,7 +4,7 @@ import type {
   LightboxItem,
   LightboxParamBag,
   LightboxProviderAttempt,
-} from "@/components/ui/lightbox/types";
+} from "@/lib/lightbox/types";
 import { imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
 import type { GeneratedImage, Generation } from "@/lib/types";
 
@@ -100,58 +100,138 @@ function firstMediaUrl(...candidates: unknown[]): string | null {
   return null;
 }
 
+type ExplainabilityValues = {
+  diagnostics: LightboxParamBag | null;
+  revisedPrompt: string | null;
+  requestedParams: LightboxParamBag | null;
+  effectiveParams: LightboxParamBag | null;
+  attempts: LightboxProviderAttempt[] | null;
+};
+
+function diagnosticsFor(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): LightboxParamBag | null {
+  return (
+    asRecord(gen.diagnostics) ??
+    asRecord(image.diagnostics) ??
+    recordObject(metadata, ["generation_diagnostics", "diagnostics"])
+  );
+}
+
+function revisedPromptFor(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): string | null {
+  return (
+    gen.revised_prompt ??
+    image.revised_prompt ??
+    recordText(metadata, ["revised_prompt", "model_revised_prompt"])
+  );
+}
+
+function requestedParamsFor(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): LightboxParamBag | null {
+  return (
+    gen.requested_params ??
+    gen.request_params ??
+    image.requested_params ??
+    image.request_params ??
+    recordObject(metadata, ["requested_params", "request_params"])
+  );
+}
+
+function effectiveParamsFor(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): LightboxParamBag | null {
+  return (
+    gen.effective_params ??
+    gen.actual_params ??
+    image.effective_params ??
+    image.actual_params ??
+    recordObject(metadata, ["effective_params", "actual_params"])
+  );
+}
+
+function providerAttemptsFor(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): LightboxProviderAttempt[] | null {
+  return (
+    gen.provider_attempts ??
+    image.provider_attempts ??
+    recordArray<LightboxProviderAttempt>(metadata, ["provider_attempts"])
+  );
+}
+
+function explainabilityValues(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): ExplainabilityValues {
+  return {
+    diagnostics: diagnosticsFor(gen, image, metadata),
+    revisedPrompt: revisedPromptFor(gen, image, metadata),
+    requestedParams: requestedParamsFor(gen, image, metadata),
+    effectiveParams: effectiveParamsFor(gen, image, metadata),
+    attempts: providerAttemptsFor(gen, image, metadata),
+  };
+}
+
+function addMetadataIfMissing(
+  metadata: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  if (value && metadata[key] == null) metadata[key] = value;
+}
+
 function explainabilityMetadata(
   gen: Generation,
   image: GeneratedImage,
 ): Record<string, unknown> {
   const metadata = { ...(image.metadata_jsonb ?? {}) };
-  const diagnostics: LightboxParamBag | null =
-    asRecord(gen.diagnostics) ??
-    asRecord(image.diagnostics) ??
-    recordObject(metadata, ["generation_diagnostics", "diagnostics"]);
-  const revisedPrompt =
-    gen.revised_prompt ??
-    image.revised_prompt ??
-    recordText(metadata, ["revised_prompt", "model_revised_prompt"]);
-  const requestedParams =
-    gen.requested_params ??
-    gen.request_params ??
-    image.requested_params ??
-    image.request_params ??
-    recordObject(metadata, ["requested_params", "request_params"]);
-  const effectiveParams =
-    gen.effective_params ??
-    gen.actual_params ??
-    image.effective_params ??
-    image.actual_params ??
-    recordObject(metadata, ["effective_params", "actual_params"]);
-  const attempts =
-    gen.provider_attempts ??
-    image.provider_attempts ??
-    recordArray(metadata, ["provider_attempts"]);
-
-  if (diagnostics && metadata.generation_diagnostics == null) {
-    metadata.generation_diagnostics = diagnostics;
+  const values = explainabilityValues(gen, image, metadata);
+  const fields: Array<[string, unknown]> = [
+    ["generation_diagnostics", values.diagnostics],
+    ["revised_prompt", values.revisedPrompt],
+    ["requested_params", values.requestedParams],
+    ["effective_params", values.effectiveParams],
+    ["provider_attempts", values.attempts],
+  ];
+  for (const [key, value] of fields) {
+    addMetadataIfMissing(metadata, key, value);
   }
-  if (revisedPrompt && metadata.revised_prompt == null) {
-    metadata.revised_prompt = revisedPrompt;
-  }
-  if (requestedParams && metadata.requested_params == null) {
-    metadata.requested_params = requestedParams;
-  }
-  if (effectiveParams && metadata.effective_params == null) {
-    metadata.effective_params = effectiveParams;
-  }
-  if (attempts && metadata.provider_attempts == null) {
-    metadata.provider_attempts = attempts;
-  }
-  if (image.parent_image_id && metadata.parent_image_id == null) {
-    metadata.parent_image_id = image.parent_image_id;
-  }
-  if (image.from_generation_id && metadata.from_generation_id == null) {
-    metadata.from_generation_id = image.from_generation_id;
-  }
+  addMetadataIfMissing(metadata, "parent_image_id", image.parent_image_id);
+  addMetadataIfMissing(metadata, "from_generation_id", image.from_generation_id);
   return metadata;
+}
+
+function lightboxRelationships(
+  gen: Generation,
+  image: GeneratedImage,
+  metadata: Record<string, unknown>,
+): {
+  parentGenerationId: string | null;
+  fromGenerationId: string;
+} {
+  return {
+    parentGenerationId:
+      gen.parent_generation_id ??
+      recordText(metadata, ["parent_generation_id", "parent_task_id"]),
+    fromGenerationId:
+      image.from_generation_id ??
+      recordText(metadata, ["from_generation_id", "generation_id"]) ??
+      gen.id,
+  };
 }
 
 function actionSourceFor(
@@ -207,34 +287,12 @@ export function imageResultToLightboxItem(
   const metadata = explainabilityMetadata(gen, image);
   const { source, sourceType, sourceId } = sourceFor(metadata, options);
   const media = mediaUrls(image, options);
-  const diagnostics: LightboxParamBag | null =
-    asRecord(gen.diagnostics) ??
-    asRecord(image.diagnostics) ??
-    recordObject(metadata, ["generation_diagnostics", "diagnostics"]);
-  const requestedParams =
-    gen.requested_params ??
-    gen.request_params ??
-    image.requested_params ??
-    image.request_params ??
-    recordObject(metadata, ["requested_params", "request_params"]);
-  const effectiveParams =
-    gen.effective_params ??
-    gen.actual_params ??
-    image.effective_params ??
-    image.actual_params ??
-    recordObject(metadata, ["effective_params", "actual_params"]);
-  const providerAttempts: LightboxProviderAttempt[] | undefined =
-    gen.provider_attempts ??
-    image.provider_attempts ??
-    recordArray<LightboxProviderAttempt>(metadata, ["provider_attempts"]) ??
-    undefined;
-  const parentGenerationId =
-    gen.parent_generation_id ??
-    recordText(metadata, ["parent_generation_id", "parent_task_id"]);
-  const fromGenerationId =
-    image.from_generation_id ??
-    recordText(metadata, ["from_generation_id", "generation_id"]) ??
-    gen.id;
+  const values = explainabilityValues(gen, image, metadata);
+  const { parentGenerationId, fromGenerationId } = lightboxRelationships(
+    gen,
+    image,
+    metadata,
+  );
 
   return {
     id: image.id,
@@ -250,15 +308,13 @@ export function imageResultToLightboxItem(
     type: options.type ?? "generated-image",
     created_at: isoFromMaybeMs(options.createdAt ?? gen.finished_at ?? gen.started_at),
     revised_prompt:
-      gen.revised_prompt ??
-      image.revised_prompt ??
-      recordText(metadata, ["revised_prompt", "model_revised_prompt"]),
-    requested_params: requestedParams,
-    request_params: requestedParams,
-    effective_params: effectiveParams,
-    actual_params: effectiveParams,
-    diagnostics,
-    provider_attempts: providerAttempts,
+      values.revisedPrompt,
+    requested_params: values.requestedParams,
+    request_params: values.requestedParams,
+    effective_params: values.effectiveParams,
+    actual_params: values.effectiveParams,
+    diagnostics: values.diagnostics,
+    provider_attempts: values.attempts ?? undefined,
     source,
     source_type: sourceType,
     source_id: sourceId,

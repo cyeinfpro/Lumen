@@ -51,45 +51,19 @@ import {
   userMemoryQueryKeys,
   useUserQueryScope,
 } from "@/components/QueryProvider";
+import {
+  formatTime,
+  isEmptyFirstRun,
+  removeEditValue,
+  TYPE_OPTIONS,
+  typeLabel,
+} from "./memoryPageUtils";
 
-const TYPE_OPTIONS: Array<{ value: MemoryType; label: string }> = [
-  { value: "profile", label: "身份" },
-  { value: "preference", label: "偏好" },
-  { value: "avoid", label: "禁忌" },
-  { value: "project", label: "项目" },
-];
-
-function typeLabel(type: MemoryType | string): string {
-  return TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
-}
-
-function formatTime(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function isEmptyFirstRun({
-  settingsPending,
-  memoriesPending,
-  memoryCount,
-  onboardingSeen,
-}: {
-  settingsPending: boolean;
-  memoriesPending: boolean;
-  memoryCount: number;
-  onboardingSeen: number;
-}): boolean {
-  return (
-    !settingsPending &&
-    !memoriesPending &&
-    memoryCount === 0 &&
-    (onboardingSeen & 1) === 0
-  );
-}
+type MemorySettingsData = Awaited<ReturnType<typeof getMemorySettings>>;
+type MemoryTimelineEvent = Awaited<
+  ReturnType<typeof listMemoryTimeline>
+>["items"][number];
+type MemoryPatchBody = Parameters<typeof patchMemory>[1];
 
 export default function MemorySettingsPage() {
   const qc = useQueryClient();
@@ -306,444 +280,892 @@ export default function MemorySettingsPage() {
           </Link>
         </header>
 
-        {!embeddingAvailable && (
-          <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />
-              <div>
-                <div className="font-medium text-warning">记忆未启用</div>
-                <p className="mt-1 type-caption leading-5 text-warning/80">
-                  需先在管理员后台为某个 provider 勾选 “embedding”；写入、检索、抽取均依赖向量。
-                </p>
-              </div>
-            </div>
-            <Link
-              href="/admin"
-              className="inline-flex min-h-11 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 type-caption font-medium text-warning transition-colors hover:bg-warning/20"
-            >
-              去管理员后台 →
-            </Link>
-          </section>
-        )}
-
-        <section className="grid gap-3 md:grid-cols-3">
-          <SettingToggle
-            icon={<Brain className="h-4 w-4" />}
-            title="启用记忆"
-            description="开启后 Lumen 会从对话中学习稳定偏好,并在新会话里复用。"
-            checked={!Boolean(settingsQ.data?.disabled)}
-            disabled={settingsMut.isPending}
-            onChange={(checked) => requestEnableMemory(checked)}
-          />
-          <SettingToggle
-            icon={<Pause className="h-4 w-4" />}
-            title="暂停学习"
-            description="不写入新记忆,已有记忆仍会参与回答。"
-            checked={Boolean(settingsQ.data?.paused)}
-            disabled={settingsMut.isPending || !embeddingAvailable || Boolean(settingsQ.data?.disabled)}
-            onChange={(checked) => settingsMut.mutate({ paused: checked })}
-          />
-          <SettingToggle
-            icon={<ShieldOff className="h-4 w-4" />}
-            title="主动确认偏好"
-            description="强偏好命中时,偶尔让模型先确认。"
-            checked={Boolean(settingsQ.data?.confirmation_enabled)}
-            disabled={settingsMut.isPending || !embeddingAvailable || Boolean(settingsQ.data?.disabled)}
-            onChange={(checked) =>
-              settingsMut.mutate({ confirmation_enabled: checked })
-            }
-          />
-        </section>
-
-        {emptyFirstRun && (
-          <section className="rounded-[var(--radius-card)] border border-accent-border bg-accent-soft p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <div className="type-body-sm font-medium text-[var(--fg-0)]">
-                  Lumen 会从对话里学到稳定偏好
-                </div>
-                <p className="mt-1 type-body-sm text-[var(--fg-1)]">
-                  也可以在这里手动添加，比如“偏好简洁回答”或“不要使用感叹号”。
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => settingsMut.mutate({ paused: true })}
-                >
-                  先暂停
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => onboardingMut.mutate(0)}
-                >
-                  {copy.action.confirm}
-                </Button>
-              </div>
-            </div>
-          </section>
-        )}
+        <MemoryCapabilityBanner available={embeddingAvailable} />
+        <MemorySettingsToggles
+          settings={settingsQ.data}
+          embeddingAvailable={embeddingAvailable}
+          pending={settingsMut.isPending}
+          onEnableChange={requestEnableMemory}
+          onPausedChange={(paused) => settingsMut.mutate({ paused })}
+          onConfirmationChange={(confirmation_enabled) =>
+            settingsMut.mutate({ confirmation_enabled })
+          }
+        />
+        <MemoryFirstRunCard
+          visible={emptyFirstRun}
+          onPause={() => settingsMut.mutate({ paused: true })}
+          onConfirm={() => onboardingMut.mutate(0)}
+        />
 
         <section className="grid min-w-0 gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
-          <aside className="min-w-0 space-y-3">
-            <div className="flex min-w-0 gap-1 overflow-x-auto rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-2 [scrollbar-width:none] lg:block lg:overflow-visible lg:p-3 [&::-webkit-scrollbar]:hidden">
-              <button
-                type="button"
-                onClick={() => setSelectedScope("all")}
-                className={scopeButtonClass(selectedScope === "all")}
-              >
-                <span>全部</span>
-                <span>{scopes.reduce((sum, scope) => sum + scope.count, 0)}</span>
-              </button>
-              {scopes.map((scope) => (
-                <ScopeButton
-                  key={scope.id}
-                  scope={scope}
-                  active={selectedScope === scope.id}
-                  onSelect={() => setSelectedScope(scope.id)}
-                  onRename={(name) => patchScopeMut.mutate({ id: scope.id, body: { name } })}
-                  onDelete={() => deleteScopeMut.mutate(scope.id)}
-                />
-              ))}
-            </div>
-
-            <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3">
-              <div className="mb-2 type-caption font-medium text-[var(--fg-1)]">新作用域</div>
-              <div className="flex gap-2">
-                <input
-                  value={newScopeEmoji}
-                  onChange={(e) => setNewScopeEmoji(e.target.value.slice(0, 4))}
-                  placeholder="图标"
-                  className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
-                />
-                <input
-                  value={newScopeName}
-                  onChange={(e) => setNewScopeName(e.target.value)}
-                  placeholder="工作"
-                  className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
-                />
-                <IconButton
-                  variant="primary"
-                  disabled={!newScopeName.trim() || createScopeMut.isPending}
-                  onClick={() =>
-                    createScopeMut.mutate({
-                      name: newScopeName.trim(),
-                      emoji: newScopeEmoji.trim() || null,
-                    })
-                  }
-                  aria-label="创建作用域"
-                >
-                  <Plus className="h-4 w-4" />
-                </IconButton>
-              </div>
-            </div>
-          </aside>
+          <MemoryScopeSidebar
+            scopes={scopes}
+            selectedScope={selectedScope}
+            newScopeName={newScopeName}
+            newScopeEmoji={newScopeEmoji}
+            creating={createScopeMut.isPending}
+            onSelectScope={setSelectedScope}
+            onRenameScope={(id, name) =>
+              patchScopeMut.mutate({ id, body: { name } })
+            }
+            onDeleteScope={(id) => deleteScopeMut.mutate(id)}
+            onNewScopeNameChange={setNewScopeName}
+            onNewScopeEmojiChange={setNewScopeEmoji}
+            onCreateScope={() =>
+              createScopeMut.mutate({
+                name: newScopeName.trim(),
+                emoji: newScopeEmoji.trim() || null,
+              })
+            }
+          />
 
           <div className="min-w-0 space-y-5">
-            <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="type-card-title">手动添加</h2>
-                  <p className="mt-1 type-caption text-[var(--fg-2)]">
-                    手动记忆按 1.0 置信度写入。
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
-                  {TYPE_OPTIONS.map((option) => (
-                    <span key={option.value}>
-                      {option.label} {typeCounts[option.value] ?? 0}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-[150px_minmax(0,1fr)_auto]">
-                <select
-                  value={newMemoryType}
-                  onChange={(e) => setNewMemoryType(e.target.value as MemoryType)}
-                  className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
-                >
-                  {TYPE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  value={newMemoryContent}
-                  onChange={(e) => setNewMemoryContent(e.target.value)}
-                  placeholder="例如：偏好 200 字以内的回答"
-                  maxLength={200}
-                  className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-10"
-                />
-                <Button
-                  variant="primary"
-                  size="md"
-                  disabled={!newMemoryContent.trim() || createMemoryMut.isPending}
-                  loading={createMemoryMut.isPending}
-                  onClick={() =>
-                    createMemoryMut.mutate({
-                      type: newMemoryType,
-                      content: newMemoryContent.trim(),
-                      scope_id: selectedScope === "all" ? defaultScope?.id ?? null : selectedScope,
-                    })
-                  }
-                  leftIcon={!createMemoryMut.isPending ? <Plus className="h-4 w-4" /> : undefined}
-                >
-                  添加
-                </Button>
-              </div>
-            </section>
+            <ManualMemorySection
+              typeCounts={typeCounts}
+              memoryType={newMemoryType}
+              content={newMemoryContent}
+              creating={createMemoryMut.isPending}
+              onTypeChange={setNewMemoryType}
+              onContentChange={setNewMemoryContent}
+              onCreate={() =>
+                createMemoryMut.mutate({
+                  type: newMemoryType,
+                  content: newMemoryContent.trim(),
+                  scope_id:
+                    selectedScope === "all"
+                      ? (defaultScope?.id ?? null)
+                      : selectedScope,
+                })
+              }
+            />
 
-            <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
-              <SectionHeader
-                title="记忆库"
-                suffix={`${filteredMemories.length}/${memories.length} 条`}
-                actions={
-                  <>
-                    <IconButton
-                      variant="outline"
-                      size="md"
-                      onClick={() => void memoriesQ.refetch()}
-                      aria-label="刷新记忆"
-                      tooltip="刷新"
-                    >
-                      <RefreshCw className="h-4 w-4" />
-                    </IconButton>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void exportJson()}
-                      leftIcon={<Download className="h-3.5 w-3.5" />}
-                    >
-                      {copy.action.export}
-                    </Button>
-                  </>
+            <MemoryLibrarySection
+              memories={memories}
+              filteredMemories={filteredMemories}
+              scopes={scopes}
+              selectedScope={selectedScope}
+              selectedMemoryIds={selectedMemoryIds}
+              editing={editing}
+              search={memorySearch}
+              pending={memoriesQ.isPending}
+              bulkMoving={bulkScopeMut.isPending}
+              onRefresh={() => void memoriesQ.refetch()}
+              onExport={() => void exportJson()}
+              onSearchChange={setMemorySearch}
+              onBulkMove={(scopeId) =>
+                bulkScopeMut.mutate({
+                  ids: Array.from(selectedMemoryIds),
+                  scopeId,
+                })
+              }
+              onToggleSelected={(id, checked) =>
+                setSelectedMemoryIds((prev) => {
+                  const next = new Set(prev);
+                  if (checked) next.add(id);
+                  else next.delete(id);
+                  return next;
+                })
+              }
+              onEditValue={(id, value) =>
+                setEditing((prev) => ({ ...prev, [id]: value }))
+              }
+              onSaveEdit={(memory) => {
+                const content = editing[memory.id]?.trim();
+                if (content && content !== memory.content) {
+                  patchMemoryMut.mutate({
+                    id: memory.id,
+                    body: { content },
+                  });
                 }
-              />
-              <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] p-3 sm:flex-row sm:items-center sm:justify-between">
-                <label className="relative min-w-0 flex-1">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
-                  <input
-                    value={memorySearch}
-                    onChange={(event) => setMemorySearch(event.target.value)}
-                    placeholder={selectedScope === "all" ? "跨作用域搜索" : "搜索当前作用域"}
-                    className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
-                  />
-                </label>
-                {selectedScope === "all" && selectedMemoryIds.size > 0 ? (
-                  <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-1)]">
-                    <span>已选 {selectedMemoryIds.size} 条</span>
-                    <select
-                      disabled={bulkScopeMut.isPending}
-                      onChange={(event) => {
-                        const scopeId = event.target.value;
-                        if (!scopeId) return;
-                        bulkScopeMut.mutate({
-                          ids: Array.from(selectedMemoryIds),
-                          scopeId,
-                        });
-                        event.currentTarget.value = "";
-                      }}
-                      className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
-                      defaultValue=""
-                    >
-                      <option value="" disabled>
-                        批量改作用域
-                      </option>
-                      {scopes.map((scope) => (
-                        <option key={scope.id} value={scope.id}>
-                          {scope.is_default ? "默认" : scope.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : null}
-              </div>
-              {memoriesQ.isPending ? (
-                <LoadingBlock />
-              ) : filteredMemories.length === 0 ? (
-                <EmptyBlock text="当前作用域还没有记忆。" />
-              ) : (
-                <div className="divide-y divide-[var(--border-subtle)]">
-                  {filteredMemories.map((memory) => (
-                    <MemoryRow
-                      key={memory.id}
-                      memory={memory}
-                      scopes={scopes}
-                      selectable={selectedScope === "all"}
-                      selected={selectedMemoryIds.has(memory.id)}
-                      onToggleSelected={(checked) =>
-                        setSelectedMemoryIds((prev) => {
-                          const next = new Set(prev);
-                          if (checked) next.add(memory.id);
-                          else next.delete(memory.id);
-                          return next;
-                        })
-                      }
-                      editingValue={editing[memory.id]}
-                      onEditValue={(value) =>
-                        setEditing((prev) => ({ ...prev, [memory.id]: value }))
-                      }
-                      onSaveEdit={() => {
-                        const content = editing[memory.id]?.trim();
-                        if (content && content !== memory.content) {
-                          patchMemoryMut.mutate({ id: memory.id, body: { content } });
-                        }
-                        setEditing((prev) => {
-                          const next = { ...prev };
-                          delete next[memory.id];
-                          return next;
-                        });
-                      }}
-                      onCancelEdit={() =>
-                        setEditing((prev) => {
-                          const next = { ...prev };
-                          delete next[memory.id];
-                          return next;
-                        })
-                      }
-                      onPatch={(body) => patchMemoryMut.mutate({ id: memory.id, body })}
-                      onDelete={() => deleteMemoryMut.mutate(memory.id)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
+                setEditing((prev) => removeEditValue(prev, memory.id));
+              }}
+              onCancelEdit={(id) =>
+                setEditing((prev) => removeEditValue(prev, id))
+              }
+              onPatch={(id, body) => patchMemoryMut.mutate({ id, body })}
+              onDelete={(id) => deleteMemoryMut.mutate(id)}
+            />
 
-            <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
-              <SectionHeader title="建议加入记忆" suffix={`${staging.length} 条`} />
-              {stagingQ.isPending ? (
-                <LoadingBlock />
-              ) : staging.length === 0 ? (
-                <EmptyBlock text="暂无待确认候选。" />
-              ) : (
-                <div className="divide-y divide-[var(--border-subtle)]">
-                  {staging.map((item) => (
-                    <div key={item.id} className="p-4">
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <TypeBadge type={item.type} />
-                        <span className="type-caption text-[var(--fg-2)]">
-                          置信度 {Math.round(item.confidence * 100)}%
-                        </span>
-                        <span className="type-caption text-[var(--fg-2)]">
-                          {formatTime(item.created_at)}
-                        </span>
-                      </div>
-                        <input
-                          value={stagingEdits[item.id] ?? item.content}
-                          onChange={(e) =>
-                            setStagingEdits((prev) => ({
-                              ...prev,
-                              [item.id]: e.target.value,
-                            }))
-                          }
-                        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
-                        />
-                      <div className="flex flex-wrap gap-2">
-                        <select
-                          value={item.scope_id}
-                          onChange={(event) =>
-                            patchStagingMut.mutate({
-                              id: item.id,
-                              body: { scope_id: event.target.value },
-                            })
-                          }
-                          className="h-11 min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
-                        >
-                          {scopes.map((scope) => (
-                            <option key={scope.id} value={scope.id}>
-                              {scope.is_default ? "默认" : scope.name}
-                              {item.recommended_scope_id === scope.id ? " · 推荐" : ""}
-                            </option>
-                          ))}
-                        </select>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => acceptMut.mutate(item)}
-                          leftIcon={<Check className="h-3.5 w-3.5" />}
-                          className="bg-success-soft text-success hover:bg-success/20"
-                        >
-                          接受
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => rejectMut.mutate(item.id)}
-                          leftIcon={<X className="h-3.5 w-3.5" />}
-                        >
-                          拒绝
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
+            <MemoryStagingSection
+              staging={staging}
+              scopes={scopes}
+              edits={stagingEdits}
+              pending={stagingQ.isPending}
+              onEdit={(id, value) =>
+                setStagingEdits((prev) => ({ ...prev, [id]: value }))
+              }
+              onScopeChange={(id, scopeId) =>
+                patchStagingMut.mutate({
+                  id,
+                  body: { scope_id: scopeId },
+                })
+              }
+              onAccept={(item) => acceptMut.mutate(item)}
+              onReject={(id) => rejectMut.mutate(id)}
+            />
 
-            <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
-              <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
-                <SectionHeader title="最近变化" />
-                {timelineQ.isPending ? (
-                  <LoadingBlock />
-                ) : (timelineQ.data?.items.length ?? 0) === 0 ? (
-                  <EmptyBlock text="还没有审计事件。" />
-                ) : (
-                  <div className="divide-y divide-[var(--border-subtle)]">
-                    {timelineQ.data?.items.map((event) => (
-                      <div key={event.id} className="grid gap-1 p-4 sm:grid-cols-[100px_minmax(0,1fr)]">
-                        <span className="type-caption text-[var(--fg-2)]">
-                          {formatTime(event.created_at)}
-                        </span>
-                        <div className="min-w-0">
-                          <div className="type-caption font-mono text-[var(--fg-1)]">
-                            {event.event_type}
-                          </div>
-                          <div className="mt-1 truncate type-body-sm text-[var(--fg-0)]">
-                            {event.new_content ?? event.old_content ?? "设置变更"}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-4">
-                <h2 className="type-card-title text-[var(--danger-fg)]">清空记忆</h2>
-                <p className="mt-1 type-caption leading-5 text-[var(--danger-fg)]/70">
-                  输入“清空”后软删全部，30 天后物理删除。
-                </p>
-                <input
-                  value={clearText}
-                  onChange={(e) => setClearText(e.target.value)}
-                  placeholder="清空"
-                  className="mt-3 h-11 w-full rounded-[var(--radius-control)] border border-danger-border bg-[var(--bg-0)]/70 px-3 text-base text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/50 focus:border-danger sm:h-10 sm:text-sm"
-                />
-                <Button
-                  variant="danger"
-                  size="md"
-                  disabled={clearText !== "清空" || clearMut.isPending}
-                  loading={clearMut.isPending}
-                  onClick={() => clearMut.mutate()}
-                  leftIcon={!clearMut.isPending ? <Trash2 className="h-4 w-4" /> : undefined}
-                  fullWidth
-                  className="mt-3"
-                >
-                  清空全部
-                </Button>
-              </div>
-            </section>
+            <MemoryTimelineAndClear
+              events={timelineQ.data?.items ?? []}
+              timelinePending={timelineQ.isPending}
+              clearText={clearText}
+              clearing={clearMut.isPending}
+              onClearTextChange={setClearText}
+              onClear={() => clearMut.mutate()}
+            />
           </div>
         </section>
       </div>
-      {showCapabilityModal && (
-        <CapabilityModal onClose={() => setShowCapabilityModal(false)} />
-      )}
+      <MemoryCapabilityModal
+        open={showCapabilityModal}
+        onClose={() => setShowCapabilityModal(false)}
+      />
     </SettingsShell>
   );
+}
+
+function MemoryCapabilityBanner({ available }: { available: boolean }) {
+  if (available) return null;
+  return (
+    <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex gap-3">
+        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />
+        <div>
+          <div className="font-medium text-warning">记忆未启用</div>
+          <p className="mt-1 type-caption leading-5 text-warning/80">
+            需先在管理员后台为某个 provider 勾选 “embedding”；写入、检索、抽取均依赖向量。
+          </p>
+        </div>
+      </div>
+      <Link
+        href="/admin"
+        className="inline-flex min-h-11 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 type-caption font-medium text-warning transition-colors hover:bg-warning/20"
+      >
+        去管理员后台 →
+      </Link>
+    </section>
+  );
+}
+
+function MemorySettingsToggles({
+  settings,
+  embeddingAvailable,
+  pending,
+  onEnableChange,
+  onPausedChange,
+  onConfirmationChange,
+}: {
+  settings: MemorySettingsData | undefined;
+  embeddingAvailable: boolean;
+  pending: boolean;
+  onEnableChange: (checked: boolean) => void;
+  onPausedChange: (checked: boolean) => void;
+  onConfirmationChange: (checked: boolean) => void;
+}) {
+  const memoryDisabled = Boolean(settings?.disabled);
+  const dependentDisabled =
+    pending || !embeddingAvailable || memoryDisabled;
+  return (
+    <section className="grid gap-3 md:grid-cols-3">
+      <SettingToggle
+        icon={<Brain className="h-4 w-4" />}
+        title="启用记忆"
+        description="开启后 Lumen 会从对话中学习稳定偏好,并在新会话里复用。"
+        checked={!memoryDisabled}
+        disabled={pending}
+        onChange={onEnableChange}
+      />
+      <SettingToggle
+        icon={<Pause className="h-4 w-4" />}
+        title="暂停学习"
+        description="不写入新记忆,已有记忆仍会参与回答。"
+        checked={Boolean(settings?.paused)}
+        disabled={dependentDisabled}
+        onChange={onPausedChange}
+      />
+      <SettingToggle
+        icon={<ShieldOff className="h-4 w-4" />}
+        title="主动确认偏好"
+        description="强偏好命中时,偶尔让模型先确认。"
+        checked={Boolean(settings?.confirmation_enabled)}
+        disabled={dependentDisabled}
+        onChange={onConfirmationChange}
+      />
+    </section>
+  );
+}
+
+function MemoryFirstRunCard({
+  visible,
+  onPause,
+  onConfirm,
+}: {
+  visible: boolean;
+  onPause: () => void;
+  onConfirm: () => void;
+}) {
+  if (!visible) return null;
+  return (
+    <section className="rounded-[var(--radius-card)] border border-accent-border bg-accent-soft p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="type-body-sm font-medium text-[var(--fg-0)]">
+            Lumen 会从对话里学到稳定偏好
+          </div>
+          <p className="mt-1 type-body-sm text-[var(--fg-1)]">
+            也可以在这里手动添加，比如“偏好简洁回答”或“不要使用感叹号”。
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onPause}>
+            先暂停
+          </Button>
+          <Button variant="primary" size="sm" onClick={onConfirm}>
+            {copy.action.confirm}
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MemoryScopeSidebar({
+  scopes,
+  selectedScope,
+  newScopeName,
+  newScopeEmoji,
+  creating,
+  onSelectScope,
+  onRenameScope,
+  onDeleteScope,
+  onNewScopeNameChange,
+  onNewScopeEmojiChange,
+  onCreateScope,
+}: {
+  scopes: MemoryScopeOut[];
+  selectedScope: string;
+  newScopeName: string;
+  newScopeEmoji: string;
+  creating: boolean;
+  onSelectScope: (scopeId: string) => void;
+  onRenameScope: (scopeId: string, name: string) => void;
+  onDeleteScope: (scopeId: string) => void;
+  onNewScopeNameChange: (name: string) => void;
+  onNewScopeEmojiChange: (emoji: string) => void;
+  onCreateScope: () => void;
+}) {
+  const totalCount = scopes.reduce((sum, scope) => sum + scope.count, 0);
+  return (
+    <aside className="min-w-0 space-y-3">
+      <div className="flex min-w-0 gap-1 overflow-x-auto rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-2 [scrollbar-width:none] lg:block lg:overflow-visible lg:p-3 [&::-webkit-scrollbar]:hidden">
+        <button
+          type="button"
+          onClick={() => onSelectScope("all")}
+          className={scopeButtonClass(selectedScope === "all")}
+        >
+          <span>全部</span>
+          <span>{totalCount}</span>
+        </button>
+        {scopes.map((scope) => (
+          <ScopeButton
+            key={scope.id}
+            scope={scope}
+            active={selectedScope === scope.id}
+            onSelect={() => onSelectScope(scope.id)}
+            onRename={(name) => onRenameScope(scope.id, name)}
+            onDelete={() => onDeleteScope(scope.id)}
+          />
+        ))}
+      </div>
+
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3">
+        <div className="mb-2 type-caption font-medium text-[var(--fg-1)]">
+          新作用域
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={newScopeEmoji}
+            onChange={(event) =>
+              onNewScopeEmojiChange(event.target.value.slice(0, 4))
+            }
+            placeholder="图标"
+            className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+          />
+          <input
+            value={newScopeName}
+            onChange={(event) => onNewScopeNameChange(event.target.value)}
+            placeholder="工作"
+            className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+          />
+          <IconButton
+            variant="primary"
+            disabled={!newScopeName.trim() || creating}
+            onClick={onCreateScope}
+            aria-label="创建作用域"
+          >
+            <Plus className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function ManualMemorySection({
+  typeCounts,
+  memoryType,
+  content,
+  creating,
+  onTypeChange,
+  onContentChange,
+  onCreate,
+}: {
+  typeCounts: Record<string, number>;
+  memoryType: MemoryType;
+  content: string;
+  creating: boolean;
+  onTypeChange: (type: MemoryType) => void;
+  onContentChange: (content: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="type-card-title">手动添加</h2>
+          <p className="mt-1 type-caption text-[var(--fg-2)]">
+            手动记忆按 1.0 置信度写入。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
+          {TYPE_OPTIONS.map((option) => (
+            <span key={option.value}>
+              {option.label} {typeCounts[option.value] ?? 0}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[150px_minmax(0,1fr)_auto]">
+        <select
+          value={memoryType}
+          onChange={(event) =>
+            onTypeChange(event.target.value as MemoryType)
+          }
+          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+        >
+          {TYPE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <input
+          value={content}
+          onChange={(event) => onContentChange(event.target.value)}
+          placeholder="例如：偏好 200 字以内的回答"
+          maxLength={200}
+          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-10"
+        />
+        <Button
+          variant="primary"
+          size="md"
+          disabled={!content.trim() || creating}
+          loading={creating}
+          onClick={onCreate}
+          leftIcon={!creating ? <Plus className="h-4 w-4" /> : undefined}
+        >
+          添加
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function MemoryLibrarySection({
+  memories,
+  filteredMemories,
+  scopes,
+  selectedScope,
+  selectedMemoryIds,
+  editing,
+  search,
+  pending,
+  bulkMoving,
+  onRefresh,
+  onExport,
+  onSearchChange,
+  onBulkMove,
+  onToggleSelected,
+  onEditValue,
+  onSaveEdit,
+  onCancelEdit,
+  onPatch,
+  onDelete,
+}: {
+  memories: MemoryItemOut[];
+  filteredMemories: MemoryItemOut[];
+  scopes: MemoryScopeOut[];
+  selectedScope: string;
+  selectedMemoryIds: Set<string>;
+  editing: Record<string, string>;
+  search: string;
+  pending: boolean;
+  bulkMoving: boolean;
+  onRefresh: () => void;
+  onExport: () => void;
+  onSearchChange: (value: string) => void;
+  onBulkMove: (scopeId: string) => void;
+  onToggleSelected: (id: string, checked: boolean) => void;
+  onEditValue: (id: string, value: string) => void;
+  onSaveEdit: (memory: MemoryItemOut) => void;
+  onCancelEdit: (id: string) => void;
+  onPatch: (id: string, body: MemoryPatchBody) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
+      <SectionHeader
+        title="记忆库"
+        suffix={`${filteredMemories.length}/${memories.length} 条`}
+        actions={
+          <>
+            <IconButton
+              variant="outline"
+              size="md"
+              onClick={onRefresh}
+              aria-label="刷新记忆"
+              tooltip="刷新"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </IconButton>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onExport}
+              leftIcon={<Download className="h-3.5 w-3.5" />}
+            >
+              {copy.action.export}
+            </Button>
+          </>
+        }
+      />
+      <MemoryLibraryToolbar
+        scopes={scopes}
+        selectedScope={selectedScope}
+        selectedMemoryIds={selectedMemoryIds}
+        search={search}
+        bulkMoving={bulkMoving}
+        onSearchChange={onSearchChange}
+        onBulkMove={onBulkMove}
+      />
+      <MemoryLibraryList
+        memories={filteredMemories}
+        scopes={scopes}
+        selectedScope={selectedScope}
+        selectedMemoryIds={selectedMemoryIds}
+        editing={editing}
+        pending={pending}
+        onToggleSelected={onToggleSelected}
+        onEditValue={onEditValue}
+        onSaveEdit={onSaveEdit}
+        onCancelEdit={onCancelEdit}
+        onPatch={onPatch}
+        onDelete={onDelete}
+      />
+    </section>
+  );
+}
+
+function MemoryLibraryToolbar({
+  scopes,
+  selectedScope,
+  selectedMemoryIds,
+  search,
+  bulkMoving,
+  onSearchChange,
+  onBulkMove,
+}: {
+  scopes: MemoryScopeOut[];
+  selectedScope: string;
+  selectedMemoryIds: Set<string>;
+  search: string;
+  bulkMoving: boolean;
+  onSearchChange: (value: string) => void;
+  onBulkMove: (scopeId: string) => void;
+}) {
+  const showBulkActions =
+    selectedScope === "all" && selectedMemoryIds.size > 0;
+  const searchPlaceholder =
+    selectedScope === "all" ? "跨作用域搜索" : "搜索当前作用域";
+  return (
+    <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] p-3 sm:flex-row sm:items-center sm:justify-between">
+      <label className="relative min-w-0 flex-1">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
+        <input
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder={searchPlaceholder}
+          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
+        />
+      </label>
+      {showBulkActions ? (
+        <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-1)]">
+          <span>已选 {selectedMemoryIds.size} 条</span>
+          <select
+            disabled={bulkMoving}
+            onChange={(event) => {
+              const scopeId = event.target.value;
+              if (!scopeId) return;
+              onBulkMove(scopeId);
+              event.currentTarget.value = "";
+            }}
+            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
+            defaultValue=""
+          >
+            <option value="" disabled>
+              批量改作用域
+            </option>
+            {scopes.map((scope) => (
+              <option key={scope.id} value={scope.id}>
+                {scope.is_default ? "默认" : scope.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MemoryLibraryList({
+  memories,
+  scopes,
+  selectedScope,
+  selectedMemoryIds,
+  editing,
+  pending,
+  onToggleSelected,
+  onEditValue,
+  onSaveEdit,
+  onCancelEdit,
+  onPatch,
+  onDelete,
+}: {
+  memories: MemoryItemOut[];
+  scopes: MemoryScopeOut[];
+  selectedScope: string;
+  selectedMemoryIds: Set<string>;
+  editing: Record<string, string>;
+  pending: boolean;
+  onToggleSelected: (id: string, checked: boolean) => void;
+  onEditValue: (id: string, value: string) => void;
+  onSaveEdit: (memory: MemoryItemOut) => void;
+  onCancelEdit: (id: string) => void;
+  onPatch: (id: string, body: MemoryPatchBody) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (pending) return <LoadingBlock />;
+  if (memories.length === 0) {
+    return <EmptyBlock text="当前作用域还没有记忆。" />;
+  }
+  const selectable = selectedScope === "all";
+  return (
+    <div className="divide-y divide-[var(--border-subtle)]">
+      {memories.map((memory) => (
+        <MemoryRow
+          key={memory.id}
+          memory={memory}
+          scopes={scopes}
+          selectable={selectable}
+          selected={selectedMemoryIds.has(memory.id)}
+          onToggleSelected={(checked) =>
+            onToggleSelected(memory.id, checked)
+          }
+          editingValue={editing[memory.id]}
+          onEditValue={(value) => onEditValue(memory.id, value)}
+          onSaveEdit={() => onSaveEdit(memory)}
+          onCancelEdit={() => onCancelEdit(memory.id)}
+          onPatch={(body) => onPatch(memory.id, body)}
+          onDelete={() => onDelete(memory.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MemoryStagingSection({
+  staging,
+  scopes,
+  edits,
+  pending,
+  onEdit,
+  onScopeChange,
+  onAccept,
+  onReject,
+}: {
+  staging: MemoryStagingOut[];
+  scopes: MemoryScopeOut[];
+  edits: Record<string, string>;
+  pending: boolean;
+  onEdit: (id: string, value: string) => void;
+  onScopeChange: (id: string, scopeId: string) => void;
+  onAccept: (item: MemoryStagingOut) => void;
+  onReject: (id: string) => void;
+}) {
+  return (
+    <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
+      <SectionHeader
+        title="建议加入记忆"
+        suffix={`${staging.length} 条`}
+      />
+      <MemoryStagingList
+        staging={staging}
+        scopes={scopes}
+        edits={edits}
+        pending={pending}
+        onEdit={onEdit}
+        onScopeChange={onScopeChange}
+        onAccept={onAccept}
+        onReject={onReject}
+      />
+    </section>
+  );
+}
+
+function MemoryStagingList({
+  staging,
+  scopes,
+  edits,
+  pending,
+  onEdit,
+  onScopeChange,
+  onAccept,
+  onReject,
+}: {
+  staging: MemoryStagingOut[];
+  scopes: MemoryScopeOut[];
+  edits: Record<string, string>;
+  pending: boolean;
+  onEdit: (id: string, value: string) => void;
+  onScopeChange: (id: string, scopeId: string) => void;
+  onAccept: (item: MemoryStagingOut) => void;
+  onReject: (id: string) => void;
+}) {
+  if (pending) return <LoadingBlock />;
+  if (staging.length === 0) {
+    return <EmptyBlock text="暂无待确认候选。" />;
+  }
+  return (
+    <div className="divide-y divide-[var(--border-subtle)]">
+      {staging.map((item) => (
+        <MemoryStagingRow
+          key={item.id}
+          item={item}
+          scopes={scopes}
+          value={edits[item.id] ?? item.content}
+          onEdit={(value) => onEdit(item.id, value)}
+          onScopeChange={(scopeId) => onScopeChange(item.id, scopeId)}
+          onAccept={() => onAccept(item)}
+          onReject={() => onReject(item.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MemoryStagingRow({
+  item,
+  scopes,
+  value,
+  onEdit,
+  onScopeChange,
+  onAccept,
+  onReject,
+}: {
+  item: MemoryStagingOut;
+  scopes: MemoryScopeOut[];
+  value: string;
+  onEdit: (value: string) => void;
+  onScopeChange: (scopeId: string) => void;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="p-4">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <TypeBadge type={item.type} />
+        <span className="type-caption text-[var(--fg-2)]">
+          置信度 {Math.round(item.confidence * 100)}%
+        </span>
+        <span className="type-caption text-[var(--fg-2)]">
+          {formatTime(item.created_at)}
+        </span>
+      </div>
+      <input
+        value={value}
+        onChange={(event) => onEdit(event.target.value)}
+        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+      />
+      <div className="flex flex-wrap gap-2">
+        <select
+          value={item.scope_id}
+          onChange={(event) => onScopeChange(event.target.value)}
+          className="h-11 min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
+        >
+          {scopes.map((scope) => (
+            <option key={scope.id} value={scope.id}>
+              {scope.is_default ? "默认" : scope.name}
+              {item.recommended_scope_id === scope.id ? " · 推荐" : ""}
+            </option>
+          ))}
+        </select>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onAccept}
+          leftIcon={<Check className="h-3.5 w-3.5" />}
+          className="bg-success-soft text-success hover:bg-success/20"
+        >
+          接受
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onReject}
+          leftIcon={<X className="h-3.5 w-3.5" />}
+        >
+          拒绝
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function MemoryTimelineAndClear({
+  events,
+  timelinePending,
+  clearText,
+  clearing,
+  onClearTextChange,
+  onClear,
+}: {
+  events: MemoryTimelineEvent[];
+  timelinePending: boolean;
+  clearText: string;
+  clearing: boolean;
+  onClearTextChange: (value: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <MemoryTimelinePanel events={events} pending={timelinePending} />
+      <MemoryClearPanel
+        clearText={clearText}
+        clearing={clearing}
+        onClearTextChange={onClearTextChange}
+        onClear={onClear}
+      />
+    </section>
+  );
+}
+
+function MemoryTimelinePanel({
+  events,
+  pending,
+}: {
+  events: MemoryTimelineEvent[];
+  pending: boolean;
+}) {
+  return (
+    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60">
+      <SectionHeader title="最近变化" />
+      <MemoryTimelineList events={events} pending={pending} />
+    </div>
+  );
+}
+
+function MemoryTimelineList({
+  events,
+  pending,
+}: {
+  events: MemoryTimelineEvent[];
+  pending: boolean;
+}) {
+  if (pending) return <LoadingBlock />;
+  if (events.length === 0) {
+    return <EmptyBlock text="还没有审计事件。" />;
+  }
+  return (
+    <div className="divide-y divide-[var(--border-subtle)]">
+      {events.map((event) => (
+        <div
+          key={event.id}
+          className="grid gap-1 p-4 sm:grid-cols-[100px_minmax(0,1fr)]"
+        >
+          <span className="type-caption text-[var(--fg-2)]">
+            {formatTime(event.created_at)}
+          </span>
+          <div className="min-w-0">
+            <div className="type-caption font-mono text-[var(--fg-1)]">
+              {event.event_type}
+            </div>
+            <div className="mt-1 truncate type-body-sm text-[var(--fg-0)]">
+              {event.new_content ?? event.old_content ?? "设置变更"}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MemoryClearPanel({
+  clearText,
+  clearing,
+  onClearTextChange,
+  onClear,
+}: {
+  clearText: string;
+  clearing: boolean;
+  onClearTextChange: (value: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-4">
+      <h2 className="type-card-title text-[var(--danger-fg)]">清空记忆</h2>
+      <p className="mt-1 type-caption leading-5 text-[var(--danger-fg)]/70">
+        输入“清空”后软删全部，30 天后物理删除。
+      </p>
+      <input
+        value={clearText}
+        onChange={(event) => onClearTextChange(event.target.value)}
+        placeholder="清空"
+        className="mt-3 h-11 w-full rounded-[var(--radius-control)] border border-danger-border bg-[var(--bg-0)]/70 px-3 text-base text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/50 focus:border-danger sm:h-10 sm:text-sm"
+      />
+      <Button
+        variant="danger"
+        size="md"
+        disabled={clearText !== "清空" || clearing}
+        loading={clearing}
+        onClick={onClear}
+        leftIcon={!clearing ? <Trash2 className="h-4 w-4" /> : undefined}
+        fullWidth
+        className="mt-3"
+      >
+        清空全部
+      </Button>
+    </div>
+  );
+}
+
+function MemoryCapabilityModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+  return <CapabilityModal onClose={onClose} />;
 }
 
 function CapabilityModal({ onClose }: { onClose: () => void }) {

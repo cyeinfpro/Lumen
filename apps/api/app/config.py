@@ -185,122 +185,166 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
-        if self.session_ttl_min < 5:
-            raise ValueError("SESSION_TTL_MIN must be at least 5 minutes")
-        if self.session_ttl_min > 60 * 24 * 30:
-            raise ValueError("SESSION_TTL_MIN must not exceed 30 days")
-        for item in self.trusted_proxies.split(","):
-            cidr = item.strip()
-            if not cidr:
-                continue
-            try:
-                ipaddress.ip_network(cidr, strict=False)
-            except ValueError as exc:
-                raise ValueError(f"invalid TRUSTED_PROXIES CIDR: {cidr}") from exc
-        env = self.app_env.strip().lower()
-        is_dev = env in {"dev", "development", "local", "test"}
-        smtp_host = self.smtp_host.strip()
-        smtp_from = self.smtp_from_email.strip()
-        smtp_username = self.smtp_username.strip()
-        smtp_password = self.smtp_password.strip()
-        self.smtp_host = smtp_host
-        self.smtp_from_email = smtp_from
-        self.smtp_username = smtp_username
-        self.smtp_password = smtp_password
-        if self.smtp_use_tls and self.smtp_starttls:
-            raise ValueError("SMTP_USE_TLS and SMTP_STARTTLS cannot both be enabled")
-        if smtp_from and "@" not in smtp_from:
-            raise ValueError("SMTP_FROM_EMAIL must be a valid email address")
-        if smtp_password and not smtp_username:
-            raise ValueError("SMTP_USERNAME must be set when SMTP_PASSWORD is set")
-        allow_public_dev = (
-            os.environ.get("LUMEN_ALLOW_PUBLIC_DEV", "").strip().lower()
-            in _TRUE_ENV_VALUES
-        )
-        if (
-            is_dev
-            and _origin_looks_public(self.public_base_url)
-            and not allow_public_dev
-        ):
-            raise ValueError(
-                "APP_ENV=dev cannot be used with a public PUBLIC_BASE_URL; "
-                "set APP_ENV=prod for deployments or set LUMEN_ALLOW_PUBLIC_DEV=1 "
-                "only for an intentional temporary test"
-            )
-        # Why: BYOK_API_KEY_MASTER_SECRET is required *in production* — without
-        # it AES-GCM encryption can't deterministically derive a key and every
-        # restart would silently invalidate stored credentials. In dev/test we
-        # fall back to a deterministic dummy so smoke tests / image start-ups
-        # / fresh local checkouts don't require explicit env configuration.
-        byok_secret = self.byok_api_key_master_secret.strip()
-        if is_dev and len(byok_secret) < 16:
-            byok_secret = BYOK_DEV_MASTER_SECRET
-            self.byok_api_key_master_secret = byok_secret
-        elif not is_dev and byok_secret == BYOK_DEV_MASTER_SECRET:
-            raise ValueError(
-                "BYOK_API_KEY_MASTER_SECRET must not use the public dev fallback outside development"
-            )
-        elif not is_dev and len(byok_secret) < 32:
-            raise ValueError(
-                "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters in production; "
-                "generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
-            )
+        _validate_session_ttl(self.session_ttl_min)
+        _validate_trusted_proxies(self.trusted_proxies)
+        _normalize_and_validate_smtp(self)
+        is_dev = _is_development_environment(self.app_env)
+        _validate_public_development_origin(self, is_dev=is_dev)
+        _configure_byok_secret(self, is_dev=is_dev)
         if not is_dev:
-            if not smtp_host:
-                raise ValueError(
-                    "SMTP_HOST must be set outside development for password reset email"
-                )
-            if not smtp_from:
-                raise ValueError(
-                    "SMTP_FROM_EMAIL must be set outside development for password reset email"
-                )
-            secret = self.session_secret.strip()
-            if not secret:
-                raise ValueError("SESSION_SECRET must be set outside development")
-            if secret in {
-                "change-me",
-                "change-me-to-a-long-random-string",
-            }:
-                raise ValueError("SESSION_SECRET must be changed outside development")
-            if len(secret) < 32:
-                raise ValueError(
-                    "SESSION_SECRET must be at least 32 characters outside development"
-                )
-            img_secret = self.image_proxy_secret.strip()
-            if not img_secret:
-                raise ValueError("IMAGE_PROXY_SECRET must be set outside development")
-            if len(img_secret) < 32:
-                raise ValueError(
-                    "IMAGE_PROXY_SECRET must be at least 32 characters outside development"
-                )
-            image_job_url = self.image_job_base_url.strip().rstrip("/")
-            image_job_host = urlsplit(image_job_url).hostname or ""
-            if (
-                not image_job_url
-                or image_job_url == _DEFAULT_IMAGE_JOB_BASE_URL
-                or image_job_host == "image-job.example.com"
-            ):
-                raise ValueError(
-                    "IMAGE_JOB_BASE_URL must be configured outside development"
-                )
-            tg_secret = self.telegram_bot_shared_secret.strip()
-            if tg_secret and len(tg_secret) < 32:
-                raise ValueError(
-                    "TELEGRAM_BOT_SHARED_SECRET must be at least 32 characters outside development"
-                )
-            db_url = urlsplit(self.database_url)
-            db_password = unquote(db_url.password or "")
-            if not db_password or db_password == _DEFAULT_DB_PASSWORD:
-                raise ValueError(
-                    "DATABASE_URL must not use the default Postgres password outside development"
-                )
-            redis_url = urlsplit(self.redis_url)
-            redis_password = unquote(redis_url.password or "")
-            if not redis_password or redis_password == _DEFAULT_REDIS_PASSWORD:
-                raise ValueError(
-                    "REDIS_URL must not use the default Redis password outside development"
-                )
+            _validate_production_settings(self)
         return self
+
+
+def _validate_session_ttl(session_ttl_min: int) -> None:
+    if session_ttl_min < 5:
+        raise ValueError("SESSION_TTL_MIN must be at least 5 minutes")
+    if session_ttl_min > 60 * 24 * 30:
+        raise ValueError("SESSION_TTL_MIN must not exceed 30 days")
+
+
+def _validate_trusted_proxies(trusted_proxies: str) -> None:
+    for item in trusted_proxies.split(","):
+        cidr = item.strip()
+        if not cidr:
+            continue
+        try:
+            ipaddress.ip_network(cidr, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"invalid TRUSTED_PROXIES CIDR: {cidr}") from exc
+
+
+def _normalize_and_validate_smtp(settings: Settings) -> None:
+    settings.smtp_host = settings.smtp_host.strip()
+    settings.smtp_from_email = settings.smtp_from_email.strip()
+    settings.smtp_username = settings.smtp_username.strip()
+    settings.smtp_password = settings.smtp_password.strip()
+    if settings.smtp_use_tls and settings.smtp_starttls:
+        raise ValueError("SMTP_USE_TLS and SMTP_STARTTLS cannot both be enabled")
+    if settings.smtp_from_email and "@" not in settings.smtp_from_email:
+        raise ValueError("SMTP_FROM_EMAIL must be a valid email address")
+    if settings.smtp_password and not settings.smtp_username:
+        raise ValueError("SMTP_USERNAME must be set when SMTP_PASSWORD is set")
+
+
+def _is_development_environment(app_env: str) -> bool:
+    return app_env.strip().lower() in {"dev", "development", "local", "test"}
+
+
+def _validate_public_development_origin(
+    settings: Settings,
+    *,
+    is_dev: bool,
+) -> None:
+    allow_public_dev = (
+        os.environ.get("LUMEN_ALLOW_PUBLIC_DEV", "").strip().lower() in _TRUE_ENV_VALUES
+    )
+    if (
+        is_dev
+        and _origin_looks_public(settings.public_base_url)
+        and not allow_public_dev
+    ):
+        raise ValueError(
+            "APP_ENV=dev cannot be used with a public PUBLIC_BASE_URL; "
+            "set APP_ENV=prod for deployments or set LUMEN_ALLOW_PUBLIC_DEV=1 "
+            "only for an intentional temporary test"
+        )
+
+
+def _configure_byok_secret(settings: Settings, *, is_dev: bool) -> None:
+    # Production needs a stable encryption root; development gets a deterministic
+    # fallback so fresh checkouts and smoke tests do not need secret provisioning.
+    byok_secret = settings.byok_api_key_master_secret.strip()
+    if is_dev and len(byok_secret) < 16:
+        settings.byok_api_key_master_secret = BYOK_DEV_MASTER_SECRET
+        return
+    if not is_dev and byok_secret == BYOK_DEV_MASTER_SECRET:
+        raise ValueError(
+            "BYOK_API_KEY_MASTER_SECRET must not use the public dev fallback outside development"
+        )
+    if not is_dev and len(byok_secret) < 32:
+        raise ValueError(
+            "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters in production; "
+            "generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+        )
+
+
+def _validate_production_smtp(settings: Settings) -> None:
+    if not settings.smtp_host:
+        raise ValueError(
+            "SMTP_HOST must be set outside development for password reset email"
+        )
+    if not settings.smtp_from_email:
+        raise ValueError(
+            "SMTP_FROM_EMAIL must be set outside development for password reset email"
+        )
+
+
+def _validate_production_session_secret(secret: str) -> None:
+    secret = secret.strip()
+    if not secret:
+        raise ValueError("SESSION_SECRET must be set outside development")
+    if secret in {"change-me", "change-me-to-a-long-random-string"}:
+        raise ValueError("SESSION_SECRET must be changed outside development")
+    if len(secret) < 32:
+        raise ValueError(
+            "SESSION_SECRET must be at least 32 characters outside development"
+        )
+
+
+def _validate_production_image_proxy_secret(secret: str) -> None:
+    secret = secret.strip()
+    if not secret:
+        raise ValueError("IMAGE_PROXY_SECRET must be set outside development")
+    if len(secret) < 32:
+        raise ValueError(
+            "IMAGE_PROXY_SECRET must be at least 32 characters outside development"
+        )
+
+
+def _validate_production_image_job_url(image_job_base_url: str) -> None:
+    image_job_url = image_job_base_url.strip().rstrip("/")
+    image_job_host = urlsplit(image_job_url).hostname or ""
+    if (
+        not image_job_url
+        or image_job_url == _DEFAULT_IMAGE_JOB_BASE_URL
+        or image_job_host == "image-job.example.com"
+    ):
+        raise ValueError("IMAGE_JOB_BASE_URL must be configured outside development")
+
+
+def _validate_production_telegram_secret(secret: str) -> None:
+    secret = secret.strip()
+    if secret and len(secret) < 32:
+        raise ValueError(
+            "TELEGRAM_BOT_SHARED_SECRET must be at least 32 characters outside development"
+        )
+
+
+def _validate_service_password(url: str, default_password: str, label: str) -> None:
+    password = unquote(urlsplit(url).password or "")
+    if not password or password == default_password:
+        raise ValueError(
+            f"{label} must not use the default password outside development"
+        )
+
+
+def _validate_production_settings(settings: Settings) -> None:
+    _validate_production_smtp(settings)
+    _validate_production_session_secret(settings.session_secret)
+    _validate_production_image_proxy_secret(settings.image_proxy_secret)
+    _validate_production_image_job_url(settings.image_job_base_url)
+    _validate_production_telegram_secret(settings.telegram_bot_shared_secret)
+    _validate_service_password(
+        settings.database_url,
+        _DEFAULT_DB_PASSWORD,
+        "DATABASE_URL",
+    )
+    _validate_service_password(
+        settings.redis_url,
+        _DEFAULT_REDIS_PASSWORD,
+        "REDIS_URL",
+    )
 
 
 settings = Settings()

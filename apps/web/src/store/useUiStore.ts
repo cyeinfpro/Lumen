@@ -3,12 +3,12 @@ import {
   OPEN_EVENT,
   type LightboxItem,
   type OpenLightboxDetail,
-} from "@/components/ui/lightbox/types";
+} from "@/lib/lightbox/types";
 import {
   DEFAULT_NAV_VISIBILITY,
   normalizeNavVisibility,
   type NavVisibility,
-} from "@/components/ui/shell/navigation";
+} from "@/lib/navigation";
 
 interface UiLightboxGalleryItem {
   imageId: string;

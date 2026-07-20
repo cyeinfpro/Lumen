@@ -32,25 +32,27 @@ test("chat store export is SSR-safe and browser-lazy", () => {
 
 test("completion stream patches are isolated and held until message lookup exists", () => {
   const store = source("src/store/useChatStore.ts");
+  const runtime = source("src/store/chat/runtime.ts");
   const streamPatches = source(
     "src/store/chat/completionStreamPatches.ts",
   );
 
-  match(store, /const _completionMessageIds = new Map</);
-  match(store, /COMPLETION_MESSAGE_ID_TTL_MS/);
-  match(store, /const _pendingDeltasByCompletionId = new Map/);
+  match(runtime, /const _completionMessageIds = new Map</);
+  match(runtime, /COMPLETION_MESSAGE_ID_TTL_MS/);
+  match(runtime, /const _pendingDeltasByCompletionId = new Map/);
   match(
     streamPatches,
     /if \(completionId\) return `comp:\$\{completionId\}`;/,
   );
-  match(store, /COMPLETION_PENDING_DELTA_TTL_MS = 10_000/);
-  match(store, /COMPLETION_PENDING_DELTA_MAX_ENTRIES = 1_000/);
-  match(store, /setBounded\(\s*_pendingDeltasByCompletionId,/);
+  match(runtime, /COMPLETION_PENDING_DELTA_TTL_MS = 10_000/);
+  match(runtime, /COMPLETION_PENDING_DELTA_MAX_ENTRIES = 1_000/);
+  match(runtime, /setBounded\(\s*_pendingDeltasByCompletionId,/);
   match(store, /rememberCompletionMessage\(completionId, realAssistant\.id\);/);
 });
 
 test("composer snapshots and SSE payloads are locally hardened", () => {
   const store = source("src/store/useChatStore.ts");
+  const runtime = source("src/store/chat/runtime.ts");
   const history = source("src/store/chat/history.ts");
   const composer = source("src/store/chat/composerSlice.ts");
   const messageAdapters = source("src/store/chat/messageAdapters.ts");
@@ -62,7 +64,7 @@ test("composer snapshots and SSE payloads are locally hardened", () => {
     /attachments\.some\(\s*\(attachment\) =>\s*attachment\.id === composer\.mask\?\.target_attachment_id,?\s*\)/,
   );
   match(composer, /\? clonePlainValue\(composer\.mask\)[\s\S]*: null;/);
-  match(store, /function ssePayloadRecord\(/);
+  match(runtime, /function ssePayloadRecord\(/);
   match(store, /dropped SSE event after store handler error/);
   match(messageAdapters, /normalizeCompletionToolStatus/);
   match(messageAdapters, /timed_out/);
@@ -182,7 +184,8 @@ test("api fetch preserves native abort semantics", () => {
 });
 
 test("chat reconciliation preserves terminal states and retry drafts", () => {
-  const store = source("src/store/useChatStore.ts");
+  const runtime = source("src/store/chat/runtime.ts");
+  const generationActions = source("src/store/chat/generationActions.ts");
   const composer = source("src/store/chat/composerSlice.ts");
   const generationSlice = source("src/store/chat/generationSlice.ts");
   const history = source("src/store/chat/history.ts");
@@ -198,11 +201,14 @@ test("chat reconciliation preserves terminal states and retry drafts", () => {
   );
   match(history, /preferredGenerationSnapshot\(existing, snapshot\)/);
   match(taskRecovery, /userSessionFence\.isCurrent\(userFence\)/);
-  match(store, /isConversationMutationCurrent\(/);
-  match(store, /restoreComposerOnFailure: false/);
-  match(store, /isResetComposerDraft\(cur, retryComposer\) \|\| isRetryDraft/);
+  match(runtime, /isConversationMutationCurrent\(/);
+  match(generationActions, /restoreComposerOnFailure: false/);
   match(
-    store,
+    generationActions,
+    /isResetComposerDraft\(cur, retryComposer\) \|\| isRetryDraft/,
+  );
+  match(
+    generationActions,
     /isResetComposerDraft\(cur, temporaryComposer\) \|\|\s*isTemporaryInpaintDraft/,
   );
   match(composer, /export function isResetComposerDraft\(/);
@@ -212,6 +218,11 @@ test("chat reconciliation preserves terminal states and retry drafts", () => {
 
 test("chat store delegates composer, task recovery, and pure reducer boundaries", () => {
   const store = source("src/store/useChatStore.ts");
+  const runtime = source("src/store/chat/runtime.ts");
+  const conversationActions = source(
+    "src/store/chat/conversationActions.ts",
+  );
+  const generationActions = source("src/store/chat/generationActions.ts");
   const composer = source("src/store/chat/composerSlice.ts");
   const imageParams = source("src/store/chat/imageParams.ts");
   const upload = source("src/store/chat/imageUpload.ts");
@@ -232,21 +243,31 @@ test("chat store delegates composer, task recovery, and pure reducer boundaries"
 
   match(store, /from "\.\/chat\/composerSlice"/);
   match(store, /from "\.\/chat\/imageParams"/);
-  match(store, /from "\.\/chat\/imageUpload"/);
+  match(conversationActions, /from "\.\/imageUpload"/);
   match(store, /from "\.\/chat\/payload"/);
   match(store, /from "\.\/chat\/messageAdapters"/);
   match(store, /from "\.\/chat\/completionEvents"/);
   match(store, /from "\.\/chat\/messageReconciliation"/);
-  match(store, /from "\.\/chat\/completionStreamPatches"/);
-  match(store, /from "\.\/chat\/base64Eviction"/);
+  match(runtime, /from "\.\/completionStreamPatches"/);
+  match(runtime, /from "\.\/base64Eviction"/);
   match(store, /from "\.\/chat\/generationSlice"/);
   match(store, /from "\.\/chat\/history"/);
   match(store, /from "\.\/chat\/taskRecovery"/);
   match(store, /from "\.\/chat\/types"/);
+  match(store, /from "\.\/chat\/runtime"/);
+  match(store, /from "\.\/chat\/conversationActions"/);
+  match(store, /from "\.\/chat\/generationActions"/);
   match(store, /export type \{ ReasoningEffort \} from "\.\/chat\/types"/);
   match(store, /\.\.\.createComposerActions\(set, get,/);
+  match(store, /\.\.\.createConversationActions\(set, get\)/);
+  match(store, /\.\.\.createGenerationActions\(set, get,/);
   match(store, /\.\.\.createTaskRecoveryActions\(set, get,/);
   match(composer, /export function createComposerActions\(/);
+  match(
+    conversationActions,
+    /export function createConversationActions\(/,
+  );
+  match(generationActions, /export function createGenerationActions\(/);
   match(taskRecovery, /export function createTaskRecoveryActions\(/);
   match(taskRecovery, /await get\(\)\.loadHistoricalMessages\(/);
   match(types, /export interface ChatState/);
@@ -312,11 +333,13 @@ test("chat store delegates composer, task recovery, and pure reducer boundaries"
     doesNotMatch(extracted, /useChatStore/);
   }
   const storeLoc = store.trimEnd().split(/\r?\n/).length;
-  ok(storeLoc < 3000, `useChatStore.ts must stay below 3000 LOC, got ${storeLoc}`);
+  ok(storeLoc < 1500, `useChatStore.ts must stay below 1500 LOC, got ${storeLoc}`);
 });
 
 test("core async actions, runtime registries, SSE handler, and singleton remain store-owned", () => {
   const store = source("src/store/useChatStore.ts");
+  const generationActions = source("src/store/chat/generationActions.ts");
+  const runtime = source("src/store/chat/runtime.ts");
   const composer = source("src/store/chat/composerSlice.ts");
   const generationSlice = source("src/store/chat/generationSlice.ts");
   const history = source("src/store/chat/history.ts");
@@ -335,7 +358,12 @@ test("core async actions, runtime registries, SSE handler, and singleton remain 
     const actionPattern = new RegExp(
       `(?:async\\s+)?${action}(?:\\s*:\\s*)?\\(`,
     );
-    match(store, actionPattern);
+    match(
+      ["sendMessage", "applySSEEvent"].includes(action)
+        ? store
+        : generationActions,
+      actionPattern,
+    );
     doesNotMatch(generationSlice, actionPattern);
     doesNotMatch(history, actionPattern);
   }
@@ -354,10 +382,10 @@ test("core async actions, runtime registries, SSE handler, and singleton remain 
   ]) {
     match(taskRecovery, new RegExp(`async ${action}\\(`));
   }
-  match(store, /const _conversationHistoryCache = new Map/);
-  match(store, /const _generationIdAliases = new Map/);
-  match(store, /let _base64EvictionTimer:/);
-  match(store, /let _completionStreamTimer:/);
+  match(runtime, /const _conversationHistoryCache = new Map/);
+  match(runtime, /const _generationIdAliases = new Map/);
+  match(runtime, /let _base64EvictionTimer:/);
+  match(runtime, /let _completionStreamTimer:/);
   match(store, /function createChatStore\(/);
   match(store, /export const useChatStore:/);
 });

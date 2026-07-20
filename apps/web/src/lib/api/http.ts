@@ -204,6 +204,116 @@ function canRetryHttp(method: string, headers: Headers): boolean {
   return hasIdempotencyKey(headers);
 }
 
+function apiUrl(path: string): string {
+  return path.startsWith("http")
+    ? path
+    : `${API_BASE.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function isBinaryBody(body: BodyInit | null | undefined): boolean {
+  return (
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof Blob !== "undefined" && body instanceof Blob) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
+    (typeof ArrayBuffer !== "undefined" &&
+      (body instanceof ArrayBuffer ||
+        ArrayBuffer.isView(body as ArrayBufferView)))
+  );
+}
+
+function addJsonContentType(
+  headers: Headers,
+  body: BodyInit | null | undefined,
+): void {
+  if (!isBinaryBody(body) && body && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+}
+
+async function addCsrfHeader(
+  headers: Headers,
+  method: string,
+  path: string,
+): Promise<void> {
+  if (!WRITE_METHODS.has(method)) return;
+  const csrf = await ensureCsrfToken();
+  if (csrf && !headers.has("x-csrf-token")) {
+    headers.set("x-csrf-token", csrf);
+    return;
+  }
+  if (!csrf && process.env.NODE_ENV !== "production") {
+    console.warn("[apiFetch] missing CSRF token for write request", {
+      method,
+      path,
+    });
+  }
+}
+
+async function requestHeaders(
+  fetchInit: RequestInit,
+  method: string,
+  path: string,
+): Promise<Headers> {
+  const headers = new Headers(fetchInit.headers ?? {});
+  addJsonContentType(headers, fetchInit.body);
+  await addCsrfHeader(headers, method, path);
+  return headers;
+}
+
+function unauthorizedError(): ApiError {
+  handle401();
+  return new ApiError({
+    code: "unauthorized",
+    message: "未登录或会话已失效",
+    status: 401,
+  });
+}
+
+async function responseData(res: Response): Promise<unknown> {
+  const contentType = res.headers.get("content-type") ?? "";
+  return contentType.includes("application/json")
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => null);
+}
+
+type ReadResponse = {
+  response: Response;
+  data: unknown;
+};
+
+async function fetchResponse(
+  url: string,
+  requestInit: RequestInit,
+  retryable: boolean,
+): Promise<ReadResponse> {
+  let response: Response;
+  try {
+    response = await fetchWithRetryableHttp(url, requestInit, retryable);
+  } catch (err) {
+    throw networkRequestError(err);
+  }
+  if (response.status === 401) throw unauthorizedError();
+  if (response.status === 204) return { response, data: undefined };
+  return { response, data: await responseData(response) };
+}
+
+async function retryAfterCsrfFailure(
+  url: string,
+  requestInit: RequestInit,
+  method: string,
+  headers: Headers,
+): Promise<ReadResponse | null> {
+  const fresh = await refreshCsrfToken().catch(() => null);
+  if (!fresh) return null;
+  const retryHeaders = new Headers(headers);
+  retryHeaders.set("x-csrf-token", fresh);
+  return fetchResponse(
+    url,
+    { ...requestInit, headers: retryHeaders },
+    canRetryHttp(method, retryHeaders),
+  );
+}
+
 async function fetchWithNetworkRetry(
   url: string,
   init: RequestInit,
@@ -296,115 +406,27 @@ export async function apiFetch<T = unknown>(
 ): Promise<T | NoContent> {
   const { expectNoContent = false, ...fetchInit } = init ?? {};
   const method = (fetchInit.method ?? "GET").toUpperCase();
-  const url = path.startsWith("http")
-    ? path
-    : `${API_BASE.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
-
-  const headers = new Headers(fetchInit.headers ?? {});
-  // 当 body 是字符串时默认 JSON；FormData / Blob / ArrayBuffer / typed array 不设置
-  // （让浏览器自带正确的 content-type，FormData 还会带 boundary）。
-  const body = fetchInit.body;
-  const isBinary =
-    (typeof FormData !== "undefined" && body instanceof FormData) ||
-    (typeof Blob !== "undefined" && body instanceof Blob) ||
-    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
-    (typeof ArrayBuffer !== "undefined" &&
-      (body instanceof ArrayBuffer || ArrayBuffer.isView(body as ArrayBufferView)));
-  if (!isBinary && body && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-  if (WRITE_METHODS.has(method)) {
-    const csrf = await ensureCsrfToken();
-    if (csrf && !headers.has("x-csrf-token")) {
-      headers.set("x-csrf-token", csrf);
-    } else if (!csrf) {
-      // CSRF 仍拿不到：服务器一般会返回 403 csrf_failed；此处提前告警便于排查
-      // dev 环境用 console.warn 以避免在 404/未登录场景反复打 Sentry
-      if (process.env.NODE_ENV !== "production") {
-        console.warn(
-          "[apiFetch] missing CSRF token for write request",
-          { method, path },
-        );
-      }
-    }
-  }
-
-  let res: Response;
+  const url = apiUrl(path);
+  const headers = await requestHeaders(fetchInit, method, path);
   const requestInit = {
     ...fetchInit,
     method,
     headers,
     credentials: "include" as RequestCredentials,
   };
-  const retryable = canRetryHttp(method, headers);
-  try {
-    res = await fetchWithRetryableHttp(url, requestInit, retryable);
-  } catch (err) {
-    throw networkRequestError(err);
-  }
-
-  if (res.status === 401) {
-    handle401();
-    throw new ApiError({
-      code: "unauthorized",
-      message: "未登录或会话已失效",
-      status: 401,
-    });
-  }
-
-  if (res.status === 204) {
-    return undefined;
-  }
-
-  let ct = res.headers.get("content-type") ?? "";
-  const isJson = ct.includes("application/json");
-  let data: unknown = isJson
-    ? await res.json().catch(() => null)
-    : await res.text().catch(() => null);
+  let { response: res, data } = await fetchResponse(
+    url,
+    requestInit,
+    canRetryHttp(method, headers),
+  );
 
   if (
     res.status === 403 &&
     WRITE_METHODS.has(method) &&
     parseApiError(res.status, data).code === CSRF_FAILED_CODE
   ) {
-    const fresh = await refreshCsrfToken().catch(() => null);
-    if (fresh) {
-      const retryHeaders = new Headers(headers);
-      retryHeaders.set("x-csrf-token", fresh);
-      const retryInit = {
-        ...requestInit,
-        headers: retryHeaders,
-      };
-      try {
-        res = await fetchWithRetryableHttp(
-          url,
-          retryInit,
-          canRetryHttp(method, retryHeaders),
-        );
-      } catch (err) {
-        throw new ApiError({
-          code: "network_error",
-          message: err instanceof Error ? err.message : "network error",
-          status: 0,
-        });
-      }
-      if (res.status === 401) {
-        handle401();
-        throw new ApiError({
-          code: "unauthorized",
-          message: "未登录或会话已失效",
-          status: 401,
-        });
-      }
-      if (res.status === 204) {
-        return undefined;
-      }
-      ct = res.headers.get("content-type") ?? "";
-      const retryIsJson = ct.includes("application/json");
-      data = retryIsJson
-        ? await res.json().catch(() => null)
-        : await res.text().catch(() => null);
-    }
+    const retried = await retryAfterCsrfFailure(url, requestInit, method, headers);
+    if (retried) ({ response: res, data } = retried);
   }
 
   if (!res.ok) {

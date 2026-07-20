@@ -301,87 +301,18 @@ function SignupForm({
           )}
         </Field>
 
-        <Field
-          id="invite-password"
-          label="密码"
-          icon={<Lock className="w-3.5 h-3.5" />}
-        >
-          <div className="relative">
-            <input
-              id="invite-password"
-              name="password"
-              type={showPwd ? "text" : "password"}
-              required
-              disabled={submitting}
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="至少 8 位"
-              autoComplete="new-password"
-              enterKeyHint="next"
-              className="auth-control pl-3 pr-12"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPwd((v) => !v)}
-              disabled={submitting}
-              aria-label={showPwd ? "隐藏密码" : "显示密码"}
-              className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
-            >
-              {showPwd ? (
-                <EyeOff className="w-4 h-4" />
-              ) : (
-                <Eye className="w-4 h-4" />
-              )}
-            </button>
-          </div>
-          <PasswordStrength strength={strength} show={password.length > 0} />
-          <p
-            className={
-              "mt-1.5 text-[11px] " +
-              (password.length > 0 && passwordTooShort
-                ? "text-danger"
-                : "text-[var(--fg-2)]")
-            }
-          >
-            至少 8 位（{Math.min(password.length, 8)}/8）
-          </p>
-        </Field>
-
-        <Field
-          id="invite-confirm"
-          label="确认密码"
-          icon={<KeyRound className="w-3.5 h-3.5" />}
-        >
-          <input
-            id="invite-confirm"
-            name="password-confirmation"
-            type={showPwd ? "text" : "password"}
-            required
-            disabled={submitting}
-            minLength={8}
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            placeholder="再输入一次"
-            autoComplete="new-password"
-            enterKeyHint="done"
-            className={
-              "auth-control px-3 " +
-              (confirmMismatch
-                ? "border-danger-border focus:border-danger focus:ring-danger/20"
-                : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
-            }
-          />
-          {confirmMismatch && (
-            <p
-              role="alert"
-              aria-live="assertive"
-              className="flex items-center gap-1 type-caption text-danger mt-1.5"
-            >
-              <AlertCircle className="w-3 h-3" /> 两次输入不一致
-            </p>
-          )}
-        </Field>
+        <InvitePasswordFields
+          password={password}
+          confirm={confirm}
+          showPassword={showPwd}
+          submitting={submitting}
+          passwordTooShort={passwordTooShort}
+          confirmMismatch={confirmMismatch}
+          strength={strength}
+          onPasswordChange={setPassword}
+          onConfirmChange={setConfirm}
+          onTogglePassword={() => setShowPwd((value) => !value)}
+        />
 
         <AnimatePresence>
           {error && (
@@ -427,6 +358,114 @@ function SignupForm({
         </Link>
       </p>
     </div>
+  );
+}
+
+function InvitePasswordFields({
+  password,
+  confirm,
+  showPassword,
+  submitting,
+  passwordTooShort,
+  confirmMismatch,
+  strength,
+  onPasswordChange,
+  onConfirmChange,
+  onTogglePassword,
+}: {
+  password: string;
+  confirm: string;
+  showPassword: boolean;
+  submitting: boolean;
+  passwordTooShort: boolean;
+  confirmMismatch: boolean;
+  strength: Strength;
+  onPasswordChange: (value: string) => void;
+  onConfirmChange: (value: string) => void;
+  onTogglePassword: () => void;
+}) {
+  const passwordInputType = showPassword ? "text" : "password";
+  const passwordToggleLabel = showPassword ? "隐藏密码" : "显示密码";
+  const passwordLengthTone =
+    password.length > 0 && passwordTooShort
+      ? "text-danger"
+      : "text-[var(--fg-2)]";
+  const confirmInputTone = confirmMismatch
+    ? "border-danger-border focus:border-danger focus:ring-danger/20"
+    : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25";
+
+  return (
+    <>
+      <Field
+        id="invite-password"
+        label="密码"
+        icon={<Lock className="w-3.5 h-3.5" />}
+      >
+        <div className="relative">
+          <input
+            id="invite-password"
+            name="password"
+            type={passwordInputType}
+            required
+            disabled={submitting}
+            minLength={8}
+            value={password}
+            onChange={(event) => onPasswordChange(event.target.value)}
+            placeholder="至少 8 位"
+            autoComplete="new-password"
+            enterKeyHint="next"
+            className="auth-control pl-3 pr-12"
+          />
+          <button
+            type="button"
+            onClick={onTogglePassword}
+            disabled={submitting}
+            aria-label={passwordToggleLabel}
+            className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+          >
+            {showPassword ? (
+              <EyeOff className="w-4 h-4" />
+            ) : (
+              <Eye className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+        <PasswordStrength strength={strength} show={password.length > 0} />
+        <p className={`mt-1.5 text-[11px] ${passwordLengthTone}`}>
+          至少 8 位（{Math.min(password.length, 8)}/8）
+        </p>
+      </Field>
+
+      <Field
+        id="invite-confirm"
+        label="确认密码"
+        icon={<KeyRound className="w-3.5 h-3.5" />}
+      >
+        <input
+          id="invite-confirm"
+          name="password-confirmation"
+          type={passwordInputType}
+          required
+          disabled={submitting}
+          minLength={8}
+          value={confirm}
+          onChange={(event) => onConfirmChange(event.target.value)}
+          placeholder="再输入一次"
+          autoComplete="new-password"
+          enterKeyHint="done"
+          className={`auth-control px-3 ${confirmInputTone}`}
+        />
+        {confirmMismatch ? (
+          <p
+            role="alert"
+            aria-live="assertive"
+            className="flex items-center gap-1 type-caption text-danger mt-1.5"
+          >
+            <AlertCircle className="w-3 h-3" /> 两次输入不一致
+          </p>
+        ) : null}
+      </Field>
+    </>
   );
 }
 

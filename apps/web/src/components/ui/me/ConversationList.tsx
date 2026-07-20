@@ -200,70 +200,21 @@ export function ConversationList({ query }: ConversationListProps) {
 
       {/* 列表 */}
       <div className="flex flex-col">
-        {isInitialLoading && <ListSkeleton />}
-
-        {!isInitialLoading && list.isError && (
-          <div className="mx-4 my-4 px-3 py-2 rounded-[var(--radius-control)] bg-danger-soft border border-danger-border type-caption text-danger">
-            加载失败
-            <Button
-              type="button"
-              size="sm"
-              variant="link"
-              onClick={() => list.refetch()}
-              className="ml-2 text-danger"
-            >
-              {copy.action.retry}
-            </Button>
-          </div>
-        )}
-
-        {!isInitialLoading && !list.isError && !hasResults && (
-          <EmptyState query={query} tab={tab} />
-        )}
-
-        {tab === "archived" && hasResults && (
-          <ArchivedRows
-            items={filtered}
-            currentConvId={currentConvId}
-            onSelect={(conv) => void handleSelect(conv)}
-            onRename={handleRename}
-            onArchive={handleArchive}
-            onDelete={handleDelete}
-          />
-        )}
-
-        {tab === "active" &&
-          hasResults &&
-          BUCKET_ORDER.map((bucket) => {
-            const items = grouped[bucket];
-            if (items.length === 0) return null;
-            return (
-              <section key={bucket} aria-label={BUCKET_LABEL[bucket]}>
-                <h3
-                  className={cn(
-                    "px-4 pt-6 pb-2.5 text-[11px] font-semibold",
-                    "tracking-[0.1em] uppercase text-[var(--fg-2)]",
-                  )}
-                >
-                  {BUCKET_LABEL[bucket]}
-                </h3>
-                <ul>
-                  {items.map((conv) => (
-                    <li key={conv.id}>
-                      <ConversationRowMobile
-                        conv={conv}
-                        active={conv.id === currentConvId}
-                        onSelect={() => void handleSelect(conv)}
-                        onRename={(t) => handleRename(conv, t)}
-                        onArchive={() => handleArchive(conv)}
-                        onDelete={() => handleDelete(conv)}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            );
-          })}
+        <ConversationRows
+          isInitialLoading={isInitialLoading}
+          hasError={list.isError}
+          onRetry={() => list.refetch()}
+          hasResults={hasResults}
+          query={query}
+          tab={tab}
+          items={filtered}
+          grouped={grouped}
+          currentConvId={currentConvId}
+          onSelect={(conv) => void handleSelect(conv)}
+          onRename={handleRename}
+          onArchive={handleArchive}
+          onDelete={handleDelete}
+        />
 
         {/* 无限滚动 sentinel */}
         {hasNextPage && (
@@ -277,6 +228,97 @@ export function ConversationList({ query }: ConversationListProps) {
       </div>
     </div>
   );
+}
+
+function ConversationRows({
+  isInitialLoading,
+  hasError,
+  onRetry,
+  hasResults,
+  query,
+  tab,
+  items,
+  grouped,
+  currentConvId,
+  onSelect,
+  onRename,
+  onArchive,
+  onDelete,
+}: {
+  isInitialLoading: boolean;
+  hasError: boolean;
+  onRetry: () => void;
+  hasResults: boolean;
+  query: string;
+  tab: TabKind;
+  items: ConversationSummary[];
+  grouped: Record<Bucket, ConversationSummary[]>;
+  currentConvId: string | null;
+  onSelect: (conv: ConversationSummary) => void;
+  onRename: (conv: ConversationSummary, title: string) => void;
+  onArchive: (conv: ConversationSummary) => void;
+  onDelete: (conv: ConversationSummary) => void;
+}) {
+  if (isInitialLoading) return <ListSkeleton />;
+  if (hasError) {
+    return (
+      <div className="mx-4 my-4 px-3 py-2 rounded-[var(--radius-control)] bg-danger-soft border border-danger-border type-caption text-danger">
+        加载失败
+        <Button
+          type="button"
+          size="sm"
+          variant="link"
+          onClick={onRetry}
+          className="ml-2 text-danger"
+        >
+          {copy.action.retry}
+        </Button>
+      </div>
+    );
+  }
+  if (!hasResults) return <EmptyState query={query} tab={tab} />;
+  if (tab === "archived") {
+    return (
+      <ArchivedRows
+        items={items}
+        currentConvId={currentConvId}
+        onSelect={onSelect}
+        onRename={onRename}
+        onArchive={onArchive}
+        onDelete={onDelete}
+      />
+    );
+  }
+  return BUCKET_ORDER.map((bucket) => {
+    const bucketItems = grouped[bucket];
+    if (bucketItems.length === 0) return null;
+    return (
+      <section key={bucket} aria-label={BUCKET_LABEL[bucket]}>
+        <h3
+          className={cn(
+            "px-4 pt-6 pb-2.5 text-[11px] font-semibold",
+            "tracking-[0.1em] uppercase text-[var(--fg-2)]",
+          )}
+        >
+          {BUCKET_LABEL[bucket]}
+        </h3>
+        <ul>
+          {bucketItems.map((conv) => (
+            <li key={conv.id}>
+              <ConversationRowMobile
+                conv={conv}
+                active={conv.id === currentConvId}
+                onSelect={() => onSelect(conv)}
+                onRename={(title) => onRename(conv, title)}
+                onArchive={() => onArchive(conv)}
+                onDelete={() => onDelete(conv)}
+              />
+            </li>
+          ))}
+        </ul>
+      </section>
+    );
+  });
 }
 
 function ArchivedRows({

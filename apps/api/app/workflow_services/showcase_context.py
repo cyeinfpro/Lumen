@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import ModelCandidate, User, WorkflowStep
 from lumen_core.schemas import ShowcaseImagesCreateIn
 
-from ..routes._showcase_shot_pool import ShotClass, ShotVariant
+from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant
 from .showcase_runtime import runtime as _runtime
 
 

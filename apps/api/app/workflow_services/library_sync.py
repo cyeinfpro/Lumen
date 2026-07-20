@@ -55,7 +55,7 @@ from lumen_core.schemas import (
 
 from ..config import settings
 from ..runtime_settings import get_setting
-from ..routes._apparel_library import (
+from ..workflow_domain.apparel_library import (
     MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
     MODEL_LIBRARY_IMAGE_SUFFIXES,
     MODEL_LIBRARY_MAX_BINARY_BYTES,

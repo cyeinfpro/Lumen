@@ -17,6 +17,7 @@ import {
   fetchJsonWithTimeout,
   pageIdentityErrors,
 } from "../scripts/cdp-page-validation.mjs";
+import { collectArchitectureFindings } from "../scripts/check-architecture.mjs";
 import { getGitChangeScope } from "../scripts/git-change-scope.mjs";
 import {
   auditHitAreaSource,
@@ -364,6 +365,52 @@ test("dead-code analysis ignores unused imports and test-only imports", () => {
   }
 });
 
+test("architecture gate rejects layer inversion and dependency cycles", () => {
+  const tempRoot = mkdtempSync(
+    path.join(os.tmpdir(), "lumen-web-architecture-"),
+  );
+  try {
+    const srcRoot = path.join(tempRoot, "src");
+    const files = {
+      "app/page.ts": "export const page = true;\n",
+      "components/widget.ts":
+        'import { page } from "@/app/page";\nexport const widget = page;\n',
+      "lib/domain.ts":
+        'import { widget } from "@/components/widget";\nexport const domain = widget;\n',
+      "store/first.ts":
+        'import { second } from "./second";\nexport const first = second;\n',
+      "store/second.ts":
+        'import { first } from "./first";\nexport const second = first;\n',
+    };
+    for (const [relativePath, source] of Object.entries(files)) {
+      const target = path.join(srcRoot, relativePath);
+      const directory = path.dirname(target);
+      execFileSync("mkdir", ["-p", directory]);
+      writeFileSync(target, source);
+    }
+
+    const findings = collectArchitectureFindings({ srcRoot });
+
+    assert.deepEqual(findings.violations, [
+      {
+        rule: "component-imports-page",
+        source: "components/widget.ts",
+        target: "app/page.ts",
+      },
+      {
+        rule: "lower-layer-imports-ui",
+        source: "lib/domain.ts",
+        target: "components/widget.ts",
+      },
+    ]);
+    assert.deepEqual(findings.cycles, [
+      ["store/first.ts", "store/second.ts"],
+    ]);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("production queries exports all have a real production reference", () => {
   const configPath = ts.findConfigFile(
     webRoot,
@@ -388,13 +435,21 @@ test("production queries exports all have a real production reference", () => {
 
 test("gate wiring keeps full Git history and the complete layout vocabulary", () => {
   const complexity = read("scripts/check-complexity.mjs");
+  const architecture = read("scripts/check-architecture.mjs");
   const governance = read("scripts/check-ui-governance.mjs");
   const layout = read("scripts/check-layout-contract.mjs");
+  const packageJson = read("package.json");
+  const fullTsconfig = JSON.parse(read("tsconfig.full.json"));
   const design = read("DESIGN.md");
   const ci = read("../../.github/workflows/ci.yml");
 
   assert.match(complexity, /getGitChangeScope/);
+  assert.match(architecture, /lower-layer-imports-ui/);
   assert.match(governance, /getGitChangeScope/);
+  assert.match(packageJson, /check:architecture/);
+  assert.match(packageJson, /tsc -p tsconfig\.full\.json/);
+  assert.equal(fullTsconfig.compilerOptions.skipLibCheck, false);
+  assert.ok(fullTsconfig.exclude.includes(".next/dev/types"));
   assert.match(layout, /"--content-form": "720px"/);
   assert.match(layout, /"--content-settings": "1080px"/);
   assert.match(design, /## 4\. 排版：14 档 type-\* class/);

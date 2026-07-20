@@ -136,62 +136,99 @@ const STATUS_TEXT: Record<string, string> = {
   failed: "失败",
 };
 
+type StageCompletion = {
+  done: boolean;
+  active: boolean;
+  count: string;
+};
+
+const SHOT_APPROVED_STATUSES = new Set([
+  "approved",
+  "keyframe_generating",
+  "keyframe_ready",
+  "keyframe_approved",
+  "generating",
+  "done",
+]);
+
+function stageResult(
+  run: StoryboardRun,
+  stage: StoryboardStage,
+  done: boolean,
+  count: string,
+): StageCompletion {
+  return { done, active: run.current_stage === stage, count };
+}
+
+function countedStageResult(
+  run: StoryboardRun,
+  stage: StoryboardStage,
+  total: number,
+  completed: number,
+): StageCompletion {
+  return stageResult(
+    run,
+    stage,
+    total > 0 && completed === total,
+    total ? `${completed}/${total}` : "0",
+  );
+}
+
 function stageCompletion(run: StoryboardRun, stage: StoryboardStage): {
   done: boolean;
   active: boolean;
   count: string;
 } {
-  if (stage === "idea") {
-    return { done: Boolean(run.idea.trim()), active: run.current_stage === stage, count: "" };
+  switch (stage) {
+    case "idea":
+      return stageResult(run, stage, Boolean(run.idea.trim()), "");
+    case "script":
+      return stageResult(
+        run,
+        stage,
+        run.script_confirmed,
+        run.script_confirmed ? "已锁定" : run.script ? "待锁定" : "",
+      );
+    case "assets":
+      return countedStageResult(
+        run,
+        stage,
+        run.assets.length,
+        run.assets.filter((asset) => asset.status === "approved").length,
+      );
+    case "shots":
+      return countedStageResult(
+        run,
+        stage,
+        run.shots.length,
+        run.shots.filter((shot) => SHOT_APPROVED_STATUSES.has(shot.status)).length,
+      );
+    case "keyframes":
+      return countedStageResult(
+        run,
+        stage,
+        run.shots.length,
+        run.shots.filter(
+          (shot) => shot.keyframe_approved_at && !shot.keyframe_stale,
+        ).length,
+      );
+    case "videos":
+      return countedStageResult(
+        run,
+        stage,
+        run.shots.length,
+        run.shots.filter((shot) => shot.status === "done").length,
+      );
+    case "assembly": {
+      const status = run.assembly?.status;
+      return stageResult(
+        run,
+        stage,
+        status === "done",
+        status ? (STATUS_TEXT[status] ?? status) : "",
+      );
+    }
   }
-  if (stage === "script") {
-    return {
-      done: run.script_confirmed,
-      active: run.current_stage === stage,
-      count: run.script_confirmed ? "已锁定" : run.script ? "待锁定" : "",
-    };
-  }
-  if (stage === "assets") {
-    const total = run.assets.length;
-    const approved = run.assets.filter((asset) => asset.status === "approved").length;
-    return {
-      done: total > 0 && approved === total,
-      active: run.current_stage === stage,
-      count: total ? `${approved}/${total}` : "0",
-    };
-  }
-  if (stage === "shots") {
-    const total = run.shots.length;
-    const approved = run.shots.filter((shot) => ["approved", "keyframe_generating", "keyframe_ready", "keyframe_approved", "generating", "done"].includes(shot.status)).length;
-    return {
-      done: total > 0 && approved === total,
-      active: run.current_stage === stage,
-      count: total ? `${approved}/${total}` : "0",
-    };
-  }
-  if (stage === "keyframes") {
-    const total = run.shots.length;
-    const approved = run.shots.filter((shot) => shot.keyframe_approved_at && !shot.keyframe_stale).length;
-    return {
-      done: total > 0 && approved === total,
-      active: run.current_stage === stage,
-      count: total ? `${approved}/${total}` : "0",
-    };
-  }
-  if (stage === "videos") {
-    const total = run.shots.length;
-    const done = run.shots.filter((shot) => shot.status === "done").length;
-    return {
-      done: total > 0 && done === total,
-      active: run.current_stage === stage,
-      count: total ? `${done}/${total}` : "0",
-    };
-  }
-  return {
-    done: run.assembly?.status === "done",
-    active: run.current_stage === stage,
-    count: run.assembly?.status ? STATUS_TEXT[run.assembly.status] ?? run.assembly.status : "",
-  };
 }
 
 function isStageUnlocked(run: StoryboardRun, stage: StoryboardStage): boolean {

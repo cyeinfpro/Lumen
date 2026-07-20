@@ -6,12 +6,11 @@
 // - 当前步：amber dot pulse + 琥珀文字
 // - 移动条：横向滚 chip + 大数字进度
 
-import { CheckCircle2 } from "lucide-react";
-
 import { cn } from "@/lib/utils";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { STEPS, STEP_INDEX } from "../types";
-import { stepOf, workflowProgress } from "../utils";
+import { workflowProgress } from "../utils";
+import { WorkflowStepRailRow } from "./WorkflowStepRailRow";
 
 export function StepRail({ workflow }: { workflow: WorkflowRun }) {
   const currentIndex = STEP_INDEX[workflow.current_step] ?? 0;
@@ -39,75 +38,15 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
       </div>
 
       <ol className="grid gap-0">
-        {STEPS.map((step, index) => {
-          const row = stepOf(workflow, step.key);
-          const Icon = step.Icon;
-          const status = row?.status;
-          const isFailed = status === "failed";
-          const isApproved =
-            status === "approved" || status === "completed" || status === "selected";
-          const isCurrent = workflow.current_step === step.key;
-          const isPast = index < currentIndex;
-          const done = isApproved || isPast;
-
-          return (
-            <li key={step.key} className="relative grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 py-2.5">
-              <span
-                className={cn(
-                  "relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-all duration-[var(--dur-base)]",
-                  isCurrent
-                    ? "border-[var(--amber-400)] bg-[var(--amber-400)] text-[var(--accent-on)]"
-                    : done
-                      ? "border-[var(--border-amber)] bg-transparent text-[var(--amber-300)]"
-                      : isFailed
-                        ? "border-[var(--danger)]/40 text-[var(--danger)]"
-                        : "border-[var(--border)] text-[var(--fg-3)]",
-                )}
-              >
-                {done && !isCurrent ? (
-                  <CheckCircle2 className="h-3 w-3" />
-                ) : (
-                  <Icon className="h-3 w-3" />
-                )}
-                {isCurrent ? (
-                  <span
-                    aria-hidden
-                    className="absolute inset-0 -z-[1] animate-ping rounded-full bg-[var(--amber-glow)] opacity-50"
-                  />
-                ) : null}
-              </span>
-
-              <div className="min-w-0 pt-0.5">
-                <div className="flex items-baseline justify-between gap-2">
-                  <p
-                    className={cn(
-                      "truncate text-[13px] transition-colors",
-                      isCurrent
-                        ? "font-medium text-[var(--fg-0)]"
-                        : done
-                          ? "text-[var(--fg-1)]"
-                          : "text-[var(--fg-2)]",
-                    )}
-                  >
-                    {step.label}
-                  </p>
-                  <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--fg-3)]">
-                    {String(index + 1).padStart(2, "0")}
-                  </span>
-                </div>
-                {isCurrent && row?.status === "running" ? (
-                  <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
-                    Running
-                  </p>
-                ) : isFailed ? (
-                  <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
-                    失败
-                  </p>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
+        {STEPS.map((step, index) => (
+          <WorkflowStepRailRow
+            key={step.key}
+            workflow={workflow}
+            step={step}
+            index={index}
+            currentIndex={currentIndex}
+          />
+        ))}
       </ol>
     </div>
   );

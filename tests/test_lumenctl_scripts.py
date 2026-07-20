@@ -401,11 +401,13 @@ def test_image_job_install_copies_all_python_runtime_modules() -> None:
     for module in (
         "app.py",
         "image_artifacts.py",
+        "image_candidates.py",
         "image_url_security.py",
         "job_persistence.py",
         "payload_helpers.py",
         "request_bodies.py",
         "runtime_config.py",
+        "upstream_runtime.py",
     ):
         assert f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"' in text
 
@@ -1428,15 +1430,25 @@ def test_storage_apply_restarts_all_backup_mount_path_watchers() -> None:
 
 def test_admin_update_panel_arms_stream_after_trigger_success() -> None:
     """The panel should live-update after a trigger without requiring Refresh status."""
-    panel = (ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.tsx").read_text(
-        encoding="utf-8"
+    panel_sources = "\n".join(
+        (
+            (ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.tsx").read_text(
+                encoding="utf-8"
+            ),
+            (
+                ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.helpers.ts"
+            ).read_text(encoding="utf-8"),
+            (
+                ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.hooks.ts"
+            ).read_text(encoding="utf-8"),
+        )
     )
 
-    assert "updateStreamArmed" in panel
-    assert "setUpdateStreamArmed(true)" in panel
-    assert "queryClient.setQueryData<AdminUpdateStatusOut | undefined>" in panel
-    assert "running: true" in panel
-    assert "updateStreamArmed ||" in panel
+    assert "updateStreamArmed" in panel_sources
+    assert "setUpdateStreamArmed(true)" in panel_sources
+    assert "queryClient.setQueryData<AdminUpdateStatusOut | undefined>" in panel_sources
+    assert "running: true" in panel_sources
+    assert "anyPending(updateRunning, updateStreamArmed, triggering)" in panel_sources
 
 
 def test_tgbot_service_points_at_api_via_docker_network() -> None:
@@ -3825,16 +3837,30 @@ def test_deploy_docker_helper_files_exist() -> None:
 
 
 def test_admin_update_checklist_uses_docker_phases() -> None:
-    panel = (
-        ROOT
-        / "apps"
-        / "web"
-        / "src"
-        / "app"
-        / "admin"
-        / "_panels"
-        / "AdminUpdatePanel.tsx"
-    ).read_text(encoding="utf-8")
+    panel = "\n".join(
+        (
+            (
+                ROOT
+                / "apps"
+                / "web"
+                / "src"
+                / "app"
+                / "admin"
+                / "_panels"
+                / "AdminUpdatePanel.tsx"
+            ).read_text(encoding="utf-8"),
+            (
+                ROOT
+                / "apps"
+                / "web"
+                / "src"
+                / "app"
+                / "admin"
+                / "_panels"
+                / "AdminUpdatePanel.helpers.ts"
+            ).read_text(encoding="utf-8"),
+        )
+    )
     for phase in (
         "lock",
         "check",

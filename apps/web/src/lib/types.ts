@@ -1,6 +1,10 @@
 // 与 DESIGN.md §4 / §5 对齐的最小 V1 前端类型。
 // 前端自用场景：没有持久化服务端时，消息/图像/任务先在内存中建立，后续接后端时仅替换数据源。
 
+import type { VideoProviderKind } from "./videoProviderTypes";
+
+export type { VideoProviderKind } from "./videoProviderTypes";
+
 export type Intent =
   "auto" | "chat" | "vision_qa" | "text_to_image" | "image_to_image";
 
@@ -695,15 +699,6 @@ export interface ProviderProxyIn {
   private_key_path?: string | null;
   enabled: boolean;
 }
-
-export type VideoProviderKind =
-  | "volcano"
-  | "volcano_third_party"
-  | "volcano_newapi"
-  | "dashscope"
-  | "veo"
-  | "omni_flash"
-  | "fake";
 
 export interface VideoProviderItemOut {
   name: string;

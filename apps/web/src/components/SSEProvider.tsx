@@ -134,6 +134,12 @@ function createBroadcastSourceId(): string {
   return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizePayloadEventId(raw: unknown): string | null {
+  if (typeof raw === "string" && raw) return raw;
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  return null;
+}
+
 function payloadEventId(data: unknown, eventId?: string): string | null {
   if (data && typeof data === "object") {
     const record = data as {
@@ -142,14 +148,18 @@ function payloadEventId(data: unknown, eventId?: string): string | null {
       msg_id?: unknown;
     };
     const raw = record.event_id;
-    if (typeof raw === "string" && raw) return raw;
-    if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+    const rawId = normalizePayloadEventId(raw);
+    if (rawId) return rawId;
     const sseId = record.sse_id;
+    if (typeof sseId === "number" && Number.isFinite(sseId)) {
+      return String(sseId);
+    }
     if (typeof sseId === "string" && sseId) return sseId;
-    if (typeof sseId === "number" && Number.isFinite(sseId)) return String(sseId);
     const msgId = record.msg_id;
+    if (typeof msgId === "number" && Number.isFinite(msgId)) {
+      return String(msgId);
+    }
     if (typeof msgId === "string" && msgId) return msgId;
-    if (typeof msgId === "number" && Number.isFinite(msgId)) return String(msgId);
   }
   return eventId || null;
 }
@@ -240,50 +250,87 @@ function completionStatusToAssistantStatus(
   }
 }
 
+function applyCompletionStatus(
+  next: AssistantMessage,
+  fresh: BackendCompletion,
+  now: number,
+): void {
+  const nextStatus = completionStatusToAssistantStatus(fresh.status);
+  if (nextStatus && next.status !== nextStatus) {
+    next.status = nextStatus;
+  }
+  if (nextStatus === "streaming" && !next.stream_started_at) {
+    next.stream_started_at = now;
+  }
+}
+
+function applyCompletionText(
+  next: AssistantMessage,
+  fresh: BackendCompletion,
+  now: number,
+): void {
+  const serverText = typeof fresh.text === "string" ? fresh.text : "";
+  const localText = next.text ?? "";
+  const shouldUseServerText =
+    serverText &&
+    (fresh.status === "succeeded" || serverText.length >= localText.length);
+  if (shouldUseServerText) {
+    next.text = serverText;
+    next.last_delta_at = now;
+  } else if (fresh.status === "failed" && !localText && fresh.error_message) {
+    next.text = fresh.error_message;
+    next.last_delta_at = now;
+  }
+}
+
+function completionMessageChanged(
+  previous: AssistantMessage,
+  next: AssistantMessage,
+): boolean {
+  const changed =
+    next.status !== previous.status ||
+    next.text !== previous.text ||
+    next.stream_started_at !== previous.stream_started_at ||
+    next.last_delta_at !== previous.last_delta_at;
+  return changed;
+}
+
+function updateCompletionMessage(
+  message: Message,
+  fresh: BackendCompletion,
+  now: number,
+): { message: Message; changed: boolean } {
+  if (message.role !== "assistant") return { message, changed: false };
+  const previous = message as AssistantMessage;
+  if (previous.completion_id !== fresh.id) {
+    return { message, changed: false };
+  }
+  const next = { ...previous };
+  applyCompletionStatus(next, fresh, now);
+  applyCompletionText(next, fresh, now);
+  const changed = completionMessageChanged(previous, next);
+  return { message: changed ? next : message, changed };
+}
+
+function mergeCompletionMessages(
+  messages: Message[],
+  fresh: BackendCompletion,
+  now: number,
+): { messages: Message[]; changed: boolean } {
+  let changed = false;
+  const nextMessages = messages.map((message) => {
+    const updated = updateCompletionMessage(message, fresh, now);
+    changed ||= updated.changed;
+    return updated.message;
+  });
+  return { messages: nextMessages, changed };
+}
+
 function applyCompletionSnapshot(fresh: BackendCompletion): void {
   const now = Date.now();
-  useChatStore.setState((s) => {
-    let changed = false;
-    const nextMessages = s.messages.map((m) => {
-      if (m.role !== "assistant") return m;
-      if ((m as AssistantMessage).completion_id !== fresh.id) return m;
-
-      const asst = m as AssistantMessage;
-      const next = { ...asst };
-      const nextStatus = completionStatusToAssistantStatus(fresh.status);
-      if (nextStatus && next.status !== nextStatus) {
-        next.status = nextStatus;
-      }
-      if (nextStatus === "streaming" && !next.stream_started_at) {
-        next.stream_started_at = now;
-      }
-
-      const serverText = typeof fresh.text === "string" ? fresh.text : "";
-      const localText = next.text ?? "";
-      if (
-        serverText &&
-        (fresh.status === "succeeded" || serverText.length >= localText.length)
-      ) {
-        next.text = serverText;
-        next.last_delta_at = now;
-      } else if (fresh.status === "failed" && !localText && fresh.error_message) {
-        next.text = fresh.error_message;
-        next.last_delta_at = now;
-      }
-
-      if (
-        next.status !== asst.status ||
-        next.text !== asst.text ||
-        next.stream_started_at !== asst.stream_started_at ||
-        next.last_delta_at !== asst.last_delta_at
-      ) {
-        changed = true;
-        return next;
-      }
-      return m;
-    });
-
-    return changed ? { messages: nextMessages } : s;
+  useChatStore.setState((state) => {
+    const merged = mergeCompletionMessages(state.messages, fresh, now);
+    return merged.changed ? { messages: merged.messages } : state;
   });
 }
 
@@ -316,6 +363,42 @@ async function refreshActiveCompletionText(opts: {
       }
     }),
   );
+}
+
+function buildRecoveryJobs(
+  request: RecoveryRequest,
+  signal: AbortSignal,
+  overflowGenerationIds: string[],
+  overflowCompletionIds: string[],
+): Array<Promise<unknown>> {
+  const store = useChatStore.getState();
+  const jobs: Array<Promise<unknown>> = [];
+  if (request.hydrateTasks) jobs.push(store.hydrateActiveTasks({ signal }));
+  if (request.pollTasks === "overflow") {
+    if (overflowGenerationIds.length > 0 || overflowCompletionIds.length > 0) {
+      jobs.push(
+        store.pollInflightTasks({
+          signal,
+          generationIds: overflowGenerationIds,
+          completionIds: overflowCompletionIds,
+          maxChecks: 24,
+        }),
+      );
+    }
+  } else if (request.pollTasks === "limited") {
+    jobs.push(store.pollInflightTasks({ signal, maxChecks: 12 }));
+  } else if (request.pollTasks === "all") {
+    jobs.push(store.pollInflightTasks({ signal, maxChecks: 50 }));
+  }
+  if (request.refreshCompletionText) {
+    jobs.push(
+      refreshActiveCompletionText({
+        signal,
+        maxChecks: request.pollTasks === "all" ? 16 : 8,
+      }),
+    );
+  }
+  return jobs;
 }
 
 export function SSEProvider({ children }: { children: React.ReactNode }) {
@@ -624,45 +707,12 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       );
       const recoveryAbort = new AbortController();
       recoveryAbortRef.current = recoveryAbort;
-      const store = useChatStore.getState();
-      const jobs: Array<Promise<unknown>> = [];
-      if (hydrateTasks) jobs.push(store.hydrateActiveTasks({ signal: recoveryAbort.signal }));
-      if (pollTasks === "overflow") {
-        const generationIds = overflowGenerationIdsRef.current;
-        const completionIds = overflowCompletionIdsRef.current;
-        if (generationIds.length > 0 || completionIds.length > 0) {
-          jobs.push(
-            store.pollInflightTasks({
-              signal: recoveryAbort.signal,
-              generationIds,
-              completionIds,
-              maxChecks: 24,
-            }),
-          );
-        }
-      } else if (pollTasks === "limited") {
-        jobs.push(
-          store.pollInflightTasks({
-            signal: recoveryAbort.signal,
-            maxChecks: 12,
-          }),
-        );
-      } else if (pollTasks === "all") {
-        jobs.push(
-          store.pollInflightTasks({
-            signal: recoveryAbort.signal,
-            maxChecks: 50,
-          }),
-        );
-      }
-      if (refreshCompletionText) {
-        jobs.push(
-          refreshActiveCompletionText({
-            signal: recoveryAbort.signal,
-            maxChecks: pollTasks === "all" ? 16 : 8,
-          }),
-        );
-      }
+      const jobs = buildRecoveryJobs(
+        request,
+        recoveryAbort.signal,
+        overflowGenerationIdsRef.current,
+        overflowCompletionIdsRef.current,
+      );
 
       if (jobs.length === 0) {
         recoveryInFlightRef.current = false;

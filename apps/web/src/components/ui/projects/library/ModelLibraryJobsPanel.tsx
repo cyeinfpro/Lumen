@@ -39,7 +39,6 @@ import type {
   ModelLibraryItemAgeSegment,
 } from "@/lib/apiClient";
 import {
-  imageBinaryUrl,
   MODEL_LIBRARY_APPEARANCE_LABEL,
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
@@ -51,6 +50,10 @@ import {
 } from "@/lib/queries";
 import { useUiStore } from "@/store/useUiStore";
 import { formatRelativeTime } from "../utils";
+import {
+  AGE_LABEL,
+  buildReferenceSummary,
+} from "./ModelLibraryJobsModel";
 
 function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
   return {
@@ -90,17 +93,6 @@ const STATUS_LABEL: Record<ApparelModelLibraryJobStatus, string> = {
 const ORIGIN_LABEL: Record<"library_generate" | "project_candidate", string> = {
   library_generate: "独立生成",
   project_candidate: "项目候选",
-};
-
-const AGE_LABEL: Record<ModelLibraryItemAgeSegment, string> = {
-  user_favorites: "用户收藏",
-  toddler: "幼儿",
-  child: "儿童",
-  teen: "青少年",
-  young_adult: "青年",
-  adult: "熟龄",
-  middle_aged: "中年",
-  senior: "老年",
 };
 
 export function ModelLibraryJobsPanel() {
@@ -569,22 +561,8 @@ function ReferenceSummary({
   job: ApparelModelLibraryJob;
   compact?: boolean;
 }) {
-  if (!job.reference_image_id) return null;
-  const profile = job.extracted_profile;
-  const tokens: string[] = [];
-  const age = profile?.age_segment || job.age_segment;
-  if (age) tokens.push(AGE_LABEL[age] ?? age);
-  const gender = profile?.gender || job.gender;
-  if (gender) tokens.push(gender === "male" ? "男" : gender === "female" ? "女" : gender);
-  const appearance = profile?.appearance_direction || job.appearance_direction;
-  if (appearance) {
-    const key = appearance as AppearanceKey;
-    tokens.push(MODEL_LIBRARY_APPEARANCE_LABEL[key] ?? appearance);
-  }
-  for (const tag of profile?.style_tags ?? []) {
-    if (tag && tokens.length < 8) tokens.push(tag);
-  }
-  const imageUrl = job.reference_image_url || imageBinaryUrl(job.reference_image_id);
+  const summary = buildReferenceSummary(job);
+  if (!summary) return null;
   return (
     <section
       className={cn(
@@ -599,7 +577,7 @@ function ReferenceSummary({
         )}
       >
         <Image
-          src={imageUrl}
+          src={summary.imageUrl}
           alt="参考图"
           fill
           unoptimized
@@ -611,9 +589,9 @@ function ReferenceSummary({
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           参考图识别
         </p>
-        {tokens.length > 0 ? (
+        {summary.tokens.length > 0 ? (
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {tokens.map((token, idx) => (
+            {summary.tokens.map((token, idx) => (
               <span
                 key={`${token}-${idx}`}
                 className="max-w-full break-words border border-[var(--border)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)]"
@@ -627,9 +605,9 @@ function ReferenceSummary({
             未返回可展示的识别字段
           </p>
         )}
-        {profile?.notes ? (
+        {summary.notes ? (
           <p className="mt-2 line-clamp-2 text-[12px] leading-[1.55] text-[var(--fg-2)]">
-            {profile.notes}
+            {summary.notes}
           </p>
         ) : null}
       </div>
@@ -723,66 +701,142 @@ function JobThumb({
   order?: number;
 }) {
   const [saveOpen, setSaveOpen] = useState(false);
-  const saved = item.saved_item_id != null;
-  const free = isFreeJobItem(item);
-  const allowSave = !disableSaveAction;
-  const canSave = Boolean(job && allowSave);
-  const appearanceKey = (item.appearance_direction || job?.appearance_direction || "") as
-    | AppearanceKey
-    | "";
-  const appearanceLabel = appearanceKey
-    ? (MODEL_LIBRARY_APPEARANCE_LABEL[appearanceKey as AppearanceKey] ?? appearanceKey)
-    : "";
+  const model = buildJobThumbModel(item, job, disableSaveAction);
 
   return (
     <div className="group relative">
       <JobThumbnailMedia
         compact={compact}
-        free={free}
+        free={model.free}
         item={item}
         order={order}
-        saved={saved}
+        saved={model.saved}
         onOpenLightbox={onOpenLightbox}
       />
-      {!compact ? (
-        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2">
-          <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
-            {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
-              .filter(Boolean)
-              .join(" · ") || "未识别"}
-          </span>
-          {canSave && !saved ? (
-            <button
-              type="button"
-              aria-label="收藏入库"
-              onClick={() => setSaveOpen(true)}
-              className="inline-flex min-h-11 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em] md:h-7 md:min-h-0"
-            >
-              <Bookmark className="h-3 w-3" />
-              入库
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-      {compact && canSave && !saved ? (
+      <JobThumbCaption
+        compact={compact}
+        item={item}
+        model={model}
+        onSave={() => setSaveOpen(true)}
+      />
+      <CompactJobThumbSaveAction
+        compact={compact}
+        model={model}
+        onSave={() => setSaveOpen(true)}
+      />
+      <JobThumbSaveDialog
+        allowSave={model.allowSave}
+        item={item}
+        job={job}
+        open={saveOpen}
+        onClose={() => setSaveOpen(false)}
+      />
+    </div>
+  );
+}
+
+interface JobThumbModel {
+  allowSave: boolean;
+  appearanceLabel: string;
+  canSave: boolean;
+  free: boolean;
+  saved: boolean;
+}
+
+function buildJobThumbModel(
+  item: ApparelModelLibraryJobItem,
+  job: ApparelModelLibraryJob | undefined,
+  disableSaveAction: boolean,
+): JobThumbModel {
+  const appearanceKey = (
+    item.appearance_direction ||
+    job?.appearance_direction ||
+    ""
+  ) as AppearanceKey | "";
+  return {
+    allowSave: !disableSaveAction,
+    appearanceLabel: appearanceKey
+      ? (MODEL_LIBRARY_APPEARANCE_LABEL[appearanceKey] ?? appearanceKey)
+      : "",
+    canSave: Boolean(job) && !disableSaveAction,
+    free: isFreeJobItem(item),
+    saved: item.saved_item_id != null,
+  };
+}
+
+function JobThumbCaption({
+  compact,
+  item,
+  model,
+  onSave,
+}: {
+  compact: boolean;
+  item: ApparelModelLibraryJobItem;
+  model: JobThumbModel;
+  onSave: () => void;
+}) {
+  if (compact) return null;
+  const caption =
+    [model.appearanceLabel, item.style_tags.slice(0, 2).join("、")]
+      .filter(Boolean)
+      .join(" · ") || "未识别";
+  return (
+    <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2">
+      <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
+        {caption}
+      </span>
+      {model.canSave && !model.saved ? (
         <button
           type="button"
           aria-label="收藏入库"
-          onClick={() => setSaveOpen(true)}
-          className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
+          onClick={onSave}
+          className="inline-flex min-h-11 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em] md:h-7 md:min-h-0"
         >
-          <Bookmark className="h-3.5 w-3.5" />
+          <Bookmark className="h-3 w-3" />
+          入库
         </button>
-      ) : null}
-      {saveOpen && job && allowSave ? (
-        <SaveJobItemDialog
-          item={item}
-          job={job}
-          onClose={() => setSaveOpen(false)}
-        />
       ) : null}
     </div>
   );
+}
+
+function CompactJobThumbSaveAction({
+  compact,
+  model,
+  onSave,
+}: {
+  compact: boolean;
+  model: JobThumbModel;
+  onSave: () => void;
+}) {
+  if (!compact || !model.canSave || model.saved) return null;
+  return (
+    <button
+      type="button"
+      aria-label="收藏入库"
+      onClick={onSave}
+      className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
+    >
+      <Bookmark className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function JobThumbSaveDialog({
+  allowSave,
+  item,
+  job,
+  open,
+  onClose,
+}: {
+  allowSave: boolean;
+  item: ApparelModelLibraryJobItem;
+  job?: ApparelModelLibraryJob;
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open || !job || !allowSave) return null;
+  return <SaveJobItemDialog item={item} job={job} onClose={onClose} />;
 }
 
 function JobThumbnailMedia({

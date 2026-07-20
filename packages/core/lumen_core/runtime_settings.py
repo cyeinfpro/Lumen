@@ -97,9 +97,7 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
     ),
     SettingSpec(
         key="canvas.enabled",
-        description=(
-            "是否开放无限画布。0=关闭入口并拒绝 /canvases API，1=开放。"
-        ),
+        description=("是否开放无限画布。0=关闭入口并拒绝 /canvases API，1=开放。"),
         sensitive=False,
         parser=int,
         env_fallback="CANVAS_ENABLED",
@@ -1054,6 +1052,99 @@ def _validate_proxy_item(item: object, index: int) -> tuple[str, bool]:
     return name.strip(), enabled
 
 
+def _validated_proxy_map(proxies: list[object]) -> dict[str, bool]:
+    enabled_by_name: dict[str, bool] = {}
+    for index, item in enumerate(proxies):
+        proxy_name, proxy_enabled = _validate_proxy_item(item, index)
+        if proxy_name in enabled_by_name:
+            raise ValueError(f"proxies[{index}].name is duplicated: {proxy_name}")
+        enabled_by_name[proxy_name] = proxy_enabled
+    return enabled_by_name
+
+
+def _remember_provider_name(
+    item: dict[str, object],
+    index: int,
+    provider_names: set[str],
+) -> None:
+    name = item.get("name", f"provider-{index}")
+    if not isinstance(name, str) or not name.strip():
+        return
+    provider_name = name.strip()
+    if provider_name in provider_names:
+        raise ValueError(f"providers[{index}].name is duplicated: {provider_name}")
+    provider_names.add(provider_name)
+
+
+def _validate_provider_base_url(base_url: object, index: int) -> None:
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ValueError(f"providers[{index}].base_url is required")
+    parts = urlsplit(base_url.strip())
+    if not parts.scheme:
+        raise ValueError(
+            f"providers[{index}].base_url has no scheme (must be http:// or https://)"
+        )
+    if parts.scheme.lower() not in {"http", "https"}:
+        raise ValueError(f"providers[{index}].base_url must use http or https")
+    if not parts.hostname:
+        raise ValueError(f"providers[{index}].base_url must include a hostname")
+    if parts.username or parts.password:
+        raise ValueError(f"providers[{index}].base_url must not include credentials")
+
+
+def _validate_provider_proxy_reference(
+    item: dict[str, object],
+    *,
+    index: int,
+    enabled: bool,
+    proxy_enabled_by_name: dict[str, bool],
+) -> None:
+    raw_proxy_name = item.get("proxy", item.get("proxy_name"))
+    if not isinstance(raw_proxy_name, str) or not raw_proxy_name.strip():
+        return
+    proxy_name = raw_proxy_name.strip()
+    if proxy_name not in proxy_enabled_by_name and enabled:
+        raise ValueError(
+            f"providers[{index}].proxy references unknown proxy: {proxy_name}"
+        )
+    if enabled and not proxy_enabled_by_name.get(proxy_name, True):
+        raise ValueError(
+            f"providers[{index}].proxy references disabled proxy: {proxy_name}"
+        )
+
+
+def _validate_provider_config_item(
+    item: object,
+    *,
+    index: int,
+    provider_names: set[str],
+    proxy_enabled_by_name: dict[str, bool],
+) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"providers[{index}] must be an object")
+    _remember_provider_name(item, index, provider_names)
+    _validate_provider_base_url(item.get("base_url", ""), index)
+    try:
+        enabled = parse_provider_bool(item.get("enabled"), default=True)
+    except ValueError as exc:
+        raise ValueError(f"providers[{index}].enabled must be a boolean") from exc
+    api_key = item.get("api_key", "")
+    if not isinstance(api_key, str):
+        raise ValueError(f"providers[{index}].api_key must be a string")
+    if enabled and not api_key.strip():
+        raise ValueError(f"providers[{index}].api_key is required")
+    _validate_provider_proxy_reference(
+        item,
+        index=index,
+        enabled=enabled,
+        proxy_enabled_by_name=proxy_enabled_by_name,
+    )
+    try:
+        normalize_provider_purposes(item.get("purposes"))
+    except ValueError as exc:
+        raise ValueError(f"providers[{index}].purposes invalid: {exc}") from exc
+
+
 def validate_providers(raw: str) -> str:
     """Validate provider-pool JSON. Returns raw string if valid.
 
@@ -1071,65 +1162,15 @@ def validate_providers(raw: str) -> str:
     items, proxies = _provider_config_items(parsed)
     if not items:
         raise ValueError("providers must be a non-empty JSON array")
-    proxy_enabled_by_name: dict[str, bool] = {}
-    for i, item in enumerate(proxies):
-        proxy_name, proxy_enabled = _validate_proxy_item(item, i)
-        if proxy_name in proxy_enabled_by_name:
-            raise ValueError(f"proxies[{i}].name is duplicated: {proxy_name}")
-        proxy_enabled_by_name[proxy_name] = proxy_enabled
-
+    proxy_enabled_by_name = _validated_proxy_map(proxies)
     provider_names: set[str] = set()
-    for i, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise ValueError(f"providers[{i}] must be an object")
-        name = item.get("name", f"provider-{i}")
-        if isinstance(name, str) and name.strip():
-            provider_name = name.strip()
-            if provider_name in provider_names:
-                raise ValueError(f"providers[{i}].name is duplicated: {provider_name}")
-            provider_names.add(provider_name)
-        base_url = item.get("base_url", "")
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError(f"providers[{i}].base_url is required")
-        try:
-            enabled = parse_provider_bool(item.get("enabled"), default=True)
-        except ValueError as exc:
-            raise ValueError(f"providers[{i}].enabled must be a boolean") from exc
-        api_key = item.get("api_key", "")
-        if not isinstance(api_key, str):
-            raise ValueError(f"providers[{i}].api_key must be a string")
-        if enabled and not api_key.strip():
-            raise ValueError(f"providers[{i}].api_key is required")
-        parts = urlsplit(base_url.strip())
-        if not parts.scheme:
-            raise ValueError(
-                f"providers[{i}].base_url has no scheme (must be http:// or https://)"
-            )
-        if parts.scheme.lower() not in {"http", "https"}:
-            raise ValueError(f"providers[{i}].base_url must use http or https")
-        if not parts.hostname:
-            raise ValueError(f"providers[{i}].base_url must include a hostname")
-        if parts.username or parts.password:
-            raise ValueError(f"providers[{i}].base_url must not include credentials")
-        raw_proxy_name = item.get("proxy", item.get("proxy_name"))
-        if isinstance(raw_proxy_name, str) and raw_proxy_name.strip():
-            name_clean = raw_proxy_name.strip()
-            if name_clean not in proxy_enabled_by_name and enabled:
-                raise ValueError(
-                    f"providers[{i}].proxy references unknown proxy: {name_clean}"
-                )
-            if (
-                name_clean in proxy_enabled_by_name
-                and not proxy_enabled_by_name[name_clean]
-                and enabled
-            ):
-                raise ValueError(
-                    f"providers[{i}].proxy references disabled proxy: {name_clean}"
-                )
-        try:
-            normalize_provider_purposes(item.get("purposes"))
-        except ValueError as exc:
-            raise ValueError(f"providers[{i}].purposes invalid: {exc}") from exc
+    for index, item in enumerate(items):
+        _validate_provider_config_item(
+            item,
+            index=index,
+            provider_names=provider_names,
+            proxy_enabled_by_name=proxy_enabled_by_name,
+        )
     return value
 
 
@@ -1258,51 +1299,70 @@ def validate_image_job_base_url(raw: str) -> str:
     return value
 
 
+def _special_setting_value(spec: SettingSpec, raw: str) -> tuple[bool, object | None]:
+    validators = {
+        "providers": validate_providers,
+        "video.providers": lambda value: validate_video_providers(
+            value,
+            allow_missing_proxy=True,
+        ),
+        "video.token_hold_estimates": validate_video_token_hold_estimates,
+        "site.public_base_url": validate_public_base_url,
+        "image.job_base_url": validate_image_job_base_url,
+        "billing.image_size_thresholds": validate_image_size_thresholds,
+        "billing.redemption_code_secret": validate_redemption_code_secret,
+    }
+    validator = validators.get(spec.key)
+    if validator is None:
+        return False, None
+    return True, validator(raw)
+
+
+def _validated_string_value(spec: SettingSpec, raw: str) -> str:
+    if spec.allowed_values is not None and raw not in spec.allowed_values:
+        allowed = ", ".join(spec.allowed_values)
+        raise ValueError(f"{spec.key} must be one of: {allowed}")
+    return raw
+
+
+def _numeric_setting_value(spec: SettingSpec, raw: str) -> int | float:
+    if spec.parser is int:
+        return int(raw)
+    if spec.parser is float:
+        return float(raw)
+    raise ValueError(f"unsupported parser {spec.parser!r}")
+
+
+def _validate_numeric_setting(
+    spec: SettingSpec,
+    raw: str,
+    value: int | float,
+) -> None:
+    if spec.allowed_values is not None:
+        # Compare normalized literals before numeric coercion so "00" and "+0"
+        # do not silently satisfy an administrator's explicit ("0", "1") set.
+        normalized = raw.strip()
+        if normalized not in {allowed.strip() for allowed in spec.allowed_values}:
+            allowed = ", ".join(spec.allowed_values)
+            raise ValueError(f"{spec.key} must be one of: {allowed}")
+    if spec.min_value is not None and value < spec.min_value:
+        raise ValueError(f"{spec.key}={value} below min ({spec.min_value})")
+    if spec.max_value is not None and value > spec.max_value:
+        raise ValueError(f"{spec.key}={value} above max ({spec.max_value})")
+
+
 def parse_value(spec: SettingSpec, raw: str) -> object:
     """根据 spec.parser 把字符串解析成正确类型；失败抛 ValueError。
 
     数值类型同时校验 min_value / max_value（若 spec 中已配置）。
     """
-    if spec.key == "providers":
-        return validate_providers(raw)
-    if spec.key == "video.providers":
-        return validate_video_providers(raw, allow_missing_proxy=True)
-    if spec.key == "video.token_hold_estimates":
-        return validate_video_token_hold_estimates(raw)
-    if spec.key == "site.public_base_url":
-        return validate_public_base_url(raw)
-    if spec.key == "image.job_base_url":
-        return validate_image_job_base_url(raw)
-    if spec.key == "billing.image_size_thresholds":
-        return validate_image_size_thresholds(raw)
-    if spec.key == "billing.redemption_code_secret":
-        return validate_redemption_code_secret(raw)
+    is_special, special_value = _special_setting_value(spec, raw)
+    if is_special:
+        return special_value
     if spec.parser is str:
-        if spec.allowed_values is not None and raw not in spec.allowed_values:
-            allowed = ", ".join(spec.allowed_values)
-            raise ValueError(f"{spec.key} must be one of: {allowed}")
-        return raw
-    if spec.parser is int:
-        value: int | float = int(raw)
-    elif spec.parser is float:
-        value = float(raw)
-    else:
-        raise ValueError(f"unsupported parser {spec.parser!r}")
-
-    if spec.allowed_values is not None:
-        # 严格按字符串字面比对：把 raw 和 allowed_values 都做 strip 后比 string，
-        # 不要先 int(raw) → set(int(allowed)) 再比。后者会让 "00" / " 0 " / "+0"
-        # 等变体被误判为合法（都 parse 成 0），而管理员配置 ("0", "1") 时
-        # 期望的是布尔开关字面值。
-        normalized = raw.strip()
-        if normalized not in {av.strip() for av in spec.allowed_values}:
-            allowed = ", ".join(spec.allowed_values)
-            raise ValueError(f"{spec.key} must be one of: {allowed}")
-
-    if spec.min_value is not None and value < spec.min_value:
-        raise ValueError(f"{spec.key}={value} below min ({spec.min_value})")
-    if spec.max_value is not None and value > spec.max_value:
-        raise ValueError(f"{spec.key}={value} above max ({spec.max_value})")
+        return _validated_string_value(spec, raw)
+    value = _numeric_setting_value(spec, raw)
+    _validate_numeric_setting(spec, raw, value)
     return value
 
 

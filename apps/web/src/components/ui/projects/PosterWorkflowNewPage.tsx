@@ -449,40 +449,11 @@ export function PosterWorkflowNewPage() {
                 className="-mt-3 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-7 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
               />
 
-              {/* Style */}
-              <SectionHeader
-                eyebrow="N°02 — 风格"
-                title="海报风格"
-                trailing={
-                  <button
-                    type="button"
-                    onClick={() => setStyleOpen(true)}
-                    className="inline-flex min-h-11 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:min-h-9"
-                  >
-                    <Palette className="h-3.5 w-3.5" />
-                    {style ? "更换风格" : "从风格库选择"}
-                  </button>
-                }
+              <PosterStyleSection
+                style={style}
+                onOpen={() => setStyleOpen(true)}
+                onClear={() => setStyle(null)}
               />
-              <div className="-mt-2">
-                {style ? (
-                  <StyleSummary style={style} onClear={() => setStyle(null)} />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setStyleOpen(true)}
-                    className="flex w-full min-h-[120px] flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-[var(--border-amber)] hover:bg-[var(--accent-soft)]"
-                  >
-                    <Palette className="h-5 w-5 text-[var(--fg-2)]" />
-                    <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-1)]">
-                      点击选择风格
-                    </p>
-                    <p className="text-[12px] text-[var(--fg-3)]">
-                      没有合适的风格？可去「风格库」创建。
-                    </p>
-                  </button>
-                )}
-              </div>
 
               {/* Aspects */}
               <SectionHeader
@@ -665,29 +636,11 @@ export function PosterWorkflowNewPage() {
                 </div>
               ) : null}
 
-              <div className="hidden border-t border-[var(--border)] pt-6 md:block">
-                <button
-                  type="button"
-                  onClick={onCreate}
-                  disabled={ctaDisabled}
-                  className={cn(
-                    "group inline-flex items-center gap-3 rounded-full px-7 py-3.5 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,opacity,box-shadow] duration-[var(--dur-base)]",
-                    ctaDisabled
-                      ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
-                      : "cursor-pointer bg-[var(--accent)] hover:scale-[1.02] active:scale-[0.98]",
-                  )}
-                >
-                  {create.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : null}
-                  <span>
-                    {create.isPending ? "创建中" : "创建海报项目"}
-                  </span>
-                  {!create.isPending ? (
-                    <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-enabled:group-hover:translate-x-0 group-enabled:group-hover:opacity-100" />
-                  ) : null}
-                </button>
-              </div>
+              <PosterCreateButton
+                pending={create.isPending}
+                disabled={ctaDisabled}
+                onClick={onCreate}
+              />
             </section>
 
             <aside className="hidden grid-cols-1 gap-0 self-start lg:grid">
@@ -711,22 +664,12 @@ export function PosterWorkflowNewPage() {
         </div>
       </main>
 
-      <div className="fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden">
-        <button
-          type="button"
-          onClick={onCreate}
-          disabled={ctaDisabled}
-          className={cn(
-            "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
-            ctaDisabled
-              ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
-              : "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]",
-          )}
-        >
-          {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          {create.isPending ? "创建中" : "创建海报项目"}
-        </button>
-      </div>
+      <PosterCreateButton
+        mobile
+        pending={create.isPending}
+        disabled={ctaDisabled}
+        onClick={onCreate}
+      />
 
       <ProjectMobileTabBar />
 
@@ -739,6 +682,97 @@ export function PosterWorkflowNewPage() {
           setStyleOpen(false);
         }}
       />
+    </div>
+  );
+}
+
+function PosterStyleSection({
+  style,
+  onOpen,
+  onClear,
+}: {
+  style: PosterStyleItem | null;
+  onOpen: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <>
+      <SectionHeader
+        eyebrow="N°02 — 风格"
+        title="海报风格"
+        trailing={
+          <button
+            type="button"
+            onClick={onOpen}
+            className="inline-flex min-h-11 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:min-h-9"
+          >
+            <Palette className="h-3.5 w-3.5" />
+            {style ? "更换风格" : "从风格库选择"}
+          </button>
+        }
+      />
+      <div className="-mt-2">
+        {style ? (
+          <StyleSummary style={style} onClear={onClear} />
+        ) : (
+          <button
+            type="button"
+            onClick={onOpen}
+            className="flex w-full min-h-[120px] flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-[var(--border-amber)] hover:bg-[var(--accent-soft)]"
+          >
+            <Palette className="h-5 w-5 text-[var(--fg-2)]" />
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-1)]">
+              点击选择风格
+            </p>
+            <p className="text-[12px] text-[var(--fg-3)]">
+              没有合适的风格？可去「风格库」创建。
+            </p>
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+function PosterCreateButton({
+  pending,
+  disabled,
+  mobile = false,
+  onClick,
+}: {
+  pending: boolean;
+  disabled: boolean;
+  mobile?: boolean;
+  onClick: () => void;
+}) {
+  const wrapperClass = mobile
+    ? "fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden"
+    : "hidden border-t border-[var(--border)] pt-6 md:block";
+  const buttonClass = mobile
+    ? "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]"
+    : "group inline-flex items-center gap-3 rounded-full px-7 py-3.5 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,opacity,box-shadow] duration-[var(--dur-base)]";
+  const enabledClass = mobile
+    ? "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]"
+    : "cursor-pointer bg-[var(--accent)] hover:scale-[1.02] active:scale-[0.98]";
+  return (
+    <div className={wrapperClass}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className={cn(
+          buttonClass,
+          disabled
+            ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
+            : enabledClass,
+        )}
+      >
+        {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        <span>{pending ? "创建中" : "创建海报项目"}</span>
+        {!mobile && !pending ? (
+          <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-enabled:group-hover:translate-x-0 group-enabled:group-hover:opacity-100" />
+        ) : null}
+      </button>
     </div>
   );
 }

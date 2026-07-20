@@ -396,6 +396,96 @@ def _split_video_config(raw: str | None) -> tuple[list[Any], list[Any], list[str
     return providers, proxies, []
 
 
+def _shared_video_proxies(
+    shared_provider_raw: str | None,
+    errors: list[str],
+) -> list[ProviderProxyDefinition]:
+    if not shared_provider_raw:
+        return []
+    _providers, shared_proxies, shared_errors = parse_provider_config_json(
+        shared_provider_raw
+    )
+    errors.extend(f"shared providers: {error}" for error in shared_errors)
+    return shared_proxies
+
+
+def _video_proxy_items(
+    items: list[Any],
+    shared_proxies: list[ProviderProxyDefinition],
+    errors: list[str],
+) -> list[ProviderProxyDefinition]:
+    proxies = list(shared_proxies)
+    seen_names = {proxy.name for proxy in proxies}
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"video.providers.proxies[{index}] must be an object")
+            continue
+        try:
+            proxy = parse_proxy_item(item, index=index)
+        except (ValueError, TypeError, KeyError) as exc:
+            errors.append(f"video.providers.proxies[{index}] invalid: {exc}")
+            continue
+        if proxy.name in seen_names:
+            errors.append(
+                f"video.providers.proxies[{index}].name is duplicated: {proxy.name}"
+            )
+            continue
+        seen_names.add(proxy.name)
+        proxies.append(proxy)
+    return proxies
+
+
+def _video_provider_items(
+    items: list[Any],
+    errors: list[str],
+) -> list[VideoProviderDefinition]:
+    providers: list[VideoProviderDefinition] = []
+    seen_names: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"video.providers[{index}] must be an object")
+            continue
+        try:
+            provider = parse_video_provider_item(item, index=index)
+        except (ValueError, TypeError, KeyError) as exc:
+            errors.append(f"video.providers[{index}] invalid: {exc}")
+            continue
+        if provider.name in seen_names:
+            errors.append(
+                f"video.providers[{index}].name is duplicated: {provider.name}"
+            )
+            continue
+        seen_names.add(provider.name)
+        providers.append(provider)
+    return providers
+
+
+def _attached_video_providers(
+    providers: list[VideoProviderDefinition],
+    proxies: list[ProviderProxyDefinition],
+    errors: list[str],
+    *,
+    allow_missing_proxy: bool,
+) -> list[VideoProviderDefinition]:
+    proxy_by_name = {proxy.name: proxy for proxy in proxies}
+    attached: list[VideoProviderDefinition] = []
+    for provider in providers:
+        proxy = proxy_by_name.get(provider.proxy_name) if provider.proxy_name else None
+        if provider.proxy_name and proxy is None:
+            if provider.enabled and not allow_missing_proxy:
+                errors.append(
+                    f"provider {provider.name}: proxy {provider.proxy_name} not found"
+                )
+        elif proxy is not None and not proxy.enabled:
+            if provider.enabled:
+                errors.append(
+                    f"provider {provider.name}: proxy {provider.proxy_name} is disabled"
+                )
+            proxy = None
+        attached.append(replace(provider, proxy=proxy))
+    return attached
+
+
 def parse_video_provider_config_json(
     raw: str | None,
     *,
@@ -405,65 +495,15 @@ def parse_video_provider_config_json(
     provider_items, proxy_items, errors = _split_video_config(raw)
     if errors:
         return [], [], errors
-    shared_proxies: list[ProviderProxyDefinition] = []
-    if shared_provider_raw:
-        _providers, shared_proxies, shared_errors = parse_provider_config_json(
-            shared_provider_raw
-        )
-        errors.extend(f"shared providers: {err}" for err in shared_errors)
-    proxies = list(shared_proxies)
-    seen_proxy_names = {p.name for p in proxies}
-    for i, item in enumerate(proxy_items):
-        if not isinstance(item, dict):
-            errors.append(f"video.providers.proxies[{i}] must be an object")
-            continue
-        try:
-            parsed_proxy = parse_proxy_item(item, index=i)
-        except (ValueError, TypeError, KeyError) as exc:
-            errors.append(f"video.providers.proxies[{i}] invalid: {exc}")
-            continue
-        if parsed_proxy.name in seen_proxy_names:
-            errors.append(
-                f"video.providers.proxies[{i}].name is duplicated: {parsed_proxy.name}"
-            )
-            continue
-        seen_proxy_names.add(parsed_proxy.name)
-        proxies.append(parsed_proxy)
-
-    providers: list[VideoProviderDefinition] = []
-    provider_names: set[str] = set()
-    for i, item in enumerate(provider_items):
-        if not isinstance(item, dict):
-            errors.append(f"video.providers[{i}] must be an object")
-            continue
-        try:
-            provider = parse_video_provider_item(item, index=i)
-        except (ValueError, TypeError, KeyError) as exc:
-            errors.append(f"video.providers[{i}] invalid: {exc}")
-            continue
-        if provider.name in provider_names:
-            errors.append(f"video.providers[{i}].name is duplicated: {provider.name}")
-            continue
-        provider_names.add(provider.name)
-        providers.append(provider)
-
-    proxy_by_name = {p.name: p for p in proxies}
-    attached: list[VideoProviderDefinition] = []
-    for provider in providers:
-        attached_proxy: ProviderProxyDefinition | None = None
-        if provider.proxy_name:
-            attached_proxy = proxy_by_name.get(provider.proxy_name)
-            if attached_proxy is None and provider.enabled and not allow_missing_proxy:
-                errors.append(
-                    f"provider {provider.name}: proxy {provider.proxy_name} not found"
-                )
-            elif attached_proxy is not None and not attached_proxy.enabled:
-                if provider.enabled:
-                    errors.append(
-                        f"provider {provider.name}: proxy {provider.proxy_name} is disabled"
-                    )
-                attached_proxy = None
-        attached.append(replace(provider, proxy=attached_proxy))
+    shared_proxies = _shared_video_proxies(shared_provider_raw, errors)
+    proxies = _video_proxy_items(proxy_items, shared_proxies, errors)
+    providers = _video_provider_items(provider_items, errors)
+    attached = _attached_video_providers(
+        providers,
+        proxies,
+        errors,
+        allow_missing_proxy=allow_missing_proxy,
+    )
     return attached, proxies, errors
 
 

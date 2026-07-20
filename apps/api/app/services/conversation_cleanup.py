@@ -12,6 +12,7 @@ from lumen_core import billing as billing_core
 from lumen_core.models import MemoryExtractionRun
 
 from ..db import affected_rows
+from .generation_queue import release_generation_queue_state
 
 
 async def conversation_wallet_exists(db: AsyncSession, user_id: str) -> bool:
@@ -50,9 +51,7 @@ async def release_conversation_generation_queue_state(
     redis: Any,
     task_id: str,
 ) -> None:
-    from ..routes.tasks import _release_generation_queue_state
-
-    await _release_generation_queue_state(redis, task_id)
+    await release_generation_queue_state(redis, task_id)
 
 
 __all__ = [

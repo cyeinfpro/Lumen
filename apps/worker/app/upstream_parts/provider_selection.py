@@ -199,20 +199,16 @@ def _provider_allows_image_endpoint(
     return facade._provider_endpoint_unavailable_error(provider, endpoint_kind) is None
 
 
-async def _pool_select_compat(
-    pool: Any,
+def _pool_select_kwargs(
     *,
     route: str,
-    ignore_cooldown: bool = False,
-    task_id: str | None = None,
-    endpoint_kind: str | None = None,
-    acquire_inflight: bool = True,
-    requires_mask: bool = False,
-    mask_transport_required: bool = True,
-) -> list[Any]:
-    """Call ProviderPool.select while retaining compatibility with older mocks."""
-    facade = _facade()
-    selector = getattr(pool, "select")
+    ignore_cooldown: bool,
+    task_id: str | None,
+    endpoint_kind: str | None,
+    acquire_inflight: bool,
+    requires_mask: bool,
+    mask_transport_required: bool,
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "route": route,
         "ignore_cooldown": ignore_cooldown,
@@ -226,68 +222,111 @@ async def _pool_select_compat(
         kwargs["requires_mask"] = True
         if not mask_transport_required:
             kwargs["mask_transport_required"] = False
+    return kwargs
 
-    def _filter_for_mask(providers: list[Any]) -> list[Any]:
-        if not requires_mask or not mask_transport_required:
-            return list(providers)
-        file_mode = [
-            provider
-            for provider in providers
-            if getattr(provider, "image_edit_input_transport", "url") == "file"
-        ]
-        return file_mode or list(providers)
 
-    try:
-        providers = await selector(**kwargs)
-        return _filter_for_mask(providers) if requires_mask else providers
-    except TypeError as exc:
-        message = str(exc)
-        if "mask_transport_required" in message:
-            kwargs.pop("mask_transport_required", None)
-            try:
-                providers = await selector(**kwargs)
-                return _filter_for_mask(providers)
-            except TypeError as inner_exc:
-                exc = inner_exc
-                message = str(inner_exc)
-        if "requires_mask" in message:
-            kwargs.pop("requires_mask", None)
-            try:
-                providers = await selector(**kwargs)
-                return _filter_for_mask(providers)
-            except TypeError as inner_exc:
-                exc = inner_exc
-                message = str(inner_exc)
-        if "acquire_inflight" in message:
-            kwargs.pop("acquire_inflight", None)
-            try:
-                providers = await selector(**kwargs)
-                return _filter_for_mask(providers)
-            except TypeError as select_exc:
-                message = str(select_exc)
-                if endpoint_kind is None or "endpoint_kind" not in message:
-                    raise
-                kwargs.pop("endpoint_kind", None)
-                providers = await selector(**kwargs)
-                providers = [
-                    provider
-                    for provider in providers
-                    if facade._provider_allows_image_endpoint(
-                        provider,
-                        endpoint_kind,
-                    )
-                ]
-                return _filter_for_mask(providers)
-        if endpoint_kind is None or "endpoint_kind" not in message:
-            raise exc
-        kwargs.pop("endpoint_kind", None)
-        providers = await selector(**kwargs)
+def _unsupported_select_kwarg(
+    exc: TypeError,
+    kwargs: dict[str, Any],
+) -> str | None:
+    message = str(exc)
+    for name in (
+        "mask_transport_required",
+        "requires_mask",
+        "acquire_inflight",
+        "endpoint_kind",
+    ):
+        if name in kwargs and name in message:
+            return name
+    return None
+
+
+async def _call_pool_select_compat(
+    selector: Callable[..., Awaitable[list[Any]]],
+    kwargs: dict[str, Any],
+) -> tuple[list[Any], bool]:
+    endpoint_fallback = False
+    while True:
+        try:
+            return await selector(**kwargs), endpoint_fallback
+        except TypeError as exc:
+            unsupported = _unsupported_select_kwarg(exc, kwargs)
+            if unsupported is None:
+                raise
+            kwargs.pop(unsupported)
+            endpoint_fallback = endpoint_fallback or unsupported == "endpoint_kind"
+
+
+def _filter_mask_providers(
+    providers: list[Any],
+    *,
+    requires_mask: bool,
+    mask_transport_required: bool,
+) -> list[Any]:
+    if not requires_mask or not mask_transport_required:
+        return list(providers)
+    file_mode = [
+        provider
+        for provider in providers
+        if getattr(provider, "image_edit_input_transport", "url") == "file"
+    ]
+    return file_mode or list(providers)
+
+
+def _filter_legacy_select_result(
+    providers: list[Any],
+    *,
+    endpoint_kind: str | None,
+    endpoint_fallback: bool,
+    requires_mask: bool,
+    mask_transport_required: bool,
+) -> list[Any]:
+    facade = _facade()
+    if endpoint_fallback and endpoint_kind is not None:
         providers = [
             provider
             for provider in providers
             if facade._provider_allows_image_endpoint(provider, endpoint_kind)
         ]
-        return _filter_for_mask(providers)
+    if requires_mask:
+        return _filter_mask_providers(
+            providers,
+            requires_mask=requires_mask,
+            mask_transport_required=mask_transport_required,
+        )
+    return providers
+
+
+async def _pool_select_compat(
+    pool: Any,
+    *,
+    route: str,
+    ignore_cooldown: bool = False,
+    task_id: str | None = None,
+    endpoint_kind: str | None = None,
+    acquire_inflight: bool = True,
+    requires_mask: bool = False,
+    mask_transport_required: bool = True,
+) -> list[Any]:
+    """Call ProviderPool.select while retaining compatibility with older mocks."""
+    selector = getattr(pool, "select")
+    kwargs = _pool_select_kwargs(
+        route=route,
+        ignore_cooldown=ignore_cooldown,
+        task_id=task_id,
+        endpoint_kind=endpoint_kind,
+        acquire_inflight=acquire_inflight,
+        requires_mask=requires_mask,
+        mask_transport_required=mask_transport_required,
+    )
+    providers, endpoint_fallback = await _call_pool_select_compat(selector, kwargs)
+    return _filter_legacy_select_result(
+        providers,
+        endpoint_kind=endpoint_kind,
+        endpoint_fallback=endpoint_fallback,
+        requires_mask=requires_mask,
+        mask_transport_required=mask_transport_required,
+    )
 
 
 def _is_image_rate_limit_error(

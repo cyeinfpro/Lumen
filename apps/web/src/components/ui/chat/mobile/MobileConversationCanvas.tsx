@@ -607,6 +607,28 @@ function isChatLikeAssistantMessage(msg: AssistantMessage): boolean {
   return msg.intent_resolved === "chat" || msg.intent_resolved === "vision_qa";
 }
 
+function deriveAssistantTurnState(
+  msg: AssistantMessage,
+  generations: Record<string, Generation>,
+) {
+  const gens = generationIdsOf(msg)
+    .map((id) => generations[id])
+    .filter((generation): generation is Generation => Boolean(generation));
+  const isStreaming = msg.status === "streaming";
+  const isFailedText =
+    msg.status === "failed" && isChatLikeAssistantMessage(msg);
+  return {
+    gens,
+    isStreaming,
+    isFailedText,
+    canCopy: Boolean(msg.text && msg.status !== "pending"),
+    canRegenerate:
+      msg.status === "succeeded" &&
+      gens.length > 0 &&
+      gens.every((generation) => generation.status === "succeeded"),
+  };
+}
+
 const AssistantTurn = memo(function AssistantTurn({
   msg,
   generations,
@@ -628,13 +650,13 @@ const AssistantTurn = memo(function AssistantTurn({
     });
   };
 
-  const gens = generationIdsOf(msg)
-    .map((id) => generations[id])
-    .filter((g): g is Generation => Boolean(g));
-  const isStreaming = msg.status === "streaming";
-  const isChatLike = isChatLikeAssistantMessage(msg);
-  const isFailedText = msg.status === "failed" && isChatLike;
-  const canCopy = Boolean(msg.text && msg.status !== "pending");
+  const {
+    gens,
+    isStreaming,
+    isFailedText,
+    canCopy,
+    canRegenerate,
+  } = deriveAssistantTurnState(msg, generations);
 
   return (
     <div id={`msg-${msg.id}`} className="flex flex-col gap-2">
@@ -695,7 +717,7 @@ const AssistantTurn = memo(function AssistantTurn({
       )}
 
       {/* 已完成的助手消息：提供重新生成按钮 */}
-      {msg.status === "succeeded" && gens.length > 0 && gens.every((g) => g.status === "succeeded") && (
+      {canRegenerate && (
         <div className="flex items-center gap-2 pt-0.5">
           <button
             type="button"

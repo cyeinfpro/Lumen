@@ -139,6 +139,68 @@ def _generated_image_lines(
     return lines
 
 
+def _attachment_summary_lines(
+    content: dict[str, Any],
+    image_captions: Mapping[str, str] | None,
+    truncate_fn: Callable[[str, int], str],
+) -> list[str]:
+    lines: list[str] = []
+    for attachment in content.get("attachments") or []:
+        line = _attachment_summary_line(
+            attachment,
+            image_captions=image_captions,
+            truncate_fn=truncate_fn,
+        )
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _attachment_summary_line(
+    attachment: Any,
+    *,
+    image_captions: Mapping[str, str] | None,
+    truncate_fn: Callable[[str, int], str],
+) -> str | None:
+    if not isinstance(attachment, dict):
+        return None
+    kind = attachment.get("kind")
+    image_id = attachment.get("image_id")
+    if kind == "image" or image_id:
+        return _user_image_line(
+            attachment,
+            image_id=image_id,
+            image_captions=image_captions,
+            truncate_fn=truncate_fn,
+        )
+    if kind == "file":
+        return (
+            f"[user_file name={attachment.get('name')!r} "
+            f"mime={attachment.get('mime')!r} size={attachment.get('size')}]"
+        )
+    return f"[attachment kind={kind!r}]"
+
+
+def _user_image_line(
+    attachment: dict[str, Any],
+    *,
+    image_id: Any,
+    image_captions: Mapping[str, str] | None,
+    truncate_fn: Callable[[str, int], str],
+) -> str:
+    ref = f"[user_image image_id={image_id}]"
+    caption = attachment.get("caption")
+    if (
+        (not isinstance(caption, str) or not caption.strip())
+        and image_id
+        and image_captions
+    ):
+        caption = image_captions.get(str(image_id))
+    if isinstance(caption, str) and caption.strip():
+        ref += f" caption={truncate_fn(caption.strip(), 280)!r}"
+    return ref
+
+
 def message_to_summary_line(
     msg: Message,
     image_captions: Mapping[str, str] | None = None,
@@ -162,30 +224,13 @@ def message_to_summary_line(
         if text:
             parts.append(text)
 
-    for att in content.get("attachments") or []:
-        if not isinstance(att, dict):
-            continue
-        kind = att.get("kind")
-        image_id = att.get("image_id")
-        if kind == "image" or image_id:
-            ref = f"[user_image image_id={image_id}]"
-            caption = att.get("caption")
-            if (
-                (not isinstance(caption, str) or not caption.strip())
-                and image_id
-                and image_captions
-            ):
-                caption = image_captions.get(str(image_id))
-            if isinstance(caption, str) and caption.strip():
-                ref += f" caption={truncate_fn(caption.strip(), 280)!r}"
-            parts.append(ref)
-        elif kind == "file":
-            parts.append(
-                f"[user_file name={att.get('name')!r} "
-                f"mime={att.get('mime')!r} size={att.get('size')}]"
-            )
-        else:
-            parts.append(f"[attachment kind={kind!r}]")
+    parts.extend(
+        _attachment_summary_lines(
+            content,
+            image_captions,
+            truncate_fn,
+        )
+    )
 
     if role == "ASSISTANT":
         parts.extend(_generated_image_lines(content, truncate_fn))

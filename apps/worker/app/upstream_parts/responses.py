@@ -33,6 +33,101 @@ def _b64_value_if_str(value: Any) -> str | None:
     return None
 
 
+def _first_b64_field(
+    candidate: dict[str, Any],
+    fields: tuple[str, ...],
+    *,
+    b64_value_if_str: B64ValueIfStr,
+) -> str | None:
+    for field in fields:
+        found = b64_value_if_str(candidate.get(field))
+        if found:
+            return found
+    return None
+
+
+def _payload_containers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    containers = [payload]
+    nested_response = payload.get("response")
+    if isinstance(nested_response, dict):
+        containers.append(nested_response)
+    return containers
+
+
+def _mapping_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _extract_data_image_b64(
+    container: dict[str, Any],
+    *,
+    b64_value_if_str: B64ValueIfStr,
+) -> str | None:
+    for entry in _mapping_entries(container.get("data")):
+        found = _first_b64_field(
+            entry,
+            ("b64_json", "result"),
+            b64_value_if_str=b64_value_if_str,
+        )
+        if found:
+            return found
+    return None
+
+
+def _extract_output_entry_b64(
+    entry: dict[str, Any],
+    *,
+    b64_value_if_str: B64ValueIfStr,
+) -> str | None:
+    direct = _first_b64_field(
+        entry,
+        ("result",),
+        b64_value_if_str=b64_value_if_str,
+    )
+    if direct:
+        return direct
+    for piece in _mapping_entries(entry.get("content")):
+        found = _first_b64_field(
+            piece,
+            ("result", "b64_json"),
+            b64_value_if_str=b64_value_if_str,
+        )
+        if found:
+            return found
+    return None
+
+
+def _extract_output_image_b64(
+    container: dict[str, Any],
+    *,
+    b64_value_if_str: B64ValueIfStr,
+) -> str | None:
+    for entry in _mapping_entries(container.get("output")):
+        found = _extract_output_entry_b64(
+            entry,
+            b64_value_if_str=b64_value_if_str,
+        )
+        if found:
+            return found
+    return None
+
+
+def _extract_container_image_b64(
+    container: dict[str, Any],
+    *,
+    b64_value_if_str: B64ValueIfStr,
+) -> str | None:
+    return _extract_data_image_b64(
+        container,
+        b64_value_if_str=b64_value_if_str,
+    ) or _extract_output_image_b64(
+        container,
+        b64_value_if_str=b64_value_if_str,
+    )
+
+
 def _extract_image_b64_from_payload(
     payload: Any,
     *,
@@ -42,54 +137,31 @@ def _extract_image_b64_from_payload(
     if not isinstance(payload, dict):
         return None
 
-    direct = b64_value_if_str(payload.get("result")) or b64_value_if_str(
-        payload.get("b64_json")
+    direct = _first_b64_field(
+        payload,
+        ("result", "b64_json"),
+        b64_value_if_str=b64_value_if_str,
     )
     if direct:
         return direct
 
     item = payload.get("item")
     if isinstance(item, dict):
-        nested = b64_value_if_str(item.get("result")) or b64_value_if_str(
-            item.get("b64_json")
+        nested = _first_b64_field(
+            item,
+            ("result", "b64_json"),
+            b64_value_if_str=b64_value_if_str,
         )
         if nested:
             return nested
 
-    candidates: list[dict[str, Any]] = [payload]
-    nested_response = payload.get("response")
-    if isinstance(nested_response, dict):
-        candidates.append(nested_response)
-
-    for container in candidates:
-        data = container.get("data")
-        if isinstance(data, list):
-            for entry in data:
-                if not isinstance(entry, dict):
-                    continue
-                found = b64_value_if_str(entry.get("b64_json")) or b64_value_if_str(
-                    entry.get("result")
-                )
-                if found:
-                    return found
-
-        outputs = container.get("output")
-        if isinstance(outputs, list):
-            for entry in outputs:
-                if not isinstance(entry, dict):
-                    continue
-                found = b64_value_if_str(entry.get("result"))
-                if found:
-                    return found
-                content = entry.get("content")
-                if isinstance(content, list):
-                    for piece in content:
-                        if isinstance(piece, dict):
-                            found = b64_value_if_str(
-                                piece.get("result")
-                            ) or b64_value_if_str(piece.get("b64_json"))
-                            if found:
-                                return found
+    for container in _payload_containers(payload):
+        found = _extract_container_image_b64(
+            container,
+            b64_value_if_str=b64_value_if_str,
+        )
+        if found:
+            return found
     return None
 
 

@@ -2,10 +2,60 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from typing import Any, Iterable
 
 from .showcase_runtime import runtime as _runtime
+
+
+_UPPER_VISIBILITY_TOKENS = (
+    "胸",
+    "领",
+    "袖",
+    "肩",
+    "背带",
+    "口袋",
+    "纽扣",
+    "扣",
+    "刺绣",
+    "图案",
+    "logo",
+    "贴布",
+    "小熊",
+    "上衣",
+    "前",
+    "纹理",
+    "明线",
+    "缝线",
+)
+_LOWER_VISIBILITY_TOKENS = ("裙", "裙摆", "衣摆", "下摆", "裤", "衣长", "廓形")
+_BACK_DETAIL_TOKENS = ("背后", "后背", "背面", "后片", "交叉", "蝴蝶结")
+_FRONT_DETAIL_TOKENS = ("前胸", "正面胸", "胸口", "前片", "正面", "胸袋")
+_SIDE_VISIBLE_TOKENS = (
+    "上衣",
+    "裙身",
+    "裙",
+    "衣摆",
+    "裙摆",
+    "下摆",
+    "背带",
+    "袖",
+    "领",
+    "廓形",
+    "纹理",
+    "明线",
+    "缝线",
+    "牛仔布",
+)
+
+
+@dataclass(frozen=True)
+class _VisibilityContext:
+    is_back_or_side: bool
+    wants_hem: bool
+    wants_full_body: bool
+    is_upper_or_detail: bool
 
 
 def _showcase_scene_label(value: Any) -> str:
@@ -266,6 +316,69 @@ def _showcase_scene_framing_direction(
     return fallback
 
 
+def _visibility_context(
+    runtime: Any,
+    *,
+    text: str,
+    shot_type: str,
+) -> _VisibilityContext:
+    return _VisibilityContext(
+        is_back_or_side=shot_type == "side_or_back"
+        or runtime._text_has_any(
+            text,
+            ("背后", "后背", "背面", "后片", "侧面", "side", "back"),
+        ),
+        wants_hem=runtime._text_has_any(
+            text,
+            ("裙摆", "衣摆", "下摆", "衣长", "hem"),
+        ),
+        wants_full_body=shot_type
+        in {
+            "front_full_body",
+            "side_or_back",
+        }
+        or runtime._text_has_any(text, ("full_body", "全身", "head_to_toe")),
+        is_upper_or_detail=shot_type == "detail_half_body"
+        or runtime._text_has_any(
+            text,
+            ("upper_body", "half_body", "close", "胸", "半身", "近景"),
+        ),
+    )
+
+
+def _visibility_bucket(
+    runtime: Any,
+    item: str,
+    context: _VisibilityContext,
+) -> str:
+    is_back_detail = runtime._text_has_any(item, _BACK_DETAIL_TOKENS)
+    is_front_detail = runtime._text_has_any(item, _FRONT_DETAIL_TOKENS)
+    if context.is_back_or_side:
+        if is_back_detail:
+            return "visible"
+        if is_front_detail:
+            return "deferred"
+        if runtime._text_has_any(item, _SIDE_VISIBLE_TOKENS):
+            return "visible"
+        if runtime._text_has_any(item, _LOWER_VISIBILITY_TOKENS) and (
+            context.wants_hem or context.wants_full_body
+        ):
+            return "visible"
+        return "deferred"
+    if context.is_upper_or_detail:
+        if is_back_detail:
+            return "deferred"
+        if (
+            runtime._text_has_any(item, _LOWER_VISIBILITY_TOKENS)
+            and not context.wants_hem
+        ):
+            return "deferred"
+        if runtime._text_has_any(item, _UPPER_VISIBILITY_TOKENS):
+            return "visible"
+        return "unclassified"
+    return "deferred" if is_back_detail else "visible"
+
+
 def _showcase_visibility_policy(
     *,
     garment_lock: dict[str, Any] | None,
@@ -289,93 +402,15 @@ def _showcase_visibility_policy(
         ]
 
     text = runtime._showcase_scene_card_text(scene_card)
-    is_back_or_side = shot_type == "side_or_back" or runtime._text_has_any(
-        text, ("背后", "后背", "背面", "后片", "侧面", "side", "back")
-    )
-    wants_hem = runtime._text_has_any(
-        text,
-        ("裙摆", "衣摆", "下摆", "衣长", "hem"),
-    )
-    wants_full_body = shot_type in {
-        "front_full_body",
-        "side_or_back",
-    } or runtime._text_has_any(text, ("full_body", "全身", "head_to_toe"))
-    is_upper_or_detail = shot_type == "detail_half_body" or runtime._text_has_any(
-        text, ("upper_body", "half_body", "close", "胸", "半身", "近景")
-    )
-    upper_tokens = (
-        "胸",
-        "领",
-        "袖",
-        "肩",
-        "背带",
-        "口袋",
-        "纽扣",
-        "扣",
-        "刺绣",
-        "图案",
-        "logo",
-        "贴布",
-        "小熊",
-        "上衣",
-        "前",
-        "纹理",
-        "明线",
-        "缝线",
-    )
-    lower_tokens = ("裙", "裙摆", "衣摆", "下摆", "裤", "衣长", "廓形")
-    back_detail_tokens = ("背后", "后背", "背面", "后片", "交叉", "蝴蝶结")
-    front_detail_tokens = ("前胸", "正面胸", "胸口", "前片", "正面", "胸袋")
-    side_visible_tokens = (
-        "上衣",
-        "裙身",
-        "裙",
-        "衣摆",
-        "裙摆",
-        "下摆",
-        "背带",
-        "袖",
-        "领",
-        "廓形",
-        "纹理",
-        "明线",
-        "缝线",
-        "牛仔布",
-    )
-
+    context = _visibility_context(runtime, text=text, shot_type=shot_type)
     visible: list[str] = []
     deferred: list[str] = []
     for item in preserve_items:
-        item_is_back_detail = runtime._text_has_any(item, back_detail_tokens)
-        item_is_front_detail = runtime._text_has_any(item, front_detail_tokens)
-        if is_back_or_side:
-            if item_is_back_detail:
-                visible.append(item)
-            elif item_is_front_detail:
-                deferred.append(item)
-            elif runtime._text_has_any(item, side_visible_tokens):
-                visible.append(item)
-            elif runtime._text_has_any(item, lower_tokens) and (
-                wants_hem or wants_full_body
-            ):
-                visible.append(item)
-            else:
-                deferred.append(item)
-            continue
-        if is_upper_or_detail:
-            if item_is_back_detail:
-                deferred.append(item)
-            elif runtime._text_has_any(item, lower_tokens) and not wants_hem:
-                deferred.append(item)
-            elif runtime._text_has_any(item, upper_tokens) or len(visible) < 3:
-                visible.append(item)
-            else:
-                deferred.append(item)
-            continue
-        if item_is_back_detail:
-            deferred.append(item)
-        else:
+        bucket = _visibility_bucket(runtime, item, context)
+        if bucket == "visible" or (bucket == "unclassified" and len(visible) < 3):
             visible.append(item)
+        else:
+            deferred.append(item)
 
     if not visible:
         priority = (

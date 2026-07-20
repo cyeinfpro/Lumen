@@ -25,7 +25,7 @@ import {
   videoReferenceLimitError,
   videoUnavailableReasonMessage,
   type VideoReferenceCounts,
-} from "../../app/video/video-options-model";
+} from "../video/optionsModel";
 
 export const MAX_CANVAS_NODES = 1_000;
 export const MAX_CANVAS_EDGES = 3_000;

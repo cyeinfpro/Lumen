@@ -5,13 +5,40 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .volcano_asset_runtime import (
+    VolcanoAssetRuntimeContext,
+    VolcanoAssetRuntimeSlot,
+    VolcanoAssetRuntimeView,
+)
+
 logger = logging.getLogger(__name__)
 
+_RUNTIME = VolcanoAssetRuntimeSlot(
+    owner=__name__,
+    dependencies=frozenset(
+        {
+            "_OperationFailure",
+            "_complete_operation",
+            "_get_operation",
+            "_operation_contract_failure",
+            "_operation_has_value",
+            "_process_create_asset",
+            "_process_management_action",
+            "_read_success_receipt",
+            "_record_operation_failure",
+            "_recover_unconfirmed_delivery",
+            "normalize_volcano_asset_name",
+        }
+    ),
+)
 
-def _runtime() -> Any:
-    from . import volcano_assets
 
-    return volcano_assets
+def install_runtime(context: VolcanoAssetRuntimeContext) -> None:
+    _RUNTIME.install(context)
+
+
+def _runtime() -> VolcanoAssetRuntimeView:
+    return _RUNTIME.get()
 
 
 def _delivery_result(
@@ -207,4 +234,4 @@ async def _process_locked(
     )
 
 
-__all__ = ["_process_locked"]
+__all__ = ["_process_locked", "install_runtime"]

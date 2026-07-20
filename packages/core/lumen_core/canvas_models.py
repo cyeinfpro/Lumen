@@ -21,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, SoftDeleteMixin, TimestampMixin, new_uuid7
+from .model_base import Base, SoftDeleteMixin, TimestampMixin, new_uuid7
 from .sqltypes import JsonType, StringListType
 
 

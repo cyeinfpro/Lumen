@@ -329,7 +329,9 @@ async def _owned_scope(
 async def _owned_memory(db: AsyncSession, user_id: str, memory_id: str) -> UserMemory:
     memory = (
         await db.execute(
-            select(UserMemory).where(UserMemory.id == memory_id, UserMemory.user_id == user_id)
+            select(UserMemory).where(
+                UserMemory.id == memory_id, UserMemory.user_id == user_id
+            )
         )
     ).scalar_one_or_none()
     if memory is None:
@@ -480,9 +482,7 @@ async def _disable_memory_for_conversation(
         return
 
 
-async def _build_memory_settings(
-    user: User, db: AsyncSession
-) -> MemorySettingsOut:
+async def _build_memory_settings(user: User, db: AsyncSession) -> MemorySettingsOut:
     available = await embedding_provider_available(db)
     return MemorySettingsOut(
         paused=bool(user.memory_paused),
@@ -567,8 +567,14 @@ async def list_memories(
     if scope_id is not None:
         stmt = stmt.where(UserMemory.scope_id == scope_id)
     rows = (
-        await db.execute(stmt.order_by(desc(UserMemory.pinned), desc(UserMemory.updated_at)))
-    ).scalars().all()
+        (
+            await db.execute(
+                stmt.order_by(desc(UserMemory.pinned), desc(UserMemory.updated_at))
+            )
+        )
+        .scalars()
+        .all()
+    )
     return MemoryListOut(items=[_memory_to_out(m) for m in rows])
 
 
@@ -677,7 +683,9 @@ async def forget_memory(
     memory.disabled = True
     memory.deleted_at = datetime.now(timezone.utc)
     memory.negative_signal += 2
-    user.extraction_threshold = min(0.95, float(user.extraction_threshold or 0.80) + 0.02)
+    user.extraction_threshold = min(
+        0.95, float(user.extraction_threshold or 0.80) + 0.02
+    )
     db.add(
         _audit(
             user_id=user.id,
@@ -730,12 +738,16 @@ async def export_memories(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
     rows = (
-        await db.execute(
-            select(UserMemory)
-            .where(UserMemory.user_id == user.id)
-            .order_by(UserMemory.created_at.asc())
+        (
+            await db.execute(
+                select(UserMemory)
+                .where(UserMemory.user_id == user.id)
+                .order_by(UserMemory.created_at.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {
         "items": [
             {
@@ -749,6 +761,150 @@ async def export_memories(
     }
 
 
+async def _undo_payload(
+    redis: Any,
+    *,
+    undo_token: str,
+    user_id: str,
+) -> dict[str, Any]:
+    raw = await redis.get(f"memory:undo:{undo_token}")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    if not raw:
+        raise _http("undo_expired", "undo token expired", 410)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _http("undo_expired", "undo token expired", 410) from exc
+    if payload.get("user_id") != user_id:
+        raise _http("forbidden", "undo token does not belong to this user", 403)
+    return payload
+
+
+async def _cleanup_undo_token(
+    redis: Any,
+    *,
+    undo_token: str,
+    user_id: str,
+    log_message: str,
+) -> None:
+    try:
+        await redis.delete(f"memory:undo:{undo_token}")
+        await _release_undo_token_claim(
+            redis,
+            undo_token,
+            owner=user_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_message, undo_token, exc)
+
+
+async def _restore_merged_candidate(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    duplicate: UserMemory,
+    candidate: object,
+) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    candidate_type = candidate.get("type")
+    candidate_content = candidate.get("content")
+    if (
+        candidate_type not in {"profile", "preference", "avoid", "project"}
+        or not isinstance(candidate_content, str)
+        or not candidate_content.strip()
+    ):
+        return None
+    scope_id = candidate.get("scope_id") or duplicate.scope_id
+    scope = await _owned_scope(db, user_id, scope_id)
+    source = candidate.get("source")
+    if source not in {"explicit", "auto", "manual"}:
+        source = "auto"
+    independent = UserMemory(
+        user_id=user_id,
+        type=candidate_type,
+        content=candidate_content.strip(),
+        source_message_id=(
+            candidate.get("source_message_id")
+            if isinstance(candidate.get("source_message_id"), str)
+            else None
+        ),
+        source_excerpt=(
+            candidate.get("source_excerpt")
+            if isinstance(candidate.get("source_excerpt"), str)
+            else None
+        ),
+        source=source,
+        embedding=None,
+        confidence=float(candidate.get("confidence") or 0.80),
+        scope_id=scope.id,
+        last_used_at=datetime.now(timezone.utc),
+    )
+    db.add(independent)
+    await db.flush()
+    db.add(
+        _audit(
+            user_id=user_id,
+            event_type="undo_merged",
+            memory_id=independent.id,
+            new_content=independent.content,
+            details={"merged_into": duplicate.id},
+        )
+    )
+    return independent.id
+
+
+async def _undo_memory_action(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    payload: dict[str, Any],
+) -> str | None:
+    action = payload.get("action")
+    memory_id = payload.get("memory_id")
+    if action in {"added", "updated"} and isinstance(memory_id, str):
+        memory = await _owned_memory(db, user_id, memory_id)
+        memory.disabled = True
+        db.add(_audit(user_id=user_id, event_type="undo", memory_id=memory.id))
+        return None
+    if action == "merged" and isinstance(memory_id, str):
+        duplicate = await _owned_memory(db, user_id, memory_id)
+        duplicate.positive_signal = max(0, duplicate.positive_signal - 1)
+        reembed_id = await _restore_merged_candidate(
+            db,
+            user_id=user_id,
+            duplicate=duplicate,
+            candidate=payload.get("candidate"),
+        )
+        db.add(
+            _audit(
+                user_id=user_id,
+                event_type="undo",
+                memory_id=duplicate.id,
+                details={"action": "merged"},
+            )
+        )
+        return reembed_id
+    if action == "superseded" and isinstance(memory_id, str):
+        memory = await _owned_memory(db, user_id, memory_id)
+        memory.disabled = True
+        old_id = payload.get("old_memory_id")
+        if isinstance(old_id, str):
+            old = await _owned_memory(db, user_id, old_id)
+            old.superseded_by = None
+        db.add(_audit(user_id=user_id, event_type="undo", memory_id=memory.id))
+        return None
+    if action == "staged":
+        staging_id = payload.get("staging_id")
+        if isinstance(staging_id, str):
+            row = await db.get(UserMemoryStaging, staging_id)
+            if row is not None and row.user_id == user_id:
+                row.decision = "rejected"
+                row.decided_at = datetime.now(timezone.utc)
+    return None
+
+
 @router.post(
     "/me/memories/undo",
     dependencies=[Depends(verify_csrf)],
@@ -759,115 +915,28 @@ async def undo_memory_write(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
     redis = get_redis()
-    raw = await redis.get(f"memory:undo:{body.undo_token}")
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    if not raw:
-        raise _http("undo_expired", "undo token expired", 410)
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise _http("undo_expired", "undo token expired", 410) from exc
-    if payload.get("user_id") != user.id:
-        raise _http("forbidden", "undo token does not belong to this user", 403)
+    payload = await _undo_payload(
+        redis,
+        undo_token=body.undo_token,
+        user_id=user.id,
+    )
     if await _undo_token_consumed(db, user_id=user.id, undo_token=body.undo_token):
-        try:
-            await redis.delete(f"memory:undo:{body.undo_token}")
-            await _release_undo_token_claim(
-                redis,
-                body.undo_token,
-                owner=user.id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "memory undo consumed token cleanup failed token=%s err=%s",
-                body.undo_token,
-                exc,
-            )
+        await _cleanup_undo_token(
+            redis,
+            undo_token=body.undo_token,
+            user_id=user.id,
+            log_message=("memory undo consumed token cleanup failed token=%s err=%s"),
+        )
         return {"ok": True}
     if not await _claim_undo_token(redis, body.undo_token, owner=user.id):
         return {"ok": False}
     action = payload.get("action")
     memory_id = payload.get("memory_id")
-    reembed_id: str | None = None
-    if action in {"added", "updated"} and isinstance(memory_id, str):
-        memory = await _owned_memory(db, user.id, memory_id)
-        memory.disabled = True
-        db.add(_audit(user_id=user.id, event_type="undo", memory_id=memory.id))
-    elif action == "merged" and isinstance(memory_id, str):
-        # 设计 §5.4: 撤销 merged 不是删 duplicate, 而是把这次合并掉的 candidate
-        # 拆成独立条, 同时把 duplicate.positive_signal 减回去 (合并时 +=1).
-        duplicate = await _owned_memory(db, user.id, memory_id)
-        duplicate.positive_signal = max(0, duplicate.positive_signal - 1)
-        candidate = payload.get("candidate")
-        if isinstance(candidate, dict):
-            cand_type = candidate.get("type")
-            cand_content = candidate.get("content")
-            if (
-                cand_type in {"profile", "preference", "avoid", "project"}
-                and isinstance(cand_content, str)
-                and cand_content.strip()
-            ):
-                cand_scope_id = candidate.get("scope_id") or duplicate.scope_id
-                scope = await _owned_scope(db, user.id, cand_scope_id)
-                cand_source = candidate.get("source")
-                if cand_source not in {"explicit", "auto", "manual"}:
-                    cand_source = "auto"
-                independent = UserMemory(
-                    user_id=user.id,
-                    type=cand_type,
-                    content=cand_content.strip(),
-                    source_message_id=(
-                        candidate.get("source_message_id")
-                        if isinstance(candidate.get("source_message_id"), str)
-                        else None
-                    ),
-                    source_excerpt=(
-                        candidate.get("source_excerpt")
-                        if isinstance(candidate.get("source_excerpt"), str)
-                        else None
-                    ),
-                    source=cand_source,
-                    embedding=None,
-                    confidence=float(candidate.get("confidence") or 0.80),
-                    scope_id=scope.id,
-                    last_used_at=datetime.now(timezone.utc),
-                )
-                db.add(independent)
-                await db.flush()
-                reembed_id = independent.id
-                db.add(
-                    _audit(
-                        user_id=user.id,
-                        event_type="undo_merged",
-                        memory_id=independent.id,
-                        new_content=independent.content,
-                        details={"merged_into": duplicate.id},
-                    )
-                )
-        db.add(
-            _audit(
-                user_id=user.id,
-                event_type="undo",
-                memory_id=duplicate.id,
-                details={"action": "merged"},
-            )
-        )
-    elif action == "superseded" and isinstance(memory_id, str):
-        memory = await _owned_memory(db, user.id, memory_id)
-        old_id = payload.get("old_memory_id")
-        memory.disabled = True
-        if isinstance(old_id, str):
-            old = await _owned_memory(db, user.id, old_id)
-            old.superseded_by = None
-        db.add(_audit(user_id=user.id, event_type="undo", memory_id=memory.id))
-    elif action == "staged":
-        staging_id = payload.get("staging_id")
-        if isinstance(staging_id, str):
-            row = await db.get(UserMemoryStaging, staging_id)
-            if row is not None and row.user_id == user.id:
-                row.decision = "rejected"
-                row.decided_at = datetime.now(timezone.utc)
+    reembed_id = await _undo_memory_action(
+        db,
+        user_id=user.id,
+        payload=payload,
+    )
     db.add(
         _audit(
             user_id=user.id,
@@ -884,15 +953,12 @@ async def undo_memory_write(
     except Exception:
         await _release_undo_token_claim(redis, body.undo_token, owner=user.id)
         raise
-    try:
-        await redis.delete(f"memory:undo:{body.undo_token}")
-        await _release_undo_token_claim(redis, body.undo_token, owner=user.id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "memory undo token cleanup failed token=%s err=%s",
-            body.undo_token,
-            exc,
-        )
+    await _cleanup_undo_token(
+        redis,
+        undo_token=body.undo_token,
+        user_id=user.id,
+        log_message="memory undo token cleanup failed token=%s err=%s",
+    )
     if reembed_id:
         await _enqueue_memory_reembed("memory", reembed_id)
     return {"ok": True}
@@ -905,20 +971,26 @@ async def list_memory_staging(
 ) -> MemoryStagingListOut:
     now = datetime.now(timezone.utc)
     rows = (
-        await db.execute(
-            select(UserMemoryStaging)
-            .where(
-                UserMemoryStaging.user_id == user.id,
-                UserMemoryStaging.decision == "pending",
-                UserMemoryStaging.expires_at > now,
+        (
+            await db.execute(
+                select(UserMemoryStaging)
+                .where(
+                    UserMemoryStaging.user_id == user.id,
+                    UserMemoryStaging.decision == "pending",
+                    UserMemoryStaging.expires_at > now,
+                )
+                .order_by(desc(UserMemoryStaging.created_at))
             )
-            .order_by(desc(UserMemoryStaging.created_at))
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return MemoryStagingListOut(items=[_staging_to_out(s) for s in rows])
 
 
-async def _owned_staging(db: AsyncSession, user_id: str, staging_id: str) -> UserMemoryStaging:
+async def _owned_staging(
+    db: AsyncSession, user_id: str, staging_id: str
+) -> UserMemoryStaging:
     row = (
         await db.execute(
             select(UserMemoryStaging).where(
@@ -1041,8 +1113,10 @@ async def memory_timeline(
         except ValueError:
             pass
     rows = (
-        await db.execute(stmt.order_by(desc(MemoryAudit.created_at)).limit(limit + 1))
-    ).scalars().all()
+        (await db.execute(stmt.order_by(desc(MemoryAudit.created_at)).limit(limit + 1)))
+        .scalars()
+        .all()
+    )
     has_more = len(rows) > limit
     rows = rows[:limit]
     return MemoryTimelineOut(
@@ -1077,7 +1151,9 @@ async def list_memory_scopes(
             .outerjoin(UserMemory, UserMemory.scope_id == UserMemoryScope.id)
             .where(UserMemoryScope.user_id == user.id)
             .group_by(UserMemoryScope.id)
-            .order_by(desc(UserMemoryScope.is_default), UserMemoryScope.created_at.asc())
+            .order_by(
+                desc(UserMemoryScope.is_default), UserMemoryScope.created_at.asc()
+            )
         )
     ).all()
     return [
@@ -1143,7 +1219,9 @@ async def patch_memory_scope(
     await db.refresh(scope)
     await _publish_account_settings_updated(get_redis(), user.id)
     count = (
-        await db.execute(select(func.count(UserMemory.id)).where(UserMemory.scope_id == scope.id))
+        await db.execute(
+            select(func.count(UserMemory.id)).where(UserMemory.scope_id == scope.id)
+        )
     ).scalar_one()
     return MemoryScopeOut(
         id=scope.id,
@@ -1166,7 +1244,9 @@ async def delete_memory_scope(
 ) -> dict[str, int]:
     scope = await _owned_scope(db, user.id, scope_id)
     if scope.is_default:
-        raise _http("cannot_delete_default", "default memory scope cannot be deleted", 422)
+        raise _http(
+            "cannot_delete_default", "default memory scope cannot be deleted", 422
+        )
     default = await _default_scope(db, user.id)
     result = await db.execute(
         update(UserMemory)
@@ -1232,7 +1312,9 @@ async def confirm_memory(
         memory.negative_signal += 2
         memory.last_confirmed_at = datetime.now(timezone.utc)
         if conversation_id:
-            await _disable_memory_for_conversation(get_redis(), conversation_id, memory.id)
+            await _disable_memory_for_conversation(
+                get_redis(), conversation_id, memory.id
+            )
     else:
         memory.last_confirmed_at = datetime.now(timezone.utc)
     db.add(
@@ -1372,16 +1454,21 @@ async def get_conversation_used_memories(
         summary=summary,
     )
 
+
 async def cleanup_expired_staging(db: AsyncSession) -> int:
     now = datetime.now(timezone.utc)
     rows = (
-        await db.execute(
-            select(UserMemoryStaging).where(
-                UserMemoryStaging.decision == "pending",
-                UserMemoryStaging.expires_at < now,
+        (
+            await db.execute(
+                select(UserMemoryStaging).where(
+                    UserMemoryStaging.decision == "pending",
+                    UserMemoryStaging.expires_at < now,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for row in rows:
         row.decision = "rejected"
         row.decided_at = now

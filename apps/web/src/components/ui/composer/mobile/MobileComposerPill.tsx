@@ -54,6 +54,14 @@ import {
   useComposerAttachmentRoles,
 } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
+import {
+  allFlags,
+  anyFlag,
+  coalesceValue,
+  firstAttachmentId,
+  renderWhen,
+  selectValue,
+} from "../shared/composerViewState";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import {
@@ -66,6 +74,13 @@ import {
   MobileAdvancedSettings,
 } from "./MobileAdvancedSettings";
 import { MobileComposerExecutionControls } from "./MobileComposerExecutionControls";
+import {
+  canSubmitMobileComposer,
+  deriveMobileComposerLayout,
+  promptCounterColor,
+  promptCounterText,
+  shouldShowPromptCount,
+} from "./mobileComposerViewState";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -98,8 +113,52 @@ function normalizedRenderQuality(value: unknown): "low" | "medium" | "high" {
     : "high";
 }
 
-function shouldShowPromptCount(text: string, promptTooLong: boolean): boolean {
-  return text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
+function resolveAttachmentMenuRole(
+  index: number,
+  id: string | null,
+  getRole: ReturnType<typeof useComposerAttachmentRoles>["getRole"],
+) {
+  if (index < 0 || !id) return null;
+  return getRole(id);
+}
+
+function attachmentMenuDescription(
+  role: ReturnType<typeof useComposerAttachmentRoles>["entries"][number]["role"] | null,
+): string | undefined {
+  return role ? `当前用途：${attachmentRoleLabel(role)}` : undefined;
+}
+
+function buildAttachmentMenuActions(input: {
+  index: number;
+  id: string | null;
+  insertMention: (imageNumber: number) => void;
+  cycleRole: (id: string) => void;
+  removeAttachment: (id: string) => void;
+}): React.ComponentProps<typeof ActionSheet>["actions"] {
+  if (input.index < 0 || !input.id) return [];
+  const imageNumber = input.index + 1;
+  const id = input.id;
+  return [
+    {
+      key: "mention",
+      label: `插入 @图${imageNumber}`,
+      icon: <AtSign className="h-5 w-5" aria-hidden />,
+      onSelect: () => input.insertMention(imageNumber),
+    },
+    {
+      key: "role",
+      label: "切换图片用途",
+      icon: <RefreshCw className="h-5 w-5" aria-hidden />,
+      onSelect: () => input.cycleRole(id),
+    },
+    {
+      key: "remove",
+      label: "移除参考图",
+      icon: <Trash2 className="h-5 w-5" aria-hidden />,
+      destructive: true,
+      onSelect: () => input.removeAttachment(id),
+    },
+  ];
 }
 
 export function MobileComposerPill({
@@ -148,7 +207,10 @@ export function MobileComposerPill({
     viewportBottom,
     viewportHeight,
   } = useKeyboardInset();
-  const keyboardOffset = keyboardInset > 60 ? keyboardInset : 0;
+  const { keyboardOffset, expandedMaxHeight } = deriveMobileComposerLayout(
+    keyboardInset,
+    viewportHeight,
+  );
   const [panel, setPanel] = useState<ComposerPanel>("none");
   const [shutterBurst, setShutterBurst] = useState(false);
   const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
@@ -166,13 +228,6 @@ export function MobileComposerPill({
     scope: "mobile-composer",
   });
   const isEnhancing = promptEnhancement.isEnhancing;
-  const visibleViewportHeight =
-    viewportHeight > 0 ? `${viewportHeight}px` : "100dvh";
-  const topChromeHeight =
-    "var(--mobile-top-chrome-height, calc(var(--mobile-topbar-h) + 52px + var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px)))";
-  const expandedMaxHeight = keyboardOffset
-    ? `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--overlay-gap) - var(--overlay-gap))`
-    : `calc(${visibleViewportHeight} - ${topChromeHeight} - var(--mobile-tabbar-height) - var(--overlay-gap) - var(--overlay-gap))`;
   const promptTooLong = isPromptTooLong(text);
   const shouldShowCount = shouldShowPromptCount(text, promptTooLong);
 
@@ -347,11 +402,13 @@ export function MobileComposerPill({
     }
   }, [text, setForceIntent]);
 
-  const canSubmit =
-    !isSending &&
-    !isEnhancing &&
-    !promptTooLong &&
-    (text.trim().length > 0 || attachments.length > 0);
+  const canSubmit = canSubmitMobileComposer({
+    isSending,
+    isEnhancing,
+    promptTooLong,
+    text,
+    attachmentCount: attachments.length,
+  });
 
   const {
     handlePaste,
@@ -373,17 +430,20 @@ export function MobileComposerPill({
   const attachmentRoles = useComposerAttachmentRoles({
     attachments,
     mode,
-    maskTargetAttachmentId: inpaint.maskActive
-      ? attachments[0]?.id ?? null
-      : null,
+    maskTargetAttachmentId: selectValue(
+      inpaint.maskActive,
+      firstAttachmentId(attachments),
+      null,
+    ),
   });
   const attachmentMenuIndex = attachments.findIndex(
     (attachment) => attachment.id === attachmentMenuId,
   );
-  const attachmentMenuRole =
-    attachmentMenuIndex >= 0 && attachmentMenuId
-      ? attachmentRoles.getRole(attachmentMenuId)
-      : null;
+  const attachmentMenuRole = resolveAttachmentMenuRole(
+    attachmentMenuIndex,
+    attachmentMenuId,
+    attachmentRoles.getRole,
+  );
   const costEstimate = useComposerCostEstimate({
     mode,
     quality,
@@ -409,7 +469,7 @@ export function MobileComposerPill({
     imageGeneration,
   });
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = async () => {
     if (submittingRef.current) return;
     if (promptTooLong) {
       setComposerError(PROMPT_TOO_LONG_MESSAGE);
@@ -446,16 +506,7 @@ export function MobileComposerPill({
       submittingRef.current = false;
       setIsSending(false);
     }
-  }, [
-    canSubmit,
-    promptTooLong,
-    text,
-    onSubmit,
-    setComposerError,
-    setForceIntent,
-    setText,
-    haptic,
-  ]);
+  };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (isComposingRef.current) return;
@@ -632,22 +683,38 @@ export function MobileComposerPill({
     textareaRef.current?.blur();
     collapsedTextareaRef.current?.blur();
     setPanel("aspect");
-  }, []);
+  }, [setPanel]);
 
   const openReasoningSheet = useCallback(() => {
     textareaRef.current?.blur();
     collapsedTextareaRef.current?.blur();
     setPanel("reasoning");
-  }, []);
+  }, [setPanel]);
 
   const openAdvancedSheet = useCallback(() => {
     textareaRef.current?.blur();
     collapsedTextareaRef.current?.blur();
     setPanel("advanced");
-  }, []);
-  const closePanel = useCallback(() => setPanel("none"), []);
+  }, [setPanel]);
+  const closePanel = useCallback(() => setPanel("none"), [setPanel]);
 
   const isImageMode = mode === "image";
+  const composerBottom = selectValue(
+    Boolean(keyboardOffset),
+    `calc(${keyboardOffset}px + 8px)`,
+    "calc(var(--mobile-tabbar-height) + 6px)",
+  );
+  const composerMaxHeight = selectValue(expanded, expandedMaxHeight, "56px");
+  const composerZIndex = selectValue(
+    expanded,
+    "var(--z-composer-expanded, 45)" as unknown as number,
+    "var(--z-composer, 40)" as unknown as number,
+  );
+  const expandedPaddingBottom = selectValue(
+    Boolean(keyboardOffset),
+    "12px",
+    "calc(env(safe-area-inset-bottom, 0px) + 12px)",
+  );
 
   return (
     <>
@@ -663,35 +730,33 @@ export function MobileComposerPill({
           "rounded-[var(--radius-sheet)] mobile-perf-surface",
           "bg-[var(--bg-1)]/96",
           "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
-          isDragActive
-            ? "border-[var(--accent)]"
-            : "border-[var(--border)] focus-within:border-[var(--accent-border)]",
+          selectValue(
+            isDragActive,
+            "border-[var(--accent)]",
+            "border-[var(--border)] focus-within:border-[var(--accent-border)]",
+          ),
           "shadow-[var(--shadow-2)]",
         )}
         style={{
-          bottom: keyboardOffset
-            ? `calc(${keyboardOffset}px + 8px)`
-            : "calc(var(--mobile-tabbar-height) + 6px)",
-          maxHeight: expanded ? expandedMaxHeight : 56,
-          zIndex: expanded
-            ? ("var(--z-composer-expanded, 45)" as unknown as number)
-            : ("var(--z-composer, 40)" as unknown as number),
+          bottom: composerBottom,
+          maxHeight: composerMaxHeight,
+          zIndex: composerZIndex,
         }}
       >
         {/* 折叠态：单行 */}
-        {!expanded && (
+        {renderWhen(!expanded, (
           <div className="flex h-14 items-center gap-1.5 px-2.5">
             <IconBtn
               label="添加参考图"
               onClick={openFilePicker}
               disabled={isUploading}
             >
-              {isUploading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Paperclip className="w-4 h-4" />
+              {selectValue(
+                isUploading,
+                <Loader2 className="w-4 h-4 animate-spin" />,
+                <Paperclip className="w-4 h-4" />,
               )}
-              {attachments.length > 0 && (
+              {renderWhen(attachments.length > 0, (
                 <span
                   aria-hidden
                   className={cn(
@@ -703,7 +768,7 @@ export function MobileComposerPill({
                 >
                   {attachments.length}
                 </span>
-              )}
+              ))}
             </IconBtn>
 
             <div
@@ -719,12 +784,14 @@ export function MobileComposerPill({
                 className={cn(
                   "shrink-0 inline-flex items-center justify-center h-[18px] px-1.5 rounded-full",
                   "text-[11px] font-semibold tracking-wide leading-none",
-                  isImageMode
-                    ? "bg-[rgba(242,169,58,0.15)] text-[var(--amber-400)]"
-                    : "bg-[rgba(62,158,255,0.12)] text-[var(--info)]",
+                  selectValue(
+                    isImageMode,
+                    "bg-[rgba(242,169,58,0.15)] text-[var(--amber-400)]",
+                    "bg-[rgba(62,158,255,0.12)] text-[var(--info)]",
+                  ),
                 )}
               >
-                {isImageMode ? "生图" : "对话"}
+                {selectValue(isImageMode, "生图", "对话")}
               </span>
               <textarea
                 ref={collapsedTextareaRef}
@@ -740,7 +807,11 @@ export function MobileComposerPill({
                   isComposingRef.current = false;
                 }}
                 readOnly={isEnhancing}
-                placeholder={isImageMode ? "描述画面..." : "直接提问..."}
+                placeholder={selectValue(
+                  isImageMode,
+                  "描述画面...",
+                  "直接提问...",
+                )}
                 aria-label="输入提示词"
                 maxLength={MAX_PROMPT_CHARS}
                 rows={1}
@@ -748,7 +819,11 @@ export function MobileComposerPill({
                 className={cn(
                   "min-w-0 flex-1 h-10 resize-none overflow-hidden bg-transparent py-[9px]",
                   "text-[16px] leading-[22px] outline-none placeholder:text-[var(--fg-2)]",
-                  text ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
+                  selectValue(
+                    Boolean(text),
+                    "text-[var(--fg-0)]",
+                    "text-[var(--fg-2)]",
+                  ),
                 )}
               />
             </div>
@@ -760,17 +835,13 @@ export function MobileComposerPill({
               onClick={() => void handleSubmit()}
             />
           </div>
-        )}
+        ))}
 
         {/* 展开态 */}
-        {expanded && (
+        {renderWhen(expanded, (
           <div
             className="flex max-h-[inherit] min-h-0 flex-col overflow-y-auto overscroll-contain touch-pan-y"
-            style={{
-              paddingBottom: keyboardOffset
-                ? "12px"
-                : "calc(env(safe-area-inset-bottom, 0px) + 12px)",
-            }}
+            style={{ paddingBottom: expandedPaddingBottom }}
           >
             {/* 收起把手 */}
             <button
@@ -785,7 +856,7 @@ export function MobileComposerPill({
 
             {/* 附件托盘 */}
             <AnimatePresence>
-              {isDragActive && (
+              {renderWhen(isDragActive, (
                 <motion.div
                   initial={{ opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -803,11 +874,11 @@ export function MobileComposerPill({
                     <span>松开上传图片，最多 {MAX_COMPOSER_ATTACHMENTS} 张</span>
                   </div>
                 </motion.div>
-              )}
+              ))}
             </AnimatePresence>
 
             {/* 附件托盘 */}
-            {attachments.length > 0 && (
+            {renderWhen(attachments.length > 0, (
               <div
                 className={cn(
                   "flex gap-2 overflow-x-auto overscroll-x-contain no-scrollbar",
@@ -871,7 +942,7 @@ export function MobileComposerPill({
                     </div>
                   );
                 })}
-                {isImageMode && (
+                {renderWhen(isImageMode, (
                   <button
                     type="button"
                     onClick={inpaint.openInpaint}
@@ -882,31 +953,37 @@ export function MobileComposerPill({
                       "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
                       "w-12 h-12 rounded-[var(--radius-card)] border text-[9px] font-medium",
                       "transition-colors",
-                      inpaint.disabled
-                        ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
-                        : inpaint.maskActive
-                          ? "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10"
-                          : "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)]",
+                      selectValue(
+                        inpaint.disabled,
+                        "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed",
+                        selectValue(
+                          inpaint.maskActive,
+                          "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10",
+                          "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)]",
+                        ),
+                      ),
                     )}
                   >
                     <SquareDashedMousePointer
                       className="w-3.5 h-3.5"
                       aria-hidden
                     />
-                    <span>{inpaint.maskActive ? "重涂" : "局部"}</span>
+                    <span>
+                      {selectValue(inpaint.maskActive, "重涂", "局部")}
+                    </span>
                   </button>
-                )}
+                ))}
               </div>
-            )}
-            {attachmentRoles.compactHint && (
+            ))}
+            {renderWhen(Boolean(attachmentRoles.compactHint), (
               <div className="px-3 pt-1 text-[10.5px] leading-4 text-[var(--fg-2)] line-clamp-1">
                 {attachmentRoles.compactHint}
               </div>
-            )}
+            ))}
 
             {/* 错误条 */}
             <AnimatePresence>
-              {composerError && (
+              {renderWhen(Boolean(composerError), (
                 <motion.div
                   initial={{ opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -932,7 +1009,7 @@ export function MobileComposerPill({
                     </button>
                   </div>
                 </motion.div>
-              )}
+              ))}
             </AnimatePresence>
 
             <PromptEnhancementCandidate
@@ -958,7 +1035,11 @@ export function MobileComposerPill({
                   isComposingRef.current = false;
                 }}
                 readOnly={isEnhancing}
-                placeholder={isImageMode ? "描述画面..." : "直接提问..."}
+                placeholder={selectValue(
+                  isImageMode,
+                  "描述画面...",
+                  "直接提问...",
+                )}
                 aria-label="输入提示词"
                 maxLength={MAX_PROMPT_CHARS}
                 rows={2}
@@ -966,7 +1047,7 @@ export function MobileComposerPill({
                   "w-full bg-transparent outline-none resize-none",
                   "text-[16px] leading-relaxed text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                   "min-h-[52px] max-h-[168px]",
-                  isEnhancing && "cursor-wait",
+                  selectValue(isEnhancing, "cursor-wait", undefined),
                 )}
               />
             </div>
@@ -1008,22 +1089,22 @@ export function MobileComposerPill({
                     onClick={openFilePicker}
                     disabled={isUploading}
                   >
-                    {isUploading ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Paperclip className="w-4 h-4" />
+                    {selectValue(
+                      isUploading,
+                      <Loader2 className="w-4 h-4 animate-spin" />,
+                      <Paperclip className="w-4 h-4" />,
                     )}
                   </IconBtn>
 
                   <IconBtn
                     label={promptEnhancement.triggerLabel}
                     onClick={() => void promptEnhancement.trigger(text)}
-                    disabled={!isEnhancing && !text.trim()}
+                    disabled={allFlags(!isEnhancing, !text.trim())}
                   >
-                    {isEnhancing ? (
-                      <X className="w-4 h-4 text-[var(--danger)]" />
-                    ) : (
-                      <Sparkles className="w-4 h-4" />
+                    {selectValue(
+                      isEnhancing,
+                      <X className="w-4 h-4 text-[var(--danger)]" />,
+                      <Sparkles className="w-4 h-4" />,
                     )}
                   </IconBtn>
 
@@ -1032,24 +1113,22 @@ export function MobileComposerPill({
                     aria-hidden
                   />
 
-                  {(text.length > 0 || shouldShowCount) && (
+                  {renderWhen(anyFlag(text.length > 0, shouldShowCount), (
                     <span
                       data-inline
                       className={cn(
                         "text-caption tabular-nums transition-colors duration-200",
-                        promptTooLong
-                          ? "text-[var(--danger)]"
-                          : shouldShowCount || text.length > 500
-                            ? "text-[var(--amber-400)]"
-                            : "text-[var(--fg-3)]",
+                        promptCounterColor(
+                          promptTooLong,
+                          shouldShowCount,
+                          text.length,
+                        ),
                       )}
                       style={{ fontFamily: "var(--font-mono)" }}
                     >
-                      {shouldShowCount
-                        ? `${text.length}/${MAX_PROMPT_CHARS}`
-                        : text.length}
+                      {promptCounterText(shouldShowCount, text.length)}
                     </span>
-                  )}
+                  ))}
                 </div>
               </div>
 
@@ -1061,7 +1140,7 @@ export function MobileComposerPill({
               />
             </div>
           </div>
-        )}
+        ))}
 
         {/* 隐藏文件输入 */}
         <input
@@ -1075,42 +1154,14 @@ export function MobileComposerPill({
         />
       </div>
 
-      <ActionSheet
-        open={attachmentMenuIndex >= 0}
+      <MobileAttachmentActionSheet
+        index={attachmentMenuIndex}
+        id={attachmentMenuId}
+        role={attachmentMenuRole}
         onClose={() => setAttachmentMenuId(null)}
-        title={
-          attachmentMenuIndex >= 0 ? `图 ${attachmentMenuIndex + 1}` : undefined
-        }
-        description={
-          attachmentMenuRole
-            ? `当前用途：${attachmentRoleLabel(attachmentMenuRole)}`
-            : undefined
-        }
-        actions={
-          attachmentMenuIndex >= 0 && attachmentMenuId
-            ? [
-                {
-                  key: "mention",
-                  label: `插入 @图${attachmentMenuIndex + 1}`,
-                  icon: <AtSign className="h-5 w-5" aria-hidden />,
-                  onSelect: () => insertImageMention(attachmentMenuIndex + 1),
-                },
-                {
-                  key: "role",
-                  label: "切换图片用途",
-                  icon: <RefreshCw className="h-5 w-5" aria-hidden />,
-                  onSelect: () => attachmentRoles.cycleRole(attachmentMenuId),
-                },
-                {
-                  key: "remove",
-                  label: "移除参考图",
-                  icon: <Trash2 className="h-5 w-5" aria-hidden />,
-                  destructive: true,
-                  onSelect: () => removeAttachment(attachmentMenuId),
-                },
-              ]
-            : []
-        }
+        onInsertMention={insertImageMention}
+        onCycleRole={attachmentRoles.cycleRole}
+        onRemove={removeAttachment}
       />
 
       <BottomSheet
@@ -1129,7 +1180,7 @@ export function MobileComposerPill({
           onOpenAspect={openAspectSheet}
           count={count}
           onCountChange={setImageCount}
-          reasoningEffort={reasoningEffort ?? "medium"}
+          reasoningEffort={coalesceValue(reasoningEffort, "medium")}
           onOpenReasoning={openReasoningSheet}
           webSearch={webSearch}
           onWebSearchChange={setWebSearch}
@@ -1180,7 +1231,7 @@ export function MobileComposerPill({
       </BottomSheet>
 
       {/* 局部修改 mask 画布弹窗 */}
-      {inpaint.open ? (
+      {renderWhen(inpaint.open, (
         <LazyMaskCanvas
           open={inpaint.open}
           imageSrc={inpaint.sourceImageSrc}
@@ -1188,7 +1239,7 @@ export function MobileComposerPill({
           onConfirm={inpaint.handleConfirm}
           submitting={inpaint.submitting}
         />
-      ) : null}
+      ))}
     </>
   );
 }
@@ -1196,6 +1247,48 @@ export function MobileComposerPill({
 // ———————————————————————————————————————————————————
 // 子组件
 // ———————————————————————————————————————————————————
+
+function MobileAttachmentActionSheet({
+  index,
+  id,
+  role,
+  onClose,
+  onInsertMention,
+  onCycleRole,
+  onRemove,
+}: {
+  index: number;
+  id: string | null;
+  role: ReturnType<
+    typeof useComposerAttachmentRoles
+  >["entries"][number]["role"] | null;
+  onClose: () => void;
+  onInsertMention: (imageNumber: number) => void;
+  onCycleRole: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const title = selectValue<string | undefined>(
+    index >= 0,
+    `图 ${index + 1}`,
+    undefined,
+  );
+  const actions = buildAttachmentMenuActions({
+    index,
+    id,
+    insertMention: onInsertMention,
+    cycleRole: onCycleRole,
+    removeAttachment: onRemove,
+  });
+  return (
+    <ActionSheet
+      open={index >= 0}
+      onClose={onClose}
+      title={title}
+      description={attachmentMenuDescription(role)}
+      actions={actions}
+    />
+  );
+}
 
 function IconBtn({
   label,

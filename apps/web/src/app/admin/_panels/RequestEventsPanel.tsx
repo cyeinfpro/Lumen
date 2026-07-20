@@ -2,24 +2,20 @@
 
 /* eslint-disable @next/next/no-img-element -- Admin request event thumbnails use authenticated API URLs. */
 
-import { Fragment, useDeferredValue, useMemo, useState } from "react";
+import {
+  Fragment,
+  type ReactNode,
+  useDeferredValue,
+  useMemo,
+  useState,
+} from "react";
 import { format } from "date-fns";
 import {
   Activity,
-  AlertTriangle,
-  BarChart3,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Clock3,
   Eye,
   Image as ImageIcon,
-  Loader2,
-  RefreshCw,
-  Search,
-  TimerReset,
-  type LucideIcon,
-  X,
 } from "lucide-react";
 
 import { useAdminRequestEventsQuery } from "@/lib/queries";
@@ -33,57 +29,21 @@ import {
   OPEN_EVENT,
   type LightboxItem,
 } from "@/components/ui/lightbox/types";
-import { Button } from "@/components/ui/primitives";
 import {
   EmptyBlock,
   ErrorBlock,
   ListSkeleton,
 } from "../_components/AdminFeedback";
-
-type EventKindFilter = "all" | "generation" | "completion";
-type TimeRangeFilter = "24h" | "7d" | "30d";
-type StatusFilter =
-  | "all"
-  | "queued"
-  | "running"
-  | "streaming"
-  | "succeeded"
-  | "failed"
-  | "canceled";
-
-const KIND_OPTIONS: Array<{ value: EventKindFilter; label: string }> = [
-  { value: "all", label: "全部" },
-  { value: "generation", label: "图片" },
-  { value: "completion", label: "对话" },
-];
-
-const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
-  { value: "all", label: "全部状态" },
-  { value: "queued", label: "排队" },
-  { value: "running", label: "生成中" },
-  { value: "streaming", label: "回复中" },
-  { value: "succeeded", label: "成功" },
-  { value: "failed", label: "失败" },
-  { value: "canceled", label: "已取消" },
-];
-
-const RANGE_OPTIONS: Array<{ value: TimeRangeFilter; label: string }> = [
-  { value: "24h", label: "24h" },
-  { value: "7d", label: "7d" },
-  { value: "30d", label: "30d" },
-];
+import {
+  RequestEventsHeader,
+  type EventKindFilter,
+  type RequestEventModelStat,
+  type StatusFilter,
+  type TimeRangeFilter,
+} from "./request-events/RequestEventsHeader";
 
 const EMPTY_REQUEST_EVENTS: AdminRequestEventOut[] = [];
 const EMPTY_MODEL_STATS: RequestEventModelStat[] = [];
-const FILTERED_SEARCH_PLACEHOLDER = "搜索用户、模型、上游、请求 ID、错误或提示词";
-const MAX_MODEL_STATS = 6;
-
-interface RequestEventModelStat {
-  model: string;
-  count: number;
-  share: number;
-}
-
 const STATUS_META: Record<
   string,
   { label: string; badge: string; dot: string; row: string }
@@ -176,13 +136,6 @@ function formatPixels(value: number | null | undefined): string {
   return `${value} px`;
 }
 
-function formatPercent(share: number): string {
-  if (!Number.isFinite(share) || share <= 0) return "0%";
-  const percent = share * 100;
-  if (percent > 0 && percent < 1) return "<1%";
-  return `${Math.round(percent)}%`;
-}
-
 function eventKindLabel(event: AdminRequestEventOut): string {
   if (event.kind === "generation") {
     return event.action === "edit" ? "图生图" : "文生图";
@@ -219,6 +172,17 @@ function previewImagesForEvent(
     .slice(0, max);
 }
 
+function positiveDimension(value: number | null | undefined): number | undefined {
+  return Number.isFinite(value) && value != null && value > 0 ? value : undefined;
+}
+
+function imageSizeLabel(
+  width: number | undefined,
+  height: number | undefined,
+): string | undefined {
+  return width && height ? `${width}x${height}` : undefined;
+}
+
 function toLightboxItem(
   image: AdminRequestEventImageOut,
   event: AdminRequestEventOut,
@@ -226,12 +190,8 @@ function toLightboxItem(
   const previewUrl = image.display_url || image.preview_url || image.url;
   const thumbUrl =
     image.thumb_url || image.preview_url || image.display_url || image.url;
-  const width =
-    Number.isFinite(image.width) && image.width > 0 ? image.width : undefined;
-  const height =
-    Number.isFinite(image.height) && image.height > 0
-      ? image.height
-      : undefined;
+  const width = positiveDimension(image.width);
+  const height = positiveDimension(image.height);
   return {
     id: image.id,
     url: image.url,
@@ -240,7 +200,7 @@ function toLightboxItem(
     prompt: event.prompt || event.conversation_title || event.id,
     width,
     height,
-    size_actual: width && height ? `${width}x${height}` : undefined,
+    size_actual: imageSizeLabel(width, height),
     model: event.model || undefined,
     mime: image.mime || undefined,
     type: image.source,
@@ -470,6 +430,37 @@ function summarizeEvents(events: AdminRequestEventOut[]) {
   };
 }
 
+function requestEventStatus(status: StatusFilter): string | undefined {
+  return status === "all" ? undefined : status;
+}
+
+function requestEventRefreshInterval(autoRefresh: boolean): number | false {
+  return autoRefresh ? 10_000 : false;
+}
+
+function requestEventModelStats(
+  hasSearch: boolean,
+  filtered: AdminRequestEventOut[],
+  fetched: RequestEventModelStat[] | undefined,
+): RequestEventModelStat[] {
+  if (hasSearch) return summarizeModelStats(filtered);
+  return fetched ?? EMPTY_MODEL_STATS;
+}
+
+function hasRequestEventFilters(
+  kind: EventKindFilter,
+  status: StatusFilter,
+  range: TimeRangeFilter,
+  search: string,
+): boolean {
+  return (
+    kind !== "all" ||
+    status !== "all" ||
+    range !== "24h" ||
+    search.trim().length > 0
+  );
+}
+
 export function RequestEventsPanel() {
   const [kind, setKind] = useState<EventKindFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -483,11 +474,11 @@ export function RequestEventsPanel() {
     {
       limit: 120,
       kind,
-      status: status === "all" ? undefined : status,
+      status: requestEventStatus(status),
       range,
     },
     {
-      refetchInterval: autoRefresh ? 10_000 : false,
+      refetchInterval: requestEventRefreshInterval(autoRefresh),
     },
   );
 
@@ -500,21 +491,19 @@ export function RequestEventsPanel() {
   const fetchedSummary = useMemo(() => summarizeEvents(rows), [rows]);
   const hasSearch = deferredSearch.trim().length > 0;
   const modelStats = useMemo(
-    () =>
-      hasSearch
-        ? summarizeModelStats(filtered)
-        : q.data?.model_stats ?? EMPTY_MODEL_STATS,
+    () => requestEventModelStats(hasSearch, filtered, q.data?.model_stats),
     [filtered, hasSearch, q.data?.model_stats],
   );
   const modelStatsTotal = useMemo(
     () => modelStats.reduce((total, stat) => total + stat.count, 0),
     [modelStats],
   );
-  const hasActiveFilters =
-    kind !== "all" ||
-    status !== "all" ||
-    range !== "24h" ||
-    search.trim().length > 0;
+  const hasActiveFilters = hasRequestEventFilters(
+    kind,
+    status,
+    range,
+    search,
+  );
   const resetFilters = () => {
     setKind("all");
     setStatus("all");
@@ -524,208 +513,45 @@ export function RequestEventsPanel() {
 
   return (
     <section className="space-y-4" aria-labelledby="request-events-title">
-      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 backdrop-blur-sm md:p-5">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
-          <div className="min-w-0">
-            <h2
-              id="request-events-title"
-              className="text-lg font-semibold tracking-tight text-[var(--fg-0)]"
-            >
-              请求事件
-            </h2>
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-2)]">
-              <span className="inline-flex items-center gap-1.5">
-                <Clock3 className="h-3.5 w-3.5" />
-                最新 {formatAge(fetchedSummary.latestAt)}
-              </span>
-              <span className="font-mono tabular-nums">
-                拉取 {rows.length} · 显示 {filtered.length}
-              </span>
-              <span className="font-mono tabular-nums">
-                平均 {formatDuration(summary.avgDurationMs)}
-              </span>
-              {q.isFetching && !q.isLoading && (
-                <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  同步中
-                </span>
-              )}
-              {autoRefresh && (
-                <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
-                  <TimerReset className="h-3.5 w-3.5" />
-                  自动刷新 10s
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:w-[520px]">
-            <StatTile
-              icon={Activity}
-              label="进行中"
-              value={summary.active}
-              tone="sky"
-            />
-            <StatTile
-              icon={CheckCircle2}
-              label="成功"
-              value={summary.succeeded}
-              tone="emerald"
-            />
-            <StatTile
-              icon={AlertTriangle}
-              label="失败"
-              value={summary.failed}
-              tone="red"
-            />
-            <StatTile
-              icon={ImageIcon}
-              label="图片"
-              value={summary.images}
-              tone="amber"
-            />
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(240px,1fr)_auto] lg:items-center">
-          <div className="flex h-10 min-w-0 items-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 transition-colors focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25">
-            <Search className="h-3.5 w-3.5 shrink-0 text-[var(--fg-2)]" />
-            <label htmlFor="search-request-events" className="sr-only">
-              搜索请求事件
-            </label>
-            <input
-              id="search-request-events"
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder={FILTERED_SEARCH_PLACEHOLDER}
-              className="min-w-0 flex-1 bg-transparent text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:outline-none"
-            />
-            {search.trim() && (
-              <button
-                type="button"
-                onClick={() => setSearch("")}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-white/10 hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
-                aria-label="清空搜索"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-
-          <div className="flex min-w-0 flex-wrap items-center gap-2 lg:justify-end">
-            <SegmentedControl
-              value={kind}
-              options={KIND_OPTIONS}
-              onChange={setKind}
-            />
-            <label htmlFor="request-event-status" className="sr-only">
-              请求状态
-            </label>
-            <select
-              id="request-event-status"
-              value={status}
-              onChange={(event) => setStatus(event.target.value as StatusFilter)}
-              className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
-            >
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <label htmlFor="request-event-range" className="sr-only">
-              查询时间
-            </label>
-            <select
-              id="request-event-range"
-              value={range}
-              onChange={(event) =>
-                setRange(event.target.value as TimeRangeFilter)
-              }
-              className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
-            >
-              {RANGE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <Button
-              variant={autoRefresh ? "primary" : "secondary"}
-              size="sm"
-              onClick={() => setAutoRefresh((value) => !value)}
-              aria-pressed={autoRefresh}
-              leftIcon={<TimerReset className="h-3.5 w-3.5" />}
-            >
-              自动刷新
-            </Button>
-            {hasActiveFilters && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={resetFilters}
-                leftIcon={<X className="h-3.5 w-3.5" />}
-              >
-                重置
-              </Button>
-            )}
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void q.refetch()}
-              disabled={q.isFetching}
-              loading={q.isFetching}
-              leftIcon={!q.isFetching ? <RefreshCw className="h-3.5 w-3.5" /> : undefined}
-            >
-              刷新
-            </Button>
-          </div>
-        </div>
-
-        {modelStats.length > 0 && (
-          <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="inline-flex items-center gap-1.5 font-medium text-[var(--fg-1)]">
-                <BarChart3 className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
-                路径统计
-              </span>
-              <span className="font-mono tabular-nums text-[var(--fg-2)]">
-                {hasSearch ? "基于当前显示" : "基于当前筛选"}{" "}
-                {hasSearch ? filtered.length : modelStatsTotal}
-              </span>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              {modelStats.slice(0, MAX_MODEL_STATS).map((stat) => (
-                <ModelStatBar key={stat.model} stat={stat} />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+      <RequestEventsHeader
+        rowsCount={rows.length}
+        filteredCount={filtered.length}
+        latestLabel={formatAge(fetchedSummary.latestAt)}
+        averageDurationLabel={formatDuration(summary.avgDurationMs)}
+        summary={summary}
+        kind={kind}
+        status={status}
+        range={range}
+        autoRefresh={autoRefresh}
+        search={search}
+        hasActiveFilters={hasActiveFilters}
+        modelStats={modelStats}
+        modelStatsTotal={modelStatsTotal}
+        hasSearch={hasSearch}
+        fetching={q.isFetching}
+        loading={q.isLoading}
+        onSearch={setSearch}
+        onClearSearch={() => setSearch("")}
+        onKindChange={setKind}
+        onStatusChange={setStatus}
+        onRangeChange={setRange}
+        onToggleAutoRefresh={() => setAutoRefresh((value) => !value)}
+        onReset={resetFilters}
+        onRefresh={() => void q.refetch()}
+      />
 
       <div
         className="overflow-hidden rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 backdrop-blur-sm"
         aria-busy={q.isFetching}
         aria-live="polite"
       >
-        {q.isLoading ? (
-          <ListSkeleton rows={7} />
-        ) : q.isError ? (
-          <ErrorBlock
-            message={q.error?.message ?? "未知错误"}
-            onRetry={() => void q.refetch()}
-          />
-        ) : filtered.length === 0 ? (
-          <EmptyBlock
-            title={rows.length === 0 ? "暂无请求事件" : "没有匹配结果"}
-            description={
-              rows.length === 0
-                ? "用户发起图片或对话请求后会出现在这里"
-                : "试试切换过滤条件或换个关键词"
-            }
-          />
-        ) : (
+        <RequestEventsResultState
+          loading={q.isLoading}
+          errorMessage={q.isError ? q.error?.message ?? "未知错误" : null}
+          rowCount={rows.length}
+          filteredCount={filtered.length}
+          onRetry={() => void q.refetch()}
+        >
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] lg:block">
               <table className="w-full min-w-[1040px] text-sm">
@@ -889,74 +715,44 @@ export function RequestEventsPanel() {
               })}
             </ul>
           </>
-        )}
+        </RequestEventsResultState>
       </div>
     </section>
   );
 }
 
-function StatTile({
-  icon: Icon,
-  label,
-  value,
-  tone,
+function RequestEventsResultState({
+  loading,
+  errorMessage,
+  rowCount,
+  filteredCount,
+  onRetry,
+  children,
 }: {
-  icon: LucideIcon;
-  label: string;
-  value: number;
-  tone: "amber" | "emerald" | "red" | "sky";
+  loading: boolean;
+  errorMessage: string | null;
+  rowCount: number;
+  filteredCount: number;
+  onRetry: () => void;
+  children: ReactNode;
 }) {
-  const toneClass = {
-    amber: "text-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 border-[var(--color-lumen-amber)]/20",
-    emerald: "text-success bg-success-soft border-success-border",
-    red: "text-danger bg-danger-soft border-danger-border",
-    sky: "text-info bg-info-soft border-info-border",
-  }[tone];
-
-  return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.035] px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-[11px] text-[var(--fg-2)]">{label}</span>
-        <span
-          className={cn(
-            "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
-            toneClass,
-          )}
-        >
-          <Icon className="h-3.5 w-3.5" />
-        </span>
-      </div>
-      <div className="mt-1 font-mono text-lg font-semibold leading-tight tabular-nums text-[var(--fg-0)]">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
-  const width = `${Math.max(2, Math.min(100, Math.round(stat.share * 100)))}%`;
-
-  return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.03] px-3 py-2.5">
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <span
-          className="min-w-0 truncate font-mono text-xs text-[var(--fg-0)]"
-          title={stat.model}
-        >
-          {stat.model}
-        </span>
-        <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--fg-2)]">
-          {stat.count} · {formatPercent(stat.share)}
-        </span>
-      </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-        <div
-          className="h-full rounded-full bg-[var(--color-lumen-amber)]"
-          style={{ width }}
-        />
-      </div>
-    </div>
-  );
+  if (loading) return <ListSkeleton rows={7} />;
+  if (errorMessage) {
+    return <ErrorBlock message={errorMessage} onRetry={onRetry} />;
+  }
+  if (filteredCount === 0) {
+    return (
+      <EmptyBlock
+        title={rowCount === 0 ? "暂无请求事件" : "没有匹配结果"}
+        description={
+          rowCount === 0
+            ? "用户发起图片或对话请求后会出现在这里"
+            : "试试切换过滤条件或换个关键词"
+        }
+      />
+    );
+  }
+  return children;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -1052,44 +848,6 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
   );
 }
 
-function SegmentedControl<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: Array<{ value: T; label: string }>;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] p-0.5 text-xs"
-    >
-      {options.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(option.value)}
-            className={cn(
-              "h-9 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
-              active
-                ? "bg-white/10 text-[var(--fg-0)]"
-                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-            )}
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function ImagesButton({ event }: { event: AdminRequestEventOut }) {
   if (event.images.length === 0) {
     return <span className="text-xs text-[var(--fg-2)]">—</span>;
@@ -1139,12 +897,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
 
 function EventDetails({ event }: { event: AdminRequestEventOut }) {
   const upstreamEntries = Object.entries(event.upstream ?? {});
-  const conversationLabel = event.conversation_title
-    ? `${event.conversation_title} (${truncateMiddle(event.conversation_id ?? "")})`
-    : displayValue(event.conversation_id);
   const outputCount = outputImageCount(event);
-  const source = upstreamSource(event);
-  const actionSource = upstreamText(event, "action_source");
 
   return (
     <div className="space-y-4 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/60 p-4">
@@ -1171,57 +924,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Detail label="请求编号" value={event.id} mono />
-        <Detail label="消息编号" value={event.message_id} mono />
-        <Detail label="会话" value={conversationLabel} />
-        <Detail label="阶段" value={displayValue(event.progress_stage)} />
-        <Detail label="创建时间" value={formatDateTime(event.created_at)} mono />
-        <Detail label="开始时间" value={formatDateTime(event.started_at)} mono />
-        <Detail label="结束时间" value={formatDateTime(event.finished_at)} mono />
-        <Detail
-          label="队列泳道"
-          value={displayValue(event.queue_lane, "未记录")}
-        />
-        <Detail
-          label="排队耗时"
-          value={formatDuration(event.queue_wait_ms ?? null)}
-          mono
-        />
-        <Detail label="尺寸桶" value={displayValue(event.size_bucket, "—")} />
-        <Detail label="像素量" value={formatPixels(event.pixel_count)} mono />
-        <Detail label="成本类型" value={displayValue(event.cost_class, "—")} />
-        {source && <Detail label="来源" value={source} />}
-        {actionSource && <Detail label="动作来源" value={actionSource} />}
-        {event.workflow_type && (
-          <Detail label="工作流" value={event.workflow_type} />
-        )}
-        {event.workflow_step_key && (
-          <Detail label="工作流步骤" value={event.workflow_step_key} />
-        )}
-        <Detail
-          label="上游端点"
-          value={displayValue(event.upstream_endpoint)}
-        />
-        <Detail
-          label="上游路由"
-          value={displayValue(event.upstream_route, "未记录")}
-        />
-        <Detail
-          label="上游"
-          value={providerDisplayValue(event)}
-        />
-        <Detail label="尝试次数" value={String(event.attempt)} mono />
-        {event.tokens_in != null && (
-          <Detail label="输入令牌数" value={String(event.tokens_in)} mono />
-        )}
-        {event.tokens_out != null && (
-          <Detail label="输出令牌数" value={String(event.tokens_out)} mono />
-        )}
-        {event.error_code && (
-          <Detail label="错误码" value={event.error_code} />
-        )}
-      </div>
+      <EventDetailGrid event={event} />
 
       {isActiveStatus(event.status) && liveLanes(event).length > 0 && (
         <div>
@@ -1318,6 +1021,86 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+interface EventDetailItem {
+  label: string;
+  value: string;
+  mono?: boolean;
+}
+
+function eventDetailItems(event: AdminRequestEventOut): EventDetailItem[] {
+  const conversationLabel = event.conversation_title
+    ? `${event.conversation_title} (${truncateMiddle(event.conversation_id ?? "")})`
+    : displayValue(event.conversation_id);
+  const items: EventDetailItem[] = [
+    { label: "请求编号", value: event.id, mono: true },
+    { label: "消息编号", value: event.message_id, mono: true },
+    { label: "会话", value: conversationLabel },
+    { label: "阶段", value: displayValue(event.progress_stage) },
+    { label: "创建时间", value: formatDateTime(event.created_at), mono: true },
+    { label: "开始时间", value: formatDateTime(event.started_at), mono: true },
+    { label: "结束时间", value: formatDateTime(event.finished_at), mono: true },
+    { label: "队列泳道", value: displayValue(event.queue_lane, "未记录") },
+    {
+      label: "排队耗时",
+      value: formatDuration(event.queue_wait_ms ?? null),
+      mono: true,
+    },
+    { label: "尺寸桶", value: displayValue(event.size_bucket, "—") },
+    { label: "像素量", value: formatPixels(event.pixel_count), mono: true },
+    { label: "成本类型", value: displayValue(event.cost_class, "—") },
+    { label: "上游端点", value: displayValue(event.upstream_endpoint) },
+    {
+      label: "上游路由",
+      value: displayValue(event.upstream_route, "未记录"),
+    },
+    { label: "上游", value: providerDisplayValue(event) },
+    { label: "尝试次数", value: String(event.attempt), mono: true },
+  ];
+  const source = upstreamSource(event);
+  const actionSource = upstreamText(event, "action_source");
+  if (source) items.push({ label: "来源", value: source });
+  if (actionSource) items.push({ label: "动作来源", value: actionSource });
+  if (event.workflow_type) {
+    items.push({ label: "工作流", value: event.workflow_type });
+  }
+  if (event.workflow_step_key) {
+    items.push({ label: "工作流步骤", value: event.workflow_step_key });
+  }
+  if (event.tokens_in != null) {
+    items.push({
+      label: "输入令牌数",
+      value: String(event.tokens_in),
+      mono: true,
+    });
+  }
+  if (event.tokens_out != null) {
+    items.push({
+      label: "输出令牌数",
+      value: String(event.tokens_out),
+      mono: true,
+    });
+  }
+  if (event.error_code) {
+    items.push({ label: "错误码", value: event.error_code });
+  }
+  return items;
+}
+
+function EventDetailGrid({ event }: { event: AdminRequestEventOut }) {
+  return (
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      {eventDetailItems(event).map((item) => (
+        <Detail
+          key={item.label}
+          label={item.label}
+          value={item.value}
+          mono={item.mono}
+        />
+      ))}
     </div>
   );
 }

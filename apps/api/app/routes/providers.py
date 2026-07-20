@@ -28,15 +28,10 @@ from lumen_core.byok import (
     extract_sse_output_text as _extract_sse_output_text,
 )
 from lumen_core.providers import (
-    DEFAULT_LEGACY_PROVIDER_BASE_URL,
-    DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
-    DEFAULT_PROVIDER_PURPOSES,
     ProviderProxyDefinition,
-    build_legacy_provider,
     endpoint_kind_allowed,
     normalize_provider_purposes,
     normalize_image_edit_input_transport,
-    parse_provider_config_json,
     parse_proxy_item,
     resolve_provider_proxy_url,
 )
@@ -62,6 +57,14 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from ..services.admin_model_cache import invalidate_admin_models_cache
+from ..services.provider_config import (
+    ensure_enabled_provider_proxies,
+    ensure_enabled_video_provider_proxies,
+    parse_provider_config as _parse_config,
+    parse_provider_items as _parse_items,
+    read_providers as _read_providers,
+)
 from ._video_provider_update import (
     VideoProviderUpdateError,
     build_video_provider_update,
@@ -129,85 +132,6 @@ def _safe_int(value: object, default: int, *, minimum: int | None = None) -> int
     if minimum is not None:
         parsed = max(minimum, parsed)
     return parsed
-
-
-def _legacy_env_providers_raw() -> str | None:
-    legacy = build_legacy_provider(
-        base_url=(
-            os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
-        ),
-        api_key=os.environ.get("UPSTREAM_API_KEY"),
-    )
-    if legacy is None:
-        return None
-    return json.dumps(
-        [
-            {
-                "name": legacy.name,
-                "base_url": legacy.base_url,
-                "api_key": legacy.api_key,
-                "priority": legacy.priority,
-                "weight": legacy.weight,
-                "enabled": legacy.enabled,
-                "purposes": list(DEFAULT_PROVIDER_PURPOSES),
-                "image_jobs_enabled": False,
-                "image_jobs_endpoint": "auto",
-                "image_jobs_endpoint_lock": False,
-                "image_jobs_base_url": "",
-                "image_edit_input_transport": DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
-                "image_concurrency": 1,
-            }
-        ],
-        ensure_ascii=False,
-    )
-
-
-async def _read_providers(
-    db: AsyncSession,
-) -> tuple[str | None, str]:
-    """返回 (raw_json, source)。source 为 "db" | "env" | "none"。"""
-    row = (
-        await db.execute(
-            select(SystemSetting.value).where(SystemSetting.key == "providers")
-        )
-    ).scalar_one_or_none()
-    if row is not None and row != "":
-        return row, "db"
-    spec = get_spec("providers")
-    if spec:
-        env_val = os.environ.get(spec.env_fallback)
-        if env_val is not None and env_val != "":
-            return env_val, "env"
-    legacy = _legacy_env_providers_raw()
-    if legacy is not None:
-        return legacy, "env"
-    return None, "none"
-
-
-def _parse_config(raw: str) -> tuple[list[dict], list[dict]]:
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return [], []
-    if isinstance(value, list):
-        return [it for it in value if isinstance(it, dict)], []
-    if not isinstance(value, dict):
-        return [], []
-    providers = value.get("providers", [])
-    proxies = value.get("proxies", [])
-    if not isinstance(providers, list):
-        providers = []
-    if not isinstance(proxies, list):
-        proxies = []
-    return (
-        [it for it in providers if isinstance(it, dict)],
-        [it for it in proxies if isinstance(it, dict)],
-    )
-
-
-def _parse_items(raw: str) -> list[dict]:
-    items, _ = _parse_config(raw)
-    return items
 
 
 def _normalize_capability(raw: Any) -> bool | None:
@@ -415,47 +339,6 @@ def _parse_video_raw_config(raw: str | None) -> tuple[list[dict], list[dict]]:
     )
 
 
-def ensure_enabled_provider_proxies(raw: str) -> None:
-    providers, _proxies, errors = parse_provider_config_json(raw)
-    if errors:
-        raise ValueError("; ".join(errors))
-    for provider in providers:
-        if not provider.enabled or not provider.proxy_name:
-            continue
-        if provider.proxy is None:
-            raise ValueError(
-                f"provider「{provider.name}」引用了不存在的代理：{provider.proxy_name}"
-            )
-        if not provider.proxy.enabled:
-            raise ValueError(
-                f"provider「{provider.name}」引用了已禁用的代理：{provider.proxy_name}"
-            )
-
-
-def ensure_enabled_video_provider_proxies(
-    raw: str,
-    *,
-    shared_provider_raw: str | None,
-) -> None:
-    providers, _proxies, errors = parse_video_provider_config_json(
-        raw,
-        shared_provider_raw=shared_provider_raw,
-    )
-    if errors:
-        raise ValueError("; ".join(errors))
-    for provider in providers:
-        if not provider.enabled or not provider.proxy_name:
-            continue
-        if provider.proxy is None:
-            raise ValueError(
-                f"视频供应商「{provider.name}」引用了不存在的代理：{provider.proxy_name}"
-            )
-        if not provider.proxy.enabled:
-            raise ValueError(
-                f"视频供应商「{provider.name}」引用了已禁用的代理：{provider.proxy_name}"
-            )
-
-
 def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
     is_volcano = provider.kind == "volcano"
     return VideoProviderItemOut(
@@ -535,6 +418,63 @@ async def list_video_providers(
     )
 
 
+def _validated_video_provider_update(
+    body: VideoProvidersUpdateIn,
+    *,
+    old_raw: str | None,
+    raw_shared: str | None,
+) -> tuple[list[dict[str, Any]], str]:
+    if body.enabled and not body.items:
+        raise _http(
+            "invalid_request",
+            "开启视频生成前至少需要一个视频供应商",
+            422,
+        )
+    try:
+        validate_video_provider_items(body.items)
+    except VideoProviderUpdateError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+
+    old_items, old_video_proxies = _parse_video_raw_config(old_raw)
+    try:
+        payload = build_video_provider_update(
+            body.items,
+            old_items=old_items,
+            old_video_proxies=old_video_proxies,
+            shared_proxies=_parse_config(raw_shared or "")[1],
+        )
+    except VideoProviderUpdateError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+
+    rows = payload.rows
+    raw_json = payload.raw_json
+    if rows and len(raw_json) > _VIDEO_PROVIDERS_MAX_LEN:
+        raise _http(
+            "invalid_request",
+            f"video.providers JSON 超过 {_VIDEO_PROVIDERS_MAX_LEN} 字符",
+            422,
+        )
+    if not rows:
+        return rows, raw_json
+
+    parsed, _proxies, errors = parse_video_provider_config_json(
+        raw_json,
+        shared_provider_raw=raw_shared,
+    )
+    if errors:
+        raise _http("invalid_request", "; ".join(errors), 422)
+    if not parsed:
+        raise _http("invalid_request", "video.providers 缺少供应商", 422)
+    try:
+        ensure_enabled_video_provider_proxies(
+            raw_json,
+            shared_provider_raw=raw_shared,
+        )
+    except ValueError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+    return rows, raw_json
+
+
 @router.put(
     "/video",
     response_model=VideoProvidersOut,
@@ -546,54 +486,13 @@ async def update_video_providers(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoProvidersOut:
-    if body.enabled and not body.items:
-        raise _http(
-            "invalid_request",
-            "开启视频生成前至少需要一个视频供应商",
-            422,
-        )
-
-    try:
-        validate_video_provider_items(body.items)
-    except VideoProviderUpdateError as exc:
-        raise _http("invalid_request", str(exc), 422) from exc
-
     old_raw, _old_source = await _read_video_providers_raw(db)
     raw_shared, _shared_source = await _read_providers(db)
-    old_items, old_video_proxies = _parse_video_raw_config(old_raw)
-    try:
-        payload = build_video_provider_update(
-            body.items,
-            old_items=old_items,
-            old_video_proxies=old_video_proxies,
-            shared_proxies=_parse_config(raw_shared or "")[1],
-        )
-    except VideoProviderUpdateError as exc:
-        raise _http("invalid_request", str(exc), 422) from exc
-    rows = payload.rows
-    raw_json = payload.raw_json
-    if rows and len(raw_json) > _VIDEO_PROVIDERS_MAX_LEN:
-        raise _http(
-            "invalid_request",
-            f"video.providers JSON 超过 {_VIDEO_PROVIDERS_MAX_LEN} 字符",
-            422,
-        )
-    if rows:
-        parsed, _proxies, errors = parse_video_provider_config_json(
-            raw_json,
-            shared_provider_raw=raw_shared,
-        )
-        if errors:
-            raise _http("invalid_request", "; ".join(errors), 422)
-        if not parsed:
-            raise _http("invalid_request", "video.providers 缺少供应商", 422)
-        try:
-            ensure_enabled_video_provider_proxies(
-                raw_json,
-                shared_provider_raw=raw_shared,
-            )
-        except ValueError as exc:
-            raise _http("invalid_request", str(exc), 422) from exc
+    rows, raw_json = _validated_video_provider_update(
+        body,
+        old_raw=old_raw,
+        raw_shared=raw_shared,
+    )
 
     await _upsert_setting_value(db, "video.enabled", "1" if body.enabled else "0")
     if rows:
@@ -614,6 +513,169 @@ async def update_video_providers(
     )
     await db.commit()
     return await list_video_providers(admin, db)
+
+
+def _validate_provider_update_names(body: ProvidersUpdateIn) -> None:
+    seen_names: set[str] = set()
+    for provider_input in body.items:
+        name = provider_input.name.strip()
+        if not name:
+            raise _http("invalid_request", "provider 名称不能为空", 422)
+        if name in seen_names:
+            raise _http("invalid_request", f"provider 名称重复：{name}", 422)
+        seen_names.add(name)
+
+    seen_proxy_names: set[str] = set()
+    for proxy_input in body.proxies:
+        name = proxy_input.name.strip()
+        if not name:
+            raise _http("invalid_request", "proxy 名称不能为空", 422)
+        if name in seen_proxy_names:
+            raise _http("invalid_request", f"proxy 名称重复：{name}", 422)
+        seen_proxy_names.add(name)
+
+
+def _stored_provider_secrets(
+    old_raw: str | None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    old_keys: dict[str, str] = {}
+    old_proxy_passwords: dict[str, str] = {}
+    if not old_raw:
+        return old_keys, old_proxy_passwords
+    old_items, old_proxies = _parse_config(old_raw)
+    for old_item in old_items:
+        name = old_item.get("name")
+        key = old_item.get("api_key")
+        if isinstance(name, str) and name.strip() and isinstance(key, str) and key:
+            old_keys[name.strip()] = key
+    for old_proxy in old_proxies:
+        name = old_proxy.get("name")
+        password = old_proxy.get("password")
+        if (
+            isinstance(name, str)
+            and name.strip()
+            and isinstance(password, str)
+            and password
+        ):
+            old_proxy_passwords[name.strip()] = password
+    return old_keys, old_proxy_passwords
+
+
+def _provider_proxy_rows(
+    body: ProvidersUpdateIn,
+    old_proxy_passwords: dict[str, str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for proxy_input in body.proxies:
+        name = proxy_input.name.strip()
+        password = proxy_input.password.strip() or old_proxy_passwords.get(name, "")
+        rows.append(
+            {
+                "name": name,
+                "type": _normalize_proxy_type(proxy_input.type),
+                "host": proxy_input.host.strip(),
+                "port": proxy_input.port,
+                "username": (proxy_input.username or "").strip() or None,
+                "password": password,
+                "private_key_path": (proxy_input.private_key_path or "").strip()
+                or None,
+                "enabled": proxy_input.enabled,
+            }
+        )
+    return rows
+
+
+def _provider_rows(
+    body: ProvidersUpdateIn,
+    *,
+    old_keys: dict[str, str],
+    proxy_names: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for provider_input in body.items:
+        name = provider_input.name.strip()
+        api_key = provider_input.api_key.strip() or old_keys.get(name, "")
+        if not api_key and provider_input.enabled:
+            raise _http(
+                "invalid_request",
+                f"provider「{name}」缺少 api_key",
+                422,
+            )
+        proxy_name = (provider_input.proxy or "").strip() or None
+        if proxy_name and proxy_name not in proxy_names:
+            raise _http(
+                "invalid_request",
+                f"provider「{name}」引用了不存在的代理：{proxy_name}",
+                422,
+            )
+        endpoint = _normalize_image_jobs_endpoint(provider_input.image_jobs_endpoint)
+        row: dict[str, Any] = {
+            "name": name,
+            "base_url": provider_input.base_url.strip(),
+            "api_key": api_key,
+            "priority": provider_input.priority,
+            "weight": max(1, provider_input.weight),
+            "enabled": provider_input.enabled,
+            "purposes": _normalize_purposes(provider_input.purposes),
+            "image_jobs_enabled": provider_input.image_jobs_enabled,
+            "image_jobs_endpoint": endpoint,
+            "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
+                provider_input.image_jobs_endpoint_lock,
+                endpoint,
+            ),
+            "image_jobs_base_url": _normalize_image_jobs_base_url(
+                provider_input.image_jobs_base_url
+            ),
+            "image_edit_input_transport": _normalize_image_edit_transport(
+                provider_input.image_edit_input_transport
+            ),
+            "image_concurrency": _normalize_image_concurrency(
+                provider_input.image_concurrency
+            ),
+        }
+        for key in (
+            "responses_supported",
+            "image_generations_supported",
+            "image_responses_supported",
+        ):
+            value = _normalize_capability(getattr(provider_input, key, None))
+            if value is not None:
+                row[key] = value
+        if proxy_name:
+            row["proxy"] = proxy_name
+        rows.append(row)
+    return rows
+
+
+def _provider_update_json(
+    provider_rows: list[dict[str, Any]],
+    proxy_rows: list[dict[str, Any]],
+) -> str:
+    raw_json = json.dumps(
+        {"providers": provider_rows, "proxies": proxy_rows},
+        ensure_ascii=False,
+    )
+    if len(raw_json) > _PROVIDERS_MAX_LEN:
+        raise _http(
+            "invalid_request",
+            f"providers JSON 超过 {_PROVIDERS_MAX_LEN} 字符",
+            422,
+        )
+    try:
+        validate_providers(raw_json)
+        ensure_enabled_provider_proxies(raw_json)
+    except ValueError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+    return raw_json
+
+
+def _provider_update_out(
+    provider_rows: list[dict[str, Any]],
+    proxy_rows: list[dict[str, Any]],
+) -> ProvidersOut:
+    items = [_to_out(row, index) for index, row in enumerate(provider_rows)]
+    proxies = [_to_proxy_out(row, index) for index, row in enumerate(proxy_rows)]
+    return ProvidersOut(items=items, proxies=proxies, source="db")
 
 
 @router.put(
@@ -645,146 +707,19 @@ async def update_providers(
             details={},
         )
         await db.commit()
-        from .admin_models import invalidate_admin_models_cache
-
         invalidate_admin_models_cache()
         return ProvidersOut(items=[], proxies=[], source="none")
 
-    # 名称去重
-    seen_names: set[str] = set()
-    for provider_input in body.items:
-        n = provider_input.name.strip()
-        if not n:
-            raise _http("invalid_request", "provider 名称不能为空", 422)
-        if n in seen_names:
-            raise _http("invalid_request", f"provider 名称重复：{n}", 422)
-        seen_names.add(n)
-
-    seen_proxy_names: set[str] = set()
-    for proxy_input in body.proxies:
-        n = proxy_input.name.strip()
-        if not n:
-            raise _http("invalid_request", "proxy 名称不能为空", 422)
-        if n in seen_proxy_names:
-            raise _http("invalid_request", f"proxy 名称重复：{n}", 422)
-        seen_proxy_names.add(n)
-
-    # 读旧 key 用于保留
+    _validate_provider_update_names(body)
     old_raw, _ = await _read_providers(db)
-    old_keys: dict[str, str] = {}
-    old_proxy_passwords: dict[str, str] = {}
-    if old_raw:
-        old_items, old_proxies = _parse_config(old_raw)
-        for old_item in old_items:
-            name = old_item.get("name", "")
-            key = old_item.get("api_key", "")
-            if isinstance(name, str) and isinstance(key, str) and name.strip() and key:
-                old_keys[name.strip()] = key
-        for old_proxy in old_proxies:
-            name = old_proxy.get("name", "")
-            password = old_proxy.get("password", "")
-            if (
-                isinstance(name, str)
-                and isinstance(password, str)
-                and name.strip()
-                and password
-            ):
-                old_proxy_passwords[name.strip()] = password
-
-    proxy_arr: list[dict[str, Any]] = []
-    for proxy_input in body.proxies:
-        proxy_name = proxy_input.name.strip()
-        proxy_type = _normalize_proxy_type(proxy_input.type)
-        proxy_password = proxy_input.password.strip()
-        if proxy_password == "" and proxy_name in old_proxy_passwords:
-            proxy_password = old_proxy_passwords[proxy_name]
-        proxy_arr.append(
-            {
-                "name": proxy_name,
-                "type": proxy_type,
-                "host": proxy_input.host.strip(),
-                "port": proxy_input.port,
-                "username": (proxy_input.username or "").strip() or None,
-                "password": proxy_password,
-                "private_key_path": (proxy_input.private_key_path or "").strip()
-                or None,
-                "enabled": proxy_input.enabled,
-            }
-        )
-    proxy_names = {proxy_row["name"] for proxy_row in proxy_arr}
-
-    arr: list[dict[str, Any]] = []
-    for provider_input in body.items:
-        provider_name = provider_input.name.strip()
-        api_key = provider_input.api_key.strip()
-        if api_key == "" and provider_name in old_keys:
-            api_key = old_keys[provider_name]
-        if not api_key and provider_input.enabled:
-            raise _http(
-                "invalid_request",
-                f"provider「{provider_name}」缺少 api_key",
-                422,
-            )
-        provider_proxy = (provider_input.proxy or "").strip() or None
-        if provider_proxy and provider_proxy not in proxy_names:
-            raise _http(
-                "invalid_request",
-                f"provider「{provider_name}」引用了不存在的代理：{provider_proxy}",
-                422,
-            )
-        endpoint = _normalize_image_jobs_endpoint(provider_input.image_jobs_endpoint)
-        row: dict[str, Any] = {
-            "name": provider_name,
-            "base_url": provider_input.base_url.strip(),
-            "api_key": api_key,
-            "priority": provider_input.priority,
-            "weight": max(1, provider_input.weight),
-            "enabled": provider_input.enabled,
-            "purposes": _normalize_purposes(provider_input.purposes),
-            "image_jobs_enabled": provider_input.image_jobs_enabled,
-            "image_jobs_endpoint": endpoint,
-            "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
-                provider_input.image_jobs_endpoint_lock, endpoint
-            ),
-            "image_jobs_base_url": _normalize_image_jobs_base_url(
-                provider_input.image_jobs_base_url
-            ),
-            "image_edit_input_transport": _normalize_image_edit_transport(
-                provider_input.image_edit_input_transport
-            ),
-            "image_concurrency": _normalize_image_concurrency(
-                provider_input.image_concurrency
-            ),
-        }
-        # capability 三态：None 时不写入持久化结构，保持配置最小、避免污染老配置。
-        for attr_in, key_out in (
-            ("responses_supported", "responses_supported"),
-            ("image_generations_supported", "image_generations_supported"),
-            ("image_responses_supported", "image_responses_supported"),
-        ):
-            val = _normalize_capability(getattr(provider_input, attr_in, None))
-            if val is not None:
-                row[key_out] = val
-        if provider_proxy:
-            row["proxy"] = provider_proxy
-        arr.append(row)
-
-    raw_json = json.dumps(
-        {"providers": arr, "proxies": proxy_arr},
-        ensure_ascii=False,
+    old_keys, old_proxy_passwords = _stored_provider_secrets(old_raw)
+    proxy_rows = _provider_proxy_rows(body, old_proxy_passwords)
+    provider_rows = _provider_rows(
+        body,
+        old_keys=old_keys,
+        proxy_names={row["name"] for row in proxy_rows},
     )
-    if len(raw_json) > _PROVIDERS_MAX_LEN:
-        raise _http(
-            "invalid_request",
-            f"providers JSON 超过 {_PROVIDERS_MAX_LEN} 字符",
-            422,
-        )
-
-    try:
-        validate_providers(raw_json)
-        ensure_enabled_provider_proxies(raw_json)
-    except ValueError as exc:
-        raise _http("invalid_request", str(exc), 422) from exc
+    raw_json = _provider_update_json(provider_rows, proxy_rows)
 
     existing = (
         await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
@@ -801,62 +736,13 @@ async def update_providers(
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
         details={
-            "count": len(arr),
-            "names": [provider_row["name"] for provider_row in arr],
+            "count": len(provider_rows),
+            "names": [row["name"] for row in provider_rows],
         },
     )
     await db.commit()
-    from .admin_models import invalidate_admin_models_cache
-
     invalidate_admin_models_cache()
-
-    out: list[ProviderItemOut] = []
-    for provider_row in arr:
-        endpoint = _normalize_image_jobs_endpoint(
-            provider_row.get("image_jobs_endpoint")
-        )
-        out.append(
-            ProviderItemOut(
-                name=provider_row["name"],
-                base_url=provider_row["base_url"],
-                api_key_hint=_mask_key(provider_row["api_key"]),
-                priority=provider_row["priority"],
-                weight=provider_row["weight"],
-                enabled=provider_row["enabled"],
-                purposes=_normalize_purposes(provider_row.get("purposes")),
-                proxy=provider_row.get("proxy"),
-                image_jobs_enabled=_normalize_bool(
-                    provider_row.get("image_jobs_enabled"),
-                    default=False,
-                ),
-                image_jobs_endpoint=endpoint,
-                image_jobs_endpoint_lock=_normalize_image_jobs_endpoint_lock(
-                    provider_row.get("image_jobs_endpoint_lock"), endpoint
-                ),
-                image_jobs_base_url=_normalize_image_jobs_base_url(
-                    provider_row.get("image_jobs_base_url")
-                ),
-                image_edit_input_transport=_normalize_image_edit_transport(
-                    provider_row.get("image_edit_input_transport")
-                ),
-                image_concurrency=_normalize_image_concurrency(
-                    provider_row.get("image_concurrency")
-                ),
-                responses_supported=_normalize_capability(
-                    provider_row.get("responses_supported")
-                ),
-                image_generations_supported=_normalize_capability(
-                    provider_row.get("image_generations_supported")
-                ),
-                image_responses_supported=_normalize_capability(
-                    provider_row.get("image_responses_supported")
-                ),
-            )
-        )
-    proxies_out = [
-        _to_proxy_out(proxy_row, index) for index, proxy_row in enumerate(proxy_arr)
-    ]
-    return ProvidersOut(items=out, proxies=proxies_out, source="db")
+    return _provider_update_out(provider_rows, proxy_rows)
 
 
 @router.patch(
@@ -921,8 +807,6 @@ async def patch_provider_enabled(
         details={"name": provider_name, "enabled": body.enabled},
     )
     await db.commit()
-    from .admin_models import invalidate_admin_models_cache
-
     invalidate_admin_models_cache()
     return _to_out(target, target_idx)
 

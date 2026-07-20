@@ -274,102 +274,217 @@ export function useLightboxGestures(
       }
     };
 
-    const onPointerMove = (e: PointerEvent) => {
-      const p = pointersRef.current.get(e.pointerId);
-      if (!p) return;
-      p.x = e.clientX;
-      p.y = e.clientY;
-      emitPointerActivity();
-
-      const now = performance.now();
-      if (modeRef.current === "pinch" && pointersRef.current.size === 2) {
-        const pts = Array.from(pointersRef.current.values());
-        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-        if (pinchStartDistRef.current > 0) {
-          const next = Math.min(
-            MAX_SCALE,
-            Math.max(1, pinchStartScaleRef.current * (d / pinchStartDistRef.current)),
-          );
-          scheduleMotion({ scale: next });
-          if (next <= 1.01) {
-            scheduleMotion({ dragX: 0, dragY: 0 });
-          }
-        }
-        movedRef.current = true;
-        clearLongPress();
-        if (e.cancelable) e.preventDefault();
-        return;
+    const handlePinchMove = (e: PointerEvent): boolean => {
+      if (modeRef.current !== "pinch" || pointersRef.current.size !== 2) {
+        return false;
       }
-
-      const dx = e.clientX - startXRef.current;
-      const dy = e.clientY - startYRef.current;
-      const absDx = Math.abs(dx);
-      const absDy = Math.abs(dy);
-
-      // 超出 tap slop 就标记 moved
-      if (!movedRef.current && (absDx > TAP_SLOP || absDy > TAP_SLOP)) {
-        movedRef.current = true;
-        clearLongPress();
+      const pts = Array.from(pointersRef.current.values());
+      const distance = Math.hypot(
+        pts[0].x - pts[1].x,
+        pts[0].y - pts[1].y,
+      );
+      if (pinchStartDistRef.current > 0) {
+        const scale = clamp(
+          pinchStartScaleRef.current *
+            (distance / pinchStartDistRef.current),
+          1,
+          MAX_SCALE,
+        );
+        scheduleMotion({ scale });
+        if (scale <= 1.01) scheduleMotion({ dragX: 0, dragY: 0 });
       }
+      movedRef.current = true;
+      clearLongPress();
+      if (e.cancelable) e.preventDefault();
+      return true;
+    };
 
-      // 估计速度
+    const updatePointerVelocity = (e: PointerEvent, now: number) => {
       const dt = Math.max(1, now - lastMoveTimeRef.current);
-      vxRef.current = (e.clientX - lastXRef.current) / dt * 1000;
-      vyRef.current = (e.clientY - lastYRef.current) / dt * 1000;
+      vxRef.current = ((e.clientX - lastXRef.current) / dt) * 1000;
+      vyRef.current = ((e.clientY - lastYRef.current) / dt) * 1000;
       lastXRef.current = e.clientX;
       lastYRef.current = e.clientY;
       lastMoveTimeRef.current = now;
+    };
 
-      if (modeRef.current === "pan") {
-        // pinch 放大后平移（由外部 motion x/y 直接驱动）
-        const bounds = panBounds();
-        scheduleMotion({
-          dragX: rubberClamp(
-            panStartXRef.current + dx,
-            -bounds.x,
-            bounds.x,
-            getWidth(),
-          ),
-          dragY: rubberClamp(
-            panStartYRef.current + dy,
-            -bounds.y,
-            bounds.y,
-            getHeight(),
-          ),
-        });
+    const handlePanMove = (
+      e: PointerEvent,
+      dx: number,
+      dy: number,
+    ): boolean => {
+      if (modeRef.current !== "pan") return false;
+      const bounds = panBounds();
+      scheduleMotion({
+        dragX: rubberClamp(
+          panStartXRef.current + dx,
+          -bounds.x,
+          bounds.x,
+          getWidth(),
+        ),
+        dragY: rubberClamp(
+          panStartYRef.current + dy,
+          -bounds.y,
+          bounds.y,
+          getHeight(),
+        ),
+      });
+      if (e.cancelable) e.preventDefault();
+      return true;
+    };
+
+    const selectMoveMode = (dx: number, dy: number) => {
+      if (modeRef.current !== "idle" || !movedRef.current) return;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        modeRef.current = "swipe-h";
+        return;
+      }
+      modeRef.current = dy > 0 ? "dismiss" : "reveal";
+    };
+
+    const handleDirectionalMove = (
+      e: PointerEvent,
+      dx: number,
+      dy: number,
+    ) => {
+      if (modeRef.current === "swipe-h") {
+        const atBoundary =
+          (optRef.current.isFirst && dx > 0) ||
+          (optRef.current.isLast && dx < 0);
+        const dragX = atBoundary
+          ? rubberBandDistance(dx, getWidth())
+          : dx;
+        scheduleMotion({ dragX });
         if (e.cancelable) e.preventDefault();
         return;
       }
+      if (!isVerticalMode(modeRef.current)) return;
+      const dragY = dy < 0 ? rubberBandDistance(dy, getHeight()) : dy;
+      const haloOpacity = clamp(1 - Math.max(0, dy) / 400, 0, 1);
+      scheduleMotion({ dragY, haloOpacity });
+      if (e.cancelable) e.preventDefault();
+    };
 
-      // 首次决定方向
-      if (modeRef.current === "idle" && movedRef.current) {
-        if (absDx > absDy) {
-          modeRef.current = "swipe-h";
-        } else if (dy > 0) {
-          modeRef.current = "dismiss";
+    const onPointerMove = (e: PointerEvent) => {
+      const pointer = pointersRef.current.get(e.pointerId);
+      if (!pointer) return;
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+      emitPointerActivity();
+      if (handlePinchMove(e)) return;
+
+      const dx = e.clientX - startXRef.current;
+      const dy = e.clientY - startYRef.current;
+      if (
+        !movedRef.current &&
+        (Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP)
+      ) {
+        movedRef.current = true;
+        clearLongPress();
+      }
+      updatePointerVelocity(e, performance.now());
+      if (handlePanMove(e, dx, dy)) return;
+      selectMoveMode(dx, dy);
+      handleDirectionalMove(e, dx, dy);
+    };
+
+    const continuePinchAfterRelease = (): boolean => {
+      if (modeRef.current !== "pinch") return false;
+      if (pointersRef.current.size === 1) {
+        const [[, point]] = pointersRef.current.entries();
+        startXRef.current = point.x;
+        startYRef.current = point.y;
+        modeRef.current = optRef.current.scale.get() > 1.01 ? "pan" : "idle";
+        panStartXRef.current = optRef.current.dragX.get();
+        panStartYRef.current = optRef.current.dragY.get();
+        return true;
+      }
+      if (pointersRef.current.size === 0) {
+        modeRef.current = "idle";
+        if (optRef.current.scale.get() <= 1.01) {
+          optRef.current.scale.set(1);
+          resetPosition();
+        }
+      }
+      return true;
+    };
+
+    const handleTapRelease = (duration: number): boolean => {
+      if (movedRef.current || duration >= 300) return false;
+      const now = performance.now();
+      const gap = now - lastTapTimeRef.current;
+      clearTapTimer();
+      if (gap < DOUBLE_TAP_MS) {
+        lastTapTimeRef.current = 0;
+        cbRef.current.onDoubleTap();
+      } else {
+        lastTapTimeRef.current = now;
+        tapTimerRef.current = window.setTimeout(() => {
+          tapTimerRef.current = null;
+          if (lastTapTimeRef.current !== now) return;
+          lastTapTimeRef.current = 0;
+          cbRef.current.onTap();
+        }, DOUBLE_TAP_MS);
+      }
+      modeRef.current = "idle";
+      resetPosition();
+      return true;
+    };
+
+    const settleHorizontalSwipe = (dx: number) => {
+      const threshold = getWidth() * SWIPE_DX_RATIO;
+      const projectedX = dx + projectMomentum(vxRef.current);
+      let handledByCallback = false;
+      if (Math.abs(projectedX) > threshold) {
+        if (projectedX < 0 && !optRef.current.isLast) {
+          handledByCallback = cbRef.current.onSwipeLeft() === true;
+        } else if (projectedX > 0 && !optRef.current.isFirst) {
+          handledByCallback = cbRef.current.onSwipeRight() === true;
+        } else if (projectedX < 0) {
+          cbRef.current.onBoundarySwipe?.("last");
         } else {
-          modeRef.current = "reveal";
+          cbRef.current.onBoundarySwipe?.("first");
         }
       }
+      if (!handledByCallback) resetPosition();
+    };
 
-      if (modeRef.current === "swipe-h") {
-        // 首末张橡皮筋
-        let outDx = dx;
-        if (
-          (optRef.current.isFirst && dx > 0) ||
-          (optRef.current.isLast && dx < 0)
-        ) {
-          outDx = rubberBandDistance(dx, getWidth());
-        }
-        scheduleMotion({ dragX: outDx });
-        if (e.cancelable) e.preventDefault();
-      } else if (isVerticalMode(modeRef.current)) {
-        const outDy =
-          dy < 0 ? rubberBandDistance(dy, getHeight()) : dy;
-        const fade = clamp(1 - Math.max(0, dy) / 400, 0, 1);
-        scheduleMotion({ dragY: outDy, haloOpacity: fade });
-        if (e.cancelable) e.preventDefault();
+    const settleVerticalSwipe = (dy: number) => {
+      const projectedY = dy + projectMomentum(vyRef.current);
+      if (projectedY > DISMISS_DY) {
+        cbRef.current.onDismiss();
+        return;
       }
+      if (projectedY < REVEAL_DY) {
+        if (optRef.current.revealOpen) {
+          cbRef.current.onRevealClose();
+        } else {
+          cbRef.current.onRevealOpen();
+        }
+      }
+      resetPosition();
+    };
+
+    const settlePan = () => {
+      const bounds = panBounds();
+      optRef.current.dragX.set(
+        clamp(optRef.current.dragX.get(), -bounds.x, bounds.x),
+      );
+      optRef.current.dragY.set(
+        clamp(optRef.current.dragY.get(), -bounds.y, bounds.y),
+      );
+    };
+
+    const settlePointerRelease = (dx: number, dy: number) => {
+      if (modeRef.current === "swipe-h") {
+        settleHorizontalSwipe(dx);
+        return;
+      }
+      if (isVerticalMode(modeRef.current)) {
+        settleVerticalSwipe(dy);
+        return;
+      }
+      if (modeRef.current === "pan") settlePan();
     };
 
     const onPointerUp = (e: PointerEvent) => {
@@ -378,102 +493,18 @@ export function useLightboxGestures(
       if (!hadPointer) return;
       clearLongPress();
       flushPendingMotion();
-
-      // 从 pinch 回落到单指：继续剩余手指为 pan
-      if (modeRef.current === "pinch") {
-        if (pointersRef.current.size === 1) {
-          const [[, pt]] = pointersRef.current.entries();
-          startXRef.current = pt.x;
-          startYRef.current = pt.y;
-          modeRef.current = optRef.current.scale.get() > 1.01 ? "pan" : "idle";
-          panStartXRef.current = optRef.current.dragX.get();
-          panStartYRef.current = optRef.current.dragY.get();
-        } else if (pointersRef.current.size === 0) {
-          modeRef.current = "idle";
-          // pinch 结束后接近 1x 时回正，释放平移引用。
-          if (optRef.current.scale.get() <= 1.01) {
-            optRef.current.scale.set(1);
-            resetPosition();
-          }
-        }
-        return;
-      }
+      if (continuePinchAfterRelease()) return;
 
       const dx = e.clientX - startXRef.current;
       const dy = e.clientY - startYRef.current;
-      const dur = performance.now() - startTimeRef.current;
-
+      const duration = performance.now() - startTimeRef.current;
       try {
         el.releasePointerCapture(e.pointerId);
       } catch {
         /* noop */
       }
-
-      // 单击 / 双击判断
-      if (!movedRef.current && dur < 300) {
-        const now = performance.now();
-        const gap = now - lastTapTimeRef.current;
-        if (gap < DOUBLE_TAP_MS) {
-          clearTapTimer();
-          lastTapTimeRef.current = 0;
-          cbRef.current.onDoubleTap();
-        } else {
-          clearTapTimer();
-          lastTapTimeRef.current = now;
-          // 推迟单击判定：若 280ms 内未再次 tap，执行 onTap
-          tapTimerRef.current = window.setTimeout(() => {
-            tapTimerRef.current = null;
-            if (lastTapTimeRef.current === now) {
-              lastTapTimeRef.current = 0;
-              cbRef.current.onTap();
-            }
-          }, DOUBLE_TAP_MS);
-        }
-        modeRef.current = "idle";
-        resetPosition();
-        return;
-      }
-
-      if (modeRef.current === "swipe-h") {
-        const threshold = getWidth() * SWIPE_DX_RATIO;
-        const projectedX = dx + projectMomentum(vxRef.current);
-        let handledByCallback = false;
-        if (Math.abs(projectedX) > threshold) {
-          if (projectedX < 0 && !optRef.current.isLast) {
-            handledByCallback = cbRef.current.onSwipeLeft() === true;
-          } else if (projectedX > 0 && !optRef.current.isFirst) {
-            handledByCallback = cbRef.current.onSwipeRight() === true;
-          } else if (projectedX < 0 && optRef.current.isLast) {
-            cbRef.current.onBoundarySwipe?.("last");
-          } else if (projectedX > 0 && optRef.current.isFirst) {
-            cbRef.current.onBoundarySwipe?.("first");
-          }
-        }
-        if (!handledByCallback) resetPosition();
-      } else if (isVerticalMode(modeRef.current)) {
-        const projectedY = dy + projectMomentum(vyRef.current);
-        if (projectedY > DISMISS_DY) {
-          cbRef.current.onDismiss();
-        } else {
-          if (projectedY < REVEAL_DY) {
-            if (optRef.current.revealOpen) {
-              cbRef.current.onRevealClose();
-            } else {
-              cbRef.current.onRevealOpen();
-            }
-          }
-          resetPosition();
-        }
-      } else if (modeRef.current === "pan") {
-        const bounds = panBounds();
-        optRef.current.dragX.set(
-          clamp(optRef.current.dragX.get(), -bounds.x, bounds.x),
-        );
-        optRef.current.dragY.set(
-          clamp(optRef.current.dragY.get(), -bounds.y, bounds.y),
-        );
-      }
-
+      if (handleTapRelease(duration)) return;
+      settlePointerRelease(dx, dy);
       modeRef.current = pointersRef.current.size > 0 ? modeRef.current : "idle";
     };
 

@@ -1,83 +1,16 @@
 "use client";
 
-// 单条任务条：缩略图（succeeded 时真实 img，运行时骨架）+ 进度环 + 状态文字 + 动作。
-// 不持有自己的副作用；取消/重试走父级传入回调。
+// 单条任务条只负责视图组合；状态派生集中在 taskItemModel。
 
-import { memo } from "react";
 import { Check, Loader2, RotateCw, X } from "lucide-react";
-import type { Generation, GenerationStage } from "@/lib/types";
-import { recommendedActionsForError } from "@/lib/errors";
+import { memo } from "react";
+
+import type { Generation, RecommendedErrorAction } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-const STAGE_LABEL: Record<GenerationStage, string> = {
-  queued: "排队中",
-  understanding: "理解中",
-  rendering: "渲染中",
-  finalizing: "收尾",
-};
-
-// 阶段 → 进度占比（视觉用，避免 0% 空环看起来坏掉）
-const STAGE_RATIO: Record<GenerationStage, number> = {
-  queued: 0.12,
-  understanding: 0.35,
-  rendering: 0.7,
-  finalizing: 0.92,
-};
-
-const SUBSTAGE_LABEL: Record<string, string> = {
-  waiting_queue: "排队中",
-  waiting_provider: "等待可用通道",
-  preparing_refs: "准备参考图",
-  upstream_started: "模型生成中",
-  upstream_retrying: "上游重试中",
-  postprocessing: "图片后处理中",
-  processing: "图片后处理中",
-  storing: "保存图片中",
-  display_ready: "图片已完成",
-  retryable: "失败，可重试",
-  terminal: "失败",
-  cancelled: "已取消",
-  provider_selected: "通道已就绪",
-  stream_started: "模型生成中",
-  partial_received: "生成预览中",
-  final_received: "生成完成，处理中",
-};
-
-function truncate(s: string, n: number) {
-  if (!s) return "";
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
-
-function taskProgressRatio(gen: Generation): number {
-  if (
-    gen.status === "succeeded" ||
-    gen.status === "failed" ||
-    gen.status === "canceled"
-  ) {
-    return 1;
-  }
-  return STAGE_RATIO[gen.stage] ?? 0.2;
-}
-
-function taskStatusText(gen: Generation): string {
-  if (gen.status === "failed") {
-    return (
-      gen.diagnostics?.safe_error_summary ?? gen.error_message ?? "生成失败"
-    );
-  }
-  if (gen.status === "canceled") return "已取消";
-  if (gen.status === "succeeded") return "已完成";
-  const substage = gen.substage ? SUBSTAGE_LABEL[gen.substage] : undefined;
-  if (gen.status === "queued") {
-    const queuePosition =
-      gen.queue_position != null && gen.queue_position > 0
-        ? ` · 第 ${gen.queue_position} 位`
-        : "";
-    return `${substage ?? "排队中"}${queuePosition}`;
-  }
-  const stage = substage ?? STAGE_LABEL[gen.stage];
-  return gen.attempt > 1 ? `${stage} (第${gen.attempt}次)` : stage;
-}
+import {
+  deriveTaskItemPresentation,
+  type TaskItemPresentation,
+} from "./taskItemModel";
 
 export interface TaskItemProps {
   gen: Generation;
@@ -92,173 +25,252 @@ export const TaskItem = memo(function TaskItem({
   onRetry,
   onView,
 }: TaskItemProps) {
-  const running = gen.status === "queued" || gen.status === "running";
-  const queued = gen.status === "queued";
-  const failed = gen.status === "failed";
-  const succeeded = gen.status === "succeeded";
-  const canceled = gen.status === "canceled";
+  const presentation = deriveTaskItemPresentation(gen);
 
-  const ratio = taskProgressRatio(gen);
+  return (
+    <TaskItemView
+      gen={gen}
+      presentation={presentation}
+      onCancel={onCancel}
+      onRetry={onRetry}
+      onView={onView}
+    />
+  );
+});
 
-  const statusText = taskStatusText(gen);
-  const actions = gen.recommended_actions?.length
-    ? gen.recommended_actions
-    : recommendedActionsForError(gen.error_code, {
-        retryable: gen.retryable,
-        status: gen.status,
-      });
-  const showRecoveryActions = (failed || canceled) && actions.length > 0;
-
+function TaskItemView({
+  gen,
+  presentation,
+  onCancel,
+  onRetry,
+  onView,
+}: TaskItemProps & { presentation: TaskItemPresentation }) {
   return (
     <div
       role="status"
       aria-live="polite"
       className={cn(
-        "relative flex gap-2.5 sm:gap-3 items-center rounded-[var(--radius-card)] border p-2 transition-all",
+        "relative flex items-center gap-2.5 rounded-[var(--radius-card)] border p-2 transition-all sm:gap-3",
         "active:scale-[0.98] active:bg-white/5",
-        failed
-          ? "bg-danger-soft border-danger-border pb-8"
-          : "bg-white/[0.03] border-[var(--border)]",
-        showRecoveryActions && !failed && "pb-8",
+        presentation.failed
+          ? "border-danger-border bg-danger-soft pb-8"
+          : "border-[var(--border)] bg-white/[0.03]",
+        presentation.showRecoveryActions &&
+          !presentation.failed &&
+          "pb-8",
       )}
     >
-      {/* 缩略图 / 骨架：窄屏缩小到 40，桌面保持 44 */}
-      <button
-        type="button"
-        onClick={() => onView?.(gen)}
-        disabled={!onView || !succeeded}
-        aria-label={succeeded ? "查看结果" : "缩略图"}
-        className={cn(
-          "relative h-11 w-11 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-          "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
-          succeeded && onView
-            ? "cursor-pointer hover:opacity-90 active:scale-[0.92]"
-            : "cursor-default",
-        )}
-      >
-        {succeeded && gen.image ? (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img
-            src={
-              gen.image.thumb_url ?? gen.image.preview_url ?? gen.image.data_url
-            }
-            alt=""
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div
-            className={cn(
-              "w-full h-full flex items-center justify-center",
-              running && "bg-white/5 animate-pulse",
-            )}
-          >
-            {failed && (
-              <span className="text-danger text-lg leading-none">!</span>
-            )}
-          </div>
-        )}
-        {/* 角标：进度环 */}
-        {running && (
-          <span className="absolute bottom-0.5 right-0.5 w-4 h-4 rounded-full bg-black/80 flex items-center justify-center">
-            <ProgressRing ratio={ratio} size={12} stroke={2} />
-          </span>
-        )}
-        {succeeded && (
-          <span className="absolute bottom-0.5 right-0.5 w-4 h-4 rounded-full bg-[var(--ok)] flex items-center justify-center">
-            <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />
-          </span>
-        )}
-      </button>
+      <TaskThumbnail
+        gen={gen}
+        presentation={presentation}
+        onView={onView}
+      />
+      <TaskSummary presentation={presentation} />
+      <TaskControls
+        gen={gen}
+        presentation={presentation}
+        onCancel={onCancel}
+        onRetry={onRetry}
+      />
+      <TaskRecoveryBar
+        gen={gen}
+        presentation={presentation}
+        onRetry={onRetry}
+      />
+    </div>
+  );
+}
 
-      <div className="flex-1 min-w-0">
-        <p className="text-[13px] font-medium text-[var(--fg-0)] truncate leading-tight">
-          {truncate(gen.prompt || "图像生成", 40)}
-        </p>
-        <p
-          aria-live="polite"
+function TaskThumbnail({
+  gen,
+  presentation,
+  onView,
+}: {
+  gen: Generation;
+  presentation: TaskItemPresentation;
+  onView?: (gen: Generation) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onView?.(gen)}
+      disabled={!onView || !presentation.succeeded}
+      aria-label={presentation.succeeded ? "查看结果" : "缩略图"}
+      className={cn(
+        "relative h-11 w-11 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)]",
+        "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+        presentation.succeeded && onView
+          ? "cursor-pointer hover:opacity-90 active:scale-[0.92]"
+          : "cursor-default",
+      )}
+    >
+      {presentation.succeeded && gen.image ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={
+            gen.image.thumb_url ?? gen.image.preview_url ?? gen.image.data_url
+          }
+          alt=""
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <div
           className={cn(
-            // 窄屏允许换行，避免进度/状态/百分比被 truncate 挤断
-            "text-[11px] mt-0.5 break-words sm:truncate",
-            failed ? "text-danger" : "text-[var(--fg-2)]",
+            "flex h-full w-full items-center justify-center",
+            presentation.running && "animate-pulse bg-white/5",
           )}
         >
-          {running && (
-            <span className="inline-flex flex-wrap items-center gap-x-1 gap-y-0.5">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" />
-              <span>{statusText}</span>
-              {!queued && (
-                <span className="tabular-nums text-[var(--fg-3)]">
-                  {Math.round(ratio * 100)}%
-                </span>
-              )}
-            </span>
+          {presentation.failed && (
+            <span className="text-lg leading-none text-danger">!</span>
           )}
-          {!running && statusText}
-        </p>
-      </div>
-
-      {/* 动作 */}
-      <div className="flex items-center gap-0.5 shrink-0">
-        {running && onCancel && (
-          <IconBtn
-            onClick={() => onCancel(gen)}
-            aria-label="取消任务"
-            title="取消"
-          >
-            <X className="w-3.5 h-3.5" />
-          </IconBtn>
-        )}
-        {(failed || canceled) && onRetry && !showRecoveryActions && (
-          <IconBtn
-            onClick={() => onRetry(gen)}
-            aria-label="重试任务"
-            title="重试"
-            className="text-[var(--accent)] hover:bg-[var(--accent)]/15"
-          >
-            <RotateCw className="w-3.5 h-3.5" />
-          </IconBtn>
-        )}
-      </div>
-      {showRecoveryActions && (
-        <div className="absolute bottom-1.5 left-[3.75rem] right-2 flex flex-wrap gap-1">
-          {actions.slice(0, 2).map((action) => {
-            if (action.kind === "retry" && onRetry) {
-              return (
-                <button
-                  key={action.id}
-                  type="button"
-                  onClick={() => onRetry(gen)}
-                  className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
-                >
-                  {action.label}
-                </button>
-              );
-            }
-            if (action.kind === "link" && action.href) {
-              return (
-                <a
-                  key={action.id}
-                  href={action.href}
-                  className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
-                >
-                  {action.label}
-                </a>
-              );
-            }
-            return (
-              <span
-                key={action.id}
-                className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]"
-              >
-                {action.label}
-              </span>
-            );
-          })}
         </div>
+      )}
+      {presentation.running && (
+        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/80">
+          <ProgressRing ratio={presentation.ratio} size={12} stroke={2} />
+        </span>
+      )}
+      {presentation.succeeded && (
+        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--ok)]">
+          <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />
+        </span>
+      )}
+    </button>
+  );
+}
+
+function TaskSummary({
+  presentation,
+}: {
+  presentation: TaskItemPresentation;
+}) {
+  return (
+    <div className="min-w-0 flex-1">
+      <p className="truncate text-[13px] font-medium leading-tight text-[var(--fg-0)]">
+        {presentation.title}
+      </p>
+      <p
+        aria-live="polite"
+        className={cn(
+          "mt-0.5 break-words text-[11px] sm:truncate",
+          presentation.failed ? "text-danger" : "text-[var(--fg-2)]",
+        )}
+      >
+        {presentation.running && (
+          <span className="inline-flex flex-wrap items-center gap-x-1 gap-y-0.5">
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            <span>{presentation.statusText}</span>
+            {!presentation.queued && (
+              <span className="tabular-nums text-[var(--fg-3)]">
+                {Math.round(presentation.ratio * 100)}%
+              </span>
+            )}
+          </span>
+        )}
+        {!presentation.running && presentation.statusText}
+      </p>
+    </div>
+  );
+}
+
+function TaskControls({
+  gen,
+  presentation,
+  onCancel,
+  onRetry,
+}: {
+  gen: Generation;
+  presentation: TaskItemPresentation;
+  onCancel?: (gen: Generation) => void;
+  onRetry?: (gen: Generation) => void;
+}) {
+  const recoverable = presentation.failed || presentation.canceled;
+
+  return (
+    <div className="flex shrink-0 items-center gap-0.5">
+      {presentation.running && onCancel && (
+        <IconBtn
+          onClick={() => onCancel(gen)}
+          aria-label="取消任务"
+          title="取消"
+        >
+          <X className="h-3.5 w-3.5" />
+        </IconBtn>
+      )}
+      {recoverable && onRetry && !presentation.showRecoveryActions && (
+        <IconBtn
+          onClick={() => onRetry(gen)}
+          aria-label="重试任务"
+          title="重试"
+          className="text-[var(--accent)] hover:bg-[var(--accent)]/15"
+        >
+          <RotateCw className="h-3.5 w-3.5" />
+        </IconBtn>
       )}
     </div>
   );
-});
+}
+
+function TaskRecoveryBar({
+  gen,
+  presentation,
+  onRetry,
+}: {
+  gen: Generation;
+  presentation: TaskItemPresentation;
+  onRetry?: (gen: Generation) => void;
+}) {
+  if (!presentation.showRecoveryActions) return null;
+
+  return (
+    <div className="absolute bottom-1.5 left-[3.75rem] right-2 flex flex-wrap gap-1">
+      {presentation.actions
+        .slice(0, 2)
+        .map((action) => (
+          <TaskRecoveryAction
+            key={action.id}
+            action={action}
+            onRetry={onRetry ? () => onRetry(gen) : undefined}
+          />
+        ))}
+    </div>
+  );
+}
+
+function TaskRecoveryAction({
+  action,
+  onRetry,
+}: {
+  action: RecommendedErrorAction;
+  onRetry?: () => void;
+}) {
+  if (action.kind === "retry" && onRetry) {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+      >
+        {action.label}
+      </button>
+    );
+  }
+  if (action.kind === "link" && action.href) {
+    return (
+      <a
+        href={action.href}
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+      >
+        {action.label}
+      </a>
+    );
+  }
+  return (
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]">
+      {action.label}
+    </span>
+  );
+}
 
 function IconBtn({
   children,
@@ -270,7 +282,6 @@ function IconBtn({
       type="button"
       {...rest}
       className={cn(
-        // 移动端 44px 命中区；桌面端保持紧凑 28px
         "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-white/10 hover:text-[var(--fg-0)] active:scale-[0.95] sm:h-7 sm:w-7",
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         className,
@@ -281,7 +292,6 @@ function IconBtn({
   );
 }
 
-// 进度环（小号）
 function ProgressRing({
   ratio,
   size = 20,
@@ -293,10 +303,11 @@ function ProgressRing({
   stroke?: number;
   className?: string;
 }) {
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(1, ratio));
-  const offset = c * (1 - clamped);
+  const offset = circumference * (1 - clamped);
+
   return (
     <svg
       className={cn("block", className)}
@@ -308,7 +319,7 @@ function ProgressRing({
       <circle
         cx={size / 2}
         cy={size / 2}
-        r={r}
+        r={radius}
         stroke="currentColor"
         strokeWidth={stroke}
         fill="none"
@@ -317,12 +328,12 @@ function ProgressRing({
       <circle
         cx={size / 2}
         cy={size / 2}
-        r={r}
+        r={radius}
         stroke="currentColor"
         strokeWidth={stroke}
         strokeLinecap="round"
         fill="none"
-        strokeDasharray={c}
+        strokeDasharray={circumference}
         strokeDashoffset={offset}
         style={{
           transform: "rotate(-90deg)",

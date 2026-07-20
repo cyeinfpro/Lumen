@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchVideoOptions } from "@/app/video/video-request-lifecycle";
+import { fetchVideoOptions } from "@/lib/video/requestLifecycle";
 import { createCanvas } from "@/lib/api/canvases";
 import {
   canvasVideoCapabilityError,
