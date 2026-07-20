@@ -16,11 +16,11 @@ import {
   type PatchSystemPromptIn,
   type SystemPrompt,
   type SystemPromptListResponse,
-} from "../apiClient";
+} from "../api/systemPrompts";
 import {
   useUserQueryScope,
   userScopedQueryKey,
-} from "@/components/QueryProvider";
+} from "@/lib/queries/userScope";
 import { qk } from "./queryKeys";
 
 function systemPromptsQueryKey(userId: string | null | undefined) {

@@ -8,7 +8,7 @@
 
 import { create } from "zustand";
 
-import type { Stroke } from "@/components/ui/inpaint/types";
+import type { Stroke } from "@/lib/inpaint/types";
 
 export interface InpaintSource {
   /** 后端 image_id（必须，sendMessage 走 attachment_image_ids 传给后端） */

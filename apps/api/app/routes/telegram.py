@@ -60,9 +60,12 @@ from ..deps import (
 )
 from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
+from ..services.provider_config import (
+    parse_provider_config as _parse_config,
+    read_providers as _read_providers,
+)
 from .messages import submit_user_message
 from .prompts import _resolve_provider_order, _stream_enhance
-from .providers import _parse_config, _read_providers
 from lumen_core.providers import (
     parse_provider_bool,
     parse_proxy_item,

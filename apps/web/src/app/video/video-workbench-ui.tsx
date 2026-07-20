@@ -29,14 +29,9 @@ import { videoBinaryUrl } from "@/lib/apiClient";
 import { formatRmb } from "@/lib/money";
 import type { VideoAction, VideoReferenceMediaIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import type { ReferenceDraft } from "@/lib/video/types";
 
-export type ReferenceDraft = VideoReferenceMediaIn & {
-  _key: string;
-  label: string;
-  ref_id: string;
-  display: string;
-  previewUrl?: string | null;
-};
+export type { ReferenceDraft } from "@/lib/video/types";
 
 export type PromptEnhanceAction =
   | "direct_pass"

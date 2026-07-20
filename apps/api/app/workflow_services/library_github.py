@@ -10,7 +10,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
-from ..routes._apparel_library import MODEL_LIBRARY_MAX_BINARY_BYTES
+from ..workflow_domain.apparel_library import MODEL_LIBRARY_MAX_BINARY_BYTES
 from .library_runtime import runtime as _runtime
 
 

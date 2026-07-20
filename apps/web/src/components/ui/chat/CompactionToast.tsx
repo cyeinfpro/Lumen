@@ -62,6 +62,144 @@ function ToneIcon({ event, reducedMotion }: { event: CompactionEvent; reducedMot
   return <AlertTriangle className={cls} aria-hidden="true" />;
 }
 
+type CompactionTone = "success" | "warning" | "info";
+
+function compactionTone(event: CompactionEvent | null): CompactionTone {
+  if (!event || event.phase !== "completed") return "info";
+  return event.ok ? "success" : "warning";
+}
+
+function dismissDelay(event: CompactionEvent): number | null {
+  if (event.phase !== "completed") return null;
+  return event.ok ? 5000 : 4000;
+}
+
+function progressScale(event: CompactionEvent): number {
+  const current = event.progress?.currentSegment ?? 0;
+  const total = event.progress?.totalSegments ?? 0;
+  return total > 0 ? Math.min(1, Math.max(0, current / total)) : 0;
+}
+
+function ProgressBar({ event }: { event: CompactionEvent }) {
+  if (event.phase !== "progress" || !event.progress?.totalSegments) {
+    return null;
+  }
+  return (
+    <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
+      <div
+        className="h-full w-full origin-left rounded-full bg-[var(--info)] transition-transform duration-200 ease-[var(--ease-develop)]"
+        style={{ transform: `scaleX(${progressScale(event)})` }}
+      />
+    </div>
+  );
+}
+
+function StatsLine({ event }: { event: CompactionEvent }) {
+  if (event.phase !== "completed" || !event.ok || !event.stats) return null;
+  return (
+    <p className="mt-1.5 text-[11px] leading-none text-[var(--fg-2)]">
+      释放{" "}
+      <RollingTokenCounter
+        value={event.stats.tokensFreed}
+        className="text-[var(--fg-1)]"
+        format={(v) => formatTokens(v)}
+      />{" "}
+      tokens
+    </p>
+  );
+}
+
+function ToastBody({
+  event,
+  eventKey,
+  reducedMotion,
+  tone,
+  className,
+  onRetry,
+  onDismiss,
+}: {
+  event: CompactionEvent;
+  eventKey: string | null;
+  reducedMotion: boolean;
+  tone: CompactionTone;
+  className?: string;
+  onRetry?: () => void;
+  onDismiss: (key: string | null) => void;
+}) {
+  const failed = event.phase === "completed" && !event.ok;
+  return (
+    <motion.div
+      key={event.conversationId}
+      role="status"
+      aria-live="polite"
+      initial={{
+        opacity: 0,
+        y: reducedMotion ? 0 : -8,
+        scale: reducedMotion ? 1 : 0.98,
+      }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{
+        opacity: 0,
+        y: reducedMotion ? 0 : -6,
+        scale: reducedMotion ? 1 : 0.98,
+      }}
+      transition={reducedMotionTransition(reducedMotion, lumenMotion.toastEnterMs)}
+      className={cn(
+        "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-panel)] border px-3 py-2.5",
+        "bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-lumen-pop backdrop-blur-xl",
+        "max-sm:fixed max-sm:left-4 max-sm:right-4 max-sm:top-[max(1rem,env(safe-area-inset-top))] max-sm:w-auto",
+        tone === "success" && "border-[var(--success)]/30",
+        tone === "warning" && "border-[var(--warning)]/35",
+        tone === "info" && "border-[var(--info)]/30",
+        className,
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={cn(
+            "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
+            tone === "success" &&
+              "bg-[var(--success-soft)] text-[var(--success)]",
+            tone === "warning" &&
+              "bg-[var(--warning-soft)] text-[var(--warning)]",
+            tone === "info" && "bg-[var(--info-soft)] text-[var(--info)]",
+          )}
+        >
+          <ToneIcon event={event} reducedMotion={reducedMotion} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] font-medium leading-tight">
+            {titleFor(event)}
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--fg-1)]">
+            {descriptionFor(event)}
+          </p>
+
+          <ProgressBar event={event} />
+          <StatsLine event={event} />
+
+          {failed && onRetry ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                onDismiss(eventKey);
+                onRetry();
+              }}
+              leftIcon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+              className="mt-2 h-7 px-2 text-[11px]"
+            >
+              {copy.action.retry}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export function CompactionToast({
   event,
   conversationId,
@@ -83,103 +221,29 @@ export function CompactionToast({
   const visible = Boolean(
     event && event.conversationId === conversationId && eventKey !== dismissedKey,
   );
-  const failed = Boolean(event?.phase === "completed" && !event.ok);
-  const tone = event?.phase === "completed" ? (event.ok ? "success" : "warning") : "info";
+  const tone = compactionTone(event);
 
   useEffect(() => {
-    if (!event || !eventKey || event.phase !== "completed") return;
+    if (!event || !eventKey) return;
+    const delay = dismissDelay(event);
+    if (delay === null) return;
     // BUG-030: 成功提示延长至 5 秒，避免用户阅读时自动消失。
-    const timer = setTimeout(() => setDismissedKey(eventKey), event.ok ? 5000 : 4000);
+    const timer = setTimeout(() => setDismissedKey(eventKey), delay);
     return () => clearTimeout(timer);
   }, [event, eventKey]);
 
   return (
     <AnimatePresence initial={false}>
       {visible && event ? (
-        <motion.div
-          key={event.conversationId}
-          role="status"
-          aria-live="polite"
-          initial={{ opacity: 0, y: reducedMotion ? 0 : -8, scale: reducedMotion ? 1 : 0.98 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: reducedMotion ? 0 : -6, scale: reducedMotion ? 1 : 0.98 }}
-          transition={reducedMotionTransition(reducedMotion, lumenMotion.toastEnterMs)}
-          className={cn(
-            "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-panel)] border px-3 py-2.5",
-            "bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-lumen-pop backdrop-blur-xl",
-            "max-sm:fixed max-sm:left-4 max-sm:right-4 max-sm:top-[max(1rem,env(safe-area-inset-top))] max-sm:w-auto",
-            tone === "success" && "border-[var(--success)]/30",
-            tone === "warning" && "border-[var(--warning)]/35",
-            tone === "info" && "border-[var(--info)]/30",
-            className,
-          )}
-        >
-          <div className="flex items-start gap-3">
-            <div
-              className={cn(
-                "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
-                tone === "success" && "bg-[var(--success-soft)] text-[var(--success)]",
-                tone === "warning" && "bg-[var(--warning-soft)] text-[var(--warning)]",
-                tone === "info" && "bg-[var(--info-soft)] text-[var(--info)]",
-              )}
-            >
-              <ToneIcon event={event} reducedMotion={reducedMotion} />
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-[13px] font-medium leading-tight">{titleFor(event)}</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--fg-1)]">
-                {descriptionFor(event)}
-              </p>
-
-              {event.phase === "progress" && event.progress?.totalSegments ? (
-                <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className="h-full w-full origin-left rounded-full bg-[var(--info)] transition-transform duration-200 ease-[var(--ease-develop)]"
-                    style={{
-                      transform: `scaleX(${Math.min(
-                        1,
-                        Math.max(
-                          0,
-                          event.progress.currentSegment /
-                            event.progress.totalSegments,
-                        ),
-                      )})`,
-                    }}
-                  />
-                </div>
-              ) : null}
-
-              {event.phase === "completed" && event.ok && event.stats ? (
-                <p className="mt-1.5 text-[11px] leading-none text-[var(--fg-2)]">
-                  释放{" "}
-                  <RollingTokenCounter
-                    value={event.stats.tokensFreed}
-                    className="text-[var(--fg-1)]"
-                    format={(v) => formatTokens(v)}
-                  />{" "}
-                  tokens
-                </p>
-              ) : null}
-
-              {failed && onRetry ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    if (eventKey) setDismissedKey(eventKey);
-                    onRetry();
-                  }}
-                  leftIcon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
-                  className="mt-2 h-7 px-2 text-[11px]"
-                >
-                  {copy.action.retry}
-                </Button>
-              ) : null}
-            </div>
-          </div>
-        </motion.div>
+        <ToastBody
+          event={event}
+          eventKey={eventKey}
+          reducedMotion={reducedMotion}
+          tone={tone}
+          className={className}
+          onRetry={onRetry}
+          onDismiss={setDismissedKey}
+        />
       ) : null}
     </AnimatePresence>
   );

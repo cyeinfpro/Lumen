@@ -842,6 +842,10 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
       new URL("../../lib/api/videoAssets.ts", import.meta.url),
       "utf8",
     ),
+    readFileSync(
+      new URL("../../lib/api/images.ts", import.meta.url),
+      "utf8",
+    ),
   ].join("\n");
   const typesSource = [
     readFileSync(new URL("../../lib/types.ts", import.meta.url), "utf8"),

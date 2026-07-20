@@ -16,6 +16,12 @@ const queriesSource = readFileSync(
   new URL("./queries.ts", import.meta.url),
   "utf8",
 );
+const queryDomainSources = [
+  readFileSync(new URL("./queries/admin.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("./queries/conversations.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("./queries/projects.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("./queries/poster.ts", import.meta.url), "utf8"),
+];
 const queryKeysSource = readFileSync(
   new URL("./queries/queryKeys.ts", import.meta.url),
   "utf8",
@@ -34,10 +40,21 @@ const systemPromptManagerSource = readFileSync(
 );
 
 function hookSource(source: string, name: string): string {
-  const start = source.indexOf(`export function ${name}`);
+  let selectedSource = source;
+  let start = selectedSource.indexOf(`export function ${name}`);
+  if (start < 0 && source === queriesSource) {
+    selectedSource =
+      queryDomainSources.find((candidate) =>
+        candidate.includes(`export function ${name}`),
+      ) ?? source;
+    start = selectedSource.indexOf(`export function ${name}`);
+  }
   ok(start >= 0, `missing ${name}`);
-  const next = source.indexOf("\nexport function ", start + 1);
-  return source.slice(start, next < 0 ? source.length : next);
+  const next = selectedSource.indexOf("\nexport function ", start + 1);
+  return selectedSource.slice(
+    start,
+    next < 0 ? selectedSource.length : next,
+  );
 }
 
 function loadStandaloneFunction<T>(
@@ -45,6 +62,19 @@ function loadStandaloneFunction<T>(
   source = queriesSource,
   filename = "queries.ts",
 ): T {
+  if (
+    source === queriesSource &&
+    !source.includes(`function ${name}(`) &&
+    !source.includes(`function ${name} <`)
+  ) {
+    const domainSource = queryDomainSources.find((candidate) =>
+      candidate.includes(`function ${name}(`),
+    );
+    if (domainSource) {
+      source = domainSource;
+      filename = `${name}.ts`;
+    }
+  }
   const sourceFile = ts.createSourceFile(
     filename,
     source,

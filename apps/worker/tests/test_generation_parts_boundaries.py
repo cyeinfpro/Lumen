@@ -9,13 +9,18 @@ import pytest
 
 from app.tasks import generation
 from app.tasks.generation_parts import (
+    failure,
     lease,
     lifecycle,
     persistence,
+    progress,
     queue,
     queue_claim,
     request_options,
     retry_state,
+    runner,
+    runtime,
+    success,
 )
 
 
@@ -49,6 +54,11 @@ def test_generation_parts_do_not_reverse_import_generation_module() -> None:
         queue_claim,
         request_options,
         retry_state,
+        runner,
+        runtime,
+        progress,
+        success,
+        failure,
     ):
         source = inspect.getsource(module)
         assert "from . import generation" not in source
@@ -59,11 +69,11 @@ def test_generation_module_size_budgets() -> None:
     generation_path = Path(generation.__file__)
     parts_dir = generation_path.with_name("generation_parts")
 
-    assert len(generation_path.read_text().splitlines()) < 2950
+    assert len(generation_path.read_text().splitlines()) <= 1500
     oversized_parts = {
         path.name: len(path.read_text().splitlines())
         for path in parts_dir.glob("*.py")
-        if len(path.read_text().splitlines()) >= 800
+        if len(path.read_text().splitlines()) > 1500
     }
     assert oversized_parts == {}
 
@@ -301,21 +311,25 @@ async def test_persistence_cleanup_uses_facade_delete_hook(
 
 
 def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
-    source = inspect.getsource(persistence.handle_dual_race_bonus_image)
-
-    settle = source.index("_g.worker_billing.settle_generation")
-    attached_stage = source.index(
-        "attached_delivery = _g._stage_generation_event", settle
+    persistence_source = inspect.getsource(persistence._persist_bonus_generation)
+    settle = persistence_source.index("_g.worker_billing.settle_generation")
+    stage = persistence_source.index("_stage_bonus_events(", settle)
+    commit = persistence_source.index("await session.commit()", stage)
+    flush = persistence_source.index(
+        "flush_balance_cache_refreshes",
+        commit,
     )
-    attached = source.index("_g.EV_GEN_ATTACHED", attached_stage)
-    succeeded_stage = source.index(
-        "success_delivery = _g._stage_generation_event",
-        attached,
-    )
-    succeeded = source.index("_g.EV_GEN_SUCCEEDED", succeeded_stage)
-    commit = source.index("await session.commit()", succeeded)
-    flush = source.index("flush_balance_cache_refreshes", commit)
-    deliver = source.index("await _g._deliver_generation_events", flush)
+    assert settle < stage < commit < flush
 
-    assert settle < attached_stage < attached < succeeded_stage < succeeded
-    assert succeeded < commit < flush < deliver
+    stage_source = inspect.getsource(persistence._stage_bonus_events)
+    attached = stage_source.index("_g.EV_GEN_ATTACHED")
+    succeeded = stage_source.index("_g.EV_GEN_SUCCEEDED", attached)
+    assert attached < succeeded
+
+    facade_source = inspect.getsource(persistence.handle_dual_race_bonus_image)
+    persist = facade_source.index("_persist_bonus_generation(")
+    deliver = facade_source.index(
+        "await _g._deliver_generation_events",
+        persist,
+    )
+    assert persist < deliver

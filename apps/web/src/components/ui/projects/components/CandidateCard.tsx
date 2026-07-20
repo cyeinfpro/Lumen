@@ -27,6 +27,125 @@ interface CandidateCardProps {
   savingToLibrary?: boolean;
 }
 
+function CandidateGallery({
+  images,
+  candidate,
+  generating,
+  onPreview,
+  onChoose,
+}: {
+  images: BackendImageMeta[];
+  candidate: ModelCandidate;
+  generating: boolean;
+  onPreview: CandidateCardProps["onPreview"];
+  onChoose?: () => void;
+}) {
+  if (images.length === 0) {
+    return (
+      <div className="col-span-full flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+        {generating ? (
+          <>
+            <Spinner size={20} />
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+              生成中
+            </span>
+          </>
+        ) : (
+          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            暂无图片
+          </span>
+        )}
+      </div>
+    );
+  }
+  return images.map((candidateImage, index) => (
+    <button
+      type="button"
+      key={candidateImage.id}
+      onClick={() =>
+        images.length > 1
+          ? onPreview(candidateImage, images, index)
+          : onChoose?.()
+      }
+      className="relative h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
+    >
+      <Image
+        src={imageSrc(candidateImage)}
+        alt={`模特候选 ${candidate.candidate_index}-${index + 1}`}
+        fill
+        sizes="(max-width: 768px) 50vw, 220px"
+        unoptimized
+        className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
+      />
+    </button>
+  ));
+}
+
+function candidateActionLabel(
+  selected: boolean,
+  generating: boolean,
+  locallySelected: boolean,
+): string {
+  if (selected) return "已确认";
+  if (generating) return "生成中";
+  return locallySelected ? "已选中" : "设为当前";
+}
+
+function CandidateActions({
+  hasImage,
+  selected,
+  generating,
+  locallySelected,
+  approving,
+  onChoose,
+  onApprove,
+  onSaveToLibrary,
+  savingToLibrary,
+}: {
+  hasImage: boolean;
+  selected: boolean;
+  generating: boolean;
+  locallySelected: boolean;
+  approving: boolean;
+  onChoose?: () => void;
+  onApprove: () => void;
+  onSaveToLibrary?: () => void;
+  savingToLibrary: boolean;
+}) {
+  const chosen = selected || locallySelected;
+
+  return (
+    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <Button
+        variant={chosen ? "secondary" : "primary"}
+        fullWidth
+        disabled={!hasImage || selected || generating}
+        loading={approving && !selected}
+        onClick={onChoose ?? onApprove}
+        leftIcon={
+          chosen ? (
+            <Check className="h-4 w-4" />
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )
+        }
+      >
+        {candidateActionLabel(selected, generating, locallySelected)}
+      </Button>
+      <Button
+        variant="outline"
+        fullWidth
+        disabled={!hasImage || generating}
+        loading={savingToLibrary}
+        onClick={onSaveToLibrary}
+        leftIcon={<BookmarkPlus className="h-4 w-4" />}
+      >
+        收藏到库
+      </Button>
+    </div>
+  );
+}
+
 export function CandidateCard({
   workflow,
   candidate,
@@ -57,44 +176,13 @@ export function CandidateCard({
             selected && "ring-1 ring-inset ring-[var(--border-amber)]",
           )}
         >
-          {images.length > 0 ? (
-            images.map((candidateImage, index) => (
-              <button
-                type="button"
-                key={candidateImage.id}
-                onClick={() =>
-                  images.length > 1
-                    ? onPreview(candidateImage, images, index)
-                    : onChoose?.()
-                }
-                className="relative h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
-              >
-                <Image
-                  src={imageSrc(candidateImage)}
-                  alt={`模特候选 ${candidate.candidate_index}-${index + 1}`}
-                  fill
-                  sizes="(max-width: 768px) 50vw, 220px"
-                  unoptimized
-                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
-                />
-              </button>
-            ))
-          ) : (
-            <div className="col-span-full flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
-              {generating ? (
-                <>
-                  <Spinner size={20} />
-                  <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                    生成中
-                  </span>
-                </>
-              ) : (
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                  暂无图片
-                </span>
-              )}
-            </div>
-          )}
+          <CandidateGallery
+            images={images}
+            candidate={candidate}
+            generating={generating}
+            onPreview={onPreview}
+            onChoose={onChoose}
+          />
         </div>
 
         <span
@@ -131,34 +219,17 @@ export function CandidateCard({
         未试穿商品，仅用于确认模特形象。
       </p>
 
-      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Button
-          variant={selected || locallySelected ? "secondary" : "primary"}
-          fullWidth
-          disabled={!firstImage || selected || generating}
-          loading={approving && !selected}
-          onClick={onChoose ?? onApprove}
-          leftIcon={
-            selected || locallySelected ? (
-              <Check className="h-4 w-4" />
-            ) : (
-              <Sparkles className="h-4 w-4" />
-            )
-          }
-        >
-          {selected ? "已确认" : generating ? "生成中" : locallySelected ? "已选中" : "设为当前"}
-        </Button>
-        <Button
-          variant="outline"
-          fullWidth
-          disabled={!firstImage || generating}
-          loading={savingToLibrary}
-          onClick={onSaveToLibrary}
-          leftIcon={<BookmarkPlus className="h-4 w-4" />}
-        >
-          收藏到库
-        </Button>
-      </div>
+      <CandidateActions
+        hasImage={Boolean(firstImage)}
+        selected={selected}
+        generating={generating}
+        locallySelected={locallySelected}
+        approving={approving}
+        onChoose={onChoose}
+        onApprove={onApprove}
+        onSaveToLibrary={onSaveToLibrary}
+        savingToLibrary={savingToLibrary}
+      />
     </motion.article>
   );
 }

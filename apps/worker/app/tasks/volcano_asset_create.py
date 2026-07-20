@@ -8,21 +8,71 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .volcano_asset_runtime import (
+    VolcanoAssetRuntimeContext,
+    VolcanoAssetRuntimeSlot,
+    VolcanoAssetRuntimeView,
+)
+
 logger = logging.getLogger(__name__)
 
 _AIGC_GROUP_TYPE = "AIGC"
 _INTENT_LOCK_PREFIX = "video-assets:create-intent:"
 _INTENT_LOCK_RETRY_SECONDS = 5
+_RUNTIME = VolcanoAssetRuntimeSlot(
+    owner=__name__,
+    dependencies=frozenset(
+        {
+            "VOLCANO_ASSET_MAX_ASSETS",
+            "VOLCANO_ASSET_OPERATION_TTL_SECONDS",
+            "VolcanoAssetClient",
+            "VolcanoAssetCreateRateLimited",
+            "VolcanoAssetMediaError",
+            "VolcanoAssetQuotaExceeded",
+            "VolcanoAssetRedisUnavailable",
+            "VolcanoAssetServiceError",
+            "_LeaseLostError",
+            "_OperationFailure",
+            "_RELEASE_OPERATION_LOCK_SCRIPT",
+            "_RENEW_OPERATION_LOCK_SCRIPT",
+            "_SuccessPersistenceError",
+            "_ambiguous_create_asset_failure",
+            "_complete_operation",
+            "_confirm_operation_lock",
+            "_defer_for_rate_limit",
+            "_media_failure",
+            "_provider_for_operation",
+            "_reconcile_ambiguous_submit",
+            "_record_operation_failure",
+            "_release_quota_best_effort",
+            "_require_group_scope",
+            "_retry_redis_call",
+            "_service_failure",
+            "_snapshot_group_asset_ids",
+            "_source_url_for_submit",
+            "_utc_iso",
+            "acquire_volcano_create_rate_limit",
+            "normalize_asset",
+            "normalize_asset_list",
+            "normalize_volcano_asset_name",
+            "reserve_volcano_asset_quota",
+            "video_provider_binding_fingerprint",
+            "volcano_asset_quota_key",
+        }
+    ),
+)
 
 
 class _IntentLockBusyError(RuntimeError):
     retry_after_seconds = _INTENT_LOCK_RETRY_SECONDS
 
 
-def _runtime() -> Any:
-    from . import volcano_assets
+def install_runtime(context: VolcanoAssetRuntimeContext) -> None:
+    _RUNTIME.install(context)
 
-    return volcano_assets
+
+def _runtime() -> VolcanoAssetRuntimeView:
+    return _RUNTIME.get()
 
 
 @dataclass
@@ -532,4 +582,4 @@ async def _process_create_asset(
         await _release_intent_lock(state)
 
 
-__all__ = ["_process_create_asset"]
+__all__ = ["_process_create_asset", "install_runtime"]

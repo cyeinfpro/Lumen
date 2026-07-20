@@ -37,20 +37,46 @@ const videoWorkbenchUiSource = readFileSync(
   new URL("./video-workbench-ui.tsx", import.meta.url),
   "utf8",
 );
+const videoPageDomainSource = readFileSync(
+  new URL("./video-page-domain.ts", import.meta.url),
+  "utf8",
+);
+const videoPageViewSource = readFileSync(
+  new URL("./video-page-view.tsx", import.meta.url),
+  "utf8",
+);
+const generationFeedSource = readFileSync(
+  new URL("./use-video-generation-feed.ts", import.meta.url),
+  "utf8",
+);
+const requestLifecycleSource = readFileSync(
+  new URL("./video-request-lifecycle.ts", import.meta.url),
+  "utf8",
+);
+const requestLifecycleCoreSource = readFileSync(
+  new URL("../../lib/video/requestLifecycle.ts", import.meta.url),
+  "utf8",
+);
+const volcanoAssetManagerSource = readFileSync(
+  new URL("./volcano-asset-manager.tsx", import.meta.url),
+  "utf8",
+);
 const optionsModelSource = readFileSync(
-  new URL("./video-options-model.ts", import.meta.url),
+  new URL("../../lib/video/optionsModel.ts", import.meta.url),
   "utf8",
 );
 const source = [
   pageSource,
+  videoPageDomainSource,
+  videoPageViewSource,
+  generationFeedSource,
   referenceDomainSource,
   optionsModelSource,
   readFileSync(new URL("./video-page-utils.ts", import.meta.url), "utf8"),
   videoWorkbenchUiSource,
-  readFileSync(
-    new URL("./video-request-lifecycle.ts", import.meta.url),
-    "utf8",
-  ),
+  requestLifecycleSource,
+  requestLifecycleCoreSource,
+  volcanoAssetManagerSource,
   taskModelSource,
   taskUiSource,
   settlingControllerSource,
@@ -157,11 +183,11 @@ function taskFixture(
 }
 
 test("video task domain stays extracted from the route page", () => {
-  ok(pageSource.split("\n").length < 3000);
+  ok(pageSource.split("\n").length <= 1500);
   doesNotMatch(pageSource, /function VideoTaskDrawer\(/);
   doesNotMatch(pageSource, /function VideoPreviewDialog\(/);
   match(pageSource, /from "\.\/video-task-model"/);
-  match(pageSource, /from "\.\/video-task-ui"/);
+  match(videoPageViewSource, /from "\.\/video-task-ui"/);
   match(taskUiSource, /export function VideoTaskDrawer\(/);
   match(taskUiSource, /export function VideoPreviewDialog\(/);
   match(taskModelSource, /export function isActiveVideo\(/);
@@ -178,10 +204,13 @@ test("video option and pricing domain stays extracted from the route page", () =
 
 test("video mobile surfaces preserve safe-area, scroll, and touch contracts", () => {
   match(
-    pageSource,
+    videoPageViewSource,
     /scroll-padding-bottom:calc\(var\(--mobile-tabbar-height\)\+6rem\)/,
   );
-  match(pageSource, /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/);
+  match(
+    videoPageViewSource,
+    /pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\]/,
+  );
   match(taskUiSource, /mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto/);
   match(taskUiSource, /min-h-11 rounded-\[var\(--radius-control\)\]/);
   match(taskUiSource, /\[&_button\]:min-h-11/);
@@ -605,9 +634,9 @@ test("video task model preserves status, elapsed, and error semantics", () => {
 test("video materialization settling is bounded and wired into active polling", () => {
   match(taskModelSource, /VIDEO_SETTLING_TIMEOUT_MS = 60_000/);
   match(taskModelSource, /phase: VideoSettlingPhase/);
-  match(pageSource, /useVideoSettlingController\(/);
-  match(pageSource, /syncVideoSettling\(next\)/);
-  match(pageSource, /isVideoSettlingActive\(item\)/);
+  match(generationFeedSource, /useVideoSettlingController\(/);
+  match(generationFeedSource, /syncVideoSettling\(next\)/);
+  match(generationFeedSource, /isVideoSettlingActive\(item\)/);
   match(
     settlingControllerSource,
     /isActiveVideo\(item, checkpointsRef\.current\.get\(item\.id\), nowMs\)/,
@@ -615,9 +644,9 @@ test("video materialization settling is bounded and wired into active polling", 
   match(settlingControllerSource, /phase === "expired"/);
   match(settlingControllerSource, /canSchedule/);
   match(settlingControllerSource, /return useMemo\(/);
-  match(pageSource, /startVideoActivePolling\(/);
-  doesNotMatch(pageSource, /\[effectiveItems, videoSettling\]/);
-  doesNotMatch(pageSource, /\[refreshGenerationSafe, videoSettling\]/);
+  match(generationFeedSource, /startVideoActivePolling\(/);
+  doesNotMatch(generationFeedSource, /\[effectiveItems, videoSettling\]/);
+  doesNotMatch(generationFeedSource, /\[refreshGenerationSafe, videoSettling\]/);
 });
 
 test("active video polling keeps the 800ms start and 2.5s cadence", (t) => {
@@ -674,7 +703,8 @@ test("video workspace keeps history reachable through a responsive task drawer",
     source,
     /mobile-dialog-panel ml-auto flex h-full w-full max-w-\[460px\]/,
   );
-  match(source, /onOpenTasks=\{\(\) => setIsTaskPanelOpen\(true\)\}/);
+  match(pageSource, /onOpenTasks: \(\) => setIsTaskPanelOpen\(true\)/);
+  match(videoPageViewSource, /onOpenTasks=\{model\.header\.onOpenTasks\}/);
 });
 
 test("video task drawer owns its scroll surface instead of shrinking the canvas", () => {
@@ -687,8 +717,8 @@ test("video task drawer owns its scroll surface instead of shrinking the canvas"
     source,
     /mobile-dialog-scroll min-h-0 flex-1 space-y-5 overflow-y-auto/,
   );
-  match(source, /activeItems=\{activeItems\}/);
-  match(source, /historyItems=\{filteredHistoryItems\}/);
+  match(videoPageViewSource, /activeItems=\{model\.tasks\.activeItems\}/);
+  match(videoPageViewSource, /historyItems=\{model\.tasks\.historyItems\}/);
 });
 
 test("video prompt and parameter panel use one discoverable workspace scroll", () => {
@@ -701,7 +731,11 @@ test("video prompt and parameter panel use one discoverable workspace scroll", (
     /className="scroll-mt-20 pb-\[calc\(var\(--mobile-tabbar-height\)\+1rem\)\] min-\[1120px\]:sticky min-\[1120px\]:top-\[76px\] min-\[1120px\]:pb-0"/,
   );
   match(source, /id="video-generation-settings"/);
-  match(source, /onOpenParameters=\{scrollParametersIntoView\}/);
+  match(pageSource, /onOpenParameters: scrollParametersIntoView/);
+  match(
+    videoPageViewSource,
+    /onOpenParameters=\{model\.header\.onOpenParameters\}/,
+  );
   match(source, />\s*视频生成参数\s*</);
 });
 
@@ -723,7 +757,11 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /function PromptEnhanceCandidateCard\(/);
   match(source, /function PromptEnhanceCandidatePreview\(/);
   match(source, /function PromptEnhanceLoadingState\(/);
-  match(source, /onReturnToEditor=\{scrollPromptEditorIntoView\}/);
+  match(pageSource, /onReturnToEditor: scrollPromptEditorIntoView/);
+  match(
+    videoPageViewSource,
+    /onReturnToEditor=\{model\.onReturnToEditor\}/,
+  );
   match(source, /function motionSafeScrollBehavior\(\): ScrollBehavior/);
   match(
     source,
@@ -795,9 +833,16 @@ test("video reference chips render material thumbnails", () => {
   match(source, /h-24 w-32/);
   match(source, /<img\s+src=\{previewUrl \?\? ""\}/);
   match(source, /function ReferenceMediaPreviewDialog\(/);
-  match(source, /onPreview=\{\(\) => setReferencePreviewItem\(item\)\}/);
+  match(pageSource, /onPreview: setReferencePreviewItem/);
+  match(
+    videoPageViewSource,
+    /onPreview=\{\(\) => model\.onPreview\(item\)\}/,
+  );
   match(source, /查看 \$\{displayToken\} 预览/);
-  match(source, /promptContainsReferenceMention\(\s*prompt,\s*item,\s*\)/);
+  match(
+    videoPageViewSource,
+    /promptContainsReferenceMention\(model\.prompt, item\)/,
+  );
 });
 
 test("reference preview dialog renders type-correct accessible media", () => {
@@ -832,12 +877,14 @@ test("official asset references keep the selected media kind", () => {
     /REFERENCE_KINDS\.filter\(\(kind\) => referenceLimits\[kind\] > 0\)/,
   );
   match(source, /aria-pressed=\{active\}/);
-  match(source, /onClick=\{\(\) => setAssetReferenceKind\(kind\)\}/);
+  match(pageSource, /onKindChange: setAssetReferenceKind/);
   match(
-    source,
-    /const selectedAssetReferenceKind = assetReferenceKindOptions\.includes\(/,
+    videoPageViewSource,
+    /onClick=\{\(\) => model\.onKindChange\(kind\)\}/,
   );
-  match(source, /assetReferenceKindOptions\[0\] \?\? "image"/);
+  match(pageSource, /const selectedAssetReferenceKind = selectedReferenceKind\(/);
+  match(videoPageDomainSource, /if \(options\.includes\(requested\)\) return requested/);
+  match(videoPageDomainSource, /return options\[0\] \?\? "image"/);
   match(source, /const kind = selectedAssetReferenceKind/);
   match(source, /const identity = nextReferenceIdentity\(kind, references\)/);
   match(source, /kind,/);
@@ -848,25 +895,33 @@ test("official asset references keep the selected media kind", () => {
 });
 
 test("volcano virtual asset manager is integrated with reference drafts", () => {
-  match(pageSource, /from "\.\/volcano-asset-manager"/);
-  match(pageSource, />\s*火山虚拟素材库\s*</);
+  match(videoPageViewSource, /from "\.\/volcano-asset-manager"/);
+  match(source, />\s*火山虚拟素材库\s*</);
   match(pageSource, /existingVolcanoAssetIds/);
   match(pageSource, /remainingVolcanoAssetLimits/);
   match(pageSource, /assetIdFromReferenceUrl\(item\.url\)/);
   match(pageSource, /appendVolcanoAssetReferences\(/);
-  match(pageSource, /onUse=\{useVolcanoAssets\}/);
-  match(pageSource, /onDeleted=\{removeDeletedVolcanoAssets\}/);
+  match(pageSource, /onUse: useVolcanoAssets/);
+  match(pageSource, /onDeleted: removeDeletedVolcanoAssets/);
+  match(
+    videoPageViewSource,
+    /onUse=\{model\.assetManager\.onUse\}/,
+  );
   match(pageSource, /removeReferencesAndReindexPrompt\(/);
   match(pageSource, /removeReferenceAndReindexPrompt\(/);
-  match(pageSource, /onRemove=\{\(\) => removeReferenceDraft\(item\)\}/);
+  match(pageSource, /onRemove: removeReferenceDraft/);
+  match(
+    videoPageViewSource,
+    /onRemove=\{\(\) => model\.onRemove\(item\)\}/,
+  );
 });
 
 test("reference submit rejects audio-only media before calling the API", () => {
   match(
-    pageSource,
+    videoPageDomainSource,
     /referenceCounts\.image \+ referenceCounts\.video === 0/,
   );
-  match(pageSource, /不能仅使用音频/);
+  match(videoPageDomainSource, /不能仅使用音频/);
 });
 
 test("video asset upload proxy budget exceeds the accepted file limit", () => {
@@ -902,7 +957,7 @@ test("video duration selector follows selected model action and resolution", () 
   match(source, /setResolution\(nextResolution\)/);
   match(
     source,
-    /setDurationS\(\(prev\) =>\s*durationOrPreferred\(prev, nextDurations\),\s*\)/,
+    /setDurationS\(\((\w+)\) =>\s*durationOrPreferred\(\1, nextDurations\),\s*\)/,
   );
 });
 
@@ -929,20 +984,24 @@ test("video queries and polling cancel stale requests by task epoch", () => {
 
 test("terminal video refresh failures preserve force sync and retry", () => {
   match(
-    pageSource,
+    generationFeedSource,
     /const scheduleGenerationRefreshRef = useRef<ScheduleGenerationRefresh>/,
   );
   match(
-    pageSource,
+    generationFeedSource,
     /recordGenerationRefreshFailure\([\s\S]*?if \(forceHistorySync\) \{\s*pendingHistoryRefreshRef\.current\.add\(id\);\s*\}[\s\S]*?scheduleGenerationRefreshRef\.current\(id, \{ forceHistorySync \}\)/,
   );
   match(
-    pageSource,
+    generationFeedSource,
     /scheduleGenerationRefreshRef\.current = scheduleGenerationRefresh/,
   );
   match(
-    pageSource,
-    /await qc\.invalidateQueries\(\{ queryKey: \["video", "generations"\] \}\);\s*if \(terminal\) terminalHistorySyncedRef\.current\.add\(id\)/,
+    generationFeedSource,
+    /await invalidateHistory\(\);\s*if \(terminal\) terminalHistorySyncedRef\.current\.add\(id\)/,
+  );
+  match(
+    generationFeedSource,
+    /qc\.invalidateQueries\(\{ queryKey: \["video", "generations"\] \}\)/,
   );
 });
 
@@ -961,13 +1020,19 @@ test("video retry fences the original request while accepting a new task id", ()
     /isVideoRequestFenceCurrent\(\s*retryRequestFenceRef\.current,\s*request/,
   );
   doesNotMatch(retrySource, /if \(gen\.id !== request\.taskId\) return/);
-  match(retrySource, /setItems\(\(prev\) => mergeById\(prev, \[gen\]\)\)/);
   match(
     retrySource,
-    /scheduleGenerationRefresh\(gen\.id, \{ delayMs: 800 \}\)/,
+    /setItems\(\((\w+)\) => mergeById\(\1, \[generation\]\)\)/,
+  );
+  match(
+    retrySource,
+    /scheduleGenerationRefresh\(generation\.id, \{ delayMs: 800 \}\)/,
   );
   match(retrySource, /已创建新的重试任务/);
-  match(retrySource, /正在跟踪新任务 \$\{gen\.id\.slice\(0, 8\)\}/);
+  match(
+    retrySource,
+    /正在跟踪新任务 \$\{generation\.id\.slice\(0, 8\)\}/,
+  );
   match(
     retrySource,
     /nextVideoRequestFence\(\s*retryRequestFenceRef\.current,\s*generationId/,
@@ -997,7 +1062,7 @@ test("video uploads are fenced to the current draft and upload epoch", () => {
   match(source, /cancelReferenceUpload\(\)/);
   match(
     source,
-    /if \(isAbortError\(err\) \|\| !isCurrentReferenceUpload\(request\)\) return/,
+    /if \(isAbortError\(error\) \|\| !isCurrentReferenceUpload\(request\)\) return/,
   );
 });
 
@@ -1026,7 +1091,7 @@ test("video prompt enhancement cannot write into a later draft", () => {
   );
   match(
     source,
-    /promptEnhanceAbortRef\.current === ctl &&\s*promptEnhanceEpochRef\.current === requestEpoch/,
+    /promptEnhanceAbortRef\.current === controller &&\s*promptEnhanceEpochRef\.current === requestEpoch/,
   );
 });
 
@@ -1044,8 +1109,13 @@ test("video upload state blocks submit and Enter shortcuts", () => {
   match(source, /if \(uploadPending\) return "等待素材上传完成"/);
   match(source, /const canSubmit = submitDisabledReason === "可以提交"/);
   match(source, /!event\.nativeEvent\.isComposing/);
-  match(source, /!referenceUploadMut\.isPending/);
-  match(source, /onSubmit=\{submitVideo\}/);
+  match(pageSource, /pending: referenceUploadMut\.isPending/);
+  match(videoPageViewSource, /!model\.pending/);
+  match(pageSource, /onSubmit: submitVideo/);
+  match(
+    videoPageViewSource,
+    /onSubmit=\{model\.parameters\.onSubmit\}/,
+  );
 });
 
 test("video task rows and preview show elapsed runtime", () => {

@@ -6,7 +6,7 @@ from typing import Any
 
 from lumen_core.models import ModelCandidate
 
-from ..routes._showcase_shot_pool import ShotVariant
+from ..workflow_domain.showcase_shot_pool import ShotVariant
 from .showcase_runtime import runtime as _runtime
 
 
@@ -141,6 +141,71 @@ def _showcase_garment_lock_prefix(
     return f"{text}{compact_deferred_note}"
 
 
+def _composed_showcase_prompt(
+    runtime: Any,
+    *,
+    lock_prefix: str,
+    composed_prompt: str,
+    scene_direction: str,
+    scene_card: dict[str, Any] | None,
+    shot_type: str,
+    visible_preserve: str,
+    deferred_preserve: str,
+) -> str:
+    prefix = (
+        f"{lock_prefix}\n\n【本张拍摄方案】\n" if lock_prefix else "【本张拍摄方案】\n"
+    )
+    if len(prefix) > runtime.MAX_PROMPT_CHARS - 600:
+        prefix = runtime._truncate_prompt_text(
+            prefix,
+            runtime.MAX_PROMPT_CHARS - 600,
+        )
+    body = composed_prompt.strip()
+    if not scene_direction:
+        return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
+
+    seed_parts: list[str] = []
+    if isinstance(scene_card, dict):
+        camera = runtime._dict_or_empty(scene_card.get("camera"))
+        camera_seed = "，".join(
+            runtime._showcase_scene_label(item)
+            for item in (
+                camera.get("distance"),
+                camera.get("angle"),
+                camera.get("lens_feel"),
+            )
+            if str(item or "").strip()
+        )
+        seed_parts = [
+            str(scene_card.get("location") or "").strip(),
+            str(scene_card.get("micro_event") or "").strip(),
+            camera_seed,
+        ]
+    seed_line = "；".join(part for part in seed_parts if part)
+    scene_rules = [
+        "【本张拍摄方案必须执行】",
+        "最终画面只采用上方短摄影方案的场景、动作、神态、构图、光线和镜头；"
+        "不得混入其它地点、动作、旧模板文案或普通棚拍站姿。",
+        (
+            "商品主体清楚，不遮挡。"
+            if lock_prefix
+            else "本张商品重点："
+            f"{runtime._compact_lock_text(visible_preserve) or visible_preserve}。"
+        ),
+    ]
+    if shot_type != "side_or_back":
+        scene_rules.append(
+            "本张视角：正面或三分之二正面优先，脸和商品主体清楚；"
+            "不要背影、背向或以后背作为主视角。"
+        )
+    if seed_line:
+        scene_rules.append(f"本张场景种子：{seed_line}。")
+    if deferred_preserve:
+        scene_rules.append("其它角度细节交给其它图，不要为它们破坏当前镜头。")
+    body = f"{body}\n\n" + "".join(scene_rules)
+    return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
+
+
 def _showcase_prompt(
     *,
     product_analysis: dict[str, Any],
@@ -235,58 +300,16 @@ def _showcase_prompt(
     )
     scene_direction = runtime._showcase_scene_card_direction(scene_card)
     if composed_prompt and composed_prompt.strip():
-        prefix = (
-            f"{lock_prefix}\n\n【本张拍摄方案】\n"
-            if lock_prefix
-            else "【本张拍摄方案】\n"
+        return _composed_showcase_prompt(
+            runtime,
+            lock_prefix=lock_prefix,
+            composed_prompt=composed_prompt,
+            scene_direction=scene_direction,
+            scene_card=scene_card,
+            shot_type=shot_type,
+            visible_preserve=visible_preserve,
+            deferred_preserve=deferred_preserve,
         )
-        if len(prefix) > runtime.MAX_PROMPT_CHARS - 600:
-            prefix = runtime._truncate_prompt_text(
-                prefix,
-                runtime.MAX_PROMPT_CHARS - 600,
-            )
-        body = composed_prompt.strip()
-        if scene_direction:
-            seed_parts: list[str] = []
-            if isinstance(scene_card, dict):
-                camera = runtime._dict_or_empty(scene_card.get("camera"))
-                camera_seed = "，".join(
-                    runtime._showcase_scene_label(item)
-                    for item in (
-                        camera.get("distance"),
-                        camera.get("angle"),
-                        camera.get("lens_feel"),
-                    )
-                    if str(item or "").strip()
-                )
-                seed_parts = [
-                    str(scene_card.get("location") or "").strip(),
-                    str(scene_card.get("micro_event") or "").strip(),
-                    camera_seed,
-                ]
-            seed_line = "；".join(part for part in seed_parts if part)
-            scene_rules = [
-                "【本张拍摄方案必须执行】",
-                "最终画面只采用上方短摄影方案的场景、动作、神态、构图、光线和镜头；"
-                "不得混入其它地点、动作、旧模板文案或普通棚拍站姿。",
-                (
-                    "商品主体清楚，不遮挡。"
-                    if lock_prefix
-                    else "本张商品重点："
-                    f"{runtime._compact_lock_text(visible_preserve) or visible_preserve}。"
-                ),
-            ]
-            if shot_type != "side_or_back":
-                scene_rules.append(
-                    "本张视角：正面或三分之二正面优先，脸和商品主体清楚；"
-                    "不要背影、背向或以后背作为主视角。"
-                )
-            if seed_line:
-                scene_rules.append(f"本张场景种子：{seed_line}。")
-            if deferred_preserve:
-                scene_rules.append("其它角度细节交给其它图，不要为它们破坏当前镜头。")
-            body = f"{body}\n\n" + "".join(scene_rules)
-        return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
     template_direction = runtime._template_requirement(
         template, product_analysis, scene_environment
     )

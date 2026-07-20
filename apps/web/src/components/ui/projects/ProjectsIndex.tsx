@@ -435,6 +435,53 @@ function projectStatusDotTone(status: WorkflowRunListItem["status"]) {
   return "bg-[var(--fg-3)]";
 }
 
+function ProjectCardMedia({
+  item,
+  order,
+  thumb,
+  running,
+}: {
+  item: WorkflowRunListItem;
+  order: number;
+  thumb: string;
+  running: boolean;
+}) {
+  return (
+    <div className="relative aspect-[3/4] overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)]">
+      {thumb ? (
+        <Image
+          src={thumb}
+          alt={item.title || "商品图"}
+          fill
+          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 25vw"
+          unoptimized
+          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
+        />
+      ) : (
+        <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
+          暂无图片
+        </div>
+      )}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
+      />
+      <span className="absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+        N°{String(order + 1).padStart(2, "0")}
+      </span>
+      {running ? (
+        <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)] backdrop-blur">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
+          </span>
+          Running
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 // Portrait 杂志卡：大图 + 下方元数据 + hover micro scale
 function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number }) {
   const running = item.status === "running";
@@ -534,38 +581,12 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         className="block focus-visible:outline-none"
         aria-label={item.title || "服饰模特图"}
       >
-        <div className="relative aspect-[3/4] overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)]">
-          {thumb ? (
-            <Image
-              src={thumb}
-              alt={item.title || "商品图"}
-              fill
-              sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 25vw"
-              unoptimized
-              className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
-              暂无图片
-            </div>
-          )}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
-          />
-          <span className="absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
-            N°{String(order + 1).padStart(2, "0")}
-          </span>
-          {running ? (
-            <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)] backdrop-blur">
-              <span className="relative flex h-1.5 w-1.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
-                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
-              </span>
-              Running
-            </span>
-          ) : null}
-        </div>
+        <ProjectCardMedia
+          item={item}
+          order={order}
+          thumb={thumb}
+          running={running}
+        />
 
         <div className="mt-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">

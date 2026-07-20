@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from lumen_core.providers import ProviderProxyDefinition
 
+from .image_execution import ImageExecutionRequest, ImageResult
 from .transport import ImageProgressCallback
 
 _UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
@@ -130,6 +132,372 @@ async def _image_job_run_once(
     return await facade._image_job_generate_once(**common)
 
 
+@dataclass(frozen=True)
+class _ImageJobProviderPlan:
+    endpoints: tuple[str, ...]
+    base_url: str
+    error: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class _ImageJobAttemptFailure:
+    error: BaseException
+    error_class: str | None
+    decision_reason: str
+    failover_reason: str
+    retriable: bool
+    duration_ms: float
+
+
+@dataclass(frozen=True)
+class _ImageJobProviderOutcome:
+    result: ImageResult | None = None
+    error: BaseException | None = None
+
+
+def _requested_image_job_kind(
+    endpoint_override: str | None,
+    endpoint_preference: str | None,
+) -> str | None:
+    if endpoint_override in ("generations", "responses"):
+        return endpoint_override
+    if endpoint_preference in ("generations", "responses"):
+        return endpoint_preference
+    return None
+
+
+def _provider_image_job_plan(
+    provider: Any,
+    *,
+    action: str,
+    pool: Any,
+    fallback_base_url: str,
+    endpoint_override: str | None,
+    endpoint_preference: str | None,
+) -> _ImageJobProviderPlan:
+    facade = _facade()
+    configured = getattr(provider, "image_jobs_endpoint", "auto")
+    try:
+        endpoint_locked = facade.parse_provider_bool(
+            getattr(provider, "image_jobs_endpoint_lock", False),
+            default=False,
+        )
+    except ValueError:
+        endpoint_locked = False
+    endpoint_locked = endpoint_locked and configured in ("generations", "responses")
+    requested_kind = _requested_image_job_kind(
+        endpoint_override,
+        endpoint_preference,
+    )
+    if requested_kind is not None:
+        unavailable = facade._provider_endpoint_unavailable_error(
+            provider,
+            requested_kind,
+        )
+        if unavailable is not None:
+            facade.logger.info(
+                "image_jobs skip provider=%s configured=%s requested_kind=%s reason=%s",
+                getattr(provider, "name", "unknown"),
+                configured,
+                requested_kind,
+                unavailable.payload.get("reason"),
+            )
+            return _ImageJobProviderPlan((), "", unavailable)
+    if endpoint_override is not None:
+        endpoints = [endpoint_override]
+    elif endpoint_locked:
+        endpoints = [configured]
+    elif endpoint_preference is not None:
+        endpoints = facade._image_jobs_endpoint_fallback_chain(endpoint_preference)
+    else:
+        endpoints = pool.endpoint_chain(provider.name, action, configured)
+    allowed = tuple(
+        endpoint
+        for endpoint in endpoints
+        if facade._provider_allows_image_endpoint(provider, endpoint)
+    )
+    if not allowed:
+        error = facade.UpstreamError(
+            f"provider {provider.name} has no supported image-job endpoint",
+            error_code=facade.EC.NO_PROVIDERS.value,
+            status_code=503,
+            payload={
+                "provider": provider.name,
+                "reason": "capability_unsupported",
+            },
+        )
+        return _ImageJobProviderPlan((), "", error)
+    base_url = getattr(provider, "image_jobs_base_url", "") or fallback_base_url
+    return _ImageJobProviderPlan(allowed, base_url)
+
+
+def _classify_image_job_attempt(
+    exc: BaseException,
+    *,
+    duration_ms: float,
+) -> _ImageJobAttemptFailure:
+    facade = _facade()
+    from ..retry import is_retriable as classify_retriable
+
+    decision = classify_retriable(
+        getattr(exc, "error_code", None),
+        getattr(exc, "status_code", None),
+        error_message=str(exc),
+    )
+    error_class = facade._image_job_error_class(exc)
+    return _ImageJobAttemptFailure(
+        error=exc,
+        error_class=error_class,
+        decision_reason=decision.reason,
+        failover_reason=error_class or decision.reason,
+        retriable=decision.retriable,
+        duration_ms=duration_ms,
+    )
+
+
+async def _emit_image_job_success(
+    request: ImageExecutionRequest,
+    *,
+    provider: Any,
+    provider_index: int,
+    endpoint: str,
+    endpoint_index: int,
+    latency_ms: float,
+    pool: Any,
+    inflight_endpoint_kind: str | None,
+    source_label: str,
+) -> None:
+    facade = _facade()
+    if not facade._is_byok_provider(provider):
+        pool.record_endpoint_success(
+            provider.name,
+            endpoint,
+            latency_ms=latency_ms,
+        )
+        facade._pool_report_image_success(
+            pool,
+            provider.name,
+            endpoint_kind=inflight_endpoint_kind,
+            record_endpoint=False,
+        )
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "provider_used",
+        provider=provider.name,
+        route="image_jobs",
+        source=source_label,
+        endpoint=f"image-jobs:{endpoint}",
+        **facade._provider_attempt_context(
+            provider,
+            attempt=provider_index + 1,
+            endpoint_attempt=endpoint_index + 1,
+            duration_ms=latency_ms,
+            status="succeeded",
+        ),
+    )
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "final_image",
+        source=source_label,
+        endpoint_used=endpoint,
+    )
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "completed",
+        source=source_label,
+        endpoint_used=endpoint,
+    )
+
+
+async def _run_image_job_endpoint(
+    request: ImageExecutionRequest,
+    *,
+    provider: Any,
+    provider_index: int,
+    endpoint: str,
+    endpoint_index: int,
+    plan: _ImageJobProviderPlan,
+    pool: Any,
+    inflight_endpoint_kind: str | None,
+    source_label: str,
+) -> ImageResult | _ImageJobAttemptFailure:
+    facade = _facade()
+    started = time.monotonic()
+    try:
+        result = await facade._image_job_run_once(
+            **request.job_run_kwargs(),
+            endpoint=endpoint,
+            api_key=provider.api_key,
+            base_url=plan.base_url,
+            proxy=facade._provider_proxy(provider),
+            image_edit_input_transport=provider.image_edit_input_transport,
+            before_attempt=facade._image_request_attempt_claim(
+                pool,
+                provider,
+                route=f"image_jobs:{endpoint}",
+            ),
+        )
+    except (asyncio.CancelledError, facade.UpstreamCancelled):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if not facade._is_byok_provider(provider):
+            pool.record_endpoint_failure(provider.name, endpoint)
+        failure = _classify_image_job_attempt(
+            exc,
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
+        facade.logger.warning(
+            "image job %s/%s endpoint=%s error_class=%s decision=%s: %r",
+            request.action,
+            provider.name,
+            endpoint,
+            failure.error_class,
+            failure.decision_reason,
+            exc,
+        )
+        return failure
+    latency_ms = (time.monotonic() - started) * 1000.0
+    await _emit_image_job_success(
+        request,
+        provider=provider,
+        provider_index=provider_index,
+        endpoint=endpoint,
+        endpoint_index=endpoint_index,
+        latency_ms=latency_ms,
+        pool=pool,
+        inflight_endpoint_kind=inflight_endpoint_kind,
+        source_label=source_label,
+    )
+    return result
+
+
+async def _emit_image_job_endpoint_failover(
+    request: ImageExecutionRequest,
+    failure: _ImageJobAttemptFailure,
+    *,
+    provider: Any,
+    provider_index: int,
+    endpoint: str,
+    endpoint_index: int,
+    remaining: int,
+) -> None:
+    facade = _facade()
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "endpoint_failover",
+        provider=provider.name,
+        from_endpoint=endpoint,
+        remaining=remaining,
+        reason=failure.failover_reason,
+        route="image_jobs",
+        **facade._provider_attempt_context(
+            provider,
+            attempt=provider_index + 1,
+            endpoint_attempt=endpoint_index + 1,
+            duration_ms=failure.duration_ms,
+            status="failed",
+            reason=failure.failover_reason,
+            exc=failure.error,
+        ),
+    )
+
+
+async def _run_image_job_provider(
+    request: ImageExecutionRequest,
+    *,
+    provider: Any,
+    provider_index: int,
+    plan: _ImageJobProviderPlan,
+    pool: Any,
+    inflight_endpoint_kind: str | None,
+    source_label: str,
+) -> _ImageJobProviderOutcome:
+    facade = _facade()
+    for endpoint_index, endpoint in enumerate(plan.endpoints):
+        outcome = await _run_image_job_endpoint(
+            request,
+            provider=provider,
+            provider_index=provider_index,
+            endpoint=endpoint,
+            endpoint_index=endpoint_index,
+            plan=plan,
+            pool=pool,
+            inflight_endpoint_kind=inflight_endpoint_kind,
+            source_label=source_label,
+        )
+        if not isinstance(outcome, _ImageJobAttemptFailure):
+            return _ImageJobProviderOutcome(result=outcome)
+        remaining = len(plan.endpoints) - endpoint_index - 1
+        if remaining > 0:
+            await _emit_image_job_endpoint_failover(
+                request,
+                outcome,
+                provider=provider,
+                provider_index=provider_index,
+                endpoint=endpoint,
+                endpoint_index=endpoint_index,
+                remaining=remaining,
+            )
+            continue
+        provider_retriable = facade._should_continue_image_provider_failover(
+            outcome.error,
+            retriable=outcome.retriable,
+        )
+        if not facade._should_continue_image_job_failover(
+            outcome.error,
+            retriable=provider_retriable,
+        ):
+            raise outcome.error
+        return _ImageJobProviderOutcome(error=outcome.error)
+    raise RuntimeError("image job provider plan has no endpoints")
+
+
+async def _record_image_job_provider_failure(
+    request: ImageExecutionRequest,
+    error: BaseException,
+    *,
+    provider: Any,
+    provider_index: int,
+    provider_count: int,
+    pool: Any,
+) -> None:
+    facade = _facade()
+    is_rate_limited, retry_after = facade._is_image_rate_limit_error(error)
+    if not facade._is_byok_provider(provider):
+        if is_rate_limited:
+            pool.report_image_rate_limited(
+                provider.name,
+                retry_after_s=retry_after,
+            )
+        else:
+            facade._pool_report_image_failure(pool, provider.name)
+    remaining = provider_count - provider_index - 1
+    if remaining <= 0:
+        return
+    facade.logger.warning(
+        "image job provider_failover: from=%s remaining=%d action=%s",
+        provider.name,
+        remaining,
+        request.action,
+    )
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "provider_failover",
+        from_provider=provider.name,
+        remaining=remaining,
+        reason="image_job_failed",
+        route="image_jobs",
+        **facade._provider_attempt_context(
+            provider,
+            attempt=provider_index + 1,
+            duration_ms=None,
+            status="failed",
+            reason="image_job_failed",
+            exc=error,
+        ),
+    )
+
+
 async def _image_job_with_failover(
     *,
     action: str,
@@ -152,18 +520,9 @@ async def _image_job_with_failover(
 ) -> tuple[str, str | None]:
     """Fail over across image-job endpoints and providers."""
     facade = _facade()
-    from ..retry import is_retriable as classify_retriable
-
     pool = await facade.provider_pool.get_pool()
-    forced_kind: str | None = None
-    if endpoint_override in ("generations", "responses"):
-        forced_kind = endpoint_override
-    elif endpoint_preference in ("generations", "responses"):
-        forced_kind = endpoint_preference
-
+    forced_kind = _requested_image_job_kind(endpoint_override, endpoint_preference)
     lane_owns_inflight = provider_override is None
-    inflight_endpoint_kind = forced_kind
-    requires_mask = mask is not None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -172,8 +531,25 @@ async def _image_job_with_failover(
             route="image_jobs",
             ignore_cooldown=True,
             endpoint_kind=forced_kind,
-            requires_mask=requires_mask,
+            requires_mask=mask is not None,
         )
+    )
+    request = ImageExecutionRequest(
+        action,
+        prompt,
+        size,
+        images,
+        mask,
+        n,
+        quality,
+        output_format,
+        output_compression,
+        background,
+        moderation,
+        model,
+        progress_callback,
+        provider_override,
+        user_id,
     )
     errors: list[BaseException] = []
     source_label = "image_jobs" if action == "generate" else "image_jobs_edit"
@@ -181,261 +557,47 @@ async def _image_job_with_failover(
 
     for provider_index, provider in enumerate(providers):
         if lane_owns_inflight and provider_index > 0:
-            facade._pool_acquire_inflight(
-                pool,
-                provider.name,
-                inflight_endpoint_kind,
-            )
+            facade._pool_acquire_inflight(pool, provider.name, forced_kind)
         try:
-            configured_endpoint = getattr(
+            plan = _provider_image_job_plan(
                 provider,
-                "image_jobs_endpoint",
-                "auto",
+                action=action,
+                pool=pool,
+                fallback_base_url=fallback_base_url,
+                endpoint_override=endpoint_override,
+                endpoint_preference=endpoint_preference,
             )
-            try:
-                endpoint_locked = facade.parse_provider_bool(
-                    getattr(provider, "image_jobs_endpoint_lock", False),
-                    default=False,
-                )
-            except ValueError:
-                endpoint_locked = False
-            endpoint_locked = endpoint_locked and configured_endpoint in (
-                "generations",
-                "responses",
-            )
-
-            conflict_kind: str | None = None
-            if endpoint_override in ("generations", "responses"):
-                conflict_kind = endpoint_override
-            elif endpoint_preference in ("generations", "responses"):
-                conflict_kind = endpoint_preference
-            if conflict_kind is not None:
-                unavailable_error = facade._provider_endpoint_unavailable_error(
-                    provider,
-                    conflict_kind,
-                )
-                if unavailable_error is not None:
-                    facade.logger.info(
-                        "image_jobs skip provider=%s configured=%s "
-                        "requested_kind=%s reason=%s",
-                        getattr(provider, "name", "unknown"),
-                        configured_endpoint,
-                        conflict_kind,
-                        unavailable_error.payload.get("reason"),
-                    )
-                    errors.append(unavailable_error)
-                    continue
-
-            if endpoint_override is not None:
-                endpoint_chain = [endpoint_override]
-            elif endpoint_locked:
-                endpoint_chain = [configured_endpoint]
-            elif endpoint_preference is not None:
-                endpoint_chain = facade._image_jobs_endpoint_fallback_chain(
-                    endpoint_preference
-                )
-            else:
-                endpoint_chain = pool.endpoint_chain(
-                    provider.name,
-                    action,
-                    configured_endpoint,
-                )
-            endpoint_chain = [
-                endpoint
-                for endpoint in endpoint_chain
-                if facade._provider_allows_image_endpoint(provider, endpoint)
-            ]
-            if not endpoint_chain:
-                errors.append(
-                    facade.UpstreamError(
-                        f"provider {provider.name} has no supported image-job endpoint",
-                        error_code=facade.EC.NO_PROVIDERS.value,
-                        status_code=503,
-                        payload={
-                            "provider": provider.name,
-                            "reason": "capability_unsupported",
-                        },
-                    )
-                )
+            if plan.error is not None:
+                errors.append(plan.error)
                 continue
-            provider_base_url = (
-                getattr(provider, "image_jobs_base_url", "") or fallback_base_url
+            outcome = await _run_image_job_provider(
+                request,
+                provider=provider,
+                provider_index=provider_index,
+                plan=plan,
+                pool=pool,
+                inflight_endpoint_kind=forced_kind,
+                source_label=source_label,
             )
-
-            last_exc: BaseException | None = None
-            for endpoint_index, endpoint in enumerate(endpoint_chain):
-                endpoint_remaining = len(endpoint_chain) - endpoint_index - 1
-                started = time.monotonic()
-                try:
-                    result = await facade._image_job_run_once(
-                        action=action,
-                        endpoint=endpoint,
-                        prompt=prompt,
-                        size=size,
-                        images=images,
-                        mask=mask,
-                        n=n,
-                        quality=quality,
-                        output_format=output_format,
-                        output_compression=output_compression,
-                        background=background,
-                        moderation=moderation,
-                        model=model,
-                        api_key=provider.api_key,
-                        base_url=provider_base_url,
-                        proxy=facade._provider_proxy(provider),
-                        image_edit_input_transport=(
-                            provider.image_edit_input_transport
-                        ),
-                        progress_callback=progress_callback,
-                        user_id=user_id,
-                        before_attempt=facade._image_request_attempt_claim(
-                            pool,
-                            provider,
-                            route=f"image_jobs:{endpoint}",
-                        ),
-                    )
-                except (asyncio.CancelledError, facade.UpstreamCancelled):
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    if not facade._is_byok_provider(provider):
-                        pool.record_endpoint_failure(
-                            provider.name,
-                            endpoint,
-                        )
-                    decision = classify_retriable(
-                        getattr(exc, "error_code", None),
-                        getattr(exc, "status_code", None),
-                        error_message=str(exc),
-                    )
-                    error_class = facade._image_job_error_class(exc)
-                    facade.logger.warning(
-                        "image job %s/%s endpoint=%s error_class=%s decision=%s: %r",
-                        action,
-                        provider.name,
-                        endpoint,
-                        error_class,
-                        decision.reason,
-                        exc,
-                    )
-                    if endpoint_remaining > 0:
-                        await facade._emit_image_progress(
-                            progress_callback,
-                            "endpoint_failover",
-                            provider=provider.name,
-                            from_endpoint=endpoint,
-                            remaining=endpoint_remaining,
-                            reason=error_class or decision.reason,
-                            route="image_jobs",
-                            **facade._provider_attempt_context(
-                                provider,
-                                attempt=provider_index + 1,
-                                endpoint_attempt=endpoint_index + 1,
-                                duration_ms=(time.monotonic() - started) * 1000,
-                                status="failed",
-                                reason=error_class or decision.reason,
-                                exc=exc,
-                            ),
-                        )
-                        continue
-                    should_continue = facade._should_continue_image_job_failover(
-                        exc,
-                        retriable=(
-                            facade._should_continue_image_provider_failover(
-                                exc,
-                                retriable=decision.retriable,
-                            )
-                        ),
-                    )
-                    if not should_continue:
-                        raise
-                    break
-                else:
-                    latency_ms = (time.monotonic() - started) * 1000.0
-                    if not facade._is_byok_provider(provider):
-                        pool.record_endpoint_success(
-                            provider.name,
-                            endpoint,
-                            latency_ms=latency_ms,
-                        )
-                        facade._pool_report_image_success(
-                            pool,
-                            provider.name,
-                            endpoint_kind=inflight_endpoint_kind,
-                            record_endpoint=False,
-                        )
-                    await facade._emit_image_progress(
-                        progress_callback,
-                        "provider_used",
-                        provider=provider.name,
-                        route="image_jobs",
-                        source=source_label,
-                        endpoint=f"image-jobs:{endpoint}",
-                        **facade._provider_attempt_context(
-                            provider,
-                            attempt=provider_index + 1,
-                            endpoint_attempt=endpoint_index + 1,
-                            duration_ms=latency_ms,
-                            status="succeeded",
-                        ),
-                    )
-                    await facade._emit_image_progress(
-                        progress_callback,
-                        "final_image",
-                        source=source_label,
-                        endpoint_used=endpoint,
-                    )
-                    await facade._emit_image_progress(
-                        progress_callback,
-                        "completed",
-                        source=source_label,
-                        endpoint_used=endpoint,
-                    )
-                    return result
-
-            if last_exc is None:
+            if outcome.result is not None:
+                return outcome.result
+            if outcome.error is None:
                 continue
-            errors.append(last_exc)
-            is_rate_limited, retry_after = facade._is_image_rate_limit_error(last_exc)
-            if not facade._is_byok_provider(provider):
-                if is_rate_limited:
-                    pool.report_image_rate_limited(
-                        provider.name,
-                        retry_after_s=retry_after,
-                    )
-                else:
-                    facade._pool_report_image_failure(pool, provider.name)
-            remaining = len(providers) - provider_index - 1
-            if remaining > 0:
-                facade.logger.warning(
-                    "image job provider_failover: from=%s remaining=%d action=%s",
-                    provider.name,
-                    remaining,
-                    action,
-                )
-                await facade._emit_image_progress(
-                    progress_callback,
-                    "provider_failover",
-                    from_provider=provider.name,
-                    remaining=remaining,
-                    reason="image_job_failed",
-                    route="image_jobs",
-                    **facade._provider_attempt_context(
-                        provider,
-                        attempt=provider_index + 1,
-                        duration_ms=None,
-                        status="failed",
-                        reason="image_job_failed",
-                        exc=last_exc,
-                    ),
-                )
+            errors.append(outcome.error)
+            await _record_image_job_provider_failure(
+                request,
+                outcome.error,
+                provider=provider,
+                provider_index=provider_index,
+                provider_count=len(providers),
+                pool=pool,
+            )
         finally:
             if lane_owns_inflight:
                 facade._pool_release_inflight(
                     pool,
                     provider.name,
-                    inflight_endpoint_kind,
+                    forced_kind,
                 )
 
     merged = facade._merge_fallback_errors(

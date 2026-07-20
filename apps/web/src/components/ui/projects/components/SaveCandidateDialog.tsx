@@ -22,6 +22,7 @@ import {
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
 import { useSaveModelCandidateToLibraryMutation } from "@/lib/queries";
+import { inferAgeSegmentFromText } from "../utils";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
   ["user_favorites", "用户收藏"],
@@ -277,15 +278,7 @@ function defaultAgeSegment(workflow: WorkflowRun): ModelLibraryItemAgeSegment {
       return value as ModelLibraryItemAgeSegment;
     }
   }
-  const text = workflow.user_prompt;
-  if (text.includes("幼儿")) return "toddler";
-  if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
-  if (text.includes("青少年")) return "teen";
-  if (text.includes("青年")) return "young_adult";
-  if (text.includes("中年") || text.includes("中老年")) return "middle_aged";
-  if (text.includes("老年")) return "senior";
-  if (text.includes("熟龄") || text.includes("成年")) return "adult";
-  return "user_favorites";
+  return inferAgeSegmentFromText(workflow.user_prompt) ?? "user_favorites";
 }
 
 function splitTags(value: string): string[] {

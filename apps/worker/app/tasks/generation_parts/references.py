@@ -334,9 +334,7 @@ def inpaint_size_from_reference(
         lambda value: max(align, int(value // align) * align),
         lambda value: max(align, int(math.ceil(value / align)) * align),
     ):
-        candidates.append(
-            (align_value(target_width), align_value(target_height))
-        )
+        candidates.append((align_value(target_width), align_value(target_height)))
     seen: set[tuple[int, int]] = set()
     for width, height in candidates:
         if (width, height) in seen:

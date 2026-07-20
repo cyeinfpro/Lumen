@@ -242,9 +242,7 @@ def request_event_provider_from_attempts(
     for attempt in attempts or []:
         if not isinstance(attempt, dict):
             continue
-        provider = redis_text(
-            attempt.get("provider") or attempt.get("actual_provider")
-        )
+        provider = redis_text(attempt.get("provider") or attempt.get("actual_provider"))
         if not provider or provider in {"dual_race", "dual_race_bonus"}:
             continue
         status = str(attempt.get("status") or "").strip().lower()
@@ -379,29 +377,24 @@ def build_generation_diagnostics(
         "requested_params": requested_params,
         "debug_id": debug_id,
     }
-    if trace_id:
-        out["trace_id"] = trace_id
-    if effective_params:
-        out["effective_params"] = effective_params
-    if revised_prompt:
-        out["revised_prompt"] = revised_prompt
+    _apply_optional_diagnostic_fields(
+        out,
+        trace_id=trace_id,
+        effective_params=effective_params,
+        revised_prompt=revised_prompt,
+        upstream_route=upstream_route,
+        actual_route=actual_route,
+        actual_source=actual_source,
+        actual_endpoint=actual_endpoint,
+        provider_attempts=attempts[:12] if attempts else None,
+        stage_timings_ms=stage_timings_ms,
+        route_diagnostics=(route_diagnostics[:12] if route_diagnostics else None),
+        safe_error_summary=error_summary,
+        error_summary=error_summary,
+    )
     if provider:
         out["provider"] = provider
         out["actual_provider"] = provider
-    if upstream_route:
-        out["upstream_route"] = upstream_route
-    if actual_route:
-        out["actual_route"] = actual_route
-    if actual_source:
-        out["actual_source"] = actual_source
-    if actual_endpoint:
-        out["actual_endpoint"] = actual_endpoint
-    if attempts:
-        out["provider_attempts"] = attempts[:12]
-    if stage_timings_ms:
-        out["stage_timings_ms"] = stage_timings_ms
-    if route_diagnostics:
-        out["route_diagnostics"] = route_diagnostics[:12]
     if failover_count:
         out["failover"] = True
         out["failover_count"] = failover_count
@@ -409,10 +402,16 @@ def build_generation_diagnostics(
         out["upstream_duration_ms"] = upstream_duration_ms
     if duration_ms is not None:
         out["duration_ms"] = duration_ms
-    if error_summary:
-        out["safe_error_summary"] = error_summary
-        out["error_summary"] = error_summary
     return sanitize_generation_diagnostics_payload(
         out,
         expose_provider_diagnostics=expose_provider_diagnostics,
     )
+
+
+def _apply_optional_diagnostic_fields(
+    output: dict[str, Any],
+    **fields: Any,
+) -> None:
+    for key, value in fields.items():
+        if value:
+            output[key] = value

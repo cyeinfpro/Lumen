@@ -82,6 +82,104 @@ function activeToolLabel(msg: AssistantMessage): CompletionStatus | null {
   return null;
 }
 
+function completionStartAt(msg: AssistantMessage, now: number): number {
+  if (msg.created_at && msg.created_at > 0) return msg.created_at;
+  if (msg.stream_started_at && msg.stream_started_at > 0) {
+    return msg.stream_started_at;
+  }
+  return now;
+}
+
+function pendingStatus(
+  msg: AssistantMessage,
+  now: number,
+): CompletionStatus {
+  const createdAt = completionStartAt(msg, now);
+  const elapsed = secondsSince(now, createdAt);
+  const waiting = now - createdAt >= WAITING_MS;
+  return {
+    label: waiting ? `等待模型响应 ${elapsed}s` : `排队中 ${elapsed}s`,
+    tone: "muted",
+    active: true,
+  };
+}
+
+function streamingOutputStatus(
+  now: number,
+  lastDeltaAt: number,
+  hasText: boolean,
+  hasGeneration: boolean,
+): CompletionStatus | null {
+  const outputIdleMs = now - lastDeltaAt;
+  if (hasText || hasGeneration) {
+    if (outputIdleMs < STALLED_MS) return null;
+    return {
+      label: `等待后续输出 ${secondsSince(now, lastDeltaAt)}s`,
+      tone: "warn",
+      active: true,
+    };
+  }
+  return null;
+}
+
+function streamingStatus(
+  msg: AssistantMessage,
+  now: number,
+  hasText: boolean,
+  hasGeneration: boolean,
+  hasThinking: boolean,
+): CompletionStatus | null {
+  const toolStatus = activeToolLabel(msg);
+  if (toolStatus) return toolStatus;
+
+  const streamStartedAt = timestampOrNow(
+    now,
+    msg.stream_started_at ?? msg.created_at,
+  );
+  const lastDeltaAt = timestampOrNow(streamStartedAt, msg.last_delta_at);
+  const outputStatus = streamingOutputStatus(
+    now,
+    lastDeltaAt,
+    hasText,
+    hasGeneration,
+  );
+  if (outputStatus) return outputStatus;
+
+  const outputIdleMs = now - lastDeltaAt;
+  const elapsed = secondsSince(now, streamStartedAt);
+  if (hasThinking) {
+    const stalled = outputIdleMs >= STALLED_MS;
+    return {
+      label: stalled
+        ? `仍在思考 ${secondsSince(now, lastDeltaAt)}s`
+        : `正在思考 ${elapsed}s`,
+      tone: stalled ? "warn" : "active",
+      active: true,
+    };
+  }
+  const stalled = outputIdleMs >= STALLED_MS;
+  return {
+    label: stalled
+      ? `仍在等待输出 ${elapsed}s`
+      : `正在连接模型 ${elapsed}s`,
+    tone: stalled ? "warn" : "active",
+    active: true,
+  };
+}
+
+function terminalStatus(
+  msg: AssistantMessage,
+  hasText: boolean,
+): CompletionStatus | null {
+  if (msg.status === "failed" && !hasText) {
+    return { label: "回复失败", tone: "danger", active: false };
+  }
+  if (msg.status === "canceled") {
+    return { label: "已取消", tone: "muted", active: false };
+  }
+  return null;
+}
+
 export function resolveCompletionStatus(
   msg: AssistantMessage,
   now: number,
@@ -97,72 +195,14 @@ export function resolveCompletionStatus(
   );
 
   if (msg.status === "pending") {
-    // 乐观更新消息的 created_at 可能为 0（尚未校正），此时以 stream_started_at
-    // 或当前时间为起点，避免显示 "排队中 0s" 不动。
-    const createdAt = msg.created_at && msg.created_at > 0
-      ? msg.created_at
-      : msg.stream_started_at && msg.stream_started_at > 0
-        ? msg.stream_started_at
-        : now;
-    const elapsed = secondsSince(now, createdAt);
-    const label =
-      now - createdAt >= WAITING_MS
-        ? `等待模型响应 ${elapsed}s`
-        : `排队中 ${elapsed}s`;
-    return { label, tone: "muted", active: true };
+    return pendingStatus(msg, now);
   }
 
   if (msg.status === "streaming") {
-    const toolStatus = activeToolLabel(msg);
-    if (toolStatus) return toolStatus;
-
-    const streamStartedAt = timestampOrNow(
-      now,
-      msg.stream_started_at ?? msg.created_at,
-    );
-    const lastDeltaAt = timestampOrNow(streamStartedAt, msg.last_delta_at);
-    const outputIdleMs = now - lastDeltaAt;
-
-    if (hasText || hasGeneration) {
-      if (outputIdleMs < STALLED_MS) return null;
-      return {
-        label: `等待后续输出 ${secondsSince(now, lastDeltaAt)}s`,
-        tone: "warn",
-        active: true,
-      };
-    }
-
-    const elapsed = secondsSince(now, streamStartedAt);
-    if (hasThinking) {
-      return {
-        label:
-          outputIdleMs >= STALLED_MS
-            ? `仍在思考 ${secondsSince(now, lastDeltaAt)}s`
-            : `正在思考 ${elapsed}s`,
-        tone: outputIdleMs >= STALLED_MS ? "warn" : "active",
-        active: true,
-      };
-    }
-
-    return {
-      label:
-        outputIdleMs >= STALLED_MS
-          ? `仍在等待输出 ${elapsed}s`
-          : `正在连接模型 ${elapsed}s`,
-      tone: outputIdleMs >= STALLED_MS ? "warn" : "active",
-      active: true,
-    };
+    return streamingStatus(msg, now, hasText, hasGeneration, hasThinking);
   }
 
-  if (msg.status === "failed" && !hasText) {
-    return { label: "回复失败", tone: "danger", active: false };
-  }
-
-  if (msg.status === "canceled") {
-    return { label: "已取消", tone: "muted", active: false };
-  }
-
-  return null;
+  return terminalStatus(msg, hasText);
 }
 
 export function CompletionStatusLine({

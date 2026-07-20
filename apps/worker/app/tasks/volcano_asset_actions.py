@@ -22,16 +22,68 @@ from lumen_core.volcano_assets import (
     volcano_asset_quota_key,
 )
 
+from .volcano_asset_runtime import (
+    VolcanoAssetRuntimeContext,
+    VolcanoAssetRuntimeSlot,
+    VolcanoAssetRuntimeView,
+)
+
 logger = logging.getLogger(__name__)
 
 _AIGC_GROUP_TYPE = "AIGC"
 _AMBIGUOUS_RECONCILE_ATTEMPTS = 3
+_RUNTIME = VolcanoAssetRuntimeSlot(
+    owner=__name__,
+    dependencies=frozenset(
+        {
+            "VolcanoAssetClient",
+            "VolcanoAssetRedisUnavailable",
+            "_LeaseLostError",
+            "_OperationFailure",
+            "_SUPPORTED_ACTIONS",
+            "_SuccessPersistenceError",
+            "_ambiguous_create_group_failure",
+            "_asset_target_reached",
+            "_complete_operation",
+            "_confirm_operation_lock",
+            "_delete_asset_result",
+            "_delete_group_result",
+            "_get_scoped_asset",
+            "_get_scoped_group",
+            "_group_target_reached",
+            "_is_not_found",
+            "_list_group_asset_ids_best_effort",
+            "_operation_deleted_asset_ids",
+            "_operation_has_value",
+            "_persist_terminal_operation",
+            "_process_create_group",
+            "_process_delete_asset",
+            "_process_delete_group",
+            "_process_update_asset",
+            "_process_update_group",
+            "_provider_for_operation",
+            "_reconcile_update_asset",
+            "_reconcile_update_group",
+            "_record_operation_failure",
+            "_release_quota_best_effort",
+            "_require_asset_scope",
+            "_require_group_scope",
+            "_resource_is_deleted",
+            "_service_failure",
+            "_utc_iso",
+            "_write_audit",
+            "reserve_volcano_asset_quota",
+        }
+    ),
+)
 
 
-def _runtime() -> Any:
-    from . import volcano_assets
+def install_runtime(context: VolcanoAssetRuntimeContext) -> None:
+    _RUNTIME.install(context)
 
-    return volcano_assets
+
+def _runtime() -> VolcanoAssetRuntimeView:
+    return _RUNTIME.get()
 
 
 def _is_not_found(exc: VolcanoAssetServiceError) -> bool:
@@ -965,4 +1017,5 @@ __all__ = [
     "_record_operation_failure",
     "_require_asset_scope",
     "_resource_is_deleted",
+    "install_runtime",
 ]

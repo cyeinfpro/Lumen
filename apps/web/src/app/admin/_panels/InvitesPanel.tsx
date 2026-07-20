@@ -513,13 +513,24 @@ export function InvitesPanel() {
         )}
       </div>
 
-      {revokeMut.isError && (
-        <p className="flex items-center gap-1.5 type-body-sm text-danger">
-          <AlertCircle className="w-4 h-4" />
-          撤销失败：{revokeMut.error?.message ?? copy.error.unknown}
-        </p>
-      )}
+      <RevokeError visible={revokeMut.isError} error={revokeMut.error} />
     </section>
+  );
+}
+
+function RevokeError({
+  visible,
+  error,
+}: {
+  visible: boolean;
+  error: Error | null;
+}) {
+  if (!visible) return null;
+  return (
+    <p className="flex items-center gap-1.5 type-body-sm text-danger">
+      <AlertCircle className="w-4 h-4" />
+      撤销失败：{error?.message ?? copy.error.unknown}
+    </p>
   );
 }
 

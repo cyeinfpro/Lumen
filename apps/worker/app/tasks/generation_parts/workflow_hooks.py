@@ -29,6 +29,19 @@ class WorkflowHookDependencies:
     model_library_requested_count: Callable[[Any], int]
 
 
+@dataclass(frozen=True)
+class PosterStyleInput:
+    title: str
+    category: str
+    mood: str | None
+    prompt_template: str | None
+    prompt: str
+    palette: list[str]
+    recommended_aspects: list[str]
+    style_tags: list[str]
+    auto_tag: bool
+
+
 def model_library_requested_count_from_step(step: Any) -> int:
     task_ids = [task_id for task_id in (step.task_ids or []) if task_id]
     if task_ids:
@@ -149,21 +162,62 @@ async def maybe_record_poster_style_library_generate_image(
     image_id: str,
     deps: WorkflowHookDependencies,
 ) -> None:
-    req = (
+    run_id = _poster_style_run_id(generation)
+    if run_id is None:
+        return
+    loaded = await _load_poster_style_run_step(
+        session,
+        user_id=user_id,
+        run_id=run_id,
+        deps=deps,
+    )
+    if loaded is None:
+        return
+    run, step = loaded
+    _append_step_image(step, image_id)
+    input_value = _poster_style_input(step)
+    target_item = await _find_or_create_poster_style_item(
+        session,
+        user_id=user_id,
+        image_id=image_id,
+        run=run,
+        input_value=input_value,
+        deps=deps,
+    )
+    if input_value.auto_tag:
+        await _auto_tag_poster_style_item(
+            session,
+            user_id=user_id,
+            image_id=image_id,
+            run=run,
+            target_item=target_item,
+            deps=deps,
+        )
+    _complete_poster_style_step(run, step, input_value)
+
+
+def _poster_style_run_id(generation: Any) -> str | None:
+    request = (
         generation.upstream_request
         if isinstance(generation.upstream_request, dict)
         else {}
     )
-    if req.get("workflow_action") != "poster_style_library_generate":
-        return
-    if req.get("workflow_step_key") != "poster_style_library_generate":
-        return
-    run_id = req.get("workflow_run_id")
-    if not isinstance(run_id, str) or not run_id:
-        return
+    if request.get("workflow_action") != "poster_style_library_generate":
+        return None
+    if request.get("workflow_step_key") != "poster_style_library_generate":
+        return None
+    run_id = request.get("workflow_run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
 
+
+async def _load_poster_style_run_step(
+    session: Any,
+    *,
+    user_id: str,
+    run_id: str,
+    deps: WorkflowHookDependencies,
+) -> tuple[Any, Any] | None:
     run_model = deps.workflow_run_model
-    step_model = deps.workflow_step_model
     run = (
         await session.execute(
             deps.select(run_model).where(
@@ -174,7 +228,8 @@ async def maybe_record_poster_style_library_generate_image(
         )
     ).scalar_one_or_none()
     if run is None:
-        return
+        return None
+    step_model = deps.workflow_step_model
     step = (
         await session.execute(
             deps.select(step_model)
@@ -185,47 +240,63 @@ async def maybe_record_poster_style_library_generate_image(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if step is None:
-        return
+    return (run, step) if step is not None else None
 
+
+def _append_step_image(step: Any, image_id: str) -> None:
     image_ids = list(step.image_ids or [])
     if image_id not in image_ids:
         image_ids.append(image_id)
     step.image_ids = list(dict.fromkeys(image_ids))
 
+
+def _poster_style_input(step: Any) -> PosterStyleInput:
     input_json = step.input_json if isinstance(step.input_json, dict) else {}
-    title = str(input_json.get("title") or "未命名风格")[:255]
-    category_raw = str(input_json.get("category") or "user_favorites")
-    category = category_raw if category_raw else "user_favorites"
+    category = str(input_json.get("category") or "user_favorites")
     mood_raw = input_json.get("mood")
     mood = (
-        str(mood_raw)[:128]
-        if isinstance(mood_raw, str) and mood_raw.strip()
-        else None
+        str(mood_raw)[:128] if isinstance(mood_raw, str) and mood_raw.strip() else None
     )
-    prompt_template_raw = input_json.get("prompt_template")
-    prompt_value = str(input_json.get("prompt") or "")[:4000]
-    if isinstance(prompt_template_raw, str) and prompt_template_raw.strip():
-        prompt_template: str | None = prompt_template_raw[:2000]
-    elif prompt_value:
-        prompt_template = prompt_value[:2000]
-    else:
-        prompt_template = None
-    palette = [
-        color for color in (input_json.get("palette") or []) if isinstance(color, str)
-    ][:8]
-    aspects = [
-        aspect
-        for aspect in (input_json.get("recommended_aspects") or [])
-        if isinstance(aspect, str)
-    ][:8]
-    style_tags = [
-        tag
-        for tag in (input_json.get("style_tags") or [])
-        if isinstance(tag, str)
-    ][:8]
-    auto_tag = bool(input_json.get("auto_tag", False))
+    prompt = str(input_json.get("prompt") or "")[:4000]
+    return PosterStyleInput(
+        title=str(input_json.get("title") or "未命名风格")[:255],
+        category=category or "user_favorites",
+        mood=mood,
+        prompt_template=_poster_style_prompt_template(input_json, prompt),
+        prompt=prompt,
+        palette=_string_list(input_json.get("palette"), limit=8),
+        recommended_aspects=_string_list(
+            input_json.get("recommended_aspects"),
+            limit=8,
+        ),
+        style_tags=_string_list(input_json.get("style_tags"), limit=8),
+        auto_tag=bool(input_json.get("auto_tag", False)),
+    )
 
+
+def _poster_style_prompt_template(
+    input_json: dict[str, Any],
+    prompt: str,
+) -> str | None:
+    raw = input_json.get("prompt_template")
+    if isinstance(raw, str) and raw.strip():
+        return raw[:2000]
+    return prompt[:2000] if prompt else None
+
+
+def _string_list(value: Any, *, limit: int) -> list[str]:
+    return [item for item in (value or []) if isinstance(item, str)][:limit]
+
+
+async def _find_or_create_poster_style_item(
+    session: Any,
+    *,
+    user_id: str,
+    image_id: str,
+    run: Any,
+    input_value: PosterStyleInput,
+    deps: WorkflowHookDependencies,
+) -> Any:
     item_model = deps.poster_style_item_model
     existing = (
         await session.execute(
@@ -237,76 +308,94 @@ async def maybe_record_poster_style_library_generate_image(
             .limit(1)
         )
     ).scalar_one_or_none()
-    if existing is None:
-        item = item_model(
-            id=f"user:{deps.new_uuid7()}",
+    if existing is not None:
+        return existing
+    item = item_model(
+        id=f"user:{deps.new_uuid7()}",
+        user_id=user_id,
+        source="generated",
+        cover_image_id=image_id,
+        sample_image_ids=[image_id],
+        title=input_value.title,
+        category=input_value.category,
+        mood=input_value.mood,
+        prompt_template=input_value.prompt_template,
+        palette=list(input_value.palette),
+        recommended_aspects=list(input_value.recommended_aspects)
+        or ["1:1", "9:16", "16:9", "3:4"],
+        style_tags=list(input_value.style_tags),
+        library_folder=None,
+        metadata_jsonb={
+            "workflow_run_id": run.id,
+            "prompt": input_value.prompt,
+        },
+    )
+    session.add(item)
+    await session.flush()
+    return item
+
+
+async def _auto_tag_poster_style_item(
+    session: Any,
+    *,
+    user_id: str,
+    image_id: str,
+    run: Any,
+    target_item: Any,
+    deps: WorkflowHookDependencies,
+) -> None:
+    try:
+        result = await deps.load_poster_style_tagger()(
+            session,
+            image_id=image_id,
             user_id=user_id,
-            source="generated",
-            cover_image_id=image_id,
-            sample_image_ids=[image_id],
-            title=title,
-            category=category,
-            mood=mood,
-            prompt_template=prompt_template,
-            palette=list(palette),
-            recommended_aspects=list(aspects)
-            or ["1:1", "9:16", "16:9", "3:4"],
-            style_tags=list(style_tags),
-            library_folder=None,
-            metadata_jsonb={
-                "workflow_run_id": run.id,
-                "prompt": prompt_value,
-            },
         )
-        session.add(item)
-        await session.flush()
-        target_item = item
-    else:
-        target_item = existing
+        _apply_poster_style_tag_result(target_item, result, deps)
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        deps.logger.info(
+            "poster_style_library_generate tagging skipped run=%s image=%s err=%s",
+            run.id,
+            image_id,
+            exc,
+        )
 
-    if auto_tag:
-        try:
-            result = await deps.load_poster_style_tagger()(
-                session,
-                image_id=image_id,
-                user_id=user_id,
-            )
-            if result.category and target_item.category in (
-                None,
-                "",
-                "user_favorites",
-            ):
-                target_item.category = result.category
-            if result.mood and not target_item.mood:
-                target_item.mood = result.mood[:128]
-            if result.style_tags:
-                merged_tags = list(
-                    dict.fromkeys([*target_item.style_tags, *result.style_tags])
-                )[:8]
-                target_item.style_tags = merged_tags
-            if result.palette and not target_item.palette:
-                target_item.palette = list(result.palette)[:8]
-            target_item.auto_tagged_at = deps.utcnow()
-            target_item.auto_tag_notes = result.notes
-            meta = dict(target_item.metadata_jsonb or {})
-            meta["auto_tag_raw"] = {
-                "category": result.category,
-                "mood": result.mood,
-                "style_tags": list(result.style_tags or []),
-                "palette": list(result.palette or []),
-                "notes": result.notes,
-            }
-            target_item.metadata_jsonb = meta
-        except (TimeoutError, asyncio.CancelledError):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            deps.logger.info(
-                "poster_style_library_generate tagging skipped run=%s image=%s err=%s",
-                run.id,
-                image_id,
-                exc,
-            )
 
+def _apply_poster_style_tag_result(
+    target_item: Any,
+    result: Any,
+    deps: WorkflowHookDependencies,
+) -> None:
+    if result.category and target_item.category in (None, "", "user_favorites"):
+        target_item.category = result.category
+    if result.mood and not target_item.mood:
+        target_item.mood = result.mood[:128]
+    if result.style_tags:
+        target_item.style_tags = list(
+            dict.fromkeys([*target_item.style_tags, *result.style_tags])
+        )[:8]
+    if result.palette and not target_item.palette:
+        target_item.palette = list(result.palette)[:8]
+    target_item.auto_tagged_at = deps.utcnow()
+    target_item.auto_tag_notes = result.notes
+    metadata = dict(target_item.metadata_jsonb or {})
+    metadata["auto_tag_raw"] = {
+        "category": result.category,
+        "mood": result.mood,
+        "style_tags": list(result.style_tags or []),
+        "palette": list(result.palette or []),
+        "notes": result.notes,
+    }
+    target_item.metadata_jsonb = metadata
+
+
+def _complete_poster_style_step(
+    run: Any,
+    step: Any,
+    input_value: PosterStyleInput,
+) -> None:
+    input_json = step.input_json if isinstance(step.input_json, dict) else {}
     requested = int(input_json.get("count") or 0)
     if requested <= 0:
         requested = max(len(step.task_ids or []), len(step.image_ids or []))

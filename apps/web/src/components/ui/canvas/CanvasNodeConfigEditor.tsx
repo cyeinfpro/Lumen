@@ -18,7 +18,7 @@ import {
   resolutionOptionsForModel,
   videoModelsForAction,
   videoUnavailableReasonMessage,
-} from "@/app/video/video-options-model";
+} from "@/lib/video/optionsModel";
 import { Button } from "@/components/ui/primitives";
 import { CANVAS_NOTE_MAX_CHARS } from "@/lib/canvas/constants";
 import {

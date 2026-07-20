@@ -26,7 +26,6 @@ from lumen_core.constants import (
 )
 from lumen_core.runtime_settings import get_spec
 from lumen_core.models import Completion, Generation, OutboxEvent, WalletTransaction
-from lumen_core.models import Conversation, Image, ImageVariant, Message
 from lumen_core.schemas import (
     ActiveTasksOut,
     CompletionOut,
@@ -44,16 +43,14 @@ from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services.generation_queue import release_generation_queue_state
+from ..services.task_listing import TaskListingRuntime, build_task_list
 from ..sse_publish import publish_sse_event
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_IMAGE_QUEUE_ACTIVE_KEY = "generation:image_queue:active"
-_IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
-_IMAGE_QUEUE_PROVIDER_ACTIVE_PREFIX = "generation:image_queue:provider_active:"
-_DUAL_RACE_SENTINEL_PREFIX = "__dr:"
 _TASK_CURSOR_VERSION = 1
 _TASK_KIND_RANK = {"completion": 0, "generation": 1}
 
@@ -98,23 +95,9 @@ _WAITING_PROVIDER_CODES = {
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
-
-
-def _image_task_provider_key(task_id: str) -> str:
-    return f"{_IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}"
-
-
-def _image_provider_active_key(provider_name: str) -> str:
-    return f"{_IMAGE_QUEUE_PROVIDER_ACTIVE_PREFIX}{provider_name}"
-
-
-def _redis_text(value: object) -> str | None:
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", "replace")
-    if isinstance(value, str):
-        return value
-    return None
+    return HTTPException(
+        status_code=http, detail={"error": {"code": code, "message": msg}}
+    )
 
 
 def _generation_billing_ref_id(task_id: str, retry_count: int | None) -> str:
@@ -338,7 +321,9 @@ def _string_value(value: Any) -> str | None:
 
 
 def _task_sort_at(task: Generation | Completion) -> datetime:
-    return task.created_at or task.started_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (
+        task.created_at or task.started_at or datetime.min.replace(tzinfo=timezone.utc)
+    )
 
 
 def _task_sort_expr(model: Any) -> Any:
@@ -536,11 +521,15 @@ def _task_recommended_actions(
         "safety_violation",
     }:
         actions.append(
-            TaskRecommendedActionOut(id="edit_prompt", label="调整提示词", kind="adjust")
+            TaskRecommendedActionOut(
+                id="edit_prompt", label="调整提示词", kind="adjust"
+            )
         )
     elif not retryable:
         actions.append(
-            TaskRecommendedActionOut(id="view_details", label="查看详情", kind="details")
+            TaskRecommendedActionOut(
+                id="view_details", label="查看详情", kind="details"
+            )
         )
     return actions[:3]
 
@@ -555,9 +544,9 @@ def _task_project_meta(
         content.get("workflow_run_id")
     )
     workflow_type = _string_value(request.get("workflow_type"))
-    workflow_step_key = _string_value(request.get("workflow_step_key")) or _string_value(
-        content.get("workflow_step_key")
-    )
+    workflow_step_key = _string_value(
+        request.get("workflow_step_key")
+    ) or _string_value(content.get("workflow_step_key"))
     return project_id, workflow_type, workflow_step_key
 
 
@@ -694,8 +683,7 @@ def _build_task_item(
         source=source,
         action_source=getattr(task, "action_source", None)
         or _task_request_str(task, "action_source"),
-        trace_id=getattr(task, "trace_id", None)
-        or _task_request_str(task, "trace_id"),
+        trace_id=getattr(task, "trace_id", None) or _task_request_str(task, "trace_id"),
         queue_lane=getattr(task, "queue_lane", None)
         or _task_request_str(task, "queue_lane"),
         pixel_count=getattr(task, "pixel_count", None)
@@ -737,36 +725,7 @@ def _variant_thumb_url(image_id: str, kinds: set[str]) -> str:
     return f"/api/images/{image_id}/binary"
 
 
-async def _release_generation_queue_state(redis: Any, task_id: str) -> None:
-    task_provider_key = _image_task_provider_key(task_id)
-    provider_name = _redis_text(await redis.get(task_provider_key))
-    pipe_fn = getattr(redis, "pipeline", None)
-    pipe = pipe_fn(transaction=False) if callable(pipe_fn) else None
-
-    async def _zrem(key: str, member: str) -> None:
-        if pipe is not None:
-            pipe.zrem(key, member)
-        else:
-            await redis.zrem(key, member)
-
-    async def _delete(key: str) -> None:
-        if pipe is not None:
-            pipe.delete(key)
-        else:
-            await redis.delete(key)
-
-    if provider_name:
-        if provider_name.startswith(_DUAL_RACE_SENTINEL_PREFIX):
-            await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, provider_name)
-        else:
-            await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, task_id)
-            await _zrem(_image_provider_active_key(provider_name), task_id)
-    else:
-        await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, task_id)
-    await _delete(task_provider_key)
-    await _delete(f"task:{task_id}:lease")
-    if pipe is not None:
-        await pipe.execute()
+_release_generation_queue_state = release_generation_queue_state
 
 
 async def _release_queued_task_hold(
@@ -807,6 +766,7 @@ async def _task_should_release_wallet_hold(
 
 # ---------- generations ----------
 
+
 @router.get("/generations/{gen_id}", response_model=GenerationOut)
 async def get_generation(
     gen_id: str,
@@ -833,14 +793,17 @@ async def cancel_generation(
 ) -> dict[str, str]:
     gen = (
         await db.execute(
-            select(Generation).where(
-                Generation.id == gen_id, Generation.user_id == user.id
-            ).with_for_update()
+            select(Generation)
+            .where(Generation.id == gen_id, Generation.user_id == user.id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not gen:
         raise _http("not_found", "generation not found", 404)
-    if gen.status not in (GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value):
+    if gen.status not in (
+        GenerationStatus.QUEUED.value,
+        GenerationStatus.RUNNING.value,
+    ):
         raise _http("not_cancelable", f"status is {gen.status}", 409)
 
     redis = get_redis()
@@ -909,7 +872,9 @@ async def cancel_generation(
             },
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("queued generation cancel publish failed gen=%s err=%s", gen.id, exc)
+        logger.warning(
+            "queued generation cancel publish failed gen=%s err=%s", gen.id, exc
+        )
     return {"status": gen.status}
 
 
@@ -921,15 +886,18 @@ async def retry_generation(
 ) -> dict[str, str]:
     gen = (
         await db.execute(
-            select(Generation).where(
-                Generation.id == gen_id, Generation.user_id == user.id
-            ).with_for_update()
+            select(Generation)
+            .where(Generation.id == gen_id, Generation.user_id == user.id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not gen:
         raise _http("not_found", "generation not found", 404)
     reject_canvas_retry(gen)
-    if gen.status not in (GenerationStatus.FAILED.value, GenerationStatus.CANCELED.value):
+    if gen.status not in (
+        GenerationStatus.FAILED.value,
+        GenerationStatus.CANCELED.value,
+    ):
         raise _http("not_retryable", f"status is {gen.status}", 409)
 
     redis = get_redis()
@@ -937,7 +905,9 @@ async def retry_generation(
         await redis.delete(f"task:{gen.id}:cancel")
     except Exception as exc:  # noqa: BLE001
         logger.warning("retry cancel-flag cleanup failed gen=%s err=%s", gen.id, exc)
-        raise _http("retry_unavailable", "could not clear prior cancel signal", 503) from exc
+        raise _http(
+            "retry_unavailable", "could not clear prior cancel signal", 503
+        ) from exc
 
     gen.status = GenerationStatus.QUEUED.value
     gen.progress_stage = GenerationStage.QUEUED.value
@@ -968,6 +938,7 @@ async def retry_generation(
 
 # ---------- completions ----------
 
+
 @router.get("/completions/{comp_id}", response_model=CompletionOut)
 async def get_completion(
     comp_id: str,
@@ -994,9 +965,9 @@ async def cancel_completion(
 ) -> dict[str, object]:
     comp = (
         await db.execute(
-            select(Completion).where(
-                Completion.id == comp_id, Completion.user_id == user.id
-            ).with_for_update()
+            select(Completion)
+            .where(Completion.id == comp_id, Completion.user_id == user.id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not comp:
@@ -1042,15 +1013,18 @@ async def retry_completion(
 ) -> dict[str, str]:
     comp = (
         await db.execute(
-            select(Completion).where(
-                Completion.id == comp_id, Completion.user_id == user.id
-            ).with_for_update()
+            select(Completion)
+            .where(Completion.id == comp_id, Completion.user_id == user.id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not comp:
         raise _http("not_found", "completion not found", 404)
     reject_canvas_retry(comp)
-    if comp.status not in (CompletionStatus.FAILED.value, CompletionStatus.CANCELED.value):
+    if comp.status not in (
+        CompletionStatus.FAILED.value,
+        CompletionStatus.CANCELED.value,
+    ):
         raise _http("not_retryable", f"status is {comp.status}", 409)
 
     redis = get_redis()
@@ -1058,7 +1032,9 @@ async def retry_completion(
         await redis.delete(f"task:{comp.id}:cancel")
     except Exception as exc:  # noqa: BLE001
         logger.warning("retry cancel-flag cleanup failed comp=%s err=%s", comp.id, exc)
-        raise _http("retry_unavailable", "could not clear prior cancel signal", 503) from exc
+        raise _http(
+            "retry_unavailable", "could not clear prior cancel signal", 503
+        ) from exc
 
     comp.status = CompletionStatus.QUEUED.value
     comp.progress_stage = CompletionStage.QUEUED.value
@@ -1096,6 +1072,21 @@ async def retry_completion(
 
 # ---------- aggregate ----------
 
+
+def _task_listing_runtime() -> TaskListingRuntime:
+    return TaskListingRuntime(
+        apply_cursor=_apply_task_cursor,
+        apply_date_filter=_apply_task_date_filter,
+        build_item=_build_task_item,
+        encode_cursor=_encode_task_cursor,
+        json_dict=_json_dict,
+        kind_rank=_task_kind_rank,
+        sort_at=_task_sort_at,
+        sort_expr=_task_sort_expr,
+        variant_thumb_url=_variant_thumb_url,
+    )
+
+
 @router.get("/tasks", response_model=TaskListOut)
 async def list_tasks(
     user: CurrentUser,
@@ -1113,238 +1104,21 @@ async def list_tasks(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> TaskListOut:
     _ = mine  # V1: always mine==1; flag accepted for API compat.
-    parsed_cursor = _decode_task_cursor(cursor)
-    query_limit = min(max(limit * 3, limit + 1), 1000)
-
-    gen_stmt = select(Generation).where(Generation.user_id == user.id)
-    comp_stmt = select(Completion).where(Completion.user_id == user.id)
-    if status == "active":
-        gen_stmt = gen_stmt.where(
-            Generation.status.in_(
-                [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-            )
-        )
-        comp_stmt = comp_stmt.where(
-            Completion.status.in_(
-                [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
-            )
-        )
-    elif status == "terminal":
-        gen_stmt = gen_stmt.where(
-            Generation.status.in_(
-                [
-                    GenerationStatus.SUCCEEDED.value,
-                    GenerationStatus.FAILED.value,
-                    GenerationStatus.CANCELED.value,
-                ]
-            )
-        )
-        comp_stmt = comp_stmt.where(
-            Completion.status.in_(
-                [
-                    CompletionStatus.SUCCEEDED.value,
-                    CompletionStatus.FAILED.value,
-                    CompletionStatus.CANCELED.value,
-                ]
-            )
-        )
-    elif status == GenerationStatus.RUNNING.value:
-        gen_stmt = gen_stmt.where(Generation.status == GenerationStatus.RUNNING.value)
-        comp_stmt = comp_stmt.where(
-            Completion.status == CompletionStatus.STREAMING.value
-        )
-    elif status == CompletionStatus.STREAMING.value:
-        gen_stmt = gen_stmt.where(Generation.status == GenerationStatus.RUNNING.value)
-        comp_stmt = comp_stmt.where(
-            Completion.status == CompletionStatus.STREAMING.value
-        )
-    elif status:
-        gen_stmt = gen_stmt.where(Generation.status == status)
-        comp_stmt = comp_stmt.where(Completion.status == status)
-
-    if error_code:
-        gen_stmt = gen_stmt.where(Generation.error_code == error_code)
-        comp_stmt = comp_stmt.where(Completion.error_code == error_code)
-
-    gen_stmt = _apply_task_date_filter(gen_stmt, Generation, date_filter)
-    comp_stmt = _apply_task_date_filter(comp_stmt, Completion, date_filter)
-    gen_stmt = _apply_task_cursor(
-        gen_stmt,
-        Generation,
-        parsed_cursor,
-        model_kind="generation",
+    return await build_task_list(
+        db,
+        _task_listing_runtime(),
+        user_id=user.id,
+        status=status,
+        kind=kind,
+        source=source,
+        conversation_id=conversation_id,
+        project_id=project_id,
+        date_filter=date_filter,
+        cursor=_decode_task_cursor(cursor),
+        error_code=error_code,
+        retryable=retryable,
+        limit=limit,
     )
-    comp_stmt = _apply_task_cursor(
-        comp_stmt,
-        Completion,
-        parsed_cursor,
-        model_kind="completion",
-    )
-
-    gens: list[Generation] = []
-    comps: list[Completion] = []
-    if kind in {"all", "generation"}:
-        gens = list(
-            (
-                await db.execute(
-                    gen_stmt.order_by(
-                        _task_sort_expr(Generation).desc(),
-                        Generation.id.desc(),
-                    ).limit(query_limit)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    if kind in {"all", "completion"}:
-        comps = list(
-            (
-                await db.execute(
-                    comp_stmt.order_by(
-                        _task_sort_expr(Completion).desc(),
-                        Completion.id.desc(),
-                    ).limit(query_limit)
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    message_ids = [gen.message_id for gen in gens] + [
-        completion.message_id for completion in comps
-    ]
-    message_meta: dict[str, tuple[str, dict[str, Any]]] = {}
-    if message_ids:
-        rows = (
-            await db.execute(
-                select(Message.id, Message.conversation_id, Message.content).where(
-                    Message.id.in_(message_ids)
-                )
-            )
-        ).all()
-        message_meta = {
-            mid: (conv_id, _json_dict(content)) for mid, conv_id, content in rows
-        }
-
-    conv_defaults: dict[str, dict[str, Any]] = {}
-    conv_ids = {conv_id for conv_id, _content in message_meta.values() if conv_id}
-    if conv_ids:
-        rows = (
-            await db.execute(
-                select(Conversation.id, Conversation.default_params).where(
-                    Conversation.id.in_(conv_ids)
-                )
-            )
-        ).all()
-        conv_defaults = {conv_id: _json_dict(params) for conv_id, params in rows}
-
-    image_by_gen: dict[str, Image] = {}
-    variant_kinds: dict[str, set[str]] = {}
-    if gens:
-        gen_ids = [g.id for g in gens]
-        image_rows = (
-            await db.execute(
-                select(Image)
-                .where(
-                    Image.owner_generation_id.in_(gen_ids),
-                    Image.deleted_at.is_(None),
-                )
-                .order_by(Image.created_at.asc(), Image.id.asc())
-            )
-        ).scalars().all()
-        for image in image_rows:
-            owner_id = image.owner_generation_id
-            if owner_id and owner_id not in image_by_gen:
-                image_by_gen[owner_id] = image
-        if image_by_gen:
-            rows = (
-                await db.execute(
-                    select(ImageVariant.image_id, ImageVariant.kind).where(
-                        ImageVariant.image_id.in_(
-                            [img.id for img in image_by_gen.values()]
-                        )
-                    )
-                )
-            ).all()
-            for image_id, variant_kind in rows:
-                variant_kinds.setdefault(image_id, set()).add(variant_kind)
-
-    queued_generation_ids = (
-        (
-            await db.execute(
-                select(Generation.id)
-                .where(
-                    Generation.user_id == user.id,
-                    Generation.status == GenerationStatus.QUEUED.value,
-                )
-                .order_by(_task_sort_expr(Generation).asc(), Generation.id.asc())
-            )
-        )
-        .scalars()
-        .all()
-    )
-    queue_positions = {
-        generation_id: index + 1 for index, generation_id in enumerate(queued_generation_ids)
-    }
-
-    sortable_items: list[tuple[datetime, str, str, TaskItemOut]] = []
-
-    def add_item(
-        task: Generation | Completion,
-        item_kind: Literal["generation", "completion"],
-    ) -> None:
-        msg_conv_id, msg_content = message_meta.get(task.message_id, (None, {}))
-        sort_at = _task_sort_at(task)
-        thumb_url = None
-        if item_kind == "generation":
-            image = image_by_gen.get(task.id)
-            if image is not None:
-                thumb_url = _variant_thumb_url(
-                    image.id,
-                    variant_kinds.get(image.id, set()),
-                )
-        item = _build_task_item(
-            item_kind,
-            task,
-            conversation_id=msg_conv_id,
-            message_content=msg_content,
-            conversation_default_params=conv_defaults.get(msg_conv_id or ""),
-            thumb_url=thumb_url,
-            queue_position=queue_positions.get(task.id),
-            sort_at=sort_at,
-        )
-        if source and item.source != source:
-            return
-        if conversation_id and item.conversation_id != conversation_id:
-            return
-        if project_id and item.project_id != project_id:
-            return
-        if retryable is not None and item.retryable is not retryable:
-            return
-        sortable_items.append(
-            (
-                sort_at,
-                item_kind,
-                task.id,
-                item,
-            )
-        )
-
-    for gen in gens:
-        add_item(gen, "generation")
-    for comp in comps:
-        add_item(comp, "completion")
-
-    sortable_items.sort(
-        key=lambda pair: (pair[0], _task_kind_rank(pair[1]), pair[2]),
-        reverse=True,
-    )
-    page = sortable_items[:limit]
-    next_cursor = None
-    if len(sortable_items) > limit and page:
-        sort_at, item_kind, task_id, _item = page[-1]
-        next_cursor = _encode_task_cursor(sort_at, item_kind, task_id)
-    return TaskListOut(items=[item for *_prefix, item in page], next_cursor=next_cursor)
 
 
 @router.get("/tasks/mine/active", response_model=ActiveTasksOut)
@@ -1361,29 +1135,42 @@ async def list_my_active_tasks(
     # busy task type does not starve the other in the final `limit` window.
     query_limit = limit * 2
     gens = (
-        await db.execute(
-            select(Generation).where(
-                Generation.user_id == user.id,
-                Generation.status.in_(
-                    [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-                ),
+        (
+            await db.execute(
+                select(Generation)
+                .where(
+                    Generation.user_id == user.id,
+                    Generation.status.in_(
+                        [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+                    ),
+                )
+                .order_by(Generation.created_at.desc())
+                .limit(query_limit)
             )
-            .order_by(Generation.created_at.desc())
-            .limit(query_limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     comps = (
-        await db.execute(
-            select(Completion).where(
-                Completion.user_id == user.id,
-                Completion.status.in_(
-                    [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
-                ),
+        (
+            await db.execute(
+                select(Completion)
+                .where(
+                    Completion.user_id == user.id,
+                    Completion.status.in_(
+                        [
+                            CompletionStatus.QUEUED.value,
+                            CompletionStatus.STREAMING.value,
+                        ]
+                    ),
+                )
+                .order_by(Completion.created_at.desc())
+                .limit(query_limit)
             )
-            .order_by(Completion.created_at.desc())
-            .limit(query_limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     items: list[tuple[datetime, str, Generation | Completion]] = []
     for gen in gens:
         items.append((gen.created_at, "generation", gen))
@@ -1406,6 +1193,7 @@ async def list_my_active_tasks(
 
 
 # ---------- helpers ----------
+
 
 async def _publish_queued(payload: dict, message_id: str) -> None:
     """Best-effort arq enqueue + PubSub on retry. Outbox publisher is the source of truth."""

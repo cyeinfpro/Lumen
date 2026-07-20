@@ -59,6 +59,15 @@ import { useMaskInpaint } from "../shared/useMaskInpaint";
 import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
+import {
+  allFlags,
+  anyFlag,
+  coalesceValue,
+  fallbackText,
+  firstAttachmentId,
+  renderWhen,
+  selectValue,
+} from "../shared/composerViewState";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import {
@@ -171,7 +180,10 @@ export function DesktopComposerPill({
   });
   const isEnhancing = promptEnhancement.isEnhancing;
   const promptTooLong = isPromptTooLong(text);
-  const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
+  const shouldShowCount = anyFlag(
+    text.length > MAX_PROMPT_CHARS * 0.8,
+    promptTooLong,
+  );
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -350,9 +362,11 @@ export function DesktopComposerPill({
   const attachmentRoles = useComposerAttachmentRoles({
     attachments,
     mode,
-    maskTargetAttachmentId: inpaint.maskActive
-      ? attachments[0]?.id ?? null
-      : null,
+    maskTargetAttachmentId: selectValue(
+      inpaint.maskActive,
+      firstAttachmentId(attachments),
+      null,
+    ),
   });
   const costEstimate = useComposerCostEstimate({
     mode,
@@ -521,25 +535,27 @@ export function DesktopComposerPill({
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
         width: composerFrameWidth(),
-        zIndex: expanded
-          ? ("var(--z-composer-expanded, 45)" as unknown as number)
-          : ("var(--z-composer, 40)" as unknown as number),
+        zIndex: selectValue(
+          expanded,
+          "var(--z-composer-expanded, 45)" as unknown as number,
+          "var(--z-composer, 40)" as unknown as number,
+        ),
       }}
     >
       {/* 折叠态：核心操作保持在一行 */}
-      {!expanded && (
+      {renderWhen(!expanded, (
         <div className="flex h-14 items-center gap-2 px-2.5">
           <IconBtn
             label="添加参考图"
             onClick={openFilePicker}
             disabled={isUploading}
           >
-            {isUploading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Paperclip className="w-4 h-4" />
+            {selectValue(
+              isUploading,
+              <Loader2 className="w-4 h-4 animate-spin" />,
+              <Paperclip className="w-4 h-4" />,
             )}
-            {attachments.length > 0 && (
+            {renderWhen(attachments.length > 0, (
               <span
                 aria-hidden
                 className={cn(
@@ -551,7 +567,7 @@ export function DesktopComposerPill({
               >
                 {attachments.length}x
               </span>
-            )}
+            ))}
           </IconBtn>
 
           <ModeSegment value={mode} onChange={handleModeChange} />
@@ -571,10 +587,14 @@ export function DesktopComposerPill({
             <span
               className={cn(
                 "text-[14px] line-clamp-1",
-                text ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
+                selectValue(
+                  Boolean(text),
+                  "text-[var(--fg-0)]",
+                  "text-[var(--fg-2)]",
+                ),
               )}
             >
-              {text || "描述你想创作的内容…"}
+              {fallbackText(text, "描述你想创作的内容…")}
             </span>
           </button>
 
@@ -586,14 +606,14 @@ export function DesktopComposerPill({
             size="md"
           />
         </div>
-      )}
+      ))}
 
       {/* 展开态 */}
-      {expanded && (
+      {renderWhen(expanded, (
         <div className="flex flex-col">
           {/* 附件托盘 */}
           <AnimatePresence>
-            {isDragActive && (
+            {renderWhen(isDragActive, (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -611,11 +631,11 @@ export function DesktopComposerPill({
                   <span>松开上传图片，最多 {MAX_COMPOSER_ATTACHMENTS} 张</span>
                 </div>
               </motion.div>
-            )}
+            ))}
           </AnimatePresence>
 
           {/* 附件托盘 */}
-          {attachments.length > 0 && (
+          {renderWhen(attachments.length > 0, (
             <div
               className={cn(
                 "flex gap-2 overflow-x-auto overscroll-x-contain no-scrollbar",
@@ -692,7 +712,7 @@ export function DesktopComposerPill({
                 );
               })}
               {/* 局部修改按钮：单张参考图 + image 模式时可用 */}
-              {isImageMode && (
+              {renderWhen(isImageMode, (
                 <button
                   type="button"
                   onClick={inpaint.openInpaint}
@@ -703,11 +723,15 @@ export function DesktopComposerPill({
                     "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
                     "w-16 h-16 rounded-[var(--radius-panel)] border text-[10px] font-medium",
                     "transition-colors",
-                    inpaint.disabled
-                      ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
-                      : inpaint.maskActive
-                        ? "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10 hover:bg-[var(--amber-400)]/15"
-                        : "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:border-[var(--border)]",
+                    selectValue(
+                      inpaint.disabled,
+                      "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed",
+                      selectValue(
+                        inpaint.maskActive,
+                        "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10 hover:bg-[var(--amber-400)]/15",
+                        "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:border-[var(--border)]",
+                      ),
+                    ),
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                   )}
                 >
@@ -715,20 +739,22 @@ export function DesktopComposerPill({
                     className="w-4 h-4"
                     aria-hidden
                   />
-                  <span>{inpaint.maskActive ? "重涂" : "局部"}</span>
+                  <span>
+                    {selectValue(inpaint.maskActive, "重涂", "局部")}
+                  </span>
                 </button>
-              )}
+              ))}
             </div>
-          )}
-          {attachmentRoles.hint && (
+          ))}
+          {renderWhen(Boolean(attachmentRoles.hint), (
             <div className="px-3 pt-1 text-[11px] leading-4 text-[var(--fg-2)]">
               {attachmentRoles.hint}
             </div>
-          )}
+          ))}
 
           {/* 错误条 */}
           <AnimatePresence>
-            {composerError && (
+            {renderWhen(Boolean(composerError), (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -754,7 +780,7 @@ export function DesktopComposerPill({
                   </button>
                 </div>
               </motion.div>
-            )}
+            ))}
           </AnimatePresence>
 
           <PromptEnhancementCandidate
@@ -791,7 +817,7 @@ export function DesktopComposerPill({
                 "w-full bg-transparent outline-none resize-none",
                 "text-body-md text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                 "min-h-11 max-h-[200px]",
-                isEnhancing && "cursor-wait",
+                selectValue(isEnhancing, "cursor-wait", undefined),
               )}
             />
           </div>
@@ -829,22 +855,22 @@ export function DesktopComposerPill({
               onClick={openFilePicker}
               disabled={isUploading}
             >
-              {isUploading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Paperclip className="w-4 h-4" />
+              {selectValue(
+                isUploading,
+                <Loader2 className="w-4 h-4 animate-spin" />,
+                <Paperclip className="w-4 h-4" />,
               )}
             </IconBtn>
 
             <IconBtn
               label={promptEnhancement.triggerLabel}
               onClick={() => void promptEnhancement.trigger(text)}
-              disabled={!isEnhancing && !text.trim()}
+              disabled={allFlags(!isEnhancing, !text.trim())}
             >
-              {isEnhancing ? (
-                <X className="w-4 h-4 text-[var(--danger)]" />
-              ) : (
-                <Sparkles className="w-4 h-4" />
+              {selectValue(
+                isEnhancing,
+                <X className="w-4 h-4 text-[var(--danger)]" />,
+                <Sparkles className="w-4 h-4" />,
               )}
             </IconBtn>
 
@@ -852,20 +878,22 @@ export function DesktopComposerPill({
 
             <ModeSegment value={mode} onChange={handleModeChange} />
 
-            {shouldShowCount && (
+            {renderWhen(shouldShowCount, (
               <span
                 data-inline
                 className={cn(
                   "text-caption tabular-nums transition-colors duration-200",
-                  promptTooLong
-                    ? "text-[var(--danger)]"
-                    : "text-[var(--amber-400)]",
+                  selectValue(
+                    promptTooLong,
+                    "text-[var(--danger)]",
+                    "text-[var(--amber-400)]",
+                  ),
                 )}
                 style={{ fontFamily: "var(--font-mono)" }}
               >
                 {text.length}/{MAX_PROMPT_CHARS}
               </span>
-            )}
+            ))}
 
             <div className="flex-1 min-w-2" />
 
@@ -897,7 +925,7 @@ export function DesktopComposerPill({
               onAspectChange={setAspectRatio}
               count={count}
               onCountChange={setImageCount}
-              reasoningEffort={reasoningEffort ?? "medium"}
+              reasoningEffort={coalesceValue(reasoningEffort, "medium")}
               onReasoningEffortChange={setReasoningEffort}
               webSearch={webSearch}
               onWebSearchChange={setWebSearch}
@@ -913,7 +941,7 @@ export function DesktopComposerPill({
             />
           </DesktopPopover>
         </div>
-      )}
+      ))}
 
       {/* 隐藏文件输入 */}
       <input
@@ -928,7 +956,7 @@ export function DesktopComposerPill({
     </div>
 
     {/* 局部修改 mask 画布弹窗 */}
-    {inpaint.open ? (
+    {renderWhen(inpaint.open, (
       <LazyMaskCanvas
         open={inpaint.open}
         imageSrc={inpaint.sourceImageSrc}
@@ -936,7 +964,7 @@ export function DesktopComposerPill({
         onConfirm={inpaint.handleConfirm}
         submitting={inpaint.submitting}
       />
-    ) : null}
+    ))}
     </>
   );
 }

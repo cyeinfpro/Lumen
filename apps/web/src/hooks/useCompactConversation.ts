@@ -1,0 +1,149 @@
+"use client";
+
+// 手动压缩对话上下文的 React Query mutation hook（P0-3 前端入口）。
+//
+// 契约见 apiClient.ts 的 compactConversation：
+//   POST /api/conversations/{conversationId}/compact
+//   Body: { extra_instruction?: string, force?: boolean, background?: boolean }
+//   200 命中压缩：    { status: "ok", compacted: true,  summary: CompactSummary }
+//   200 未达阈值：    { status: "ok", compacted: false, reason: "below_budget", ... }
+//   200 后台任务中：  { status: "pending", compacted: false, reason: "pending", job_id }
+//   404 / 409 / 503: ApiError，详见 onError 注释
+//
+// 入口位置：
+//   - 桌面：DesktopStudio 顶栏的 ContextWindowMeter（"压缩历史"按钮）
+//   - 移动：MobileStudioTopBar 顶栏的 ContextWindowMeter（compact 模式 Archive 图标）
+// 两端直接触发后台压缩，不再弹出手动压缩确认框。
+
+import { useMutation, useQueryClient, type UseMutationOptions } from "@tanstack/react-query";
+
+import {
+  ApiError,
+  compactConversation,
+  type CompactConversationApiResponse,
+  type CompactUnavailableReason,
+} from "@/lib/apiClient";
+import { qk } from "@/lib/queries";
+import { useUserQueryScope } from "@/lib/queries/userScope";
+
+export type {
+  CompactConversationApiResponse,
+  CompactConversationResponse,
+  CompactSummary,
+  CompactSummaryStatus,
+  CompactUnavailableReason,
+} from "@/lib/apiClient";
+
+type ErrorPayload = {
+  error?: {
+    reason?: unknown;
+    details?: Record<string, unknown>;
+    rate_limit_reset_seconds?: unknown;
+  };
+};
+
+export interface CompactConversationVars {
+  conversationId: string;
+  extra_instruction?: string | null;
+  // 默认 true：用户点"立即压缩"按钮就该真打上游，不管历史是否到阈值
+  force?: boolean;
+}
+
+// 后端统一错误 payload 形如 { error: { code, message, ... } }。
+function readUnavailableReason(err: unknown): CompactUnavailableReason | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status !== 503) return null;
+  const reason = readErrorField(err.payload, "reason");
+  if (
+    reason === "lock_busy" ||
+    reason === "circuit_open" ||
+    reason === "upstream_error"
+  ) {
+    return reason;
+  }
+  return null;
+}
+
+function readErrorField(payload: unknown, field: "reason" | "rate_limit_reset_seconds"): unknown {
+  if (!payload || typeof payload !== "object") return null;
+  const direct = (payload as Record<string, unknown>)[field];
+  const error = (payload as ErrorPayload).error;
+  if (direct != null) return direct;
+  if (error && typeof error === "object") {
+    const fromError = (error as Record<string, unknown>)[field];
+    if (fromError != null) return fromError;
+    const details = (error as ErrorPayload["error"])?.details;
+    if (details && typeof details === "object") {
+      return details[field];
+    }
+  }
+  return null;
+}
+
+function describeCooldownError(err: ApiError): string {
+  const reset = readErrorField(err.payload, "rate_limit_reset_seconds");
+  if (typeof reset === "number" && Number.isFinite(reset) && reset > 0) {
+    return `冷却中，${Math.ceil(reset)} 秒后可重试`;
+  }
+  return "冷却中，请稍后重试";
+}
+
+function describeUnavailableError(err: ApiError): string {
+  const reason = readUnavailableReason(err);
+  const messages: Partial<Record<CompactUnavailableReason, string>> = {
+    lock_busy: "正在压缩中，稍后再试",
+    circuit_open: "压缩服务暂不可用",
+    upstream_error: "上游服务异常，稍后重试",
+  };
+  return (reason && messages[reason]) || "压缩服务暂不可用";
+}
+
+// 把后端错误翻译成"用户能读懂的一行话"，调用方可自行 toast。
+export function describeCompactError(err: unknown): string {
+  if (!(err instanceof ApiError)) {
+    return err instanceof Error && err.message ? err.message : "压缩失败";
+  }
+  if (err.status === 404) return "对话不存在或无权限";
+  if (err.status === 409) return "暂无可压缩的历史";
+  if (err.status === 503) return describeUnavailableError(err);
+  if (err.status === 429 && err.code === "manual_compact_cooldown") {
+    return describeCooldownError(err);
+  }
+  if (err.status === 401) return "请重新登录";
+  return err.message || `压缩失败 (HTTP ${err.status})`;
+}
+
+export function useCompactConversation(
+  options?: Omit<
+    UseMutationOptions<CompactConversationApiResponse, Error, CompactConversationVars>,
+    "mutationFn"
+  >,
+) {
+  const userScope = useUserQueryScope();
+  const qc = useQueryClient();
+  const userKeys = qk.user(userScope.userId);
+
+  return useMutation<CompactConversationApiResponse, Error, CompactConversationVars>({
+    mutationFn: async ({ conversationId, extra_instruction, force = true }) => {
+      return compactConversation(conversationId, {
+        extra_instruction,
+        force,
+        background: true,
+      });
+    },
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      if (data.status === "ok") {
+        // 让下一次 chat 拿到最新摘要：会话上下文统计需主动 refetch（顶栏 token 计量器即时刷新），消息列表/会话列表交给 active observers 自动拉取。
+        void qc.refetchQueries({
+          queryKey: userKeys.conversationContext(vars.conversationId),
+        });
+        void qc.invalidateQueries({ queryKey: ["messages", vars.conversationId] });
+        void qc.invalidateQueries({
+          queryKey: userKeys.conversationsAll(),
+        });
+      }
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}

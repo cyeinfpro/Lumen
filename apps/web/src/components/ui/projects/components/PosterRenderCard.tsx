@@ -46,6 +46,78 @@ interface PosterRenderCardProps {
   onPreview?: (image: BackendImageMeta) => void;
 }
 
+function PosterPreview({
+  image,
+  render,
+  isGenerating,
+  isFailed,
+  onPreview,
+}: {
+  image?: BackendImageMeta;
+  render: PosterRender;
+  isGenerating: boolean;
+  isFailed: boolean;
+  onPreview?: (image: BackendImageMeta) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (image && onPreview) onPreview(image);
+      }}
+      disabled={!image}
+      className={cn(
+        "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        aspectClass(render.aspect_ratio),
+      )}
+    >
+      {image ? (
+        <Image
+          src={imageSrc(image)}
+          alt={`海报 ${render.aspect_ratio}`}
+          fill
+          sizes="(max-width: 768px) 50vw, 360px"
+          unoptimized
+          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
+        />
+      ) : (
+        <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+          {isGenerating ? (
+            <>
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+                {render.status === "revising" ? "返修中" : "生成中"}
+              </span>
+            </>
+          ) : isFailed ? (
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
+              生成失败
+            </span>
+          ) : (
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+              等待中
+            </span>
+          )}
+        </div>
+      )}
+
+      <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
+        {render.aspect_ratio}
+      </span>
+    </button>
+  );
+}
+
+function downloadPoster(downloadHref: string, render: PosterRender) {
+  if (!downloadHref) return;
+  const link = document.createElement("a");
+  link.href = downloadHref;
+  link.download = `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 export function PosterRenderCard({
   workflow,
   render,
@@ -65,51 +137,13 @@ export function PosterRenderCard({
 
   return (
     <li className="group relative">
-      <button
-        type="button"
-        onClick={() => {
-          if (image && onPreview) onPreview(image);
-        }}
-        disabled={!image}
-        className={cn(
-          "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          aspectClass(render.aspect_ratio),
-        )}
-      >
-        {image ? (
-          <Image
-            src={imageSrc(image)}
-            alt={`海报 ${render.aspect_ratio}`}
-            fill
-            sizes="(max-width: 768px) 50vw, 360px"
-            unoptimized
-            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
-          />
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
-            {isGenerating ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                  {render.status === "revising" ? "返修中" : "生成中"}
-                </span>
-              </>
-            ) : isFailed ? (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
-                生成失败
-              </span>
-            ) : (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                等待中
-              </span>
-            )}
-          </div>
-        )}
-
-        <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
-          {render.aspect_ratio}
-        </span>
-      </button>
+      <PosterPreview
+        image={image}
+        render={render}
+        isGenerating={isGenerating}
+        isFailed={isFailed}
+        onPreview={onPreview}
+      />
 
       <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
         <p className="text-[14px] font-medium tracking-tight text-[var(--fg-0)]">
@@ -146,15 +180,7 @@ export function PosterRenderCard({
           variant="ghost"
           size="sm"
           disabled={!downloadHref}
-          onClick={() => {
-            if (!downloadHref) return;
-            const link = document.createElement("a");
-            link.href = downloadHref;
-            link.download = `poster_${render.aspect_ratio}_${render.id.slice(0, 8)}.png`;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-          }}
+          onClick={() => downloadPoster(downloadHref, render)}
           leftIcon={<Download className="h-3.5 w-3.5" />}
         >
           下载

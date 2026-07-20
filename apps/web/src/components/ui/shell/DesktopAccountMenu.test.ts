@@ -24,6 +24,10 @@ const queryProviderSource = readFileSync(
   new URL("../../QueryProvider.tsx", import.meta.url),
   "utf8",
 );
+const queryIdentitySource = readFileSync(
+  new URL("../../../lib/queries/userScope.ts", import.meta.url),
+  "utf8",
+);
 const runtimeDefaultsSource = readFileSync(
   new URL("../../RuntimeDefaultsBootstrap.tsx", import.meta.url),
   "utf8",
@@ -153,15 +157,15 @@ type QueryProviderHelpers = {
 };
 
 function loadQueryProviderHelpers(): QueryProviderHelpers {
-  const start = queryProviderSource.indexOf(
+  const start = queryIdentitySource.indexOf(
     "export const AUTH_USER_QUERY_KEY",
   );
-  const end = queryProviderSource.indexOf(
+  const end = queryIdentitySource.indexOf(
     "export function useUserQueryScope",
   );
   ok(start >= 0 && end > start, "missing query identity helper block");
   const output = ts.transpileModule(
-    queryProviderSource.slice(start, end),
+    queryIdentitySource.slice(start, end),
     {
       compilerOptions: {
         module: ts.ModuleKind.CommonJS,

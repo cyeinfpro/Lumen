@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,11 +20,18 @@ from lumen_core.providers import parse_provider_bool, parse_proxy_json
 from lumen_core.url_security import PublicHttpTarget, resolve_public_http_target
 
 from .config import settings
-from .provider_pool import ResolvedProvider
-from .upstream import UpstreamError
+from .provider_runtime import byok_context as _byok_context
+from .provider_runtime.contracts import ResolvedProvider
+from .provider_runtime.errors import UpstreamError
 
 
 logger = logging.getLogger(__name__)
+_BYOK_HTTP_TARGET_CONTEXT = _byok_context._BYOK_HTTP_TARGET_CONTEXT
+_http_origin = _byok_context._http_origin
+bind_byok_http_target = _byok_context.bind_byok_http_target
+current_byok_http_target = _byok_context.current_byok_http_target
+reset_byok_http_target = _byok_context.reset_byok_http_target
+validate_byok_http_target = _byok_context.validate_byok_http_target
 
 
 # 由 tasks 模块（generation.py / completion.py / upstream.py）共享的 BYOK provider
@@ -34,10 +39,6 @@ logger = logging.getLogger(__name__)
 # 跳过 BYOK provider，否则会污染共享 provider 池的健康度 / 配额计数。
 _BYOK_PROVIDER_PREFIX = "user:"
 _DEV_ENVS = {"dev", "development", "local", "test"}
-_BYOK_HTTP_TARGET_CONTEXT: ContextVar[PublicHttpTarget | None] = ContextVar(
-    "byok_http_target",
-    default=None,
-)
 
 
 def is_byok_provider(provider: Any) -> bool:
@@ -57,43 +58,6 @@ def _credential_provider_name(supplier: ApiSupplierTemplate, credential_id: str)
 
 def _is_dev_env() -> bool:
     return settings.app_env.strip().lower() in _DEV_ENVS
-
-
-def _http_origin(value: str) -> tuple[str, str, int]:
-    parsed = urlsplit(value)
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    return parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."), port
-
-
-def current_byok_http_target(url: str | None = None) -> PublicHttpTarget | None:
-    target = _BYOK_HTTP_TARGET_CONTEXT.get()
-    if target is None or not target.resolved_ips:
-        return None
-    if url is not None and _http_origin(target.url) != _http_origin(url):
-        return None
-    return target
-
-
-def validate_byok_http_target(
-    target: PublicHttpTarget | None,
-    url: str,
-) -> PublicHttpTarget | None:
-    """Return a usable pin only when it matches the outbound request origin."""
-    if target is None or not target.resolved_ips:
-        return None
-    if _http_origin(target.url) != _http_origin(url):
-        raise ValueError("validated BYOK target origin does not match request URL")
-    return target
-
-
-def bind_byok_http_target(
-    target: PublicHttpTarget | None,
-) -> Token[PublicHttpTarget | None]:
-    return _BYOK_HTTP_TARGET_CONTEXT.set(target)
-
-
-def reset_byok_http_target(token: Token[PublicHttpTarget | None]) -> None:
-    _BYOK_HTTP_TARGET_CONTEXT.reset(token)
 
 
 async def _resolve_supplier_base_target(raw_base_url: str) -> PublicHttpTarget:

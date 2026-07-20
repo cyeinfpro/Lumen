@@ -19,6 +19,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .sse_transport import CurlSSEEventParser, CurlSSEProcess, decode_sse_event
+
 ImageProgressCallback = Callable[[dict[str, Any]], Any]
 
 _UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
@@ -115,7 +117,7 @@ def _current_byok_http_target(
 ) -> Any | None:
     if proxy_url is not None:
         return None
-    from ..byok_runtime import current_byok_http_target
+    from ..provider_runtime.byok_context import current_byok_http_target
 
     return current_byok_http_target(url)
 
@@ -640,6 +642,14 @@ async def _curl_stderr_text(stderr_task: asyncio.Task[bytes] | None) -> str:
     return raw.decode("utf-8", "replace")
 
 
+async def _read_curl_stderr(stream: Any) -> bytes:
+    return await _read_stream_limited(
+        stream,
+        max_bytes=_CURL_STDERR_MAX_BYTES,
+        label="curl stderr",
+    )
+
+
 async def _read_curl_response_head(
     reader: _CurlSSEReader,
     *,
@@ -671,30 +681,17 @@ async def _iter_curl_sse_events(
     *,
     facade: Any,
 ) -> AsyncIterator[dict[str, Any]]:
-    event_type: str | None = None
-    event_data: list[str] = []
+    parser = CurlSSEEventParser()
     while True:
         raw = await reader.next_line()
         if raw is None:
             break
-        line_text = raw.decode("utf-8", "replace").rstrip("\r\n")
-        if line_text == "":
-            if event_data:
-                event = _decode_curl_sse_event(event_type, event_data)
-                if event is not None:
-                    facade._maybe_record_usage_from_event(event)
-                    yield event
-            event_type = None
-            event_data = []
-            continue
-        if line_text.startswith(":"):
-            continue
-        if line_text.startswith("event:"):
-            event_type = line_text[6:].strip()
-        elif line_text.startswith("data:"):
-            event_data.append(line_text[5:].lstrip())
+        event = parser.feed_line(raw)
+        if event is not None:
+            facade._maybe_record_usage_from_event(event)
+            yield event
 
-    event = _decode_curl_sse_event(event_type, event_data)
+    event = parser.finish()
     if event is not None:
         facade._maybe_record_usage_from_event(event)
         yield event
@@ -704,18 +701,7 @@ def _decode_curl_sse_event(
     event_type: str | None,
     event_data: list[str],
 ) -> dict[str, Any] | None:
-    data = "\n".join(event_data)
-    if not data or data == "[DONE]":
-        return None
-    try:
-        event = json.loads(data)
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(event, dict):
-        return None
-    if event_type and "type" not in event:
-        event["type"] = event_type
-    return event
+    return decode_sse_event(event_type, event_data)
 
 
 async def _iter_sse_curl(
@@ -740,10 +726,7 @@ async def _iter_sse_curl(
         prefix="lumen_sse_body_",
         suffix=".json",
     )
-    proc: asyncio.subprocess.Process | None = None
-    config_path: str | None = None
-    stderr_task: asyncio.Task[bytes] | None = None
-    reader: _CurlSSEReader | None = None
+    process = CurlSSEProcess(body_fd=fd, body_path=body_path)
     started = time.monotonic()
     response_headers: dict[str, str] = {}
     final_status = 0
@@ -752,13 +735,15 @@ async def _iter_sse_curl(
         try:
             await asyncio.to_thread(facade._write_json_body_file, fd, json_body)
         finally:
-            os.close(fd)
+            process.close_body_fd()
 
-        config_path = await _stage_curl_secret_config(
-            url=url,
-            headers={**headers, "Content-Type": "application/json"},
-            proxy_url=proxy_url,
-            pinned_target=pinned_target,
+        process.set_config_path(
+            await _stage_curl_secret_config(
+                url=url,
+                headers={**headers, "Content-Type": "application/json"},
+                proxy_url=proxy_url,
+                pinned_target=pinned_target,
+            )
         )
         cmd = [
             facade._CURL_BIN,
@@ -766,18 +751,13 @@ async def _iter_sse_curl(
             "-N",
             "-i",
             "--config",
-            config_path,
+            process.config_path,
             "--data-binary",
             f"@{body_path}",
             url,
         ]
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            proc = await process.start(cmd, stderr_reader=_read_curl_stderr)
         except OSError as exc:
             raise facade.UpstreamError(
                 f"curl sse executable failed to start: {facade._CURL_BIN!r}: {exc}",
@@ -785,14 +765,6 @@ async def _iter_sse_curl(
                 status_code=None,
             ) from exc
         assert proc.stdout is not None
-        if proc.stderr is not None:
-            stderr_task = asyncio.create_task(
-                _read_stream_limited(
-                    proc.stderr,
-                    max_bytes=_CURL_STDERR_MAX_BYTES,
-                    label="curl stderr",
-                )
-            )
 
         reader = _CurlSSEReader(
             proc.stdout,
@@ -869,9 +841,9 @@ async def _iter_sse_curl(
                     "payload": json_payload,
                     "content_type": content_type,
                 }
-                rc = await proc.wait()
+                rc = await process.wait()
                 if rc != 0:
-                    stderr_s = await _curl_stderr_text(stderr_task)
+                    stderr_s = await _curl_stderr_text(process.stderr_task)
                     facade.logger.debug(
                         "curl json fallback exited rc=%s stderr=%.500s",
                         rc,
@@ -882,9 +854,9 @@ async def _iter_sse_curl(
         async for event in _iter_curl_sse_events(reader, facade=facade):
             yield event
 
-        rc = await proc.wait()
+        rc = await process.wait()
         if rc != 0:
-            stderr_s = await _curl_stderr_text(stderr_task)
+            stderr_s = await _curl_stderr_text(process.stderr_task)
             raise facade.UpstreamError(
                 f"curl sse exited rc={rc} stderr={stderr_s[:500]}",
                 error_code=facade.EC.SSE_CURL_FAILED.value,
@@ -893,22 +865,7 @@ async def _iter_sse_curl(
     except asyncio.CancelledError:
         raise
     finally:
-        await facade._terminate_curl_proc_group(proc)
-        if stderr_task is not None:
-            if not stderr_task.done():
-                stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        if config_path is not None:
-            with suppress(OSError):
-                os.unlink(config_path)
-        try:
-            os.unlink(body_path)
-        except Exception:  # noqa: BLE001
-            pass
+        await process.cleanup(facade._terminate_curl_proc_group)
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
             facade._log_upstream_call(

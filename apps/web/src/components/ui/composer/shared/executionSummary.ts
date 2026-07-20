@@ -43,6 +43,62 @@ function imageTaskLabel(input: {
   return "参考图生图";
 }
 
+function executionTaskLabel(
+  mode: ComposerMode,
+  attachmentCount: number,
+  input: {
+    attachmentCount: number;
+    maskActive: boolean;
+    attachmentRoles: ComposerAttachmentRole[];
+  },
+): string {
+  if (mode === "image") return imageTaskLabel(input);
+  return attachmentCount > 0 ? "识图问答" : "文本对话";
+}
+
+function imageExecutionParts(input: {
+  attachmentCount: number;
+  outputCount: number;
+  aspect: AspectRatio;
+  quality: Quality;
+  renderQuality: RenderQualityChoice;
+  fast: boolean;
+}): string[] {
+  const count = Math.max(1, Math.min(16, input.outputCount || 1));
+  const parts = [
+    `${count} 张`,
+    input.aspect,
+    QUALITY_LABELS[input.quality],
+    RENDER_QUALITY_LABELS[input.renderQuality],
+    input.fast ? "Fast" : "标准",
+  ];
+  if (input.attachmentCount > 0) parts.push(`${input.attachmentCount} 张参考`);
+  return parts;
+}
+
+function chatExecutionParts(input: {
+  attachmentCount: number;
+  fast: boolean;
+  reasoningEffort?: string;
+  webSearch?: boolean;
+  fileSearch?: boolean;
+  codeInterpreter?: boolean;
+  imageGeneration?: boolean;
+}): string[] {
+  const parts: string[] = [];
+  if (input.attachmentCount > 0) parts.push(`${input.attachmentCount} 张图`);
+  const reasoning = input.reasoningEffort
+    ? REASONING_LABELS[input.reasoningEffort]
+    : null;
+  if (reasoning) parts.push(reasoning);
+  parts.push(input.fast ? "Fast" : "标准");
+  if (input.webSearch) parts.push("联网");
+  if (input.fileSearch) parts.push("文件");
+  if (input.codeInterpreter) parts.push("代码");
+  if (input.imageGeneration) parts.push("可出图");
+  return parts;
+}
+
 export function buildComposerExecutionSummary(input: {
   mode: ComposerMode;
   attachmentCount: number;
@@ -61,35 +117,12 @@ export function buildComposerExecutionSummary(input: {
   codeInterpreter?: boolean;
   imageGeneration?: boolean;
 }): ComposerExecutionSummary {
-  const parts: string[] = [];
   const tone = input.mode === "image" ? "image" : "chat";
-
-  const taskLabel =
+  const taskLabel = executionTaskLabel(input.mode, input.attachmentCount, input);
+  const parts =
     input.mode === "image"
-      ? imageTaskLabel(input)
-      : input.attachmentCount > 0
-        ? "识图问答"
-        : "文本对话";
-
-  if (input.mode === "image") {
-    const count = Math.max(1, Math.min(16, input.outputCount || 1));
-    parts.push(`${count} 张`, input.aspect, QUALITY_LABELS[input.quality]);
-    parts.push(RENDER_QUALITY_LABELS[input.renderQuality]);
-    parts.push(input.fast ? "Fast" : "标准");
-    if (input.attachmentCount > 0) parts.push(`${input.attachmentCount} 张参考`);
-  } else {
-    if (input.attachmentCount > 0) parts.push(`${input.attachmentCount} 张图`);
-    const reasoning = input.reasoningEffort
-      ? REASONING_LABELS[input.reasoningEffort]
-      : null;
-    if (reasoning) parts.push(reasoning);
-    parts.push(input.fast ? "Fast" : "标准");
-    if (input.webSearch) parts.push("联网");
-    if (input.fileSearch) parts.push("文件");
-    if (input.codeInterpreter) parts.push("代码");
-    if (input.imageGeneration) parts.push("可出图");
-  }
-
+      ? imageExecutionParts(input)
+      : chatExecutionParts(input);
   if (input.costLabel) parts.push(input.costLabel);
 
   const text = ["将执行：" + taskLabel, ...parts].join(" · ");

@@ -24,11 +24,11 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
-from .providers import (
+from ..runtime_settings import get_setting, get_settings_view, update_settings
+from ..services.provider_config import (
     ensure_enabled_provider_proxies,
     ensure_enabled_video_provider_proxies,
 )
-from ..runtime_settings import get_setting, get_settings_view, update_settings
 from ..services.redemption_secret import (
     PreviousRedemptionSecretLocked,
     remember_previous_redemption_secret,

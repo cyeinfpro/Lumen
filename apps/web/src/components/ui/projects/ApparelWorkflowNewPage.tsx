@@ -13,7 +13,14 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Loader2, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateApparelWorkflowMutation } from "@/lib/queries";
@@ -481,116 +488,20 @@ export function ApparelWorkflowNewPage() {
 
           <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
             <section className="grid min-w-0 gap-5 md:gap-6">
-              {/* Upload */}
-              <SectionHeader
-                eyebrow="N°01 — 上传"
-                title="商品图"
-                trailing={
-                  <span className="font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
-                    {String(files.length).padStart(2, "0")} / {String(MAX_PRODUCT_IMAGES).padStart(2, "0")}
-                  </span>
-                }
-              />
-
-              <div
-                onDragEnter={(event) => {
-                  event.preventDefault();
-                  setDragActive(true);
-                }}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  if (!dragActive) setDragActive(true);
-                }}
-                onDragLeave={(event) => {
-                  if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-                  setDragActive(false);
-                }}
+              <ApparelProductImagesSection
+                files={files}
+                fileInputRef={fileInputRef}
+                isBusy={isBusy}
+                dragActive={dragActive}
+                anyUploading={anyUploading}
+                totalProgress={totalProgress}
+                onDragActiveChange={setDragActive}
                 onDrop={onDrop}
-                className="relative -mt-3 md:-mt-4"
-              >
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isBusy}
-                  className={cn(
-                    "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[220px] md:min-h-[260px]",
-                    dragActive
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
-                      : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors md:h-12 md:w-12",
-                      dragActive
-                        ? "border-[var(--border-amber)] bg-[var(--accent)] text-black"
-                        : "border-[var(--border)] bg-transparent text-[var(--fg-1)]",
-                    )}
-                  >
-                    <Upload className="h-5 w-5" strokeWidth={1.5} />
-                  </span>
-                  <p
-                    className={cn(
-                      "type-section-title md:text-[20px]",
-                      dragActive ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
-                    )}
-                  >
-                    {dragActive ? "松开即可加入项目" : "拖拽到这里，或点击选择"}
-                  </p>
-                  <p className="max-w-[18rem] font-mono text-[10px] uppercase tracking-[0.12em] leading-5 text-[var(--fg-2)] sm:tracking-[0.22em]">
-                    PNG / JPG / WebP 格式 &nbsp;·&nbsp; ≤ {formatBytes(MAX_PRODUCT_IMAGE_BYTES)} &nbsp;·&nbsp; 最多 {MAX_PRODUCT_IMAGES} 张
-                  </p>
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept={ACCEPT.join(",")}
-                  multiple
-                  className="hidden"
-                  onChange={(event) => {
-                    onPickFiles(event.target.files);
-                    event.target.value = "";
-                  }}
-                />
-              </div>
-
-              {/* Aggregate progress hairline */}
-              {anyUploading ? (
-                <div className="-mt-6 grid gap-2">
-                  <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                    <span>上传中</span>
-                    <span className="tabular-nums text-[var(--amber-300)]">
-                      {Math.round(totalProgress * 100).toString().padStart(2, "0")}%
-                    </span>
-                  </div>
-                  <div className="relative h-px w-full bg-[var(--border)]">
-                    <div
-                      className="absolute inset-y-0 left-0 bg-[var(--amber-400)] transition-[width] duration-200 ease-out"
-                      style={{ width: `${totalProgress * 100}%` }}
-                    />
-                  </div>
-                </div>
-              ) : null}
-
-              {/* File preview grid: portrait cards */}
-              {files.length > 0 ? (
-                <ul className="-mt-4 grid grid-cols-1 gap-x-4 gap-y-8 min-[390px]:grid-cols-2 md:grid-cols-3 md:gap-x-6">
-                  {files.map((item, index) => (
-                    <FilePortrait
-                      key={item.uid}
-                      item={item}
-                      index={index}
-                      total={files.length}
-                      locked={isBusy}
-                      onRetry={() => uploadOne(item)}
-                      onCancel={() => item.controller?.abort()}
-                      onMoveUp={() => moveFile(item.uid, -1)}
-                      onMoveDown={() => moveFile(item.uid, 1)}
-                      onRemove={() => removeFile(item.uid)}
-                    />
-                  ))}
-                </ul>
-              ) : null}
+                onPickFiles={onPickFiles}
+                onUploadOne={uploadOne}
+                onMoveFile={moveFile}
+                onRemoveFile={removeFile}
+              />
 
               {/* Project title */}
               <div className="grid gap-4">
@@ -710,34 +621,12 @@ export function ApparelWorkflowNewPage() {
                 </div>
               ) : null}
 
-              {/* Desktop CTA inline at the bottom */}
-              <div className="hidden border-t border-[var(--border)] pt-6 md:block">
-                <button
-                  type="button"
-                  onClick={onCreate}
-                  disabled={ctaDisabled}
-                  className={cn(
-                    "group inline-flex items-center gap-3 rounded-full px-7 py-3.5 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,opacity,box-shadow] duration-[var(--dur-base)]",
-                    ctaDisabled
-                      ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
-                      : "cursor-pointer bg-[var(--accent)] hover:scale-[1.02] active:scale-[0.98]",
-                  )}
-                >
-                  {isBusy ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : null}
-                  <span>
-                    {isBusy
-                      ? "正在创建项目"
-                      : allDone
-                        ? "创建项目并开始分析"
-                        : "上传图片并创建项目"}
-                  </span>
-                  {!isBusy ? (
-                    <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-enabled:group-hover:translate-x-0 group-enabled:group-hover:opacity-100" />
-                  ) : null}
-                </button>
-              </div>
+              <ApparelCreateButton
+                isBusy={isBusy}
+                allDone={allDone}
+                disabled={ctaDisabled}
+                onClick={onCreate}
+              />
             </section>
 
             {/* Right rail */}
@@ -762,31 +651,209 @@ export function ApparelWorkflowNewPage() {
         </div>
       </main>
 
-      {/* Mobile sticky CTA */}
-      <div className="fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden">
-        <button
-          type="button"
-          onClick={onCreate}
-          disabled={ctaDisabled}
-          className={cn(
-            "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
-            ctaDisabled
-              ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
-              : "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]",
-          )}
-        >
-          {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          {isBusy
-            ? "正在创建项目"
-            : allDone
-              ? "创建项目并开始分析"
-              : "上传图片并创建项目"}
-        </button>
-      </div>
+      <ApparelCreateButton
+        mobile
+        isBusy={isBusy}
+        allDone={allDone}
+        disabled={ctaDisabled}
+        onClick={onCreate}
+      />
 
       <ProjectMobileTabBar />
     </div>
   );
+}
+
+function ApparelProductImagesSection({
+  files,
+  fileInputRef,
+  isBusy,
+  dragActive,
+  anyUploading,
+  totalProgress,
+  onDragActiveChange,
+  onDrop,
+  onPickFiles,
+  onUploadOne,
+  onMoveFile,
+  onRemoveFile,
+}: {
+  files: PendingFile[];
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  isBusy: boolean;
+  dragActive: boolean;
+  anyUploading: boolean;
+  totalProgress: number;
+  onDragActiveChange: (active: boolean) => void;
+  onDrop: (event: React.DragEvent) => void;
+  onPickFiles: (list: FileList | null) => void;
+  onUploadOne: (file: PendingFile) => Promise<string | null>;
+  onMoveFile: (uid: string, direction: -1 | 1) => void;
+  onRemoveFile: (uid: string) => void;
+}) {
+  return (
+    <>
+      <SectionHeader
+        eyebrow="N°01 — 上传"
+        title="商品图"
+        trailing={
+          <span className="font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
+            {String(files.length).padStart(2, "0")} /{" "}
+            {String(MAX_PRODUCT_IMAGES).padStart(2, "0")}
+          </span>
+        }
+      />
+      <div
+        onDragEnter={(event) => {
+          event.preventDefault();
+          onDragActiveChange(true);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          if (!dragActive) onDragActiveChange(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+          onDragActiveChange(false);
+        }}
+        onDrop={onDrop}
+        className="relative -mt-3 md:-mt-4"
+      >
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isBusy}
+          className={cn(
+            "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[220px] md:min-h-[260px]",
+            dragActive
+              ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
+              : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors md:h-12 md:w-12",
+              dragActive
+                ? "border-[var(--border-amber)] bg-[var(--accent)] text-black"
+                : "border-[var(--border)] bg-transparent text-[var(--fg-1)]",
+            )}
+          >
+            <Upload className="h-5 w-5" strokeWidth={1.5} />
+          </span>
+          <p
+            className={cn(
+              "type-section-title md:text-[20px]",
+              dragActive
+                ? "text-[var(--amber-300)]"
+                : "text-[var(--fg-0)]",
+            )}
+          >
+            {dragActive ? "松开即可加入项目" : "拖拽到这里，或点击选择"}
+          </p>
+          <p className="max-w-[18rem] font-mono text-[10px] uppercase tracking-[0.12em] leading-5 text-[var(--fg-2)] sm:tracking-[0.22em]">
+            PNG / JPG / WebP 格式 &nbsp;·&nbsp; ≤{" "}
+            {formatBytes(MAX_PRODUCT_IMAGE_BYTES)} &nbsp;·&nbsp; 最多{" "}
+            {MAX_PRODUCT_IMAGES} 张
+          </p>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ACCEPT.join(",")}
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            onPickFiles(event.target.files);
+            event.target.value = "";
+          }}
+        />
+      </div>
+      {anyUploading ? (
+        <div className="-mt-6 grid gap-2">
+          <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <span>上传中</span>
+            <span className="tabular-nums text-[var(--amber-300)]">
+              {Math.round(totalProgress * 100).toString().padStart(2, "0")}%
+            </span>
+          </div>
+          <div className="relative h-px w-full bg-[var(--border)]">
+            <div
+              className="absolute inset-y-0 left-0 bg-[var(--amber-400)] transition-[width] duration-200 ease-out"
+              style={{ width: `${totalProgress * 100}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+      {files.length > 0 ? (
+        <ul className="-mt-4 grid grid-cols-1 gap-x-4 gap-y-8 min-[390px]:grid-cols-2 md:grid-cols-3 md:gap-x-6">
+          {files.map((item, index) => (
+            <FilePortrait
+              key={item.uid}
+              item={item}
+              index={index}
+              total={files.length}
+              locked={isBusy}
+              onRetry={() => onUploadOne(item)}
+              onCancel={() => item.controller?.abort()}
+              onMoveUp={() => onMoveFile(item.uid, -1)}
+              onMoveDown={() => onMoveFile(item.uid, 1)}
+              onRemove={() => onRemoveFile(item.uid)}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </>
+  );
+}
+
+function ApparelCreateButton({
+  isBusy,
+  allDone,
+  disabled,
+  mobile = false,
+  onClick,
+}: {
+  isBusy: boolean;
+  allDone: boolean;
+  disabled: boolean;
+  mobile?: boolean;
+  onClick: () => void;
+}) {
+  const wrapperClass = mobile
+    ? "fixed inset-x-0 bottom-[var(--mobile-tabbar-height)] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[390px]:px-4 md:hidden"
+    : "hidden border-t border-[var(--border)] pt-6 md:block";
+  const buttonClass = mobile
+    ? "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]"
+    : "group inline-flex items-center gap-3 rounded-full px-7 py-3.5 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,opacity,box-shadow] duration-[var(--dur-base)]";
+  const enabledClass = mobile
+    ? "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]"
+    : "cursor-pointer bg-[var(--accent)] hover:scale-[1.02] active:scale-[0.98]";
+  return (
+    <div className={wrapperClass}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className={cn(
+          buttonClass,
+          disabled
+            ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
+            : enabledClass,
+        )}
+      >
+        {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        <span>{apparelCreateLabel(isBusy, allDone)}</span>
+        {!mobile && !isBusy ? (
+          <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-enabled:group-hover:translate-x-0 group-enabled:group-hover:opacity-100" />
+        ) : null}
+      </button>
+    </div>
+  );
+}
+
+function apparelCreateLabel(isBusy: boolean, allDone: boolean): string {
+  if (isBusy) return "正在创建项目";
+  return allDone ? "创建项目并开始分析" : "上传图片并创建项目";
 }
 
 // hairline section header：mono eyebrow + compact title + 可选右侧元素

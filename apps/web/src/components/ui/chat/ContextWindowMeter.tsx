@@ -12,7 +12,7 @@ import {
   describeCompactError,
   useCompactConversation,
   type CompactConversationApiResponse,
-} from "@/app/(chat)/_hooks/useCompactConversation";
+} from "@/hooks/useCompactConversation";
 import { useUserQueryScope } from "@/components/QueryProvider";
 import { CompactionToast } from "@/components/ui/chat/CompactionToast";
 import { RollingTokenCounter } from "@/components/ui/chat/RollingTokenCounter";
@@ -50,6 +50,11 @@ type ExtendedContextStats = ConversationContextStats &
     manual_compact_cooldown_seconds: number;
     manual_compact_unavailable_reason: string | null;
   }>;
+
+type CompactSuccessResponse = Extract<
+  CompactConversationApiResponse,
+  { compacted: true }
+>;
 
 interface ContextWindowMeterProps {
   stats?: ExtendedContextStats | null;
@@ -236,6 +241,33 @@ function disabledReason(
   return null;
 }
 
+function compactSuccessToast(result: CompactSuccessResponse): void {
+  const summary = result.summary;
+  const isCached =
+    summary.status === "cached" ||
+    summary.status === "cached_after_lock_wait" ||
+    summary.status === "cas_reused";
+  const isFallback = summary.status === "created_local_fallback";
+  const title = isCached
+    ? "已使用现有上下文摘要"
+    : isFallback
+      ? `已用兜底摘要压缩 ${summary.source_message_count} 条消息`
+      : `已压缩 ${summary.source_message_count} 条早期消息`;
+  const description =
+    [
+      summary.tokens_freed != null && summary.tokens_freed > 0
+        ? `释放约 ${formatTokens(summary.tokens_freed)} token`
+        : null,
+      summary.tokens > 0 ? `摘要 ${formatTokens(summary.tokens)} token` : null,
+      summary.image_caption_count != null && summary.image_caption_count > 0
+        ? `图片描述 ${summary.image_caption_count} 个`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || undefined;
+  toast.success(title, { description });
+}
+
 function resultToast(result: CompactConversationApiResponse) {
   if (result.status === "pending") {
     toast.info("已开始后台压缩", {
@@ -263,30 +295,7 @@ function resultToast(result: CompactConversationApiResponse) {
     });
     return;
   }
-  const s = result.summary;
-  const isCached =
-    s.status === "cached" ||
-    s.status === "cached_after_lock_wait" ||
-    s.status === "cas_reused";
-  const isFallback = s.status === "created_local_fallback";
-  const title = isCached
-    ? "已使用现有上下文摘要"
-    : isFallback
-      ? `已用兜底摘要压缩 ${s.source_message_count} 条消息`
-    : `已压缩 ${s.source_message_count} 条早期消息`;
-  const description =
-    [
-      s.tokens_freed != null && s.tokens_freed > 0
-        ? `释放约 ${formatTokens(s.tokens_freed)} token`
-        : null,
-      s.tokens > 0 ? `摘要 ${formatTokens(s.tokens)} token` : null,
-      s.image_caption_count != null && s.image_caption_count > 0
-        ? `图片描述 ${s.image_caption_count} 个`
-        : null,
-    ]
-      .filter(Boolean)
-      .join(" · ") || undefined;
-  toast.success(title, { description });
+  compactSuccessToast(result);
 }
 
 export function ContextWindowMeter({

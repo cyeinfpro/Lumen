@@ -86,6 +86,24 @@ type ParamRead = {
   value: unknown;
 };
 
+function firstPresent<T>(
+  values: Array<T | null | undefined>,
+): T | null {
+  for (const value of values) {
+    if (value !== null && value !== undefined) return value;
+  }
+  return null;
+}
+
+function optionalRow(
+  label: string,
+  value: string | null | undefined,
+  badge?: string,
+): LightboxMetadataRow | null {
+  if (!value) return null;
+  return badge ? { label, value, badge } : { label, value };
+}
+
 function pushUniqueRecord(
   target: Record<string, unknown>[],
   seen: Set<Record<string, unknown>>,
@@ -437,18 +455,32 @@ function distinctLightboxType(item: LightboxItem, mime: string | null): string |
 export function buildLightboxMetadataSections(
   item: LightboxItem,
 ): LightboxMetadataSection[] {
-  const dimensions = formatImageDimensions(item);
-  const mime = getLightboxMimeType(item);
-  const type = distinctLightboxType(item, mime);
-  const createdAt = formatLightboxDate(item.created_at);
+  return [
+    { title: "版本来源", rows: buildSourceRows(item) },
+    { title: "生成参数", rows: buildGenerationRows(item) },
+    { title: "参数差异", rows: buildParamDiffRows(item) },
+    { title: "运行信息", rows: buildRuntimeRows(item) },
+    { title: "诊断", rows: buildDiagnosticsRows(item) },
+    { title: "文件信息", rows: buildFileRows(item) },
+    { title: "记录", rows: buildRecordRows(item) },
+  ].filter((section) => section.rows.length > 0);
+}
+
+function buildGenerationRows(item: LightboxItem): LightboxMetadataRow[] {
   const effectiveParams = effectiveParamRecords(item);
-  const renderQuality =
-    formatParamValue(readField(effectiveParams, ["render_quality", "quality"]).value) ??
-    item.quality ??
-    item.render_quality ??
-    null;
+  const renderQuality = firstPresent([
+    formatParamValue(
+      readField(effectiveParams, ["render_quality", "quality"]).value,
+    ),
+    item.quality,
+    item.render_quality,
+  ]);
   const outputFormat = formatParamValue(
-    readField(effectiveParams, ["output_format", "format", "image_job_format"]).value,
+    readField(effectiveParams, [
+      "output_format",
+      "format",
+      "image_job_format",
+    ]).value,
   );
   const outputCompression = formatParamValue(
     readField(effectiveParams, ["output_compression", "compression"]).value,
@@ -459,49 +491,38 @@ export function buildLightboxMetadataSections(
   const moderation = formatParamValue(
     readField(effectiveParams, ["moderation"]).value,
   );
-  const rows = {
-    source: buildSourceRows(item),
-    generation: [
-      dimensions ? { label: "尺寸", value: dimensions } : null,
-      item.aspect_ratio ? { label: "比例", value: item.aspect_ratio } : null,
-      item.seed !== undefined && item.seed !== null
-        ? { label: "Seed", value: String(item.seed) }
-        : null,
-      renderQuality ? { label: "渲染", value: renderQuality } : null,
-      outputFormat ? { label: "格式", value: outputFormat } : null,
-      outputCompression ? { label: "压缩", value: outputCompression } : null,
-      background ? { label: "背景", value: background } : null,
-      moderation ? { label: "审核", value: moderation } : null,
-      formatBooleanMode(item.fast)
-        ? { label: "模式", value: formatBooleanMode(item.fast) as string }
-        : null,
-      item.model ?? item.model_id
-        ? { label: "模型", value: item.model ?? item.model_id ?? "" }
-        : null,
-    ],
-    diff: buildParamDiffRows(item),
-    runtime: buildRuntimeRows(item),
-    diagnostics: buildDiagnosticsRows(item),
-    file: [
-      mime ? { label: "MIME", value: mime } : null,
-      type ? { label: "类型", value: type } : null,
-      { label: "扩展名", value: inferLightboxFileExtension(item) },
-    ],
-    record: [
-      createdAt ? { label: "创建时间", value: createdAt } : null,
-      { label: "ID", value: item.id },
-    ],
-  };
+  const seed =
+    item.seed === undefined || item.seed === null ? null : String(item.seed);
+  const model = firstPresent([item.model, item.model_id]);
 
-  return [
-    { title: "版本来源", rows: rows.source },
-    { title: "生成参数", rows: compactRows(rows.generation) },
-    { title: "参数差异", rows: rows.diff },
-    { title: "运行信息", rows: rows.runtime },
-    { title: "诊断", rows: rows.diagnostics },
-    { title: "文件信息", rows: compactRows(rows.file) },
-    { title: "记录", rows: compactRows(rows.record) },
-  ].filter((section) => section.rows.length > 0);
+  return compactRows([
+    optionalRow("尺寸", formatImageDimensions(item)),
+    optionalRow("比例", item.aspect_ratio),
+    optionalRow("Seed", seed),
+    optionalRow("渲染", renderQuality),
+    optionalRow("格式", outputFormat),
+    optionalRow("压缩", outputCompression),
+    optionalRow("背景", background),
+    optionalRow("审核", moderation),
+    optionalRow("模式", formatBooleanMode(item.fast)),
+    optionalRow("模型", model),
+  ]);
+}
+
+function buildFileRows(item: LightboxItem): LightboxMetadataRow[] {
+  const mime = getLightboxMimeType(item);
+  return compactRows([
+    optionalRow("MIME", mime),
+    optionalRow("类型", distinctLightboxType(item, mime)),
+    optionalRow("扩展名", inferLightboxFileExtension(item)),
+  ]);
+}
+
+function buildRecordRows(item: LightboxItem): LightboxMetadataRow[] {
+  return compactRows([
+    optionalRow("创建时间", formatLightboxDate(item.created_at)),
+    optionalRow("ID", item.id),
+  ]);
 }
 
 function sourceLabel(value: string | null): string | null {
@@ -534,50 +555,65 @@ function compactId(value: string | null): string | null {
 
 function buildSourceRows(item: LightboxItem): LightboxMetadataRow[] {
   const sources = collectRecordSources(item);
-  const source =
-    item.source_type ??
-    item.source ??
-    firstTextFromSources(sources, ["source_type", "source", "origin"]);
-  const action =
-    item.action_source ??
-    item.generation_action ??
-    firstTextFromSources(sources, ["action_source", "generation_action", "action"]);
-  const parentImage =
-    item.parent_image_id ??
-    firstTextFromSources(sources, ["parent_image_id", "source_image_id"]);
-  const parentGeneration =
-    item.parent_generation_id ??
-    firstTextFromSources(sources, ["parent_generation_id", "parent_task_id"]);
-  const generation =
-    item.generation_id ??
-    item.from_generation_id ??
+  const source = firstPresent([
+    item.source_type,
+    item.source,
+    firstTextFromSources(sources, ["source_type", "source", "origin"]),
+  ]);
+  const action = firstPresent([
+    item.action_source,
+    item.generation_action,
+    firstTextFromSources(sources, [
+      "action_source",
+      "generation_action",
+      "action",
+    ]),
+  ]);
+  const parentImage = firstPresent([
+    item.parent_image_id,
+    firstTextFromSources(sources, ["parent_image_id", "source_image_id"]),
+  ]);
+  const parentGeneration = firstPresent([
+    item.parent_generation_id,
+    firstTextFromSources(sources, [
+      "parent_generation_id",
+      "parent_task_id",
+    ]),
+  ]);
+  const generation = firstPresent([
+    item.generation_id,
+    item.from_generation_id,
     firstTextFromSources(sources, [
       "generation_id",
       "from_generation_id",
       "owner_generation_id",
-    ]);
-  const message =
-    item.message_id ?? firstTextFromSources(sources, ["message_id"]);
-  const sourceId =
-    item.source_id ??
-    item.conversation_id ??
+    ]),
+  ]);
+  const message = firstPresent([
+    item.message_id,
+    firstTextFromSources(sources, ["message_id"]),
+  ]);
+  const sourceId = firstPresent([
+    item.source_id,
+    item.conversation_id,
     firstTextFromSources(sources, [
       "source_id",
       "conversation_id",
       "workflow_run_id",
       "project_id",
-    ]);
+    ]),
+  ]);
+  const sourceValue = sourceLabel(source);
+  const actionValue = actionLabel(action);
 
   return compactRows([
-    sourceLabel(source) ? { label: "来源", value: sourceLabel(source) as string } : null,
-    actionLabel(action) ? { label: "动作", value: actionLabel(action) as string } : null,
-    parentImage ? { label: "父图", value: compactId(parentImage) as string } : null,
-    parentGeneration
-      ? { label: "父任务", value: compactId(parentGeneration) as string }
-      : null,
-    generation ? { label: "任务", value: compactId(generation) as string } : null,
-    message ? { label: "消息", value: compactId(message) as string } : null,
-    sourceId ? { label: "来源 ID", value: compactId(sourceId) as string } : null,
+    optionalRow("来源", sourceValue),
+    optionalRow("动作", actionValue),
+    optionalRow("父图", compactId(parentImage)),
+    optionalRow("父任务", compactId(parentGeneration)),
+    optionalRow("任务", compactId(generation)),
+    optionalRow("消息", compactId(message)),
+    optionalRow("来源 ID", compactId(sourceId)),
   ]);
 }
 
@@ -662,16 +698,16 @@ function buildParamDiffRows(item: LightboxItem): LightboxMetadataRow[] {
 function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
   const sources = collectRecordSources(item);
   const attempts = providerAttempts(item);
-  const firstProvider =
+  const firstProvider = firstPresent([
     firstTextFromSources(sources, [
       "initial_provider",
       "first_provider",
       "requested_provider",
       "provider_initial",
-    ]) ??
-    attempts[0]?.provider ??
-    null;
-  const actualProvider =
+    ]),
+    attempts[0]?.provider,
+  ]);
+  const actualProvider = firstPresent([
     firstTextFromSources(sources, [
       "actual_provider",
       "upstream_provider",
@@ -679,7 +715,9 @@ function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
       "selected_provider",
       "provider_name",
       "provider",
-    ]) ?? lastSuccessfulProvider(attempts);
+    ]),
+    lastSuccessfulProvider(attempts),
+  ]);
   const route = firstTextFromSources(sources, [
     "actual_route",
     "upstream_route",
@@ -703,30 +741,9 @@ function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
     "using_proxy",
     "proxy_used",
   ]);
-  const durationMs =
-    firstNumberFromSources(sources, [
-      "upstream_duration_ms",
-      "duration_ms",
-      "elapsed_ms",
-    ]) ??
-    (() => {
-      const seconds = firstNumberFromSources(sources, [
-        "upstream_duration_seconds",
-        "duration_seconds",
-      ]);
-      return seconds !== null ? seconds * 1000 : null;
-    })();
-  const failoverCount =
-    firstNumberFromSources(sources, ["failover_count", "provider_failover_count"]) ??
-    (attempts.length > 1 ? attempts.length - 1 : null);
-  const failoverValue =
-    failoverCount !== null && failoverCount > 0
-      ? `是 · ${Math.round(failoverCount)} 次`
-      : firstBooleanFromSources(sources, ["failover", "provider_failover"]) === true
-        ? "是"
-        : firstBooleanFromSources(sources, ["failover", "provider_failover"]) === false
-          ? "否"
-          : null;
+  const durationMs = runtimeDurationMs(sources);
+  const failoverCount = runtimeFailoverCount(sources, attempts.length);
+  const failoverValue = runtimeFailoverValue(sources, failoverCount);
   const debugId = firstTextFromSources(sources, [
     "debug_id",
     "trace_id",
@@ -740,13 +757,13 @@ function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
     "error_summary",
     "failure_summary",
   ]);
-  const attemptChain = attempts
-    .map((attempt) => attempt.provider)
-    .filter((provider): provider is string => Boolean(provider))
-    .join(" → ");
+  const attemptChain = providerAttemptChain(attempts);
+  const proxyValue = runtimeProxyValue(proxyName, proxyEnabled);
+  const durationValue =
+    durationMs === null ? null : formatDurationMs(durationMs);
 
   return compactRows([
-    actualProvider ? { label: "Provider", value: actualProvider } : null,
+    optionalRow("Provider", actualProvider),
     firstProvider && actualProvider && firstProvider !== actualProvider
       ? { label: "首次尝试", value: firstProvider }
       : null,
@@ -755,18 +772,74 @@ function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
       : null,
     route ? { label: "路由", value: route } : null,
     endpoint ? { label: "端点", value: endpoint } : null,
-    proxyName
-      ? { label: "代理", value: `已启用 · ${proxyName}` }
-      : proxyEnabled !== null
-        ? { label: "代理", value: proxyEnabled ? "已启用" : "未启用" }
-        : null,
-    durationMs !== null && formatDurationMs(durationMs)
-      ? { label: "耗时", value: formatDurationMs(durationMs) as string }
-      : null,
-    failoverValue ? { label: "Failover", value: failoverValue } : null,
-    debugId ? { label: "Debug ID", value: debugId } : null,
-    safeError ? { label: "错误摘要", value: safeError } : null,
+    optionalRow("代理", proxyValue),
+    optionalRow("耗时", durationValue),
+    optionalRow("Failover", failoverValue),
+    optionalRow("Debug ID", debugId),
+    optionalRow("错误摘要", safeError),
   ]);
+}
+
+function runtimeDurationMs(
+  sources: Record<string, unknown>[],
+): number | null {
+  const milliseconds = firstNumberFromSources(sources, [
+    "upstream_duration_ms",
+    "duration_ms",
+    "elapsed_ms",
+  ]);
+  if (milliseconds !== null) return milliseconds;
+  const seconds = firstNumberFromSources(sources, [
+    "upstream_duration_seconds",
+    "duration_seconds",
+  ]);
+  return seconds === null ? null : seconds * 1000;
+}
+
+function runtimeFailoverCount(
+  sources: Record<string, unknown>[],
+  attemptCount: number,
+): number | null {
+  const recorded = firstNumberFromSources(sources, [
+    "failover_count",
+    "provider_failover_count",
+  ]);
+  if (recorded !== null) return recorded;
+  return attemptCount > 1 ? attemptCount - 1 : null;
+}
+
+function runtimeFailoverValue(
+  sources: Record<string, unknown>[],
+  failoverCount: number | null,
+): string | null {
+  if (failoverCount !== null && failoverCount > 0) {
+    return `是 · ${Math.round(failoverCount)} 次`;
+  }
+  const enabled = firstBooleanFromSources(sources, [
+    "failover",
+    "provider_failover",
+  ]);
+  if (enabled === true) return "是";
+  if (enabled === false) return "否";
+  return null;
+}
+
+function providerAttemptChain(
+  attempts: NormalizedProviderAttempt[],
+): string {
+  return attempts
+    .map((attempt) => attempt.provider)
+    .filter((provider): provider is string => Boolean(provider))
+    .join(" → ");
+}
+
+function runtimeProxyValue(
+  proxyName: string | null,
+  proxyEnabled: boolean | null,
+): string | null {
+  if (proxyName) return `已启用 · ${proxyName}`;
+  if (proxyEnabled === null) return null;
+  return proxyEnabled ? "已启用" : "未启用";
 }
 
 function buildDiagnosticsRows(item: LightboxItem): LightboxMetadataRow[] {

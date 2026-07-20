@@ -72,6 +72,27 @@ function ConversationTypeIcon({
   );
 }
 
+function ConversationMeta({
+  meta,
+  timeIso,
+}: {
+  meta: string;
+  timeIso?: string;
+}) {
+  if (!meta && !timeIso) return null;
+  return (
+    <span className="flex items-center gap-1.5 text-[12px] text-[var(--fg-2)]">
+      {meta ? <span className="truncate">{meta}</span> : null}
+      {meta && timeIso ? <span aria-hidden>·</span> : null}
+      {timeIso ? (
+        <span className="font-mono tracking-wider shrink-0">
+          {relativeTime(timeIso)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 export function ConversationRowMobile({
   conv,
   active,
@@ -188,15 +209,7 @@ export function ConversationRowMobile({
               >
                 {titleOf(conv)}
               </span>
-              <span className="flex items-center gap-1.5 text-[12px] text-[var(--fg-2)]">
-                {meta && <span className="truncate">{meta}</span>}
-                {meta && timeIso && <span aria-hidden>·</span>}
-                {timeIso && (
-                  <span className="font-mono tracking-wider shrink-0">
-                    {relativeTime(timeIso)}
-                  </span>
-                )}
-              </span>
+              <ConversationMeta meta={meta} timeIso={timeIso} />
             </span>
           </button>
 

@@ -14,10 +14,13 @@ from lumen_core.models import Conversation, Message, User
 from lumen_core.schemas import ChatParamsIn, ImageParamsIn, VideoCreateIn
 
 from ..redis_client import get_redis
-from ..routes.messages import _create_assistant_task, _publish_assistant_task
-from ..routes.videos import (
-    _create_video_generation_record,
-    invalidate_balance_cache,
+from .message_submission import (
+    create_assistant_task as _create_assistant_task,
+    publish_assistant_task as _publish_assistant_task,
+)
+from .video.submission import (
+    create_video_generation_record as _create_video_generation_record,
+    invalidate_video_balance_cache as invalidate_balance_cache,
 )
 from .video_publish import publish_video_queued
 

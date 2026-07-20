@@ -21,6 +21,32 @@ import {
   TEMPLATE_VALUE_LABEL,
 } from "./types";
 
+type InferredAgeSegment = Exclude<
+  ModelLibraryAgeSegment,
+  "all" | "user_favorites"
+>;
+
+const AGE_SEGMENT_RULES: Array<
+  [InferredAgeSegment, readonly string[]]
+> = [
+  ["toddler", ["幼儿"]],
+  ["child", ["儿童", "童装", "小朋友", "孩子"]],
+  ["teen", ["青少年"]],
+  ["young_adult", ["青年"]],
+  ["middle_aged", ["中年", "中老年"]],
+  ["senior", ["老年"]],
+  ["adult", ["熟龄", "成年"]],
+];
+
+export function inferAgeSegmentFromText(
+  text: string,
+): InferredAgeSegment | null {
+  const match = AGE_SEGMENT_RULES.find(([, words]) =>
+    words.some((word) => text.includes(word)),
+  );
+  return match?.[0] ?? null;
+}
+
 export function imageSrc(image?: BackendImageMeta | null): string {
   if (!image) return "";
   return image.display_url || image.preview_url || image.thumb_url || image.url;
@@ -105,15 +131,7 @@ export function defaultLibraryAgeSegment(workflow: WorkflowRun): ModelLibraryAge
     const value = (profile as { age_segment?: unknown }).age_segment;
     if (typeof value === "string" && isLibraryAgeSegment(value)) return value;
   }
-  const text = workflow.user_prompt;
-  if (text.includes("幼儿")) return "toddler";
-  if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
-  if (text.includes("青少年")) return "teen";
-  if (text.includes("青年")) return "young_adult";
-  if (text.includes("中年") || text.includes("中老年")) return "middle_aged";
-  if (text.includes("老年")) return "senior";
-  if (text.includes("熟龄") || text.includes("成年")) return "adult";
-  return "all";
+  return inferAgeSegmentFromText(workflow.user_prompt) ?? "all";
 }
 
 export function showcaseImages(workflow: WorkflowRun): BackendImageMeta[] {

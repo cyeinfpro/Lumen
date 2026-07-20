@@ -40,7 +40,7 @@ from ..services.task_submission import (
     publish_canvas_image_task,
     publish_canvas_video_task,
 )
-from ..routes.videos import video_options
+from ..services.video.options import get_video_options as video_options
 from .api_schemas import CanvasExecuteIn
 from .core_adapter import stable_hash, validated_graph
 from .document_service import get_owned_canvas

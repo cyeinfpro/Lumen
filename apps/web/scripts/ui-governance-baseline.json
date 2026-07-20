@@ -1,63 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-18T06:34:29.421Z",
+  "generatedAt": "2026-07-19T23:57:55.303Z",
   "note": "Known frontend UI-governance debt. The checker fails only when current count exceeds a baseline count for the same fingerprint.",
-  "findings": [
-    {
-      "key": "aria-live-error|src/app/admin/_panels/ByokPanel.tsx|ea318c421b61384e",
-      "rule": "aria-live-error",
-      "path": "src/app/admin/_panels/ByokPanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "(error ? \"border-danger-border\" : \"border-[var(--border)]\")",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/app/admin/_panels/ByokPanel.tsx|4ba9062f0fc37dc0",
-      "rule": "aria-live-error",
-      "path": "src/app/admin/_panels/ByokPanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{error ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/app/admin/_panels/ByokPanel.tsx|44e23cf21b50fc86",
-      "rule": "aria-live-error",
-      "path": "src/app/admin/_panels/ByokPanel.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "<span className=\"text-[11px] text-danger\">{error}</span>",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/inpaint/MaskBoard.tsx|70f33294372e286a",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/inpaint/MaskBoard.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{imgError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/stages/ModelCandidatesStage.tsx|b333fb87b255d86c",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/stages/ModelCandidatesStage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{stageError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/stages/QualityReviewStage.tsx|b333fb87b255d86c",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/stages/QualityReviewStage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{stageError ? (",
-      "count": 1
-    },
-    {
-      "key": "aria-live-error|src/components/ui/projects/stages/ShowcaseGenerationStage.tsx|b333fb87b255d86c",
-      "rule": "aria-live-error",
-      "path": "src/components/ui/projects/stages/ShowcaseGenerationStage.tsx",
-      "message": "Visible inline error/status content should include role=\"alert\"/role=\"status\" or aria-live nearby.",
-      "snippet": "{stageError ? (",
-      "count": 1
-    }
-  ]
+  "findings": []
 }

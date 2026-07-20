@@ -58,6 +58,16 @@ function hasAnyFilter(f: StreamFeedFilters): boolean {
   return Boolean(f.ratio || f.has_ref || f.fast);
 }
 
+function shouldShowOverview(
+  isLoading: boolean,
+  hasError: boolean,
+  itemCount: number,
+  hasFilters: boolean,
+  query: string,
+): boolean {
+  return !isLoading && !hasError && (itemCount > 0 || hasFilters || Boolean(query.trim()));
+}
+
 interface ToolbarProps {
   total: number;
   searchActive: boolean;
@@ -340,6 +350,14 @@ export function DesktopStream() {
   const isEmptyAll = !isLoading && items.length === 0;
   const isEmptyFiltered =
     !isLoading && items.length > 0 && filteredItems.length === 0;
+  const hasFilters = hasAnyFilter(filters);
+  const showOverview = shouldShowOverview(
+    isLoading,
+    query.isError,
+    items.length,
+    hasFilters,
+    q,
+  );
 
   const onToggleSearch = useCallback(() => {
     setSearchOpen((v) => {
@@ -375,7 +393,7 @@ export function DesktopStream() {
           <StreamToolbar
             total={total}
             searchActive={searchOpen}
-            filterActive={filterOpen || hasAnyFilter(filters)}
+            filterActive={filterOpen || hasFilters}
             onToggleSearch={onToggleSearch}
             onToggleFilter={onToggleFilter}
             onRefresh={onRefresh}
@@ -410,15 +428,13 @@ export function DesktopStream() {
             }}
           />
           <FilterBar
-            open={filterOpen || hasAnyFilter(filters)}
+            open={filterOpen || hasFilters}
             filters={filters}
             onChange={(next) => applyFilters(next)}
             onClear={clearFilters}
           />
 
-          {!isLoading &&
-            !query.isError &&
-            (items.length > 0 || hasAnyFilter(filters) || q.trim()) && (
+          {showOverview && (
               <StreamOverview
                 total={total}
                 loaded={items.length}
@@ -449,7 +465,7 @@ export function DesktopStream() {
             isLoading={isLoading}
             columns={desktopCols}
             isEmptyAll={isEmptyAll}
-            hasFilters={hasAnyFilter(filters)}
+            hasFilters={hasFilters}
             isEmptyFiltered={isEmptyFiltered}
             searchValue={q}
             onClear={clearAllControls}

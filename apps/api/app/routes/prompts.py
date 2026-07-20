@@ -7,22 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import mimetypes
 import os
 import secrets
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 from urllib.parse import urlencode
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,11 +33,9 @@ from lumen_core.providers import (
     build_effective_provider_config,
     endpoint_kind_allowed,
     provider_supports_route,
-    resolve_provider_proxy_url,
     weighted_priority_order,
 )
 from lumen_core.runtime_settings import get_spec
-from lumen_core.schemas import VideoReferenceMediaIn
 from lumen_core.vision_tagging import image_record_to_data_url
 
 from ..billing_cache_state import invalidate_balance_cache
@@ -62,8 +58,13 @@ from ._prompt_enhance_templates import (
     VIDEO_ENHANCE_SYSTEM_PROMPT,
     VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE,
 )
+from .prompt_parts import content as _prompt_content
+from .prompt_parts import failover as _prompt_failover
+from .prompt_parts import keepalive as _prompt_keepalive
+from .prompt_parts import upstream as _prompt_upstream
 
 logger = logging.getLogger(__name__)
+httpx = _prompt_upstream.httpx
 
 _VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 
@@ -75,16 +76,8 @@ router = APIRouter(
 
 _PROVIDER_RR_COUNTERS: dict[int, int] = {}
 _PROVIDER_RR_LOCK = asyncio.Lock()
-_RETRYABLE_HTTP_STATUS = {408, 409, 425, 429}
-_FALLBACK_400_MARKERS = (
-    "model",
-    "service_tier",
-    "tier",
-    "reasoning",
-    "unsupported",
-    "not_found",
-    "not found",
-)
+_RETRYABLE_HTTP_STATUS = _prompt_upstream.RETRYABLE_HTTP_STATUS
+_FALLBACK_400_MARKERS = _prompt_upstream.FALLBACK_400_MARKERS
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
 _PROMPT_ENHANCE_MEDIA_MAX_BYTES = 18 * 1024 * 1024
 _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES = 24 * 1024 * 1024
@@ -96,59 +89,16 @@ _PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS = 10.0
 _PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS = 10.0
 _PROMPT_ENHANCE_RELEASE_TASKS: set[asyncio.Task[None]] = set()
 
-
-@dataclass(frozen=True)
-class _EnhanceAttempt:
-    name: str
-    model: str
-    reasoning_effort: str | None = "low"
-    service_tier: str | None = "priority"
-
-
-_ENHANCE_ATTEMPTS = (
-    _EnhanceAttempt(name="primary", model="gpt-5.5", reasoning_effort="low"),
-    _EnhanceAttempt(
-        name="fallback-gpt-5.4-low", model="gpt-5.4", reasoning_effort="low"
-    ),
-    _EnhanceAttempt(
-        name="fallback-gpt-5.4-low-standard",
-        model="gpt-5.4",
-        reasoning_effort="low",
-        service_tier=None,
-    ),
-)
+_EnhanceAttempt = _prompt_upstream.EnhanceAttempt
+_EnhanceProviderError = _prompt_upstream.EnhanceProviderError
+_ENHANCE_ATTEMPTS = _prompt_upstream.ENHANCE_ATTEMPTS
 
 
 class EnhanceIn(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
 
 
-class VideoEnhanceIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(default="", max_length=10000)
-    action: str = Field(default="t2v", max_length=32)
-    model: str = Field(default="", max_length=128)
-    duration_s: int | None = Field(default=None, ge=-1, le=60)
-    resolution: str | None = Field(default=None, max_length=32)
-    aspect_ratio: str | None = Field(default=None, max_length=32)
-    generate_audio: bool | None = None
-    input_image_id: str | None = Field(default=None, max_length=36)
-    variant_count: int = Field(default=1, ge=1, le=3)
-    reference_media: list[VideoReferenceMediaIn] = Field(
-        default_factory=list,
-        max_length=12,
-    )
-
-    @model_validator(mode="after")
-    def require_prompt_or_reference(self) -> "VideoEnhanceIn":
-        if (
-            not self.text.strip()
-            and not (self.input_image_id or "").strip()
-            and not self.reference_media
-        ):
-            raise ValueError("text or reference media is required")
-        return self
+VideoEnhanceIn = _prompt_content.VideoEnhanceIn
 
 
 def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
@@ -159,10 +109,7 @@ def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException
 
 
 def _responses_url(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/responses"
-    return f"{base}/v1/responses"
+    return _prompt_upstream.responses_url(base_url)
 
 
 def _video_enhance_system_prompt(variant_count: int) -> str:
@@ -203,12 +150,6 @@ async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
         return weighted_priority_order(providers, _PROVIDER_RR_COUNTERS)
 
 
-class _EnhanceProviderError(Exception):
-    def __init__(self, message: str, *, retryable: bool) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-
-
 def _build_enhance_body(
     text: str,
     attempt: _EnhanceAttempt,
@@ -217,26 +158,13 @@ def _build_enhance_body(
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "model": attempt.model,
-        "instructions": system_prompt,
-        "input": [
-            {
-                "role": "user",
-                "content": content
-                if content is not None
-                else [{"type": "input_text", "text": text}],
-            }
-        ],
-        "stream": True,
-    }
-    if metadata:
-        body["metadata"] = metadata
-    if attempt.reasoning_effort:
-        body["reasoning"] = {"effort": attempt.reasoning_effort}
-    if attempt.service_tier:
-        body["service_tier"] = attempt.service_tier
-    return body
+    return _prompt_upstream.build_enhance_body(
+        text,
+        attempt,
+        system_prompt=system_prompt,
+        content=content,
+        metadata=metadata,
+    )
 
 
 def _storage_path(storage_key: str) -> Path:
@@ -334,49 +262,24 @@ def _append_input_image_with_budget(
     *,
     media_payload_bytes: int,
 ) -> tuple[bool, int]:
-    next_payload_bytes = media_payload_bytes
-    if image_url.startswith("data:image/"):
-        payload_bytes = len(image_url.encode("utf-8"))
-        if media_payload_bytes + payload_bytes > _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES:
-            return False, media_payload_bytes
-        next_payload_bytes += payload_bytes
-    content.append({"type": "input_image", "image_url": image_url})
-    return True, next_payload_bytes
+    return _prompt_content.append_input_image_with_budget(
+        content,
+        image_url,
+        media_payload_bytes=media_payload_bytes,
+        media_total_max_bytes=_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,
+    )
 
 
 def _external_image_url_for_input(url: str | None) -> str | None:
-    value = (url or "").strip()
-    if value.startswith("data:image/"):
-        return value
-    if value.startswith(("http://", "https://")):
-        return value
-    return None
+    return _prompt_content.external_image_url_for_input(url)
 
 
 def _append_video_context_line(lines: list[str], key: str, value: Any) -> None:
-    if value is None:
-        return
-    if isinstance(value, str):
-        clean = value.strip()
-        if not clean:
-            return
-        lines.append(f"{key}: {clean}")
-        return
-    lines.append(f"{key}: {value}")
+    _prompt_content.append_video_context_line(lines, key, value)
 
 
 def _reference_anchor(ref_id: str | None, kind: str, index: int) -> str:
-    clean = (ref_id or "").strip().lower()
-    parts = clean.split(":")
-    if (
-        len(parts) == 3
-        and parts[0] == "ref"
-        and parts[1] == kind
-        and parts[2].isdigit()
-        and int(parts[2]) > 0
-    ):
-        return f"[{clean}]"
-    return f"[ref:{kind}:{index}]"
+    return _prompt_content.reference_anchor(ref_id, kind, index)
 
 
 def _video_reference_public_url(video: Video, public_base_url: str) -> tuple[str, bool]:
@@ -431,220 +334,22 @@ async def _build_video_enhance_content(
     db: AsyncSession,
     user_id: str,
 ) -> tuple[list[dict[str, Any]], bool]:
-    lines = [
-        "任务：将下面的输入优化成可直接提交给视频生成模型的一段提示词。",
-        (
-            "优化重点：按火山/Seedance 视频提示词结构补齐主体动作、"
-            "运动轨迹、运镜、首尾时间推进、视觉风格和参考一致性；"
-            "不要生成字幕、水印、UI 文案、seed 或命令参数。"
-        ),
-        (
-            "Vibe Creating 判断：先判断真实场景是否适合故事、情绪、记忆、"
-            "氛围、意象或主观体验表达；再判断原文应直接放行、轻度提纯、"
-            "直接改写、先补问、原样保留，还是只给可选 VC 版。"
-        ),
-        (
-            "信息密度：若缺少视觉锚点、行为/状态、局部调性或视频主题/风格，"
-            '请先输出 action="ask_first" 的 1-3 个必要问题，不要硬猜。'
-        ),
-        (
-            "参考素材锚点合同：参考图/视频都有唯一锚点，例如 [ref:image:1]。"
-            "优化后必须保留用户实际引用到的锚点；如果同类素材有多张而用户只说"
-            "这张图、那张图、左图、右图等模糊指代，请输出 ask_first 补问，"
-            "不要自行选择。"
-        ),
-        (
-            "约束优先：用户明确写出的台词、旁白、音乐、音效、歌词、"
-            "镜头结构、参数保留要求和交付格式必须保留；未要求保留的焦段、"
-            "光圈、曝光、ISO、设备和纯剪辑参数可转译为自然观看感受。"
-        ),
-        f"原始描述：{body.text.strip() or '（未填写，请主要根据参考素材生成）'}",
-    ]
-    _append_video_context_line(lines, "生成模式", body.action)
-    _append_video_context_line(lines, "模型", body.model)
-    _append_video_context_line(lines, "时长", body.duration_s)
-    _append_video_context_line(lines, "分辨率", body.resolution)
-    _append_video_context_line(lines, "画幅", body.aspect_ratio)
-    if body.generate_audio is not None:
-        lines.append(f"音频：{'需要' if body.generate_audio else '不需要'}")
-    if body.variant_count > 1:
-        lines.append(
-            f"候选方案数量：{body.variant_count}；必须按 "
-            '<variant action="direct_rewrite" title="...">...</variant> 输出，'
-            "第一项为推荐最佳；action 只能是 direct_pass、light_refine、"
-            "direct_rewrite、ask_first、keep_original、optional_vc；"
-            "信息不足或低适配时可只输出 1 个补问/保留候选，不要为了凑数硬改写；"
-            "正常改写时每个方案应有不同侧重，分别强化动作轨迹、运镜/镜头语言、"
-            "时间推进/节奏/连续性/参考素材一致性。"
-        )
-
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": "\n".join(lines)}]
-    token_changed = False
-    media_payload_bytes = 0
-
-    if body.input_image_id:
-        image = await _owned_image(db, user_id=user_id, image_id=body.input_image_id)
-        content.append({"type": "input_text", "text": "首帧参考图："})
-        image_url = await _image_data_url(image)
-        if image_url:
-            appended, media_payload_bytes = _append_input_image_with_budget(
-                content,
-                image_url,
-                media_payload_bytes=media_payload_bytes,
-            )
-            if not appended:
-                content.append(
-                    {
-                        "type": "input_text",
-                        "text": f"首帧参考图 image_id={image.id}，但参考素材总体过大，已降级为文字引用。",
-                    }
-                )
-        else:
-            content.append(
-                {
-                    "type": "input_text",
-                    "text": f"首帧参考图 image_id={image.id}，但图片过大或暂不可读取。",
-                }
-            )
-
-    public_base_url: str | None = None
-    for index, item in enumerate(body.reference_media, start=1):
-        noun = (
-            "图片"
-            if item.kind == "image"
-            else "音频"
-            if item.kind == "audio"
-            else "视频"
-        )
-        label = (item.label or "").strip() or f"参考{noun} {index}"
-        same_kind_index = sum(
-            1 for prior in body.reference_media[:index] if prior.kind == item.kind
-        )
-        anchor = _reference_anchor(item.ref_id, item.kind, same_kind_index)
-        if item.kind == "image":
-            if item.image_id:
-                image = await _owned_image(db, user_id=user_id, image_id=item.image_id)
-                content.append(
-                    {
-                        "type": "input_text",
-                        "text": f"{label} 锚点 {anchor}；优化输出引用该素材时必须保留此锚点：",
-                    }
-                )
-                image_url = await _image_data_url(image)
-                if image_url:
-                    appended, media_payload_bytes = _append_input_image_with_budget(
-                        content,
-                        image_url,
-                        media_payload_bytes=media_payload_bytes,
-                    )
-                    if not appended:
-                        content.append(
-                            {
-                                "type": "input_text",
-                                "text": f"{label} image_id={image.id}，但参考素材总体过大，已降级为文字引用。",
-                            }
-                        )
-                else:
-                    content.append(
-                        {
-                            "type": "input_text",
-                            "text": f"{label} image_id={image.id}，但图片过大或暂不可读取。",
-                        }
-                    )
-            elif image_url := _external_image_url_for_input(item.url):
-                is_data_image = image_url.startswith("data:image/")
-                content.append(
-                    {
-                        "type": "input_text",
-                        "text": (
-                            f"{label} 锚点 {anchor}；外部图片数据 URL："
-                            if is_data_image
-                            else f"{label} 锚点 {anchor}；外部图片 URL：{image_url}"
-                        ),
-                    }
-                )
-                appended, media_payload_bytes = _append_input_image_with_budget(
-                    content,
-                    image_url,
-                    media_payload_bytes=media_payload_bytes,
-                )
-                if not appended:
-                    content.append(
-                        {
-                            "type": "input_text",
-                            "text": (
-                                f"{label} 外部图片数据 URL 过大，已忽略图片内容，仅保留标签。"
-                                if is_data_image
-                                else f"{label} 外部图片过大，已降级为 URL 文字引用。"
-                            ),
-                        }
-                    )
-            else:
-                content.append(
-                    {
-                        "type": "input_text",
-                        "text": f"{label} 锚点 {anchor}；外部图片引用：{(item.url or '').strip()}",
-                    }
-                )
-            continue
-
-        if item.kind == "audio":
-            content.append(
-                {
-                    "type": "input_text",
-                    "text": f"{label} 锚点 {anchor}；外部参考音频 URL：{(item.url or '').strip()}",
-                }
-            )
-            continue
-
-        if item.video_id:
-            video = await _owned_video(db, user_id=user_id, video_id=item.video_id)
-            if public_base_url is None:
-                public_base_url = await _resolve_optional_public_base_url(request, db)
-            video_url = ""
-            if public_base_url:
-                video_url, changed = _video_reference_public_url(video, public_base_url)
-                token_changed = token_changed or changed
-            details = [
-                f"{label}：参考视频",
-                f"anchor={anchor}",
-                f"video_id={video.id}",
-                f"mime={video.mime}",
-                f"duration_ms={video.duration_ms}",
-                f"size_bytes={video.size_bytes}",
-            ]
-            if video_url:
-                details.append(f"url={video_url}")
-            content.append({"type": "input_text", "text": "；".join(details)})
-            poster_url = await _video_poster_data_url(video)
-            if poster_url:
-                content.append(
-                    {
-                        "type": "input_text",
-                        "text": f"{label} 的 poster / 首帧视觉参考：",
-                    }
-                )
-                appended, media_payload_bytes = _append_input_image_with_budget(
-                    content,
-                    poster_url,
-                    media_payload_bytes=media_payload_bytes,
-                )
-                if not appended:
-                    content.append(
-                        {
-                            "type": "input_text",
-                            "text": f"{label} 的 poster 过大，已降级为文字引用。",
-                        }
-                    )
-        else:
-            content.append(
-                {
-                    "type": "input_text",
-                    "text": f"{label} 锚点 {anchor}；外部参考视频 URL：{(item.url or '').strip()}",
-                }
-            )
-
-    return content, token_changed
+    runtime = _prompt_content.ContentRuntime(
+        owned_image=_owned_image,
+        owned_video=_owned_video,
+        image_data_url=_image_data_url,
+        video_poster_data_url=_video_poster_data_url,
+        resolve_public_base_url=_resolve_optional_public_base_url,
+        video_reference_public_url=_video_reference_public_url,
+    )
+    return await _prompt_content.build_video_enhance_content(
+        body,
+        request=request,
+        db=db,
+        user_id=user_id,
+        runtime=runtime,
+        media_total_max_bytes=_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,
+    )
 
 
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
@@ -822,120 +527,155 @@ def _normalize_usage_for_billing(
     ).normalized()
 
 
-async def _charge_prompt_enhance(
+def _usage_is_empty(usage: UsageTokens) -> bool:
+    return all(
+        value <= 0
+        for value in (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.cache_creation_5m_tokens,
+            usage.cache_creation_1h_tokens,
+            usage.reasoning_tokens,
+            usage.image_output_tokens,
+        )
+    )
+
+
+def _held_amount_breakdown(
+    billing: _EnhanceBillingContext,
+    *,
+    cost: int | None = None,
+) -> billing_core.CostBreakdown:
+    actual_cost = billing.hold_amount_micro if cost is None else cost
+    return billing_core.CostBreakdown(
+        input_cost_micro=actual_cost,
+        output_cost_micro=0,
+        cache_read_cost_micro=0,
+        cache_creation_cost_micro=0,
+        image_output_cost_micro=0,
+        reasoning_cost_micro=0,
+        long_context_applied=False,
+        priority_tier_applied=False,
+        rate_multiplier_x10000=billing.rate_multiplier_x10000,
+        total_cost_micro=actual_cost,
+        actual_cost_micro=actual_cost,
+        pricing_source="held_amount_fallback",
+    )
+
+
+async def _audit_held_amount_fallback(
+    billing: _EnhanceBillingContext,
+    *,
+    model: str,
+    usage: UsageTokens,
+    error: str,
+) -> None:
+    await write_audit(
+        billing.db,
+        event_type="billing.pricing.hold_fallback_after_upstream",
+        user_id=billing.user_id,
+        actor_email_hash=hash_email(billing.user_email),
+        details={
+            "scope": "chat_model",
+            "model": model,
+            "prompt_enhance_id": billing.request_id,
+            "usage": usage.model_dump(),
+            "actual_micro": billing.hold_amount_micro,
+            "error": error,
+        },
+        autocommit=False,
+    )
+
+
+async def _resolve_prompt_enhance_breakdown(
     billing: _EnhanceBillingContext,
     capture: _EnhanceUsageCapture,
-) -> None:
-    if not capture.usage:
-        await _release_prompt_enhance_hold(billing, reason="missing_usage")
-        return
-    model = capture.model or _ENHANCE_ATTEMPTS[0].model
-    usage = _normalize_usage_for_billing(
-        parse_usage(model, capture.usage),
-        cache_aware=billing.cache_aware,
-    )
-    if (
-        usage.input_tokens <= 0
-        and usage.output_tokens <= 0
-        and usage.cache_read_tokens <= 0
-        and usage.cache_creation_tokens <= 0
-        and usage.cache_creation_5m_tokens <= 0
-        and usage.cache_creation_1h_tokens <= 0
-        and usage.reasoning_tokens <= 0
-        and usage.image_output_tokens <= 0
-    ):
-        await _release_prompt_enhance_hold(billing, reason="zero_usage")
-        return
-
+    *,
+    model: str,
+    usage: UsageTokens,
+) -> billing_core.CostBreakdown:
     try:
         snapshot = billing.pricing_snapshots.get(
             capture.pricing_snapshot_key
             or _enhance_pricing_snapshot_key(model, capture.service_tier)
         )
         if snapshot is not None:
-            breakdown = billing_core.completion_breakdown_from_snapshot(
+            return billing_core.completion_breakdown_from_snapshot(
                 snapshot,
                 model=model,
                 tokens=usage,
                 rate_multiplier_x10000=billing.rate_multiplier_x10000,
                 service_tier=capture.service_tier,
             )
-        else:
-            breakdown = await billing_core.estimate_completion_breakdown(
-                billing.db,
-                model=model,
-                tokens=usage,
-                rate_multiplier_x10000=billing.rate_multiplier_x10000,
-                service_tier=capture.service_tier,
-            )
+        return await billing_core.estimate_completion_breakdown(
+            billing.db,
+            model=model,
+            tokens=usage,
+            rate_multiplier_x10000=billing.rate_multiplier_x10000,
+            service_tier=capture.service_tier,
+        )
     except billing_core.BillingError as exc:
-        if exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}:
+        if (
+            exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}
+            or billing.hold_amount_micro <= 0
+        ):
             raise
-        if billing.hold_amount_micro <= 0:
-            raise
-        breakdown = billing_core.CostBreakdown(
-            input_cost_micro=billing.hold_amount_micro,
-            output_cost_micro=0,
-            cache_read_cost_micro=0,
-            cache_creation_cost_micro=0,
-            image_output_cost_micro=0,
-            reasoning_cost_micro=0,
-            long_context_applied=False,
-            priority_tier_applied=False,
-            rate_multiplier_x10000=billing.rate_multiplier_x10000,
-            total_cost_micro=billing.hold_amount_micro,
-            actual_cost_micro=billing.hold_amount_micro,
-            pricing_source="held_amount_fallback",
+        await _audit_held_amount_fallback(
+            billing,
+            model=model,
+            usage=usage,
+            error=exc.message,
         )
-        await write_audit(
-            billing.db,
-            event_type="billing.pricing.hold_fallback_after_upstream",
-            user_id=billing.user_id,
-            actor_email_hash=hash_email(billing.user_email),
-            details={
-                "scope": "chat_model",
-                "model": model,
-                "prompt_enhance_id": billing.request_id,
-                "usage": usage.model_dump(),
-                "actual_micro": billing.hold_amount_micro,
-                "error": exc.message,
-            },
-            autocommit=False,
-        )
-    cost = breakdown.actual_cost_micro
-    response_id = capture.response_id or billing.request_id
-    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
-    if cost <= 0 and billing.hold_amount_micro > 0:
-        cost = billing.hold_amount_micro
-        breakdown = billing_core.CostBreakdown(
-            input_cost_micro=cost,
-            output_cost_micro=0,
-            cache_read_cost_micro=0,
-            cache_creation_cost_micro=0,
-            image_output_cost_micro=0,
-            reasoning_cost_micro=0,
-            long_context_applied=False,
-            priority_tier_applied=False,
-            rate_multiplier_x10000=billing.rate_multiplier_x10000,
-            total_cost_micro=cost,
-            actual_cost_micro=cost,
-            pricing_source="held_amount_fallback",
-        )
-    if breakdown.pricing_source == "fallback":
-        await write_audit(
-            billing.db,
-            event_type="billing.pricing.fallback_used",
-            user_id=billing.user_id,
-            actor_email_hash=hash_email(billing.user_email),
-            details={
-                "model": model,
-                "prompt_enhance_id": ref_id,
-                "usage": usage.model_dump(),
-            },
-            autocommit=False,
-        )
+        return _held_amount_breakdown(billing)
 
-    tx_meta = {
+
+def _effective_prompt_enhance_cost(
+    billing: _EnhanceBillingContext,
+    breakdown: billing_core.CostBreakdown,
+) -> tuple[int, billing_core.CostBreakdown]:
+    cost = breakdown.actual_cost_micro
+    if cost > 0 or billing.hold_amount_micro <= 0:
+        return cost, breakdown
+    cost = billing.hold_amount_micro
+    return cost, _held_amount_breakdown(billing, cost=cost)
+
+
+async def _audit_fallback_pricing(
+    billing: _EnhanceBillingContext,
+    *,
+    breakdown: billing_core.CostBreakdown,
+    model: str,
+    ref_id: str,
+    usage: UsageTokens,
+) -> None:
+    if breakdown.pricing_source != "fallback":
+        return
+    await write_audit(
+        billing.db,
+        event_type="billing.pricing.fallback_used",
+        user_id=billing.user_id,
+        actor_email_hash=hash_email(billing.user_email),
+        details={
+            "model": model,
+            "prompt_enhance_id": ref_id,
+            "usage": usage.model_dump(),
+        },
+        autocommit=False,
+    )
+
+
+def _prompt_enhance_tx_meta(
+    billing: _EnhanceBillingContext,
+    capture: _EnhanceUsageCapture,
+    *,
+    breakdown: billing_core.CostBreakdown,
+    model: str,
+    response_id: str,
+    usage: UsageTokens,
+) -> dict[str, Any]:
+    return {
         "route": "prompts.enhance",
         "model": model,
         "provider": capture.provider_name,
@@ -952,8 +692,17 @@ async def _charge_prompt_enhance(
         "rate_multiplier_x10000": billing.rate_multiplier_x10000,
         "service_tier": capture.service_tier,
     }
+
+
+async def _settle_or_charge_prompt_enhance(
+    billing: _EnhanceBillingContext,
+    *,
+    cost: int,
+    ref_id: str,
+    tx_meta: dict[str, Any],
+) -> Any:
     if billing.hold_amount_micro > 0:
-        tx = await billing_core.settle(
+        return await billing_core.settle(
             billing.db,
             billing.user_id,
             ref_type="prompt_enhance",
@@ -963,55 +712,126 @@ async def _charge_prompt_enhance(
             allow_negative=billing.allow_negative,
             meta={**tx_meta, "preauth_micro": billing.hold_amount_micro},
         )
-    else:
-        tx = await billing_core.charge(
-            billing.db,
-            billing.user_id,
-            cost,
-            ref_type="prompt_enhance",
-            ref_id=ref_id,
-            idempotency_key=f"prompt_enhance:{ref_id}",
-            allow_negative=billing.allow_negative,
-            record_zero=True,
-            kind="charge_completion",
-            meta=tx_meta,
-        )
-    if tx is not None:
-        await write_audit(
-            billing.db,
-            event_type="wallet.charge.completion",
-            user_id=billing.user_id,
-            actor_email_hash=hash_email(billing.user_email),
-            details={
-                "completion_id": ref_id,
-                "prompt_enhance_id": ref_id,
-                "response_id": response_id,
-                "route": "prompts.enhance",
-                "cost_micro": cost,
-                "usage": usage.model_dump(),
-                "cost_breakdown": breakdown.model_dump(),
-                "service_tier": capture.service_tier,
-                "amount_micro": tx.amount_micro,
-                "balance_after": tx.balance_after,
-            },
-            autocommit=False,
-        )
-        if cost == 0 and billing.rate_multiplier_x10000 == 0:
-            await write_audit(
-                billing.db,
-                event_type="wallet.charge.zero_rate",
-                user_id=billing.user_id,
-                actor_email_hash=hash_email(billing.user_email),
-                details={
-                    "prompt_enhance_id": ref_id,
-                    "response_id": response_id,
-                    "tx_id": tx.id,
-                    "ref_type": "prompt_enhance",
-                    "ref_id": ref_id,
-                    "rate_multiplier_x10000": 0,
-                },
-                autocommit=False,
-            )
+    return await billing_core.charge(
+        billing.db,
+        billing.user_id,
+        cost,
+        ref_type="prompt_enhance",
+        ref_id=ref_id,
+        idempotency_key=f"prompt_enhance:{ref_id}",
+        allow_negative=billing.allow_negative,
+        record_zero=True,
+        kind="charge_completion",
+        meta=tx_meta,
+    )
+
+
+async def _audit_prompt_enhance_charge(
+    billing: _EnhanceBillingContext,
+    capture: _EnhanceUsageCapture,
+    tx: Any,
+    *,
+    breakdown: billing_core.CostBreakdown,
+    cost: int,
+    ref_id: str,
+    response_id: str,
+    usage: UsageTokens,
+) -> None:
+    if tx is None:
+        return
+    await write_audit(
+        billing.db,
+        event_type="wallet.charge.completion",
+        user_id=billing.user_id,
+        actor_email_hash=hash_email(billing.user_email),
+        details={
+            "completion_id": ref_id,
+            "prompt_enhance_id": ref_id,
+            "response_id": response_id,
+            "route": "prompts.enhance",
+            "cost_micro": cost,
+            "usage": usage.model_dump(),
+            "cost_breakdown": breakdown.model_dump(),
+            "service_tier": capture.service_tier,
+            "amount_micro": tx.amount_micro,
+            "balance_after": tx.balance_after,
+        },
+        autocommit=False,
+    )
+    if cost != 0 or billing.rate_multiplier_x10000 != 0:
+        return
+    await write_audit(
+        billing.db,
+        event_type="wallet.charge.zero_rate",
+        user_id=billing.user_id,
+        actor_email_hash=hash_email(billing.user_email),
+        details={
+            "prompt_enhance_id": ref_id,
+            "response_id": response_id,
+            "tx_id": tx.id,
+            "ref_type": "prompt_enhance",
+            "ref_id": ref_id,
+            "rate_multiplier_x10000": 0,
+        },
+        autocommit=False,
+    )
+
+
+async def _charge_prompt_enhance(
+    billing: _EnhanceBillingContext,
+    capture: _EnhanceUsageCapture,
+) -> None:
+    if not capture.usage:
+        await _release_prompt_enhance_hold(billing, reason="missing_usage")
+        return
+    model = capture.model or _ENHANCE_ATTEMPTS[0].model
+    usage = _normalize_usage_for_billing(
+        parse_usage(model, capture.usage),
+        cache_aware=billing.cache_aware,
+    )
+    if _usage_is_empty(usage):
+        await _release_prompt_enhance_hold(billing, reason="zero_usage")
+        return
+    breakdown = await _resolve_prompt_enhance_breakdown(
+        billing,
+        capture,
+        model=model,
+        usage=usage,
+    )
+    response_id = capture.response_id or billing.request_id
+    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
+    cost, breakdown = _effective_prompt_enhance_cost(billing, breakdown)
+    await _audit_fallback_pricing(
+        billing,
+        breakdown=breakdown,
+        model=model,
+        ref_id=ref_id,
+        usage=usage,
+    )
+    tx_meta = _prompt_enhance_tx_meta(
+        billing,
+        capture,
+        breakdown=breakdown,
+        model=model,
+        response_id=response_id,
+        usage=usage,
+    )
+    tx = await _settle_or_charge_prompt_enhance(
+        billing,
+        cost=cost,
+        ref_id=ref_id,
+        tx_meta=tx_meta,
+    )
+    await _audit_prompt_enhance_charge(
+        billing,
+        capture,
+        tx,
+        breakdown=breakdown,
+        cost=cost,
+        ref_id=ref_id,
+        response_id=response_id,
+        usage=usage,
+    )
     await billing.db.commit()
     if tx is not None:
         await invalidate_balance_cache(billing.user_id)
@@ -1102,63 +922,19 @@ async def _release_prompt_enhance_hold_after_cancel(
 
 
 def _is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:
-    if status_code in _RETRYABLE_HTTP_STATUS or status_code >= 500:
-        return True
-    if status_code not in {400, 404}:
-        return False
-    text = raw[:2000].decode("utf-8", errors="ignore").lower()
-    return any(marker in text for marker in _FALLBACK_400_MARKERS)
+    return _prompt_upstream.is_retryable_upstream_error(status_code, raw)
 
 
 def _extract_error_message(evt: dict[str, Any]) -> str:
-    err = evt.get("error")
-    if isinstance(err, dict):
-        msg = err.get("message") or err.get("code") or err.get("type")
-        if isinstance(msg, str) and msg.strip():
-            return msg.strip()
-        return json.dumps(err, ensure_ascii=False)[:500]
-    if isinstance(err, str) and err.strip():
-        return err.strip()
-    msg = evt.get("message")
-    return msg.strip() if isinstance(msg, str) and msg.strip() else "response_failed"
+    return _prompt_upstream.extract_error_message(evt)
 
 
 def _extract_response_text(obj: Any) -> str:
-    if not isinstance(obj, dict):
-        return ""
-    chunks: list[str] = []
-    output = obj.get("output")
-    if isinstance(output, list):
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    text = part.get("text")
-                    if isinstance(text, str) and text:
-                        chunks.append(text)
-    text = obj.get("output_text") or obj.get("text")
-    if isinstance(text, str) and text:
-        chunks.append(text)
-    return "".join(chunks)
+    return _prompt_upstream.extract_response_text(obj)
 
 
 def _iter_sse_payloads_from_buffer(buffer: str) -> tuple[list[str], str]:
-    buffer = buffer.replace("\r\n", "\n")
-    payloads: list[str] = []
-    while "\n\n" in buffer:
-        raw_event, buffer = buffer.split("\n\n", 1)
-        data_lines: list[str] = []
-        for line in raw_event.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                data_lines.append(line[len("data:") :].strip())
-        if data_lines:
-            payloads.append("\n".join(data_lines))
-    return payloads, buffer
+    return _prompt_upstream.iter_sse_payloads_from_buffer(buffer)
 
 
 async def _stream_enhance_one(
@@ -1171,127 +947,23 @@ async def _stream_enhance_one(
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
-    url = _responses_url(provider.base_url)
-
-    body = _build_enhance_body(
+    timeouts = _prompt_upstream.StreamTimeouts(
+        connect=_PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS,
+        read=_PROMPT_ENHANCE_READ_TIMEOUT_SECONDS,
+        write=_PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS,
+        pool=_PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS,
+    )
+    async for chunk in _prompt_upstream.stream_enhance_one(
         text,
+        provider,
         attempt,
+        capture,
         system_prompt=system_prompt,
         content=content,
         metadata=metadata,
-    )
-
-    try:
-        proxy_url = await resolve_provider_proxy_url(provider.proxy)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=_PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS,
-                read=_PROMPT_ENHANCE_READ_TIMEOUT_SECONDS,
-                write=_PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS,
-                pool=_PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS,
-            ),
-            proxy=proxy_url,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            async with client.stream(
-                "POST",
-                url,
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {provider.api_key}",
-                    "Content-Type": "application/json",
-                },
-            ) as resp:
-                if resp.status_code != 200:
-                    raw = await resp.aread()
-                    logger.warning(
-                        "enhance upstream error provider=%s attempt=%s status=%s: %s",
-                        provider.name,
-                        attempt.name,
-                        resp.status_code,
-                        raw[:500],
-                    )
-                    raise _EnhanceProviderError(
-                        f"upstream http {resp.status_code}",
-                        retryable=_is_retryable_upstream_error(resp.status_code, raw),
-                    )
-
-                buf = ""
-                emitted = False
-                async for chunk in resp.aiter_text():
-                    buf += chunk
-                    payloads, buf = _iter_sse_payloads_from_buffer(buf)
-                    for payload in payloads:
-                        if payload == "[DONE]":
-                            return
-                        try:
-                            evt = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-
-                        _capture_enhance_usage(
-                            capture,
-                            evt,
-                            provider=provider,
-                            attempt=attempt,
-                        )
-                        evt_type = evt.get("type", "")
-                        if evt_type == "response.output_text.delta":
-                            delta = evt.get("delta", "")
-                            if delta:
-                                emitted = True
-                                yield f"data: {json.dumps({'text': delta})}\n\n"
-                        elif evt_type == "response.output_text.done":
-                            text_done = evt.get("text")
-                            if not emitted and isinstance(text_done, str) and text_done:
-                                emitted = True
-                                yield f"data: {json.dumps({'text': text_done})}\n\n"
-                            elif not emitted:
-                                raise _EnhanceProviderError(
-                                    "empty_response",
-                                    retryable=True,
-                                )
-                        elif evt_type == "response.completed":
-                            if not emitted:
-                                completed_text = _extract_response_text(
-                                    evt.get("response") or evt
-                                )
-                                if completed_text:
-                                    emitted = True
-                                    yield f"data: {json.dumps({'text': completed_text})}\n\n"
-                                else:
-                                    raise _EnhanceProviderError(
-                                        "empty_response",
-                                        retryable=True,
-                                    )
-                            return
-                        elif evt_type in {
-                            "response.failed",
-                            "response.incomplete",
-                            "error",
-                        }:
-                            raise _EnhanceProviderError(
-                                _extract_error_message(evt),
-                                retryable=not emitted,
-                            )
-
-                if emitted:
-                    return
-                raise _EnhanceProviderError("empty_response", retryable=True)
-
-    except _EnhanceProviderError:
-        raise
-    except httpx.TimeoutException:
-        logger.warning(
-            "enhance upstream timeout provider=%s attempt=%s read_timeout_s=%s",
-            provider.name,
-            attempt.name,
-            _PROMPT_ENHANCE_READ_TIMEOUT_SECONDS,
-        )
-        raise _EnhanceProviderError("timeout", retryable=True) from None
-    except httpx.HTTPError as exc:
-        raise _EnhanceProviderError(type(exc).__name__, retryable=True) from exc
+        timeouts=timeouts,
+    ):
+        yield chunk
 
 
 async def _stream_enhance(
@@ -1303,106 +975,28 @@ async def _stream_enhance(
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
-    last_error = "upstream_error"
-    total_attempts = len(_ENHANCE_ATTEMPTS) * len(providers)
-    seen_attempts = 0
-    settled = False
-    stream_kwargs: dict[str, Any] = {}
-    if system_prompt != ENHANCE_SYSTEM_PROMPT:
-        stream_kwargs["system_prompt"] = system_prompt
-    if content is not None:
-        stream_kwargs["content"] = content
-    if metadata is not None:
-        stream_kwargs["metadata"] = metadata
+    runtime = _prompt_failover.StreamRuntime(
+        stream_one=_stream_enhance_one,
+        charge=_charge_prompt_enhance,
+        release=_release_prompt_enhance_hold,
+        release_after_cancel=_release_prompt_enhance_hold_after_cancel,
+    )
+    stream = _prompt_failover.stream_enhance(
+        text,
+        providers,
+        billing,
+        attempts=_ENHANCE_ATTEMPTS,
+        runtime=runtime,
+        default_system_prompt=ENHANCE_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
+        content=content,
+        metadata=metadata,
+    )
     try:
-        for attempt in _ENHANCE_ATTEMPTS:
-            for provider in providers:
-                seen_attempts += 1
-                emitted = False
-                capture = _EnhanceUsageCapture()
-                try:
-                    async for chunk in _stream_enhance_one(
-                        text,
-                        provider,
-                        attempt,
-                        capture,
-                        **stream_kwargs,
-                    ):
-                        emitted = True
-                        yield chunk
-                    if billing is not None:
-                        try:
-                            await _charge_prompt_enhance(billing, capture)
-                            settled = True
-                        except Exception:
-                            logger.exception("prompt enhance billing charge failed")
-                            await _release_prompt_enhance_hold(
-                                billing,
-                                reason="charge_failed",
-                            )
-                            settled = True
-                            yield f"data: {json.dumps({'error': 'billing_failed'})}\n\n"
-                            return
-                    yield "data: [DONE]\n\n"
-                    return
-                except _EnhanceProviderError as exc:
-                    last_error = (
-                        "timeout" if str(exc) == "timeout" else "upstream_error"
-                    )
-                    logger.warning(
-                        (
-                            "enhance provider failed provider=%s attempt=%s "
-                            "remaining=%d retryable=%s err=%s"
-                        ),
-                        provider.name,
-                        attempt.name,
-                        total_attempts - seen_attempts,
-                        exc.retryable,
-                        exc,
-                    )
-                    if emitted or not exc.retryable:
-                        await _release_prompt_enhance_hold(
-                            billing,
-                            reason="provider_error_after_emit"
-                            if emitted
-                            else "provider_error",
-                        )
-                        settled = True
-                        yield f"data: {json.dumps({'error': last_error})}\n\n"
-                        return
-                except GeneratorExit:
-                    raise
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "enhance provider exception provider=%s attempt=%s",
-                        provider.name,
-                        attempt.name,
-                    )
-                    last_error = "internal"
-                    if emitted:
-                        await _release_prompt_enhance_hold(
-                            billing,
-                            reason="internal_error_after_emit",
-                        )
-                        settled = True
-                        yield f"data: {json.dumps({'error': last_error})}\n\n"
-                        return
-        await _release_prompt_enhance_hold(billing, reason="no_success")
-        settled = True
-        yield f"data: {json.dumps({'error': last_error})}\n\n"
-    except asyncio.CancelledError:
-        if not settled:
-            await _release_prompt_enhance_hold_after_cancel(
-                billing,
-                reason="stream_cancelled",
-            )
-        raise
-    except GeneratorExit:
-        if not settled:
-            await _release_prompt_enhance_hold(billing, reason="stream_cancelled")
-        raise
+        async for chunk in stream:
+            yield chunk
+    finally:
+        await stream.aclose()
 
 
 async def _stream_with_keepalive(
@@ -1410,55 +1004,12 @@ async def _stream_with_keepalive(
     *,
     interval_seconds: float = _PROMPT_ENHANCE_KEEPALIVE_SECONDS,
 ) -> AsyncIterator[str]:
-    queue: asyncio.Queue[tuple[str, str | BaseException | None]] = asyncio.Queue()
-
-    async def _pump() -> None:
-        try:
-            async for chunk in source:
-                await queue.put(("chunk", chunk))
-            await queue.put(("done", None))
-        except BaseException as exc:  # noqa: BLE001
-            await queue.put(("error", exc))
-
-    pump_task = asyncio.create_task(_pump())
-
-    async def _cancel_pump() -> None:
-        pump_task.cancel()
-        try:
-            await pump_task
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("prompt enhance keepalive pump failed during cancellation")
-
-    try:
-        yield _PROMPT_ENHANCE_KEEPALIVE_CHUNK
-        while True:
-            try:
-                kind, payload = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=interval_seconds,
-                )
-            except asyncio.TimeoutError:
-                yield _PROMPT_ENHANCE_KEEPALIVE_CHUNK
-                continue
-
-            if kind == "chunk":
-                if not isinstance(payload, str):
-                    raise RuntimeError("prompt enhance stream emitted non-text chunk")
-                yield payload
-                continue
-            if kind == "done":
-                return
-            if isinstance(payload, BaseException):
-                raise payload
-            return
-    except (asyncio.CancelledError, GeneratorExit):
-        await _cancel_pump()
-        raise
-    finally:
-        if not pump_task.done():
-            await _cancel_pump()
+    async for chunk in _prompt_keepalive.stream_with_keepalive(
+        source,
+        interval_seconds=interval_seconds,
+        keepalive_chunk=_PROMPT_ENHANCE_KEEPALIVE_CHUNK,
+    ):
+        yield chunk
 
 
 @router.post("/enhance")

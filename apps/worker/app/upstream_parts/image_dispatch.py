@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
+from .image_execution import ImageExecutionRequest, ImageProviderRoute, ImageResult
 from .transport import ImageProgressCallback
 
 _UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
@@ -93,6 +95,274 @@ async def _image_dispatch_candidates(
     )
 
 
+async def _prepare_provider_route(
+    request: ImageExecutionRequest,
+    *,
+    channel: str,
+    engine: str,
+) -> ImageProviderRoute:
+    facade = _facade()
+    provider = request.provider_override
+    use_jobs = facade._should_use_image_jobs(channel, provider)
+    provider_name = getattr(provider, "name", "unknown")
+    facade.logger.info(
+        "%s image dispatch provider=%s channel=%s engine=%s use_jobs=%s mask=%s",
+        request.action,
+        provider_name,
+        channel,
+        engine,
+        use_jobs,
+        request.mask is not None,
+    )
+    if engine != facade._IMAGE_ROUTE_DUAL_RACE or not facade._is_byok_provider(
+        provider
+    ):
+        return ImageProviderRoute(channel, engine, use_jobs, provider_name)
+    await facade._emit_image_progress(
+        request.progress_callback,
+        "route_diagnostic",
+        provider=provider_name,
+        route=f"{channel}:{engine}",
+        reason="byok_disables_dual_race",
+        fallback_route=f"{channel}:{facade._IMAGE_ROUTE_RESPONSES}",
+        byok=True,
+        status="routed",
+    )
+    return ImageProviderRoute(
+        channel,
+        facade._IMAGE_ROUTE_RESPONSES,
+        use_jobs,
+        provider_name,
+    )
+
+
+def _require_edit_images(request: ImageExecutionRequest) -> None:
+    if request.images:
+        return
+    facade = _facade()
+    raise facade.UpstreamError(
+        "edit action requires at least one reference image",
+        error_code=facade.EC.MISSING_INPUT_IMAGES.value,
+        status_code=400,
+    )
+
+
+def _require_mask_images(request: ImageExecutionRequest) -> None:
+    if request.images and any(request.images):
+        return
+    facade = _facade()
+    raise facade.UpstreamError(
+        "mask requires at least one reference image",
+        error_code=facade.EC.MISSING_INPUT_IMAGES.value,
+        status_code=400,
+    )
+
+
+async def _run_direct_image2_once(
+    request: ImageExecutionRequest,
+) -> list[ImageResult]:
+    facade = _facade()
+    if request.action == "edit":
+        _require_edit_images(request)
+        return await facade._direct_edit_image_with_failover(
+            **request.direct_edit_kwargs()
+        )
+    return await facade._direct_generate_image_with_failover(
+        **request.direct_generate_kwargs()
+    )
+
+
+async def _run_responses_once(
+    request: ImageExecutionRequest,
+) -> ImageResult:
+    facade = _facade()
+    return await facade._race_responses_image(
+        **request.responses_kwargs(),
+        lanes=max(1, int(facade.settings.edit_race_lanes)),
+    )
+
+
+def _merge_image_route_errors(
+    request: ImageExecutionRequest,
+    *,
+    primary_path: str,
+    primary_error: BaseException,
+    fallback_path: str,
+    fallback_error: BaseException,
+) -> BaseException:
+    facade = _facade()
+    return facade._merge_image_path_errors(
+        action=request.action,
+        primary_path=primary_path,
+        primary_error=primary_error,
+        fallback_path=fallback_path,
+        fallback_error=fallback_error,
+    )
+
+
+async def _run_image2_with_responses_fallback(
+    request: ImageExecutionRequest,
+    route: ImageProviderRoute,
+) -> list[ImageResult]:
+    facade = _facade()
+    try:
+        return await _run_direct_image2_once(request)
+    except (asyncio.CancelledError, facade.UpstreamCancelled):
+        raise
+    except Exception as primary_error:  # noqa: BLE001
+        if facade._is_direct_image_result_unknown(primary_error):
+            raise
+        facade.logger.warning(
+            "%s image2 provider=%s failed; falling back to responses: %r",
+            request.action,
+            route.provider_name,
+            primary_error,
+        )
+        unavailable = facade._provider_endpoint_unavailable_error(
+            request.provider_override,
+            "responses",
+        )
+        if unavailable is not None:
+            raise _merge_image_route_errors(
+                request,
+                primary_path="image2",
+                primary_error=primary_error,
+                fallback_path="responses",
+                fallback_error=unavailable,
+            ) from primary_error
+        try:
+            return [await _run_responses_once(request)]
+        except (asyncio.CancelledError, facade.UpstreamCancelled):
+            raise
+        except Exception as fallback_error:  # noqa: BLE001
+            raise _merge_image_route_errors(
+                request,
+                primary_path="image2",
+                primary_error=primary_error,
+                fallback_path="responses",
+                fallback_error=fallback_error,
+            ) from fallback_error
+
+
+async def _run_responses_with_image2_fallback(
+    request: ImageExecutionRequest,
+    route: ImageProviderRoute,
+) -> list[ImageResult]:
+    facade = _facade()
+    try:
+        return [await _run_responses_once(request)]
+    except (asyncio.CancelledError, facade.UpstreamCancelled):
+        raise
+    except Exception as primary_error:  # noqa: BLE001
+        facade.logger.warning(
+            "%s responses provider=%s failed; falling back to image2: %r",
+            request.action,
+            route.provider_name,
+            primary_error,
+        )
+        unavailable = facade._provider_endpoint_unavailable_error(
+            request.provider_override,
+            "generations",
+        )
+        if unavailable is not None:
+            raise _merge_image_route_errors(
+                request,
+                primary_path="responses",
+                primary_error=primary_error,
+                fallback_path="image2",
+                fallback_error=unavailable,
+            ) from primary_error
+        if request.action == "edit" and not request.images:
+            try:
+                _require_edit_images(request)
+            except facade.UpstreamError as missing_images:
+                raise missing_images from primary_error
+        try:
+            return await _run_direct_image2_once(request)
+        except (asyncio.CancelledError, facade.UpstreamCancelled):
+            raise
+        except Exception as fallback_error:  # noqa: BLE001
+            if facade._is_direct_image_result_unknown(fallback_error):
+                raise
+            raise _merge_image_route_errors(
+                request,
+                primary_path="responses",
+                primary_error=primary_error,
+                fallback_path="image2",
+                fallback_error=fallback_error,
+            ) from fallback_error
+
+
+async def _run_masked_image_once(
+    request: ImageExecutionRequest,
+    route: ImageProviderRoute,
+) -> list[ImageResult]:
+    facade = _facade()
+    if request.action != "edit":
+        raise facade.UpstreamError(
+            f"mask only supported on edit action (got {request.action})",
+            error_code=facade.EC.INVALID_REQUEST_ERROR.value,
+            status_code=400,
+        )
+    _require_mask_images(request)
+    if route.engine != facade._IMAGE_ROUTE_IMAGE2 or route.use_jobs:
+        await facade._emit_image_progress(
+            request.progress_callback,
+            "route_diagnostic",
+            provider=route.provider_name,
+            route=f"{route.channel}:{route.engine}",
+            reason="mask_requires_generations_endpoint",
+            fallback_route=(
+                "image_jobs:generations" if route.use_jobs else "image2_edit_direct"
+            ),
+            byok=facade._is_byok_provider(request.provider_override),
+            status="routed",
+        )
+    if not route.use_jobs:
+        return await _run_direct_image2_once(request)
+    return [
+        await facade._image_job_with_failover(
+            **request.action_kwargs(),
+            endpoint_override="generations",
+        )
+    ]
+
+
+def _dual_race_image_iter(
+    request: ImageExecutionRequest,
+    route: ImageProviderRoute,
+) -> AsyncIterator[ImageResult]:
+    facade = _facade()
+    race = (
+        facade._dual_race_image_jobs_action
+        if route.use_jobs
+        else facade._dual_race_image_action
+    )
+    kwargs = request.action_kwargs()
+    if not route.use_jobs:
+        kwargs["allow_provider_override_race"] = True
+    return race(**kwargs)
+
+
+async def _run_non_race_image_once(
+    request: ImageExecutionRequest,
+    route: ImageProviderRoute,
+) -> list[ImageResult]:
+    facade = _facade()
+    if route.use_jobs:
+        return [
+            await facade._image_job_with_failover(
+                **request.action_kwargs(),
+                endpoint_preference=facade._image_jobs_endpoint_for_engine(
+                    route.engine
+                ),
+            )
+        ]
+    if route.engine == facade._IMAGE_ROUTE_IMAGE2:
+        return await _run_image2_with_responses_fallback(request, route)
+    return await _run_responses_with_image2_fallback(request, route)
+
+
 async def _run_image_once_for_provider(
     *,
     action: str,
@@ -114,351 +384,35 @@ async def _run_image_once_for_provider(
     user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     facade = _facade()
-    use_jobs = facade._should_use_image_jobs(channel, provider)
-    provider_name = getattr(provider, "name", "unknown")
-    facade.logger.info(
-        "%s image dispatch provider=%s channel=%s engine=%s use_jobs=%s mask=%s",
+    request = ImageExecutionRequest(
         action,
-        provider_name,
-        channel,
-        engine,
-        use_jobs,
-        mask is not None,
+        prompt,
+        size,
+        images,
+        mask,
+        n,
+        quality,
+        output_format,
+        output_compression,
+        background,
+        moderation,
+        model,
+        progress_callback,
+        provider,
+        user_id,
     )
-
-    if engine == facade._IMAGE_ROUTE_DUAL_RACE and facade._is_byok_provider(provider):
-        await facade._emit_image_progress(
-            progress_callback,
-            "route_diagnostic",
-            provider=provider_name,
-            route=f"{channel}:{engine}",
-            reason="byok_disables_dual_race",
-            fallback_route=(f"{channel}:{facade._IMAGE_ROUTE_RESPONSES}"),
-            byok=True,
-            status="routed",
-        )
-        engine = facade._IMAGE_ROUTE_RESPONSES
-
-    if mask is not None:
-        if action != "edit":
-            raise facade.UpstreamError(
-                f"mask only supported on edit action (got {action})",
-                error_code=facade.EC.INVALID_REQUEST_ERROR.value,
-                status_code=400,
-            )
-        if not images or not any(images):
-            raise facade.UpstreamError(
-                "mask requires at least one reference image",
-                error_code=facade.EC.MISSING_INPUT_IMAGES.value,
-                status_code=400,
-            )
-        if engine != facade._IMAGE_ROUTE_IMAGE2 or use_jobs:
-            await facade._emit_image_progress(
-                progress_callback,
-                "route_diagnostic",
-                provider=provider_name,
-                route=f"{channel}:{engine}",
-                reason="mask_requires_generations_endpoint",
-                fallback_route=(
-                    "image_jobs:generations" if use_jobs else "image2_edit_direct"
-                ),
-                byok=facade._is_byok_provider(provider),
-                status="routed",
-            )
-        if use_jobs:
-            yield await facade._image_job_with_failover(
-                action="edit",
-                prompt=prompt,
-                size=size,
-                images=images,
-                mask=mask,
-                n=n,
-                quality=quality,
-                output_format=output_format,
-                output_compression=output_compression,
-                background=background,
-                moderation=moderation,
-                model=model,
-                progress_callback=progress_callback,
-                provider_override=provider,
-                endpoint_override="generations",
-                user_id=user_id,
-            )
-            return
-        for item in await facade._direct_edit_image_with_failover(
-            prompt=prompt,
-            size=size,
-            images=images,
-            mask=mask,
-            n=n,
-            quality=quality,
-            output_format=output_format,
-            output_compression=output_compression,
-            background=background,
-            moderation=moderation,
-            progress_callback=progress_callback,
-            provider_override=provider,
-        ):
+    route = await _prepare_provider_route(request, channel=channel, engine=engine)
+    if request.mask is not None:
+        for item in await _run_masked_image_once(request, route):
             yield item
         return
-
-    if engine == facade._IMAGE_ROUTE_DUAL_RACE:
-        if use_jobs:
-            async for item in facade._dual_race_image_jobs_action(
-                action=action,
-                prompt=prompt,
-                size=size,
-                images=images,
-                mask=mask,
-                n=n,
-                quality=quality,
-                output_format=output_format,
-                output_compression=output_compression,
-                background=background,
-                moderation=moderation,
-                model=model,
-                progress_callback=progress_callback,
-                provider_override=provider,
-                user_id=user_id,
-            ):
+    if route.engine == facade._IMAGE_ROUTE_DUAL_RACE:
+        async with aclosing(_dual_race_image_iter(request, route)) as results:
+            async for item in results:
                 yield item
-            return
-        async for item in facade._dual_race_image_action(
-            action=action,
-            prompt=prompt,
-            size=size,
-            images=images,
-            mask=mask,
-            n=n,
-            quality=quality,
-            output_format=output_format,
-            output_compression=output_compression,
-            background=background,
-            moderation=moderation,
-            model=model,
-            progress_callback=progress_callback,
-            provider_override=provider,
-            user_id=user_id,
-            allow_provider_override_race=True,
-        ):
-            yield item
         return
-
-    if use_jobs:
-        yield await facade._image_job_with_failover(
-            action=action,
-            prompt=prompt,
-            size=size,
-            images=images,
-            mask=mask,
-            n=n,
-            quality=quality,
-            output_format=output_format,
-            output_compression=output_compression,
-            background=background,
-            moderation=moderation,
-            model=model,
-            progress_callback=progress_callback,
-            provider_override=provider,
-            endpoint_preference=facade._image_jobs_endpoint_for_engine(engine),
-            user_id=user_id,
-        )
-        return
-
-    if engine == facade._IMAGE_ROUTE_IMAGE2:
-        try:
-            if action == "edit":
-                if not images:
-                    raise facade.UpstreamError(
-                        "edit action requires at least one reference image",
-                        error_code=facade.EC.MISSING_INPUT_IMAGES.value,
-                        status_code=400,
-                    )
-                for item in await facade._direct_edit_image_with_failover(
-                    prompt=prompt,
-                    size=size,
-                    images=images,
-                    mask=mask,
-                    n=n,
-                    quality=quality,
-                    output_format=output_format,
-                    output_compression=output_compression,
-                    background=background,
-                    moderation=moderation,
-                    progress_callback=progress_callback,
-                    provider_override=provider,
-                ):
-                    yield item
-                return
-            for item in await facade._direct_generate_image_with_failover(
-                prompt=prompt,
-                size=size,
-                n=n,
-                quality=quality,
-                output_format=output_format,
-                output_compression=output_compression,
-                background=background,
-                moderation=moderation,
-                progress_callback=progress_callback,
-                provider_override=provider,
-            ):
-                yield item
-            return
-        except (asyncio.CancelledError, facade.UpstreamCancelled):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            if facade._is_direct_image_result_unknown(exc):
-                raise
-            facade.logger.warning(
-                "%s image2 provider=%s failed; falling back to responses: %r",
-                action,
-                provider_name,
-                exc,
-            )
-            responses_unavailable = facade._provider_endpoint_unavailable_error(
-                provider,
-                "responses",
-            )
-            if responses_unavailable is not None:
-                raise facade._merge_image_path_errors(
-                    action=action,
-                    primary_path="image2",
-                    primary_error=exc,
-                    fallback_path="responses",
-                    fallback_error=responses_unavailable,
-                ) from exc
-            try:
-                yield await facade._race_responses_image(
-                    action=action,
-                    prompt=prompt,
-                    size=size,
-                    images=images,
-                    quality=quality,
-                    output_format=output_format,
-                    output_compression=output_compression,
-                    background=background,
-                    moderation=moderation,
-                    model=model,
-                    lanes=max(1, int(facade.settings.edit_race_lanes)),
-                    progress_callback=progress_callback,
-                    provider_override=provider,
-                    user_id=user_id,
-                )
-            except (asyncio.CancelledError, facade.UpstreamCancelled):
-                raise
-            except Exception as fallback_exc:  # noqa: BLE001
-                raise facade._merge_image_path_errors(
-                    action=action,
-                    primary_path="image2",
-                    primary_error=exc,
-                    fallback_path="responses",
-                    fallback_error=fallback_exc,
-                ) from fallback_exc
-            return
-
-    lanes = max(1, int(facade.settings.edit_race_lanes))
-    try:
-        yield await facade._race_responses_image(
-            action=action,
-            prompt=prompt,
-            size=size,
-            images=images,
-            quality=quality,
-            output_format=output_format,
-            output_compression=output_compression,
-            background=background,
-            moderation=moderation,
-            model=model,
-            lanes=lanes,
-            progress_callback=progress_callback,
-            provider_override=provider,
-            user_id=user_id,
-        )
-        return
-    except (asyncio.CancelledError, facade.UpstreamCancelled):
-        raise
-    except Exception as exc:  # noqa: BLE001
-        facade.logger.warning(
-            "%s responses provider=%s failed; falling back to image2: %r",
-            action,
-            provider_name,
-            exc,
-        )
-        generations_unavailable = facade._provider_endpoint_unavailable_error(
-            provider,
-            "generations",
-        )
-        if generations_unavailable is not None:
-            raise facade._merge_image_path_errors(
-                action=action,
-                primary_path="responses",
-                primary_error=exc,
-                fallback_path="image2",
-                fallback_error=generations_unavailable,
-            ) from exc
-        if action == "edit":
-            if not images:
-                raise facade.UpstreamError(
-                    "edit action requires at least one reference image",
-                    error_code=facade.EC.MISSING_INPUT_IMAGES.value,
-                    status_code=400,
-                ) from exc
-            try:
-                for item in await facade._direct_edit_image_with_failover(
-                    prompt=prompt,
-                    size=size,
-                    images=images,
-                    mask=mask,
-                    n=n,
-                    quality=quality,
-                    output_format=output_format,
-                    output_compression=output_compression,
-                    background=background,
-                    moderation=moderation,
-                    progress_callback=progress_callback,
-                    provider_override=provider,
-                ):
-                    yield item
-            except (asyncio.CancelledError, facade.UpstreamCancelled):
-                raise
-            except Exception as fallback_exc:  # noqa: BLE001
-                if facade._is_direct_image_result_unknown(fallback_exc):
-                    raise
-                raise facade._merge_image_path_errors(
-                    action=action,
-                    primary_path="responses",
-                    primary_error=exc,
-                    fallback_path="image2",
-                    fallback_error=fallback_exc,
-                ) from fallback_exc
-            return
-        try:
-            for item in await facade._direct_generate_image_with_failover(
-                prompt=prompt,
-                size=size,
-                n=n,
-                quality=quality,
-                output_format=output_format,
-                output_compression=output_compression,
-                background=background,
-                moderation=moderation,
-                progress_callback=progress_callback,
-                provider_override=provider,
-            ):
-                yield item
-        except (asyncio.CancelledError, facade.UpstreamCancelled):
-            raise
-        except Exception as fallback_exc:  # noqa: BLE001
-            if facade._is_direct_image_result_unknown(fallback_exc):
-                raise
-            raise facade._merge_image_path_errors(
-                action=action,
-                primary_path="responses",
-                primary_error=exc,
-                fallback_path="image2",
-                fallback_error=fallback_exc,
-            ) from fallback_exc
-        return
+    for item in await _run_non_race_image_once(request, route):
+        yield item
 
 
 async def _dispatch_image(

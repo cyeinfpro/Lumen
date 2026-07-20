@@ -60,7 +60,9 @@ test("admin panels contain no proxy draft state or unreachable update group", ()
 });
 
 test("desktop lightbox scopes transient and async state to the active image", () => {
-  const source = read("src/components/ui/lightbox/DesktopLightbox.tsx");
+  const source = read(
+    "src/components/ui/lightbox/DesktopLightboxController.tsx",
+  );
 
   assert.match(
     source,

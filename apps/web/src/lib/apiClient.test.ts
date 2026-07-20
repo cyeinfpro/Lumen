@@ -29,6 +29,22 @@ const videoAssetsSource = readFileSync(
   new URL("./api/videoAssets.ts", import.meta.url),
   "utf8",
 );
+const conversationsSource = readFileSync(
+  new URL("./api/conversations.ts", import.meta.url),
+  "utf8",
+);
+const systemPromptsSource = readFileSync(
+  new URL("./api/systemPrompts.ts", import.meta.url),
+  "utf8",
+);
+const imagesSource = readFileSync(
+  new URL("./api/images.ts", import.meta.url),
+  "utf8",
+);
+const accountSource = readFileSync(
+  new URL("./api/account.ts", import.meta.url),
+  "utf8",
+);
 const typesSource = readFileSync(new URL("./types.ts", import.meta.url), "utf8");
 const videoAssetTypesSource = readFileSync(
   new URL("./videoAssetTypes.ts", import.meta.url),
@@ -98,6 +114,25 @@ test("apiClient preserves video asset and poster workflow ABI through focused mo
   match(videoAssetTypesSource, /export interface VideoAssetOperationOut/);
 });
 
+test("apiClient preserves conversation, prompt, and image exports through focused modules", () => {
+  match(source, /export \* from "\.\/api\/conversations";/);
+  match(source, /export \* from "\.\/api\/systemPrompts";/);
+  match(source, /export \* from "\.\/api\/images";/);
+  match(source, /export \* from "\.\/api\/account";/);
+
+  doesNotMatch(source, /export interface ConversationSummary/);
+  doesNotMatch(source, /export interface SystemPrompt/);
+  doesNotMatch(source, /export interface UploadedImage/);
+
+  match(conversationsSource, /export interface ConversationSummary/);
+  match(conversationsSource, /export function listMessages/);
+  match(systemPromptsSource, /export function listSystemPrompts/);
+  match(imagesSource, /export function uploadImage/);
+  match(imagesSource, /export function imageVariantUrl/);
+  match(accountSource, /export function listMySessions/);
+  match(accountSource, /export function deleteMyAccount/);
+});
+
 test("focused storyboard and workflow requests reuse the shared HTTP helper", () => {
   match(storyboardsSource, /import \{ apiFetch \} from "\.\/http";/);
   match(workflowsSource, /import \{ apiFetch \} from "\.\/http";/);
@@ -144,6 +179,14 @@ test("apiClient and focused modules compile with the project TypeScript config",
     "./api/workflows.ts",
     "./api/posterWorkflows.ts",
     "./api/videoAssets.ts",
+    "./api/admin.ts",
+    "./api/system.ts",
+    "./api/billing.ts",
+    "./api/memory.ts",
+    "./api/conversations.ts",
+    "./api/systemPrompts.ts",
+    "./api/images.ts",
+    "./api/account.ts",
     "./videoAssetTypes.ts",
   ].map((relativePath) =>
     fileURLToPath(new URL(relativePath, import.meta.url)),

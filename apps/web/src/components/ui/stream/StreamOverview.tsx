@@ -41,6 +41,114 @@ function hasStreamOverviewFilters(filters: StreamFeedFilters): boolean {
   return Boolean(filters.ratio || filters.has_ref || filters.fast);
 }
 
+function SelectionControls({
+  selectionMode,
+  selectedCount,
+  sharingSelected,
+  onToggleSelectionMode,
+  onClearSelection,
+  onShareSelected,
+}: Pick<
+  StreamOverviewProps,
+  | "selectionMode"
+  | "selectedCount"
+  | "sharingSelected"
+  | "onToggleSelectionMode"
+  | "onClearSelection"
+  | "onShareSelected"
+>) {
+  if (selectedCount && selectedCount > 0) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={onShareSelected}
+          disabled={sharingSelected}
+          className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none md:h-9 md:min-h-0"
+        >
+          <Share2 className="h-3 w-3" />
+          {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
+        </button>
+        <button
+          type="button"
+          onClick={onClearSelection}
+          aria-label="取消选择"
+          className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </>
+    );
+  }
+  if (!onToggleSelectionMode) return null;
+  return (
+    <button
+      type="button"
+      onClick={onToggleSelectionMode}
+      aria-pressed={selectionMode}
+      className={cn(
+        "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none md:h-9 md:min-h-0",
+        selectionMode
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
+      )}
+    >
+      <CheckSquare className="h-3 w-3" />
+      多选
+    </button>
+  );
+}
+
+function FilterChips({
+  filters,
+  searchValue,
+  onToggleReferenceFilter,
+  onToggleFastFilter,
+}: Pick<
+  StreamOverviewProps,
+  | "filters"
+  | "searchValue"
+  | "onToggleReferenceFilter"
+  | "onToggleFastFilter"
+>) {
+  const hasSearch = searchValue.trim().length > 0;
+  return (
+    <>
+      {filters.ratio && (
+        <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+          {filters.ratio}
+        </span>
+      )}
+      {filters.has_ref && (
+        <button
+          type="button"
+          onClick={onToggleReferenceFilter}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
+        >
+          <ImageIcon className="h-3 w-3" />
+          参考图
+        </button>
+      )}
+      {filters.fast && (
+        <button
+          type="button"
+          onClick={onToggleFastFilter}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
+        >
+          <Gauge className="h-3 w-3" />
+          快速
+        </button>
+      )}
+      {hasSearch && (
+        <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+          <Search className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate">{searchValue.trim()}</span>
+        </span>
+      )}
+    </>
+  );
+}
+
 export function StreamOverview({
   total,
   loaded,
@@ -89,42 +197,14 @@ export function StreamOverview({
         </div>
 
         <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
-          {selectedCount > 0 ? (
-            <>
-              <button
-                type="button"
-                onClick={onShareSelected}
-                disabled={sharingSelected}
-                className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none md:h-9 md:min-h-0"
-              >
-                <Share2 className="h-3 w-3" />
-                {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
-              </button>
-              <button
-                type="button"
-                onClick={onClearSelection}
-                aria-label="取消选择"
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </>
-          ) : onToggleSelectionMode ? (
-            <button
-              type="button"
-              onClick={onToggleSelectionMode}
-              aria-pressed={selectionMode}
-              className={cn(
-                "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none md:h-9 md:min-h-0",
-                selectionMode
-                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
-              )}
-            >
-              <CheckSquare className="h-3 w-3" />
-              多选
-            </button>
-          ) : null}
+          <SelectionControls
+            selectionMode={selectionMode}
+            selectedCount={selectedCount}
+            sharingSelected={sharingSelected}
+            onToggleSelectionMode={onToggleSelectionMode}
+            onClearSelection={onClearSelection}
+            onShareSelected={onShareSelected}
+          />
           {hasControls && (
             <button
               type="button"
@@ -157,37 +237,12 @@ export function StreamOverview({
 
       {hasControls && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-          {filters.ratio && (
-            <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
-              {filters.ratio}
-            </span>
-          )}
-          {filters.has_ref && (
-            <button
-              type="button"
-              onClick={onToggleReferenceFilter}
-              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
-            >
-              <ImageIcon className="h-3 w-3" />
-              参考图
-            </button>
-          )}
-          {filters.fast && (
-            <button
-              type="button"
-              onClick={onToggleFastFilter}
-              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
-            >
-              <Gauge className="h-3 w-3" />
-              快速
-            </button>
-          )}
-          {hasSearch && (
-            <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
-              <Search className="h-3 w-3 shrink-0" />
-              <span className="min-w-0 truncate">{searchValue.trim()}</span>
-            </span>
-          )}
+          <FilterChips
+            filters={filters}
+            searchValue={searchValue}
+            onToggleReferenceFilter={onToggleReferenceFilter}
+            onToggleFastFilter={onToggleFastFilter}
+          />
         </div>
       )}
     </section>

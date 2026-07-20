@@ -19,8 +19,10 @@ EXTRACTED_MODULES = (
     "payload_helpers.py",
     "job_persistence.py",
     "image_artifacts.py",
+    "image_candidates.py",
     "image_url_security.py",
     "request_bodies.py",
+    "upstream_runtime.py",
 )
 RUNTIME_MODULES = ("app.py", *EXTRACTED_MODULES)
 
@@ -57,7 +59,7 @@ def load_app_from(path: Path, module_name: str) -> Any:
 def test_app_stays_below_modularization_limit() -> None:
     line_count = len((IMAGE_JOB_DIR / "app.py").read_text().splitlines())
 
-    assert line_count < 2200
+    assert line_count < 1500
 
 
 def test_extracted_modules_do_not_import_app() -> None:
@@ -147,8 +149,12 @@ def test_copied_app_loads_only_sibling_modules_and_keeps_pixel_limit(
 
         assert Path(app_a._runtime_config.__file__).parent == copy_a
         assert Path(app_a._image_artifacts_module.__file__).parent == copy_a
+        assert Path(app_a._image_candidates_module.__file__).parent == copy_a
+        assert Path(app_a._upstream_runtime_module.__file__).parent == copy_a
         assert Path(app_b._runtime_config.__file__).parent == copy_b
         assert Path(app_b._image_artifacts_module.__file__).parent == copy_b
+        assert Path(app_b._image_candidates_module.__file__).parent == copy_b
+        assert Path(app_b._upstream_runtime_module.__file__).parent == copy_b
 
         buffer = BytesIO()
         Image.new("RGB", (10, 10)).save(buffer, format="PNG")

@@ -37,6 +37,14 @@ class RouteFacade:
         self.module_name = module_name
         self.runtime = FacadeRuntime(f"{module_name}-facade")
         self._default_facade: Any | None = None
+        # Route modules can be loaded through an alias by test harnesses or
+        # application bootstrap code. Keep the historical canonical keys
+        # available so late-bound facade lookups never depend on import order.
+        module = sys.modules.get(module_name)
+        if module is not None:
+            short_name = module_name.rsplit(".", 1)[-1]
+            canonical_name = f"app.routes.workflow_routes.{short_name}"
+            sys.modules.setdefault(canonical_name, module)
 
     @property
     def module(self) -> Any:

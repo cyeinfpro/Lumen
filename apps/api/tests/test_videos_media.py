@@ -15,6 +15,7 @@ from lumen_core.schemas import VideoCreateIn, VideoPriceOptionOut, VideoReferenc
 from lumen_core.video_providers import VideoProviderDefinition
 
 from app.routes import events, videos
+from app.services.video import submission as video_submission
 from app.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
 from app.video_reference_images import (
     VIDEO_REFERENCE_IMAGE_KIND,
@@ -1753,35 +1754,46 @@ async def test_reference_public_base_url_still_fails_for_video_reference(
 
 
 def test_create_video_generation_maps_billing_error() -> None:
-    source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
+    source = inspect.getsource(video_submission.create_video_generation_record)
 
     assert "except billing_core.BillingError as exc" in source
 
 
 def test_create_video_generation_commits_video_hold_and_outbox_together() -> None:
-    source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
+    source = inspect.getsource(video_submission.create_video_generation_record)
     hold_idx = source.index("await billing_core.hold")
     try_idx = source.rfind("try:", 0, hold_idx)
     except_idx = source.index("except billing_core.BillingError", hold_idx)
     guarded = source[try_idx:except_idx]
 
-    assert "db.add(vg)" in guarded
+    assert "db.add(generation)" in guarded
     assert "await billing_core.hold" in guarded
     assert "db.add(outbox)" in guarded
     assert "await db.flush()" in guarded
     assert "await db.commit()" in guarded
-    assert guarded.index("db.add(vg)") < guarded.index("await billing_core.hold")
+    assert guarded.index("db.add(generation)") < guarded.index(
+        "await billing_core.hold"
+    )
     assert guarded.index("await billing_core.hold") < guarded.index("db.add(outbox)")
     assert guarded.index("db.add(outbox)") < guarded.index("await db.commit()")
 
 
 def test_create_video_generation_reuses_request_fingerprint() -> None:
+    source = inspect.getsource(video_submission.create_video_generation_record)
+
+    assert "request_fingerprint_value = request_fingerprint(body)" in source
+    assert '"request_fingerprint": request_fingerprint_value' in source
+    assert '"reference_media_count": len(reference_snapshots)' in source
+    assert "request_fingerprint=request_fingerprint_value" in source
+
+
+def test_video_route_submission_wrapper_preserves_patch_hooks() -> None:
     source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
 
-    assert "request_fingerprint = _request_fingerprint(body)" in source
-    assert '"request_fingerprint": request_fingerprint' in source
-    assert '"reference_media_count": len(reference_snapshots)' in source
-    assert "request_fingerprint=request_fingerprint" in source
+    assert "video_submission_service.create_video_generation_record" in source
+    assert "require_ready=_require_video_create_ready" in source
+    assert "reference_snapshot_loader=_reference_media_snapshots" in source
+    assert "balance_invalidator=invalidate_balance_cache" in source
 
 
 def test_idempotent_replay_rejects_mismatched_fingerprint() -> None:

@@ -844,26 +844,18 @@ function ResilientShareImage({
   const src = candidates[attempt];
   const failed = !src;
   const lowQualitySrc = lowQualityPlaceholderUrl(image, surface);
+  const showLowQualityPreview =
+    Boolean(lowQualitySrc) && !loaded && !failed && lowQualitySrc !== src;
 
   return (
     <>
-      {lowQualitySrc && !loaded && !failed && lowQualitySrc !== src && (
-        <img
-          src={lowQualitySrc}
-          alt=""
-          aria-hidden
-          loading={loading}
-          decoding="async"
-          className={cn(
-            "pointer-events-none absolute inset-0 h-full w-full",
-            surface === "lightbox" ? "opacity-35" : "scale-[1.025] opacity-60 blur-md",
-            surface === "lightbox" || surface === "single"
-              ? "object-contain"
-              : "object-cover",
-          )}
-        />
-      )}
-      {src && (
+      <ShareImageLowQualityPreview
+        visible={showLowQualityPreview}
+        src={lowQualitySrc}
+        surface={surface}
+        loading={loading}
+      />
+      {src ? (
         <img
           key={src}
           src={src}
@@ -889,26 +881,75 @@ function ResilientShareImage({
             loaded ? "opacity-100" : "opacity-0",
           )}
         />
-      )}
-      {!loaded && !failed && (
-        <span
-          className={cn(
-            "pointer-events-none absolute inset-0 flex items-center justify-center bg-[linear-gradient(110deg,rgba(255,255,255,0.05),rgba(255,255,255,0.12),rgba(255,255,255,0.05))] bg-[length:220%_100%] animate-lumen-shimmer",
-            surface === "lightbox" ? "bg-black/[0.18]" : "bg-white/[0.035]",
-          )}
-        >
-          {surface === "lightbox" && (
-            <Loader2 className="h-5 w-5 animate-spin text-white/55" aria-hidden />
-          )}
-        </span>
-      )}
-      {failed && (
-        <span className="pointer-events-none absolute inset-0 flex min-h-32 flex-col items-center justify-center gap-2 bg-[var(--bg-0)] px-4 text-center text-xs text-[var(--fg-1)]">
-          <ImageOff className="h-6 w-6 text-[var(--fg-2)]" aria-hidden />
-          <span>图片暂时不可用</span>
-        </span>
-      )}
+      ) : null}
+      <ShareImageLoadingOverlay
+        visible={!loaded && !failed}
+        surface={surface}
+      />
+      <ShareImageFailure visible={failed} />
     </>
+  );
+}
+
+function ShareImageLowQualityPreview({
+  visible,
+  src,
+  surface,
+  loading,
+}: {
+  visible: boolean;
+  src: string | null;
+  surface: ShareImageSurface;
+  loading: "eager" | "lazy";
+}) {
+  if (!visible || !src) return null;
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden
+      loading={loading}
+      decoding="async"
+      className={cn(
+        "pointer-events-none absolute inset-0 h-full w-full",
+        surface === "lightbox" ? "opacity-35" : "scale-[1.025] opacity-60 blur-md",
+        surface === "lightbox" || surface === "single"
+          ? "object-contain"
+          : "object-cover",
+      )}
+    />
+  );
+}
+
+function ShareImageLoadingOverlay({
+  visible,
+  surface,
+}: {
+  visible: boolean;
+  surface: ShareImageSurface;
+}) {
+  if (!visible) return null;
+  return (
+    <span
+      className={cn(
+        "pointer-events-none absolute inset-0 flex items-center justify-center bg-[linear-gradient(110deg,rgba(255,255,255,0.05),rgba(255,255,255,0.12),rgba(255,255,255,0.05))] bg-[length:220%_100%] animate-lumen-shimmer",
+        surface === "lightbox" ? "bg-black/[0.18]" : "bg-white/[0.035]",
+      )}
+    >
+      {surface === "lightbox" ? (
+        <Loader2 className="h-5 w-5 animate-spin text-white/55" aria-hidden />
+      ) : null}
+    </span>
+  );
+}
+
+function ShareImageFailure({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <span className="pointer-events-none absolute inset-0 flex min-h-32 flex-col items-center justify-center gap-2 bg-[var(--bg-0)] px-4 text-center text-xs text-[var(--fg-1)]">
+      <ImageOff className="h-6 w-6 text-[var(--fg-2)]" aria-hidden />
+      <span>图片暂时不可用</span>
+    </span>
   );
 }
 

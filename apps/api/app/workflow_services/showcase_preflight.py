@@ -24,7 +24,7 @@ from lumen_core.models import (
 )
 from lumen_core.schemas import AccessoryPlanIn, ShowcaseImagesCreateIn
 
-from ..routes._apparel_scene_planner import (
+from ..workflow_domain.apparel_scene_planner import (
     build_garment_lock as _build_garment_lock,
     compose_image_prompt_with_gpt55 as _compose_image_prompt_with_gpt55,
     fallback_risk_review as _fallback_risk_review,
@@ -34,7 +34,7 @@ from ..routes._apparel_scene_planner import (
     rules_fallback_planning as _rules_fallback_scene_planning,
     scene_fingerprint as _scene_fingerprint,
 )
-from ..routes._showcase_model_policy import (
+from ..workflow_domain.showcase_model_policy import (
     _age_direction,
     _compact_showcase_user_direction,
     _height_requirement,
@@ -43,7 +43,7 @@ from ..routes._showcase_model_policy import (
     _model_diversity_anchor,
     _style_region_from_text,
 )
-from ..routes._showcase_shot_pool import (
+from ..workflow_domain.showcase_shot_pool import (
     SHOT_CLASS_ORDER,
     ShotClass,
     ShotPool,
@@ -54,9 +54,9 @@ from ..routes._showcase_shot_pool import (
     select_variants as _select_shot_variants,
     shot_class_distribution as _shot_class_distribution,
 )
-from ..routes._showcase_shot_pool_adult import ADULT_POOL
-from ..routes._showcase_shot_pool_kids import CHILD_POOL, TODDLER_POOL
-from ..routes._showcase_template_policy import (
+from ..workflow_domain.showcase_shot_pool_adult import ADULT_POOL
+from ..workflow_domain.showcase_shot_pool_kids import CHILD_POOL, TODDLER_POOL
+from ..workflow_domain.showcase_template_policy import (
     _showcase_composition_direction,
     _showcase_framing_direction,
     _showcase_pose_direction,

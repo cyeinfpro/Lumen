@@ -27,7 +27,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchVideoOptions,
   uploadReferenceVideo,
-} from "@/app/video/video-request-lifecycle";
+} from "@/lib/video/requestLifecycle";
 import {
   imageBinaryUrl,
   imageVariantUrl,

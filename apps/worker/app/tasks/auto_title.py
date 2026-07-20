@@ -216,6 +216,90 @@ async def _build_summary(session: Any, conversation_id: str) -> list[dict[str, A
     return items
 
 
+def _looks_like_sse(text: str, content_type: str) -> bool:
+    return (
+        "text/event-stream" in content_type
+        or text.startswith("event:")
+        or "\ndata:" in text
+        or text.startswith("data:")
+    )
+
+
+def _iter_sse_payloads(text: str):
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[len("data:") :].lstrip()
+        if raw == "[DONE]":
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
+def _response_output_text(payload: dict[str, Any]) -> str:
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+    return ""
+
+
+def _sse_done_text(event: dict[str, Any]) -> str:
+    event_type = event.get("type")
+    if event_type == "response.output_text.done":
+        text = event.get("text")
+        return text.strip() if isinstance(text, str) and text.strip() else ""
+    if event_type == "response.content_part.done":
+        part = event.get("part")
+        if isinstance(part, dict):
+            text = part.get("text")
+            return text.strip() if isinstance(text, str) and text.strip() else ""
+    if event_type == "response.completed":
+        response = event.get("response")
+        return _response_output_text(response) if isinstance(response, dict) else ""
+    return ""
+
+
+def _sse_response_text(text: str) -> str:
+    accumulated_delta: list[str] = []
+    done_text = ""
+    for event in _iter_sse_payloads(text):
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                accumulated_delta.append(delta)
+            continue
+        candidate = _sse_done_text(event)
+        if candidate and (event_type != "response.completed" or not done_text):
+            done_text = candidate
+    if done_text:
+        return done_text
+    return "".join(accumulated_delta).strip()
+
+
+def _json_response_text(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return _response_output_text(payload)
+
+
 def _parse_response_text(text: str, content_type: str) -> str:
     """从上游 /v1/responses 响应体里抽出完整 title 文本。
 
@@ -232,84 +316,11 @@ def _parse_response_text(text: str, content_type: str) -> str:
     """
     if not text:
         return ""
-
-    # ---- SSE 路径：行级解析 ----
-    accumulated_delta = ""
-    done_text = ""
-
-    is_sse = (
-        "text/event-stream" in content_type
-        or text.startswith("event:")
-        or "\ndata:" in text
-        or text.startswith("data:")
-    )
-    if is_sse:
-        for line in text.splitlines():
-            if not line.startswith("data:"):
-                continue
-            raw = line[len("data:") :].lstrip()
-            if raw == "[DONE]":
-                continue
-            try:
-                ev = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(ev, dict):
-                continue
-            evtype = ev.get("type")
-            if evtype == "response.output_text.delta":
-                d = ev.get("delta")
-                if isinstance(d, str):
-                    accumulated_delta += d
-            elif evtype == "response.output_text.done":
-                t = ev.get("text")
-                if isinstance(t, str) and t.strip():
-                    done_text = t.strip()
-            elif evtype == "response.content_part.done":
-                part = ev.get("part") if isinstance(ev.get("part"), dict) else None
-                if isinstance(part, dict):
-                    t = part.get("text")
-                    if isinstance(t, str) and t.strip():
-                        done_text = t.strip()
-            elif evtype == "response.completed":
-                # 兜底：从 response.output[].content[].text 提取完整文本
-                resp_obj = ev.get("response")
-                if isinstance(resp_obj, dict) and not done_text:
-                    for item in resp_obj.get("output") or []:
-                        if not isinstance(item, dict):
-                            continue
-                        for part in item.get("content") or []:
-                            if isinstance(part, dict):
-                                t = part.get("text")
-                                if isinstance(t, str) and t.strip():
-                                    done_text = t.strip()
-                                    break
-                        if done_text:
-                            break
-
-        if done_text:
-            return done_text
-        if accumulated_delta.strip():
-            return accumulated_delta.strip()
-
-    # ---- 兜底：整体 JSON 解析（上游可能切回非 SSE） ----
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return ""
-    if isinstance(payload, dict):
-        for item in payload.get("output") or []:
-            if not isinstance(item, dict):
-                continue
-            for part in item.get("content") or []:
-                if isinstance(part, dict):
-                    t = part.get("text")
-                    if isinstance(t, str) and t.strip():
-                        return t.strip()
-        ot = payload.get("output_text")
-        if isinstance(ot, str) and ot.strip():
-            return ot.strip()
-    return ""
+    if _looks_like_sse(text, content_type):
+        sse_text = _sse_response_text(text)
+        if sse_text:
+            return sse_text
+    return _json_response_text(text)
 
 
 async def _call_upstream_one(

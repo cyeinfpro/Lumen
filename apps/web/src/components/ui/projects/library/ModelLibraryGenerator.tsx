@@ -23,6 +23,10 @@ import {
   ModelLibraryReferenceUploader,
   type ModelLibraryReferenceValue,
 } from "./ModelLibraryReferenceUploader";
+import {
+  buildModelLibraryGenerationBody,
+  modelLibrarySubmissionWarning,
+} from "./ModelLibraryGeneratorModel";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
   ["toddler", "幼儿"],
@@ -92,28 +96,27 @@ export function ModelLibraryGenerator({
   const totalCount = count * Math.max(1, genders.length);
 
   const submit = async () => {
-    if (mode === "reference_image" && referenceUploading) {
-      toast.warning("参考图仍在上传");
-      return;
-    }
-    if (mode === "reference_image" && !referenceImage) {
-      toast.warning("请先上传参考图");
-      return;
-    }
-    const resolvedAgeSegment =
-      mode === "text" ? (ageSegment || defaultAgeSegment) : ageSegment || null;
-    const body: ApparelModelLibraryGenerateIn = {
+    const warning = modelLibrarySubmissionWarning({
       mode,
-      reference_image_id: mode === "reference_image" ? referenceImage?.imageId ?? null : null,
-      age_segment: resolvedAgeSegment,
-      genders: genders.length ? genders : undefined,
-      gender: mode === "text" ? genders[0] ?? "female" : genders[0] ?? null,
-      appearance_direction: appearance || null,
-      extra_requirements: extra.trim() || null,
-      style_tags: styleTags,
+      referenceImageId: referenceImage?.imageId ?? null,
+      referenceUploading,
+    });
+    if (warning) {
+      toast.warning(warning);
+      return;
+    }
+    const body = buildModelLibraryGenerationBody({
+      ageSegment,
+      appearance,
+      autoTag,
       count,
-      auto_tag: autoTag,
-    };
+      defaultAgeSegment,
+      extra,
+      genders,
+      mode,
+      referenceImageId: referenceImage?.imageId ?? null,
+      styleTags,
+    });
     try {
       await onSubmit(body);
     } catch (err) {

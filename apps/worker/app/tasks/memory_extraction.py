@@ -529,6 +529,149 @@ def _clip_lines(memories: list[UserMemory], *, max_chars: int) -> list[UserMemor
     return out
 
 
+async def _memory_scope_context(
+    session: Any,
+    *,
+    user_id: str,
+    conversation: Conversation,
+) -> tuple[set[str], UserMemoryScope | None]:
+    default_scope = await _default_scope(session, user_id)
+    scope_ids = {default_scope.id}
+    active_scope = None
+    if conversation.active_scope_id:
+        scope_ids.add(conversation.active_scope_id)
+        active_scope = await session.get(
+            UserMemoryScope,
+            conversation.active_scope_id,
+        )
+    return scope_ids, active_scope
+
+
+async def _prompt_memory_rows(
+    session: Any,
+    *,
+    user_id: str,
+    conversation_id: str,
+    scope_ids: set[str],
+    redis: Any | None,
+) -> list[UserMemory]:
+    rows = list(
+        (
+            await session.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.disabled.is_(False),
+                    UserMemory.superseded_by.is_(None),
+                    UserMemory.scope_id.in_(scope_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
+    if not disabled_ids:
+        return rows
+    return [memory for memory in rows if memory.id not in disabled_ids]
+
+
+async def _ranked_prompt_memories(
+    rows: list[UserMemory],
+    *,
+    user_text: str,
+    now: datetime,
+) -> tuple[list[UserMemory], list[UserMemory], list[UserMemory], list[float] | None]:
+    profiles = [memory for memory in rows if memory.type == "profile"]
+    avoids = [memory for memory in rows if memory.type == "avoid"]
+    pinned = [memory for memory in rows if memory.pinned]
+    candidates = [
+        memory
+        for memory in rows
+        if memory.type in {"preference", "project"} and not memory.pinned
+    ]
+
+    query_vec = None
+    ranked: list[tuple[float, UserMemory]] = []
+    if len((user_text or "").strip()) >= 5:
+        query_vec = await _embedding_vector(None, user_text)
+        for memory in candidates:
+            memory_vec = parse_embedding_literal(
+                memory.embedding
+            ) or deterministic_embedding(memory.content)
+            score = (
+                cosine_similarity(query_vec, memory_vec)
+                * (1 + 0.1 * memory.positive_signal - 0.15 * memory.negative_signal)
+                * _decay(memory, now)
+            )
+            ranked.append((score, memory))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    context_memories: list[UserMemory] = []
+    seen: set[str] = set()
+    for memory in [*pinned, *[memory for _, memory in ranked[:8]]]:
+        if memory.id in seen or memory.type in {"profile", "avoid"}:
+            continue
+        seen.add(memory.id)
+        context_memories.append(memory)
+    return profiles, avoids, context_memories, query_vec
+
+
+def _clipped_prompt_memories(
+    profiles: list[UserMemory],
+    avoids: list[UserMemory],
+    context_memories: list[UserMemory],
+) -> tuple[list[UserMemory], list[UserMemory], list[UserMemory]]:
+    profiles = _clip_lines(
+        sorted(profiles, key=lambda memory: (not memory.pinned, -memory.confidence)),
+        max_chars=400,
+    )
+    avoids = _clip_lines(
+        sorted(avoids, key=lambda memory: (not memory.pinned, -memory.confidence)),
+        max_chars=400,
+    )
+    return profiles, avoids, _clip_lines(context_memories, max_chars=600)
+
+
+async def _record_used_memories(
+    session: Any,
+    *,
+    redis: Any | None,
+    used_ids: list[str],
+    now: datetime,
+) -> None:
+    if not used_ids:
+        return
+    flushed = False
+    if redis is not None:
+        try:
+            pipe = redis.pipeline(transaction=False)
+            score = now.timestamp()
+            for memory_id in used_ids:
+                pipe.zadd(_LAST_USED_PENDING_KEY, {memory_id: score})
+            await pipe.execute()
+            flushed = True
+        except Exception:
+            flushed = False
+    if flushed:
+        return
+    await session.execute(
+        update(UserMemory)
+        .where(UserMemory.id.in_(used_ids))
+        .values(last_used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _confirmation_instruction(memory: UserMemory | None) -> str | None:
+    if memory is None:
+        return None
+    return (
+        f"如果用户问题与用户偏好「{memory.content}」高度相关,"
+        "请在回答开头用一句话简短确认:「按你之前提到的这个偏好来吗?」再继续回答。"
+        "不要解释为什么记得。"
+    )
+
+
 async def assemble_user_memory_prompt(
     session: Any,
     *,
@@ -547,94 +690,39 @@ async def assemble_user_memory_prompt(
     if not await _embedding_provider_available(None):
         return AssembledMemoryPrompt(None, None, None, [], [])
 
-    default_scope = await _default_scope(session, user_id)
-    scope_ids = {default_scope.id}
-    active_scope: UserMemoryScope | None = None
-    if conv.active_scope_id:
-        scope_ids.add(conv.active_scope_id)
-        active_scope = await session.get(UserMemoryScope, conv.active_scope_id)
-    rows = (
-        (
-            await session.execute(
-                select(UserMemory).where(
-                    UserMemory.user_id == user_id,
-                    UserMemory.disabled.is_(False),
-                    UserMemory.superseded_by.is_(None),
-                    UserMemory.scope_id.in_(scope_ids),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    scope_ids, active_scope = await _memory_scope_context(
+        session,
+        user_id=user_id,
+        conversation=conv,
     )
-    disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
-    if disabled_ids:
-        rows = [memory for memory in rows if memory.id not in disabled_ids]
+    rows = await _prompt_memory_rows(
+        session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        scope_ids=scope_ids,
+        redis=redis,
+    )
     now = datetime.now(timezone.utc)
-
-    profiles = [m for m in rows if m.type == "profile"]
-    avoids = [m for m in rows if m.type == "avoid"]
-    pinned = [m for m in rows if m.pinned]
-    candidates = [
-        m for m in rows if m.type in {"preference", "project"} and not m.pinned
-    ]
-
-    ranked: list[tuple[float, UserMemory]] = []
-    if len((user_text or "").strip()) >= 5:
-        query_vec = await _embedding_vector(None, user_text)
-        for memory in candidates:
-            memory_vec = parse_embedding_literal(
-                memory.embedding
-            ) or deterministic_embedding(memory.content)
-            score = (
-                cosine_similarity(query_vec, memory_vec)
-                * (1 + 0.1 * memory.positive_signal - 0.15 * memory.negative_signal)
-                * _decay(memory, now)
-            )
-            ranked.append((score, memory))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-
-    context_memories: list[UserMemory] = []
-    seen: set[str] = set()
-    for memory in [*pinned, *[m for _, m in ranked[:8]]]:
-        if memory.id in seen or memory.type in {"profile", "avoid"}:
-            continue
-        seen.add(memory.id)
-        context_memories.append(memory)
-
-    profiles = _clip_lines(
-        sorted(profiles, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400
+    profiles, avoids, context_memories, query_vec = await _ranked_prompt_memories(
+        rows,
+        user_text=user_text,
+        now=now,
     )
-    avoids = _clip_lines(
-        sorted(avoids, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400
+    profiles, avoids, context_memories = _clipped_prompt_memories(
+        profiles,
+        avoids,
+        context_memories,
     )
-    context_memories = _clip_lines(context_memories, max_chars=600)
 
     used = [*profiles, *avoids, *context_memories]
     used_ids = [m.id for m in used]
     used_summary = [{"id": m.id, "type": m.type, "content": m.content} for m in used]
-    if used_ids:
-        # 高频热点写: 把 (memory_id -> ts) 写进 redis ZSET, 由 worker cron
-        # `flush_memory_last_used` 每 30s 批量 UPDATE 一次. 取不到 redis 时
-        # 退化为同步 UPDATE, 保证功能可用.
-        flushed = False
-        if redis is not None:
-            try:
-                pipe = redis.pipeline(transaction=False)
-                score = now.timestamp()
-                for mid in used_ids:
-                    pipe.zadd(_LAST_USED_PENDING_KEY, {mid: score})
-                await pipe.execute()
-                flushed = True
-            except Exception:
-                flushed = False
-        if not flushed:
-            await session.execute(
-                update(UserMemory)
-                .where(UserMemory.id.in_(used_ids))
-                .values(last_used_at=now)
-                .execution_options(synchronize_session=False)
-            )
+    await _record_used_memories(
+        session,
+        redis=redis,
+        used_ids=used_ids,
+        now=now,
+    )
 
     confirmation_candidate = await _pick_confirmation_candidate(
         session,
@@ -644,15 +732,8 @@ async def assemble_user_memory_prompt(
         now=now,
         conversation_id=conversation_id,
         parent_user_message_id=parent_user_message_id,
-        query_vec=query_vec if "query_vec" in locals() else None,
+        query_vec=query_vec,
     )
-    confirmation_instruction = None
-    if confirmation_candidate is not None:
-        confirmation_instruction = (
-            f"如果用户问题与用户偏好「{confirmation_candidate.content}」高度相关,"
-            "请在回答开头用一句话简短确认:「按你之前提到的这个偏好来吗?」再继续回答。"
-            "不要解释为什么记得。"
-        )
 
     return AssembledMemoryPrompt(
         profile_text=_memory_lines("user_profile", profiles),
@@ -668,7 +749,7 @@ async def assemble_user_memory_prompt(
         confirmation_candidate_id=confirmation_candidate.id
         if confirmation_candidate
         else None,
-        confirmation_instruction=confirmation_instruction,
+        confirmation_instruction=_confirmation_instruction(confirmation_candidate),
     )
 
 

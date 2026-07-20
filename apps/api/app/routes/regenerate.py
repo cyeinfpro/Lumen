@@ -493,7 +493,8 @@ async def _image_params_from_target(
     except (TypeError, ValueError) as exc:
         logger.warning(
             "regenerate image params fallback target_msg=%s err=%s",
-            target_msg_id, exc,
+            target_msg_id,
+            exc,
         )
         return ImageParamsIn()
 
@@ -532,35 +533,25 @@ async def _mask_image_id_from_target(
     return mask_id
 
 
-@router.post(
-    "/conversations/{conv_id}/messages/{message_id}/regenerate",
-    response_model=RegenerateOut,
-    dependencies=[Depends(verify_csrf)],
-)
-async def regenerate_message(
+async def _regenerate_messages(
+    db: AsyncSession,
+    *,
+    user_id: str,
     conv_id: str,
     message_id: str,
-    body: RegenerateIn,
-    user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> RegenerateOut:
-    redis = get_redis()
-    await MESSAGES_LIMITER.check(redis, f"rl:msg:{user.id}")
-
-    # ---- ownership: conversation ----
+) -> tuple[Conversation, Message, Message]:
     conv = (
         await db.execute(
             select(Conversation).where(
                 Conversation.id == conv_id,
-                Conversation.user_id == user.id,
+                Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
             )
         )
     ).scalar_one_or_none()
-    if not conv:
+    if conv is None:
         raise _http("not_found", "conversation not found", 404)
 
-    # ---- target assistant message must belong to this conv & be assistant role ----
     target = (
         await db.execute(
             select(Message).where(
@@ -573,8 +564,7 @@ async def regenerate_message(
     if target is None or target.role != Role.ASSISTANT.value:
         raise _http("not_found", "assistant message not found", 404)
 
-    # ---- find parent user message (the regen input) ----
-    user_msg: Message | None = None
+    user_msg = None
     if target.parent_message_id:
         user_msg = (
             await db.execute(
@@ -592,6 +582,109 @@ async def regenerate_message(
             "parent user message not found; cannot regenerate",
             422,
         )
+    return conv, target, user_msg
+
+
+def _attachment_ids_from_content(user_content: dict[str, Any]) -> list[str]:
+    return [
+        attachment["image_id"]
+        for attachment in user_content.get("attachments") or []
+        if isinstance(attachment, dict) and attachment.get("image_id")
+    ]
+
+
+async def _validated_attachment_ids(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    user_content: dict[str, Any],
+    intent: Intent,
+) -> list[str]:
+    attachment_ids = _attachment_ids_from_content(user_content)
+    if attachment_ids:
+        rows = (
+            (
+                await db.execute(
+                    select(Image.id).where(
+                        Image.id.in_(attachment_ids),
+                        Image.user_id == user_id,
+                        Image.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) != len(attachment_ids):
+            raise _http(
+                "invalid_attachment",
+                "one or more attachment images were deleted",
+                400,
+            )
+    if intent == Intent.IMAGE_TO_IMAGE and not attachment_ids:
+        raise _http(
+            "missing_reference_image",
+            "image_to_image requires the original user message to have at least one "
+            "reference image",
+            400,
+        )
+    return attachment_ids
+
+
+async def _regenerate_system_prompt(
+    db: AsyncSession,
+    *,
+    user: CurrentUser,
+    conv: Conversation,
+    target: Message,
+    intent: Intent,
+    chat_params: ChatParamsIn,
+) -> str | None:
+    if intent not in (Intent.CHAT, Intent.VISION_QA):
+        return None
+    system_prompt = (
+        await db.execute(
+            select(Completion.system_prompt)
+            .where(
+                Completion.user_id == user.id,
+                Completion.message_id == target.id,
+            )
+            .order_by(Completion.created_at.desc(), Completion.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if system_prompt is not None:
+        return system_prompt
+    return await resolve_system_prompt_for_message(
+        db,
+        user_id=user.id,
+        default_system_prompt_id=user.default_system_prompt_id,
+        conv=conv,
+        explicit_prompt=chat_params.system_prompt,
+    )
+
+
+@router.post(
+    "/conversations/{conv_id}/messages/{message_id}/regenerate",
+    response_model=RegenerateOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def regenerate_message(
+    conv_id: str,
+    message_id: str,
+    body: RegenerateIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RegenerateOut:
+    redis = get_redis()
+    await MESSAGES_LIMITER.check(redis, f"rl:msg:{user.id}")
+
+    conv, target, user_msg = await _regenerate_messages(
+        db,
+        user_id=user.id,
+        conv_id=conv_id,
+        message_id=message_id,
+    )
 
     # ---- idempotency short-circuit ---------------------------------------
     # If the same idempotency_key was already used by this user, return its result.
@@ -607,34 +700,12 @@ async def regenerate_message(
 
     # ---- vision/i2i sanity: pull attachments from user message ----
     user_content = user_msg.content or {}
-    attachment_ids: list[str] = []
-    for att in user_content.get("attachments") or []:
-        if isinstance(att, dict) and att.get("image_id"):
-            attachment_ids.append(att["image_id"])
-    if attachment_ids:
-        rows = (
-            await db.execute(
-                select(Image.id).where(
-                    Image.id.in_(attachment_ids),
-                    Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
-                )
-            )
-        ).scalars().all()
-        if len(rows) != len(attachment_ids):
-            raise _http(
-                "invalid_attachment",
-                "one or more attachment images were deleted",
-                400,
-            )
-
-    if intent == Intent.IMAGE_TO_IMAGE and not attachment_ids:
-        raise _http(
-            "missing_reference_image",
-            "image_to_image requires the original user message to have at least one "
-            "reference image",
-            400,
-        )
+    attachment_ids = await _validated_attachment_ids(
+        db,
+        user_id=user.id,
+        user_content=user_content,
+        intent=intent,
+    )
 
     text = user_content.get("text") or ""
 
@@ -671,27 +742,14 @@ async def regenerate_message(
         else _DEFAULT_IMAGE_OUTPUT_FORMAT
     )
     chat_params = _chat_params_from_user_content(user_content)
-    system_prompt = None
-    if intent in (Intent.CHAT, Intent.VISION_QA):
-        system_prompt = (
-            await db.execute(
-                select(Completion.system_prompt)
-                .where(
-                    Completion.user_id == user.id,
-                    Completion.message_id == target.id,
-                )
-                .order_by(Completion.created_at.desc(), Completion.id.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if system_prompt is None:
-            system_prompt = await resolve_system_prompt_for_message(
-                db,
-                user_id=user.id,
-                default_system_prompt_id=user.default_system_prompt_id,
-                conv=conv,
-                explicit_prompt=chat_params.system_prompt,
-            )
+    system_prompt = await _regenerate_system_prompt(
+        db,
+        user=user,
+        conv=conv,
+        target=target,
+        intent=intent,
+        chat_params=chat_params,
+    )
 
     result = await _create_assistant_task(
         db=db,

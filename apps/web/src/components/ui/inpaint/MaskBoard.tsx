@@ -37,13 +37,18 @@ import type Konva from "konva";
 import { Button, IconButton } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
+import {
+  applyMaskShortcut,
+  MASK_BRUSH_STEP as BRUSH_STEP,
+  resolveMaskShortcut,
+  shouldIgnoreMaskShortcut,
+} from "./maskBoardKeyboard";
 import type { Stroke, Tool } from "./types";
 export type { Stroke, Tool } from "./types";
 
 const MAX_DISPLAY = 768;
 const MIN_BRUSH = 8;
 const MAX_BRUSH = 96;
-const BRUSH_STEP = 4;
 const DEFAULT_BRUSH_DESKTOP = 36;
 const DEFAULT_BRUSH_TOUCH = 56;
 const STROKE_MIN_DELTA_SQ = 1.44; // 1.2px 平方；同笔内距离过近的点抽稀掉
@@ -53,19 +58,6 @@ const STROKES_DEBOUNCE_MS = 380; // onStrokesChange 去抖：避免逐点触发�
 const MIN_VIEW_SCALE = 1;
 const MAX_VIEW_SCALE = 6;
 const PINCH_MIN_DISTANCE = 8;
-
-// 数字键 1-9 → 画笔预设大小
-const BRUSH_PRESETS: Record<string, number> = {
-  "1": 12,
-  "2": 18,
-  "3": 26,
-  "4": 36,
-  "5": 48,
-  "6": 60,
-  "7": 72,
-  "8": 84,
-  "9": 96,
-};
 
 // hex #ff3b3080 ≈ Apple destructive red 调色 + 半透明
 const OVERLAY_RED = "rgba(255, 59, 48, 0.5)";
@@ -120,6 +112,18 @@ interface PinchGesture {
   startDistance: number;
   startLocalCenter: StagePoint;
   startView: ViewTransform;
+}
+
+interface MaskCursor {
+  x: number;
+  y: number;
+  pointerType: "mouse" | "pen" | "touch" | null;
+}
+
+interface DisplayDimensions {
+  width: number;
+  height: number;
+  scale: number;
 }
 
 function isTouchDevice(): boolean {
@@ -200,6 +204,79 @@ function estimateLuminance(img: HTMLImageElement): number {
   }
 }
 
+function shouldStopForTouchGesture({
+  native,
+  stagePoint,
+  activeTouchPoints,
+  suppressTouchDraw,
+  cancelTouchStroke,
+  updatePinchGesture,
+}: {
+  native: PointerEvent;
+  stagePoint: StagePoint | null;
+  activeTouchPoints: Map<number, StagePoint>;
+  suppressTouchDraw: { current: boolean };
+  cancelTouchStroke: () => void;
+  updatePinchGesture: () => void;
+}): boolean {
+  if (native.pointerType !== "touch" || !stagePoint) return false;
+  native.preventDefault();
+  activeTouchPoints.set(native.pointerId, stagePoint);
+  if (activeTouchPoints.size >= 2) {
+    suppressTouchDraw.current = true;
+    cancelTouchStroke();
+    updatePinchGesture();
+    return true;
+  }
+  return suppressTouchDraw.current;
+}
+
+function isPointInsideDisplay(
+  point: StagePoint,
+  dimensions: DisplayDimensions,
+): boolean {
+  return (
+    point.x >= 0 &&
+    point.y >= 0 &&
+    point.x <= dimensions.width &&
+    point.y <= dimensions.height
+  );
+}
+
+function isPrimaryDrawingPointer(event: PointerEvent): boolean {
+  return event.button === undefined || event.button <= 0;
+}
+
+function effectiveBrushRadius(event: PointerEvent, brushSize: number): number {
+  const isPen = event.pointerType === "pen";
+  const pressure =
+    typeof event.pressure === "number" ? event.pressure : 0;
+  const sizeMultiplier =
+    isPen && pressure > 0 ? 0.4 + pressure * 0.6 : 1;
+  return Math.max(
+    Math.round(MIN_BRUSH / 2),
+    Math.round(brushSize * sizeMultiplier),
+  );
+}
+
+function maskColorsForLuminance(luminance: number) {
+  const isDarkBg = luminance < 0.45;
+  return {
+    isDarkBg,
+    overlayColor: isDarkBg ? OVERLAY_CYAN : OVERLAY_RED,
+    cursorStroke: isDarkBg ? CURSOR_CYAN_STROKE : CURSOR_RED_STROKE,
+    cursorFill: isDarkBg ? CURSOR_CYAN_FILL : CURSOR_RED_FILL,
+  };
+}
+
+function isViewTransformFit(view: ViewTransform): boolean {
+  return (
+    Math.abs(view.scale - 1) < 0.001 &&
+    Math.abs(view.x) < 0.5 &&
+    Math.abs(view.y) < 0.5
+  );
+}
+
 export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
   function MaskBoard(
     {
@@ -236,11 +313,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     const [strokes, setStrokes] = useState<Stroke[]>(
       () => initialStrokes ?? [],
     );
-    const [cursor, setCursor] = useState<{
-      x: number;
-      y: number;
-      pointerType: "mouse" | "pen" | "touch" | null;
-    } | null>(null);
+    const [cursor, setCursor] = useState<MaskCursor | null>(null);
     const [imgFadeIn, setImgFadeIn] = useState(false);
     const [luminance, setLuminance] = useState<number>(0.6);
     const [view, setView] = useState<ViewTransform>(() =>
@@ -309,10 +382,8 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       };
     }, [imageSrc, retryAttempt]);
 
-    const isDarkBg = luminance < 0.45;
-    const overlayColor = isDarkBg ? OVERLAY_CYAN : OVERLAY_RED;
-    const cursorStroke = isDarkBg ? CURSOR_CYAN_STROKE : CURSOR_RED_STROKE;
-    const cursorFill = isDarkBg ? CURSOR_CYAN_FILL : CURSOR_RED_FILL;
+    const { isDarkBg, overlayColor, cursorStroke, cursorFill } =
+      maskColorsForLuminance(luminance);
 
     // ———— 容器尺寸监听：让画板严格 fit 容器（不溢出） ————
     // ResizeObserver 在 observe() 后会自动派发一次首帧 callback（spec 行为），
@@ -371,58 +442,22 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     }, [displayKey, imageSrc]);
 
     const hasStroke = strokes.length > 0;
-    const viewIsFit =
-      Math.abs(view.scale - 1) < 0.001 &&
-      Math.abs(view.x) < 0.5 &&
-      Math.abs(view.y) < 0.5;
+    const viewIsFit = isViewTransformFit(view);
 
     // ———— 全局快捷键 ————
     // B/E 切工具，Z 撤销，[/] 调大小，1-9 预设大小
     useEffect(() => {
       const onKey = (e: KeyboardEvent) => {
-        if (e.metaKey || e.ctrlKey || e.altKey) return;
-        const target = e.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === "INPUT" ||
-            target.tagName === "TEXTAREA" ||
-            target.isContentEditable)
-        ) {
-          return;
-        }
-        switch (e.key) {
-          case "b":
-          case "B":
-            e.preventDefault();
-            setTool("brush");
-            return;
-          case "e":
-          case "E":
-            e.preventDefault();
-            setTool("eraser");
-            return;
-          case "z":
-          case "Z":
-            if (hasStroke) {
-              e.preventDefault();
-              setStrokes((prev) => prev.slice(0, -1));
-            }
-            return;
-          case "[":
-            e.preventDefault();
-            setBrushSize((v) => clampBrush(v - BRUSH_STEP));
-            return;
-          case "]":
-            e.preventDefault();
-            setBrushSize((v) => clampBrush(v + BRUSH_STEP));
-            return;
-          default:
-            if (e.key in BRUSH_PRESETS) {
-              e.preventDefault();
-              setBrushSize(BRUSH_PRESETS[e.key]);
-            }
-            return;
-        }
+        if (shouldIgnoreMaskShortcut(e)) return;
+        const shortcut = resolveMaskShortcut(e.key);
+        if (!shortcut) return;
+        const handled = applyMaskShortcut(shortcut, hasStroke, {
+          setTool,
+          setStrokes,
+          setBrushSize,
+          clampBrush,
+        });
+        if (handled) e.preventDefault();
       };
       document.addEventListener("keydown", onKey);
       return () => document.removeEventListener("keydown", onKey);
@@ -531,41 +566,24 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         const stage = e.target.getStage();
         const native = e.evt as PointerEvent;
         const stagePoint = pointFromPointerEvent(native, stageRef.current);
-        if (native.pointerType === "touch" && stagePoint) {
-          native.preventDefault();
-          activeTouchPointsRef.current.set(native.pointerId, stagePoint);
-          if (activeTouchPointsRef.current.size >= 2) {
-            suppressTouchDrawRef.current = true;
-            cancelTouchStrokeForGesture();
-            updatePinchGesture();
-            return;
-          }
-          if (suppressTouchDrawRef.current) return;
-        }
+        const stopForTouchGesture = shouldStopForTouchGesture({
+          native,
+          stagePoint,
+          activeTouchPoints: activeTouchPointsRef.current,
+          suppressTouchDraw: suppressTouchDrawRef,
+          cancelTouchStroke: cancelTouchStrokeForGesture,
+          updatePinchGesture,
+        });
+        if (stopForTouchGesture) return;
         const pointer = stagePoint ?? stage?.getPointerPosition();
         if (!pointer) return;
         const pos = imagePointFromStagePoint(pointer);
-        if (
-          pos.x < 0 ||
-          pos.y < 0 ||
-          pos.x > displayDims.width ||
-          pos.y > displayDims.height
-        ) {
-          return;
-        }
+        if (!isPointInsideDisplay(pos, displayDims)) return;
         // 仅主键 / 触摸 / 笔触发笔画；忽略右键
-        if (native.button !== undefined && native.button > 0) return;
+        if (!isPrimaryDrawingPointer(native)) return;
         drawingRef.current = true;
         touchStrokeStartedRef.current = native.pointerType === "touch";
-        const isPen = native.pointerType === "pen";
-        const pressure =
-          typeof native.pressure === "number" ? native.pressure : 0;
-        const sizeMultiplier =
-          isPen && pressure > 0 ? 0.4 + pressure * 0.6 : 1;
-        const effectiveRadius = Math.max(
-          Math.round(MIN_BRUSH / 2),
-          Math.round(brushSize * sizeMultiplier),
-        );
+        const effectiveRadius = effectiveBrushRadius(native, brushSize);
         setStrokes((prev) => [
           ...prev,
           { tool, radius: effectiveRadius, points: [pos.x, pos.y] },
@@ -575,8 +593,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         brushSize,
         cancelTouchStrokeForGesture,
         disabled,
-        displayDims.height,
-        displayDims.width,
+        displayDims,
         imagePointFromStagePoint,
         tool,
         updatePinchGesture,
@@ -846,178 +863,458 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         style={style}
         onPointerDown={onContainerPointerDown}
       >
-        {/* 画板区域：ResizeObserver 测内容尺寸 → displayDims fit；不再 overflow-auto */}
-        <div
-          ref={boardAreaRef}
-          className={cn(
-            "relative flex-1 min-h-0 rounded-[var(--radius-card)] bg-[var(--bg-0)]",
-            "p-2 sm:p-4 overflow-hidden",
-            "flex items-center justify-center",
-          )}
+        <MaskBoardSurface
+          boardAreaRef={boardAreaRef}
+          stageRef={stageRef}
+          imgError={imgError}
+          imgEl={imgEl}
+          imgFadeIn={imgFadeIn}
+          displayDims={displayDims}
+          view={view}
+          strokes={strokes}
+          overlayColor={overlayColor}
+          cursor={cursor}
+          disabled={Boolean(disabled)}
+          brushSize={brushSize}
+          cursorStroke={cursorStroke}
+          cursorFill={cursorFill}
+          tool={tool}
           onWheel={handleWheel}
-        >
-          <div className="flex items-center justify-center w-full h-full">
-            {imgError ? (
-              <div className="flex flex-col items-center gap-2 type-body-sm text-[var(--danger-fg)]">
-                <span>{imgError}</span>
-                <Button
-                  variant="link"
-                  onClick={handleManualRetry}
-                >
-                  重试
-                </Button>
-              </div>
-            ) : !imgEl ? (
-              <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                加载中
-              </div>
-            ) : (
-              <div
-                data-mask-canvas-stage
-                className={cn(
-                  "relative rounded-[var(--radius-card)] overflow-hidden border border-[var(--border-subtle)]",
-                  "shadow-[var(--shadow-1)]",
-                  "touch-none select-none",
-                  !isTouchDevice() && "cursor-crosshair",
-                )}
-                style={{
-                  width: displayDims.width,
-                  height: displayDims.height,
-                  opacity: imgFadeIn ? 1 : 0,
-                  transition: "opacity 220ms ease-out",
-                }}
-              >
-                <Stage
-                  ref={stageRef}
-                  width={displayDims.width}
-                  height={displayDims.height}
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  onPointerLeave={handlePointerLeave}
-                  onPointerCancel={handlePointerUp}
-                >
-                  <Layer listening={false}>
-                    <Group
-                      x={view.x}
-                      y={view.y}
-                      scaleX={view.scale}
-                      scaleY={view.scale}
-                    >
-                      <KonvaImage
-                        image={imgEl}
-                        width={displayDims.width}
-                        height={displayDims.height}
-                      />
-                    </Group>
-                  </Layer>
-                  <Layer listening={false}>
-                    <Group
-                      x={view.x}
-                      y={view.y}
-                      scaleX={view.scale}
-                      scaleY={view.scale}
-                    >
-                      {strokes.map((s, i) => (
-                        <Line
-                          key={i}
-                          points={s.points}
-                          stroke={overlayColor}
-                          strokeWidth={s.radius * 2}
-                          tension={0}
-                          lineCap="round"
-                          lineJoin="round"
-                          globalCompositeOperation={
-                            s.tool === "brush"
-                              ? "source-over"
-                              : "destination-out"
-                          }
-                        />
-                      ))}
-                    </Group>
-                  </Layer>
-                </Stage>
-
-                {/* 光标预览（仅 mouse/pen 显示；触屏隐藏避免重影） */}
-                {cursor &&
-                  cursor.pointerType !== "touch" &&
-                  !disabled && (
-                    <div
-                      aria-hidden
-                      className="pointer-events-none absolute"
-                      style={{
-                        left: cursor.x - brushSize * view.scale,
-                        top: cursor.y - brushSize * view.scale,
-                        width: brushSize * 2 * view.scale,
-                        height: brushSize * 2 * view.scale,
-                        borderRadius: "50%",
-                        border: `1.5px solid ${cursorStroke}`,
-                        background:
-                          tool === "brush" ? cursorFill : "transparent",
-                        boxShadow: "0 0 0 1px rgba(0,0,0,0.32) inset",
-                      }}
-                    />
-                  )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* 工具条 */}
-        <div className="flex flex-wrap items-center gap-2 px-1">
-          <ToolSegment value={tool} onChange={setTool} disabled={disabled} />
-
-          <BrushSizeControl
-            value={brushSize}
-            onChange={(v) => setBrushSize(clampBrush(v))}
-            disabled={disabled}
-            isDarkBg={isDarkBg}
-          />
-
-          <IconButton
-            variant="ghost"
-            onClick={handleFitView}
-            disabled={!imgEl || viewIsFit}
-            aria-label="适应画布"
-            tooltip={`适应画布 (${Math.round(view.scale * 100)}%)`}
-            className="rounded-full"
-          >
-            <Scan className="w-4 h-4" />
-          </IconButton>
-
-          <IconButton
-            variant="ghost"
-            onClick={handleUndo}
-            disabled={!hasStroke || disabled}
-            aria-label="撤销 (Z)"
-            tooltip="撤销 (Z)"
-            className="rounded-full"
-          >
-            <Undo2 className="w-4 h-4" />
-          </IconButton>
-
-          <IconButton
-            variant="ghost"
-            onClick={handleReset}
-            disabled={!hasStroke || disabled}
-            aria-label="清除全部"
-            tooltip="清除全部"
-            className="rounded-full"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </IconButton>
-
-          {/* 实时覆盖率 */}
-          <CoverageBadge
-            coverage={liveCoverage}
-            strokeCount={strokes.length}
-          />
-        </div>
+          onRetry={handleManualRetry}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+        />
+        <MaskBoardToolbar
+          tool={tool}
+          brushSize={brushSize}
+          disabled={Boolean(disabled)}
+          isDarkBg={isDarkBg}
+          hasImage={Boolean(imgEl)}
+          view={view}
+          viewIsFit={viewIsFit}
+          hasStroke={hasStroke}
+          liveCoverage={liveCoverage}
+          strokeCount={strokes.length}
+          onToolChange={setTool}
+          onBrushSizeChange={(value) => setBrushSize(clampBrush(value))}
+          onFitView={handleFitView}
+          onUndo={handleUndo}
+          onReset={handleReset}
+        />
       </div>
     );
   },
 );
+
+type MaskStagePointerHandler = (
+  event: Konva.KonvaEventObject<PointerEvent>,
+) => void;
+
+function MaskBoardSurface({
+  boardAreaRef,
+  stageRef,
+  imgError,
+  imgEl,
+  imgFadeIn,
+  displayDims,
+  view,
+  strokes,
+  overlayColor,
+  cursor,
+  disabled,
+  brushSize,
+  cursorStroke,
+  cursorFill,
+  tool,
+  onWheel,
+  onRetry,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerLeave,
+}: {
+  boardAreaRef: React.RefObject<HTMLDivElement | null>;
+  stageRef: React.RefObject<Konva.Stage | null>;
+  imgError: string | null;
+  imgEl: HTMLImageElement | null;
+  imgFadeIn: boolean;
+  displayDims: DisplayDimensions;
+  view: ViewTransform;
+  strokes: Stroke[];
+  overlayColor: string;
+  cursor: MaskCursor | null;
+  disabled: boolean;
+  brushSize: number;
+  cursorStroke: string;
+  cursorFill: string;
+  tool: Tool;
+  onWheel: React.WheelEventHandler<HTMLDivElement>;
+  onRetry: () => void;
+  onPointerDown: MaskStagePointerHandler;
+  onPointerMove: MaskStagePointerHandler;
+  onPointerUp: MaskStagePointerHandler;
+  onPointerLeave: MaskStagePointerHandler;
+}) {
+  return (
+    <div
+      ref={boardAreaRef}
+      className={cn(
+        "relative flex-1 min-h-0 rounded-[var(--radius-card)] bg-[var(--bg-0)]",
+        "p-2 sm:p-4 overflow-hidden",
+        "flex items-center justify-center",
+      )}
+      onWheel={onWheel}
+    >
+      <div className="flex items-center justify-center w-full h-full">
+        <MaskBoardSurfaceContent
+          stageRef={stageRef}
+          imgError={imgError}
+          imgEl={imgEl}
+          imgFadeIn={imgFadeIn}
+          displayDims={displayDims}
+          view={view}
+          strokes={strokes}
+          overlayColor={overlayColor}
+          cursor={cursor}
+          disabled={disabled}
+          brushSize={brushSize}
+          cursorStroke={cursorStroke}
+          cursorFill={cursorFill}
+          tool={tool}
+          onRetry={onRetry}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerLeave}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MaskBoardSurfaceContent({
+  stageRef,
+  imgError,
+  imgEl,
+  imgFadeIn,
+  displayDims,
+  view,
+  strokes,
+  overlayColor,
+  cursor,
+  disabled,
+  brushSize,
+  cursorStroke,
+  cursorFill,
+  tool,
+  onRetry,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerLeave,
+}: {
+  stageRef: React.RefObject<Konva.Stage | null>;
+  imgError: string | null;
+  imgEl: HTMLImageElement | null;
+  imgFadeIn: boolean;
+  displayDims: DisplayDimensions;
+  view: ViewTransform;
+  strokes: Stroke[];
+  overlayColor: string;
+  cursor: MaskCursor | null;
+  disabled: boolean;
+  brushSize: number;
+  cursorStroke: string;
+  cursorFill: string;
+  tool: Tool;
+  onRetry: () => void;
+  onPointerDown: MaskStagePointerHandler;
+  onPointerMove: MaskStagePointerHandler;
+  onPointerUp: MaskStagePointerHandler;
+  onPointerLeave: MaskStagePointerHandler;
+}) {
+  if (imgError) {
+    return (
+      <div className="flex flex-col items-center gap-2 type-body-sm text-[var(--danger-fg)]">
+        <span>{imgError}</span>
+        <Button variant="link" onClick={onRetry}>
+          重试
+        </Button>
+      </div>
+    );
+  }
+  if (!imgEl) {
+    return (
+      <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        加载中
+      </div>
+    );
+  }
+  return (
+    <MaskCanvasStage
+      stageRef={stageRef}
+      imgEl={imgEl}
+      imgFadeIn={imgFadeIn}
+      displayDims={displayDims}
+      view={view}
+      strokes={strokes}
+      overlayColor={overlayColor}
+      cursor={cursor}
+      disabled={disabled}
+      brushSize={brushSize}
+      cursorStroke={cursorStroke}
+      cursorFill={cursorFill}
+      tool={tool}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerLeave={onPointerLeave}
+    />
+  );
+}
+
+function MaskCanvasStage({
+  stageRef,
+  imgEl,
+  imgFadeIn,
+  displayDims,
+  view,
+  strokes,
+  overlayColor,
+  cursor,
+  disabled,
+  brushSize,
+  cursorStroke,
+  cursorFill,
+  tool,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerLeave,
+}: {
+  stageRef: React.RefObject<Konva.Stage | null>;
+  imgEl: HTMLImageElement;
+  imgFadeIn: boolean;
+  displayDims: DisplayDimensions;
+  view: ViewTransform;
+  strokes: Stroke[];
+  overlayColor: string;
+  cursor: MaskCursor | null;
+  disabled: boolean;
+  brushSize: number;
+  cursorStroke: string;
+  cursorFill: string;
+  tool: Tool;
+  onPointerDown: MaskStagePointerHandler;
+  onPointerMove: MaskStagePointerHandler;
+  onPointerUp: MaskStagePointerHandler;
+  onPointerLeave: MaskStagePointerHandler;
+}) {
+  return (
+    <div
+      data-mask-canvas-stage
+      className={cn(
+        "relative rounded-[var(--radius-card)] overflow-hidden border border-[var(--border-subtle)]",
+        "shadow-[var(--shadow-1)]",
+        "touch-none select-none",
+        isTouchDevice() ? null : "cursor-crosshair",
+      )}
+      style={{
+        width: displayDims.width,
+        height: displayDims.height,
+        opacity: imgFadeIn ? 1 : 0,
+        transition: "opacity 220ms ease-out",
+      }}
+    >
+      <Stage
+        ref={stageRef}
+        width={displayDims.width}
+        height={displayDims.height}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
+        onPointerCancel={onPointerUp}
+      >
+        <Layer listening={false}>
+          <Group
+            x={view.x}
+            y={view.y}
+            scaleX={view.scale}
+            scaleY={view.scale}
+          >
+            <KonvaImage
+              image={imgEl}
+              width={displayDims.width}
+              height={displayDims.height}
+            />
+          </Group>
+        </Layer>
+        <Layer listening={false}>
+          <Group
+            x={view.x}
+            y={view.y}
+            scaleX={view.scale}
+            scaleY={view.scale}
+          >
+            {strokes.map((stroke, index) => (
+              <Line
+                key={index}
+                points={stroke.points}
+                stroke={overlayColor}
+                strokeWidth={stroke.radius * 2}
+                tension={0}
+                lineCap="round"
+                lineJoin="round"
+                globalCompositeOperation={
+                  stroke.tool === "brush"
+                    ? "source-over"
+                    : "destination-out"
+                }
+              />
+            ))}
+          </Group>
+        </Layer>
+      </Stage>
+
+      <MaskCursorPreview
+        cursor={cursor}
+        disabled={disabled}
+        brushSize={brushSize}
+        viewScale={view.scale}
+        cursorStroke={cursorStroke}
+        cursorFill={cursorFill}
+        tool={tool}
+      />
+    </div>
+  );
+}
+
+function MaskCursorPreview({
+  cursor,
+  disabled,
+  brushSize,
+  viewScale,
+  cursorStroke,
+  cursorFill,
+  tool,
+}: {
+  cursor: MaskCursor | null;
+  disabled: boolean;
+  brushSize: number;
+  viewScale: number;
+  cursorStroke: string;
+  cursorFill: string;
+  tool: Tool;
+}) {
+  if (!cursor || cursor.pointerType === "touch" || disabled) return null;
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none absolute"
+      style={{
+        left: cursor.x - brushSize * viewScale,
+        top: cursor.y - brushSize * viewScale,
+        width: brushSize * 2 * viewScale,
+        height: brushSize * 2 * viewScale,
+        borderRadius: "50%",
+        border: `1.5px solid ${cursorStroke}`,
+        background: tool === "brush" ? cursorFill : "transparent",
+        boxShadow: "0 0 0 1px rgba(0,0,0,0.32) inset",
+      }}
+    />
+  );
+}
+
+function MaskBoardToolbar({
+  tool,
+  brushSize,
+  disabled,
+  isDarkBg,
+  hasImage,
+  view,
+  viewIsFit,
+  hasStroke,
+  liveCoverage,
+  strokeCount,
+  onToolChange,
+  onBrushSizeChange,
+  onFitView,
+  onUndo,
+  onReset,
+}: {
+  tool: Tool;
+  brushSize: number;
+  disabled: boolean;
+  isDarkBg: boolean;
+  hasImage: boolean;
+  view: ViewTransform;
+  viewIsFit: boolean;
+  hasStroke: boolean;
+  liveCoverage: number;
+  strokeCount: number;
+  onToolChange: (tool: Tool) => void;
+  onBrushSizeChange: (value: number) => void;
+  onFitView: () => void;
+  onUndo: () => void;
+  onReset: () => void;
+}) {
+  const editDisabled = !hasStroke || disabled;
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-1">
+      <ToolSegment
+        value={tool}
+        onChange={onToolChange}
+        disabled={disabled}
+      />
+
+      <BrushSizeControl
+        value={brushSize}
+        onChange={onBrushSizeChange}
+        disabled={disabled}
+        isDarkBg={isDarkBg}
+      />
+
+      <IconButton
+        variant="ghost"
+        onClick={onFitView}
+        disabled={!hasImage || viewIsFit}
+        aria-label="适应画布"
+        tooltip={`适应画布 (${Math.round(view.scale * 100)}%)`}
+        className="rounded-full"
+      >
+        <Scan className="w-4 h-4" />
+      </IconButton>
+
+      <IconButton
+        variant="ghost"
+        onClick={onUndo}
+        disabled={editDisabled}
+        aria-label="撤销 (Z)"
+        tooltip="撤销 (Z)"
+        className="rounded-full"
+      >
+        <Undo2 className="w-4 h-4" />
+      </IconButton>
+
+      <IconButton
+        variant="ghost"
+        onClick={onReset}
+        disabled={editDisabled}
+        aria-label="清除全部"
+        tooltip="清除全部"
+        className="rounded-full"
+      >
+        <RotateCcw className="w-4 h-4" />
+      </IconButton>
+
+      <CoverageBadge coverage={liveCoverage} strokeCount={strokeCount} />
+    </div>
+  );
+}
 
 function ToolSegment({
   value,

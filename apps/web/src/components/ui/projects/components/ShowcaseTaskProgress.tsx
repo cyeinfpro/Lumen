@@ -15,29 +15,16 @@ import type {
 } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "../utils";
-
-type ProgressState = "done" | "active" | "pending" | "failed";
+import {
+  buildShowcaseProgressModel,
+  type ProgressState,
+} from "./ShowcaseTaskProgressModel";
 
 interface ShowcaseTaskProgressProps {
   workflow: WorkflowRun;
   step: WorkflowStep;
   images: BackendImageMeta[];
 }
-
-const PREFLIGHT_LABEL: Record<string, string> = {
-  queued: "等待场景规划",
-  running: "规划镜头与提示词",
-  dispatched: "图像任务已派发",
-  failed: "场景规划失败",
-};
-
-const PREFLIGHT_PHASE_LABEL: Record<string, string> = {
-  director: "GPT-5.5 规划并扩写",
-  composer: "GPT-5.5 扩写提示词",
-  review: "GPT-5.5 风险复核",
-  fallback: "规则兜底",
-  dispatching: "派发生图任务",
-};
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "排队中",
@@ -81,95 +68,7 @@ export function ShowcaseTaskProgress({
   step,
   images,
 }: ShowcaseTaskProgressProps) {
-  const taskIds = step.task_ids ?? [];
-  const generationsById = new Map(workflow.generations.map((task) => [task.id, task]));
-  const bonusByParentId = new Map(
-    workflow.generations
-      .filter((task) => task.is_dual_race_bonus && task.parent_generation_id)
-      .map((task) => [task.parent_generation_id as string, task]),
-  );
-  const requestedCount =
-    numberValue(step.input_json?.active_output_count) ??
-    numberValue(step.input_json?.output_count);
-  const explicitActiveTaskIds = stringArray(step.input_json?.active_task_ids);
-  const currentTaskIds =
-    explicitActiveTaskIds.length > 0
-      ? explicitActiveTaskIds
-      : requestedCount && taskIds.length > requestedCount
-        ? taskIds.slice(-requestedCount)
-        : taskIds;
-  const historyTaskCount = Math.max(0, taskIds.length - currentTaskIds.length);
-  const tasks = currentTaskIds.map((taskId, index) => ({
-    id: taskId,
-    index,
-    generation: effectiveGeneration(generationsById.get(taskId), bonusByParentId.get(taskId)),
-  }));
-  const taskStatuses = tasks
-    .map((task) => task.generation?.status)
-    .filter((status): status is BackendGeneration["status"] => Boolean(status));
-  const runningCount = taskStatuses.filter(
-    (status) => status === "queued" || status === "running",
-  ).length;
-  const succeededCount = taskStatuses.filter((status) => status === "succeeded").length;
-  const failedCount = taskStatuses.filter((status) => status === "failed").length;
-  const canceledCount = taskStatuses.filter((status) => status === "canceled").length;
-  const plannedCount = Math.max(
-    explicitActiveTaskIds.length,
-    requestedCount ?? 0,
-    currentTaskIds.length,
-  );
-  const targetImageCount = numberValue(step.input_json?.target_image_count);
-  const baselineImageCount =
-    numberValue(step.input_json?.baseline_image_count) ??
-    (typeof targetImageCount === "number" && typeof requestedCount === "number"
-      ? Math.max(0, targetImageCount - requestedCount)
-      : 0);
-  const currentImageCount = Math.max(0, images.length - baselineImageCount);
-  const progressCount = Math.max(
-    Math.min(plannedCount, currentImageCount),
-    Math.min(plannedCount, succeededCount),
-  );
-  const preflightStatus = stringValue(step.input_json?.preflight_status);
-  const preflightPhase = stringValue(step.input_json?.preflight_phase);
-  const preflightPhaseDetail = stringValue(step.input_json?.preflight_phase_detail);
-  const preflightPhaseCurrent = numberValue(step.input_json?.preflight_phase_current);
-  const preflightPhaseTotal = numberValue(step.input_json?.preflight_phase_total);
-  const preflightDisplay = preflightPhaseDetail
-    ? `${PREFLIGHT_PHASE_LABEL[preflightPhase ?? ""] ?? "规划中"} · ${preflightPhaseDetail}`
-    : PREFLIGHT_LABEL[preflightStatus ?? "queued"] ?? "等待场景规划";
-  const phase = resolvePhase({
-    preflightStatus,
-    preflightDisplay,
-    taskCount: tasks.length,
-    runningCount,
-    failedCount,
-    canceledCount,
-    plannedCount,
-    progressCount,
-    stepStatus: step.status,
-  });
-  const percent = progressPercent({
-    preflightStatus,
-    preflightPhase,
-    preflightPhaseCurrent,
-    preflightPhaseTotal,
-    taskCount: tasks.length,
-    plannedCount,
-    progressCount,
-    stepStatus: step.status,
-  });
-  const milestones = buildMilestones({
-    preflightStatus,
-    preflightDisplay,
-    taskCount: tasks.length,
-    runningCount,
-    failedCount,
-    canceledCount,
-    plannedCount,
-    progressCount,
-    stepStatus: step.status,
-  });
-
+  const model = buildShowcaseProgressModel(workflow, step, images);
   return (
     <section className="border-t border-[var(--border)] py-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -178,15 +77,31 @@ export function ShowcaseTaskProgress({
             Task Progress
           </p>
           <p className="mt-1 text-[13px] leading-6 text-[var(--fg-1)]">
-            {phase}
+            {model.phase}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em]">
-          <Metric label="完成" value={`${progressCount}/${plannedCount}`} tone="success" />
-          {runningCount > 0 ? <Metric label="进行中" value={runningCount} tone="amber" /> : null}
-          {failedCount > 0 ? <Metric label="失败" value={failedCount} tone="danger" /> : null}
-          {canceledCount > 0 ? <Metric label="取消" value={canceledCount} tone="neutral" /> : null}
-          {historyTaskCount > 0 ? <Metric label="历史" value={historyTaskCount} tone="neutral" /> : null}
+          <Metric
+            label="完成"
+            value={`${model.progressCount}/${model.plannedCount}`}
+            tone="success"
+          />
+          {model.runningCount > 0 ? (
+            <Metric label="进行中" value={model.runningCount} tone="amber" />
+          ) : null}
+          {model.failedCount > 0 ? (
+            <Metric label="失败" value={model.failedCount} tone="danger" />
+          ) : null}
+          {model.canceledCount > 0 ? (
+            <Metric label="取消" value={model.canceledCount} tone="neutral" />
+          ) : null}
+          {model.historyTaskCount > 0 ? (
+            <Metric
+              label="历史"
+              value={model.historyTaskCount}
+              tone="neutral"
+            />
+          ) : null}
         </div>
       </div>
 
@@ -194,16 +109,17 @@ export function ShowcaseTaskProgress({
         <div
           className={cn(
             "h-full rounded-full transition-all duration-500",
-            (failedCount > 0 || canceledCount > 0) && runningCount === 0
+            (model.failedCount > 0 || model.canceledCount > 0) &&
+              model.runningCount === 0
               ? "bg-[var(--danger)]"
               : "bg-[var(--amber-400)]",
           )}
-          style={{ width: `${percent}%` }}
+          style={{ width: `${model.percent}%` }}
         />
       </div>
 
       <ol className="mt-4 grid gap-2 md:grid-cols-4">
-        {milestones.map((item) => (
+        {model.milestones.map((item) => (
           <li
             key={item.label}
             className="flex min-h-12 items-center gap-2 border border-[var(--border)] px-3 py-2"
@@ -222,8 +138,8 @@ export function ShowcaseTaskProgress({
       </ol>
 
       <div className="mt-4 divide-y divide-[var(--border)] border-y border-[var(--border)]">
-        {tasks.length > 0 ? (
-          tasks.map((task) => (
+        {model.tasks.length > 0 ? (
+          model.tasks.map((task) => (
             <TaskRow
               key={task.id}
               index={task.index}
@@ -237,7 +153,7 @@ export function ShowcaseTaskProgress({
                 等待派发图像任务
               </p>
               <p className="mt-1 text-[12px] text-[var(--fg-1)]">
-                {preflightDisplay}
+                {model.preflightDisplay}
               </p>
             </div>
             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--amber-300)]" />
@@ -280,20 +196,7 @@ function TaskRow({
   index: number;
   generation?: BackendGeneration;
 }) {
-  const status = generation?.status ?? "queued";
-  const stage = generation?.progress_stage ?? "queued";
-  const time =
-    generation?.finished_at ??
-    generation?.started_at ??
-    null;
-  const detail = [
-    STAGE_LABEL[stage] ?? stage,
-    generation?.attempt ? `第 ${generation.attempt} 次尝试` : null,
-    time ? formatRelativeTime(time) : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
+  const presentation = taskRowPresentation(generation);
   return (
     <div className="grid min-h-14 gap-2 px-1 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
       <div className="min-w-0">
@@ -304,58 +207,60 @@ function TaskRow({
           <span
             className={cn(
               "inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em]",
-              STATUS_TONE[status],
+              STATUS_TONE[presentation.status],
             )}
           >
             <span
               aria-hidden
               className={cn(
                 "h-1.5 w-1.5 rounded-full",
-                STATUS_DOT[status],
-                status === "running" && "animate-pulse",
+                STATUS_DOT[presentation.status],
+                presentation.status === "running" && "animate-pulse",
               )}
             />
-            {STATUS_LABEL[status] ?? status}
+            {STATUS_LABEL[presentation.status] ?? presentation.status}
           </span>
         </div>
         <p className="mt-1 truncate text-[12px] text-[var(--fg-1)]">
-          {generation ? detail : "任务已登记，等待状态同步"}
+          {presentation.detail}
         </p>
-        {generation?.error_message ? (
+        {presentation.error ? (
           <p
             role="alert"
             className="mt-1 line-clamp-2 text-[12px] leading-5 text-[var(--danger)]"
           >
-            {generation.error_message}
+            {presentation.error}
           </p>
         ) : null}
       </div>
-      <TaskIcon status={status} />
+      <TaskIcon status={presentation.status} />
     </div>
   );
 }
 
-function effectiveGeneration(
-  base?: BackendGeneration,
-  bonus?: BackendGeneration,
-): BackendGeneration | undefined {
-  if (!bonus) return base;
-  if (!base) return bonus;
-  if (base.status === "succeeded") return base;
-  if (bonus.status === "succeeded") return bonus;
-  if (
-    (base.status === "failed" || base.status === "canceled") &&
-    (bonus.status === "queued" || bonus.status === "running")
-  ) {
-    return bonus;
+function taskRowPresentation(generation?: BackendGeneration) {
+  const status = generation?.status ?? "queued";
+  if (!generation) {
+    return {
+      detail: "任务已登记，等待状态同步",
+      error: null,
+      status,
+    };
   }
-  if (
-    (base.status === "failed" || base.status === "canceled") &&
-    (bonus.status === "failed" || bonus.status === "canceled")
-  ) {
-    return bonus;
-  }
-  return base;
+  const stage = generation.progress_stage ?? "queued";
+  const time = generation.finished_at ?? generation.started_at ?? null;
+  const detail = [
+    STAGE_LABEL[stage] ?? stage,
+    generation.attempt ? `第 ${generation.attempt} 次尝试` : null,
+    time ? formatRelativeTime(time) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    detail,
+    error: generation.error_message,
+    status,
+  };
 }
 
 function TaskIcon({ status }: { status: string }) {
@@ -366,182 +271,24 @@ function TaskIcon({ status }: { status: string }) {
     return <AlertCircle className="h-4 w-4 text-[var(--danger)]" />;
   }
   if (status === "running") {
-    return <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />;
+    return (
+      <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />
+    );
   }
   return <Clock3 className="h-4 w-4 text-[var(--fg-2)]" />;
 }
 
 function MilestoneIcon({ state }: { state: ProgressState }) {
-  if (state === "done") return <CheckCircle2 className="h-4 w-4 text-[var(--success)]" />;
-  if (state === "failed") return <AlertCircle className="h-4 w-4 text-[var(--danger)]" />;
-  if (state === "active") return <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />;
+  if (state === "done") {
+    return <CheckCircle2 className="h-4 w-4 text-[var(--success)]" />;
+  }
+  if (state === "failed") {
+    return <AlertCircle className="h-4 w-4 text-[var(--danger)]" />;
+  }
+  if (state === "active") {
+    return (
+      <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />
+    );
+  }
   return <Clock3 className="h-4 w-4 text-[var(--fg-3)]" />;
-}
-
-function buildMilestones({
-  preflightStatus,
-  preflightDisplay,
-  taskCount,
-  runningCount,
-  failedCount,
-  canceledCount,
-  plannedCount,
-  progressCount,
-  stepStatus,
-}: {
-  preflightStatus: string | null;
-  preflightDisplay: string;
-  taskCount: number;
-  runningCount: number;
-  failedCount: number;
-  canceledCount: number;
-  plannedCount: number;
-  progressCount: number;
-  stepStatus: string;
-}): Array<{ label: string; detail: string; state: ProgressState }> {
-  const preflightFailed = preflightStatus === "failed" || stepStatus === "failed";
-  const dispatchDone = taskCount > 0 || stepStatus === "completed";
-  const outputDone = plannedCount > 0 && progressCount >= plannedCount;
-  const terminalProblemCount = failedCount + canceledCount;
-
-  return [
-    {
-      label: "Submitted",
-      detail: "生成请求已提交",
-      state: "done" as ProgressState,
-    },
-    {
-      label: "Planning",
-      detail: preflightDisplay,
-      state: preflightFailed
-        ? "failed"
-        : dispatchDone
-          ? "done"
-          : "active",
-    },
-    {
-      label: "Queue",
-      detail: taskCount > 0 ? `${taskCount} 条任务` : "等待派发",
-      state: preflightFailed
-        ? "failed"
-        : taskCount > 0
-          ? runningCount > 0
-            ? "active"
-            : "done"
-          : "pending",
-    },
-    {
-      label: "Outputs",
-      detail: `${progressCount}/${plannedCount} 张`,
-      state:
-        terminalProblemCount > 0 && runningCount === 0 && !outputDone
-          ? "failed"
-          : outputDone
-            ? "done"
-            : taskCount > 0
-              ? "active"
-              : "pending",
-    },
-  ];
-}
-
-function resolvePhase({
-  preflightStatus,
-  preflightDisplay,
-  taskCount,
-  runningCount,
-  failedCount,
-  canceledCount,
-  plannedCount,
-  progressCount,
-  stepStatus,
-}: {
-  preflightStatus: string | null;
-  preflightDisplay: string;
-  taskCount: number;
-  runningCount: number;
-  failedCount: number;
-  canceledCount: number;
-  plannedCount: number;
-  progressCount: number;
-  stepStatus: string;
-}): string {
-  if (stepStatus === "failed" || preflightStatus === "failed") return "生成任务失败";
-  if (plannedCount > 0 && progressCount >= plannedCount) return "本轮成品图已完成";
-  if (taskCount === 0) {
-    return preflightDisplay;
-  }
-  if (runningCount > 0) return "图像任务正在生成";
-  if (failedCount > 0) return "部分图像任务失败";
-  if (canceledCount > 0) return "部分图像任务已取消";
-  return "等待任务状态同步";
-}
-
-function progressPercent({
-  preflightStatus,
-  preflightPhase,
-  preflightPhaseCurrent,
-  preflightPhaseTotal,
-  taskCount,
-  plannedCount,
-  progressCount,
-  stepStatus,
-}: {
-  preflightStatus: string | null;
-  preflightPhase: string | null;
-  preflightPhaseCurrent: number | null;
-  preflightPhaseTotal: number | null;
-  taskCount: number;
-  plannedCount: number;
-  progressCount: number;
-  stepStatus: string;
-}): number {
-  if (stepStatus === "failed" || preflightStatus === "failed") return 100;
-  if (plannedCount > 0 && progressCount >= plannedCount) return 100;
-  if (taskCount === 0) {
-    if (
-      preflightPhase === "composer" &&
-      preflightPhaseTotal &&
-      preflightPhaseCurrent !== null
-    ) {
-      return Math.max(
-        18,
-        Math.min(42, Math.round(18 + (preflightPhaseCurrent / preflightPhaseTotal) * 24)),
-      );
-    }
-    if (
-      preflightPhase === "review" &&
-      preflightPhaseTotal &&
-      preflightPhaseCurrent !== null
-    ) {
-      return Math.max(
-        42,
-        Math.min(55, Math.round(42 + (preflightPhaseCurrent / preflightPhaseTotal) * 13)),
-      );
-    }
-    if (preflightPhase === "dispatching") return 45;
-    if (preflightPhase === "fallback") return 16;
-    return preflightStatus === "running" ? 18 : 8;
-  }
-  const taskProgress = plannedCount > 0 ? progressCount / plannedCount : 0;
-  return Math.max(25, Math.min(98, Math.round(25 + taskProgress * 70)));
-}
-
-function numberValue(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
-    : [];
 }

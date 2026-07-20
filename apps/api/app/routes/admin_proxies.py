@@ -43,12 +43,12 @@ from ..proxy_pool import (
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ._admin_common import admin_http as _http, write_admin_audit
-from .admin_models import invalidate_admin_models_cache
-from .providers import (
-    _parse_config,
-    _read_providers,
+from ..services.admin_model_cache import invalidate_admin_models_cache
+from ..services.provider_config import (
+    parse_provider_config as _parse_config,
+    read_providers as _read_providers,
 )
+from ._admin_common import admin_http as _http, write_admin_audit
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,9 @@ def _decode_health(raw: dict) -> dict[str, object]:
     return out
 
 
-async def _load_proxy_health_batch(redis, names: list[str]) -> dict[str, tuple[dict[str, object], bool]]:  # type: ignore[no-untyped-def]
+async def _load_proxy_health_batch(
+    redis, names: list[str]
+) -> dict[str, tuple[dict[str, object], bool]]:  # type: ignore[no-untyped-def]
     if not names:
         return {}
     try:
@@ -192,9 +194,21 @@ async def list_proxies(
         if not isinstance(p, dict):
             continue
         name = str(p.get("name") or "")
-        has_password_by_name[name] = bool((p.get("password") or "").strip()) if isinstance(p.get("password"), str) else False
-        username_by_name[name] = p.get("username") if isinstance(p.get("username"), str) and p.get("username") else None
-        pkpath_by_name[name] = p.get("private_key_path") if isinstance(p.get("private_key_path"), str) and p.get("private_key_path") else None
+        has_password_by_name[name] = (
+            bool((p.get("password") or "").strip())
+            if isinstance(p.get("password"), str)
+            else False
+        )
+        username_by_name[name] = (
+            p.get("username")
+            if isinstance(p.get("username"), str) and p.get("username")
+            else None
+        )
+        pkpath_by_name[name] = (
+            p.get("private_key_path")
+            if isinstance(p.get("private_key_path"), str) and p.get("private_key_path")
+            else None
+        )
         try:
             parsed.append(parse_proxy_item(p, index=i))
         except Exception as exc:  # noqa: BLE001
@@ -208,9 +222,7 @@ async def list_proxies(
         h, in_cd = health_by_name.get(p.name, ({}, False))
         latency_value = h.get("last_latency_ms")
         last_latency_ms = (
-            float(latency_value)
-            if isinstance(latency_value, (int, float))
-            else None
+            float(latency_value) if isinstance(latency_value, (int, float)) else None
         )
         tested_value = h.get("last_tested_at")
         last_tested_at = tested_value if isinstance(tested_value, str) else None
@@ -298,9 +310,7 @@ async def update_proxies(
         raise _http("invalid_config", str(exc), 422) from exc
 
     existing = (
-        await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "providers")
-        )
+        await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
     if existing is None:
         db.add(SystemSetting(key="providers", value=validated))
@@ -343,7 +353,9 @@ async def test_proxy(
     target_proxy = next((p for p in proxies if p.name == name), None)
     if target_proxy is None:
         raise _http("not_found", f"proxy '{name}' not found", 404)
-    target = (body.target.strip() if body and body.target else "") or await _resolve_test_target(db)
+    target = (
+        body.target.strip() if body and body.target else ""
+    ) or await _resolve_test_target(db)
 
     redis = get_redis()
     latency_ms, err = await measure_latency(target_proxy, target=target)
@@ -352,7 +364,11 @@ async def test_proxy(
         await set_health(redis, name, latency_ms=latency_ms, target=target)
     logger.info(
         "admin proxy test name=%s target=%s ok=%s latency_ms=%.1f err=%s",
-        name, target, ok, latency_ms, err,
+        name,
+        target,
+        ok,
+        latency_ms,
+        err,
     )
     return ProxyTestOut(
         name=name,
@@ -377,7 +393,9 @@ async def test_all_proxies(
     body: ProxyTestIn | None = None,
 ) -> list[ProxyTestOut]:
     proxies = await _load_proxies(db)
-    target = (body.target.strip() if body and body.target else "") or await _resolve_test_target(db)
+    target = (
+        body.target.strip() if body and body.target else ""
+    ) or await _resolve_test_target(db)
     redis = get_redis()
 
     async def _one(p: ProviderProxyDefinition) -> ProxyTestOut:
