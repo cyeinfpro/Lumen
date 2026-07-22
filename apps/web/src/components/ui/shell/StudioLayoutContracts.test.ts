@@ -1,4 +1,4 @@
-import { deepEqual, doesNotMatch, match, ok } from "node:assert/strict";
+import { deepEqual, doesNotMatch, equal, match, ok } from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
@@ -13,6 +13,10 @@ const responsiveSource = source("./ResponsiveStudio.tsx");
 const desktopNavSource = source("./DesktopTopNav.tsx");
 const desktopStudioSource = source("./DesktopStudio.tsx");
 const mobileStudioSource = source("./MobileStudio.tsx");
+const conversationSelectionSource = source("./conversationSelection.ts");
+const defaultConversationSelectionSource = source(
+  "./useDefaultConversationSelection.ts",
+);
 const mobileTopBarSource = source("./MobileStudioTopBar.tsx");
 const mobileTabBarSource = source("./MobileTabBar.tsx");
 const mobileMeSource = source("./MobileMe.tsx");
@@ -73,6 +77,31 @@ export { nextScrollToAutoScrollGate };`,
   return moduleRecord.exports.nextScrollToAutoScrollGate;
 }
 
+function loadFirstActiveConversation() {
+  const output = ts.transpileModule(
+    `${conversationSelectionSource}
+module.exports.firstActiveConversation = firstActiveConversation;`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+  const moduleRecord = {
+    exports: {} as {
+      firstActiveConversation: <T extends { archived: boolean }>(
+        conversations: readonly T[],
+      ) => T | null;
+    },
+  };
+  runInNewContext(output, {
+    module: moduleRecord,
+    exports: moduleRecord.exports,
+  });
+  return moduleRecord.exports.firstActiveConversation;
+}
+
 function plainValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -119,6 +148,29 @@ test("studio renders a real server-selected shell without ssr:false", () => {
   match(pageSource, /<ResponsiveStudio initialMobile=\{initialMobile\} \/>/);
   match(responsiveSource, /detectedMobile \?\? initialMobile/);
   doesNotMatch(pageSource, /next\/dynamic|ssr:\s*false|ShellSkeleton/);
+});
+
+test("root studio opens the latest active conversation by default", () => {
+  const firstActiveConversation = loadFirstActiveConversation();
+  equal(
+    firstActiveConversation([
+      { id: "latest", archived: false },
+      { id: "archived", archived: true },
+      { id: "older", archived: false },
+    ])?.id,
+    "latest",
+  );
+  match(desktopStudioSource, /useDefaultConversationSelection\(/);
+  match(mobileStudioSource, /useDefaultConversationSelection\(/);
+  match(
+    defaultConversationSelectionSource,
+    /if \(currentConvId \|\| urlConversationId\) return/,
+  );
+  match(defaultConversationSelectionSource, /setCurrentConv\(first\.id\)/);
+  match(
+    defaultConversationSelectionSource,
+    /loadHistoricalMessages\(first\.id\)/,
+  );
 });
 
 test("desktop primary navigation is viewport-centered and uses links", () => {

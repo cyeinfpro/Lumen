@@ -35,6 +35,7 @@ import { DURATION, EASE, SPRING } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { StudioContextBar } from "./StudioContextBar";
+import { useDefaultConversationSelection } from "./useDefaultConversationSelection";
 import { useConversationRouteSync } from "./useConversationRouteSync";
 
 declare global {
@@ -74,15 +75,29 @@ export function DesktopStudio() {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
 
   const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
+  const conversations = useMemo(
+    () => convsQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [convsQuery.data],
+  );
   const {
     data: contextStats,
     refetch: refetchContextStats,
   } = useConversationContextQuery(currentConvId, { refetchInterval: 30_000 });
-  useConversationRouteSync({
+  const urlConversationId = useConversationRouteSync({
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
     rootStartsNew: true,
+  });
+  useDefaultConversationSelection({
+    currentConvId,
+    urlConversationId,
+    conversations,
+    hasNextPage: Boolean(convsQuery.hasNextPage),
+    isFetchingNextPage: convsQuery.isFetchingNextPage,
+    fetchNextPage: convsQuery.fetchNextPage,
+    loadHistoricalMessages,
+    setCurrentConv,
   });
 
   useEffect(() => {
@@ -148,12 +163,11 @@ export function DesktopStudio() {
   const imageViewScrollKeyRef = useRef<string | null>(null);
   const isEmpty = messages.length === 0;
   const currentTitle = useMemo(() => {
-    const items = convsQuery.data?.pages.flatMap((page) => page.items) ?? [];
-    const current = items.find((item) => item.id === currentConvId);
+    const current = conversations.find((item) => item.id === currentConvId);
     if (current?.title) return current.title;
     const firstUser = messages.find((message) => message.role === "user");
     return firstUser?.text?.slice(0, 48) || "新对话";
-  }, [convsQuery.data, currentConvId, messages]);
+  }, [conversations, currentConvId, messages]);
 
   useEffect(() => {
     if (studioView !== "images") {
