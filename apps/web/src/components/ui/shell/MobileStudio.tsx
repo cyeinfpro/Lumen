@@ -17,8 +17,10 @@ import { MobileComposerPill } from "@/components/ui/composer/mobile/MobileCompos
 import { MobileEmptyStudio } from "@/components/ui/chat/mobile/MobileEmptyStudio";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useChatStore } from "@/store/useChatStore";
+import { useListConversationsInfiniteQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useElementBlockSize } from "@/hooks/useElementBlockSize";
+import { useDefaultConversationSelection } from "./useDefaultConversationSelection";
 import { useConversationRouteSync } from "./useConversationRouteSync";
 
 type ScrollToAutoScrollGate = {
@@ -88,6 +90,11 @@ export function MobileStudio() {
   const setMode = useChatStore((s) => s.setMode);
   // runtime_defaults 由 RuntimeDefaultsBootstrap（layout 级）统一同步到 store
 
+  const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
+  const conversations = useMemo(
+    () => convsQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [convsQuery.data],
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [composerMetrics, setComposerMetrics] = useState<{
     height: number;
@@ -146,11 +153,21 @@ export function MobileStudio() {
     return last?.role === "assistant" && last.status === "streaming";
   }, [messages]);
 
-  useConversationRouteSync({
+  const urlConversationId = useConversationRouteSync({
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
     rootStartsNew: true,
+  });
+  useDefaultConversationSelection({
+    currentConvId,
+    urlConversationId,
+    conversations,
+    hasNextPage: Boolean(convsQuery.hasNextPage),
+    isFetchingNextPage: convsQuery.isFetchingNextPage,
+    fetchNextPage: convsQuery.fetchNextPage,
+    loadHistoricalMessages,
+    setCurrentConv,
   });
 
   const stickToBottomRef = useRef(true);
