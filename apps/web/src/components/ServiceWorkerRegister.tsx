@@ -34,16 +34,7 @@ export function ServiceWorkerRegister() {
     }
 
     let cancelled = false;
-    let reloadRequested = false;
     let removeVisibilityListener: (() => void) | null = null;
-
-    const onControllerChange = () => {
-      // 新 SW 接管页面 → 重新加载，让用户拿到与新 SW 一致的资源版本。
-      // 同一页面生命周期只响应一次；reload 后 guard 自动重置，后续版本仍可刷新。
-      if (reloadRequested) return;
-      reloadRequested = true;
-      window.location.reload();
-    };
 
     const register = async () => {
       if (cancelled) return;
@@ -56,7 +47,8 @@ export function ServiceWorkerRegister() {
         });
         if (cancelled) return;
 
-        // 监听新版本：waiting 出现时让它立即激活，触发 controllerchange。
+        // 监听新版本：waiting 出现时让它立即激活。当前 SW 不缓存任何页面
+        // 或静态资源，因此接管无需刷新正在创作的页面。
         const promoteWaiting = (worker: ServiceWorker | null) => {
           if (!worker) return;
           worker.addEventListener("statechange", () => {
@@ -69,11 +61,6 @@ export function ServiceWorkerRegister() {
           reg.waiting.postMessage({ type: "SKIP_WAITING" });
         }
         reg.addEventListener("updatefound", () => promoteWaiting(reg.installing));
-
-        navigator.serviceWorker.addEventListener(
-          "controllerchange",
-          onControllerChange,
-        );
 
         // 页面回到前台时主动检查更新（用户长时间挂着 PWA 的常见情况）。
         const onVisibilityChange = () => {
@@ -128,10 +115,6 @@ export function ServiceWorkerRegister() {
       }
       removeVisibilityListener?.();
       removeVisibilityListener = null;
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        onControllerChange,
-      );
     };
   }, []);
   return null;

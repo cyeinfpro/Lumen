@@ -23,7 +23,6 @@ import {
 } from "@/lib/queries";
 import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
-import { logWarn } from "@/lib/logger";
 
 import { ConversationRowMobile } from "./ConversationRowMobile";
 
@@ -80,9 +79,6 @@ export function ConversationList({ query }: ConversationListProps) {
 
   const currentConvId = useChatStore((s) => s.currentConvId);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
-  const loadHistoricalMessages = useChatStore(
-    (s) => s.loadHistoricalMessages,
-  );
 
   const list = useListConversationsInfiniteQuery({ limit: 30 });
   const patchMut = usePatchConversationMutation();
@@ -147,17 +143,9 @@ export function ConversationList({ query }: ConversationListProps) {
     return () => io.disconnect();
   }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
-  const handleSelect = async (conv: ConversationSummary) => {
+  const handleSelect = (conv: ConversationSummary) => {
     setCurrentConv(conv.id);
-    try {
-      await loadHistoricalMessages(conv.id);
-    } catch (err) {
-      logWarn("mobile_me.load_historical_messages_failed", {
-        scope: "mobile-me",
-        extra: { convId: conv.id, err: String(err) },
-      });
-    }
-    router.push("/");
+    router.push(`/?conversationId=${encodeURIComponent(conv.id)}`);
   };
 
   const handleRename = (conv: ConversationSummary, title: string) => {
@@ -210,7 +198,7 @@ export function ConversationList({ query }: ConversationListProps) {
           items={filtered}
           grouped={grouped}
           currentConvId={currentConvId}
-          onSelect={(conv) => void handleSelect(conv)}
+          onSelect={handleSelect}
           onRename={handleRename}
           onArchive={handleArchive}
           onDelete={handleDelete}

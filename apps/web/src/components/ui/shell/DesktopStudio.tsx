@@ -87,7 +87,6 @@ export function DesktopStudio() {
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
-    rootStartsNew: true,
   });
   useDefaultConversationSelection({
     currentConvId,

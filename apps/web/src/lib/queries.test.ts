@@ -16,9 +16,13 @@ const queriesSource = readFileSync(
   new URL("./queries.ts", import.meta.url),
   "utf8",
 );
+const conversationsQueriesSource = readFileSync(
+  new URL("./queries/conversations.ts", import.meta.url),
+  "utf8",
+);
 const queryDomainSources = [
   readFileSync(new URL("./queries/admin.ts", import.meta.url), "utf8"),
-  readFileSync(new URL("./queries/conversations.ts", import.meta.url), "utf8"),
+  conversationsQueriesSource,
   readFileSync(new URL("./queries/projects.ts", import.meta.url), "utf8"),
   readFileSync(new URL("./queries/poster.ts", import.meta.url), "utf8"),
 ];
@@ -344,6 +348,111 @@ test("all private query hooks use scoped keys and identity gates", () => {
     match(hook, /userKeys/);
     match(hook, /enabled: userScope\.enabled/);
   }
+});
+
+type ConversationListFixture = {
+  items: Array<{ id: string; title: string }>;
+  next_cursor?: string | null;
+};
+
+type ConversationInfiniteFixture = {
+  pages: ConversationListFixture[];
+  pageParams: Array<string | undefined>;
+};
+
+test("deleted conversations are removed from finite and infinite caches without mutating misses", () => {
+  const removeFromList = loadStandaloneFunction<
+    (
+      data: ConversationListFixture | undefined,
+      conversationId: string,
+    ) => ConversationListFixture | undefined
+  >(
+    "removeConversationFromListResponse",
+    conversationsQueriesSource,
+    "conversations.ts",
+  );
+  const removeFromInfinite = loadStandaloneFunction<
+    (
+      data: ConversationInfiniteFixture | undefined,
+      conversationId: string,
+    ) => ConversationInfiniteFixture | undefined
+  >(
+    "removeConversationFromInfiniteData",
+    conversationsQueriesSource,
+    "conversations.ts",
+  );
+  const finite = {
+    items: [
+      { id: "keep", title: "Keep" },
+      { id: "delete", title: "Delete" },
+    ],
+    next_cursor: "cursor-2",
+  };
+  const infinite = {
+    pages: [
+      finite,
+      {
+        items: [{ id: "older", title: "Older" }],
+        next_cursor: null,
+      },
+    ],
+    pageParams: [undefined, "cursor-2"],
+  };
+
+  deepEqual(
+    JSON.parse(JSON.stringify(removeFromList(finite, "delete"))),
+    {
+      items: [{ id: "keep", title: "Keep" }],
+      next_cursor: "cursor-2",
+    },
+  );
+  deepEqual(
+    JSON.parse(JSON.stringify(removeFromInfinite(infinite, "delete"))),
+    {
+      pages: [
+        {
+          items: [{ id: "keep", title: "Keep" }],
+          next_cursor: "cursor-2",
+        },
+        {
+          items: [{ id: "older", title: "Older" }],
+          next_cursor: null,
+        },
+      ],
+      pageParams: [null, "cursor-2"],
+    },
+  );
+  equal(removeFromList(finite, "missing"), finite);
+  equal(removeFromInfinite(infinite, "missing"), infinite);
+  equal(removeFromList(undefined, "delete"), undefined);
+  equal(removeFromInfinite(undefined, "delete"), undefined);
+});
+
+test("delete conversation mutation evicts stale caches before caller state changes", () => {
+  const hook = hookSource(queriesSource, "useDeleteConversationMutation");
+  const finiteCacheWrite = hook.indexOf(
+    "qc.setQueriesData<ConversationListResponse>",
+  );
+  const infiniteCacheWrite = hook.indexOf(
+    "qc.setQueriesData<",
+    finiteCacheWrite + 1,
+  );
+  const callerOnSuccess = hook.indexOf("options?.onSuccess?.(");
+
+  ok(finiteCacheWrite >= 0, "finite conversation caches must update");
+  ok(infiniteCacheWrite >= 0, "infinite conversation caches must update");
+  ok(
+    infiniteCacheWrite < callerOnSuccess,
+    "cache eviction must finish before caller clears the selected conversation",
+  );
+  match(hook, /removeConversationFromListResponse\(previous, vars\)/);
+  match(hook, /removeConversationFromInfiniteData\(previous, vars\)/);
+  match(hook, /userKeys\.conversationDetail\(vars\)/);
+  match(hook, /userKeys\.conversationContext\(vars\)/);
+  doesNotMatch(
+    hook,
+    /invalidateQueries\(\{ queryKey: userKeys\.conversationsAll\(\) \}\)/,
+  );
 });
 
 test("poster style previous data is retained only for the same user", () => {

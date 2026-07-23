@@ -93,7 +93,7 @@ test("runtime upload limit falls back locally but accepts server defaults", () =
   match(store, /setMaxUploadSourceBytes\(defaults\.upload_max_source_bytes\)/);
 });
 
-test("authenticated bootstrap delegates fail-closed identity recovery", () => {
+test("authenticated bootstrap retains confirmed identity during recovery", () => {
   const bootstrap = source("src/components/RuntimeDefaultsBootstrap.tsx");
   const identityRecovery = source(
     "src/components/useIdentityRevalidation.ts",

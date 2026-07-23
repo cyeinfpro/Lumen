@@ -40,16 +40,13 @@ test("error boundary clears its error before returning home", () => {
   );
 });
 
-test("service worker reload guard resets with each page lifecycle", () => {
+test("service worker updates never force-refresh active work", () => {
   const register = source("src/components/ServiceWorkerRegister.tsx");
 
-  match(register, /let reloadRequested = false;/);
-  match(
-    register,
-    /if \(reloadRequested\) return;\s*reloadRequested = true;\s*window\.location\.reload\(\);/,
-  );
-  doesNotMatch(register, /sessionStorage/);
-  doesNotMatch(register, /__lumen_sw_reloaded/);
+  match(register, /reg\.update\(\)\.catch/);
+  match(register, /worker\.postMessage\(\{ type: "SKIP_WAITING" \}\)/);
+  doesNotMatch(register, /window\.location\.reload/);
+  doesNotMatch(register, /["']controllerchange["']/);
 });
 
 test("archived sidebar rows invalidate and remeasure layout caches", () => {

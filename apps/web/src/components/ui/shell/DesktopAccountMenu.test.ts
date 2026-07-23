@@ -235,7 +235,8 @@ function loadIdentityErrorPolicy() {
   const output = ts.transpileModule(
     `${identityRevalidationSource.slice(start, end)}
 module.exports.isUnauthorizedIdentityError = isUnauthorizedIdentityError;
-module.exports.isRetryableIdentityError = isRetryableIdentityError;`,
+module.exports.isRetryableIdentityError = isRetryableIdentityError;
+module.exports.canRetainConfirmedIdentity = canRetainConfirmedIdentity;`,
     {
       compilerOptions: {
         module: ts.ModuleKind.CommonJS,
@@ -247,6 +248,11 @@ module.exports.isRetryableIdentityError = isRetryableIdentityError;`,
     exports: {} as {
       isUnauthorizedIdentityError: (error: unknown) => boolean;
       isRetryableIdentityError: (error: unknown) => boolean;
+      canRetainConfirmedIdentity: (
+        error: unknown,
+        currentUserId: string | null,
+        retainedUserId: string | null,
+      ) => boolean;
     },
   };
   runInNewContext(output, {
@@ -381,7 +387,7 @@ test("identity cache cleanup clears data from mounted observers before removal",
   }
 });
 
-test("identity revalidation clears a mounted old-user observer before accepting the changed user", async () => {
+test("identity revalidation retains mounted data until a changed user is confirmed", async () => {
   const helpers = loadQueryProviderHelpers();
   const client = new QueryClient({
     defaultOptions: {
@@ -422,20 +428,24 @@ test("identity revalidation clears a mounted old-user observer before accepting 
   try {
     equal(privateObserver.getCurrentResult().data, "user-a-private-data");
 
-    const previousUserId = currentUserId;
-    currentUserId = null;
-    helpers.prepareUserIdentityRevalidation(client, previousUserId);
     const revalidation = authObserver.refetch({ cancelRefetch: true });
 
-    equal(currentUserId, null);
-    equal(authObserver.getCurrentResult().data, undefined);
-    equal(privateObserver.getCurrentResult().data, undefined);
-    equal(privateResults[privateResults.length - 1], undefined);
+    equal(currentUserId, "user-a");
+    deepEqual(
+      plainValue(authObserver.getCurrentResult().data),
+      { id: "user-a" },
+    );
+    equal(
+      privateObserver.getCurrentResult().data,
+      "user-a-private-data",
+    );
+    equal(privateResults.includes(undefined), false);
     equal(authObserver.getCurrentResult().fetchStatus, "paused");
     equal(identityFetches, 0);
 
     onlineManager.setOnline(true);
     const result = await revalidation;
+    helpers.clearPreviousUserQueryCache(client, currentUserId);
     currentUserId = result.data?.id ?? null;
 
     equal(currentUserId, "user-b");
@@ -453,7 +463,7 @@ test("identity revalidation clears a mounted old-user observer before accepting 
   }
 });
 
-test("transient identity failure stays fail-closed before a later response restores the user", async () => {
+test("transient identity failure preserves the current user and private data", async () => {
   const helpers = loadQueryProviderHelpers();
   const client = new QueryClient({
     defaultOptions: {
@@ -495,21 +505,20 @@ test("transient identity failure stays fail-closed before a later response resto
   onlineManager.setOnline(true);
 
   try {
-    const previousUserId = currentUserId;
-    currentUserId = null;
-    helpers.prepareUserIdentityRevalidation(client, previousUserId);
     const failedRevalidation = await authObserver.refetch({
       cancelRefetch: true,
     });
 
     equal(failedRevalidation.status, "error");
-    equal(currentUserId, null);
-    equal(privateObserver.getCurrentResult().data, undefined);
-    equal(privateResults[privateResults.length - 1], undefined);
+    equal(currentUserId, "user-a");
+    equal(
+      privateObserver.getCurrentResult().data,
+      "user-a-private-data",
+    );
+    equal(privateResults.includes(undefined), false);
 
-    // This is the next bounded retry: isolation remains in place until the
-    // identity request actually succeeds.
-    helpers.prepareUserIdentityRevalidation(client, previousUserId);
+    // The bounded retry revalidates the retained identity without remounting
+    // the authenticated application.
     const recoveredRevalidation = await authObserver.refetch({
       cancelRefetch: true,
     });
@@ -518,7 +527,7 @@ test("transient identity failure stays fail-closed before a later response resto
 
     equal(identityFetches, 2);
     equal(currentUserId, "user-a");
-    equal(client.getQueryData(userAKey), undefined);
+    equal(client.getQueryData(userAKey), "user-a-private-data");
   } finally {
     onlineManager.setOnline(true);
     client.unmount();
@@ -649,7 +658,7 @@ test("runtime identity bootstrap revalidates on focus and visible-tab restoratio
   match(runtimeDefaultsSource, /networkMode: "online"/);
   match(
     identityRevalidationSource,
-    /const retainedUserId =[\s\S]*?state\.retainedUserId = retainedUserId;[\s\S]*?enterFailClosed\(retainedUserId\);[\s\S]*?refetch\(\{ cancelRefetch: true \}\)/,
+    /const retainedUserId =[\s\S]*?state\.retainedUserId = retainedUserId;[\s\S]*?refetch\(\{ cancelRefetch: true \}\)/,
   );
   match(
     identityRevalidationSource,
@@ -681,7 +690,7 @@ test("runtime identity bootstrap revalidates on focus and visible-tab restoratio
   );
 });
 
-test("identity recovery uses bounded retries, fail-closed isolation, and 401 termination", () => {
+test("identity recovery retains confirmed sessions, retries, and terminates on 401", () => {
   const retryDelay = loadIdentityRetryDelay();
   const errorPolicy = loadIdentityErrorPolicy();
   deepEqual(
@@ -708,6 +717,30 @@ test("identity recovery uses bounded retries, fail-closed isolation, and 401 ter
     errorPolicy.isRetryableIdentityError(new errorPolicy.ApiError(403)),
     false,
   );
+  equal(
+    errorPolicy.canRetainConfirmedIdentity(
+      new errorPolicy.ApiError(503),
+      "user-a",
+      "user-a",
+    ),
+    true,
+  );
+  equal(
+    errorPolicy.canRetainConfirmedIdentity(
+      new errorPolicy.ApiError(401),
+      "user-a",
+      "user-a",
+    ),
+    false,
+  );
+  equal(
+    errorPolicy.canRetainConfirmedIdentity(
+      new errorPolicy.ApiError(503),
+      null,
+      "user-a",
+    ),
+    false,
+  );
   match(runtimeDefaultsSource, /useIdentityRevalidation\(\{/);
   match(identityRevalidationSource, /enterFailClosed/);
   match(identityRevalidationSource, /state\.handledError/);
@@ -715,6 +748,15 @@ test("identity recovery uses bounded retries, fail-closed isolation, and 401 ter
   match(identityRevalidationSource, /state\.retryTimer !== null/);
   match(identityRevalidationSource, /runRef\.current\(true\)/);
   match(runtimeDefaultsSource, /refetchOnReconnect: false/);
+  const revalidationStart = identityRevalidationSource.slice(
+    identityRevalidationSource.indexOf(
+      "const revalidateIdentity = useCallback(",
+    ),
+    identityRevalidationSource.indexOf(
+      "let request: Promise<IdentityRefetchResult>;",
+    ),
+  );
+  doesNotMatch(revalidationStart, /enterFailClosed/);
   match(
     identityRevalidationSource,
     /function removeAuthUserQuery[\s\S]*?\.reset\(\);[\s\S]*?removeQueries\(\{/,
@@ -730,6 +772,18 @@ test("identity recovery uses bounded retries, fail-closed isolation, and 401 ter
   match(
     identityRevalidationSource,
     /if \(isRetryableIdentityError\(error\)\) scheduleRetry\(\);/,
+  );
+  match(
+    identityRevalidationSource,
+    /canRetainConfirmedIdentity\([\s\S]*?state\.retainedUserId,[\s\S]*?\)[\s\S]*?setIsolated\(false\);[\s\S]*?scheduleRetry\(\);[\s\S]*?return;/,
+  );
+  match(
+    identityRevalidationSource,
+    /identityUnavailable: isPublicAuthPath \|\| isolated/,
+  );
+  doesNotMatch(
+    identityRevalidationSource,
+    /identityUnavailable:[^\n]*queryError/,
   );
 });
 
