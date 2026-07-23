@@ -63,6 +63,18 @@ function isRetryableIdentityError(error: unknown): boolean {
   return error.status === 0 || (error.status >= 500 && error.status <= 599);
 }
 
+function canRetainConfirmedIdentity(
+  error: unknown,
+  currentUserId: string | null,
+  retainedUserId: string | null,
+): currentUserId is string {
+  return (
+    isRetryableIdentityError(error) &&
+    currentUserId !== null &&
+    retainedUserId === currentUserId
+  );
+}
+
 function isAuthUser(value: unknown): value is AuthUser {
   return (
     Boolean(value) &&
@@ -289,6 +301,21 @@ export function useIdentityRevalidation({
         return;
       }
 
+      if (
+        canRetainConfirmedIdentity(
+          error,
+          currentUserId,
+          state.retainedUserId,
+        )
+      ) {
+        // A transient focus/visibility revalidation failure does not invalidate
+        // the last confirmed identity. Keep the current UI mounted and retry in
+        // the background; a later 401 or changed user still clears old data.
+        setIsolated(false);
+        scheduleRetry();
+        return;
+      }
+
       enterFailClosed(state.retainedUserId);
       if (isRetryableIdentityError(error)) scheduleRetry();
     },
@@ -329,7 +356,6 @@ export function useIdentityRevalidation({
       const generation = state.generation;
       state.retainedUserId = retainedUserId;
       state.handledError = null;
-      enterFailClosed(retainedUserId);
 
       let request: Promise<IdentityRefetchResult>;
       try {
@@ -357,7 +383,6 @@ export function useIdentityRevalidation({
     [
       acceptIdentity,
       clearRetryTimer,
-      enterFailClosed,
       handleFailure,
       isPublicAuthPath,
       isFetching,
@@ -442,6 +467,6 @@ export function useIdentityRevalidation({
   );
 
   return {
-    identityUnavailable: isPublicAuthPath || isolated || queryError != null,
+    identityUnavailable: isPublicAuthPath || isolated,
   };
 }

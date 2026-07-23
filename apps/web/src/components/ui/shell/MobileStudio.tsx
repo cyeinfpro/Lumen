@@ -157,7 +157,6 @@ export function MobileStudio() {
     currentConvId,
     loadHistoricalMessages,
     setCurrentConv,
-    rootStartsNew: true,
   });
   useDefaultConversationSelection({
     currentConvId,

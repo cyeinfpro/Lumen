@@ -13,10 +13,12 @@ const responsiveSource = source("./ResponsiveStudio.tsx");
 const desktopNavSource = source("./DesktopTopNav.tsx");
 const desktopStudioSource = source("./DesktopStudio.tsx");
 const mobileStudioSource = source("./MobileStudio.tsx");
+const conversationRouteSyncSource = source("./useConversationRouteSync.ts");
 const conversationSelectionSource = source("./conversationSelection.ts");
 const defaultConversationSelectionSource = source(
   "./useDefaultConversationSelection.ts",
 );
+const conversationListSource = source("../me/ConversationList.tsx");
 const mobileTopBarSource = source("./MobileStudioTopBar.tsx");
 const mobileTabBarSource = source("./MobileTabBar.tsx");
 const mobileMeSource = source("./MobileMe.tsx");
@@ -171,6 +173,22 @@ test("root studio opens the latest active conversation by default", () => {
     defaultConversationSelectionSource,
     /loadHistoricalMessages\(first\.id\)/,
   );
+  doesNotMatch(desktopStudioSource, /rootStartsNew/);
+  doesNotMatch(mobileStudioSource, /rootStartsNew/);
+});
+
+test("conversation selection updates the URL without resetting or refreshing the studio", () => {
+  match(
+    conversationRouteSyncSource,
+    /window\.history\.replaceState\(window\.history\.state, "", href\)/,
+  );
+  doesNotMatch(conversationRouteSyncSource, /useRouter|router\.replace/);
+  doesNotMatch(conversationRouteSyncSource, /rootStartsNew|setCurrentConv\(null\)/);
+  match(
+    conversationListSource,
+    /router\.push\(`\/\?conversationId=\$\{encodeURIComponent\(conv\.id\)\}`\)/,
+  );
+  doesNotMatch(conversationListSource, /loadHistoricalMessages/);
 });
 
 test("desktop primary navigation is viewport-centered and uses links", () => {

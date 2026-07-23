@@ -7,15 +7,15 @@
 // 升级机制：
 //   1. next.config.ts 给 /sw.js 设了 no-cache，浏览器每次 navigation 校验
 //   2. 改 SW_VERSION 字符串 = 强制浏览器视为"新 SW"，触发 install/activate
-//   3. install 里 skipWaiting + activate 里 clients.claim → 配合注册侧的
-//      controllerchange 监听，新版本接管时刷新页面
+//   3. install 里 skipWaiting + activate 里 clients.claim，让新版本直接接管；
+//      passthrough SW 不缓存页面或静态资源，因此接管时不刷新正在创作的页面
 //
 // 未来如果加缓存：
 //   - 用 SW_VERSION 作为 cache name 前缀（lumen-${SW_VERSION}-...）
 //   - activate 时遍历 caches.keys() 删掉非当前版本的，避免老版本 cache 残留
 //   - **永远不要**缓存 /api/* /events /sw.js manifest——见 fetch handler 注释
 
-const SW_VERSION = "2026-05-01-1";
+const SW_VERSION = "2026-07-23-1";
 
 self.addEventListener("install", () => {
   // 立即进入 waiting 状态后直接激活，避免旧 SW 与新页面 mismatch。

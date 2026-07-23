@@ -33,6 +33,47 @@ import {
   useCurrentUserQueryKeys,
 } from "./privateQueryScope";
 
+function isFiniteConversationListQuery(
+  queryKey: readonly unknown[],
+  userScopeId: unknown,
+): boolean {
+  return (
+    queryKey[0] === "user" &&
+    queryKey[1] === userScopeId &&
+    queryKey[2] === "conversations" &&
+    queryKey[3] !== null &&
+    typeof queryKey[3] === "object" &&
+    !Array.isArray(queryKey[3])
+  );
+}
+
+function removeConversationFromListResponse(
+  data: ConversationListResponse | undefined,
+  conversationId: string,
+): ConversationListResponse | undefined {
+  if (!data) return data;
+  const items = data.items.filter((item) => item.id !== conversationId);
+  return items.length === data.items.length ? data : { ...data, items };
+}
+
+function removeConversationFromInfiniteData(
+  data:
+    | InfiniteData<ConversationListResponse, string | undefined>
+    | undefined,
+  conversationId: string,
+): InfiniteData<ConversationListResponse, string | undefined> | undefined {
+  if (!data) return data;
+
+  let changed = false;
+  const pages = data.pages.map((page) => {
+    const items = page.items.filter((item) => item.id !== conversationId);
+    if (items.length === page.items.length) return page;
+    changed = true;
+    return { ...page, items };
+  });
+  return changed ? { ...data, pages } : data;
+}
+
 export function useListConversationsQuery(
   opts?: ListConversationsOpts,
   options?: Omit<
@@ -133,17 +174,11 @@ export function usePatchConversationMutation(
       qc.invalidateQueries({
         queryKey: userKeys.conversationsAll(),
         exact: false,
-        predicate: (q) => {
-          const key = q.queryKey;
-          // userKeys.conversations(opts) → ["user", userId, "conversations", opts]
-          return (
-            Array.isArray(key) &&
-            key[0] === "user" &&
-            key[1] === userKeys.conversationsAll()[1] &&
-            key[2] === "conversations" &&
-            typeof key[3] === "object"
-          );
-        },
+        predicate: (q) =>
+          isFiniteConversationListQuery(
+            q.queryKey,
+            userKeys.conversationsAll()[1],
+          ),
       });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
@@ -159,7 +194,47 @@ export function useDeleteConversationMutation(
     mutationFn: (id) => deleteConversation(id),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
-      qc.invalidateQueries({ queryKey: userKeys.conversationsAll() });
+      qc.setQueriesData<ConversationListResponse>(
+        {
+          queryKey: userKeys.conversationsAll(),
+          exact: false,
+          predicate: (q) =>
+            isFiniteConversationListQuery(
+              q.queryKey,
+              userKeys.conversationsAll()[1],
+            ),
+        },
+        (previous) => removeConversationFromListResponse(previous, vars),
+      );
+      qc.setQueriesData<
+        InfiniteData<ConversationListResponse, string | undefined>
+      >(
+        {
+          queryKey: userKeys.conversationsInfiniteAll(),
+          exact: false,
+        },
+        (previous) => removeConversationFromInfiniteData(previous, vars),
+      );
+      qc.removeQueries({
+        queryKey: userKeys.conversationDetail(vars),
+        exact: true,
+      });
+      qc.removeQueries({
+        queryKey: userKeys.conversationContext(vars),
+        exact: true,
+      });
+      qc.invalidateQueries({
+        queryKey: userKeys.conversationsInfiniteAll(),
+      });
+      qc.invalidateQueries({
+        queryKey: userKeys.conversationsAll(),
+        exact: false,
+        predicate: (q) =>
+          isFiniteConversationListQuery(
+            q.queryKey,
+            userKeys.conversationsAll()[1],
+          ),
+      });
       qc.invalidateQueries({ queryKey: ["stream", "feed"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
