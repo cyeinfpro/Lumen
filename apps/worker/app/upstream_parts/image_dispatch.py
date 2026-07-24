@@ -60,6 +60,27 @@ def _should_use_image_jobs(channel: str, provider: Any) -> bool:
     return supports_jobs
 
 
+def _is_image_job_configuration_error(exc: BaseException) -> bool:
+    facade = _facade()
+    return (
+        isinstance(exc, facade.UpstreamError)
+        and getattr(exc, "payload", {}).get("reason")
+        == "configuration_unavailable"
+    )
+
+
+async def _validate_selected_image_job_configuration(provider: Any) -> None:
+    facade = _facade()
+    facade._image_job_sidecar_token()
+    provider_base_url = str(
+        getattr(provider, "image_jobs_base_url", "") or ""
+    ).strip()
+    if provider_base_url:
+        facade._validate_image_job_base_url(provider_base_url)
+        return
+    await facade._resolve_image_job_base_url()
+
+
 def _image_endpoint_kind_for_engine(engine: str) -> str | None:
     facade = _facade()
     if engine == facade._IMAGE_ROUTE_IMAGE2:
@@ -105,6 +126,31 @@ async def _prepare_provider_route(
     provider = request.provider_override
     use_jobs = facade._should_use_image_jobs(channel, provider)
     provider_name = getattr(provider, "name", "unknown")
+    if use_jobs:
+        try:
+            await _validate_selected_image_job_configuration(provider)
+        except facade.UpstreamError as exc:
+            if (
+                channel != facade._IMAGE_CHANNEL_AUTO
+                or not _is_image_job_configuration_error(exc)
+            ):
+                raise
+            use_jobs = False
+            facade.logger.warning(
+                "%s image dispatch provider=%s channel=auto "
+                "image_jobs configuration unavailable; falling back to stream",
+                request.action,
+                provider_name,
+            )
+            await facade._emit_image_progress(
+                request.progress_callback,
+                "route_diagnostic",
+                provider=provider_name,
+                route=f"{channel}:{engine}",
+                reason="image_job_configuration_unavailable",
+                fallback_route=f"stream_only:{engine}",
+                status="routed",
+            )
     facade.logger.info(
         "%s image dispatch provider=%s channel=%s engine=%s use_jobs=%s mask=%s",
         request.action,
@@ -658,9 +704,11 @@ __all__ = [
     "_image_dispatch_candidates",
     "_image_endpoint_kind_for_engine",
     "_image_jobs_endpoint_for_engine",
+    "_is_image_job_configuration_error",
     "_provider_supports_image_jobs",
     "_run_image_once_for_provider",
     "_should_use_image_jobs",
+    "_validate_selected_image_job_configuration",
     "edit_image",
     "generate_image",
 ]

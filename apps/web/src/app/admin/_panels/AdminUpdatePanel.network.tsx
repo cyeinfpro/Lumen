@@ -107,7 +107,7 @@ export function UpdateNetworkSettingsCard({
                 ])
               }
               className={cn(
-                "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50",
+                "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11",
                 useProxyPool
                   ? "border-accent-border bg-accent"
                   : "border-[var(--border)] bg-[var(--bg-2)]",

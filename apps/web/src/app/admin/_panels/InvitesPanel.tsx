@@ -419,7 +419,7 @@ export function InvitesPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.03, 0.2),
                       }}
-                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors align-middle"
+                      className="border-t border-[var(--border-subtle)] hover:bg-[var(--bg-3)] transition-colors align-middle"
                     >
                       <td className="py-3 px-4 max-w-[280px]">
                         <div className="flex items-center gap-2">
@@ -430,7 +430,7 @@ export function InvitesPanel() {
                           <button
                             type="button"
                             onClick={() => onCopy(`row:${row.id}`, row.url)}
-                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
+                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)] transition-colors"
                             aria-label="复制链接"
                           >
                             {copiedKey === `row:${row.id}` ? (
@@ -583,7 +583,7 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       成员
     </span>
@@ -625,7 +625,7 @@ function StatusBadge({
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--fg-3)]" />
       expired
     </span>

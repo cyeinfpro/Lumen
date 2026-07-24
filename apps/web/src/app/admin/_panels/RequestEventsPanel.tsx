@@ -50,9 +50,9 @@ const STATUS_META: Record<
 > = {
   queued: {
     label: "排队",
-    badge: "bg-white/[0.06] text-[var(--fg-1)] border-[var(--border)]",
+    badge: "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)]",
     dot: "bg-[var(--fg-2)]",
-    row: "border-l-white/10",
+    row: "border-l-[var(--border)]",
   },
   running: {
     label: "生成中",
@@ -90,9 +90,9 @@ function getStatusMeta(status: string) {
   return (
     STATUS_META[status] ?? {
       label: status || "未知",
-      badge: "bg-white/[0.06] text-[var(--fg-1)] border-[var(--border)]",
+      badge: "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)]",
       dot: "bg-[var(--fg-2)]",
-      row: "border-l-white/10",
+      row: "border-l-[var(--border)]",
     }
   );
 }
@@ -576,9 +576,9 @@ export function RequestEventsPanel() {
                       <Fragment key={event.id}>
                         <tr
                           className={cn(
-                            "border-t border-l-2 border-[var(--border-subtle)] align-top transition-colors hover:bg-white/[0.035]",
+                            "border-t border-l-2 border-[var(--border-subtle)] align-top transition-colors hover:bg-[var(--bg-2)]",
                             statusMeta.row,
-                            expanded && "bg-white/[0.025]",
+                            expanded && "bg-[var(--bg-2)]",
                           )}
                         >
                           <td className="py-3 px-3">
@@ -587,7 +587,7 @@ export function RequestEventsPanel() {
                               onClick={() =>
                                 setExpandedId(expanded ? null : event.id)
                               }
-                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-white/10 hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
                               aria-label={expanded ? "收起详情" : "展开详情"}
                               aria-expanded={expanded}
                               aria-controls={detailId}
@@ -661,7 +661,7 @@ export function RequestEventsPanel() {
                     className={cn(
                       "space-y-3 border-l-2 p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start lg:gap-4 lg:space-y-0",
                       statusMeta.row,
-                      expanded && "bg-white/[0.025]",
+                      expanded && "bg-[var(--bg-2)]",
                     )}
                   >
                     <button
@@ -863,14 +863,14 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
         openEventImages(event);
       }}
       disabled={!canOpen}
-      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-2.5 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2.5 text-xs text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
       aria-label={`查看 ${event.images.length} 张事件图片`}
     >
       <span className="flex shrink-0 -space-x-1">
         {previews.map((image) => (
           <span
             key={image.id}
-            className="h-7 w-7 overflow-hidden rounded-[var(--radius-control)] border border-black/40 bg-white/[0.06] shadow-sm"
+            className="h-7 w-7 overflow-hidden rounded-[var(--radius-control)] border border-black/40 bg-[var(--bg-2)] shadow-sm"
           >
             <img
               src={imagePreviewSrc(image)}
@@ -883,7 +883,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
       </span>
       <Eye className="w-3.5 h-3.5" />
       查看
-      <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]">
+      <span className="rounded bg-[var(--bg-3)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]">
         {event.images.length}
       </span>
       {outputCount > 0 && (
@@ -932,7 +932,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
             <Activity className="w-3.5 h-3.5" />
             实时供应商（任务心跳）
           </div>
-          <div className="flex flex-col gap-1.5 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] p-3">
+          <div className="flex flex-col gap-1.5 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3">
             {liveLanes(event).map((lane, idx) => (
               <LiveLaneRow key={`detail-${lane.label}-${idx}`} lane={lane} />
             ))}
@@ -945,7 +945,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
           <div className="mb-1.5 text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
             提示词
           </div>
-          <p className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] p-3 text-xs leading-relaxed text-[var(--fg-1)]">
+          <p className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3 text-xs leading-relaxed text-[var(--fg-1)]">
             {event.prompt}
           </p>
         </div>
@@ -978,7 +978,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                   openEventImages(event, image.id);
                 }}
                 disabled={!image.url}
-                className="group relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] text-left transition-colors hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="group relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-left transition-colors hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
               >
                 <img
                   src={imagePreviewSrc(image)}
@@ -1010,7 +1010,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
               <span
                 key={key}
                 title={formatUnknownValue(value)}
-                className="inline-flex max-w-full items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] px-2 py-1 text-xs text-[var(--fg-1)]"
+                className="inline-flex max-w-full items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-1 text-xs text-[var(--fg-1)]"
               >
                 <span className="shrink-0 text-[var(--fg-2)]">{key}</span>
                 <span className="truncate font-mono text-[var(--fg-1)]">
@@ -1134,7 +1134,7 @@ function Detail({
 
 function MiniField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] px-2 py-1.5">
+    <div className="min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-1.5">
       <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>

@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/image-job
+EnvironmentFile=/etc/image-job/image-job.env
 Environment=IMAGE_JOB_UPSTREAM_BASE_URL=http://127.0.0.1:8081
 Environment=IMAGE_JOB_PUBLIC_BASE_URL=https://example.com
 Environment=IMAGE_JOB_DATA_DIR=/opt/image-job/data

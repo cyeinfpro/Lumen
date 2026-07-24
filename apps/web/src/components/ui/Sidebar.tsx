@@ -268,7 +268,7 @@ function SidebarListHeader({
                   role="menuitem"
                   onClick={controller.toggleArchiveTab}
                   className={cn(
-                    "flex h-10 w-full items-center gap-2 px-3 text-left type-caption",
+                    "flex h-10 min-h-11 w-full items-center gap-2 px-3 text-left type-caption sm:min-h-0",
                     "text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)]",
                     "focus-visible:outline-none focus-visible:bg-[var(--bg-2)]",
                   )}
@@ -691,7 +691,7 @@ function EmptyState({
   if (tab === "archived") {
     return (
       <div className="px-4 py-8 text-center">
-        <div className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-white/5">
+        <div className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--bg-2)]">
           <Inbox className="h-4 w-4 text-[var(--fg-2)]" />
         </div>
         <p className="type-caption text-[var(--fg-2)]">归档为空</p>
@@ -700,7 +700,7 @@ function EmptyState({
   }
   return (
     <div className="px-4 py-8 text-center">
-      <div className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-white/5">
+      <div className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--bg-2)]">
         <Inbox className="h-4 w-4 text-[var(--fg-2)]" />
       </div>
       <p className="mb-3 type-caption text-[var(--fg-2)]">还没有会话</p>
@@ -725,9 +725,9 @@ function ListSkeleton() {
           key={row.id}
           className="flex h-10 items-center gap-2 rounded-[var(--radius-control)] px-2"
         >
-          <div className="h-3.5 w-3.5 animate-pulse rounded bg-white/5" />
+          <div className="h-3.5 w-3.5 animate-pulse rounded bg-[var(--bg-2)]" />
           <div
-            className="h-3 animate-pulse rounded bg-white/5"
+            className="h-3 animate-pulse rounded bg-[var(--bg-2)]"
             style={{ width: `${row.width}%` }}
           />
         </div>

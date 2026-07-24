@@ -6,16 +6,15 @@ import { logWarn } from "@/lib/logger";
 
 const SW_URL = "/sw.js";
 const SW_SCOPE = "/";
-const PWA_STATUS_EVENT = "lumen:pwa-status";
 // requestIdleCallback 兜底超时：弱网 / 低端机可能很久没空闲，宁可抢一点首屏
-// 资源也不能让 SW 永远不注册（会破坏 PWA installability）。
+// 资源也不能让 SW 永远不注册。
 const IDLE_TIMEOUT_MS = 4000;
 
 // 在 production 注册 /sw.js；dev 主动 unregister 任何遗留 SW，避免 prod 装过
 // PWA 的浏览器切到 localhost 调试时被旧 SW 拦截请求。
 //
-// SW 本身是 passthrough（见 public/sw.js），存在的唯一目的是满足 PWA
-// installability，让浏览器允许"添加到主屏"。
+// SW 本身是 passthrough（见 public/sw.js），不提供离线缓存，也不是浏览器
+// 安装应用的前置条件。这里保留注册仅用于已安装客户端的生命周期钩子和未来扩展。
 export function ServiceWorkerRegister() {
   useEffect(() => {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
@@ -74,14 +73,6 @@ export function ServiceWorkerRegister() {
         removeVisibilityListener = () =>
           document.removeEventListener("visibilitychange", onVisibilityChange);
       } catch (error) {
-        window.dispatchEvent(
-          new CustomEvent(PWA_STATUS_EVENT, {
-            detail: {
-              status: "registration_failed",
-              message: "离线安装不可用，刷新后会重试。",
-            },
-          }),
-        );
         logWarn("service worker register failed", {
           scope: "pwa",
           extra: { message: error instanceof Error ? error.message : String(error) },

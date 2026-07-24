@@ -8,7 +8,7 @@
 // - 页面 visibilitychange：hidden 延迟 close，visible → open（节流）
 // - 调用方自己在 handlers 里 dispatch（不在 hook 里耦合 store）
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sseUrl } from "./apiClient";
 import { logError } from "./logger";
 
@@ -35,18 +35,11 @@ export interface UseSSEOptions {
 }
 
 const DEFAULT_HIDDEN_CLOSE_DELAY_MS = 30_000;
-const DEFAULT_DESKTOP_MAX_RETRY_COUNT = 20;
-// 4K 生图 10+ min 期间网络抖动可能耗光重试；5 次太紧会让前台移动用户提早看到 error。
-// 退避封顶 30s × 20 次 ≈ 10 min；之后 visibilitychange 仍会重置重连。
-const DEFAULT_MOBILE_MAX_RETRY_COUNT = 20;
+const DEFAULT_MAX_RETRY_COUNT = Number.POSITIVE_INFINITY;
 
-function defaultMaxRetryCount(): number {
-  if (typeof window === "undefined") return DEFAULT_DESKTOP_MAX_RETRY_COUNT;
-  const coarsePointer = window.matchMedia?.("(pointer: coarse)").matches ?? false;
-  if (coarsePointer || navigator.maxTouchPoints > 0) {
-    return DEFAULT_MOBILE_MAX_RETRY_COUNT;
-  }
-  return DEFAULT_DESKTOP_MAX_RETRY_COUNT;
+export function getSSEBackoffBaseDelay(attempt: number): number {
+  const boundedAttempt = Math.min(5, Math.max(0, Math.trunc(attempt)));
+  return Math.min(30_000, 1000 * 2 ** boundedAttempt);
 }
 
 function initialStatus(): SSEStatus {
@@ -158,6 +151,18 @@ class SharedSSEConnection {
     };
   }
 
+  reconnectNow(): void {
+    if (
+      this.disposed ||
+      this.subscribers.size === 0 ||
+      document.visibilityState !== "visible"
+    ) {
+      return;
+    }
+    this.retryAttempt = 0;
+    this.open();
+  }
+
   ensureNamedListener(name: string): void {
     if (!this.es || this.namedListeners.has(name)) return;
     if (name === "message" || name === "open" || name === "error") return;
@@ -225,7 +230,7 @@ class SharedSSEConnection {
     for (const subscriber of this.subscribers) {
       count = Math.max(count, subscriber.maxRetryCountRef.current);
     }
-    return count || defaultMaxRetryCount();
+    return count || DEFAULT_MAX_RETRY_COUNT;
   }
 
   private closeEventSource(): void {
@@ -319,7 +324,7 @@ class SharedSSEConnection {
       this.notifyStatus("error");
       return;
     }
-    const baseDelay = Math.min(30_000, 1000 * 2 ** this.retryAttempt);
+    const baseDelay = getSSEBackoffBaseDelay(this.retryAttempt);
     const delay = Math.min(30_000, computeJitteredDelay(baseDelay));
     this.retryAttempt += 1;
     this.retryTimer = setTimeout(() => {
@@ -395,7 +400,7 @@ export function useSSE(
   channels: string[],
   handlers: SSEHandlers,
   opts?: UseSSEOptions,
-): { status: SSEStatus } {
+): { status: SSEStatus; reconnect: () => void } {
   const [status, setStatus] = useState<SSEStatus>(initialStatus);
   // handlers 放入 ref；同步到最新在 effect 里做，避免 "update ref during render"。
   const handlersRef = useRef<SSEHandlers>(handlers);
@@ -405,8 +410,9 @@ export function useSSE(
     opts?.hiddenCloseDelayMs ?? DEFAULT_HIDDEN_CLOSE_DELAY_MS,
   );
   const maxRetryCountRef = useRef<number>(
-    opts?.maxRetryCount ?? defaultMaxRetryCount(),
+    opts?.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT,
   );
+  const connectionRef = useRef<SharedSSEConnection | null>(null);
   // 每次 render 后同步 ref。inline `{}` / 裸函数每次 render 引用都不同,
   // 写依赖数组反而每次都触发；省略 deps 等价 "每次 render 之后跑",
   // 是 React 文档明确认可的 ref 同步写法（render 阶段本身不访问 ref）。
@@ -416,7 +422,8 @@ export function useSSE(
     onErrorRef.current = opts?.onError;
     hiddenCloseDelayRef.current =
       opts?.hiddenCloseDelayMs ?? DEFAULT_HIDDEN_CLOSE_DELAY_MS;
-    maxRetryCountRef.current = opts?.maxRetryCount ?? defaultMaxRetryCount();
+    maxRetryCountRef.current =
+      opts?.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT;
   });
 
   // channels 用 sorted-join 做稳定 key：顺序不同也不视为变化。
@@ -443,8 +450,18 @@ export function useSSE(
       eventNames: new Set(handlerEventKey.split(",").filter(Boolean)),
       setStatus,
     };
-    return acquireSharedSSEConnection(channelKey).subscribe(subscriber);
+    const connection = acquireSharedSSEConnection(channelKey);
+    connectionRef.current = connection;
+    const unsubscribe = connection.subscribe(subscriber);
+    return () => {
+      if (connectionRef.current === connection) connectionRef.current = null;
+      unsubscribe();
+    };
   }, [channelKey, handlerEventKey]);
 
-  return { status };
+  const reconnect = useCallback(() => {
+    connectionRef.current?.reconnectNow();
+  }, []);
+
+  return { status, reconnect };
 }

@@ -898,6 +898,7 @@ install_image_job() {
 
     local app_dir data_dir state_dir db_path upstream_base public_base listen_host listen_port
     local concurrency python_bin service_user service_group
+    local config_dir env_file sidecar_token tmp_env
 
     log_step "安装 image-job sidecar"
     app_dir="$(read_or_default '应用目录' '/opt/image-job')"
@@ -927,6 +928,8 @@ install_image_job() {
     ensure_service_user "${service_user}" "${app_dir}"
     service_group="$(id -gn "${service_user}" 2>/dev/null || printf '%s' "${service_user}")"
     db_path="${state_dir}/image_jobs.sqlite3"
+    config_dir="/etc/image-job"
+    env_file="${config_dir}/image-job.env"
 
     log_step "复制 image-job 文件"
     as_sudo install -d -m 0755 "${app_dir}" "${data_dir}" "${data_dir}/images"
@@ -949,6 +952,46 @@ install_image_job() {
     as_sudo "${python_bin}" -m venv "${app_dir}/.venv"
     as_sudo "${app_dir}/.venv/bin/pip" install -r "${app_dir}/requirements.txt"
 
+    log_step "配置 image-job 服务凭证"
+    tmp_env="$(mktemp)"
+    chmod 0600 "${tmp_env}"
+    if as_sudo test -f "${env_file}"; then
+        as_sudo cat "${env_file}" > "${tmp_env}"
+    fi
+    sidecar_token="$(
+        awk -F= '
+            $1 == "IMAGE_JOB_SIDECAR_TOKEN" {
+                sub(/^[^=]*=/, "")
+                print
+                exit
+            }
+        ' "${tmp_env}"
+    )"
+    if [ "${#sidecar_token}" -lt 32 ] || [[ "${sidecar_token}" =~ [[:space:]] ]]; then
+        sidecar_token="$(
+            "${python_bin}" -c 'import secrets; print(secrets.token_urlsafe(48))'
+        )"
+    fi
+    awk -v token="${sidecar_token}" '
+        BEGIN { replaced = 0 }
+        /^IMAGE_JOB_SIDECAR_TOKEN=/ {
+            if (!replaced) {
+                print "IMAGE_JOB_SIDECAR_TOKEN=" token
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced) print "IMAGE_JOB_SIDECAR_TOKEN=" token
+        }
+    ' "${tmp_env}" > "${tmp_env}.new"
+    mv "${tmp_env}.new" "${tmp_env}"
+    chmod 0600 "${tmp_env}"
+    as_sudo install -d -m 0755 "${config_dir}"
+    as_sudo install -m 0600 "${tmp_env}" "${env_file}"
+    rm -f "${tmp_env}"
+
     log_step "写入 systemd 服务"
     local tmp_unit
     tmp_unit="$(mktemp)"
@@ -963,6 +1006,7 @@ Type=simple
 User=${service_user}
 Group=${service_group}
 WorkingDirectory=${app_dir}
+EnvironmentFile=${env_file}
 Environment=IMAGE_JOB_UPSTREAM_BASE_URL=${upstream_base}
 Environment=IMAGE_JOB_PUBLIC_BASE_URL=${public_base}
 Environment=IMAGE_JOB_ROOT_DIR=${app_dir}
@@ -1006,6 +1050,7 @@ EOF
     service:      image-job
     local health: http://${listen_host}:${listen_port}/health
     public base:  ${public_base}
+    service auth: ${env_file}（仅 root 可读）
 
   如需暴露公网路由，请继续执行：
     bash scripts/lumenctl.sh nginx-optimize
@@ -1236,12 +1281,43 @@ write_lumen_nginx_config() {
     local cert_file="$6"
     local key_file="$7"
     local primary zone_suffix zone_api zone_events upstream_name
+    local hsts_enabled hsts_include_subdomains hsts_header
 
     primary="$(printf '%s' "${server_names}" | awk '{print $1}')"
     zone_suffix="$(sanitize_name "${primary}" | tr '.-' '__')"
     zone_api="lumen_api_${zone_suffix}"
     zone_events="lumen_events_${zone_suffix}"
     upstream_name="lumen_web_${zone_suffix}"
+    hsts_enabled="$(
+        printf '%s' "${LUMEN_HSTS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]'
+    )"
+    hsts_include_subdomains="$(
+        printf '%s' "${LUMEN_HSTS_INCLUDE_SUBDOMAINS:-false}" |
+            tr '[:upper:]' '[:lower:]'
+    )"
+    case "${hsts_enabled}" in
+        1|true|yes|on) hsts_enabled="1" ;;
+        0|false|no|off) hsts_enabled="0" ;;
+        *)
+            log_error "LUMEN_HSTS_ENABLED 必须是 true 或 false。"
+            return 1
+            ;;
+    esac
+    case "${hsts_include_subdomains}" in
+        1|true|yes|on) hsts_include_subdomains="1" ;;
+        0|false|no|off) hsts_include_subdomains="0" ;;
+        *)
+            log_error "LUMEN_HSTS_INCLUDE_SUBDOMAINS 必须是 true 或 false。"
+            return 1
+            ;;
+    esac
+    hsts_header=""
+    if [ "${hsts_enabled}" = "1" ]; then
+        hsts_header="max-age=31536000"
+        if [ "${hsts_include_subdomains}" = "1" ]; then
+            hsts_header="${hsts_header}; includeSubDomains"
+        fi
+    fi
 
     {
         cat <<EOF
@@ -1283,8 +1359,11 @@ server {
   ssl_protocols TLSv1.2 TLSv1.3;
   ssl_session_cache shared:SSL:10m;
   ssl_session_timeout 1d;
-  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 EOF
+            if [ -n "${hsts_header}" ]; then
+                printf '  add_header Strict-Transport-Security "%s" always;\n' \
+                    "${hsts_header}"
+            fi
         else
             cat <<EOF
 server {

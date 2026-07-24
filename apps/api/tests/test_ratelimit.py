@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.ratelimit import MESSAGES_LIMITER, RateLimiter, client_ip
+from app.ratelimit import (
+    MESSAGES_LIMITER,
+    RateLimiter,
+    client_ip,
+    user_rate_limits_effective,
+    user_rate_limits_effective_reason,
+)
 
 
 class OkRedis:
@@ -44,6 +50,49 @@ async def test_messages_limiter_runs_in_production_when_flag_false() -> None:
         settings.app_env = old_env
         settings.user_rate_limit_enabled = old_enabled
     assert redis.called is True
+
+
+def test_user_rate_limit_effective_semantics_match_runtime() -> None:
+    old_env = settings.app_env
+    old_enabled = settings.user_rate_limit_enabled
+    try:
+        settings.app_env = "production"
+        settings.user_rate_limit_enabled = False
+        assert user_rate_limits_effective() is True
+        assert user_rate_limits_effective_reason() == "production_fail_closed"
+
+        settings.app_env = "development"
+        assert user_rate_limits_effective() is False
+        assert user_rate_limits_effective_reason() == "development_disabled"
+
+        settings.user_rate_limit_enabled = True
+        assert user_rate_limits_effective() is True
+        assert user_rate_limits_effective_reason() == "configured_enabled"
+
+        settings.app_env = "test"
+        settings.user_rate_limit_enabled = False
+        assert user_rate_limits_effective() is True
+        assert user_rate_limits_effective_reason() == "test_fail_closed"
+    finally:
+        settings.app_env = old_env
+        settings.user_rate_limit_enabled = old_enabled
+
+
+def test_startup_log_reports_configured_and_effective_rate_limit_values(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import app.main as main
+
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "user_rate_limit_enabled", False)
+
+    with caplog.at_level("INFO", logger=main.logger.name):
+        main._log_rate_limit_status()
+
+    assert "configured_user=False" in caplog.text
+    assert "effective_user=True" in caplog.text
+    assert "effective_reason=production_fail_closed" in caplog.text
 
 
 @pytest.mark.asyncio

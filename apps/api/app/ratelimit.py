@@ -43,6 +43,27 @@ def _is_test_env() -> bool:
     return getattr(settings, "app_env", "dev").strip().lower() == "test"
 
 
+def user_rate_limits_effective() -> bool:
+    """Return whether opt-in per-user limiters are enforced at runtime.
+
+    Production and tests are fail-closed regardless of the configured flag.
+    Development aliases may disable these limiters for local iteration.
+    """
+    if getattr(settings, "user_rate_limit_enabled", False):
+        return True
+    return not _is_dev_env() or _is_test_env()
+
+
+def user_rate_limits_effective_reason() -> str:
+    if getattr(settings, "user_rate_limit_enabled", False):
+        return "configured_enabled"
+    if _is_test_env():
+        return "test_fail_closed"
+    if not _is_dev_env():
+        return "production_fail_closed"
+    return "development_disabled"
+
+
 # KEYS[1] = bucket key
 # ARGV[1] = capacity; ARGV[2] = refill_per_sec; ARGV[3] = now_ms; ARGV[4] = cost
 # ARGV[5] = initial_tokens
@@ -137,7 +158,9 @@ class RateLimiter:
             )
         if self.scope == "ip":
             return f"{self.key_prefix}:{require_client_ip(request)}"
-        raise RuntimeError("manual rate limiters require callers to pass an explicit key")
+        raise RuntimeError(
+            "manual rate limiters require callers to pass an explicit key"
+        )
 
     async def check(self, redis: Redis, key: str, cost: int = 1) -> None:
         import time
@@ -148,16 +171,8 @@ class RateLimiter:
         if cost > self.capacity:
             raise ValueError("cost exceeds capacity")
 
-        is_dev = _is_dev_env()
-        if not self.always_on:
-            # dev/local/test 仍可通过 USER_RATE_LIMIT_ENABLED 开关开启；
-            # 生产环境默认强制开启（fail-closed），避免忘开等于无限流。
-            if (
-                is_dev
-                and not _is_test_env()
-                and not getattr(settings, "user_rate_limit_enabled", False)
-            ):
-                return
+        if not self.always_on and not user_rate_limits_effective():
+            return
 
         now_ms = int(time.time() * 1000)
         try:
@@ -171,9 +186,7 @@ class RateLimiter:
                     str(now_ms),
                     str(cost),
                     str(
-                        self.initial_tokens
-                        if self.initial_tokens is not None
-                        else cost
+                        self.initial_tokens if self.initial_tokens is not None else cost
                     ),
                 )
             )
@@ -333,7 +346,7 @@ def _is_trusted_proxy(remote: str) -> bool:
 def _parse_ip_token(token: str) -> str | None:
     value = token.strip().strip('"')
     if value.startswith("[") and "]" in value:
-        value = value[1:value.index("]")]
+        value = value[1 : value.index("]")]
     elif value.count(":") == 1 and "." in value:
         value = value.rsplit(":", 1)[0]
     try:

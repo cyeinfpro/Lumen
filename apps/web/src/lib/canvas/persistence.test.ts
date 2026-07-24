@@ -3,14 +3,18 @@ import test from "node:test";
 import "../../store/chat/moduleResolution.test-helper.mjs";
 
 const {
+  activatePrivateCanvasPersistence,
   canvasSaveBatchMatchesPending,
+  clearPrivateCanvasPersistence,
   deleteCanvasEmergencyDraft,
   getCanvasDraft,
   getCanvasEmergencyDraft,
   getCanvasSaveBatch,
   isSuspiciousEmptyCanvasDraft,
   listCanvasDrafts,
+  putCanvasDraft,
   putCanvasEmergencyDraft,
+  resumePrivateCanvasPersistence,
   SerialCanvasDraftWriter,
 } = await import("#canvas-persistence");
 const { createDefaultCanvasGraph, createEmptyCanvasGraph } = await import(
@@ -118,6 +122,85 @@ function installIndexedDb({
   };
 }
 
+function installClearableIndexedDb() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  const stores = {
+    drafts: new Map([["draft", { private: true }]]),
+    "save-batches": new Map([["batch", { private: true }]]),
+  };
+  const request = (result: unknown) => {
+    const value = { result } as IDBRequest;
+    queueMicrotask(() => value.onsuccess?.(new Event("success")));
+    return value;
+  };
+  const database = {
+    close() {},
+    transaction(storeNames: string[]) {
+      const transaction = {
+        objectStore(storeName: keyof typeof stores) {
+          return {
+            clear() {
+              stores[storeName].clear();
+            },
+          };
+        },
+      } as unknown as IDBTransaction;
+      queueMicrotask(() => transaction.oncomplete?.(new Event("complete")));
+      assert.deepEqual(storeNames, ["drafts", "save-batches"]);
+      return transaction;
+    },
+  };
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: {
+      open() {
+        return request(database);
+      },
+    },
+  });
+  return {
+    stores,
+    restore() {
+      if (descriptor) {
+        Object.defineProperty(globalThis, "indexedDB", descriptor);
+      } else {
+        delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+      }
+    },
+  };
+}
+
+function installDelayedOpenIndexedDb() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  const requests: Array<IDBOpenDBRequest & { result: IDBDatabase }> = [];
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: {
+      open() {
+        const request = {} as IDBOpenDBRequest & { result: IDBDatabase };
+        requests.push(request);
+        return request;
+      },
+    },
+  });
+  return {
+    requests,
+    resolve(index: number, database: IDBDatabase) {
+      const request = requests[index];
+      assert.ok(request);
+      request.result = database;
+      queueMicrotask(() => request.onsuccess?.(new Event("success")));
+    },
+    restore() {
+      if (descriptor) {
+        Object.defineProperty(globalThis, "indexedDB", descriptor);
+      } else {
+        delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+      }
+    },
+  };
+}
+
 function emergencyDraft(canvasId = "canvas-1", clientId = "client-1") {
   return {
     canvas_id: canvasId,
@@ -214,17 +297,136 @@ test("draft writer reports failures and still runs a queued latest write", async
   assert.deepEqual(errors, [failure]);
 });
 
-test("emergency drafts round trip synchronously and delete cleanly", () => {
+test("emergency drafts stay disabled until an identity is accepted", async () => {
   const storage = new MemoryStorage();
   const restore = installLocalStorage(storage);
   try {
     const draft = emergencyDraft();
+    await clearPrivateCanvasPersistence();
+    assert.equal(putCanvasEmergencyDraft(draft), false);
+    await activatePrivateCanvasPersistence("user-a");
     assert.equal(putCanvasEmergencyDraft(draft), true);
     assert.deepEqual(getCanvasEmergencyDraft(draft.canvas_id), draft);
     deleteCanvasEmergencyDraft(draft.canvas_id);
     assert.equal(getCanvasEmergencyDraft(draft.canvas_id), null);
   } finally {
+    resumePrivateCanvasPersistence();
     restore();
+  }
+});
+
+test("private canvas cleanup clears only canvas persistence", async () => {
+  const storage = new MemoryStorage();
+  const restoreStorage = installLocalStorage(storage);
+  const indexedDb = installClearableIndexedDb();
+  try {
+    storage.setItem("lumen:poster-draft", "keep-me");
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft()), true);
+
+    await clearPrivateCanvasPersistence();
+
+    assert.equal(getCanvasEmergencyDraft("canvas-1"), null);
+    assert.equal(storage.getItem("lumen:poster-draft"), "keep-me");
+    assert.equal(indexedDb.stores.drafts.size, 0);
+    assert.equal(indexedDb.stores["save-batches"].size, 0);
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft("stale")), false);
+
+    await activatePrivateCanvasPersistence("user-a");
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft("user-a")), true);
+    await activatePrivateCanvasPersistence("user-a");
+    assert.equal(getCanvasEmergencyDraft("user-a")?.canvas_id, "user-a");
+
+    await activatePrivateCanvasPersistence("user-b");
+    assert.equal(getCanvasEmergencyDraft("user-a"), null);
+    assert.equal(storage.getItem("lumen:poster-draft"), "keep-me");
+  } finally {
+    resumePrivateCanvasPersistence();
+    indexedDb.restore();
+    restoreStorage();
+  }
+});
+
+test("canvas writes started before identity invalidation cannot land afterward", async () => {
+  const storage = new MemoryStorage();
+  const restoreStorage = installLocalStorage(storage);
+  const indexedDb = installDelayedOpenIndexedDb();
+  try {
+    const pendingWrite = putCanvasDraft(emergencyDraft());
+    const cleanup = clearPrivateCanvasPersistence();
+    assert.equal(indexedDb.requests.length, 2);
+
+    let oldTransactionOpened = false;
+    indexedDb.resolve(0, {
+      close() {},
+      transaction() {
+        oldTransactionOpened = true;
+        throw new Error("stale write reached a transaction");
+      },
+    } as unknown as IDBDatabase);
+    await assert.rejects(
+      pendingWrite,
+      (error: unknown) =>
+        error instanceof DOMException && error.name === "AbortError",
+    );
+    assert.equal(oldTransactionOpened, false);
+
+    const clearTransaction = {
+      objectStore() {
+        return { clear() {} };
+      },
+    } as unknown as IDBTransaction;
+    indexedDb.resolve(1, {
+      close() {},
+      transaction() {
+        queueMicrotask(() =>
+          clearTransaction.oncomplete?.(new Event("complete")),
+        );
+        return clearTransaction;
+      },
+    } as unknown as IDBDatabase);
+    await cleanup;
+  } finally {
+    resumePrivateCanvasPersistence();
+    indexedDb.restore();
+    restoreStorage();
+  }
+});
+
+test("stale identity activation cannot re-enable persistence after logout", async () => {
+  const storage = new MemoryStorage();
+  const restoreStorage = installLocalStorage(storage);
+  const indexedDb = installDelayedOpenIndexedDb();
+  storage.setItem("lumen:canvas-owner:v1", "user-a");
+  try {
+    const staleActivation = activatePrivateCanvasPersistence("user-b");
+    const logoutCleanup = clearPrivateCanvasPersistence();
+    assert.equal(indexedDb.requests.length, 2);
+
+    const transaction = {
+      objectStore() {
+        return { clear() {} };
+      },
+    } as unknown as IDBTransaction;
+    const database = {
+      close() {},
+      transaction() {
+        queueMicrotask(() => transaction.oncomplete?.(new Event("complete")));
+        return transaction;
+      },
+    } as unknown as IDBDatabase;
+
+    indexedDb.resolve(0, database);
+    await staleActivation;
+    assert.equal(storage.getItem("lumen:canvas-owner:v1"), "user-a");
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft("stale")), false);
+
+    indexedDb.resolve(1, database);
+    await logoutCleanup;
+    assert.equal(putCanvasEmergencyDraft(emergencyDraft("logged-out")), false);
+  } finally {
+    resumePrivateCanvasPersistence();
+    indexedDb.restore();
+    restoreStorage();
   }
 });
 

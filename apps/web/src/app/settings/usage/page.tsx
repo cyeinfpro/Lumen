@@ -559,7 +559,7 @@ function SecondaryCard({
           {label}
         </div>
         {icon && (
-          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] text-[var(--fg-2)] flex items-center justify-center">
+          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border)] text-[var(--fg-2)] flex items-center justify-center">
             {icon}
           </span>
         )}

@@ -19,6 +19,10 @@ class CorsMiddlewareTests(unittest.TestCase):
                     "Access-Control-Request-Method": "GET",
                 },
             )
+            actual = client.get(
+                "/healthz",
+                headers={"Origin": "http://198.51.100.10:3000"},
+            )
         finally:
             settings.cors_allow_origins = original
 
@@ -29,6 +33,10 @@ class CorsMiddlewareTests(unittest.TestCase):
         )
         self.assertEqual(
             response.headers.get("access-control-allow-credentials"), "true"
+        )
+        self.assertIn(
+            "X-Lumen-Session-Cookie-Secure",
+            actual.headers.get("access-control-expose-headers", ""),
         )
 
     def test_preflight_allows_idempotency_key_header_for_put(self) -> None:

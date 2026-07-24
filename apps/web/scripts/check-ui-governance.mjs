@@ -238,8 +238,13 @@ function scanSharedA11yContracts(root) {
     },
     {
       path: "src/components/OfflineBanner.tsx",
-      test: (src) => /aria-live="assertive"/.test(src) && /role="status"/.test(src),
-      message: "OfflineBanner must remain a live announced connectivity status.",
+      test: (src) =>
+        /aria-live="assertive"/.test(src) &&
+        /role="alert"/.test(src) &&
+        /不支持离线使用/.test(src) &&
+        !/PWA_STATUS_EVENT/.test(src),
+      message:
+        "OfflineBanner must announce actual connectivity loss without conflating it with PWA installation.",
     },
   ];
 

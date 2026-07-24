@@ -41,7 +41,7 @@ from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import video_generation as video_generation_tasks
 from .tasks import volcano_assets as volcano_asset_tasks
-from .upstream import close_client
+from .upstream import close_client, validate_effective_image_job_configuration
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
@@ -67,6 +67,7 @@ async def _cleanup_resources() -> None:
 async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
     try:
+        await validate_effective_image_job_configuration()
         storage.ensure_ready()
         init_sentry(
             settings.sentry_dsn,

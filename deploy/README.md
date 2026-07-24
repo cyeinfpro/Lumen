@@ -155,7 +155,7 @@ bash scripts/lumenctl.sh install-image-job
 
 | 文件 | 角色 | 用法 |
 |------|------|------|
-| `nginx.conf.example` | **主反代**（`lumen.example.com`） | 反代 Next.js + API，含 SSE / body size / TLS / 限流。整段拷到 `sites-available/lumen.conf`。proxy_pass 仍指 `127.0.0.1:3000`，与 Docker Web 容器映射端口一致（详见 `docs/docker-full-stack-cutover-plan.md` §14）。 |
+| `nginx.conf.example` | **主反代**（`lumen.example.com`） | 反代 Next.js + API，含 SSE / body size / TLS / 限流。先按模板头部说明用 `LUMEN_HSTS_ENABLED` / `LUMEN_HSTS_INCLUDE_SUBDOMAINS` 渲染，再写入 `sites-available/lumen.conf`。proxy_pass 仍指 `127.0.0.1:3000`，与 Docker Web 容器映射端口一致（详见 `docs/docker-full-stack-cutover-plan.md` §14）。 |
 | `image-job/image-job.example.com.conf` | **image-job 独立子域** | sidecar 用独立域名（如 `img.example.com`）暴露时用。完整 server block，含 ACME + TLS。 |
 | `image-job/nginx-image-job.locations.conf` | **image-job location 片段** | 想把 sidecar 挂在主站 `/v1/image-jobs` 路径下时用。`include` 进主反代的 `server {}` 即可。 |
 

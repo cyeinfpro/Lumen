@@ -280,7 +280,7 @@ function ApiCredentialHealthCard({
           </div>
         </div>
         {active ? (
-          <span className="rounded-full border border-[var(--border)] bg-white/5 px-2.5 py-1 type-caption text-[var(--fg-1)]">
+          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2.5 py-1 type-caption text-[var(--fg-1)]">
             {active.status}
           </span>
         ) : null}

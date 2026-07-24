@@ -180,7 +180,7 @@ function MeterBar({
 }) {
   const animated = active && !reducedMotion;
   return (
-    <span className="block h-0.5 w-full overflow-hidden rounded-full bg-white/10">
+    <span className="block h-0.5 w-full overflow-hidden rounded-full bg-[var(--bg-3)]">
       <motion.span
         className={cn(
           "block h-full w-full origin-left rounded-full transition-transform duration-200 ease-[var(--ease-develop)]",

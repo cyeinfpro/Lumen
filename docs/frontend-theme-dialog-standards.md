@@ -124,11 +124,14 @@ Public share, login, invite, reset password, settings, and admin pages must not 
 bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)]
 ```
 
-## 6. Legacy Compatibility Layer
+## 6. Legacy Utility Migration
 
-`globals.css` contains light-theme compatibility overrides for older utilities such as `text-neutral-*`, `border-white/*`, `bg-white/*`, and dark neutral panel classes.
+`globals.css` does not remap legacy dark utilities for the light theme. Older
+components using `text-neutral-*`, `border-white/*`, `bg-white/*`, or dark
+neutral panel classes must be migrated directly to semantic variables.
 
-That layer is a safety net only. New code should not rely on it. If you touch an old component, prefer converting nearby surface/text/border classes to semantic variables instead of adding more global overrides.
+If you touch an old component, convert the nearby surface, text, and border
+classes instead of adding global compatibility overrides.
 
 Do not globally remap `bg-black/*`: it is also used for real scrims and media overlays. Convert ordinary panels and forms directly.
 

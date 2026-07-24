@@ -172,12 +172,12 @@ Copy `.env.example` to `.env` for manual compose use, or edit `/opt/lumen/shared
 
 | Area | Important variables |
 | --- | --- |
-| Runtime | `APP_ENV`, `PUBLIC_BASE_URL`, `CORS_ALLOW_ORIGINS`, `TRUSTED_PROXIES` |
+| Runtime | `APP_ENV`, `PUBLIC_BASE_URL`, `CORS_ALLOW_ORIGINS`, `TRUSTED_PROXIES`, `SESSION_COOKIE_SECURE`, `LUMEN_HSTS_ENABLED`, `LUMEN_HSTS_INCLUDE_SUBDOMAINS` |
 | Database/cache | `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DATABASE_URL`, `REDIS_PASSWORD`, `REDIS_URL` |
 | Secrets | `SESSION_SECRET`, `IMAGE_PROXY_SECRET`, `BYOK_API_KEY_MASTER_SECRET` |
 | Provider pool | `PROVIDERS`, `UPSTREAM_DEFAULT_MODEL`, `UPSTREAM_GLOBAL_CONCURRENCY`, `IMAGE_GENERATION_CONCURRENCY` |
 | Storage/backup | `LUMEN_DATA_ROOT`, `LUMEN_DB_ROOT`, `STORAGE_ROOT`, `BACKUP_ROOT`, `MAX_KEEP` |
-| Web | `LUMEN_BACKEND_URL`, `NEXT_PUBLIC_API_BASE`, `NEXT_PUBLIC_LUMEN_VERSION`, `LUMEN_UPGRADE_INSECURE_REQUESTS`, `LUMEN_HSTS_INCLUDE_SUBDOMAINS` |
+| Web | `LUMEN_BACKEND_URL`, `NEXT_PUBLIC_API_BASE`, `NEXT_PUBLIC_LUMEN_VERSION`, `LUMEN_UPGRADE_INSECURE_REQUESTS` |
 | Telegram | `TELEGRAM_BOT_SHARED_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `LUMEN_API_BASE` |
 | image-job | `IMAGE_JOB_UPSTREAM_BASE_URL`, `IMAGE_JOB_PUBLIC_BASE_URL`, `IMAGE_JOB_DATA_DIR`, `IMAGE_JOB_STATE_DIR`, `IMAGE_JOB_CONCURRENCY` |
 
@@ -194,8 +194,29 @@ Production requirements:
 - `APP_ENV=prod`
 - `SESSION_SECRET`, `IMAGE_PROXY_SECRET`, `BYOK_API_KEY_MASTER_SECRET` must be strong random values.
 - `SMTP_HOST` and `SMTP_FROM_EMAIL` are required outside development for password reset email.
-- `IMAGE_JOB_BASE_URL` must point at a real sidecar outside development if image-job routing is enabled.
+- `IMAGE_CHANNEL=stream_only` disables image-job routing and does not require sidecar configuration.
+- `IMAGE_CHANNEL=auto` only selects image-job for providers with `image_jobs_enabled`; an unavailable URL/token falls back to stream without blocking production startup.
+- `IMAGE_CHANNEL=image_jobs_only` is strict and fails fast unless `IMAGE_JOB_BASE_URL` is a non-placeholder `http`/`https` URL with a host and `IMAGE_JOB_SIDECAR_TOKEN` is a whitespace-free token of at least 32 characters.
+- HTTPS production should use `SESSION_COOKIE_SECURE=1` and render the outer nginx template with `LUMEN_HSTS_ENABLED=true`. The historical cookie default remains Secure outside dev/local/test.
+- Direct production HTTP is an explicit compatibility mode only: `PUBLIC_BASE_URL` must use `http` with a loopback, RFC1918/ULA private, or link-local address, `SESSION_COOKIE_SECURE=0`, and `LUMEN_HSTS_ENABLED=false`. Public domains/IPs and HTTPS with non-Secure cookies are rejected at API configuration load.
+- HSTS is emitted only by the outermost nginx. API and Web do not add it. `LUMEN_HSTS_INCLUDE_SUBDOMAINS` defaults to `false`; enable it only after every subdomain is permanently HTTPS-ready.
+- `USER_RATE_LIMIT_ENABLED` is a development convenience flag. Production and tests enforce regular per-user limiters regardless of the configured value; auth/reset/public limiters are always on.
 - Never expose `REDIS_URL`, `PROVIDERS`, provider keys, BYOK secrets, Telegram token, or session secrets to frontend variables or logs.
+
+After login, verify that the client stored and returned the session cookie without
+exposing its value:
+
+```bash
+curl -sS -D /tmp/lumen-login.headers -c /tmp/lumen-cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"REPLACE_ME"}' \
+  https://example.com/api/auth/login >/dev/null
+grep -i '^set-cookie:' /tmp/lumen-login.headers
+curl -sS -b /tmp/lumen-cookies.txt https://example.com/api/auth/me
+```
+
+The second request returns the authenticated user only after the API has
+validated the returned session cookie. Cookie values are never returned.
 
 ## Development
 

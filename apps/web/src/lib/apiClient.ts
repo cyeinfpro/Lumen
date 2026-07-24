@@ -5,7 +5,9 @@ import {
   apiFetchNoContent,
   ensureCsrfToken,
   handle401,
+  invalidateSessionClientState,
   refreshCsrfToken,
+  resumeSessionClientState,
 } from "./api/http";
 import type { NoContent } from "./api/http";
 import type { BackendMessage } from "./api/conversations";
@@ -42,7 +44,13 @@ import type {
   RecommendedErrorAction,
 } from "./types";
 import { uuid } from "./utils";
-export { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./api/http";
+export {
+  API_BASE,
+  ApiError,
+  apiFetch,
+  apiFetchNoContent,
+  safeAuthNextPath,
+} from "./api/http";
 export type { NoContent } from "./api/http";
 export * from "./api/tasks";
 export * from "./api/storyboards";
@@ -98,11 +106,66 @@ export interface AuthUser {
     };
   };
 }
-export function login(email: string, password: string): Promise<AuthUser> {
-  return apiFetch<AuthUser>("/auth/login", {
+
+async function acceptAuthenticatedSession(user: AuthUser): Promise<AuthUser> {
+  await resumeSessionClientState(user.id);
+  return user;
+}
+
+function sessionCookieSecureSignal(value: unknown): boolean | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as {
+    session_cookie_secure?: unknown;
+    response?: unknown;
+    detail?: unknown;
+  };
+  if (typeof record.session_cookie_secure === "boolean") {
+    return record.session_cookie_secure;
+  }
+  return (
+    sessionCookieSecureSignal(record.response) ??
+    sessionCookieSecureSignal(record.detail)
+  );
+}
+
+function loginSessionError(
+  loginResponse: unknown,
+  unauthorized: ApiError,
+): ApiError {
+  const sessionCookieSecure =
+    sessionCookieSecureSignal(unauthorized.payload) ??
+    sessionCookieSecureSignal(loginResponse);
+  const secureCookieBlockedByHttp =
+    sessionCookieSecure === true &&
+    typeof window !== "undefined" &&
+    window.location.protocol === "http:";
+  return new ApiError({
+    code: secureCookieBlockedByHttp
+      ? "secure_cookie_requires_https"
+      : "session_unverified",
+    message: secureCookieBlockedByHttp
+      ? "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。请改用 HTTPS 地址后重新登录。"
+      : "密码验证成功，但登录会话未能确认。请检查 Cookie 或反向代理配置后重试。",
+    status: 401,
+  });
+}
+
+export async function login(
+  email: string,
+  password: string,
+): Promise<AuthUser> {
+  const loginResponse = await apiFetch<AuthUser>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
+  try {
+    return await acceptAuthenticatedSession(await getMe());
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      throw loginSessionError(loginResponse, err);
+    }
+    throw err;
+  }
 }
 
 export function signup(
@@ -118,7 +181,7 @@ export function signup(
   return apiFetch<AuthUser>("/auth/signup", {
     method: "POST",
     body: JSON.stringify(body),
-  });
+  }).then(acceptAuthenticatedSession);
 }
 
 export function listPublicApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
@@ -144,11 +207,16 @@ export function signupByok(
   return apiFetch<AuthUser>("/auth/signup/byok", {
     method: "POST",
     body: JSON.stringify({ email, password, display_name, verification_token }),
-  });
+  }).then(acceptAuthenticatedSession);
 }
 
-export function logout(): Promise<NoContent> {
-  return apiFetchNoContent("/auth/logout", { method: "POST" });
+export async function logout(): Promise<NoContent> {
+  await invalidateSessionClientState();
+  try {
+    return await apiFetchNoContent("/auth/logout", { method: "POST" });
+  } finally {
+    await invalidateSessionClientState();
+  }
 }
 
 export function getMe(): Promise<AuthUser> {

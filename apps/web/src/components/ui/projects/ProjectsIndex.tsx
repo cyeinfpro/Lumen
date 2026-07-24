@@ -681,7 +681,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 type="button"
                 onClick={() => setRenaming(true)}
                 role="menuitem"
-                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
               >
                 <Pencil className="h-3.5 w-3.5" />
                 重命名
@@ -825,7 +825,7 @@ function ProjectActionsSheet({
           <button
             type="button"
             onClick={onStartRename}
-            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left text-[15px] text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] active:bg-white/[0.08]"
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left text-[15px] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] active:bg-[var(--bg-3)]"
           >
             <Pencil className="h-4 w-4 text-[var(--fg-2)]" />
             重命名
@@ -841,7 +841,7 @@ function ProjectActionsSheet({
           <button
             type="button"
             onClick={onClose}
-            className="mt-2 flex min-h-11 w-full cursor-pointer items-center justify-center border border-[var(--border)] px-3 text-[15px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.04]"
+            className="mt-2 flex min-h-11 w-full cursor-pointer items-center justify-center border border-[var(--border)] px-3 text-[15px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
           >
             取消
           </button>

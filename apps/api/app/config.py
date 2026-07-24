@@ -33,8 +33,24 @@ _DEFAULT_REDIS_URL = (
 _DEFAULT_PUBLIC_BASE_URL = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_CORS_ALLOW_ORIGINS = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
+_IMAGE_JOB_PLACEHOLDER_HOSTS = frozenset(
+    {
+        "example.com",
+        "example.net",
+        "example.org",
+    }
+)
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_PRIVATE_IP_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    )
+)
 
 
 def _workspace_env_file() -> Path | None:
@@ -89,9 +105,29 @@ def _origin_looks_public(origin: str) -> bool:
     return bool(host and not _host_is_localish(host))
 
 
+def _host_allows_insecure_production_http(host: str) -> bool:
+    value = host.strip().strip("[]").lower()
+    if value == "localhost" or value.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or any(ip in network for network in _PRIVATE_IP_NETWORKS)
+    )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=_settings_env_files(), env_file_encoding="utf-8", extra="ignore"
+        env_file=_settings_env_files(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
     )
 
     database_url: str = _DEFAULT_DATABASE_URL
@@ -117,6 +153,10 @@ class Settings(BaseSettings):
 
     session_secret: str = ""
     session_ttl_min: int = 60 * 24 * 7  # 7 天
+    # None preserves the historical behavior: dev/local/test cookies are
+    # non-Secure, while every other environment uses Secure cookies. Direct
+    # production HTTP deployments must explicitly set false.
+    session_cookie_secure: bool | None = None
 
     # 图片签名 URL 的对称密钥（HMAC-SHA256）。`/api/images/_/sig/...` 端点用它验签。
     # dev/test 留空时 verify 立即返回 False，签名通道实际不可用——保持 owner-check 路由可用即可。
@@ -131,6 +171,13 @@ class Settings(BaseSettings):
     public_base_url: str = _DEFAULT_PUBLIC_BASE_URL
     cors_allow_origins: str = _DEFAULT_CORS_ALLOW_ORIGINS
     trusted_proxies: str = ""
+    # The outermost nginx owns the final HSTS header. The API still reads these
+    # values to validate the production cookie/transport contract.
+    hsts_enabled: bool = Field(default=True, alias="LUMEN_HSTS_ENABLED")
+    hsts_include_subdomains: bool = Field(
+        default=False,
+        alias="LUMEN_HSTS_INCLUDE_SUBDOMAINS",
+    )
 
     # Password reset email delivery. Production must be wired to a real SMTP
     # server so reset links are not silently generated and dropped.
@@ -304,13 +351,71 @@ def _validate_production_image_proxy_secret(secret: str) -> None:
 
 def _validate_production_image_job_url(image_job_base_url: str) -> None:
     image_job_url = image_job_base_url.strip().rstrip("/")
-    image_job_host = urlsplit(image_job_url).hostname or ""
+    parts = urlsplit(image_job_url)
+    image_job_host = (parts.hostname or "").lower().rstrip(".")
     if (
-        not image_job_url
-        or image_job_url == _DEFAULT_IMAGE_JOB_BASE_URL
-        or image_job_host == "image-job.example.com"
+        parts.scheme.lower() not in {"http", "https"}
+        or not image_job_host
+        or any(char.isspace() for char in image_job_host)
     ):
-        raise ValueError("IMAGE_JOB_BASE_URL must be configured outside development")
+        raise ValueError(
+            "IMAGE_JOB_BASE_URL must be an http or https URL with a hostname"
+        )
+    if parts.username or parts.password:
+        raise ValueError("IMAGE_JOB_BASE_URL must not include credentials")
+    if parts.query or parts.fragment:
+        raise ValueError("IMAGE_JOB_BASE_URL must not include query or fragment")
+    if any(
+        image_job_host == placeholder or image_job_host.endswith(f".{placeholder}")
+        for placeholder in _IMAGE_JOB_PLACEHOLDER_HOSTS
+    ):
+        raise ValueError("IMAGE_JOB_BASE_URL must not use a placeholder hostname")
+
+
+def _image_job_is_required(image_channel: str) -> bool:
+    """Whether startup must prove that the image-job sidecar is configured."""
+    return image_channel.strip().lower() == "image_jobs_only"
+
+
+def effective_session_cookie_secure(runtime_settings: Settings) -> bool:
+    """Resolve the cookie transport policy while preserving existing defaults."""
+    if runtime_settings.session_cookie_secure is not None:
+        return runtime_settings.session_cookie_secure
+    return not _is_development_environment(runtime_settings.app_env)
+
+
+def production_http_compatibility_mode(runtime_settings: Settings) -> bool:
+    return not _is_development_environment(
+        runtime_settings.app_env
+    ) and not effective_session_cookie_secure(runtime_settings)
+
+
+def _validate_production_transport(settings: Settings) -> None:
+    if not production_http_compatibility_mode(settings):
+        return
+
+    parsed = urlsplit(settings.public_base_url.strip())
+    if "public_base_url" not in settings.model_fields_set:
+        raise ValueError(
+            "PUBLIC_BASE_URL must be explicitly configured when "
+            "SESSION_COOKIE_SECURE=false outside development"
+        )
+    if parsed.scheme != "http":
+        raise ValueError(
+            "SESSION_COOKIE_SECURE=false outside development requires an explicit "
+            "http PUBLIC_BASE_URL; HTTPS requires Secure cookies"
+        )
+    host = parsed.hostname or ""
+    if not _host_allows_insecure_production_http(host):
+        raise ValueError(
+            "SESSION_COOKIE_SECURE=false outside development is limited to "
+            "loopback, private, or link-local PUBLIC_BASE_URL addresses"
+        )
+    if settings.hsts_enabled:
+        raise ValueError(
+            "LUMEN_HSTS_ENABLED must be false when using production HTTP "
+            "compatibility mode"
+        )
 
 
 def _validate_production_telegram_secret(secret: str) -> None:
@@ -330,10 +435,12 @@ def _validate_service_password(url: str, default_password: str, label: str) -> N
 
 
 def _validate_production_settings(settings: Settings) -> None:
+    _validate_production_transport(settings)
     _validate_production_smtp(settings)
     _validate_production_session_secret(settings.session_secret)
     _validate_production_image_proxy_secret(settings.image_proxy_secret)
-    _validate_production_image_job_url(settings.image_job_base_url)
+    if _image_job_is_required(settings.image_channel):
+        _validate_production_image_job_url(settings.image_job_base_url)
     _validate_production_telegram_secret(settings.telegram_bot_shared_secret)
     _validate_service_password(
         settings.database_url,

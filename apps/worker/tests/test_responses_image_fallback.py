@@ -1205,6 +1205,13 @@ async def test_generate_image_can_use_image_jobs_route(
     assert len(client.posts) == 1
     post = client.posts[0]
     assert post["url"] == "https://image-job.example/v1/image-jobs"
+    assert (
+        post["headers"]["authorization"]
+        == "Bearer test-image-job-sidecar-token-0123456789"
+    )
+    assert (
+        post["headers"]["X-Lumen-Upstream-Authorization"] == "Bearer test-key"
+    )
     payload = post["json"]
     assert payload["request_type"] == "responses"
     assert payload["endpoint"] == "/v1/responses"
@@ -1217,6 +1224,15 @@ async def test_generate_image_can_use_image_jobs_route(
         "https://image-job.example/v1/image-jobs/img_test_123",
         "https://image-cdn.example/images/img_test_123.jpeg",
     ]
+    for poll in client.gets[:2]:
+        assert (
+            poll["headers"]["authorization"]
+            == "Bearer test-image-job-sidecar-token-0123456789"
+        )
+        assert (
+            poll["headers"]["X-Lumen-Upstream-Authorization"]
+            == "Bearer test-key"
+        )
     progress_types = [
         event["type"]
         for event in progress_events

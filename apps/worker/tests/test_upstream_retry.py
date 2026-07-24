@@ -496,6 +496,37 @@ async def test_image_job_submit_uses_payload_idempotency_key(
     expected = upstream.hashlib.sha256(b"generation:stable").hexdigest()
     assert seen["headers"]["Idempotency-Key"] == f"lumen-image-job-{expected[:32]}"
     assert seen["headers"]["x-trace-id"] == "trace-not-stable"
+    assert (
+        seen["headers"]["authorization"]
+        == "Bearer test-image-job-sidecar-token-0123456789"
+    )
+    assert (
+        seen["headers"]["X-Lumen-Upstream-Authorization"] == "Bearer sk-test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_does_not_fall_back_to_upstream_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(upstream.settings, "image_job_sidecar_token", "")
+
+    with pytest.raises(upstream.UpstreamError) as exc:
+        await upstream._submit_and_wait_image_job(
+            payload={
+                "endpoint": "/v1/images/generations",
+                "request_type": "generations",
+                "retention_days": 1,
+            },
+            base_url="https://jobs.example",
+            api_key="sk-must-not-become-sidecar-token",
+            proxy=None,
+            progress_callback=None,
+        )
+
+    assert exc.value.status_code == 503
+    assert "sk-must-not-become-sidecar-token" not in str(exc.value)
+    assert exc.value.payload["configuration"] == "sidecar_auth"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 "use client";
 
 // Editorial 项目流程内的"选模特"弹窗：
-//  - header 去 bg-white/[0.035] 卡片，改为 mono eyebrow + compact title + hairline
+//  - header 去旧半透明卡片，改为 mono eyebrow + compact title + hairline
 //  - 不再用 Library lucide 图标做 prefix；左上角清晰排印自带气场
 //  - 桌面 modal 改为轻圆角 + hairline + bg-0 极简底
 //  - footer 去厚底 bg；按钮 secondary 改 outline (hairline)

@@ -3,7 +3,7 @@
 // 右侧约束面板：
 // - 桌面常驻（≥ xl）：直接铺 InfoPanel，section 之间走 hairline
 // - 中屏 / 移动：抽屉/BottomSheet，header 用 mono eyebrow + unified title
-// - 不再叠加 bg-white/[0.035] + border + shadow 的旧卡片包裹
+// - 不再叠加旧的半透明卡片包裹
 //
 // SSR safe：useState false → effect 里读 matchMedia 切换；与 useMediaQuery 一致策略。
 

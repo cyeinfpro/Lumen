@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from app import provider_pool, upstream
+from app.upstream_parts import image_dispatch
 from app.upstream_parts.image_execution import ImageExecutionRequest
 
 
@@ -58,6 +59,112 @@ def test_image_execution_request_keeps_downstream_kwarg_boundaries() -> None:
     assert {"images", "mask", "model", "user_id"}.isdisjoint(
         request.direct_generate_kwargs()
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_provider_without_image_jobs_does_not_read_sidecar_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SimpleNamespace(name="stream-provider", image_jobs_enabled=False)
+
+    def unexpected_token_read() -> str:
+        raise AssertionError("disabled image jobs must not read sidecar config")
+
+    monkeypatch.setattr(upstream, "_image_job_sidecar_token", unexpected_token_read)
+
+    route = await image_dispatch._prepare_provider_route(
+        _request(provider_override=provider, mask=None),
+        channel=upstream._IMAGE_CHANNEL_AUTO,
+        engine=upstream._IMAGE_ROUTE_RESPONSES,
+    )
+
+    assert route.use_jobs is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sidecar_token", "provider_base_url"),
+    [
+        ("", ""),
+        ("short", ""),
+        ("s" * 32, "https://image-job.example.com"),
+    ],
+)
+async def test_auto_falls_back_to_stream_when_sidecar_configuration_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    sidecar_token: str,
+    provider_base_url: str,
+) -> None:
+    provider = SimpleNamespace(
+        name="jobs-provider",
+        image_jobs_enabled=True,
+        image_jobs_base_url=provider_base_url,
+    )
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(upstream.settings, "image_job_sidecar_token", sidecar_token)
+
+    route = await image_dispatch._prepare_provider_route(
+        _request(
+            provider_override=provider,
+            mask=None,
+            progress_callback=events.append,
+        ),
+        channel=upstream._IMAGE_CHANNEL_AUTO,
+        engine=upstream._IMAGE_ROUTE_RESPONSES,
+    )
+
+    assert route.use_jobs is False
+    assert events[-1]["reason"] == "image_job_configuration_unavailable"
+    assert events[-1]["fallback_route"] == "stream_only:responses"
+
+
+@pytest.mark.asyncio
+async def test_image_jobs_only_reports_configuration_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SimpleNamespace(name="jobs-provider", image_jobs_enabled=True)
+    monkeypatch.setattr(upstream.settings, "image_job_sidecar_token", "")
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await image_dispatch._prepare_provider_route(
+            _request(provider_override=provider, mask=None),
+            channel=upstream._IMAGE_CHANNEL_IMAGE_JOBS_ONLY,
+            engine=upstream._IMAGE_ROUTE_RESPONSES,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "configuration unavailable" in str(exc_info.value)
+    assert exc_info.value.payload == {
+        "path": "image-jobs",
+        "configuration": "sidecar_auth",
+        "reason": "configuration_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_effective_image_jobs_only_configuration_is_validated_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def strict_channel() -> str:
+        return "image_jobs_only"
+
+    calls: list[str] = []
+
+    def valid_token() -> str:
+        calls.append("token")
+        return "s" * 32
+
+    async def valid_base_url() -> str:
+        calls.append("base_url")
+        return "https://image-job.internal"
+
+    monkeypatch.setattr(upstream, "_resolve_image_channel", strict_channel)
+    monkeypatch.setattr(upstream, "_image_job_sidecar_token", valid_token)
+    monkeypatch.setattr(upstream, "_resolve_image_job_base_url", valid_base_url)
+
+    await upstream.validate_effective_image_job_configuration()
+
+    assert calls == ["token", "base_url"]
 
 
 @pytest.mark.asyncio

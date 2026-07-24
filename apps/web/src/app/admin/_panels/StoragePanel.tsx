@@ -630,7 +630,7 @@ function StorageStatusHeader({
           {status && (
             <div className="text-xs leading-5 text-[var(--fg-1)]">
               target{" "}
-              <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
+              <code className="rounded bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
                 {status.target || "—"}
               </code>{" "}
               · fstype{" "}
@@ -754,7 +754,7 @@ function SubLine({
   ts: number;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.02] px-3 py-2 text-xs">
+    <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 text-xs">
       <span className="mt-0.5 shrink-0">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
@@ -783,7 +783,7 @@ function Badge({
         ? "border-danger-border bg-danger-soft text-danger"
         : tone === "info"
           ? "border-info-border bg-info-soft text-info"
-          : "border-[var(--border)] bg-white/[0.04] text-[var(--fg-2)]";
+          : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]";
   return (
     <span className={cn("inline-flex items-center rounded-[var(--radius-control)] border px-2 py-0.5", cls)}>
       {children}
@@ -840,7 +840,7 @@ function BackendSwitch({
               "disabled:cursor-not-allowed disabled:opacity-60",
               active
                 ? "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/8"
-                : "border-[var(--border)] bg-white/[0.02] hover:bg-white/[0.04]",
+                : "border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)]",
             )}
           >
             <span
@@ -848,7 +848,7 @@ function BackendSwitch({
                 "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                 active
                   ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/15"
-                  : "border-[var(--border)] bg-white/[0.04]",
+                  : "border-[var(--border)] bg-[var(--bg-2)]",
               )}
             >
               {active && (
@@ -977,13 +977,13 @@ function SmbForm({
 
 function RecoveryHints() {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-white/[0.02] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
+    <div className="rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
         <div className="space-y-1.5">
           <p>
             如果 SMB 挂不上，SSH 到 host 上创建{" "}
-            <code className="rounded bg-white/8 px-1 py-0.5 font-mono text-[11px] text-[var(--fg-1)]">
+            <code className="rounded bg-[var(--bg-2)] px-1 py-0.5 font-mono text-[11px] text-[var(--fg-1)]">
               /var/lib/lumen-storage/disabled
             </code>{" "}
             文件可强制回退到本地默认路径并恢复服务。

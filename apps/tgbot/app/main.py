@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -33,6 +34,7 @@ _FSM_STATE_TTL_SEC = 3600
 
 
 _CONTROL_CHANNEL = "admin:tgbot:control"
+_PAUSED_CONFIG_REFRESH_INTERVAL_SEC = 20.0
 
 
 async def _run_control_listener(stop_event: asyncio.Event) -> None:
@@ -77,7 +79,9 @@ async def _run_control_listener(stop_event: asyncio.Event) -> None:
         except Exception as exc:  # noqa: BLE001
             consecutive_failures += 1
             level = (
-                logging.ERROR if consecutive_failures >= alert_threshold else logging.WARNING
+                logging.ERROR
+                if consecutive_failures >= alert_threshold
+                else logging.WARNING
             )
             logger.log(
                 level,
@@ -117,12 +121,121 @@ def _setup_logging() -> None:
     )
 
 
+def _install_stop_signal_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            pass  # Windows fallback
+
+
+async def _cancel_task(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+async def _runtime_config_is_runnable(api: LumenApi) -> bool:
+    access_cfg = await api.get_access_config()
+    if not bool(access_cfg.get("bot_enabled", True)):
+        return False
+    if settings.telegram_bot_token.strip():
+        return True
+
+    cfg = await api.get_runtime_config(avoid=[])
+    bot_enabled = bool(cfg.get("bot_enabled", True))
+    bot_token = (cfg.get("bot_token") or "").strip()
+    return bot_enabled and bool(bot_token)
+
+
+async def _run_paused_config_refresh(
+    stop_event: asyncio.Event,
+    logger: logging.Logger,
+    recovery_check: Callable[[], Awaitable[bool]],
+    *,
+    refresh_interval_sec: float,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=refresh_interval_sec,
+            )
+            return
+        except TimeoutError:
+            pass
+
+        try:
+            if await recovery_check():
+                logger.info(
+                    "runtime configuration is runnable; exiting paused state "
+                    "for supervisor restart"
+                )
+                stop_event.set()
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "paused runtime-config refresh failed: %s; retry in %.1fs",
+                exc,
+                refresh_interval_sec,
+            )
+
+
+async def _pause_until_restart_or_stop(
+    logger: logging.Logger,
+    diagnostic: str,
+    *,
+    level: int,
+    recovery_check: Callable[[], Awaitable[bool]] | None = None,
+    refresh_interval_sec: float = _PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+) -> None:
+    """Stay active until stopped, restarted, or runtime configuration recovers."""
+    stop_event = asyncio.Event()
+    _install_stop_signal_handlers(stop_event)
+    tasks = [
+        asyncio.create_task(
+            _run_control_listener(stop_event),
+            name="lumen-control-paused",
+        )
+    ]
+    if recovery_check is not None:
+        tasks.append(
+            asyncio.create_task(
+                _run_paused_config_refresh(
+                    stop_event,
+                    logger,
+                    recovery_check,
+                    refresh_interval_sec=refresh_interval_sec,
+                ),
+                name="lumen-config-refresh-paused",
+            )
+        )
+    logger.log(
+        level,
+        "%s; bot polling is paused until configuration recovery, "
+        "an admin restart, or service stop",
+        diagnostic,
+    )
+    try:
+        await stop_event.wait()
+    finally:
+        for task in tasks:
+            await _cancel_task(task)
+
+
 async def _amain() -> None:
     _setup_logging()
     logger = logging.getLogger("lumen-tgbot")
 
     if not settings.telegram_bot_shared_secret.strip():
-        logger.error("no TELEGRAM_BOT_SHARED_SECRET, refusing to start")
+        await _pause_until_restart_or_stop(
+            logger,
+            "configuration error: TELEGRAM_BOT_SHARED_SECRET is empty",
+            level=logging.ERROR,
+        )
         return
     api = LumenApi()
     proxy_mgr = ProxyManager(api)
@@ -149,12 +262,27 @@ async def _amain() -> None:
     initial_proxy_url = _normalize_proxy_url(initial_proxy_url)
 
     if not bot_enabled:
-        logger.info("telegram.bot_enabled=0 in DB → exit cleanly")
-        await api.aclose()
+        try:
+            await _pause_until_restart_or_stop(
+                logger,
+                "telegram.bot_enabled=0 in runtime configuration",
+                level=logging.INFO,
+                recovery_check=lambda: _runtime_config_is_runnable(api),
+            )
+        finally:
+            await api.aclose()
         return
     if not bot_token:
-        logger.error("no bot token (DB empty + env empty), refusing to start")
-        await api.aclose()
+        try:
+            await _pause_until_restart_or_stop(
+                logger,
+                "configuration error: bot token is empty in runtime configuration and "
+                "TELEGRAM_BOT_TOKEN",
+                level=logging.ERROR,
+                recovery_check=lambda: _runtime_config_is_runnable(api),
+            )
+        finally:
+            await api.aclose()
         return
 
     if initial_proxy_url:
@@ -164,9 +292,15 @@ async def _amain() -> None:
             _redact_proxy(initial_proxy_url),
         )
     else:
-        logger.warning("no outbound proxy configured; TG calls will go direct (likely fail in CN)")
+        logger.warning(
+            "no outbound proxy configured; TG calls will go direct (likely fail in CN)"
+        )
 
-    session = FailoverSession(proxy_mgr, proxy=initial_proxy_url) if initial_proxy_url else None
+    session = (
+        FailoverSession(proxy_mgr, proxy=initial_proxy_url)
+        if initial_proxy_url
+        else None
+    )
     defaults = DefaultBotProperties(parse_mode=None)
     bot = (
         Bot(token=bot_token, default=defaults, session=session)
@@ -211,15 +345,14 @@ async def _amain() -> None:
     dp.include_router(build_root_router())
 
     stop_event = asyncio.Event()
-    listener_task = asyncio.create_task(run_listener(bot, api, stop_event), name="lumen-listener")
-    control_task = asyncio.create_task(_run_control_listener(stop_event), name="lumen-control")
+    listener_task = asyncio.create_task(
+        run_listener(bot, api, stop_event), name="lumen-listener"
+    )
+    control_task = asyncio.create_task(
+        _run_control_listener(stop_event), name="lumen-control"
+    )
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:
-            pass  # Windows fallback
+    _install_stop_signal_handlers(stop_event)
 
     try:
         logger.info("starting polling; api=%s", settings.lumen_api_base)
@@ -237,11 +370,7 @@ async def _amain() -> None:
     finally:
         stop_event.set()
         for t in (listener_task, control_task):
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            await _cancel_task(t)
         await bot.session.close()
         await api.aclose()
         if fsm_redis is not None:

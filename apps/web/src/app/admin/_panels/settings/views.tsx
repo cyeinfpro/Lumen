@@ -676,7 +676,7 @@ function ToggleSettingControl({
           aria-label={`${meta.title} ${checked ? "关闭" : "开启"}`}
           onClick={() => onChange({ kind: "set", value: checked ? "0" : "1" })}
           className={cn(
-            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30",
+            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 max-sm:min-h-11 max-sm:min-w-11",
             checked
               ? "border-accent-border bg-accent"
               : "border-[var(--border)] bg-[var(--bg-2)]",

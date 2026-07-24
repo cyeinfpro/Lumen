@@ -9,7 +9,12 @@ import {
   AUTH_USER_QUERY_KEY,
 } from "@/components/QueryProvider";
 import { ApiError, type AuthUser } from "@/lib/apiClient";
+import { resumeSessionClientState } from "@/lib/api/http";
 import { isPublicPath } from "@/lib/auth/publicPaths";
+import {
+  registerRuntimeRecovery,
+  type SessionRuntimeStatus,
+} from "@/lib/runtimeResilience";
 import { useChatStore } from "@/store/useChatStore";
 
 const IDENTITY_REVALIDATION_RETRY_DELAYS_MS = [
@@ -152,6 +157,10 @@ export function useIdentityRevalidation({
     refetch,
   } = query;
   const [isolated, setIsolated] = useState(isPublicAuthPath);
+  const [identityStatus, setIdentityStatus] =
+    useState<SessionRuntimeStatus>(
+      isPublicAuthPath ? "public" : queryData ? "authenticated" : "revalidating",
+    );
   const stateRef = useRef<IdentityRevalidationState>({
     generation: 0,
     request: null,
@@ -224,8 +233,10 @@ export function useIdentityRevalidation({
       state.handledError = null;
       state.terminal = false;
       clearRetryTimer();
+      void resumeSessionClientState(user.id);
       useChatStore.getState().setCurrentUser(user.id);
       setIsolated(false);
+      setIdentityStatus("authenticated");
     },
     [
       clearRetryTimer,
@@ -291,6 +302,7 @@ export function useIdentityRevalidation({
         useChatStore.getState().setCurrentUser(null);
         removeAuthUserQuery(queryClient);
         setIsolated(true);
+        setIdentityStatus("public");
         return;
       }
       if (isUnauthorizedIdentityError(error)) {
@@ -298,6 +310,7 @@ export function useIdentityRevalidation({
         useChatStore.getState().setCurrentUser(null);
         removeAuthUserQuery(queryClient);
         setIsolated(true);
+        setIdentityStatus("unauthorized");
         return;
       }
 
@@ -312,11 +325,13 @@ export function useIdentityRevalidation({
         // the last confirmed identity. Keep the current UI mounted and retry in
         // the background; a later 401 or changed user still clears old data.
         setIsolated(false);
+        setIdentityStatus("degraded");
         scheduleRetry();
         return;
       }
 
       enterFailClosed(state.retainedUserId);
+      setIdentityStatus("degraded");
       if (isRetryableIdentityError(error)) scheduleRetry();
     },
     [
@@ -356,6 +371,7 @@ export function useIdentityRevalidation({
       const generation = state.generation;
       state.retainedUserId = retainedUserId;
       state.handledError = null;
+      setIdentityStatus("revalidating");
 
       let request: Promise<IdentityRefetchResult>;
       try {
@@ -401,6 +417,14 @@ export function useIdentityRevalidation({
     };
   }, [revalidateIdentity]);
 
+  useEffect(
+    () =>
+      registerRuntimeRecovery("session", () => {
+        revalidateIdentity(true);
+      }),
+    [revalidateIdentity],
+  );
+
   useEffect(() => {
     if (isPublicAuthPath) return;
     const resume = () => {
@@ -427,6 +451,11 @@ export function useIdentityRevalidation({
     useChatStore.getState().setCurrentUser(null);
     removeAuthUserQuery(queryClient);
   }, [isPublicAuthPath, queryClient, resetRecovery]);
+
+  useLayoutEffect(() => {
+    if (isPublicAuthPath || stateRef.current.request) return;
+    stateRef.current.terminal = false;
+  }, [isPublicAuthPath, queryData, queryError]);
 
   useLayoutEffect(() => {
     const state = stateRef.current;
@@ -466,7 +495,14 @@ export function useIdentityRevalidation({
     [],
   );
 
+  const effectiveIdentityStatus: SessionRuntimeStatus = isPublicAuthPath
+    ? "public"
+    : identityStatus === "public"
+      ? "revalidating"
+      : identityStatus;
+
   return {
     identityUnavailable: isPublicAuthPath || isolated,
+    identityStatus: effectiveIdentityStatus,
   };
 }

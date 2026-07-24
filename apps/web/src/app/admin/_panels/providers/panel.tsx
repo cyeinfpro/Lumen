@@ -230,7 +230,7 @@ function ProviderPanelSkeleton() {
       {[0, 1, 2].map((index) => (
         <div
           key={`skel-${index}`}
-          className="h-28 animate-pulse rounded-[var(--radius-dialog)] bg-white/5"
+          className="h-28 animate-pulse rounded-[var(--radius-dialog)] bg-[var(--bg-2)]"
           style={{ animationDelay: `${index * 80}ms` }}
         />
       ))}
@@ -248,7 +248,7 @@ function EmptyProvidersState({
   return (
     <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 py-16 text-center backdrop-blur-sm">
       <div className="flex flex-col items-center gap-4">
-        <div className="flex h-14 w-14 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-white/5">
+        <div className="flex h-14 w-14 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-2)]">
           <CloudOff className="h-6 w-6 text-[var(--fg-2)]" />
         </div>
         <div>

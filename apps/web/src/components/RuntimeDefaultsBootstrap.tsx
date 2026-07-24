@@ -8,6 +8,10 @@ import { getMe, type AuthUser } from "@/lib/apiClient";
 import { isPublicPath } from "@/lib/auth/publicPaths";
 import { AUTH_USER_QUERY_KEY } from "@/components/QueryProvider";
 import {
+  installHighRiskIdentityWriteGuard,
+  setSessionRuntimeStatus,
+} from "@/lib/runtimeResilience";
+import {
   getRedirectForHiddenNavPath,
   normalizeNavVisibility,
   type NavVisibility,
@@ -110,7 +114,7 @@ export function RuntimeDefaultsBootstrap({
     refetchOnWindowFocus: false,
     enabled: !isPublicAuthPath,
   });
-  const { identityUnavailable } = useIdentityRevalidation({
+  const { identityUnavailable, identityStatus } = useIdentityRevalidation({
     isPublicAuthPath,
     query: meQuery,
   });
@@ -142,6 +146,12 @@ export function RuntimeDefaultsBootstrap({
     useChatStore.getState().setCurrentUser(meQuery.data.id);
     applyRuntimeDefaultsToStores(runtimeDefaults);
   }, [identityUnavailable, meQuery.data, runtimeDefaults]);
+
+  useLayoutEffect(() => {
+    setSessionRuntimeStatus(identityStatus);
+  }, [identityStatus]);
+
+  useEffect(() => installHighRiskIdentityWriteGuard(), []);
 
   useEffect(() => {
     if (!meQuery.data || identityUnavailable) return;

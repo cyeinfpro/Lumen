@@ -477,6 +477,13 @@ test("desktop studio uses one compact control family and aligned content rails",
   match(segmented, /focus-visible:shadow-\[var\(--ring\)\]/);
   match(contextBar, /density="compact"/);
   match(contextBar, /<span>图库<\/span>/);
+  match(contextBar, /aria-haspopup="dialog"/);
+  match(contextBar, /role="dialog"/);
+  match(contextBar, /aria-modal="false"/);
+  match(contextBar, /aria-labelledby=\{settingsTitleId\}/);
+  match(contextBar, /aria-pressed=\{fast\}/);
+  doesNotMatch(contextBar, /role="menu"/);
+  doesNotMatch(contextBar, /role="menuitemcheckbox"/);
   match(composer, /density="compact"/);
   match(canvas, /max-w-\[var\(--content-composer\)\]/);
   match(canvas, /aria-label="回到最新"/);

@@ -2,7 +2,7 @@
 
 // 全局 toast：右下角堆叠。通过 `toast.success(...) / toast.error(...) / toast.info(...)`
 // 在任何组件/回调中调用；需要把 <ToastViewport /> 挂在 layout.tsx 里。
-// 自动 3s 消失，可带 action（一个按钮）。
+// 默认时长按级别分层；带 action 的通知会保留更久。
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { create } from "zustand";
@@ -45,7 +45,18 @@ interface ToastState {
   clear: () => void;
 }
 
-const DEFAULT_DURATION_MS = 3000;
+const DEFAULT_DURATION_MS: Record<ToastTone, number> = {
+  success: 4000,
+  info: 5000,
+  warning: 8000,
+  error: 8000,
+};
+const ACTION_DURATION_MS = 10000;
+
+function defaultDurationMs(tone: ToastTone, hasAction: boolean) {
+  const toneDuration = DEFAULT_DURATION_MS[tone];
+  return hasAction ? Math.max(toneDuration, ACTION_DURATION_MS) : toneDuration;
+}
 
 const useToastStore = create<ToastState>((set) => ({
   items: [],
@@ -60,7 +71,8 @@ const useToastStore = create<ToastState>((set) => ({
       title: t.title,
       description: t.description,
       action: t.action,
-      durationMs: t.durationMs ?? DEFAULT_DURATION_MS,
+      durationMs:
+        t.durationMs ?? defaultDurationMs(t.tone, Boolean(t.action)),
     };
     set((s) => ({ items: [...s.items, item] }));
     return id;
@@ -146,6 +158,7 @@ function ToastRow({ item }: { item: ToastItem }) {
       style={{ touchAction: "pan-y" }}
       role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
       aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
+      aria-atomic="true"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocusCapture={() => setPaused(true)}
@@ -189,7 +202,7 @@ function ToastRow({ item }: { item: ToastItem }) {
               item.action?.onClick();
               dismiss(item.id);
             }}
-            className="mt-1.5 text-[11px] font-medium text-[var(--accent)] hover:underline underline-offset-2"
+            className="mt-1.5 inline-flex items-center justify-center text-[11px] font-medium text-[var(--accent)] underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:px-2 max-sm:min-w-11"
           >
             {item.action.label}
           </button>
@@ -200,7 +213,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         size="sm"
         aria-label="关闭通知"
         onClick={() => dismiss(item.id)}
-        className="shrink-0 text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+        className="shrink-0 text-[var(--fg-1)] hover:text-[var(--fg-0)] max-sm:-mr-1"
       >
         <X className="w-3.5 h-3.5" aria-hidden="true" />
       </IconButton>

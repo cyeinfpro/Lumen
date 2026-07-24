@@ -7,6 +7,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
@@ -156,6 +158,18 @@ def test_compose_one_shot_profiles_do_not_auto_restart() -> None:
         assert match is not None, f"{service} service missing"
         assert 'restart: "no"' in match.group("body")
         assert "on-failure" not in match.group("body")
+
+
+def test_compose_tgbot_starts_python_before_validating_runtime_secret() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    tgbot = compose["services"]["tgbot"]
+
+    assert tgbot["command"] == ["python", "-m", "app.main"]
+    assert tgbot["restart"] == "unless-stopped"
+    assert (
+        tgbot["environment"]["TELEGRAM_BOT_SHARED_SECRET"]
+        == "${TELEGRAM_BOT_SHARED_SECRET:-}"
+    )
 
 
 def test_storage_mount_cleans_smb_credentials_on_hard_failures() -> None:

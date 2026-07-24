@@ -2243,6 +2243,14 @@ async def test_startup_failure_closes_upstream_clients(
     async def fake_billing_shutdown() -> None:
         cleanup_calls.append("billing")
 
+    async def valid_image_job_configuration() -> None:
+        return None
+
+    monkeypatch.setattr(
+        main,
+        "validate_effective_image_job_configuration",
+        valid_image_job_configuration,
+    )
     monkeypatch.setattr(main, "init_sentry", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main, "init_otel", raise_startup_error)
     monkeypatch.setattr(main, "start_metrics_server", lambda *_args, **_kwargs: None)

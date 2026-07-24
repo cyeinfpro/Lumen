@@ -23,7 +23,7 @@ from lumen_core.models import (
     OutboxEvent,
     User,
 )
-from app import sse_publish
+from app import observability, sse_publish
 from app.tasks import outbox
 
 
@@ -1508,6 +1508,259 @@ async def test_reconcile_skips_task_with_active_lease(monkeypatch):
     assert redis.enqueued == []
     assert generation.status == "running"
     assert published == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_lease_read_states_fail_closed() -> None:
+    class Redis:
+        async def get(self, key: str):
+            if key == "task:active:lease":
+                return "worker-1:token-1"
+            if key == "task:expired:lease":
+                return None
+            raise RuntimeError("redis unavailable")
+
+    redis = Redis()
+
+    assert (
+        await outbox._read_lease_state(redis, "active")  # noqa: SLF001
+        is outbox._LeaseState.ACTIVE  # noqa: SLF001
+    )
+    assert (
+        await outbox._read_lease_state(redis, "expired")  # noqa: SLF001
+        is outbox._LeaseState.EXPIRED  # noqa: SLF001
+    )
+    assert (
+        await outbox._read_lease_state(redis, "unknown")  # noqa: SLF001
+        is outbox._LeaseState.UNKNOWN  # noqa: SLF001
+    )
+    assert await outbox._lease_expired(redis, "unknown") is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unknown_generation_lease_requeues_only_after_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updated_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    generation = Generation(
+        id="gen-unknown",
+        user_id="user-1",
+        message_id="msg-1",
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+        updated_at=updated_at,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
+    published = _patch_publish_event(monkeypatch)
+
+    class BrokenLeaseRedis(FakeRedis):
+        lease_reads = 0
+
+        async def get(self, key: str):
+            if key == "task:gen-unknown:lease":
+                self.lease_reads += 1
+                if self.lease_reads == 1:
+                    raise RuntimeError("redis unavailable")
+            return await super().get(key)
+
+    redis = BrokenLeaseRedis()
+    released: list[str] = []
+
+    async def release_generation(*_args, **_kwargs) -> None:
+        released.append("generation")
+
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "release_generation",
+        release_generation,
+    )
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 0
+    assert generation.status == "running"
+    assert generation.progress_stage == "rendering"
+    assert generation.attempt == 1
+    assert generation.updated_at == updated_at
+    assert generation.error_code is None
+    assert generation.finished_at is None
+    assert fake_session.outbox_events == []
+    assert released == []
+    assert published == []
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 1
+    assert generation.status == GenerationStatus.QUEUED.value
+    assert generation.progress_stage == "queued"
+    assert generation.attempt == 1
+    assert generation.updated_at != updated_at
+    assert redis.enqueued == [("run_generation", "gen-unknown")]
+    assert {event.kind for event in fake_session.outbox_events} == {
+        "generation",
+        "sse",
+    }
+    assert released == []
+    assert len(published) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_aggregates_unknown_lease_metrics_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    generations = [
+        Generation(
+            id=f"gen-unknown-{index}",
+            user_id="user-1",
+            message_id=f"msg-gen-{index}",
+            status="running",
+            attempt=1,
+        )
+        for index in range(4)
+    ]
+    completions = [
+        Completion(
+            id=f"comp-unknown-{index}",
+            user_id="user-1",
+            message_id=f"msg-comp-{index}",
+            status="streaming",
+            attempt=1,
+        )
+        for index in range(2)
+    ]
+    _patch_recon_session_local(monkeypatch, generations, completions)
+    _patch_publish_event(monkeypatch)
+
+    class BrokenLeaseRedis(FakeRedis):
+        async def get(self, key: str):
+            if key.startswith("task:") and key.endswith(":lease"):
+                raise RuntimeError("redis unavailable")
+            return await super().get(key)
+
+    generation_counter = observability.task_reconcile_lease_unknown_total.labels(
+        kind="generation"
+    )
+    completion_counter = observability.task_reconcile_lease_unknown_total.labels(
+        kind="completion"
+    )
+    generation_before = float(generation_counter._value.get())
+    completion_before = float(completion_counter._value.get())
+
+    with caplog.at_level("WARNING", logger=outbox.logger.name):
+        touched = await outbox.reconcile_tasks({"redis": BrokenLeaseRedis()})
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == outbox.logger.name
+        and "reconcile lease state unknown" in record.getMessage()
+    ]
+    assert touched == 0
+    assert float(generation_counter._value.get()) == generation_before + 4
+    assert float(completion_counter._value.get()) == completion_before + 2
+    assert len(messages) == 1
+    assert "total=6 generations=4 completions=2" in messages[0]
+    assert "gen-unknown-0:RuntimeError" in messages[0]
+    assert "gen-unknown-2:RuntimeError" in messages[0]
+    assert "gen-unknown-3" not in messages[0]
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reconcilers_do_not_duplicate_enqueue_while_owner_holds_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = Generation(
+        id="gen-owned",
+        user_id="user-1",
+        message_id="msg-1",
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
+    _patch_publish_event(monkeypatch)
+
+    class BlockingLeaseRedis(FakeRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lease_read_started = asyncio.Event()
+            self.allow_lease_read = asyncio.Event()
+
+        async def get(self, key: str):
+            if key == "task:gen-owned:lease":
+                self.lease_read_started.set()
+                await self.allow_lease_read.wait()
+            return await super().get(key)
+
+    redis = BlockingLeaseRedis()
+    owner = asyncio.create_task(outbox.reconcile_tasks({"redis": redis}))
+    await asyncio.wait_for(redis.lease_read_started.wait(), timeout=1)
+
+    contender_result = await outbox.reconcile_tasks({"redis": redis})
+    redis.allow_lease_read.set()
+    owner_result = await asyncio.wait_for(owner, timeout=1)
+
+    assert contender_result == 0
+    assert owner_result == 1
+    assert redis.enqueued == [("run_generation", "gen-owned")]
+    assert [event.kind for event in fake_session.outbox_events] == ["generation", "sse"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unknown_completion_does_not_block_expired_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion_updated_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    generation = Generation(
+        id="gen-expired",
+        user_id="user-1",
+        message_id="msg-gen",
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+    )
+    completion = Completion(
+        id="comp-unknown",
+        user_id="user-1",
+        message_id="msg-comp",
+        status="streaming",
+        progress_stage="streaming",
+        attempt=3,
+        updated_at=completion_updated_at,
+    )
+    fake_session = _patch_recon_session_local(
+        monkeypatch,
+        [generation],
+        [completion],
+    )
+    _patch_publish_event(monkeypatch)
+
+    class PartiallyBrokenLeaseRedis(FakeRedis):
+        async def get(self, key: str):
+            if key == "task:comp-unknown:lease":
+                raise RuntimeError("redis unavailable")
+            return await super().get(key)
+
+    redis = PartiallyBrokenLeaseRedis()
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 1
+    assert generation.status == GenerationStatus.QUEUED.value
+    assert redis.enqueued == [("run_generation", "gen-expired")]
+    assert completion.status == "streaming"
+    assert completion.progress_stage == "streaming"
+    assert completion.attempt == 3
+    assert completion.updated_at == completion_updated_at
+    assert completion.error_code is None
+    assert completion.finished_at is None
+    assert all(
+        event.payload.get("task_id") != "comp-unknown"
+        and event.payload.get("data", {}).get("completion_id") != "comp-unknown"
+        for event in fake_session.outbox_events
+    )
 
 
 @pytest.mark.asyncio

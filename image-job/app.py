@@ -94,6 +94,7 @@ UpstreamFacade = _upstream_runtime_module.UpstreamFacade
 
 ALLOWED_FIXED_ENDPOINTS = _runtime_config.ALLOWED_FIXED_ENDPOINTS
 ALLOWED_PREFIX_ENDPOINTS = _runtime_config.ALLOWED_PREFIX_ENDPOINTS
+ALLOW_LEGACY_BEARER_AUTH = _runtime_config.ALLOW_LEGACY_BEARER_AUTH
 CONCURRENCY = _runtime_config.CONCURRENCY
 DATA_DIR = _runtime_config.DATA_DIR
 DB_PATH = _runtime_config.DB_PATH
@@ -122,6 +123,7 @@ MAX_JSON_TOTAL_VALUES = _runtime_config.MAX_JSON_TOTAL_VALUES
 MAX_REF_BYTES = _runtime_config.MAX_REF_BYTES
 MAX_REQUEST_TYPE_CHARS = _runtime_config.MAX_REQUEST_TYPE_CHARS
 MAX_RETENTION_DAYS = _runtime_config.MAX_RETENTION_DAYS
+MIN_SIDECAR_TOKEN_CHARS = _runtime_config.MIN_SIDECAR_TOKEN_CHARS
 MAX_TOTAL_IMAGE_BYTES = _runtime_config.MAX_TOTAL_IMAGE_BYTES
 MAX_UPSTREAM_ERROR_BODY_BYTES = _runtime_config.MAX_UPSTREAM_ERROR_BODY_BYTES
 MAX_UPSTREAM_RESPONSE_BYTES = _runtime_config.MAX_UPSTREAM_RESPONSE_BYTES
@@ -137,6 +139,7 @@ RETRY_NETWORK_MAX = _runtime_config.RETRY_NETWORK_MAX
 RETRY_RESPONSES_STREAM_MAX = _runtime_config.RETRY_RESPONSES_STREAM_MAX
 RETRY_UPSTREAM_5XX_MAX = _runtime_config.RETRY_UPSTREAM_5XX_MAX
 ROOT_DIR = _runtime_config.ROOT_DIR
+SIDECAR_TOKEN = _runtime_config.SIDECAR_TOKEN
 SQLITE_JOURNAL_MODE = _runtime_config.SQLITE_JOURNAL_MODE
 STATE_DIR = _runtime_config.STATE_DIR
 STUCK_QUEUED_AFTER_S = _runtime_config.STUCK_QUEUED_AFTER_S
@@ -322,6 +325,7 @@ def init_storage_sync() -> None:
         refs_dir=REFS_DIR,
         db_path=DB_PATH,
         open_conn=_open_conn,
+        auth_hash=auth_hash,
     )
 
 
@@ -370,8 +374,9 @@ async def enqueue_job(job_id: str) -> str:
 async def insert_and_enqueue_job(
     job_id: str,
     payload: dict[str, Any],
-    auth_header: str,
+    upstream_auth_header: str,
     *,
+    owner_auth_header: str | None = None,
     idempotency_key: str | None = None,
     payload_hash: str | None = None,
 ) -> str:
@@ -383,7 +388,8 @@ async def insert_and_enqueue_job(
         await insert_job(
             job_id,
             payload,
-            auth_header,
+            upstream_auth_header,
+            owner_auth_header=owner_auth_header,
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
         )
@@ -417,6 +423,94 @@ def validate_json_shape(value: Any) -> None:
 body_preview = _payload_helpers.body_preview
 require_auth = _payload_helpers.require_auth
 infer_request_type = _payload_helpers.infer_request_type
+optional_upstream_auth = _payload_helpers.optional_upstream_auth
+require_sidecar_auth = _payload_helpers.require_sidecar_auth
+require_upstream_auth = _payload_helpers.require_upstream_auth
+validate_sidecar_auth_config = _payload_helpers.validate_sidecar_auth_config
+
+
+def authenticate_caller(request: Request) -> tuple[str, bool]:
+    return require_sidecar_auth(
+        request,
+        expected_token=SIDECAR_TOKEN,
+        allow_legacy=ALLOW_LEGACY_BEARER_AUTH,
+    )
+
+
+def scoped_request_hash(
+    payload: dict[str, Any],
+    upstream_auth_header: str,
+    *,
+    legacy_auth: bool,
+) -> str:
+    if legacy_auth:
+        return request_hash(payload)
+    return request_hash(
+        {
+            "payload": payload,
+            "upstream_auth_hash": auth_hash(upstream_auth_header),
+        }
+    )
+
+
+async def find_idempotent_job(
+    *,
+    owner_auth_header: str,
+    upstream_auth_header: str,
+    idempotency_key: str,
+    payload: dict[str, Any],
+    payload_hash: str,
+    legacy_auth: bool,
+) -> tuple[Any | None, str]:
+    owner_digest = auth_hash(owner_auth_header)
+    upstream_digest = auth_hash(upstream_auth_header)
+    existing = await db_one(
+        """
+        SELECT * FROM jobs
+        WHERE auth_hash = ? AND upstream_auth_hash = ? AND idempotency_key = ?
+        """,
+        (owner_digest, upstream_digest, idempotency_key),
+    )
+    if existing is not None:
+        return existing, payload_hash
+
+    # Jobs completed before upstream_auth_hash existed no longer retain the
+    # upstream credential. Match them only when the stored request hash proves
+    # this is the same request; a different provider may legitimately reuse the
+    # caller's idempotency key during failover.
+    expected_hash = request_hash(payload) if legacy_auth else payload_hash
+    existing = await db_one(
+        """
+        SELECT * FROM jobs
+        WHERE auth_hash = ? AND upstream_auth_hash IS NULL
+          AND idempotency_key = ? AND request_hash = ?
+        """,
+        (owner_digest, idempotency_key, expected_hash),
+    )
+    if existing is not None:
+        return existing, expected_hash
+
+    if legacy_auth or hmac.compare_digest(owner_digest, upstream_digest):
+        return None, payload_hash
+
+    # Rolling upgrade compatibility: jobs created under legacy Bearer auth were
+    # owned by the upstream credential rather than the new service token.
+    legacy_expected_hash = request_hash(payload)
+    existing = await db_one(
+        """
+        SELECT * FROM jobs
+        WHERE auth_hash = ? AND idempotency_key = ?
+          AND (upstream_auth_hash = ? OR upstream_auth_hash IS NULL)
+          AND request_hash = ?
+        """,
+        (
+            upstream_digest,
+            idempotency_key,
+            upstream_digest,
+            legacy_expected_hash,
+        ),
+    )
+    return existing, legacy_expected_hash
 
 
 def _payload_policy() -> PayloadPolicy:
@@ -1013,6 +1107,16 @@ async def lifespan(app: FastAPI):
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    validate_sidecar_auth_config(
+        SIDECAR_TOKEN,
+        allow_legacy=ALLOW_LEGACY_BEARER_AUTH,
+        min_token_chars=MIN_SIDECAR_TOKEN_CHARS,
+    )
+    if ALLOW_LEGACY_BEARER_AUTH:
+        LOG.warning(
+            "legacy Bearer authentication is enabled; disable it after all "
+            "Lumen workers use IMAGE_JOB_SIDECAR_TOKEN"
+        )
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
@@ -1111,7 +1215,12 @@ async def health() -> dict[str, Any]:
 
 @app.post("/v1/image-jobs")
 async def create_image_job(request: Request) -> dict[str, Any]:
-    auth_header = require_auth(request)
+    owner_auth_header, legacy_auth = authenticate_caller(request)
+    upstream_auth_header = require_upstream_auth(
+        request,
+        caller_auth_header=owner_auth_header,
+        legacy_auth=legacy_auth,
+    )
     raw = await _read_request_body_bounded(
         request,
         max_bytes=MAX_IMAGE_JOB_REQUEST_BYTES,
@@ -1120,16 +1229,23 @@ async def create_image_job(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="empty JSON body")
     raw_payload = load_image_job_json(raw)
     payload = validate_payload(raw_payload)
-    auth_digest = auth_hash(auth_header)
     idempotency_key = request_idempotency_key(request, raw_payload)
-    payload_hash = request_hash(payload)
+    payload_hash = scoped_request_hash(
+        payload,
+        upstream_auth_header,
+        legacy_auth=legacy_auth,
+    )
     if idempotency_key is not None:
-        existing = await db_one(
-            "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
-            (auth_digest, idempotency_key),
+        existing, expected_hash = await find_idempotent_job(
+            owner_auth_header=owner_auth_header,
+            upstream_auth_header=upstream_auth_header,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            payload_hash=payload_hash,
+            legacy_auth=legacy_auth,
         )
         if existing is not None:
-            if existing["request_hash"] != payload_hash:
+            if existing["request_hash"] != expected_hash:
                 raise HTTPException(
                     status_code=409,
                     detail="idempotency key already used for a different image job",
@@ -1141,18 +1257,23 @@ async def create_image_job(request: Request) -> dict[str, Any]:
         result = await insert_and_enqueue_job(
             job_id,
             payload,
-            auth_header,
+            upstream_auth_header,
+            owner_auth_header=owner_auth_header,
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
         )
     except sqlite3.IntegrityError:
         if idempotency_key is None:
             raise
-        existing = await db_one(
-            "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
-            (auth_digest, idempotency_key),
+        existing, expected_hash = await find_idempotent_job(
+            owner_auth_header=owner_auth_header,
+            upstream_auth_header=upstream_auth_header,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            payload_hash=payload_hash,
+            legacy_auth=legacy_auth,
         )
-        if existing is not None and existing["request_hash"] == payload_hash:
+        if existing is not None and existing["request_hash"] == expected_hash:
             await ensure_queued_job_scheduled(existing)
             return row_to_response(existing)
         raise HTTPException(
@@ -1161,12 +1282,16 @@ async def create_image_job(request: Request) -> dict[str, Any]:
         ) from None
     if result == "full":
         if idempotency_key is not None:
-            existing = await db_one(
-                "SELECT * FROM jobs WHERE auth_hash = ? AND idempotency_key = ?",
-                (auth_digest, idempotency_key),
+            existing, expected_hash = await find_idempotent_job(
+                owner_auth_header=owner_auth_header,
+                upstream_auth_header=upstream_auth_header,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=payload_hash,
+                legacy_auth=legacy_auth,
             )
             if existing is not None:
-                if existing["request_hash"] != payload_hash:
+                if existing["request_hash"] != expected_hash:
                     raise HTTPException(
                         status_code=409,
                         detail=(
@@ -1188,11 +1313,19 @@ async def create_image_job(request: Request) -> dict[str, Any]:
 
 @app.get("/v1/image-jobs/{job_id}")
 async def get_image_job(job_id: str, request: Request) -> dict[str, Any]:
-    auth_header = require_auth(request)
+    owner_auth_header, legacy_auth = authenticate_caller(request)
     row = await db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
     if row is None:
         raise HTTPException(status_code=404, detail="image job not found")
-    if not hmac.compare_digest(row["auth_hash"], auth_hash(auth_header)):
+    candidate_hashes = [auth_hash(owner_auth_header)]
+    if not legacy_auth:
+        upstream_auth_header = optional_upstream_auth(request)
+        if upstream_auth_header is not None:
+            candidate_hashes.append(auth_hash(upstream_auth_header))
+    if not any(
+        hmac.compare_digest(row["auth_hash"], candidate_hash)
+        for candidate_hash in candidate_hashes
+    ):
         raise HTTPException(
             status_code=403, detail="image job belongs to a different key"
         )
@@ -1236,13 +1369,13 @@ async def upload_reference(request: Request) -> dict[str, Any]:
 
     Body：raw 图片 bytes（PNG / JPEG / WebP）。Content-Type 只做允许性校验；
     落盘扩展名和实际 MIME 以 Pillow 识别的格式为准。
-    Auth：与其他端点一致（Authorization: Bearer <api_key>）；同一 auth 下同 sha256
-        复用已有 URL，不同 auth 会生成不同 token，避免跨 key 共享 bearer URL。
+    Auth：Authorization 使用 Lumen→sidecar 服务 token；同一服务身份下同 sha256
+        复用已有 URL。旧 Bearer 行为仅在显式兼容开关开启时保留。
     幂等：同 auth + 同 sha256 复用已有 URL；不重复写盘。
     TTL：与 jobs 共用 MAX_RETENTION_DAYS（默认 1d）。
     """
-    auth_header = require_auth(request)
-    auth_digest = auth_hash(auth_header)
+    owner_auth_header, _legacy_auth = authenticate_caller(request)
+    auth_digest = auth_hash(owner_auth_header)
     raw = await _read_request_body_bounded(request, max_bytes=MAX_REF_BYTES)
     if not raw:
         raise HTTPException(status_code=400, detail="empty body")

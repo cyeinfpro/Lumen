@@ -249,7 +249,7 @@ function SessionsSection() {
             {SESSION_SKELETON_KEYS.map((key, i) => (
               <div
                 key={key}
-                className="h-14 rounded-[var(--radius-control)] bg-white/5 animate-pulse"
+                className="h-14 rounded-[var(--radius-control)] bg-[var(--bg-2)] animate-pulse"
                 style={{ animationDelay: `${i * 80}ms` }}
               />
             ))}

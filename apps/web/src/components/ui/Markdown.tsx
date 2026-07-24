@@ -204,7 +204,7 @@ function buildComponents(): Components {
       </div>
     ),
     tr: ({ children, ...props }) => (
-      <tr {...props} className="hover:bg-white/[0.03] transition-colors">
+      <tr {...props} className="transition-colors hover:bg-[var(--bg-2)]">
         {children}
       </tr>
     ),

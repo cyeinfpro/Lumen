@@ -33,6 +33,7 @@ def load_app_module():
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.ALLOW_LEGACY_BEARER_AUTH = True
     return module
 
 

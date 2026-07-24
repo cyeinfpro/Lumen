@@ -504,7 +504,7 @@ function ByokModeSettings({
           当前是自定义组合（未匹配预设模式），点上方任意卡片可重置。
         </p>
       )}
-      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
+      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
         <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
           <span>高级覆盖（手动改 3 个原始开关）</span>
           <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
@@ -794,7 +794,7 @@ function ByokSupplierList({
         </div>
       </header>
       {suppliers.length === 0 ? (
-        <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-white/[0.02] py-10 text-center text-sm text-[var(--fg-1)]">
+        <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-[var(--bg-2)] py-10 text-center text-sm text-[var(--fg-1)]">
           还没有供应商模板，使用上方「新供应商」创建。
         </div>
       ) : (
@@ -891,7 +891,7 @@ function Overview({
 function OverviewItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] bg-white/[0.05] border border-[var(--border-subtle)] text-[var(--color-lumen-amber)]">
+      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border-subtle)] text-[var(--color-lumen-amber)]">
         {icon}
       </span>
       <div className="flex flex-col">
@@ -913,14 +913,14 @@ function ModeCard({ def, active, onSelect }: { def: ModeDef; active: boolean; on
         "text-left rounded-[var(--radius-panel)] border p-3 transition-colors " +
         (active
           ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10"
-          : "border-[var(--border)] bg-white/[0.03] hover:bg-white/[0.06]")
+          : "border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)]")
       }
     >
       <div className="flex items-center gap-2">
         <span
           className={
             "flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] " +
-            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-white/[0.05] text-[var(--fg-1)]")
+            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-[var(--bg-2)] text-[var(--fg-1)]")
           }
         >
           <Icon className="w-3.5 h-3.5" />
@@ -969,7 +969,7 @@ function SupplierRow({
                 <Check className="w-3 h-3" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
                 已禁用
               </span>
             )}
@@ -979,10 +979,10 @@ function SupplierRow({
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap text-xs">
-          <span className="rounded-full border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[var(--fg-1)]">
+          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2.5 py-1 text-[var(--fg-1)]">
             活跃 Key {supplier.active_credentials}
           </span>
-          <span className="rounded-full border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[var(--fg-1)]">
+          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2.5 py-1 text-[var(--fg-1)]">
             验证模型 {supplier.validation_model}
           </span>
           <Button
@@ -1005,7 +1005,7 @@ function SupplierRow({
       )}
 
       {open && (
-        <div className="border-t border-[var(--border)] p-4 space-y-4 bg-white/[0.02]">
+        <div className="border-t border-[var(--border)] p-4 space-y-4 bg-[var(--bg-2)]">
           <SupplierForm draft={draft} urlError={urlError} onChange={onChange} onUrlBlur={onUrlBlur} showProbe />
           <div className="flex items-center gap-2 flex-wrap">
             <Button
@@ -1083,7 +1083,7 @@ function SupplierForm({
         />
       </div>
 
-      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
+      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
         <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
           <span>高级配置</span>
           <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
@@ -1248,7 +1248,7 @@ function PurposesField({ purposes, onToggle }: { purposes: ByokPurpose[]; onTogg
                 "px-2.5 py-1 rounded-[var(--radius-card)] border text-xs transition-colors " +
                 (active
                   ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
-                  : "bg-white/[0.03] text-[var(--fg-1)] border-[var(--border)] hover:bg-white/[0.08]")
+                  : "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)] hover:bg-[var(--bg-3)]")
               }
             >
               {p.label}
@@ -1279,7 +1279,7 @@ function ToggleRow({
   return (
     <label
       className={
-        "flex items-start justify-between gap-3 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.03] px-3 py-2 " +
+        "flex items-start justify-between gap-3 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 " +
         (disabled ? "opacity-50" : "")
       }
     >

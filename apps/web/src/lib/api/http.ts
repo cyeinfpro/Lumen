@@ -1,4 +1,8 @@
 import { isPublicPath } from "@/lib/auth/publicPaths";
+import {
+  activatePrivateCanvasPersistence,
+  clearPrivateCanvasPersistence,
+} from "#canvas-persistence";
 
 // Lumen 前端统一 API 客户端（DESIGN §3.1 / §5.x）
 //
@@ -40,23 +44,64 @@ export type ApiFetchInit = RequestInit & {
    * claiming a JSON shape for an empty response.
    */
   expectNoContent?: boolean;
+  /**
+   * Total request budget in milliseconds. Requests have no synthetic deadline
+   * unless a caller opts in; uploads and operational APIs can legitimately run
+   * longer than a single global budget.
+   */
+  timeoutMs?: number | null;
 };
 
-// 只在客户端、且一个 tick 内只做一次跳转，防止多并发 401 风暴。
+export const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+export function safeAuthNextPath(
+  raw: string,
+  origin?: string,
+): string {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (!trimmed || trimmed.startsWith("//")) return "/";
+  try {
+    const base =
+      origin ??
+      (typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost");
+    const parsed = new URL(trimmed, base);
+    if (parsed.origin !== new URL(base).origin) return "/";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "/";
+    if (!parsed.pathname.startsWith("/") || isPublicPath(parsed.pathname)) {
+      return "/";
+    }
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/";
+  }
+}
+
+// 只在客户端、且一次页面生命周期内只做一次跳转，防止多并发 401 风暴。
 let _redirecting = false;
 // 已经在公开页（/login、/reset-password、/invite/*）就不要再跳 /login，
-// 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → assign("/login") → 重载 → 再 401，会死循环刷新。
+// 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → replace("/login") → 重载 → 再 401，会死循环刷新。
 export function handle401() {
+  const privateStateCleanup = invalidateSessionClientState();
   if (typeof window === "undefined") return;
   if (_redirecting) return;
   if (isPublicPath(window.location.pathname)) return;
   _redirecting = true;
-  // 使用 location.assign 而非 replace，保留 back 返回能力
-  try {
-    window.location.assign("/login");
-  } catch {
-    /* swallow */
-  }
+  const currentPath = safeAuthNextPath(
+    `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    window.location.origin,
+  );
+  const loginPath = `/login?next=${encodeURIComponent(currentPath)}`;
+  // 必须整页 replace：document teardown 会清空 React Query、Zustand 与模块级
+  // 私有内存缓存，同时不会把已失效的受保护页面留在 history 中。
+  void privateStateCleanup.finally(() => {
+    try {
+      window.location.replace(loginPath);
+    } catch {
+      _redirecting = false;
+    }
+  });
 }
 
 function readCookie(name: string): string | null {
@@ -192,6 +237,138 @@ const CSRF_FAILED_CODE = "csrf_failed";
 const NETWORK_RETRY_MAX = 2;
 const NETWORK_RETRY_DELAYS_MS = [400, 1200];
 const RETRYABLE_HTTP_STATUSES = new Set([502, 503, 504]);
+type RequestAbortSource = "caller" | "timeout" | null;
+
+type RequestSignalContext = {
+  signal?: AbortSignal;
+  abortSource: () => RequestAbortSource;
+  abortReason: () => unknown;
+  cleanup: () => void;
+};
+
+type CsrfRefreshFlight = {
+  epoch: number;
+  controller: AbortController;
+  promise: Promise<string | null>;
+};
+
+let _csrfRefreshEpoch = 0;
+let _csrfRefreshFlight: CsrfRefreshFlight | null = null;
+
+function requestSignal(
+  callerSignal: AbortSignal | null | undefined,
+  timeoutMs: number | null | undefined,
+): RequestSignalContext {
+  if (timeoutMs === null) {
+    return {
+      signal: callerSignal ?? undefined,
+      abortSource: () => (callerSignal?.aborted ? "caller" : null),
+      abortReason: () => abortReason(callerSignal),
+      cleanup: () => undefined,
+    };
+  }
+  const normalizedTimeout =
+    typeof timeoutMs === "number" &&
+    Number.isFinite(timeoutMs) &&
+    timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_API_TIMEOUT_MS;
+  const controller = new AbortController();
+  let source: RequestAbortSource = null;
+  const onCallerAbort = () => {
+    if (source) return;
+    source = "caller";
+    controller.abort(abortReason(callerSignal));
+  };
+  if (callerSignal?.aborted) {
+    onCallerAbort();
+  } else {
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  const timeout = setTimeout(() => {
+    if (source) return;
+    source = "timeout";
+    controller.abort(new DOMException("Request timed out", "TimeoutError"));
+  }, normalizedTimeout);
+  return {
+    signal: controller.signal,
+    abortSource: () => source,
+    abortReason: () =>
+      source === "caller"
+        ? abortReason(callerSignal)
+        : controller.signal.reason,
+    cleanup: () => {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+function abortReason(
+  signal: AbortSignal | null | undefined,
+): unknown {
+  return (
+    signal?.reason ??
+    new DOMException("The operation was aborted", "AbortError")
+  );
+}
+
+function requestFailure(
+  err: unknown,
+  context: RequestSignalContext,
+): never {
+  const source = context.abortSource();
+  if (source === "caller") throw context.abortReason();
+  if (source === "timeout") {
+    throw new ApiError({
+      code: "request_timeout",
+      message: "请求超时，请稍后重试",
+      status: 0,
+      payload: err,
+    });
+  }
+  throw networkRequestError(err);
+}
+
+export function invalidateCsrfTokenRefresh(): void {
+  _csrfRefreshEpoch += 1;
+  const flight = _csrfRefreshFlight;
+  _csrfRefreshFlight = null;
+  flight?.controller.abort(
+    new DOMException("CSRF refresh invalidated", "AbortError"),
+  );
+}
+
+export function invalidateSessionClientState(): Promise<void> {
+  invalidateCsrfTokenRefresh();
+  return clearPrivateCanvasPersistence();
+}
+
+export function resumeSessionClientState(userId: string): Promise<void> {
+  return activatePrivateCanvasPersistence(userId);
+}
+
+async function retryDelay(
+  delayMs: number,
+  signal: AbortSignal | null | undefined,
+): Promise<void> {
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return;
+  }
+  if (signal.aborted) throw abortReason(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function hasIdempotencyKey(headers: Headers): boolean {
   return headers.has("Idempotency-Key") || headers.has("idempotency-key");
@@ -260,12 +437,35 @@ async function requestHeaders(
   return headers;
 }
 
-function unauthorizedError(): ApiError {
+function sessionCookieSecureSignal(
+  res: Response,
+  data: unknown,
+): boolean | null {
+  const header = res.headers.get("x-lumen-session-cookie-secure")?.trim();
+  if (header === "1" || header === "true") return true;
+  if (header === "0" || header === "false") return false;
+  if (!data || typeof data !== "object") return null;
+  const direct = (data as { session_cookie_secure?: unknown })
+    .session_cookie_secure;
+  if (typeof direct === "boolean") return direct;
+  const detail = (data as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const nested = (detail as { session_cookie_secure?: unknown })
+    .session_cookie_secure;
+  return typeof nested === "boolean" ? nested : null;
+}
+
+function unauthorizedError(res: Response, data: unknown): ApiError {
   handle401();
+  const sessionCookieSecure = sessionCookieSecureSignal(res, data);
   return new ApiError({
     code: "unauthorized",
     message: "未登录或会话已失效",
     status: 401,
+    payload:
+      sessionCookieSecure === null
+        ? data
+        : { response: data, session_cookie_secure: sessionCookieSecure },
   });
 }
 
@@ -285,16 +485,18 @@ async function fetchResponse(
   url: string,
   requestInit: RequestInit,
   retryable: boolean,
+  abortContext: RequestSignalContext,
 ): Promise<ReadResponse> {
   let response: Response;
   try {
     response = await fetchWithRetryableHttp(url, requestInit, retryable);
   } catch (err) {
-    throw networkRequestError(err);
+    requestFailure(err, abortContext);
   }
-  if (response.status === 401) throw unauthorizedError();
   if (response.status === 204) return { response, data: undefined };
-  return { response, data: await responseData(response) };
+  const data = await responseData(response);
+  if (response.status === 401) throw unauthorizedError(response, data);
+  return { response, data };
 }
 
 async function retryAfterCsrfFailure(
@@ -302,6 +504,7 @@ async function retryAfterCsrfFailure(
   requestInit: RequestInit,
   method: string,
   headers: Headers,
+  abortContext: RequestSignalContext,
 ): Promise<ReadResponse | null> {
   const fresh = await refreshCsrfToken().catch(() => null);
   if (!fresh) return null;
@@ -311,6 +514,7 @@ async function retryAfterCsrfFailure(
     url,
     { ...requestInit, headers: retryHeaders },
     canRetryHttp(method, retryHeaders),
+    abortContext,
   );
 }
 
@@ -332,8 +536,9 @@ async function fetchWithNetworkRetry(
       if (!retryable) throw err;
       lastErr = err;
       if (attempt < NETWORK_RETRY_MAX) {
-        await new Promise((r) =>
-          setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200),
+        await retryDelay(
+          NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200,
+          sig,
         );
       }
     }
@@ -357,8 +562,9 @@ async function fetchWithRetryableHttp(
     ) {
       break;
     }
-    await new Promise((r) =>
-      setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200),
+    await retryDelay(
+      NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200,
+      init.signal,
     );
     attempt += 1;
   }
@@ -371,21 +577,50 @@ async function fetchWithRetryableHttp(
   return res;
 }
 
-export async function refreshCsrfToken(): Promise<string | null> {
-  if (typeof document === "undefined") return null;
+async function requestFreshCsrfToken(
+  epoch: number,
+  signal: AbortSignal,
+): Promise<string | null> {
   const url = `${API_BASE.replace(/\/$/, "")}/auth/csrf`;
-  const res = await fetchWithNetworkRetry(url, {
-    method: "GET",
-    credentials: "include",
-    cache: "no-store",
-  });
+  const timeoutContext = requestSignal(signal, DEFAULT_API_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetchWithNetworkRetry(url, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      signal: timeoutContext.signal,
+    });
+  } finally {
+    timeoutContext.cleanup();
+  }
+  if (epoch !== _csrfRefreshEpoch || signal.aborted) return null;
+  if (res.status === 401) {
+    handle401();
+    return null;
+  }
   if (!res.ok) return null;
   const data = (await res.json().catch(() => null)) as
     | { csrf_token?: unknown }
     | null;
+  if (epoch !== _csrfRefreshEpoch || signal.aborted) return null;
   return typeof data?.csrf_token === "string"
     ? data.csrf_token
     : readCookie("csrf");
+}
+
+export function refreshCsrfToken(): Promise<string | null> {
+  if (typeof document === "undefined") return Promise.resolve(null);
+  const epoch = _csrfRefreshEpoch;
+  if (_csrfRefreshFlight?.epoch === epoch) {
+    return _csrfRefreshFlight.promise;
+  }
+  const controller = new AbortController();
+  const promise = requestFreshCsrfToken(epoch, controller.signal).finally(() => {
+    if (_csrfRefreshFlight?.promise === promise) _csrfRefreshFlight = null;
+  });
+  _csrfRefreshFlight = { epoch, controller, promise };
+  return promise;
 }
 
 export async function ensureCsrfToken(): Promise<string | null> {
@@ -404,41 +639,61 @@ export async function apiFetch<T = unknown>(
   path: string,
   init?: ApiFetchInit,
 ): Promise<T | NoContent> {
-  const { expectNoContent = false, ...fetchInit } = init ?? {};
+  const {
+    expectNoContent = false,
+    timeoutMs = null,
+    ...fetchInit
+  } = init ?? {};
   const method = (fetchInit.method ?? "GET").toUpperCase();
   const url = apiUrl(path);
-  const headers = await requestHeaders(fetchInit, method, path);
-  const requestInit = {
-    ...fetchInit,
-    method,
-    headers,
-    credentials: "include" as RequestCredentials,
-  };
-  let { response: res, data } = await fetchResponse(
-    url,
-    requestInit,
-    canRetryHttp(method, headers),
-  );
+  const abortContext = requestSignal(fetchInit.signal, timeoutMs);
+  try {
+    const headers = await requestHeaders(fetchInit, method, path);
+    if (abortContext.signal?.aborted) {
+      requestFailure(abortContext.signal.reason, abortContext);
+    }
+    const requestInit = {
+      ...fetchInit,
+      method,
+      headers,
+      credentials: "include" as RequestCredentials,
+      signal: abortContext.signal,
+    };
+    let { response: res, data } = await fetchResponse(
+      url,
+      requestInit,
+      canRetryHttp(method, headers),
+      abortContext,
+    );
 
-  if (
-    res.status === 403 &&
-    WRITE_METHODS.has(method) &&
-    parseApiError(res.status, data).code === CSRF_FAILED_CODE
-  ) {
-    const retried = await retryAfterCsrfFailure(url, requestInit, method, headers);
-    if (retried) ({ response: res, data } = retried);
+    if (
+      res.status === 403 &&
+      WRITE_METHODS.has(method) &&
+      parseApiError(res.status, data).code === CSRF_FAILED_CODE
+    ) {
+      const retried = await retryAfterCsrfFailure(
+        url,
+        requestInit,
+        method,
+        headers,
+        abortContext,
+      );
+      if (retried) ({ response: res, data } = retried);
+    }
+
+    if (!res.ok) {
+      const { code, message } = parseApiError(res.status, data);
+      throw new ApiError({ code, message, status: res.status, payload: data });
+    }
+
+    if (expectNoContent) {
+      return undefined;
+    }
+
+    return data as T;
+  } finally {
+    abortContext.cleanup();
   }
-
-  if (!res.ok) {
-    const { code, message } = parseApiError(res.status, data);
-    throw new ApiError({ code, message, status: res.status, payload: data });
-  }
-
-  if (expectNoContent) {
-    return undefined;
-  }
-
-  return data as T;
 }
 
 export function apiFetchNoContent(

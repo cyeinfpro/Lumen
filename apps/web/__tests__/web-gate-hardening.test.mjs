@@ -23,6 +23,7 @@ import {
   auditHitAreaSource,
   findMobileDialogIssues,
 } from "../scripts/jsx-quality-analysis.mjs";
+import { discoverTestFiles } from "../scripts/run-tests.mjs";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(testDir, "..");
@@ -218,6 +219,23 @@ test("clean shallow clones fail closed when no comparison base is available", ()
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("frontend test runner discovers every supported test file", () => {
+  const discovered = discoverTestFiles(webRoot);
+  assert.ok(discovered.includes("__tests__/web-gate-hardening.test.mjs"));
+  assert.ok(
+    discovered.includes(
+      "src/components/ui/chat/ConversationMemoryButton.test.ts",
+    ),
+  );
+  assert.ok(
+    discovered.includes(
+      "src/components/ui/projects/storyboard/StoryboardPages.test.ts",
+    ),
+  );
+  assert.ok(discovered.includes("src/store/chat/taskRecovery.test.ts"));
+  assert.deepEqual(discovered, [...discovered].sort());
 });
 
 function isTestFile(filePath) {
@@ -446,6 +464,7 @@ test("gate wiring keeps full Git history and the complete layout vocabulary", ()
   assert.match(complexity, /getGitChangeScope/);
   assert.match(architecture, /lower-layer-imports-ui/);
   assert.match(governance, /getGitChangeScope/);
+  assert.match(packageJson, /"test": "node scripts\/run-tests\.mjs"/);
   assert.match(packageJson, /check:architecture/);
   assert.match(packageJson, /tsc -p tsconfig\.full\.json/);
   assert.equal(fullTsconfig.compilerOptions.skipLibCheck, false);
@@ -454,6 +473,6 @@ test("gate wiring keeps full Git history and the complete layout vocabulary", ()
   assert.match(layout, /"--content-settings": "1080px"/);
   assert.match(design, /## 4\. 排版：14 档 type-\* class/);
   assert.match(ci, /fetch-depth:\s*0/);
-  assert.match(ci, /web-gate-hardening\.test\.mjs/);
+  assert.doesNotMatch(ci, /node --test __tests__\/web-gate-hardening\.test\.mjs/);
   assert.match(ci, /node scripts\/audit-hit-area\.mjs/);
 });

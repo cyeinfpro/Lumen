@@ -588,13 +588,13 @@ function MemoryScopeSidebar({
               onNewScopeEmojiChange(event.target.value.slice(0, 4))
             }
             placeholder="图标"
-            className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+            className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
           />
           <input
             value={newScopeName}
             onChange={(event) => onNewScopeNameChange(event.target.value)}
             placeholder="工作"
-            className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+            className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
           />
           <IconButton
             variant="primary"
@@ -650,7 +650,7 @@ function ManualMemorySection({
           onChange={(event) =>
             onTypeChange(event.target.value as MemoryType)
           }
-          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
         >
           {TYPE_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
@@ -663,7 +663,7 @@ function ManualMemorySection({
           onChange={(event) => onContentChange(event.target.value)}
           placeholder="例如：偏好 200 字以内的回答"
           maxLength={200}
-          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-10"
+          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-10"
         />
         <Button
           variant="primary"
@@ -804,7 +804,7 @@ function MemoryLibraryToolbar({
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder={searchPlaceholder}
-          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
+          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
         />
       </label>
       {showBulkActions ? (
@@ -818,7 +818,7 @@ function MemoryLibraryToolbar({
               onBulkMove(scopeId);
               event.currentTarget.value = "";
             }}
-            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
+            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
             defaultValue=""
           >
             <option value="" disabled>
@@ -1003,7 +1003,7 @@ function MemoryStagingRow({
       <input
         value={value}
         onChange={(event) => onEdit(event.target.value)}
-        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
       />
       <div className="flex flex-wrap gap-2">
         <select
@@ -1253,7 +1253,7 @@ function SettingToggle({
         "flex min-h-[112px] items-start gap-3 rounded-[var(--radius-card)] border p-4 text-left transition-colors disabled:opacity-60",
         checked
           ? "border-accent-border bg-accent-soft"
-          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/60 hover:bg-white/[0.03]",
+          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/60 hover:bg-[var(--bg-3)]",
       ].join(" ")}
     >
       <span className="mt-0.5 text-accent">{icon}</span>
@@ -1268,7 +1268,7 @@ function SettingToggle({
           "mt-1 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
           checked
             ? "border-accent bg-accent"
-            : "border-[var(--border)] bg-white/5",
+            : "border-[var(--border)] bg-[var(--bg-2)]",
         ].join(" ")}
         aria-hidden
       >
@@ -1304,7 +1304,7 @@ function ScopeButton({
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none md:h-8"
+          className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-0)] outline-none md:h-8"
         />
         <Button
           variant="secondary"
@@ -1355,7 +1355,7 @@ function scopeButtonClass(active: boolean): string {
     "flex min-h-11 min-w-max flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors lg:h-9 lg:min-h-0 lg:min-w-0",
     active
       ? "bg-accent-soft text-accent"
-      : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
+      : "text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
   ].join(" ");
 }
 
@@ -1393,7 +1393,7 @@ function MemoryRow({
             type="checkbox"
             checked={selected}
             onChange={(event) => onToggleSelected?.(event.target.checked)}
-            className="h-4 w-4 rounded border-[var(--border-strong)] bg-white/[0.03]"
+            className="h-4 w-4 rounded border-[var(--border-strong)] bg-[var(--bg-2)]"
             aria-label="选择记忆"
           />
         ) : null}
@@ -1467,7 +1467,7 @@ function MemoryRow({
 
 function TypeBadge({ type }: { type: MemoryType | string }) {
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)]">
       {typeLabel(type)}
     </span>
   );

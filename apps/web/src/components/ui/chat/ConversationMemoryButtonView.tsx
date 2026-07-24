@@ -54,8 +54,8 @@ function MemoryTrigger({
         "inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-full transition-colors disabled:opacity-40",
         compact ? "h-9 w-9" : "h-7 px-2",
         disabled
-          ? "text-[var(--fg-3)] hover:bg-white/8"
-          : "text-[var(--fg-2)] hover:bg-white/8 hover:text-[var(--fg-0)]",
+          ? "text-[var(--fg-3)] hover:bg-[var(--bg-3)]"
+          : "text-[var(--fg-2)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
       ].join(" ")}
       aria-label="本会话记忆"
       title={disabled ? "本会话未使用记忆" : "本会话记忆"}
@@ -137,7 +137,7 @@ function MemoryScopeControl({
         value={activeScopeId ?? ""}
         disabled={scopePending || scopes.length === 0 || !canQueryConversation}
         onChange={(event) => onScopeChange(event.target.value || null)}
-        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
       >
         <option value="">默认</option>
         {scopes
@@ -156,7 +156,7 @@ function MemoryScopeControl({
 function UsedMemoryList({ used }: { used: UsedMemory[] }) {
   if (used.length === 0) {
     return (
-      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.02] p-3 type-caption">
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3 type-caption">
         最近一轮没有使用记忆。
       </div>
     );
@@ -167,7 +167,7 @@ function UsedMemoryList({ used }: { used: UsedMemory[] }) {
       {used.slice(0, 6).map((memory) => (
         <div
           key={memory.id}
-          className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-white/[0.02] px-2 py-1.5 type-caption"
+          className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2 py-1.5 type-caption"
         >
           <span className="text-[var(--fg-2)]">{memory.type}</span>
           <span className="mx-1 text-[var(--fg-3)]">·</span>
@@ -234,7 +234,7 @@ function MemoryPanel({
         <Link
           href="/settings/memory"
           onClick={onClose}
-          className="block rounded-[var(--radius-control)] border border-[var(--border)] px-3 py-2 text-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.04] hover:text-[var(--fg-0)]"
+          className="block rounded-[var(--radius-control)] border border-[var(--border)] px-3 py-2 text-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
         >
           管理全部记忆
         </Link>

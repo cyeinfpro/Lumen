@@ -198,7 +198,7 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
             title="重置为适应窗口（0）"
             aria-label="重置为适应窗口（0）"
             className={cn(
-              "h-9 min-w-16 rounded-full px-3 text-xs font-mono tabular-nums",
+              "h-9 min-w-16 rounded-full px-3 text-xs font-mono tabular-nums max-sm:min-h-11",
               "text-white/82 hover:bg-white/10 hover:text-white",
               "transition-colors duration-150 cursor-pointer",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
@@ -510,7 +510,7 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
               type="button"
               onClick={props.onOpenOriginal}
               className={cn(
-                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)]",
+                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)] max-sm:min-h-11",
                 "border border-white/10 bg-white/5 text-sm text-white/80",
                 "hover:border-white/25 hover:bg-white/10 hover:text-white",
                 "transition-colors duration-150 cursor-pointer",
@@ -525,7 +525,7 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
               onClick={props.onDownload}
               disabled={props.downloadStatus === "downloading"}
               className={cn(
-                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)]",
+                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)] max-sm:min-h-11",
                 "border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/14",
                 "text-sm text-[var(--amber-100)]",
                 "hover:bg-[var(--color-lumen-amber)]/22",
@@ -786,7 +786,7 @@ function ToolIconButton({
       aria-label={title}
       title={title}
       className={cn(
-        "inline-flex h-9 w-9 items-center justify-center rounded-full",
+        "inline-flex h-9 w-9 items-center justify-center rounded-full max-sm:min-h-11 max-sm:min-w-11",
         "border border-transparent text-white/68",
         "hover:border-white/15 hover:bg-white/10 hover:text-white",
         "disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-transparent disabled:hover:bg-transparent",
@@ -828,7 +828,7 @@ function TopButton({
       title={title}
       aria-label={title}
       className={cn(
-        "inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-sm",
+        "inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-sm max-sm:min-h-11",
         "border border-transparent text-white/82",
         "hover:border-white/15 hover:bg-white/10 hover:text-white",
         "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent",

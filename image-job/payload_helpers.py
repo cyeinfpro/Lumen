@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import math
 from collections.abc import Set
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, Request
+
+UPSTREAM_AUTH_HEADER = "x-lumen-upstream-authorization"
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,84 @@ def require_auth(request: Request) -> str:
         raise HTTPException(
             status_code=401,
             detail="Missing Authorization: Bearer token",
+        ) from None
+    return f"Bearer {credential}"
+
+
+def validate_sidecar_auth_config(
+    expected_token: str,
+    *,
+    allow_legacy: bool,
+    min_token_chars: int,
+) -> None:
+    if expected_token:
+        if len(expected_token) < min_token_chars or any(
+            char.isspace() for char in expected_token
+        ):
+            raise RuntimeError(
+                "IMAGE_JOB_SIDECAR_TOKEN must be a whitespace-free token "
+                f"with at least {min_token_chars} characters"
+            )
+        return
+    if not allow_legacy:
+        raise RuntimeError(
+            "IMAGE_JOB_SIDECAR_TOKEN is required unless "
+            "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1 is explicitly enabled"
+        )
+
+
+def require_sidecar_auth(
+    request: Request,
+    *,
+    expected_token: str,
+    allow_legacy: bool,
+) -> tuple[str, bool]:
+    incoming = require_auth(request)
+    incoming_credential = _bearer_credential(incoming)
+    if expected_token and hmac.compare_digest(
+        incoming_credential.encode("utf-8"),
+        expected_token.encode("utf-8"),
+    ):
+        return f"Bearer {expected_token}", False
+    if allow_legacy:
+        return incoming, True
+    if not expected_token:
+        raise HTTPException(
+            status_code=503,
+            detail="image-job service authentication is not configured",
+        )
+    raise HTTPException(status_code=401, detail="Invalid service credentials")
+
+
+def require_upstream_auth(
+    request: Request,
+    *,
+    caller_auth_header: str,
+    legacy_auth: bool,
+) -> str:
+    if legacy_auth:
+        return caller_auth_header
+    upstream_auth = request.headers.get(UPSTREAM_AUTH_HEADER, "")
+    try:
+        credential = _bearer_credential(upstream_auth)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing {UPSTREAM_AUTH_HEADER} Bearer credential",
+        ) from None
+    return f"Bearer {credential}"
+
+
+def optional_upstream_auth(request: Request) -> str | None:
+    upstream_auth = request.headers.get(UPSTREAM_AUTH_HEADER, "")
+    if not upstream_auth:
+        return None
+    try:
+        credential = _bearer_credential(upstream_auth)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Malformed {UPSTREAM_AUTH_HEADER} Bearer credential",
         ) from None
     return f"Bearer {credential}"
 

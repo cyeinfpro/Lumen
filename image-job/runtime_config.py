@@ -23,6 +23,10 @@ MAX_REF_BYTES = int(os.getenv("IMAGE_JOB_MAX_REF_BYTES", str(50 * 1024 * 1024)))
 STATE_DIR = Path(os.getenv("IMAGE_JOB_STATE_DIR", "/var/lib/image-job/state"))
 DB_PATH = Path(os.getenv("IMAGE_JOB_DB_PATH", str(STATE_DIR / "image_jobs.sqlite3")))
 
+SIDECAR_TOKEN = os.getenv("IMAGE_JOB_SIDECAR_TOKEN", "").strip()
+ALLOW_LEGACY_BEARER_AUTH = env_flag("IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH")
+MIN_SIDECAR_TOKEN_CHARS = 32
+
 CONCURRENCY = max(1, int(os.getenv("IMAGE_JOB_CONCURRENCY", "2")))
 UPSTREAM_TIMEOUT_S = float(os.getenv("IMAGE_JOB_UPSTREAM_TIMEOUT_S", "1800"))
 UPSTREAM_CONNECT_TIMEOUT_S = float(

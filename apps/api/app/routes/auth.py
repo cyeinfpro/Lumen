@@ -46,7 +46,7 @@ from lumen_core.schemas import (
 
 from ..audit import request_ip_hash, write_audit, write_audit_isolated
 from ..byok_service import read_byok_settings, verification_token_hash
-from ..config import settings
+from ..config import effective_session_cookie_secure, settings
 from ..db import get_db
 from ..deps import (
     CSRF_COOKIE,
@@ -452,7 +452,7 @@ def _is_dev_env() -> bool:
 
 
 def _cookie_secure() -> bool:
-    return not _is_dev_env()
+    return effective_session_cookie_secure(settings)
 
 
 def _cookie_samesite() -> Literal["lax", "strict"]:

@@ -23,8 +23,13 @@ import { getTask, type BackendCompletion } from "@/lib/apiClient";
 import { onOnlineRestore, startConnectivity } from "@/lib/connectivity";
 import { logError } from "@/lib/logger";
 import { qk } from "@/lib/queries/queryKeys";
+import {
+  registerRuntimeRecovery,
+  setRealtimeRuntimeStatus,
+} from "@/lib/runtimeResilience";
 import { useSSE, type SSEHandlers } from "@/lib/useSSE";
 import type { AssistantMessage, Generation, Message } from "@/lib/types";
+import { RuntimeResilienceStatus } from "@/components/RuntimeResilienceStatus";
 
 const GENERATION_EVENTS = [
   "generation.queued",
@@ -790,7 +795,15 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     runRecovery("reconnect-open", true, true, "limited");
   }, [channels, channelsKey, runRecovery, userId]);
 
-  useSSE(channels, handlers, { onOpen: handleSSEOpen });
+  const { status: sseStatus, reconnect: reconnectSSE } = useSSE(
+    channels,
+    handlers,
+    { onOpen: handleSSEOpen },
+  );
+
+  useEffect(() => {
+    setRealtimeRuntimeStatus(channels.length > 0 ? sseStatus : "idle");
+  }, [channels.length, sseStatus]);
 
   useEffect(() => {
     recoveryDisposedRef.current = false;
@@ -798,13 +811,22 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     const pendingTaskInvalidationUsers =
       pendingTaskInvalidationUsersRef.current;
     const unsubscribeOnlineRestore = onOnlineRestore(() => {
+      reconnectSSE();
       runRecovery("online-restore", true, false, "limited");
     });
+    const unsubscribeRuntimeRecovery = registerRuntimeRecovery(
+      "realtime",
+      () => {
+        reconnectSSE();
+        runRecovery("manual-reconnect", true, true, "all");
+      },
+    );
     const stopConnectivity = startConnectivity();
     return () => {
       recoveryDisposedRef.current = true;
       recoveryLifecycleRef.current += 1;
       unsubscribeOnlineRestore();
+      unsubscribeRuntimeRecovery();
       stopConnectivity();
       if (taskInvalidationTimerRef.current) {
         clearTimeout(taskInvalidationTimerRef.current);
@@ -823,7 +845,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       queuedRecoveryRef.current = null;
       disposeChatStoreRuntime();
     };
-  }, [runRecovery]);
+  }, [reconnectSSE, runRecovery]);
 
   // 自愈轮询：周期扫描 in-flight 任务，发现 SSE 漏接的 terminal 状态时主动 refetch。
   // 覆盖 Redis Pub/Sub 不持久化的盲区（刷新瞬间错过的 succeeded/failed event）。
@@ -848,13 +870,19 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     if (typeof document === "undefined") return;
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
+        reconnectSSE();
         runRecovery("visible-restore", true, false, "limited");
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () =>
       document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [runRecovery]);
+  }, [reconnectSSE, runRecovery]);
 
-  return <>{children}</>;
+  return (
+    <>
+      {children}
+      <RuntimeResilienceStatus />
+    </>
+  );
 }

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import hashlib
 import inspect
 import io
 import logging
@@ -31,7 +30,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
+from PIL import Image as PILImage, UnidentifiedImageError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,14 +45,6 @@ from lumen_core.constants import ImageSource, ImageVisibility
 from lumen_core.image_signing import (
     ALLOWED_VARIANTS as SIGNED_ALLOWED_VARIANTS,
     verify_image_sig,
-)
-from lumen_core.image_reference import (
-    DEFAULT_REFERENCE_MAX_SIDE,
-    ImageReferenceError,
-    MaskPreflightError,
-    analyze_mask_image,
-    make_reference_variant,
-    validate_mask_preflight,
 )
 from lumen_core.models import (
     Conversation,
@@ -86,7 +77,7 @@ from ..ratelimit import (
     require_client_ip,
 )
 from ..redis_client import get_redis
-from ..services import storage_files
+from ..services import storage_files, upload_pipeline
 from ..volcano_asset_media import (
     VOLCANO_ASSET_IMAGE_KIND,
     VOLCANO_ASSET_IMAGE_MIME,
@@ -148,17 +139,6 @@ async def _resolve_redis_result(value: Awaitable[_T] | _T) -> _T:
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-def _image_mime_type(image: PILImage.Image) -> str:
-    custom_mimetype = getattr(image, "custom_mimetype", None)
-    if isinstance(custom_mimetype, str) and custom_mimetype:
-        return custom_mimetype.lower()
-    image_format = image.format
-    if not isinstance(image_format, str):
-        return ""
-    mime = PILImage.MIME.get(image_format.upper())
-    return mime.lower() if isinstance(mime, str) else ""
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -317,138 +297,6 @@ def _enforce_pixel_limit(
             f"image long side exceeds {max_long_side}px",
             413,
         )
-
-
-def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
-    try:
-        im = PILImage.open(io.BytesIO(data))
-        if verify:
-            im.verify()
-        return im
-    except PILImage.DecompressionBombError as exc:
-        raise _too_many_pixels() from exc
-    except UnidentifiedImageError as exc:
-        raise _http("invalid_image", "unreadable image", 400) from exc
-    except Exception as exc:
-        raise _http("invalid_image", "unreadable image", 400) from exc
-
-
-def _prepare_upload_image(
-    data: bytes,
-    filename: str | None,
-    *,
-    mask_requested: bool = False,
-    reference_size: tuple[int, int] | None = None,
-    allow_large_dimensions: bool = False,
-) -> tuple[
-    bytes,
-    str,
-    int,
-    int,
-    dict[str, Any],
-    bytes,
-    dict[str, Any],
-]:
-    _open_image_bytes(data, verify=True)
-
-    with _open_image_bytes(data) as im:
-        mime = _image_mime_type(im)
-        source_mime = mime
-        uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
-        if mime in ALLOWED_MIME:
-            width, height = im.size
-            _enforce_pixel_limit(
-                (width, height),
-                max_long_side=(
-                    VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
-                    if allow_large_dimensions
-                    else MAX_LONG_SIDE
-                ),
-            )
-        elif mime in NORMALIZABLE_UPLOAD_MIME:
-            data, width, height = _normalize_upload_image_to_jpeg(
-                im,
-                allow_large_dimensions=allow_large_dimensions,
-            )
-            mime = "image/jpeg"
-            uploaded_model_metadata["upload_normalized"] = {
-                "source_mime": source_mime,
-                "target_mime": mime,
-                "reason": "unsupported_upload_mime",
-            }
-        else:
-            raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
-    try:
-        normalized_ref = make_reference_variant(
-            data,
-            max_side=DEFAULT_REFERENCE_MAX_SIDE,
-        )
-        mask_preflight = analyze_mask_image(data, reference_size=reference_size)
-        if mask_requested:
-            validate_mask_preflight(mask_preflight)
-    except MaskPreflightError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
-    except ImageReferenceError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
-
-    metadata = {
-        **uploaded_model_metadata,
-        "mask_preflight": mask_preflight.to_metadata(),
-    }
-    normalized_ref_meta = {
-        "mime": normalized_ref.mime,
-        "width": normalized_ref.width,
-        "height": normalized_ref.height,
-        "sha256": normalized_ref.sha256,
-        "bytes": normalized_ref.bytes,
-        "max_side": normalized_ref.max_side,
-    }
-    return (
-        data,
-        mime,
-        width,
-        height,
-        metadata,
-        normalized_ref.data,
-        normalized_ref_meta,
-    )
-
-
-def _normalize_upload_image_to_jpeg(
-    im: PILImage.Image,
-    *,
-    allow_large_dimensions: bool = False,
-) -> tuple[bytes, int, int]:
-    try:
-        normalized = ImageOps.exif_transpose(im)
-        width, height = normalized.size
-        _enforce_pixel_limit(
-            (width, height),
-            max_long_side=(
-                VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
-                if allow_large_dimensions
-                else MAX_LONG_SIDE
-            ),
-        )
-        if "A" in normalized.getbands() or "transparency" in getattr(
-            normalized, "info", {}
-        ):
-            rgba = normalized.convert("RGBA")
-            flattened = PILImage.new("RGB", rgba.size, (255, 255, 255))
-            flattened.paste(rgba, mask=rgba.getchannel("A"))
-            normalized = flattened
-        elif normalized.mode != "RGB":
-            normalized = normalized.convert("RGB")
-        out = io.BytesIO()
-        normalized.save(out, format="JPEG", quality=95)
-        data = out.getvalue()
-    except PILImage.DecompressionBombError as exc:
-        raise _too_many_pixels() from exc
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
-        raise _http("invalid_image", "unreadable image", 400) from exc
-    if len(data) > MAX_BYTES:
-        raise _http("too_large", f"file exceeds {MAX_BYTES // (1024 * 1024)}MB", 413)
-    return data, width, height
 
 
 def _model_metadata_json_from_upload(
@@ -965,112 +813,113 @@ async def upload_image(
     reference_height: int | None = Form(default=None),
 ) -> ImageOut:
     await _check_upload_rate_limit(user.id)
-
-    # Read all bytes with size cap.
-    buf = bytearray()
-    while True:
-        chunk = await file.read(64 * 1024)
-        if not chunk:
-            break
-        buf.extend(chunk)
-        if len(buf) > MAX_BYTES:
-            raise _http(
-                "too_large", f"file exceeds {MAX_BYTES // (1024 * 1024)}MB", 413
+    try:
+        _ensure_storage_free_space(0)
+        async with upload_pipeline.stage_upload(
+            file,
+            storage_root=settings.storage_root,
+            max_bytes=MAX_BYTES,
+        ) as staged:
+            _ensure_storage_free_space(staged.size_bytes)
+            reference_size = (
+                (reference_width, reference_height)
+                if reference_width is not None and reference_height is not None
+                else None
+            )
+            prepared = await asyncio.to_thread(
+                upload_pipeline.prepare_image_upload,
+                staged,
+                file.filename,
+                allowed_mime=ALLOWED_MIME,
+                normalizable_mime=NORMALIZABLE_UPLOAD_MIME,
+                max_bytes=MAX_BYTES,
+                max_pixels=MAX_IMAGE_PIXELS,
+                max_long_side=(
+                    VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+                    if _upload_allows_large_dimensions(purpose)
+                    else MAX_LONG_SIDE
+                ),
+                mask_requested=_upload_requests_mask_preflight(
+                    purpose,
+                    file.filename,
+                ),
+                reference_size=reference_size,
+                metadata_reader=_model_metadata_json_from_upload,
+            )
+            _ensure_storage_free_space(
+                prepared.size_bytes
+                + int(prepared.normalized_ref_meta["bytes"])
             )
 
-    if not buf:
-        raise _http("empty_file", "empty file", 400)
+            img = Image(
+                user_id=user.id,
+                source=ImageSource.UPLOADED.value,
+                storage_key="",
+                mime=prepared.mime,
+                width=prepared.width,
+                height=prepared.height,
+                size_bytes=prepared.size_bytes,
+                sha256=prepared.sha256,
+                blurhash=None,
+                visibility=ImageVisibility.PRIVATE.value,
+            )
+            db.add(img)
+            await db.flush()
 
-    data = bytes(buf)
-    _ensure_storage_free_space(len(data))
-    reference_size = (
-        (reference_width, reference_height)
-        if reference_width is not None and reference_height is not None
-        else None
-    )
-    (
-        data,
-        mime,
-        width,
-        height,
-        upload_metadata,
-        normalized_ref,
-        normalized_ref_meta,
-    ) = await asyncio.to_thread(
-        _prepare_upload_image,
-        data,
-        file.filename,
-        mask_requested=_upload_requests_mask_preflight(purpose, file.filename),
-        reference_size=reference_size,
-        allow_large_dimensions=_upload_allows_large_dimensions(purpose),
-    )
-    _ensure_storage_free_space(len(data) + len(normalized_ref))
-    buf = bytearray(data)
+            ext = EXT_BY_MIME[prepared.mime]
+            upload_metadata = prepared.metadata
+            model_payload = upload_metadata.get("model_library")
+            if isinstance(model_payload, dict):
+                upload_metadata["suggested_filename"] = model_image_filename(
+                    image_id=img.id,
+                    ext=ext,
+                    age_segment=model_payload.get("age_segment"),
+                    gender=model_payload.get("gender"),
+                    appearance_direction=model_payload.get("appearance_direction"),
+                    style_tags=model_payload.get("style_tags") or [],
+                )
+            key = _key_for_upload(user.id, img.id, ext)
+            normalized_key = _key_for_normalized_ref(user.id, img.id)
+            upload_metadata["normalized_ref"] = {
+                **prepared.normalized_ref_meta,
+                "storage_key": normalized_key,
+            }
+            img.metadata_jsonb = upload_metadata
+            img.storage_key = key
 
-    # hash
-    sha = hashlib.sha256(bytes(buf)).hexdigest()
-
-    # blurhash (best effort; lib is in worker only — we skip here and leave None)
-    blurhash: str | None = None
-
-    # Build image row.
-    img = Image(
-        user_id=user.id,
-        source=ImageSource.UPLOADED.value,
-        storage_key="",  # filled after we know image_id
-        mime=mime,
-        width=width,
-        height=height,
-        size_bytes=len(buf),
-        sha256=sha,
-        blurhash=blurhash,
-        visibility=ImageVisibility.PRIVATE.value,
-    )
-    db.add(img)
-    await db.flush()
-
-    ext = EXT_BY_MIME[mime]
-    model_payload = upload_metadata.get("model_library")
-    if isinstance(model_payload, dict):
-        upload_metadata["suggested_filename"] = model_image_filename(
-            image_id=img.id,
-            ext=ext,
-            age_segment=model_payload.get("age_segment"),
-            gender=model_payload.get("gender"),
-            appearance_direction=model_payload.get("appearance_direction"),
-            style_tags=model_payload.get("style_tags") or [],
-        )
-    key = _key_for_upload(user.id, img.id, ext)
-    normalized_key = _key_for_normalized_ref(user.id, img.id)
-    upload_metadata["normalized_ref"] = {
-        **normalized_ref_meta,
-        "storage_key": normalized_key,
-    }
-    img.metadata_jsonb = upload_metadata
-    img.storage_key = key
-
-    # Write to disk.
-    path = _fs_path(key)
-    normalized_path = _fs_path(normalized_key)
-    written_paths: list[Path] = []
-    try:
-        await asyncio.to_thread(_write_new_file_atomic, path, bytes(buf))
-        written_paths.append(path)
-        await asyncio.to_thread(_write_new_file_atomic, normalized_path, normalized_ref)
-        written_paths.append(normalized_path)
-        await db.commit()
-    except FileExistsError as exc:
-        await db.rollback()
-        for written_path in reversed(written_paths):
-            await asyncio.to_thread(_unlink_file_if_exists, written_path)
-        raise _http(
-            "storage_conflict", "image storage key already exists", 409
-        ) from exc
-    except Exception:
-        await db.rollback()
-        for written_path in reversed(written_paths):
-            await asyncio.to_thread(_unlink_file_if_exists, written_path)
-        raise
+            path = _fs_path(key)
+            normalized_path = _fs_path(normalized_key)
+            written_paths: list[Path] = []
+            try:
+                await asyncio.to_thread(
+                    upload_pipeline.publish_temp_file,
+                    prepared.original_path,
+                    path,
+                )
+                written_paths.append(path)
+                await asyncio.to_thread(
+                    upload_pipeline.publish_temp_file,
+                    prepared.normalized_ref_path,
+                    normalized_path,
+                )
+                written_paths.append(normalized_path)
+                await db.commit()
+            except FileExistsError as exc:
+                await db.rollback()
+                for written_path in reversed(written_paths):
+                    await asyncio.to_thread(_unlink_file_if_exists, written_path)
+                raise _http(
+                    "storage_conflict",
+                    "image storage key already exists",
+                    409,
+                ) from exc
+            except Exception:
+                await db.rollback()
+                for written_path in reversed(written_paths):
+                    await asyncio.to_thread(_unlink_file_if_exists, written_path)
+                raise
+    except upload_pipeline.UploadPipelineError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
     await db.refresh(img)
 
     return await _image_out(db, img)

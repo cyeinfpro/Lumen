@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,14 +10,16 @@ from app.config import BYOK_DEV_MASTER_SECRET, Settings, _settings_env_files
 from lumen_core.runtime_settings import validate_providers
 
 
-def _prod_kwargs() -> dict[str, str]:
+def _prod_kwargs() -> dict[str, Any]:
     return {
         "app_env": "prod",
+        "public_base_url": "https://lumen.example.com",
         "session_secret": "x" * 32,
         "byok_api_key_master_secret": "b" * 32,
         "database_url": "postgresql+asyncpg://lumen_prod:secret@localhost:5432/lumen",
         "redis_url": "redis://:redis-prod-password@localhost:6379/0",
-        "image_job_base_url": "https://image-jobs.example.net",
+        "image_channel": "auto",
+        "image_job_base_url": "https://image-job.internal",
         "image_proxy_secret": "i" * 32,
         "smtp_host": "smtp.example.com",
         "smtp_from_email": "noreply@example.com",
@@ -174,9 +178,162 @@ def test_non_dev_rejects_default_redis_password() -> None:
 
 def test_non_dev_rejects_placeholder_image_job_base_url() -> None:
     kwargs = _prod_kwargs()
+    kwargs["image_channel"] = "image_jobs_only"
     kwargs["image_job_base_url"] = "https://image-job.example.com"
 
     with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+@pytest.mark.parametrize("image_channel", ["stream_only", "auto"])
+@pytest.mark.parametrize(
+    "image_job_base_url",
+    ["", "https://image-job.example.com"],
+)
+def test_non_dev_optional_image_job_channels_allow_unconfigured_sidecar(
+    image_channel: str,
+    image_job_base_url: str,
+) -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_channel"] = image_channel
+    kwargs["image_job_base_url"] = image_job_base_url
+
+    settings = Settings(**kwargs)
+
+    assert settings.image_channel == image_channel
+
+
+@pytest.mark.parametrize(
+    "image_job_base_url",
+    [
+        "",
+        "image-job.internal",
+        "ftp://image-job.internal",
+        "https:///v1",
+        "https://image job.internal",
+        "https://image-job.example.com",
+        "https://image-jobs.example.net/v1",
+        "https://user:secret@image-job.internal",
+        "https://image-job.internal?token=secret",
+        "https://image-job.internal#fragment",
+    ],
+)
+def test_non_dev_image_jobs_only_requires_valid_non_placeholder_url(
+    image_job_base_url: str,
+) -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_channel"] = "image_jobs_only"
+    kwargs["image_job_base_url"] = image_job_base_url
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_image_jobs_only_accepts_http_url_with_host() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_channel"] = "image_jobs_only"
+    kwargs["image_job_base_url"] = "http://image-job.internal/v1/"
+
+    settings = Settings(**kwargs)
+
+    assert settings.image_job_base_url == "http://image-job.internal/v1/"
+
+
+def test_hsts_settings_use_shared_lumen_environment_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUMEN_HSTS_ENABLED", "false")
+    monkeypatch.setenv("LUMEN_HSTS_INCLUDE_SUBDOMAINS", "true")
+
+    settings = Settings(app_env="dev", _env_file=None)
+
+    assert settings.hsts_enabled is False
+    assert settings.hsts_include_subdomains is True
+
+
+@pytest.mark.parametrize(
+    "public_base_url",
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://10.0.0.20:3000",
+        "http://172.16.10.20:3000",
+        "http://192.168.10.20:3000",
+        "http://169.254.10.20:3000",
+        "http://[::1]:3000",
+        "http://[fc00::20]:3000",
+        "http://[fe80::20]:3000",
+        "http://[::ffff:192.168.10.20]:3000",
+    ],
+)
+def test_production_insecure_cookie_allows_only_explicit_private_http(
+    public_base_url: str,
+) -> None:
+    kwargs = _prod_kwargs()
+    kwargs.update(
+        public_base_url=public_base_url,
+        session_cookie_secure=False,
+        hsts_enabled=False,
+    )
+
+    settings = Settings(**kwargs)
+
+    assert settings.session_cookie_secure is False
+    assert settings.hsts_enabled is False
+
+
+@pytest.mark.parametrize(
+    "public_base_url",
+    [
+        "http://lumen.example.com",
+        "http://8.8.8.8:3000",
+        "http://192.0.2.1:3000",
+        "http://0.0.0.0:3000",
+    ],
+)
+def test_production_insecure_cookie_rejects_public_or_non_private_http(
+    public_base_url: str,
+) -> None:
+    kwargs = _prod_kwargs()
+    kwargs.update(
+        public_base_url=public_base_url,
+        session_cookie_secure=False,
+        hsts_enabled=False,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="loopback, private, or link-local",
+    ):
+        Settings(**kwargs)
+
+
+def test_production_insecure_cookie_requires_explicit_public_base_url() -> None:
+    kwargs = _prod_kwargs()
+    kwargs.pop("public_base_url")
+    kwargs.update(session_cookie_secure=False, hsts_enabled=False)
+
+    with pytest.raises(ValidationError, match="must be explicitly configured"):
+        Settings(**kwargs)
+
+
+def test_production_https_rejects_non_secure_cookie() -> None:
+    kwargs = _prod_kwargs()
+    kwargs.update(session_cookie_secure=False, hsts_enabled=False)
+
+    with pytest.raises(ValidationError, match="HTTPS requires Secure cookies"):
+        Settings(**kwargs)
+
+
+def test_production_http_compatibility_requires_hsts_disabled() -> None:
+    kwargs = _prod_kwargs()
+    kwargs.update(
+        public_base_url="http://10.0.0.20:3000",
+        session_cookie_secure=False,
+        hsts_enabled=True,
+    )
+
+    with pytest.raises(ValidationError, match="LUMEN_HSTS_ENABLED must be false"):
         Settings(**kwargs)
 
 

@@ -39,7 +39,17 @@ GET  /images/temp/...
 GET  /refs/...
 ```
 
-The caller must send the same `Authorization: Bearer <UPSTREAM_API_KEY>` when creating and polling a job.
+Lumen authenticates to the sidecar with
+`Authorization: Bearer <IMAGE_JOB_SIDECAR_TOKEN>`. Job creation also sends the
+provider credential in `X-Lumen-Upstream-Authorization`; the sidecar stores and
+forwards that value only to the configured upstream. The two credentials must
+be generated and rotated independently.
+
+On the Lumen side, `stream_only` does not require this service. `auto` checks
+the sidecar URL and token only when a provider with image jobs enabled is
+selected, and falls back to stream if the configuration is unavailable.
+`image_jobs_only` treats missing, malformed, or placeholder sidecar
+configuration as a fatal configuration error.
 
 Each upstream POST carries a stable `Idempotency-Key` derived from the persisted
 `job_id`. The service does not assume that an upstream honors this key unless

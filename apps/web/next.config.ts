@@ -90,12 +90,6 @@ const scriptSrc = isDev
   : "'self' 'unsafe-inline'";
 const upgradeInsecureRequests =
   !isDev && process.env.LUMEN_UPGRADE_INSECURE_REQUESTS === "true";
-const hsts = unique([
-  "max-age=31536000",
-  process.env.LUMEN_HSTS_INCLUDE_SUBDOMAINS === "true"
-    ? "includeSubDomains"
-    : null,
-]).join("; ");
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -139,11 +133,6 @@ const nextConfig: NextConfig = {
         value: "camera=(), microphone=(), geolocation=()",
       },
     ];
-    if (!isDev) {
-      // includeSubDomains 影响所有子域，默认关闭；确认全站子域均 HTTPS 后设置
-      // LUMEN_HSTS_INCLUDE_SUBDOMAINS=true 再启用。
-      headers.push({ key: "Strict-Transport-Security", value: hsts });
-    }
     return [
       {
         source: "/:path*",
