@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
+
+from ..config import validate_image_job_base_url
 
 _UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
 
@@ -58,30 +60,19 @@ def _image_job_status_url(base: str, job_id: str) -> str:
 
 def _validate_image_job_base_url(raw_base: str) -> str:
     facade = _facade()
-    base = (raw_base or "").strip().rstrip("/")
-    parts = urlsplit(base)
-    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+    try:
+        return validate_image_job_base_url(raw_base)
+    except ValueError as exc:
         raise facade.UpstreamError(
-            "image job base URL must be an http or https URL with a hostname",
-            status_code=400,
-            error_code=facade.EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    if parts.username or parts.password:
-        raise facade.UpstreamError(
-            "image job base URL must not include credentials",
-            status_code=400,
-            error_code=facade.EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    if parts.query or parts.fragment:
-        raise facade.UpstreamError(
-            "image job base URL must not include query or fragment",
-            status_code=400,
-            error_code=facade.EC.INVALID_VALUE.value,
-            payload={"base_url": raw_base},
-        )
-    return base
+            f"image job configuration unavailable: {exc}",
+            status_code=503,
+            error_code=facade.EC.SERVICE_UNAVAILABLE.value,
+            payload={
+                "path": "image-jobs",
+                "configuration": "sidecar_url",
+                "reason": "configuration_unavailable",
+            },
+        ) from None
 
 
 __all__ = [

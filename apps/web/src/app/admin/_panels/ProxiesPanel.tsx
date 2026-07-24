@@ -259,7 +259,7 @@ export function ProxiesPanel() {
       {/* 全局参数 */}
       <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center shrink-0">
             <Network className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
           <div className="min-w-0">
@@ -559,7 +559,7 @@ function ProxyList({
         {[1, 2].map((index) => (
           <div
             key={index}
-            className="h-16 bg-white/5 rounded-[var(--radius-card)] animate-pulse"
+            className="h-16 bg-[var(--bg-2)] rounded-[var(--radius-card)] animate-pulse"
           />
         ))}
       </div>
@@ -624,7 +624,7 @@ function ProxyViewRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="type-body-sm font-medium text-[var(--fg-0)]">{proxy.name}</span>
-            <span className="type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
+            <span className="type-overline px-1.5 py-0.5 rounded bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
               {proxy.type}
             </span>
             {proxy.enabled ? (
@@ -632,7 +632,7 @@ function ProxyViewRow({
                 <Power className="w-2.5 h-2.5" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-3)] border border-[var(--border)]">
+              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-[var(--bg-2)] text-[var(--fg-3)] border border-[var(--border)]">
                 <PowerOff className="w-2.5 h-2.5" /> 禁用
               </span>
             )}
@@ -742,7 +742,7 @@ function ProxyEditRow({
                 size="sm"
                 onClick={() => setShowPwd((s) => !s)}
                 aria-label={showPwd ? "隐藏" : "显示"}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-white/5 hover:bg-white/10"
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-[var(--bg-2)] hover:bg-[var(--bg-3)]"
               >
                 {showPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               </IconButton>
@@ -768,7 +768,7 @@ function ProxyEditRow({
             className={
               draft.enabled
                 ? "bg-success-soft text-success border-success-border"
-                : "bg-white/5 text-[var(--fg-2)] border-[var(--border)]"
+                : "bg-[var(--bg-2)] text-[var(--fg-2)] border-[var(--border)]"
             }
           >
             {draft.enabled ? "启用" : "禁用"}

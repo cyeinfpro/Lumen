@@ -142,7 +142,7 @@ function DraftCardSummary({
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-white/[0.02]"
+      className="flex w-full items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-[var(--bg-3)]"
     >
       <span className="shrink-0 text-[var(--fg-2)]">
         <GripVertical className="h-3.5 w-3.5" />
@@ -372,7 +372,7 @@ function PurposeField({
                 "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (checked
                   ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                  : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
+                  : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
               }
             >
               <span
@@ -510,7 +510,7 @@ function DraftToggleField({
             ? infoTone
               ? "border-info-border bg-info-soft text-info hover:bg-info/20"
               : "border-success-border bg-success-soft text-success hover:bg-success/20"
-            : "border-[var(--border-strong)] bg-white/10 text-[var(--fg-2)] hover:bg-white/15")
+            : "border-[var(--border-strong)] bg-[var(--bg-3)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
         }
       >
         {enabled ? enabledIcon : disabledIcon}
@@ -535,7 +535,7 @@ function DraftImageJobFields({
   const endpoint = draft.image_jobs_endpoint ?? "auto";
   const endpointSelected = endpoint !== "auto";
   return (
-    <div className="grid grid-cols-1 gap-4 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.02] p-3 md:grid-cols-2">
+    <div className="grid grid-cols-1 gap-4 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3 md:grid-cols-2">
       <div className="flex flex-col">
         <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
           接口偏好
@@ -549,7 +549,7 @@ function DraftImageJobFields({
                 "auto",
             })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
         >
           <option value="auto">自动（按健康度自适应）</option>
           <option value="generations">
@@ -593,7 +593,7 @@ function EndpointLockField({
           "mt-2 inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-3 text-xs transition-colors sm:h-8 " +
           (draft.image_jobs_endpoint_lock
             ? "border-warning-border bg-warning-soft text-warning hover:bg-warning/20"
-            : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-2)] hover:bg-white/[0.06]")
+            : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
         }
       >
         {draft.image_jobs_endpoint_lock
@@ -629,7 +629,7 @@ function ProviderJobOverrides({
           onChange={(event) =>
             onUpdate({ image_jobs_base_url: event.target.value })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:border-info-border focus:outline-none sm:h-9"
         />
         <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
           支持给不同供应商指定独立的图片任务旁路服务，例如多区域部署时按供应商路由。
@@ -647,7 +647,7 @@ function ProviderJobOverrides({
                 (event.target.value as "url" | "file") || "url",
             })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
         >
           <option value="url">链接（JSON image_url）</option>
           <option value="file">文件（multipart image[]）</option>
@@ -681,7 +681,7 @@ function DraftCardActions({
         type="button"
         onClick={() => onMove(-1)}
         disabled={index === 0}
-        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/5 px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-white/10 disabled:opacity-25 sm:h-7"
+        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
       >
         <ChevronUp className="h-3 w-3" /> 上移
       </button>
@@ -689,7 +689,7 @@ function DraftCardActions({
         type="button"
         onClick={() => onMove(1)}
         disabled={index === total - 1}
-        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/5 px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-white/10 disabled:opacity-25 sm:h-7"
+        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
       >
         <ChevronDown className="h-3 w-3" /> 下移
       </button>

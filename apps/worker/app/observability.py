@@ -36,6 +36,7 @@ _SENSITIVE_HEADERS = {
     "x-csrf-token",
     "x-api-key",
     "x-auth-token",
+    "x-lumen-upstream-authorization",
 }
 _SENSITIVE_KEY_HINTS = (
     "password",
@@ -228,6 +229,13 @@ completion_cancel_check_errors_total = _metric(
     Counter,
     "lumen_completion_cancel_check_errors_total",
     "Redis errors while checking chat completion cancellation.",
+)
+
+task_reconcile_lease_unknown_total = _metric(
+    Counter,
+    "lumen_task_reconcile_lease_unknown_total",
+    "Task reconciler lease reads that could not determine ownership.",
+    labelnames=("kind",),
 )
 
 # ---- 账号级 image 调度指标（多 provider = 多 OAuth 账号 → 每号一组时序） ----
@@ -521,6 +529,7 @@ __all__ = [
     "billing_rate_limit_block_total",
     "billing_idempotency_replay_total",
     "completion_cancel_check_errors_total",
+    "task_reconcile_lease_unknown_total",
     "safe_outcome",
     "account_image_state",
     "account_image_calls_total",

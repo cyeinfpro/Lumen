@@ -22,7 +22,11 @@ from lumen_core.runtime_settings import get_spec
 from sqlalchemy import text
 
 from .arq_pool import close_arq_pool, get_arq_pool
-from .config import settings
+from .config import (
+    effective_session_cookie_secure,
+    production_http_compatibility_mode,
+    settings,
+)
 from .db import SessionLocal, engine
 from .observability import (
     http_errors_total,
@@ -30,7 +34,7 @@ from .observability import (
     init_sentry,
     setup_prometheus,
 )
-from .ratelimit import _is_trusted_proxy
+from .ratelimit import user_rate_limits_effective, user_rate_limits_effective_reason
 from .redis_client import get_redis
 from .runtime_settings import (
     get_setting,
@@ -72,20 +76,7 @@ _SECURITY_HEADERS = (
         b"default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     ),
 )
-_HSTS_HEADER = (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
-
-
-def _request_is_https(scope) -> bool:  # type: ignore[no-untyped-def]
-    if scope.get("scheme") == "https":
-        return True
-    remote = scope.get("client")
-    remote_host = remote[0] if remote else None
-    if not remote_host or not _is_trusted_proxy(remote_host):
-        return False
-    for name, value in scope.get("headers", []):
-        if name == b"x-forwarded-proto":
-            return value.decode("latin-1").split(",", 1)[0].strip().lower() == "https"
-    return False
+_SESSION_COOKIE_SECURE_HEADER = b"x-lumen-session-cookie-secure"
 
 
 class _SecurityHeadersMiddleware:
@@ -110,8 +101,16 @@ class _SecurityHeadersMiddleware:
                 for name, value in _SECURITY_HEADERS:
                     if name not in existing:
                         headers.append((name, value))
-                if _request_is_https(scope) and _HSTS_HEADER[0] not in existing:
-                    headers.append(_HSTS_HEADER)
+                if (
+                    scope.get("path", "").startswith("/auth/")
+                    and _SESSION_COOKIE_SECURE_HEADER not in existing
+                ):
+                    headers.append(
+                        (
+                            _SESSION_COOKIE_SECURE_HEADER,
+                            b"1" if effective_session_cookie_secure(settings) else b"0",
+                        )
+                    )
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
@@ -377,6 +376,30 @@ async def _check_alembic_head() -> None:
         logger.warning(msg)
 
 
+def _log_rate_limit_status() -> None:
+    configured = bool(getattr(settings, "user_rate_limit_enabled", False))
+    effective = user_rate_limits_effective()
+    logger.info(
+        "rate limiting status env=%s configured_user=%s effective_user=%s "
+        "effective_reason=%s always_on_security=true",
+        settings.app_env,
+        configured,
+        effective,
+        user_rate_limits_effective_reason(),
+    )
+
+
+def _log_transport_security_status() -> None:
+    if not production_http_compatibility_mode(settings):
+        return
+    logger.critical(
+        "SECURITY WARNING: PRODUCTION HTTP COMPATIBILITY MODE ACTIVE; "
+        "session cookies are not Secure, HSTS is disabled, and PUBLIC_BASE_URL=%s. "
+        "Use only on an isolated loopback/private/link-local network.",
+        settings.public_base_url,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 观测层初始化（dsn/endpoint 为空即 no-op，不影响本地 dev）
@@ -392,20 +415,10 @@ async def lifespan(app: FastAPI):
     )
     # Alembic 启动门禁：prod 必须在 head；非 prod 仅 warn；测试期通过 env 跳过。
     await _check_alembic_head()
-    # 限流可观测性：明确记录限流是否启用，避免生产忘开等于无限流。
-    is_rl_enabled = bool(getattr(settings, "user_rate_limit_enabled", False))
-    if _is_prod_env() and not is_rl_enabled:
-        logger.warning(
-            "PRODUCTION MODE: user_rate_limit_enabled=False; "
-            "per-user chat/upload throttles are disabled. Always-on security "
-            "limiters for auth, reset, public previews, and bot tokens remain enforced.",
-        )
-    else:
-        logger.info(
-            "rate limiting status env=%s user_rate_limit_enabled=%s",
-            settings.app_env,
-            is_rl_enabled,
-        )
+    # Log configured and effective values separately. Production/test enforce
+    # per-user limits even when the development convenience flag is false.
+    _log_rate_limit_status()
+    _log_transport_security_status()
     try:
         async with SessionLocal() as session:
             changed = await migrate_image_primary_route(session)
@@ -481,6 +494,7 @@ def build_app() -> FastAPI:
             "Idempotency-Key",
             "Last-Event-ID",
         ],
+        expose_headers=["X-Lumen-Session-Cookie-Secure"],
     )
     app.add_middleware(_BodySizeLimitMiddleware)
     app.add_middleware(_NavFeatureGuardMiddleware)

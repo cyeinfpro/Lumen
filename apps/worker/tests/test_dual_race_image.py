@@ -490,7 +490,11 @@ async def test_dispatch_dual_race_uses_image_jobs_when_selected_provider_support
 
     image_iter = upstream._run_image_once_for_provider(
         action="generate",
-        provider=SimpleNamespace(name="jobs", image_jobs_enabled=True),
+        provider=SimpleNamespace(
+            name="jobs",
+            image_jobs_enabled=True,
+            image_jobs_base_url="https://image-job.test.internal",
+        ),
         channel="auto",
         engine="dual_race",
         prompt="hi",
@@ -640,8 +644,16 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_wrapped_failur
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     providers = [
-        SimpleNamespace(name="acc1", image_jobs_enabled=True),
-        SimpleNamespace(name="acc2", image_jobs_enabled=True),
+        SimpleNamespace(
+            name="acc1",
+            image_jobs_enabled=True,
+            image_jobs_base_url="https://image-job.test.internal",
+        ),
+        SimpleNamespace(
+            name="acc2",
+            image_jobs_enabled=True,
+            image_jobs_base_url="https://image-job.test.internal",
+        ),
     ]
     calls: list[str] = []
 
@@ -707,8 +719,16 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_safety_error(
     error_code: str,
 ) -> None:
     providers = [
-        SimpleNamespace(name="acc1", image_jobs_enabled=True),
-        SimpleNamespace(name="acc2", image_jobs_enabled=True),
+        SimpleNamespace(
+            name="acc1",
+            image_jobs_enabled=True,
+            image_jobs_base_url="https://image-job.test.internal",
+        ),
+        SimpleNamespace(
+            name="acc2",
+            image_jobs_enabled=True,
+            image_jobs_base_url="https://image-job.test.internal",
+        ),
     ]
     calls: list[str] = []
 

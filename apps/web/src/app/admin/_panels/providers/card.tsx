@@ -135,10 +135,10 @@ function ProviderCardHeader({
           onClick={() => onToggleEnabled(provider.name, !provider.enabled)}
           disabled={quickSaving}
           className={
-            "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border transition-colors " +
+            "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border transition-colors max-sm:min-h-11 max-sm:min-w-11 " +
             (provider.enabled
               ? "border-success-border bg-success-soft text-success hover:bg-success/20"
-              : "border-[var(--border-strong)] bg-white/10 text-[var(--fg-2)] hover:bg-white/15")
+              : "border-[var(--border-strong)] bg-[var(--bg-3)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
           }
           aria-label={provider.enabled ? "停用供应商" : "启用供应商"}
           title={provider.enabled ? "停用供应商" : "启用供应商"}
@@ -153,7 +153,7 @@ function ProviderCardHeader({
           type="button"
           onClick={() => onProbeSingle(provider.name)}
           disabled={probing || !provider.enabled}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-white/5 text-[var(--fg-2)] opacity-0 transition-all hover:bg-white/10 focus:opacity-100 group-hover:opacity-100 disabled:opacity-30"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] opacity-0 transition-all hover:bg-[var(--bg-3)] focus:opacity-100 group-hover:opacity-100 disabled:opacity-30 max-sm:min-h-11 max-sm:min-w-11"
           aria-label="探活此供应商"
           title="探活此供应商"
         >
@@ -189,7 +189,7 @@ function ProviderPurposeSelector({
               "inline-flex items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
               (checked
                 ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
+                : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
             }
             title={
               disabled && checked

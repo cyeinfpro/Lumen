@@ -51,10 +51,10 @@ function TaskItemView({
       aria-live="polite"
       className={cn(
         "relative flex items-center gap-2.5 rounded-[var(--radius-card)] border p-2 transition-all sm:gap-3",
-        "active:scale-[0.98] active:bg-white/5",
+        "active:scale-[0.98] active:bg-[var(--bg-3)]",
         presentation.failed
           ? "border-danger-border bg-danger-soft pb-8"
-          : "border-[var(--border)] bg-white/[0.03]",
+          : "border-[var(--border)] bg-[var(--bg-2)]",
         presentation.showRecoveryActions &&
           !presentation.failed &&
           "pb-8",
@@ -117,7 +117,7 @@ function TaskThumbnail({
         <div
           className={cn(
             "flex h-full w-full items-center justify-center",
-            presentation.running && "animate-pulse bg-white/5",
+            presentation.running && "animate-pulse bg-[var(--bg-2)]",
           )}
         >
           {presentation.failed && (
@@ -282,7 +282,7 @@ function IconBtn({
       type="button"
       {...rest}
       className={cn(
-        "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-white/10 hover:text-[var(--fg-0)] active:scale-[0.95] sm:h-7 sm:w-7",
+        "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:scale-[0.95] sm:h-7 sm:w-7",
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         className,
       )}
@@ -323,7 +323,7 @@ function ProgressRing({
         stroke="currentColor"
         strokeWidth={stroke}
         fill="none"
-        className="text-white/15"
+        className="text-[var(--border-strong)]"
       />
       <circle
         cx={size / 2}

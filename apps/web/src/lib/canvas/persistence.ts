@@ -13,10 +13,14 @@ const DRAFT_STORE = "drafts";
 const SAVE_BATCH_STORE = "save-batches";
 const CANVAS_ID_INDEX = "canvas_id";
 const EMERGENCY_DRAFT_STORAGE_KEY = "lumen:canvas-emergency-drafts:v1";
+const CANVAS_OWNER_STORAGE_KEY = "lumen:canvas-owner:v1";
 const EMERGENCY_DRAFT_VERSION = 1;
 const MAX_EMERGENCY_DRAFTS = 4;
 const MAX_EMERGENCY_DRAFT_LENGTH = 512 * 1024;
 const MAX_EMERGENCY_DRAFT_STORAGE_LENGTH = 2 * 1024 * 1024;
+let privateCanvasPersistenceEpoch = 0;
+let privateCanvasActivationGeneration = 0;
+let privateCanvasPersistenceEnabled = false;
 const CANVAS_EDGE_ROLES = new Set([
   "reference",
   "subject",
@@ -98,6 +102,7 @@ export function getCanvasEmergencyDraft(
   canvasId: string,
   clientId?: string,
 ): CanvasEmergencyDraft | null {
+  if (!privateCanvasPersistenceEnabled) return null;
   try {
     const storage = localStorageOrNull();
     if (!storage) return null;
@@ -119,6 +124,7 @@ export function getCanvasEmergencyDraft(
 export function putCanvasEmergencyDraft(
   draft: CanvasEmergencyDraft,
 ): boolean {
+  if (!privateCanvasPersistenceEnabled) return false;
   try {
     if (!isCanvasEmergencyDraft(draft)) return false;
     const storage = localStorageOrNull();
@@ -182,6 +188,77 @@ export function deleteCanvasEmergencyDraft(
   }
 }
 
+async function clearPrivateCanvasStorage(): Promise<void> {
+  try {
+    localStorageOrNull()?.removeItem(EMERGENCY_DRAFT_STORAGE_KEY);
+  } catch {
+    // Private-state cleanup is best effort in restricted storage contexts.
+  }
+  if (typeof indexedDB === "undefined") return;
+  try {
+    const db = await openDatabase();
+    try {
+      const transaction = db.transaction(
+        [DRAFT_STORE, SAVE_BATCH_STORE],
+        "readwrite",
+      );
+      transaction.objectStore(DRAFT_STORE).clear();
+      transaction.objectStore(SAVE_BATCH_STORE).clear();
+      await transactionDone(transaction);
+    } finally {
+      db.close();
+    }
+  } catch {
+    // A navigation or storage policy may close IndexedDB during invalidation.
+  }
+}
+
+export async function clearPrivateCanvasPersistence(): Promise<void> {
+  privateCanvasActivationGeneration += 1;
+  privateCanvasPersistenceEpoch += 1;
+  privateCanvasPersistenceEnabled = false;
+  await clearPrivateCanvasStorage();
+}
+
+export function resumePrivateCanvasPersistence(): void {
+  privateCanvasActivationGeneration += 1;
+  privateCanvasPersistenceEpoch += 1;
+  privateCanvasPersistenceEnabled = true;
+}
+
+export async function activatePrivateCanvasPersistence(
+  userId: string,
+): Promise<void> {
+  const normalizedUserId = userId.trim();
+  if (!normalizedUserId) {
+    await clearPrivateCanvasPersistence();
+    return;
+  }
+  const activationGeneration = privateCanvasActivationGeneration + 1;
+  privateCanvasActivationGeneration = activationGeneration;
+  privateCanvasPersistenceEpoch += 1;
+  privateCanvasPersistenceEnabled = false;
+  const storage = localStorageOrNull();
+  let previousOwner: string | null = null;
+  try {
+    previousOwner = storage?.getItem(CANVAS_OWNER_STORAGE_KEY)?.trim() || null;
+  } catch {
+    previousOwner = null;
+  }
+  if (previousOwner !== normalizedUserId) {
+    await clearPrivateCanvasStorage();
+  }
+  if (activationGeneration !== privateCanvasActivationGeneration) return;
+  try {
+    storage?.setItem(CANVAS_OWNER_STORAGE_KEY, normalizedUserId);
+  } catch {
+    // The in-memory fence still protects this page when storage is restricted.
+  }
+  if (activationGeneration !== privateCanvasActivationGeneration) return;
+  privateCanvasPersistenceEpoch += 1;
+  privateCanvasPersistenceEnabled = true;
+}
+
 export function canvasSaveBatchMatchesPending(
   batch: Pick<PersistedCanvasSaveBatch, "base_revision" | "operations">,
   revision: number,
@@ -221,6 +298,7 @@ export async function getCanvasDraft(
   canvasId: string,
   clientId: string,
 ): Promise<CanvasDraft | null> {
+  if (!privateCanvasPersistenceEnabled) return null;
   const db = await openDatabase();
   try {
     const value = await requestResult<unknown>(
@@ -237,6 +315,7 @@ export async function getCanvasDraft(
 export async function listCanvasDrafts(
   canvasId: string,
 ): Promise<CanvasDraft[]> {
+  if (!privateCanvasPersistenceEnabled) return [];
   const db = await openDatabase();
   try {
     const drafts = await requestResult<unknown[]>(
@@ -259,8 +338,10 @@ export async function listCanvasDrafts(
 export async function putCanvasDraft(
   draft: Omit<CanvasDraft, "key">,
 ): Promise<void> {
+  const epoch = privateCanvasPersistenceEpoch;
   const db = await openDatabase();
   try {
+    assertPrivateCanvasPersistenceEpoch(epoch);
     const transaction = db.transaction(DRAFT_STORE, "readwrite");
     transaction.objectStore(DRAFT_STORE).put({
       ...draft,
@@ -292,6 +373,7 @@ export async function getCanvasSaveBatch(
   canvasId: string,
   clientId: string,
 ): Promise<PersistedCanvasSaveBatch | null> {
+  if (!privateCanvasPersistenceEnabled) return null;
   const db = await openDatabase();
   try {
     const value = await requestResult<unknown>(
@@ -308,8 +390,10 @@ export async function getCanvasSaveBatch(
 export async function putCanvasSaveBatch(
   batch: Omit<PersistedCanvasSaveBatch, "key">,
 ): Promise<void> {
+  const epoch = privateCanvasPersistenceEpoch;
   const db = await openDatabase();
   try {
+    assertPrivateCanvasPersistenceEpoch(epoch);
     const transaction = db.transaction(SAVE_BATCH_STORE, "readwrite");
     transaction.objectStore(SAVE_BATCH_STORE).put({
       ...batch,
@@ -399,6 +483,18 @@ function jsonValueEqual(left: unknown, right: unknown): boolean {
         jsonValueEqual(leftRecord[key], rightRecord[key]),
     )
   );
+}
+
+function assertPrivateCanvasPersistenceEpoch(epoch: number): void {
+  if (
+    !privateCanvasPersistenceEnabled ||
+    epoch !== privateCanvasPersistenceEpoch
+  ) {
+    throw new DOMException(
+      "Canvas persistence was invalidated",
+      "AbortError",
+    );
+  }
 }
 
 function localStorageOrNull(): Storage | null {

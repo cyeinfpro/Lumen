@@ -2844,6 +2844,16 @@ def test_lumenctl_help_lists_every_documented_command() -> None:
         assert f"  {command}" in output, f"lumenctl.sh help 缺少子命令：{command}"
 
 
+def test_install_image_job_persists_required_sidecar_token() -> None:
+    source = bash_function_source(LUMENCTL, "install_image_job")
+
+    assert 'env_file="${config_dir}/image-job.env"' in source
+    assert "secrets.token_urlsafe(48)" in source
+    assert 'as_sudo install -m 0600 "${tmp_env}" "${env_file}"' in source
+    assert "EnvironmentFile=${env_file}" in source
+    assert "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1" not in source
+
+
 def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
     result = subprocess.run(
         ["bash", str(LUMENCTL), "menu"],
@@ -3328,6 +3338,8 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
     assert_bash_ok(
         f"""
         . {LUMENCTL}
+        LUMEN_HSTS_ENABLED=true
+        LUMEN_HSTS_INCLUDE_SUBDOMAINS=false
         write_lumen_nginx_config {out} 'lumen.example.com www.example.com' '127.0.0.1:3000' 1 1 /etc/ssl/fullchain.pem /etc/ssl/privkey.pem
         """
     )
@@ -3340,9 +3352,35 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
         "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
     )
     assert "add_header X-Content-Type-Options" in config
+    assert (
+        'add_header Strict-Transport-Security "max-age=31536000" always;' in config
+    )
+    assert "includeSubDomains" not in config
     assert "client_max_body_size 80m;" in config
     assert config.count("proxy_send_timeout 3600s;") == 4
     assert config.count("proxy_read_timeout 1800s;") == 4
+
+
+def test_lumen_nginx_config_honors_hsts_policy_switches(tmp_path: Path) -> None:
+    disabled = tmp_path / "disabled.conf"
+    subdomains = tmp_path / "subdomains.conf"
+    assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        LUMEN_HSTS_ENABLED=false
+        LUMEN_HSTS_INCLUDE_SUBDOMAINS=true
+        write_lumen_nginx_config {disabled} lumen.example.com 127.0.0.1:3000 1 1 /cert /key
+        LUMEN_HSTS_ENABLED=true
+        LUMEN_HSTS_INCLUDE_SUBDOMAINS=true
+        write_lumen_nginx_config {subdomains} lumen.example.com 127.0.0.1:3000 1 1 /cert /key
+        """
+    )
+
+    assert "Strict-Transport-Security" not in disabled.read_text(encoding="utf-8")
+    assert (
+        'Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
+        in subdomains.read_text(encoding="utf-8")
+    )
 
 
 def test_ci_upload_body_size_guard_tracks_80mb_limit() -> None:
@@ -3426,6 +3464,10 @@ def test_nginx_example_security_headers_are_not_duplicated() -> None:
         in config
     )
     assert "Content-Security-Policy \"default-src 'none'" not in config
+    assert "${LUMEN_HSTS_ENABLED}:${LUMEN_HSTS_INCLUDE_SUBDOMAINS}" in config
+    assert '"true:false" "max-age=31536000";' in config
+    assert '"true:true"  "max-age=31536000; includeSubDomains";' in config
+    assert "add_header Strict-Transport-Security $lumen_hsts_header always;" in config
 
 
 def test_sub2api_nginx_configs_have_long_timeouts_and_buffering_off(

@@ -227,7 +227,11 @@ def _provider_image_job_plan(
             },
         )
         return _ImageJobProviderPlan((), "", error)
-    base_url = getattr(provider, "image_jobs_base_url", "") or fallback_base_url
+    raw_base_url = getattr(provider, "image_jobs_base_url", "") or fallback_base_url
+    try:
+        base_url = facade._validate_image_job_base_url(raw_base_url)
+    except facade.UpstreamError as exc:
+        return _ImageJobProviderPlan((), "", exc)
     return _ImageJobProviderPlan(allowed, base_url)
 
 
@@ -520,6 +524,7 @@ async def _image_job_with_failover(
 ) -> tuple[str, str | None]:
     """Fail over across image-job endpoints and providers."""
     facade = _facade()
+    facade._image_job_sidecar_token()
     pool = await facade.provider_pool.get_pool()
     forced_kind = _requested_image_job_kind(endpoint_override, endpoint_preference)
     lane_owns_inflight = provider_override is None
@@ -553,7 +558,12 @@ async def _image_job_with_failover(
     )
     errors: list[BaseException] = []
     source_label = "image_jobs" if action == "generate" else "image_jobs_edit"
-    fallback_base_url = await facade._resolve_image_job_base_url()
+    fallback_base_url = ""
+    if any(
+        not str(getattr(provider, "image_jobs_base_url", "") or "").strip()
+        for provider in providers
+    ):
+        fallback_base_url = await facade._resolve_image_job_base_url()
 
     for provider_index, provider in enumerate(providers):
         if lane_owns_inflight and provider_index > 0:

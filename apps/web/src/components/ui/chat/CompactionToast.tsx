@@ -85,7 +85,7 @@ function ProgressBar({ event }: { event: CompactionEvent }) {
     return null;
   }
   return (
-    <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
+    <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--bg-3)]">
       <div
         className="h-full w-full origin-left rounded-full bg-[var(--info)] transition-transform duration-200 ease-[var(--ease-develop)]"
         style={{ transform: `scaleX(${progressScale(event)})` }}

@@ -19,7 +19,10 @@ Lumen Web is the Next.js frontend for the Lumen workspace. It renders Studio, vi
 | `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | Optional Sentry client/server DSN. |
 | `NEXT_PUBLIC_SENTRY_ENV` / `SENTRY_ENV` | Optional Sentry environment. |
 | `LUMEN_UPGRADE_INSECURE_REQUESTS` | Enables production CSP `upgrade-insecure-requests` only when explicitly set to `true`. |
-| `LUMEN_HSTS_INCLUDE_SUBDOMAINS` | Adds `includeSubDomains` to HSTS only when explicitly set to `true`. |
+
+HSTS is intentionally absent from Next.js and the Web container. The outermost
+nginx renders the final policy from `LUMEN_HSTS_ENABLED` and
+`LUMEN_HSTS_INCLUDE_SUBDOMAINS`.
 
 ## Development
 

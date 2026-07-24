@@ -727,7 +727,7 @@ function ApparelProductImagesSection({
             "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[220px] md:min-h-[260px]",
             dragActive
               ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
-              : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
+              : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-[var(--bg-2)]",
           )}
         >
           <span

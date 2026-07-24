@@ -644,7 +644,7 @@ function SystemPromptSidebar({
             "mb-2 flex min-h-11 w-full items-center gap-2 rounded-[var(--radius-dialog)] border px-3 py-2 text-left type-body-sm transition-colors",
             selectedId === "new"
               ? "border-[var(--accent)]/45 bg-[var(--accent)]/10 text-[var(--fg-0)]"
-              : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-1)] hover:bg-white/[0.06] hover:text-[var(--fg-0)]",
+              : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
           )}
         >
           <Plus className="h-4 w-4" />
@@ -977,7 +977,7 @@ function PromptRow({
         "group min-h-11 w-full rounded-[var(--radius-dialog)] border px-3 py-2 text-left transition-colors",
         active
           ? "border-[var(--accent)]/50 bg-[var(--accent)]/10"
-          : "border-[var(--border-subtle)] bg-white/[0.025] hover:border-[var(--border)] hover:bg-white/[0.05]",
+          : "border-[var(--border-subtle)] bg-[var(--bg-2)] hover:border-[var(--border)] hover:bg-[var(--bg-3)]",
       )}
     >
       <div className="flex items-center gap-2">

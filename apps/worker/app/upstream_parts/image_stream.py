@@ -342,17 +342,19 @@ async def _responses_image_stream(
     image_urls: list[str] | None = None
     if action == "edit":
         sidecar_base_url: str | None = None
+        sidecar_token: str | None = None
         try:
             sidecar_base_url = await facade._resolve_image_job_base_url()
+            sidecar_token = facade._image_job_sidecar_token()
         except Exception as exc:  # noqa: BLE001
             facade.logger.debug(
-                "reference push base_url resolve fallback err=%s",
+                "reference push sidecar configuration fallback err=%s",
                 exc,
             )
         ref_urls = await facade._resolve_reference_image_urls(
             images,
             base_url=sidecar_base_url,
-            api_key=api_key,
+            api_key=sidecar_token,
             user_id=user_id,
         )
         image_urls = ref_urls or None

@@ -42,11 +42,15 @@ test("error boundary clears its error before returning home", () => {
 
 test("service worker updates never force-refresh active work", () => {
   const register = source("src/components/ServiceWorkerRegister.tsx");
+  const offlineBanner = source("src/components/OfflineBanner.tsx");
 
   match(register, /reg\.update\(\)\.catch/);
   match(register, /worker\.postMessage\(\{ type: "SKIP_WAITING" \}\)/);
   doesNotMatch(register, /window\.location\.reload/);
   doesNotMatch(register, /["']controllerchange["']/);
+  doesNotMatch(register, /离线安装不可用|PWA_STATUS_EVENT/);
+  match(offlineBanner, /Lumen 不支持离线使用/);
+  doesNotMatch(offlineBanner, /PWA_STATUS_EVENT|registration_failed/);
 });
 
 test("archived sidebar rows invalidate and remeasure layout caches", () => {

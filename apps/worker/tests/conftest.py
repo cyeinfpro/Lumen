@@ -28,6 +28,14 @@ os.environ.setdefault(
     "BYOK_API_KEY_MASTER_SECRET",
     "test-byok-master-secret-0123456789-test",
 )
+os.environ.setdefault(
+    "IMAGE_JOB_SIDECAR_TOKEN",
+    "test-image-job-sidecar-token-0123456789",
+)
+os.environ.setdefault(
+    "IMAGE_JOB_BASE_URL",
+    "https://image-job.test.internal",
+)
 os.environ.setdefault("APP_ENV", "test")
 
 

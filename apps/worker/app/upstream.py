@@ -71,7 +71,10 @@ from lumen_core.url_security import (
 )
 
 from . import http_retry, provider_pool, upstream_image_requests
-from .config import settings
+from .config import (
+    settings,
+    validate_image_job_sidecar_token,  # noqa: F401 - late-bound image-job facade
+)
 from .provider_runtime.probe_hooks import set_image_probe
 from .runtime_settings import resolve, resolve_db
 from .upstream_parts import (
@@ -1145,6 +1148,7 @@ _image_job_payload = upstream_image_jobs._image_job_payload
 _build_responses_image_body = upstream_image_jobs._build_responses_image_body
 _image_job_error = upstream_image_jobs._image_job_error
 _download_image_job_result = upstream_image_jobs._download_image_job_result
+_image_job_sidecar_token = upstream_image_jobs._image_job_sidecar_token
 _submit_and_wait_image_job = upstream_image_jobs._submit_and_wait_image_job
 _image_job_generate_once = upstream_image_jobs._image_job_generate_once
 _image_job_reference_image_entries = (
@@ -1370,6 +1374,14 @@ generate_image = upstream_image_dispatch.generate_image
 edit_image = upstream_image_dispatch.edit_image
 
 
+async def validate_effective_image_job_configuration() -> None:
+    """Fail startup when the effective strict image channel is unusable."""
+    if await _resolve_image_channel() != _IMAGE_CHANNEL_IMAGE_JOBS_ONLY:
+        return
+    _image_job_sidecar_token()
+    await _resolve_image_job_base_url()
+
+
 _iter_sse_with_runtime = upstream_responses_client._iter_sse_with_runtime
 _iter_sse = upstream_responses_client._iter_sse
 stream_completion = upstream_responses_client.stream_completion
@@ -1432,4 +1444,5 @@ __all__ = [
     "stream_completion",
     "responses_call",
     "close_client",
+    "validate_effective_image_job_configuration",
 ]

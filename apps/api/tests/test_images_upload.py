@@ -353,59 +353,6 @@ def test_upload_limits_are_bounded() -> None:
     assert images.PILImage.MAX_IMAGE_PIXELS == images.MAX_IMAGE_PIXELS
 
 
-def test_prepare_upload_image_preserves_original_and_builds_normalized_ref() -> None:
-    original = _png_bytes("RGB", (3000, 1500), (30, 60, 90))
-
-    data, mime, width, height, metadata, normalized_ref, normalized_meta = (
-        images._prepare_upload_image(original, "reference.png")
-    )
-
-    assert data == original
-    assert mime == "image/png"
-    assert (width, height) == (3000, 1500)
-    assert metadata["mask_preflight"]["has_alpha"] is False
-    assert normalized_meta["mime"] == "image/webp"
-    assert normalized_meta["width"] == 2048
-    assert normalized_meta["height"] == 1024
-    assert normalized_meta["bytes"] == len(normalized_ref)
-    assert len(normalized_meta["sha256"]) == 64
-
-
-def test_prepare_upload_image_rejects_long_side_over_limit() -> None:
-    original = _png_bytes("RGB", (images.MAX_LONG_SIDE + 1, 8), (30, 60, 90))
-
-    with pytest.raises(Exception) as excinfo:
-        images._prepare_upload_image(original, "wide.png")
-
-    assert getattr(excinfo.value, "status_code", None) == 413
-    assert excinfo.value.detail["error"]["code"] == "too_large"
-
-
-def test_prepare_upload_image_allows_large_dimensions_for_volcano_asset() -> None:
-    original = _png_bytes("RGB", (5000, 100), (10, 20, 30))
-
-    (
-        prepared,
-        mime,
-        width,
-        height,
-        _metadata,
-        normalized_ref,
-        _normalized_ref_meta,
-    ) = images._prepare_upload_image(
-        original,
-        "volcano-asset.png",
-        allow_large_dimensions=True,
-    )
-
-    assert prepared == original
-    assert mime == "image/png"
-    assert (width, height) == (5000, 100)
-    assert normalized_ref
-    assert images._upload_allows_large_dimensions("volcano_asset") is True
-    assert images._upload_allows_large_dimensions("reference") is False
-
-
 def test_volcano_asset_upload_still_enforces_absolute_long_side_limit() -> None:
     with pytest.raises(Exception) as excinfo:
         images._enforce_pixel_limit(
@@ -418,6 +365,7 @@ def test_volcano_asset_upload_still_enforces_absolute_long_side_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_upload_image_passes_volcano_asset_dimension_policy(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class StopAfterPrepare(RuntimeError):
@@ -429,7 +377,7 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
         return None
 
     def fake_prepare(
-        _data: bytes,
+        _staged: Any,
         _filename: str | None,
         **kwargs: Any,
     ) -> Any:
@@ -438,7 +386,12 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
 
     monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
     monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
-    monkeypatch.setattr(images, "_prepare_upload_image", fake_prepare)
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    monkeypatch.setattr(
+        images.upload_pipeline,
+        "prepare_image_upload",
+        fake_prepare,
+    )
 
     with pytest.raises(StopAfterPrepare):
         await images.upload_image(
@@ -448,70 +401,10 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
             purpose="volcano_asset",
         )
 
-    assert captured["allow_large_dimensions"] is True
-
-
-def test_prepare_upload_image_normalizes_mpo_to_jpeg(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original = _jpeg_bytes((640, 480), (30, 60, 90))
-    original_image_mime_type = images._image_mime_type
-    calls = 0
-
-    def fake_image_mime_type(image: PILImage.Image) -> str:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return "image/mpo"
-        return original_image_mime_type(image)
-
-    monkeypatch.setattr(images, "_image_mime_type", fake_image_mime_type)
-
-    data, mime, width, height, metadata, normalized_ref, normalized_meta = (
-        images._prepare_upload_image(original, "iphone-photo.mpo")
+    assert (
+        captured["max_long_side"]
+        == images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
     )
-
-    assert mime == "image/jpeg"
-    assert (width, height) == (640, 480)
-    assert data != original
-    assert metadata["upload_normalized"] == {
-        "source_mime": "image/mpo",
-        "target_mime": "image/jpeg",
-        "reason": "unsupported_upload_mime",
-    }
-    with PILImage.open(io.BytesIO(data)) as im:
-        assert images._image_mime_type(im) == "image/jpeg"
-        assert im.size == (640, 480)
-    assert normalized_meta["mime"] == "image/webp"
-    assert normalized_meta["bytes"] == len(normalized_ref)
-
-
-def test_prepare_upload_image_rejects_no_alpha_mask() -> None:
-    mask = _png_bytes("RGB", (32, 32), (0, 0, 0))
-
-    with pytest.raises(Exception) as excinfo:
-        images._prepare_upload_image(mask, "mask.png", mask_requested=True)
-
-    assert getattr(excinfo.value, "status_code", None) == 400
-    assert excinfo.value.detail["error"]["code"] == "invalid_mask_alpha"
-    assert "no alpha channel" in excinfo.value.detail["error"]["message"]
-
-
-def test_prepare_upload_image_rejects_mask_size_mismatch() -> None:
-    mask = _png_bytes("RGBA", (32, 32), (255, 255, 255, 0))
-
-    with pytest.raises(Exception) as excinfo:
-        images._prepare_upload_image(
-            mask,
-            "mask.png",
-            mask_requested=True,
-            reference_size=(64, 64),
-        )
-
-    assert getattr(excinfo.value, "status_code", None) == 400
-    assert excinfo.value.detail["error"]["code"] == "mask_size_mismatch"
-    assert "32x32" in excinfo.value.detail["error"]["message"]
-    assert "64x64" in excinfo.value.detail["error"]["message"]
 
 
 def test_mask_filename_requests_strict_preflight() -> None:
@@ -519,21 +412,6 @@ def test_mask_filename_requests_strict_preflight() -> None:
     assert images._upload_requests_mask_preflight(None, "mask_123.png")
     assert images._upload_requests_mask_preflight("inpaint_mask", "photo.png")
     assert not images._upload_requests_mask_preflight(None, "reference.png")
-
-
-def test_decompression_bomb_error_maps_to_413(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def boom(_fp):
-        raise images.PILImage.DecompressionBombError("too many pixels")
-
-    monkeypatch.setattr(images.PILImage, "open", boom)
-
-    with pytest.raises(Exception) as excinfo:
-        images._open_image_bytes(b"not-used")
-
-    assert getattr(excinfo.value, "status_code", None) == 413
-    assert excinfo.value.detail["error"]["code"] == "too_many_pixels"
 
 
 def test_explicit_pixel_limit_maps_to_413() -> None:

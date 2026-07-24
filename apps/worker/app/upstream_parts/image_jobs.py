@@ -23,6 +23,39 @@ class _FacadeProxy:
 
 
 _runtime = _FacadeProxy()
+_UPSTREAM_AUTH_HEADER = "X-Lumen-Upstream-Authorization"
+
+
+def _image_job_sidecar_token() -> str:
+    raw_token = str(
+        getattr(_runtime.settings, "image_job_sidecar_token", "") or ""
+    )
+    try:
+        return _runtime.validate_image_job_sidecar_token(raw_token)
+    except ValueError as exc:
+        raise _runtime.UpstreamError(
+            f"image job configuration unavailable: {exc}",
+            status_code=503,
+            error_code=_runtime.EC.SERVICE_UNAVAILABLE.value,
+            payload={
+                "path": "image-jobs",
+                "configuration": "sidecar_auth",
+                "reason": "configuration_unavailable",
+            },
+        ) from None
+
+
+def _image_job_headers(
+    *,
+    api_key: str,
+    trace_id: str,
+) -> dict[str, str]:
+    headers = _runtime._auth_headers(
+        _image_job_sidecar_token(),
+        trace_id=trace_id,
+    )
+    headers[_UPSTREAM_AUTH_HEADER] = _runtime._auth_headers(api_key)["authorization"]
+    return headers
 
 
 def _image_job_body_base(
@@ -188,7 +221,7 @@ def _image_job_submit_headers(
     api_key: str,
     trace_id: str,
 ) -> dict[str, str]:
-    headers = _runtime._auth_headers(api_key, trace_id=trace_id)
+    headers = _image_job_headers(api_key=api_key, trace_id=trace_id)
     payload_idempotency_key = str(payload.get("idempotency_key") or "").strip()
     if payload_idempotency_key:
         digest = _runtime.hashlib.sha256(
@@ -311,7 +344,7 @@ async def _poll_image_job_once(
     try:
         poll_resp = await client.get(
             status_url,
-            headers=_runtime._auth_headers(api_key, trace_id=poll_trace_id),
+            headers=_image_job_headers(api_key=api_key, trace_id=poll_trace_id),
         )
     except _runtime._RETRY_HTTPX_EXC as exc:
         _runtime.logger.warning(
@@ -555,7 +588,7 @@ async def _image_job_reference_image_entries(
     image_urls = await _runtime._resolve_reference_image_urls(
         images,
         base_url=base_url,
-        api_key=api_key,
+        api_key=_image_job_sidecar_token(),
         user_id=user_id,
     )
     return [{"image_url": url} for url in image_urls]
@@ -659,11 +692,11 @@ async def _image_job_responses_once(
     _ = n  # /v1/responses + image_generation tool returns a single image.
     sidecar_base_url = base_url_override or await _runtime._resolve_image_job_base_url()
     # 先 push reference 到 image-job sidecar 拿短 URL；失败时 image_urls=[] 让 build 走 base64 fallback。
-    # api_key 用同一个（image-job sidecar /v1/refs 和 /v1/image-jobs 共用 Bearer）。
+    # /v1/refs 只接收 Lumen→sidecar 服务 token；供应商 Bearer 不参与引用上传。
     image_urls = await _runtime._resolve_reference_image_urls(
         images,
         base_url=sidecar_base_url,
-        api_key=api_key_override,
+        api_key=_image_job_sidecar_token(),
         user_id=user_id,
     )
     body = _runtime._build_responses_image_body(

@@ -326,7 +326,7 @@ export function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
                   </span>
                 </div>
               </div>
-              <div className="flex rounded-[var(--radius-control)] overflow-hidden h-1.5 bg-white/5">
+              <div className="flex rounded-[var(--radius-control)] overflow-hidden h-1.5 bg-[var(--bg-2)]">
                 {s.success > 0 && (
                   <div
                     className="h-full bg-success/70"
@@ -385,7 +385,7 @@ export function PriorityGroupView({
               </span>
             )}
           </span>
-          <div className="flex-1 h-px bg-white/8" />
+          <div className="flex-1 h-px bg-[var(--bg-2)]" />
           <span className="text-[10px] text-[var(--fg-2)] tabular-nums">
             {group.items.length} 个供应商
           </span>

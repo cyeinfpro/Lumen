@@ -1194,7 +1194,7 @@ useUiStore = {
 - 普通 UI 不允许写死暗色。页面根、表单、卡片、弹窗、popover、toast、tooltip、设置页、后台页、分享页必须使用 `--bg-*`、`--fg-*`、`--border*`、`--shadow-*` 等语义变量。
 - `bg-neutral-900/950`、`bg-black/*`、`text-white`、`hover:text-white`、`border-white/*` 只能出现在明确的例外场景：图片/视频/灯箱覆盖层、深色 code/pre、scrim/backdrop、危险按钮、成功勾选、彩色徽标。
 - 移动端弹窗和 bottom sheet 必须使用 `mobile-dialog-shell`、`mobile-dialog-panel` 或 `mobile-dialog-sheet`、`mobile-dialog-scroll`、`mobile-dialog-footer`，不能自行写一套 `100dvh` 和 safe-area 计算。
-- 全局浅色兼容层只是旧代码兜底，不是新代码模式。新组件必须直接用语义变量。
+- 不提供全局浅色兼容层。旧组件和新组件都必须直接使用语义变量。
 - 交付前必须扫描硬编码深色 class，并说明剩余命中属于哪类例外。
 
 ---

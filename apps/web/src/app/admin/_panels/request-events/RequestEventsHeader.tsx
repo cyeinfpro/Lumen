@@ -97,7 +97,7 @@ function StatTile({
   }[tone];
 
   return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.035] px-3 py-2.5">
+    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-[11px] text-[var(--fg-2)]">{label}</span>
         <span
@@ -120,7 +120,7 @@ function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
   const width = `${Math.max(2, Math.min(100, Math.round(stat.share * 100)))}%`;
 
   return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.03] px-3 py-2.5">
+    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2.5">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <span
           className="min-w-0 truncate font-mono text-xs text-[var(--fg-0)]"
@@ -132,7 +132,7 @@ function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
           {stat.count} · {formatPercent(stat.share)}
         </span>
       </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
         <div
           className="h-full rounded-full bg-[var(--color-lumen-amber)]"
           style={{ width }}
@@ -154,7 +154,7 @@ function SegmentedControl<T extends string>({
   return (
     <div
       role="tablist"
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] p-0.5 text-xs"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] p-0.5 text-xs"
     >
       {options.map((option) => {
         const active = option.value === value;
@@ -166,9 +166,9 @@ function SegmentedControl<T extends string>({
             aria-selected={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-9 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
+              "h-9 min-h-11 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 sm:min-h-0",
               active
-                ? "bg-white/10 text-[var(--fg-0)]"
+                ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
                 : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
@@ -293,7 +293,7 @@ export function RequestEventsHeader({
             <button
               type="button"
               onClick={onClearSearch}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-white/10 hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+              className="inline-flex h-7 w-7 min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 sm:min-h-0 sm:min-w-0"
               aria-label="清空搜索"
             >
               <X className="h-3.5 w-3.5" />
@@ -314,7 +314,7 @@ export function RequestEventsHeader({
             id="request-event-status"
             value={status}
             onChange={(event) => onStatusChange(event.target.value as StatusFilter)}
-            className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+            className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
           >
             {STATUS_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -329,7 +329,7 @@ export function RequestEventsHeader({
             id="request-event-range"
             value={range}
             onChange={(event) => onRangeChange(event.target.value as TimeRangeFilter)}
-            className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+            className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
           >
             {RANGE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>

@@ -863,7 +863,7 @@ function StyleSummary({
         type="button"
         onClick={onClear}
         aria-label="清除选择"
-        className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-8 md:w-8"
+        className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] md:h-8 md:w-8"
       >
         <X className="h-4 w-4" />
       </button>
@@ -917,7 +917,7 @@ function BrandImageSlot({
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={uploading}
-            className="flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-[var(--border-amber)] hover:bg-white/[0.02] disabled:opacity-50"
+            className="flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-[var(--border-amber)] hover:bg-[var(--bg-2)] disabled:opacity-50"
           >
             {uploading ? (
               <>

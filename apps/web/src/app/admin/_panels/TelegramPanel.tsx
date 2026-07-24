@@ -159,7 +159,7 @@ export function TelegramPanel() {
       const res = await restartMut.mutateAsync();
       if (res.receivers === 0) {
         setRestartHint(
-          "已发送重启指令，但当前没有 bot 进程在监听控制通道（可能未启动）。请手动 systemctl start lumen-tgbot。",
+          "已发送重启指令，但当前没有 bot 进程在监听控制通道。请手动执行 systemctl restart lumen-tgbot 重新加载配置。",
         );
       } else {
         setRestartHint(`已发送重启指令，机器人会在数秒内自动重新启动。`);
@@ -180,7 +180,7 @@ export function TelegramPanel() {
       {/* 提示条 */}
       <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center shrink-0">
             <Bot className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
           <div className="min-w-0 type-caption text-[var(--fg-2)] leading-relaxed">
@@ -277,7 +277,7 @@ export function TelegramPanel() {
                       "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-xs transition-colors " +
                       (sel
                         ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-                        : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10")
+                        : "bg-[var(--bg-2)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-3)]")
                     }
                     disabled={!p.enabled}
                     title={p.enabled ? p.host + ":" + p.port : "（已禁用，不能选）"}
@@ -308,7 +308,7 @@ export function TelegramPanel() {
                     "text-left p-3 rounded-[var(--radius-card)] border text-xs transition-colors " +
                     (active
                       ? "bg-[var(--color-lumen-amber)]/10 border-[var(--color-lumen-amber)]/40"
-                      : "bg-white/[0.02] border-[var(--border)] hover:bg-white/[0.05]")
+                      : "bg-[var(--bg-2)] border-[var(--border)] hover:bg-[var(--bg-3)]")
                   }
                 >
                   <div className="flex items-center gap-2 mb-1">
@@ -515,7 +515,7 @@ function Field({
             size="sm"
             onClick={onToggleMask}
             aria-label={masked ? "显示" : "隐藏"}
-            className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-white/5 hover:bg-white/10"
+            className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-[var(--bg-2)] hover:bg-[var(--bg-3)]"
           >
             {masked ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
           </IconButton>
@@ -552,7 +552,7 @@ function ToggleField({
           "shrink-0 mt-0.5 w-11 h-6 rounded-full transition-colors relative " +
           (on
             ? "bg-[var(--color-lumen-amber)]"
-            : "bg-white/10 border border-[var(--border)]")
+            : "bg-[var(--bg-3)] border border-[var(--border)]")
         }
       >
         <span

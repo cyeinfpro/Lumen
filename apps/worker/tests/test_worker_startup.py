@@ -23,6 +23,15 @@ async def test_startup_failure_closes_partial_resources(
     monkeypatch.setattr(
         main.storage, "ensure_ready", lambda: calls.append("storage_ready")
     )
+
+    async def valid_image_job_configuration() -> None:
+        return None
+
+    monkeypatch.setattr(
+        main,
+        "validate_effective_image_job_configuration",
+        valid_image_job_configuration,
+    )
     monkeypatch.setattr(main, "init_sentry", lambda *_a, **_kw: None)
     monkeypatch.setattr(main, "init_otel", lambda *_a, **_kw: None)
     monkeypatch.setattr(main, "start_metrics_server", lambda *_a, **_kw: None)
@@ -42,6 +51,35 @@ async def test_startup_failure_closes_partial_resources(
         "close_client",
         "metrics_stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_invalid_effective_image_job_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def invalid_image_job_configuration() -> None:
+        raise RuntimeError("effective image_jobs_only configuration is invalid")
+
+    monkeypatch.setattr(
+        main,
+        "validate_effective_image_job_configuration",
+        invalid_image_job_configuration,
+    )
+    monkeypatch.setattr(
+        main.storage,
+        "ensure_ready",
+        lambda: calls.append("storage_ready"),
+    )
+    monkeypatch.setattr(main.billing_cache, "shutdown", lambda: None)
+    monkeypatch.setattr(main, "close_client", lambda: None)
+    monkeypatch.setattr(main, "stop_metrics_server", lambda: None)
+
+    with pytest.raises(RuntimeError, match="effective image_jobs_only"):
+        await main._on_startup({"redis": object()})
+
+    assert calls == []
 
 
 @pytest.mark.asyncio

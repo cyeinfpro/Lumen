@@ -16,9 +16,25 @@
 #   - TLS hardening              ：HSTS + TLSv1.2/1.3 + 强加密
 #   - rate limit                 ：API/SSE 基础限流，防止绕过应用层限流打满 upstream
 # ============================================================================
+#
+# HSTS 模板输入（必须先渲染再安装）：
+#   LUMEN_HSTS_ENABLED=true|false
+#   LUMEN_HSTS_INCLUDE_SUBDOMAINS=true|false
+# 示例：
+#   export LUMEN_HSTS_ENABLED="${LUMEN_HSTS_ENABLED:-true}"
+#   export LUMEN_HSTS_INCLUDE_SUBDOMAINS="${LUMEN_HSTS_INCLUDE_SUBDOMAINS:-false}"
+#   envsubst '${LUMEN_HSTS_ENABLED} ${LUMEN_HSTS_INCLUDE_SUBDOMAINS}' \
+#     < deploy/nginx.conf.example > /etc/nginx/sites-available/lumen.conf
+# `false:*` 映射为空值，nginx 不发送 Strict-Transport-Security。
 
 limit_req_zone $binary_remote_addr zone=lumen_api:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=lumen_events:10m rate=30r/m;
+
+map "${LUMEN_HSTS_ENABLED}:${LUMEN_HSTS_INCLUDE_SUBDOMAINS}" $lumen_hsts_header {
+    default      "";
+    "true:false" "max-age=31536000";
+    "true:true"  "max-age=31536000; includeSubDomains";
+}
 
 upstream lumen_web {
     # Next.js 监听本机 3000；keepalive 池保持长连接，
@@ -68,8 +84,8 @@ server {
     # ssl_dhparam /etc/ssl/certs/lumen-dhparam.pem;
     limit_req_status    429;
 
-    # HSTS：浏览器缓存一年强制 HTTPS
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # HSTS 只在最外层 nginx 生成；API 与 Web 不重复发送。
+    add_header Strict-Transport-Security $lumen_hsts_header always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "DENY" always;

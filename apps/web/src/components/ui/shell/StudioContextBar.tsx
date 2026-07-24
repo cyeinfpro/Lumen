@@ -9,6 +9,7 @@ import {
 import {
   type ComponentProps,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -39,9 +40,20 @@ export function StudioContextBar({
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement | null>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const settingsDialogId = useId();
+  const settingsTitleId = useId();
 
   useEffect(() => {
     if (!settingsOpen) return;
+    const panel = settingsPanelRef.current;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstControl = panel?.querySelector<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      );
+      (firstControl ?? panel)?.focus({ preventScroll: true });
+    });
     const onPointerDown = (event: PointerEvent) => {
       const root = settingsRef.current;
       if (!root || !(event.target instanceof Node) || root.contains(event.target)) {
@@ -50,11 +62,15 @@ export function StudioContextBar({
       setSettingsOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSettingsOpen(false);
+      if (event.key !== "Escape" || event.isComposing || event.repeat) return;
+      event.preventDefault();
+      setSettingsOpen(false);
+      settingsTriggerRef.current?.focus({ preventScroll: true });
     };
     window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown);
     };
@@ -104,11 +120,13 @@ export function StudioContextBar({
 
       <div ref={settingsRef} className="relative shrink-0">
         <IconButton
+          ref={settingsTriggerRef}
           size="sm"
           variant={settingsOpen ? "secondary" : "ghost"}
           onClick={() => setSettingsOpen((open) => !open)}
-          aria-haspopup="menu"
+          aria-haspopup="dialog"
           aria-expanded={settingsOpen}
+          aria-controls={settingsOpen ? settingsDialogId : undefined}
           aria-label="会话设置"
           className={cn(
             "relative",
@@ -126,20 +144,26 @@ export function StudioContextBar({
 
         {settingsOpen && (
           <div
-            role="menu"
-            aria-label="会话设置"
+            ref={settingsPanelRef}
+            id={settingsDialogId}
+            role="dialog"
+            aria-modal="false"
+            aria-labelledby={settingsTitleId}
+            tabIndex={-1}
             className="surface-panel adaptive-material absolute right-0 top-10 z-40 w-[min(320px,calc(100vw-24px))] origin-top-right p-2"
           >
             <div className="px-2 pb-2 pt-1">
-              <p className="type-label text-[var(--fg-0)]">
+              <p
+                id={settingsTitleId}
+                className="type-label text-[var(--fg-0)]"
+              >
                 会话设置
               </p>
             </div>
 
             <button
               type="button"
-              role="menuitemcheckbox"
-              aria-checked={fast}
+              aria-pressed={fast}
               onClick={() => onFastChange(!fast)}
               className={cn(
                 "type-control flex min-h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",

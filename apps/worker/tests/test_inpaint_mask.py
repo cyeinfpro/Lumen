@@ -677,9 +677,13 @@ async def test_edit_image_does_not_wrap_prompt_when_mask_none(monkeypatch: pytes
 
 class _StubProvider:
     """最小 provider 替身，让 _run_image_once_for_provider 跑得通。"""
+
     def __init__(self, name: str = "stub", *, image_jobs_enabled: bool = True) -> None:
         self.name = name
         self.image_jobs_enabled = image_jobs_enabled
+        self.image_jobs_base_url = (
+            "https://image-job.internal" if image_jobs_enabled else ""
+        )
 
 
 def _install_run_image_once_stubs(

@@ -129,7 +129,7 @@ export function BackupsPanel() {
               <p className="type-card-title">备份与恢复</p>
               <p className="type-caption text-[var(--fg-2)] mt-1 leading-relaxed break-words">
                 系统每 4 小时自动备份数据库和缓存到
-                <code className="mx-1 px-1.5 py-0.5 rounded bg-white/5 border border-[var(--border)] text-[11px] break-all">
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-[var(--bg-2)] border border-[var(--border)] text-[11px] break-all">
                   /opt/lumendata/backup
                 </code>
                 ，最多保留 40 份。恢复会成对还原数据库和缓存。
@@ -169,7 +169,7 @@ export function BackupsPanel() {
               type="button"
               onClick={() => setBanner(null)}
               aria-label={copy.action.close}
-              className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] hover:bg-white/10 transition-colors"
+              className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] hover:bg-[var(--bg-3)] transition-colors"
             >
               <X className="w-3 h-3" />
             </button>
@@ -219,7 +219,7 @@ export function BackupsPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.02, 0.2),
                       }}
-                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors"
+                      className="border-t border-[var(--border-subtle)] hover:bg-[var(--bg-3)] transition-colors"
                     >
                       <td className="py-3 px-4 text-[var(--fg-0)] font-mono text-xs tabular-nums">
                         {formatTs(b.timestamp, b.created_at)}
@@ -280,7 +280,7 @@ export function BackupsPanel() {
                     </Button>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+                    <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
                       <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)] inline-flex items-center gap-1">
                         <Database className="w-2.5 h-2.5" /> 数据库
                       </div>
@@ -288,7 +288,7 @@ export function BackupsPanel() {
                         {formatBytes(b.pg_size)}
                       </div>
                     </div>
-                    <div className="rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+                    <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
                       <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         缓存
                       </div>

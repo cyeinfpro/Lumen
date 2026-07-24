@@ -870,6 +870,7 @@ def test_worker_sentry_before_send_scrubs_worker_pii() -> None:
         "request": {
             "headers": {
                 "Authorization": "Bearer secret",
+                "X-Lumen-Upstream-Authorization": "Bearer provider-secret",
                 "X-Requester": "user@example.com",
             },
             "cookies": {"session": "secret"},
@@ -896,6 +897,10 @@ def test_worker_sentry_before_send_scrubs_worker_pii() -> None:
     scrubbed = observability._sentry_before_send(event, {})
 
     assert scrubbed["request"]["headers"]["Authorization"] == "[redacted]"
+    assert (
+        scrubbed["request"]["headers"]["X-Lumen-Upstream-Authorization"]
+        == "[redacted]"
+    )
     assert scrubbed["request"]["headers"]["X-Requester"] == "[email]"
     assert scrubbed["request"]["cookies"] == "[redacted]"
     assert scrubbed["request"]["data"]["prompt"] == "[redacted]"

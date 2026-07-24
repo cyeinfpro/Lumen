@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic import model_validator
@@ -15,11 +16,57 @@ _DEFAULT_REDIS_URL = f"redis://:{_DEFAULT_REDIS_PASSWORD}@localhost:6379/0"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://lumen:lumen@localhost:5432/lumen"
 _DEV_ENVIRONMENTS = frozenset({"dev", "development", "local", "test"})
+_IMAGE_JOB_PLACEHOLDER_HOSTS = frozenset(
+    {
+        "example.com",
+        "example.net",
+        "example.org",
+    }
+)
+
+
+def validate_image_job_base_url(raw_base: str) -> str:
+    """Validate and normalize an operator-configured image-job URL."""
+    base = (raw_base or "").strip().rstrip("/")
+    parts = urlsplit(base)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not host
+        or any(char.isspace() for char in host)
+    ):
+        raise ValueError(
+            "IMAGE_JOB_BASE_URL must be an http or https URL with a hostname"
+        )
+    if parts.username or parts.password:
+        raise ValueError("IMAGE_JOB_BASE_URL must not include credentials")
+    if parts.query or parts.fragment:
+        raise ValueError("IMAGE_JOB_BASE_URL must not include query or fragment")
+    if any(
+        host == placeholder or host.endswith(f".{placeholder}")
+        for placeholder in _IMAGE_JOB_PLACEHOLDER_HOSTS
+    ):
+        raise ValueError("IMAGE_JOB_BASE_URL must not use a placeholder hostname")
+    return base
+
+
+def validate_image_job_sidecar_token(raw_token: str) -> str:
+    """Validate the service credential required by the image-job path."""
+    token = (raw_token or "").strip()
+    if len(token) < 32 or any(char.isspace() for char in token):
+        raise ValueError(
+            "IMAGE_JOB_SIDECAR_TOKEN must be a whitespace-free token "
+            "with at least 32 characters"
+        )
+    return token
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", _ROOT_ENV), env_file_encoding="utf-8", extra="ignore"
+        env_file=(".env", _ROOT_ENV),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
     )
 
     database_url: str = _DEFAULT_DATABASE_URL
@@ -42,6 +89,10 @@ class Settings(BaseSettings):
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
     image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
     image_job_base_url: str = _DEFAULT_IMAGE_JOB_BASE_URL
+    image_job_sidecar_token: str = Field(
+        default="",
+        repr=False,
+    )
 
     storage_root: str = "/opt/lumendata/storage"
 
@@ -88,10 +139,14 @@ class Settings(BaseSettings):
             raise ValueError("EDIT_RACE_LANES must be at least 1")
         env = self.app_env.strip().lower()
         is_dev = env in _DEV_ENVIRONMENTS
-        image_job_base = self.image_job_base_url.strip().rstrip("/")
-        if not is_dev and image_job_base == _DEFAULT_IMAGE_JOB_BASE_URL:
-            raise ValueError(
-                "IMAGE_JOB_BASE_URL must not use the example.com placeholder outside development"
+        self.image_job_base_url = self.image_job_base_url.strip().rstrip("/")
+        self.image_job_sidecar_token = self.image_job_sidecar_token.strip()
+        if self.image_channel.strip().lower() == "image_jobs_only":
+            self.image_job_base_url = validate_image_job_base_url(
+                self.image_job_base_url
+            )
+            self.image_job_sidecar_token = validate_image_job_sidecar_token(
+                self.image_job_sidecar_token
             )
         if not is_dev and self.redis_url.strip() == _DEFAULT_REDIS_URL:
             raise ValueError(

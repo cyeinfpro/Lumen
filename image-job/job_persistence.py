@@ -233,6 +233,7 @@ def init_storage(
     refs_dir: Path,
     db_path: Path,
     open_conn: Callable[[], sqlite3.Connection],
+    auth_hash: Callable[[str], str],
 ) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     refs_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +246,7 @@ def init_storage(
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
                 auth_hash TEXT NOT NULL,
+                upstream_auth_hash TEXT,
                 auth_header TEXT,
                 idempotency_key TEXT,
                 request_hash TEXT,
@@ -277,6 +279,7 @@ def init_storage(
         _ensure_column(conn, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "error_class", "TEXT")
         _ensure_column(conn, "jobs", "endpoint_used", "TEXT")
+        _ensure_column(conn, "jobs", "upstream_auth_hash", "TEXT")
         _ensure_column(conn, "jobs", "idempotency_key", "TEXT")
         _ensure_column(conn, "jobs", "request_hash", "TEXT")
         _ensure_column(conn, "jobs", "retryable", "INTEGER NOT NULL DEFAULT 0")
@@ -292,10 +295,31 @@ def init_storage(
             "outcome_uncertain",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        rows = conn.execute(
+            """
+            SELECT job_id, auth_header
+            FROM jobs
+            WHERE upstream_auth_hash IS NULL AND auth_header IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                digest = auth_hash(row["auth_header"])
+            except ValueError:
+                continue
+            conn.execute(
+                """
+                UPDATE jobs
+                SET upstream_auth_hash = ?
+                WHERE job_id = ? AND upstream_auth_hash IS NULL
+                """,
+                (digest, row["job_id"]),
+            )
+        conn.execute("DROP INDEX IF EXISTS jobs_auth_idempotency_idx")
         conn.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS jobs_auth_idempotency_idx
-                ON jobs(auth_hash, idempotency_key)
+            CREATE UNIQUE INDEX jobs_auth_idempotency_idx
+                ON jobs(auth_hash, upstream_auth_hash, idempotency_key)
                 WHERE idempotency_key IS NOT NULL
             """
         )
@@ -365,20 +389,24 @@ class JobPersistenceFacade:
         payload: dict[str, Any],
         auth_header: str,
         *,
+        owner_auth_header: str | None = None,
         idempotency_key: str | None = None,
         payload_hash: str | None = None,
     ) -> None:
         now = self.now_iso()
+        owner_auth = owner_auth_header or auth_header
         await self.db_exec(
             """
             INSERT INTO jobs (
-                job_id, auth_hash, auth_header, idempotency_key, request_hash,
-                request_type, endpoint, payload_json, status, relay_url,
-                retention_days, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+                job_id, auth_hash, upstream_auth_hash, auth_header,
+                idempotency_key, request_hash, request_type, endpoint,
+                payload_json, status, relay_url, retention_days,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
             """,
             (
                 job_id,
+                self.auth_hash(owner_auth),
                 self.auth_hash(auth_header),
                 auth_header,
                 idempotency_key,

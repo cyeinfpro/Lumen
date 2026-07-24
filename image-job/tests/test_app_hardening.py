@@ -45,6 +45,7 @@ def load_app_module():
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.ALLOW_LEGACY_BEARER_AUTH = True
     return module
 
 
@@ -160,6 +161,17 @@ def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
                 error TEXT,
                 upstream_body TEXT
             );
+            INSERT INTO jobs (
+                job_id, auth_hash, auth_header, request_type, endpoint,
+                payload_json, status, relay_url, retention_days,
+                created_at, updated_at
+            ) VALUES (
+                'job-migrate', 'owner-hash', 'Bearer sk-migrate',
+                'generations', '/v1/images/generations', '{}', 'queued',
+                'https://relay.invalid', 1,
+                '2026-07-01T00:00:00+00:00',
+                '2026-07-01T00:00:00+00:00'
+            );
             """
         )
     finally:
@@ -171,12 +183,28 @@ def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(jobs)")}
+        index_columns = [
+            row[2]
+            for row in conn.execute(
+                "PRAGMA index_info(jobs_auth_idempotency_idx)"
+            )
+        ]
+        migrated_upstream_hash = conn.execute(
+            "SELECT upstream_auth_hash FROM jobs WHERE job_id = 'job-migrate'"
+        ).fetchone()[0]
     finally:
         conn.close()
 
     assert "idempotency_key" in cols
     assert "request_hash" in cols
+    assert "upstream_auth_hash" in cols
     assert "jobs_auth_idempotency_idx" in indexes
+    assert index_columns == [
+        "auth_hash",
+        "upstream_auth_hash",
+        "idempotency_key",
+    ]
+    assert migrated_upstream_hash == app.auth_hash("Bearer sk-migrate")
     assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
 
@@ -1094,6 +1122,240 @@ def test_image_job_create_is_idempotent_per_auth_and_key(monkeypatch, tmp_path) 
 
     assert first["job_id"] == second["job_id"]
     assert row_count == 1
+
+
+def test_image_job_service_auth_is_separate_from_upstream_bearer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    upstream_key = "sk-upstream-secret"
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+    monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    async def fake_enqueue(_job_id: str) -> str:
+        return "queued"
+
+    monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
+    request = _JsonRequest(
+        {
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+        },
+        headers={
+            "authorization": f"Bearer {sidecar_token}",
+            "x-lumen-upstream-authorization": f"Bearer {upstream_key}",
+        },
+    )
+
+    async def _run() -> object:
+        response = await app.create_image_job(request)
+        return await app.db_one(
+            "SELECT * FROM jobs WHERE job_id = ?",
+            (response["job_id"],),
+        )
+
+    row = asyncio.run(_run())
+
+    assert row is not None
+    assert row["auth_hash"] == app.auth_hash(f"Bearer {sidecar_token}")
+    assert row["upstream_auth_hash"] == app.auth_hash(f"Bearer {upstream_key}")
+    assert row["auth_header"] == f"Bearer {upstream_key}"
+    assert upstream_key not in row["payload_json"]
+    assert row["request_hash"] == app.scoped_request_hash(
+        app.validate_payload(request.payload),
+        f"Bearer {upstream_key}",
+        legacy_auth=False,
+    )
+
+
+def test_image_job_idempotency_is_scoped_to_upstream_provider(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+    monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+
+    async def fake_enqueue(_job_id: str) -> str:
+        return "queued"
+
+    monkeypatch.setattr(app, "enqueue_job", fake_enqueue)
+
+    def request(upstream_key: str) -> _JsonRequest:
+        return _JsonRequest(
+            {
+                "endpoint": "/v1/images/generations",
+                "body": {"prompt": "cat"},
+            },
+            headers={
+                "authorization": f"Bearer {sidecar_token}",
+                "x-lumen-upstream-authorization": f"Bearer {upstream_key}",
+                "Idempotency-Key": "generation-stable-job",
+            },
+        )
+
+    async def _run() -> tuple[dict[str, object], dict[str, object], list[Any]]:
+        first = await app.create_image_job(request("sk-provider-a"))
+        second = await app.create_image_job(request("sk-provider-b"))
+        rows = await app.db_all(
+            """
+            SELECT job_id, upstream_auth_hash
+            FROM jobs
+            ORDER BY job_id
+            """,
+            (),
+        )
+        return first, second, rows
+
+    first, second, rows = asyncio.run(_run())
+
+    assert first["job_id"] != second["job_id"]
+    assert len(rows) == 2
+    assert {row["upstream_auth_hash"] for row in rows} == {
+        app.auth_hash("Bearer sk-provider-a"),
+        app.auth_hash("Bearer sk-provider-b"),
+    }
+
+
+def test_image_job_service_auth_uses_compare_digest(monkeypatch) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    calls: list[tuple[bytes, bytes]] = []
+
+    def fake_compare_digest(left: bytes, right: bytes) -> bool:
+        calls.append((left, right))
+        return left == right
+
+    monkeypatch.setattr(
+        app._payload_helpers.hmac,
+        "compare_digest",
+        fake_compare_digest,
+    )
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+
+    owner, legacy = app.authenticate_caller(
+        SimpleNamespace(headers={"authorization": f"Bearer {sidecar_token}"})
+    )
+
+    assert owner == f"Bearer {sidecar_token}"
+    assert legacy is False
+    assert calls == [(sidecar_token.encode(), sidecar_token.encode())]
+
+
+def test_image_job_service_auth_fails_closed_without_config(monkeypatch) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", "")
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+
+    with pytest.raises(HTTPException) as exc:
+        app.authenticate_caller(
+            SimpleNamespace(headers={"authorization": "Bearer sk-upstream"})
+        )
+
+    assert exc.value.status_code == 503
+    assert "sk-upstream" not in str(exc.value.detail)
+
+
+def test_image_job_startup_auth_config_is_fail_closed() -> None:
+    app = load_app_module()
+
+    with pytest.raises(RuntimeError, match="IMAGE_JOB_SIDECAR_TOKEN"):
+        app.validate_sidecar_auth_config(
+            "",
+            allow_legacy=False,
+            min_token_chars=32,
+        )
+
+    app.validate_sidecar_auth_config(
+        "",
+        allow_legacy=True,
+        min_token_chars=32,
+    )
+
+
+def test_image_job_legacy_auth_requires_explicit_opt_in(monkeypatch) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    request = SimpleNamespace(
+        headers={"authorization": "Bearer sk-legacy-upstream"}
+    )
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+
+    with pytest.raises(HTTPException) as exc:
+        app.authenticate_caller(request)
+    assert exc.value.status_code == 401
+
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", True)
+    owner, legacy = app.authenticate_caller(request)
+    assert owner == "Bearer sk-legacy-upstream"
+    assert legacy is True
+
+
+def test_new_service_auth_can_poll_legacy_job(monkeypatch, tmp_path) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    upstream_auth = "Bearer sk-legacy-upstream"
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+    monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
+    app.init_storage_sync()
+    payload = app.validate_payload(
+        {
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+        }
+    )
+
+    async def _run() -> dict[str, object]:
+        await app.insert_job("job-legacy", payload, upstream_auth)
+        return await app.get_image_job(
+            "job-legacy",
+            SimpleNamespace(
+                headers={
+                    "authorization": f"Bearer {sidecar_token}",
+                    "x-lumen-upstream-authorization": upstream_auth,
+                }
+            ),
+        )
+
+    response = asyncio.run(_run())
+    assert response["job_id"] == "job-legacy"
+    assert response["status"] == "queued"
+
+
+def test_image_job_service_auth_rejects_missing_upstream_header(monkeypatch) -> None:
+    app = load_app_module()
+    sidecar_token = "sidecar-token-" + "s" * 32
+    monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
+    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
+    request = _JsonRequest(
+        {
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+        },
+        headers={"authorization": f"Bearer {sidecar_token}"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(app.create_image_job(request))
+
+    assert exc.value.status_code == 400
+    assert sidecar_token not in str(exc.value.detail)
 
 
 def test_image_job_payload_idempotency_key_is_persisted_and_deduped(

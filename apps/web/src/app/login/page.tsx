@@ -18,7 +18,12 @@ import {
 } from "lucide-react";
 
 import { LumenMark } from "@/components/ui/brand/LumenMark";
-import { ApiError, listPublicApiSuppliers, login } from "@/lib/apiClient";
+import {
+  ApiError,
+  listPublicApiSuppliers,
+  login,
+  safeAuthNextPath,
+} from "@/lib/apiClient";
 import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
 
@@ -34,7 +39,7 @@ function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
   const rawNext = params.get("next") || "/";
-  const next = safeNextPath(rawNext);
+  const next = safeAuthNextPath(rawNext);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -80,7 +85,17 @@ function LoginInner() {
       router.replace(next);
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.status === 401 || err.status === 403 || err.status === 404) {
+        if (err.code === "secure_cookie_requires_https") {
+          setError(
+            "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。请改用 HTTPS 地址后重新登录。",
+          );
+        } else if (err.code === "session_unverified") {
+          setError("密码验证成功，但登录会话未能确认。请检查 Cookie 或反向代理配置后重试。");
+        } else if (
+          err.status === 401 ||
+          err.status === 403 ||
+          err.status === 404
+        ) {
           setError("邮箱或密码不正确");
         } else if (err.status === 422) {
           setError("提交内容不合法");
@@ -265,30 +280,6 @@ function LoginInner() {
       </footer>
     </div>
   );
-}
-
-function safeNextPath(raw: string): string {
-  // 严格白名单：只允许相对路径或当前 origin 的 http(s) URL。
-  // 杜绝 javascript:/data:/file: + //evil.com/ 类绕过。
-  const trimmed = typeof raw === "string" ? raw.trim() : "";
-  if (!trimmed) return "/";
-  if (trimmed.startsWith("//")) return "/";
-  try {
-    const base =
-      typeof window !== "undefined"
-        ? window.location.origin
-        : "http://localhost";
-    const parsed = new URL(trimmed, base);
-    if (parsed.origin !== base) return "/";
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "/";
-    if (!parsed.pathname.startsWith("/")) return "/";
-    if (parsed.pathname === "/login") return "/";
-    // 显式禁止 javascript: 等被某些浏览器宽松解析的边界
-    if (/^javascript:/i.test(trimmed)) return "/";
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch {
-    return "/";
-  }
 }
 
 function Field({

@@ -789,9 +789,10 @@ async def test_responses_stream_routes_body_through_facade(
 
     async def resolve_refs(
         raw_images: list[bytes] | None,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> list[str]:
         assert raw_images == images
+        captured["reference_kwargs"] = kwargs
         return image_urls
 
     async def resolve_proxy(_proxy: Any) -> str | None:
@@ -830,9 +831,41 @@ async def test_responses_stream_routes_body_through_facade(
     )
 
     assert result == ("ZmFrZS1pbWFnZQ==", None)
+    assert captured["reference_kwargs"]["api_key"] == (
+        "test-image-job-sidecar-token-0123456789"
+    )
     assert captured["builder_kwargs"]["image_urls"] == image_urls
     assert captured["sent_body"] is captured["built_body"]
     assert captured["sent_body"]["facade_marker"] is True
     actual_without_marker = dict(captured["sent_body"])
     actual_without_marker.pop("facade_marker")
     assert actual_without_marker == expected
+
+
+@pytest.mark.asyncio
+async def test_image_job_reference_upload_uses_sidecar_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def resolve_refs(
+        raw_images: list[bytes] | None,
+        **kwargs: Any,
+    ) -> list[str]:
+        captured["images"] = raw_images
+        captured.update(kwargs)
+        return ["https://refs.example/ref.webp"]
+
+    monkeypatch.setattr(upstream, "_resolve_reference_image_urls", resolve_refs)
+
+    entries = await upstream._image_job_reference_image_entries(
+        [b"raw-reference"],
+        base_url="https://image-job.example",
+        api_key="sk-upstream",
+        user_id="user-1",
+    )
+
+    assert entries == [{"image_url": "https://refs.example/ref.webp"}]
+    assert captured["api_key"] == "test-image-job-sidecar-token-0123456789"
+    assert captured["base_url"] == "https://image-job.example"
+    assert captured["user_id"] == "user-1"

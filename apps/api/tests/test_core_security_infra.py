@@ -112,7 +112,9 @@ async def test_canvas_feature_guard_requires_both_project_and_canvas_flags(
         send,
     )
 
-    start = next(message for message in sent if message["type"] == "http.response.start")
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
     body = b"".join(
         message.get("body", b"")
         for message in sent
@@ -164,13 +166,17 @@ async def test_canvas_feature_guard_fails_closed_when_setting_read_fails(
         send,
     )
 
-    start = next(message for message in sent if message["type"] == "http.response.start")
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
     assert start["status"] == 404
     assert downstream_called is False
 
 
 @pytest.mark.asyncio
-async def test_body_size_limit_counts_chunked_body(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_body_size_limit_counts_chunked_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def app(_scope, receive, send):
         while True:
             message = await receive()
@@ -206,10 +212,7 @@ async def test_body_size_limit_counts_chunked_body(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_hsts_uses_trusted_forwarded_proto(monkeypatch: pytest.MonkeyPatch) -> None:
-    old = main.settings.trusted_proxies
-    main.settings.trusted_proxies = "127.0.0.1/32"
-
+async def test_api_security_headers_do_not_emit_hsts() -> None:
     async def app(_scope, _receive, send):
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
@@ -222,28 +225,80 @@ async def test_hsts_uses_trusted_forwarded_proto(monkeypatch: pytest.MonkeyPatch
     async def send(message):
         sent.append(message)
 
-    try:
-        await main._SecurityHeadersMiddleware(app)(
-            {
-                "type": "http",
-                "scheme": "http",
-                "method": "GET",
-                "path": "/",
-                "client": ("127.0.0.1", 12345),
-                "headers": [(b"x-forwarded-proto", b"https")],
-            },
-            receive,
-            send,
-        )
-    finally:
-        main.settings.trusted_proxies = old
+    await main._SecurityHeadersMiddleware(app)(
+        {
+            "type": "http",
+            "scheme": "https",
+            "method": "GET",
+            "path": "/",
+            "client": ("127.0.0.1", 12345),
+            "headers": [],
+        },
+        receive,
+        send,
+    )
 
-    headers = dict(sent[0]["headers"])
-    assert b"strict-transport-security" in headers
+    assert b"strict-transport-security" not in dict(sent[0]["headers"])
 
 
 @pytest.mark.asyncio
-async def test_arq_pool_recreated_when_loop_marker_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("secure", "expected"), [(True, b"1"), (False, b"0")])
+async def test_auth_responses_expose_session_cookie_security_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    secure: bool,
+    expected: bytes,
+) -> None:
+    async def app(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 401, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    monkeypatch.setattr(main.settings, "session_cookie_secure", secure)
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await main._SecurityHeadersMiddleware(app)(
+        {
+            "type": "http",
+            "scheme": "https",
+            "method": "GET",
+            "path": "/auth/me",
+            "client": ("127.0.0.1", 12345),
+            "headers": [],
+        },
+        receive,
+        send,
+    )
+
+    headers = dict(sent[0]["headers"])
+    assert headers[b"x-lumen-session-cookie-secure"] == expected
+
+
+def test_production_http_compatibility_logs_critical_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(main.settings, "app_env", "production")
+    monkeypatch.setattr(main.settings, "public_base_url", "http://10.0.0.20:3000")
+    monkeypatch.setattr(main.settings, "session_cookie_secure", False)
+    monkeypatch.setattr(main.settings, "hsts_enabled", False)
+
+    with caplog.at_level("CRITICAL", logger=main.logger.name):
+        main._log_transport_security_status()
+
+    assert "PRODUCTION HTTP COMPATIBILITY MODE ACTIVE" in caplog.text
+    assert "session cookies are not Secure" in caplog.text
+    assert "HSTS is disabled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_arq_pool_recreated_when_loop_marker_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     closed = []
     created = []
 
@@ -267,7 +322,9 @@ async def test_arq_pool_recreated_when_loop_marker_changes(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_write_audit_uses_isolated_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_write_audit_uses_isolated_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = []
 
     async def fake_isolated(**kwargs):
@@ -280,7 +337,9 @@ async def test_write_audit_uses_isolated_transaction(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(audit, "write_audit_isolated", fake_isolated)
 
     await audit.write_audit(
-        PoisonSession(), event_type="event", user_id="user-1"  # type: ignore[arg-type]
+        PoisonSession(),
+        event_type="event",
+        user_id="user-1",  # type: ignore[arg-type]
     )
 
     assert calls == [

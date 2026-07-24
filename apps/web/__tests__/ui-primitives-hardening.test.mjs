@@ -373,6 +373,19 @@ test("mobile toast preserves ReactNode content and tone mapping", () => {
   );
 });
 
+test("global toast keeps actionable and severe notices readable on mobile", () => {
+  const toastSource = source("src/components/ui/primitives/Toast.tsx");
+
+  assert.match(toastSource, /success: 4000/);
+  assert.match(toastSource, /info: 5000/);
+  assert.match(toastSource, /warning: 8000/);
+  assert.match(toastSource, /error: 8000/);
+  assert.match(toastSource, /const ACTION_DURATION_MS = 10000/);
+  assert.match(toastSource, /defaultDurationMs\(t\.tone, Boolean\(t\.action\)\)/);
+  assert.match(toastSource, /max-sm:min-h-11 max-sm:px-2/);
+  assert.match(toastSource, /aria-atomic="true"/);
+});
+
 test("image lightbox URL selection skips null and invalid candidates", () => {
   const { imageResultToLightboxItem } = loadModule(
     "src/lib/imageResultLightbox.ts",

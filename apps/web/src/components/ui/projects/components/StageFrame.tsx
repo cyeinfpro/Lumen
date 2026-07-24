@@ -2,7 +2,7 @@
 
 // Stage frame：去除嵌套卡片化，改为 hairline 分隔 + 工作台式排印层级。
 // 视觉规范：mono uppercase eyebrow + compact title + sans subtitle。
-// 子内容贴底铺，不再叠加 bg-white/[0.035] + border + shadow。
+// 子内容贴底铺，不再叠加旧的半透明卡片表面。
 
 import { cn } from "@/lib/utils";
 

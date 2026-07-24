@@ -218,6 +218,53 @@ def test_auth_cookies_use_lax_for_all_dev_env_aliases(
         assert all("samesite=lax" in cookie for cookie in cookies)
 
 
+def test_auth_cookies_allow_explicit_insecure_production_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth.settings, "app_env", "prod")
+    monkeypatch.setattr(auth.settings, "session_cookie_secure", False)
+    response = Response()
+
+    auth._set_auth_cookies(response, "session-1", "csrf-1")
+
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
+    assert cookies
+    assert all("secure" not in cookie for cookie in cookies)
+
+
+def test_auth_cookies_allow_explicit_secure_local_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth.settings, "app_env", "dev")
+    monkeypatch.setattr(auth.settings, "session_cookie_secure", True)
+    response = Response()
+
+    auth._set_auth_cookies(response, "session-1", "csrf-1")
+
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
+    assert cookies
+    assert all("secure" in cookie for cookie in cookies)
+
+
+def test_auth_router_keeps_me_and_removes_redundant_session_endpoint() -> None:
+    paths = {
+        getattr(route, "path", None)
+        for route in auth.router.routes
+        if getattr(route, "methods", None)
+    }
+
+    assert "/me" in paths
+    assert "/session" not in paths
+
+
 def test_clear_auth_cookies_matches_cookie_attributes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -258,7 +258,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
   return (
     <div className="w-full max-w-md">
       <div className="surface-section space-y-4 py-10 text-center">
-        <div className="mx-auto w-14 h-14 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]">
           {isNotFound ? (
             <FileX className="w-6 h-6 text-[var(--fg-1)]" />
           ) : isGone ? (

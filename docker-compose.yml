@@ -204,6 +204,7 @@ services:
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     environment:
       <<: *app-runtime-env
+      IMAGE_JOB_SIDECAR_TOKEN: "${IMAGE_JOB_SIDECAR_TOKEN:-}"
       LUMEN_WORKER_HEALTH_INTERVAL: "${LUMEN_WORKER_HEALTH_INTERVAL:-30}"
       LUMEN_WORKER_HEALTH_KEY: "${LUMEN_WORKER_HEALTH_KEY:-arq:queue:health-check}"
     restart: unless-stopped
@@ -286,12 +287,7 @@ services:
     container_name: lumen-tgbot
     build: *app-build
     working_dir: /app/apps/tgbot
-    command:
-      - "/bin/sh"
-      - "-ec"
-      - |
-        : "$${TELEGRAM_BOT_SHARED_SECRET:?Set TELEGRAM_BOT_SHARED_SECRET in .env when enabling tgbot}"
-        exec python -m app.main
+    command: ["python", "-m", "app.main"]
     # 与 api/worker 一致：先 env_file 读 .env，environment 块再覆盖关键变量。
     # 没 env_file 会让 tgbot 漏掉 admin / DB / observability 等共用配置。
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}

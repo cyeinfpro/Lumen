@@ -19,6 +19,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, AsyncIterator
 
 from arq.cron import cron
@@ -50,6 +51,7 @@ from lumen_core.models import (
 
 from .. import billing as worker_billing
 from ..db import SessionLocal
+from ..observability import task_reconcile_lease_unknown_total
 from ..sse_publish import publish_event
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ _RECON_GENERATION_MAX_ATTEMPTS = 5
 _RECON_COMPLETION_MAX_ATTEMPTS = 3
 _RECON_TIMEOUT_CODE = "timeout"
 _RECON_TIMEOUT_MESSAGE = "task stuck; reconciler timed out"
+_RECON_LEASE_UNKNOWN_LOG_SAMPLE = 3
 _MEMORY_RECON_LOCK_KEY = "lock:outbox:memory_reconciler"
 _MEMORY_RECON_LOCK_TTL_S = 50
 _MEMORY_RECON_BATCH = 100
@@ -723,13 +726,59 @@ async def _deliver_staged_outbox_events(
 # ---------------------------------------------------------------------------
 
 
-async def _lease_expired(redis: Any, task_id: str) -> bool:
-    """Worker lease 过期 = Redis 里不存在此 key。"""
+class _LeaseState(Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    UNKNOWN = "unknown"
+
+
+class _LeaseUnknownSummary:
+    def __init__(self) -> None:
+        self.counts = {"generation": 0, "completion": 0}
+        self.samples: list[str] = []
+
+    def record(self, *, kind: str, task_id: str, error: Exception) -> None:
+        task_reconcile_lease_unknown_total.labels(kind=kind).inc()
+        self.counts[kind] += 1
+        if len(self.samples) < _RECON_LEASE_UNKNOWN_LOG_SAMPLE:
+            self.samples.append(f"{kind}:{task_id}:{type(error).__name__}")
+
+    def log(self) -> None:
+        total = sum(self.counts.values())
+        if total == 0:
+            return
+        logger.warning(
+            "reconcile lease state unknown total=%d generations=%d "
+            "completions=%d samples=%s",
+            total,
+            self.counts["generation"],
+            self.counts["completion"],
+            ",".join(self.samples),
+        )
+
+
+async def _read_lease_state(
+    redis: Any,
+    task_id: str,
+    *,
+    kind: str | None = None,
+    unknowns: _LeaseUnknownSummary | None = None,
+) -> _LeaseState:
+    """Read the worker lease without treating Redis failures as expiry."""
     try:
-        v = await redis.get(f"task:{task_id}:lease")
-        return v is None
-    except Exception:  # noqa: BLE001
-        return True
+        value = await redis.get(f"task:{task_id}:lease")
+    except Exception as exc:  # noqa: BLE001
+        if kind is not None and unknowns is not None:
+            unknowns.record(kind=kind, task_id=task_id, error=exc)
+        return _LeaseState.UNKNOWN
+    if value is None:
+        return _LeaseState.EXPIRED
+    return _LeaseState.ACTIVE
+
+
+async def _lease_expired(redis: Any, task_id: str) -> bool:
+    """Compatibility helper; unknown lease state fails closed."""
+    return await _read_lease_state(redis, task_id) is _LeaseState.EXPIRED
 
 
 _DUAL_RACE_SENTINEL_PREFIX = "__dr:"
@@ -819,6 +868,7 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
 
         touched = 0
         pending_outbox: list[_PendingOutboxDelivery] = []
+        lease_unknowns = _LeaseUnknownSummary()
         cutoff = datetime.now(timezone.utc) - _RECON_STUCK_AFTER
 
         async with SessionLocal() as session:
@@ -837,7 +887,13 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
             gen_rows = list((await session.execute(gen_q)).scalars())
 
             for g in gen_rows:
-                if not await _lease_expired(redis, g.id):
+                lease_state = await _read_lease_state(
+                    redis,
+                    g.id,
+                    kind="generation",
+                    unknowns=lease_unknowns,
+                )
+                if lease_state is not _LeaseState.EXPIRED:
                     continue
                 reconciled_at = datetime.now(timezone.utc)
                 if (g.attempt or 0) < _RECON_GENERATION_MAX_ATTEMPTS:
@@ -933,7 +989,13 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
             comp_rows = list((await session.execute(comp_q)).scalars())
 
             for c in comp_rows:
-                if not await _lease_expired(redis, c.id):
+                lease_state = await _read_lease_state(
+                    redis,
+                    c.id,
+                    kind="completion",
+                    unknowns=lease_unknowns,
+                )
+                if lease_state is not _LeaseState.EXPIRED:
                     continue
                 reconciled_at = datetime.now(timezone.utc)
                 if (c.attempt or 0) < _RECON_COMPLETION_MAX_ATTEMPTS:
@@ -1017,6 +1079,8 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
 
             await session.commit()
             await worker_billing.flush_balance_cache_refreshes(session)
+
+        lease_unknowns.log()
 
         # Fast path only after the task-row transaction commits. If Redis or
         # finalization fails, the unpublished rows above remain recoverable.

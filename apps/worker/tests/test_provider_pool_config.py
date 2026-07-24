@@ -52,6 +52,7 @@ def test_worker_non_dev_rejects_development_connection_defaults(
         "app_env": "production",
         "byok_api_key_master_secret": "p" * 32,
         "image_job_base_url": "https://image-job.internal",
+        "image_job_sidecar_token": "s" * 32,
         "redis_url": "redis://prod.example:6379/0",
         "database_url": "postgresql+asyncpg://prod:secret@db.internal/lumen",
     }
@@ -66,8 +67,94 @@ def test_worker_non_dev_rejects_image_job_example_placeholder() -> None:
         Settings(
             app_env="prod",
             byok_api_key_master_secret="x" * 32,
+            IMAGE_CHANNEL="image_jobs_only",
             image_job_base_url="https://image-job.example.com",
+            image_job_sidecar_token="s" * 32,
+            redis_url="redis://prod.example:6379/0",
+            database_url="postgresql+asyncpg://prod:secret@db.internal/lumen",
         )
+
+
+@pytest.mark.parametrize("image_channel", ["stream_only", "auto"])
+@pytest.mark.parametrize(
+    ("image_job_base_url", "sidecar_token"),
+    [
+        ("", ""),
+        ("https://image-job.example.com", ""),
+        ("not-a-url", "short"),
+    ],
+)
+def test_worker_non_dev_optional_image_job_channels_start_without_sidecar(
+    image_channel: str,
+    image_job_base_url: str,
+    sidecar_token: str,
+) -> None:
+    values = {
+        "app_env": "prod",
+        "byok_api_key_master_secret": "x" * 32,
+        "redis_url": "redis://prod.example:6379/0",
+        "database_url": "postgresql+asyncpg://prod:secret@db.internal/lumen",
+    }
+
+    settings = Settings(
+        **values,
+        IMAGE_CHANNEL=image_channel,
+        image_job_base_url=image_job_base_url,
+        image_job_sidecar_token=sidecar_token,
+    )
+
+    assert settings.image_channel == image_channel
+
+
+@pytest.mark.parametrize(
+    "image_job_base_url",
+    [
+        "",
+        "image-job.internal",
+        "ftp://image-job.internal",
+        "https:///v1",
+        "https://image job.internal",
+        "https://image-job.example.com",
+        "https://image-jobs.example.org/v1",
+        "https://user:secret@image-job.internal",
+        "https://image-job.internal?token=secret",
+        "https://image-job.internal#fragment",
+    ],
+)
+def test_worker_image_jobs_only_requires_valid_non_placeholder_url(
+    image_job_base_url: str,
+) -> None:
+    values = {
+        "app_env": "prod",
+        "byok_api_key_master_secret": "x" * 32,
+        "redis_url": "redis://prod.example:6379/0",
+        "database_url": "postgresql+asyncpg://prod:secret@db.internal/lumen",
+        "IMAGE_CHANNEL": "image_jobs_only",
+        "image_job_sidecar_token": "s" * 32,
+    }
+
+    with pytest.raises(ValidationError, match="IMAGE_JOB_BASE_URL"):
+        Settings(**values, image_job_base_url=image_job_base_url)
+
+
+def test_worker_image_jobs_only_requires_strong_sidecar_token() -> None:
+    values = {
+        "app_env": "prod",
+        "byok_api_key_master_secret": "x" * 32,
+        "image_job_base_url": "https://image-job.internal",
+        "redis_url": "redis://prod.example:6379/0",
+        "database_url": "postgresql+asyncpg://prod:secret@db.internal/lumen",
+        "IMAGE_CHANNEL": "image_jobs_only",
+    }
+
+    with pytest.raises(ValidationError, match="IMAGE_JOB_SIDECAR_TOKEN"):
+        Settings(**values, image_job_sidecar_token="")
+    with pytest.raises(ValidationError, match="at least 32 characters"):
+        Settings(**values, image_job_sidecar_token="too-short")
+
+    settings = Settings(**values, image_job_sidecar_token="s" * 32)
+    assert settings.image_job_sidecar_token == "s" * 32
+    assert "s" * 32 not in repr(settings)
 
 
 def test_provider_dataclass_repr_does_not_include_api_key() -> None:
