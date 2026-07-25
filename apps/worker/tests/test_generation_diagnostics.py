@@ -1,6 +1,6 @@
 import pytest
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
 from app.tasks.generation_parts import diagnostics
 
 

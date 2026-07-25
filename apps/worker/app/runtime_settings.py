@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
@@ -22,10 +23,17 @@ from .db import SessionLocal
 
 
 _TTL_S = 5.0
+
+
 # key -> (expires_at, raw_str_or_None)
-_CACHE: dict[str, tuple[float, str | None]] = {}
-_DB_ONLY_CACHE: dict[str, tuple[float, str | None]] = {}
-_CACHE_LOCK = asyncio.Lock()
+@dataclass(slots=True)
+class RuntimeSettingsCache:
+    values: dict[str, tuple[float, str | None]] = field(default_factory=dict)
+    db_only_values: dict[str, tuple[float, str | None]] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_RUNTIME_CACHE = RuntimeSettingsCache()
 
 
 def _config_fallback(spec: SettingSpec) -> str | None:
@@ -61,13 +69,13 @@ async def resolve(spec_key: str) -> str | None:
         return None
 
     now = time.monotonic()
-    cached = _CACHE.get(spec_key)
+    cached = _RUNTIME_CACHE.values.get(spec_key)
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    async with _CACHE_LOCK:
+    async with _RUNTIME_CACHE.lock:
         # 双重检查
-        cached = _CACHE.get(spec_key)
+        cached = _RUNTIME_CACHE.values.get(spec_key)
         if cached is not None and cached[0] > now:
             return cached[1]
 
@@ -77,7 +85,7 @@ async def resolve(spec_key: str) -> str | None:
         else:
             value = _config_fallback(spec)
 
-        _CACHE[spec_key] = (now + _TTL_S, value)
+        _RUNTIME_CACHE.values[spec_key] = (now + _TTL_S, value)
         return value
 
 
@@ -86,16 +94,16 @@ async def resolve_db(spec_key: str) -> str | None:
     if get_spec(spec_key) is None:
         return None
     now = time.monotonic()
-    cached = _DB_ONLY_CACHE.get(spec_key)
+    cached = _RUNTIME_CACHE.db_only_values.get(spec_key)
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    async with _CACHE_LOCK:
-        cached = _DB_ONLY_CACHE.get(spec_key)
+    async with _RUNTIME_CACHE.lock:
+        cached = _RUNTIME_CACHE.db_only_values.get(spec_key)
         if cached is not None and cached[0] > now:
             return cached[1]
         value = await _read_db(spec_key)
-        _DB_ONLY_CACHE[spec_key] = (now + _TTL_S, value)
+        _RUNTIME_CACHE.db_only_values[spec_key] = (now + _TTL_S, value)
         return value
 
 
@@ -111,8 +119,8 @@ async def resolve_int(spec_key: str, default: int) -> int:
 
 def invalidate_cache() -> None:
     """主动清缓存（用于测试）。"""
-    _CACHE.clear()
-    _DB_ONLY_CACHE.clear()
+    _RUNTIME_CACHE.values.clear()
+    _RUNTIME_CACHE.db_only_values.clear()
 
 
 __all__ = [

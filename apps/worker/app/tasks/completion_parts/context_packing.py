@@ -2,8 +2,7 @@
 
 The data-access primitives stay in :mod:`context_loading`; this module owns the
 policy decisions around summaries, sticky messages, token budgets, and safe
-fallbacks.  It intentionally receives a late-bound hooks object so the worker
-facade retains its existing monkeypatch surface.
+fallbacks. It receives explicit hooks from the completion runtime.
 """
 
 from __future__ import annotations
@@ -22,19 +21,19 @@ from lumen_core.models import Conversation, Message
 
 from .context import (
     PackedContext,
-    _estimated_summary_source,
-    _fallback_pack,
-    _pack_with_existing_summary,
-    _packed_with_input,
+    estimated_summary_source as _estimated_summary_source,
+    fallback_pack as _fallback_pack,
+    pack_with_existing_summary as _pack_with_existing_summary,
+    packed_with_input as _packed_with_input,
 )
 from .history import (
-    _SummaryBoundary,
-    _message_created_at,
-    _summary_age_seconds,
-    _summary_compressed_at,
-    _summary_covers_boundary,
-    _sticky_text_from_message,
-    _instructions_with_summary_guardrail,
+    SummaryBoundary as _SummaryBoundary,
+    instructions_with_summary_guardrail as _instructions_with_summary_guardrail,
+    message_created_at as _message_created_at,
+    sticky_text_from_message as _sticky_text_from_message,
+    summary_age_seconds as _summary_age_seconds,
+    summary_compressed_at as _summary_compressed_at,
+    summary_covers_boundary as _summary_covers_boundary,
 )
 
 

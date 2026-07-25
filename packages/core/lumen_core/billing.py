@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import secrets
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
@@ -21,6 +22,7 @@ from .models import (
     WalletTransaction,
     new_uuid7,
 )
+from .immutables import immutable_mapping
 from .pricing import (
     CostBreakdown,
     ModelPricing,
@@ -33,11 +35,13 @@ from .pricing_resolver import PricingResolver
 
 
 MICRO_RMB = 1_000_000
-DEFAULT_IMAGE_SIZE_THRESHOLDS: dict[str, int] = {
-    "1k": 1_572_864,
-    "2k": 3_686_400,
-    "4k": 8_294_400,
-}
+DEFAULT_IMAGE_SIZE_THRESHOLDS: Mapping[str, int] = immutable_mapping(
+    {
+        "1k": 1_572_864,
+        "2k": 3_686_400,
+        "4k": 8_294_400,
+    }
+)
 CROCKFORD_REDEMPTION_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,7 @@ def completion_billing_ref_id(completion: Any) -> str:
     )
 
 
-def tier_for_pixels(px: int, thresholds: dict[str, int] | None = None) -> str:
+def tier_for_pixels(px: int, thresholds: Mapping[str, int] | None = None) -> str:
     values = thresholds or DEFAULT_IMAGE_SIZE_THRESHOLDS
     tier = "1k"
     for name, lower in sorted(values.items(), key=lambda item: item[1]):

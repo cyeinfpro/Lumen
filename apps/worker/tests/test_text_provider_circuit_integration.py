@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import asyncio
 import time
 from types import SimpleNamespace
@@ -38,7 +40,8 @@ def _make_pool(
         for index in range(provider_count)
     ]
     pool._health = {  # noqa: SLF001
-        provider.name: ProviderHealth() for provider in pool._providers  # noqa: SLF001
+        provider.name: ProviderHealth()
+        for provider in pool._providers  # noqa: SLF001
     }
     health = pool._health["provider-0"]  # noqa: SLF001
     health.consecutive_failures = 3
@@ -503,11 +506,13 @@ async def test_upstream_responses_call_reports_success(
         seen.update(kwargs)
         return {"output_text": "ok"}
 
-    monkeypatch.setattr(upstream.upstream_responses_client, "responses_call", fake_call)
+    monkeypatch.setattr(
+        upstream_services().responses,
+        "responses_client_call",
+        fake_call,
+    )
 
-    assert await upstream.responses_call({"model": "gpt-test"}) == {
-        "output_text": "ok"
-    }
+    assert await upstream.responses_call({"model": "gpt-test"}) == {"output_text": "ok"}
     assert seen["base_url_override"] == "https://provider-0.example/v1"
     assert seen["api_key_override"] == "sk-provider-0"
     assert health.consecutive_failures == 0
@@ -533,7 +538,9 @@ async def test_upstream_responses_call_reports_provider_failure(
             status_code=503,
         )
 
-    monkeypatch.setattr(upstream.upstream_responses_client, "responses_call", fail_call)
+    monkeypatch.setattr(
+        upstream_services().core.upstream_responses_client, "responses_call", fail_call
+    )
 
     with pytest.raises(upstream.UpstreamError):
         await upstream.responses_call({"model": "gpt-test"})
@@ -565,7 +572,11 @@ async def test_upstream_single_provider_continues_after_local_error_and_cancel(
             raise outcome
         return outcome
 
-    monkeypatch.setattr(upstream.upstream_responses_client, "responses_call", fake_call)
+    monkeypatch.setattr(
+        upstream_services().responses,
+        "responses_client_call",
+        fake_call,
+    )
 
     with pytest.raises(ValueError, match="local validation"):
         await upstream.responses_call({"model": "gpt-test"})

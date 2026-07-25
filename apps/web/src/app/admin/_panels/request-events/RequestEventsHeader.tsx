@@ -90,7 +90,7 @@ function StatTile({
 }) {
   const toneClass = {
     amber:
-      "text-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 border-[var(--color-lumen-amber)]/20",
+      "text-[var(--accent)] bg-[var(--accent)]/12 border-[var(--accent)]/20",
     emerald: "text-success bg-success-soft border-success-border",
     red: "text-danger bg-danger-soft border-danger-border",
     sky: "text-info bg-info-soft border-info-border",
@@ -134,7 +134,7 @@ function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
         <div
-          className="h-full rounded-full bg-[var(--color-lumen-amber)]"
+          className="h-full rounded-full bg-[var(--accent)]"
           style={{ width }}
         />
       </div>
@@ -166,7 +166,7 @@ function SegmentedControl<T extends string>({
             aria-selected={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-9 min-h-11 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 sm:min-h-0",
+              "h-9 min-h-11 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25 sm:min-h-0",
               active
                 ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
                 : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -276,7 +276,7 @@ export function RequestEventsHeader({
       </div>
 
       <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(240px,1fr)_auto] lg:items-center">
-        <div className="flex h-10 min-w-0 items-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 transition-colors focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25">
+        <div className="flex h-10 min-w-0 items-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 transition-colors focus-within:border-[var(--accent)]/50 focus-within:ring-2 focus-within:ring-[var(--accent)]/25">
           <Search className="h-3.5 w-3.5 shrink-0 text-[var(--fg-2)]" />
           <label htmlFor="search-request-events" className="sr-only">
             搜索请求事件
@@ -293,7 +293,7 @@ export function RequestEventsHeader({
             <button
               type="button"
               onClick={onClearSearch}
-              className="inline-flex h-7 w-7 min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 sm:min-h-0 sm:min-w-0"
+              className="inline-flex h-7 w-7 min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25 sm:min-h-0 sm:min-w-0"
               aria-label="清空搜索"
             >
               <X className="h-3.5 w-3.5" />
@@ -314,7 +314,7 @@ export function RequestEventsHeader({
             id="request-event-status"
             value={status}
             onChange={(event) => onStatusChange(event.target.value as StatusFilter)}
-            className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+            className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
           >
             {STATUS_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -329,7 +329,7 @@ export function RequestEventsHeader({
             id="request-event-range"
             value={range}
             onChange={(event) => onRangeChange(event.target.value as TimeRangeFilter)}
-            className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+            className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
           >
             {RANGE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -373,7 +373,7 @@ export function RequestEventsHeader({
         <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 font-medium text-[var(--fg-1)]">
-              <BarChart3 className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
+              <BarChart3 className="h-3.5 w-3.5 text-[var(--accent)]" />
               路径统计
             </span>
             <span className="font-mono tabular-nums text-[var(--fg-2)]">

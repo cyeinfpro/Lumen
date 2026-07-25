@@ -16,11 +16,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import importlib.util
 import json
 import stat
 import sqlite3
-import sys
 from collections.abc import AsyncIterator
 from io import BytesIO
 from pathlib import Path
@@ -35,18 +33,11 @@ from PIL import Image
 
 def load_app_module():
     asyncio.set_event_loop(asyncio.new_event_loop())
-    path = Path(__file__).resolve().parents[1] / "app.py"
-    module_dir = str(path.parent)
-    if module_dir not in sys.path:
-        sys.path.insert(0, module_dir)
-    spec = importlib.util.spec_from_file_location("image_job_app_under_test", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    module.ALLOW_LEGACY_BEARER_AUTH = True
-    return module
+    from .support import load_harness
+
+    app = load_harness()
+    app.ALLOW_LEGACY_BEARER_AUTH = True
+    return app
 
 
 def _tiny_png_b64() -> str:
@@ -185,9 +176,7 @@ def test_init_storage_migrates_legacy_jobs_before_idempotency_index(
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(jobs)")}
         index_columns = [
             row[2]
-            for row in conn.execute(
-                "PRAGMA index_info(jobs_auth_idempotency_idx)"
-            )
+            for row in conn.execute("PRAGMA index_info(jobs_auth_idempotency_idx)")
         ]
         migrated_upstream_hash = conn.execute(
             "SELECT upstream_auth_hash FROM jobs WHERE job_id = 'job-migrate'"
@@ -1288,9 +1277,7 @@ def test_image_job_startup_auth_config_is_fail_closed() -> None:
 def test_image_job_legacy_auth_requires_explicit_opt_in(monkeypatch) -> None:
     app = load_app_module()
     sidecar_token = "sidecar-token-" + "s" * 32
-    request = SimpleNamespace(
-        headers={"authorization": "Bearer sk-legacy-upstream"}
-    )
+    request = SimpleNamespace(headers={"authorization": "Bearer sk-legacy-upstream"})
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
     monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
 

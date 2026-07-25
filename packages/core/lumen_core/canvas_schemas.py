@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 import math
 import re
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -18,6 +19,7 @@ from pydantic import (
 )
 
 from .constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
+from .immutables import immutable_nested_mapping
 
 
 GRAPH_SCHEMA_VERSION = 1
@@ -461,77 +463,83 @@ class CanvasPortSpec:
     required_for_execution: bool = False
 
 
-NODE_INPUT_PORTS: dict[str, dict[str, CanvasPortSpec]] = {
-    "prompt": {},
-    "prompt_merge": {
-        "texts": CanvasPortSpec("text", None),
-    },
-    "image_asset": {},
-    "mask_asset": {},
-    "video_asset": {},
-    "image_generate": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "references": CanvasPortSpec("image", None),
-        "mask": CanvasPortSpec("mask", 1),
-    },
-    "image_edit": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "source": CanvasPortSpec("image", 1, True),
-        "references": CanvasPortSpec("image", MAX_MESSAGE_ATTACHMENTS - 1),
-    },
-    "image_inpaint": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "source": CanvasPortSpec("image", 1, True),
-        "mask": CanvasPortSpec("mask", 1, True),
-    },
-    "image_upscale": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "source": CanvasPortSpec("image", 1, True),
-    },
-    "video_generate": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "first_frame": CanvasPortSpec("image", 1),
-        "reference_images": CanvasPortSpec("image", None),
-        "reference_videos": CanvasPortSpec("video", None),
-    },
-    "video_text_generate": {
-        "prompt": CanvasPortSpec("text", 1, True),
-    },
-    "video_image_generate": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "first_frame": CanvasPortSpec("image", 1, True),
-    },
-    "video_reference_generate": {
-        "prompt": CanvasPortSpec("text", 1, True),
-        "reference_images": CanvasPortSpec("image", 9),
-        "reference_videos": CanvasPortSpec("video", 3),
-    },
-    "note": {},
-    "frame": {},
-    "delivery": {
-        "images": CanvasPortSpec("image", None),
-        "videos": CanvasPortSpec("video", None),
-    },
-}
+NODE_INPUT_PORTS: Mapping[str, Mapping[str, CanvasPortSpec]] = immutable_nested_mapping(
+    {
+        "prompt": {},
+        "prompt_merge": {
+            "texts": CanvasPortSpec("text", None),
+        },
+        "image_asset": {},
+        "mask_asset": {},
+        "video_asset": {},
+        "image_generate": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "references": CanvasPortSpec("image", None),
+            "mask": CanvasPortSpec("mask", 1),
+        },
+        "image_edit": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "source": CanvasPortSpec("image", 1, True),
+            "references": CanvasPortSpec("image", MAX_MESSAGE_ATTACHMENTS - 1),
+        },
+        "image_inpaint": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "source": CanvasPortSpec("image", 1, True),
+            "mask": CanvasPortSpec("mask", 1, True),
+        },
+        "image_upscale": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "source": CanvasPortSpec("image", 1, True),
+        },
+        "video_generate": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "first_frame": CanvasPortSpec("image", 1),
+            "reference_images": CanvasPortSpec("image", None),
+            "reference_videos": CanvasPortSpec("video", None),
+        },
+        "video_text_generate": {
+            "prompt": CanvasPortSpec("text", 1, True),
+        },
+        "video_image_generate": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "first_frame": CanvasPortSpec("image", 1, True),
+        },
+        "video_reference_generate": {
+            "prompt": CanvasPortSpec("text", 1, True),
+            "reference_images": CanvasPortSpec("image", 9),
+            "reference_videos": CanvasPortSpec("video", 3),
+        },
+        "note": {},
+        "frame": {},
+        "delivery": {
+            "images": CanvasPortSpec("image", None),
+            "videos": CanvasPortSpec("video", None),
+        },
+    }
+)
 
-NODE_OUTPUT_PORTS: dict[str, dict[str, CanvasPortSpec]] = {
-    "prompt": {"text": CanvasPortSpec("text", None)},
-    "prompt_merge": {"text": CanvasPortSpec("text", None)},
-    "image_asset": {"image": CanvasPortSpec("image", None)},
-    "mask_asset": {"mask": CanvasPortSpec("mask", None)},
-    "video_asset": {"video": CanvasPortSpec("video", None)},
-    "image_generate": {"image": CanvasPortSpec("image", None)},
-    "image_edit": {"image": CanvasPortSpec("image", None)},
-    "image_inpaint": {"image": CanvasPortSpec("image", None)},
-    "image_upscale": {"image": CanvasPortSpec("image", None)},
-    "video_generate": {"video": CanvasPortSpec("video", None)},
-    "video_text_generate": {"video": CanvasPortSpec("video", None)},
-    "video_image_generate": {"video": CanvasPortSpec("video", None)},
-    "video_reference_generate": {"video": CanvasPortSpec("video", None)},
-    "note": {},
-    "frame": {},
-    "delivery": {},
-}
+NODE_OUTPUT_PORTS: Mapping[str, Mapping[str, CanvasPortSpec]] = (
+    immutable_nested_mapping(
+        {
+            "prompt": {"text": CanvasPortSpec("text", None)},
+            "prompt_merge": {"text": CanvasPortSpec("text", None)},
+            "image_asset": {"image": CanvasPortSpec("image", None)},
+            "mask_asset": {"mask": CanvasPortSpec("mask", None)},
+            "video_asset": {"video": CanvasPortSpec("video", None)},
+            "image_generate": {"image": CanvasPortSpec("image", None)},
+            "image_edit": {"image": CanvasPortSpec("image", None)},
+            "image_inpaint": {"image": CanvasPortSpec("image", None)},
+            "image_upscale": {"image": CanvasPortSpec("image", None)},
+            "video_generate": {"video": CanvasPortSpec("video", None)},
+            "video_text_generate": {"video": CanvasPortSpec("video", None)},
+            "video_image_generate": {"video": CanvasPortSpec("video", None)},
+            "video_reference_generate": {"video": CanvasPortSpec("video", None)},
+            "note": {},
+            "frame": {},
+            "delivery": {},
+        }
+    )
+)
 
 
 def _validate_group_depth(

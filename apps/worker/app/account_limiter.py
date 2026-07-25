@@ -23,6 +23,7 @@ import math
 import time
 from datetime import datetime, timezone
 from typing import Any
+from types import MappingProxyType
 from uuid import uuid4
 
 from redis.exceptions import WatchError
@@ -132,23 +133,25 @@ end
 return removed
 """
 
-_UNIT_SECONDS: dict[str, int] = {
-    "s": 1,
-    "sec": 1,
-    "second": 1,
-    "seconds": 1,
-    "m": 60,
-    "min": 60,
-    "minute": 60,
-    "minutes": 60,
-    "h": 3600,
-    "hr": 3600,
-    "hour": 3600,
-    "hours": 3600,
-    "d": 86400,
-    "day": 86400,
-    "days": 86400,
-}
+_UNIT_SECONDS = MappingProxyType(
+    {
+        "s": 1,
+        "sec": 1,
+        "second": 1,
+        "seconds": 1,
+        "m": 60,
+        "min": 60,
+        "minute": 60,
+        "minutes": 60,
+        "h": 3600,
+        "hr": 3600,
+        "hour": 3600,
+        "hours": 3600,
+        "d": 86400,
+        "day": 86400,
+        "days": 86400,
+    }
+)
 
 
 class AccountLimiterUnavailable(RuntimeError):

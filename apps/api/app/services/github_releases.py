@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 
 TAG_RE = re.compile(r"^(?:v[0-9]+(?:\.[0-9]+){0,2}(?:-[0-9A-Za-z.-]+)?|main|latest)$")
-_ALLOWED_RELEASE_HOSTS = {"github.com", "api.github.com"}
+_ALLOWED_RELEASE_HOSTS = frozenset({"github.com", "api.github.com"})
 
 
 class GitHubRelease(BaseModel):

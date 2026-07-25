@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from lumen_core.constants import (
@@ -19,6 +20,7 @@ from lumen_core.constants import (
     EVENTS_STREAM_PREFIX,
     EVENTS_STREAM_TTL_SECONDS,
 )
+
 logger = logging.getLogger(__name__)
 
 _XADD_RETRY_DELAYS_SECONDS = (0.05, 0.2)
@@ -54,11 +56,17 @@ redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
 return stream_id
 """
 
+
 # Per-process monotonic only. Different API workers can still produce
 # non-comparable values, so clients must use Redis stream ids for replay
 # ordering and treat ts_ms as a display hint.
-_LAST_TS_MS = 0
-_TS_LOCK = asyncio.Lock()
+@dataclass
+class _SSEPublishState:
+    last_ts_ms: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_sse_publish_state = _SSEPublishState()
 
 
 class SSEPublishEvent(TypedDict):
@@ -69,12 +77,11 @@ class SSEPublishEvent(TypedDict):
 
 
 async def _monotonic_ts_ms() -> int:
-    global _LAST_TS_MS
-    async with _TS_LOCK:
+    async with _sse_publish_state.lock:
         now = int(time.time() * 1000)
-        if now <= _LAST_TS_MS:
-            now = _LAST_TS_MS + 1
-        _LAST_TS_MS = now
+        if now <= _sse_publish_state.last_ts_ms:
+            now = _sse_publish_state.last_ts_ms + 1
+        _sse_publish_state.last_ts_ms = now
         return now
 
 

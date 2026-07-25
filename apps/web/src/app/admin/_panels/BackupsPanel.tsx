@@ -122,8 +122,8 @@ export function BackupsPanel() {
       <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-start gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center shrink-0">
-              <Archive className="w-4 h-4 text-[var(--color-lumen-amber)]" />
+            <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--accent)]/15 border border-[var(--accent)]/25 flex items-center justify-center shrink-0">
+              <Archive className="w-4 h-4 text-[var(--accent)]" />
             </div>
             <div className="min-w-0">
               <p className="type-card-title">备份与恢复</p>
@@ -242,7 +242,7 @@ export function BackupsPanel() {
                           size="sm"
                           onClick={() => setRestoreTarget(b)}
                           leftIcon={<RotateCcw className="w-3 h-3" />}
-                          className="text-[var(--color-lumen-amber)] hover:bg-[var(--color-lumen-amber)]/10"
+                          className="text-[var(--accent)] hover:bg-[var(--accent)]/10"
                         >
                           恢复
                         </Button>
@@ -274,7 +274,7 @@ export function BackupsPanel() {
                       size="sm"
                       onClick={() => setRestoreTarget(b)}
                       leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
-                      className="shrink-0 bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
+                      className="shrink-0 bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]"
                     >
                       恢复
                     </Button>

@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 from types import SimpleNamespace
 from typing import Any
 import time
 
 import pytest
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.tasks.generation_parts import queue as generation_queue
 
 
@@ -93,9 +110,7 @@ class _QueueRedis:
         low = float("-inf") if str(min_score) == "-inf" else float(min_score)
         high = float("inf") if str(max_score) == "+inf" else float(max_score)
         stale = [
-            member
-            for member, score in bucket.items()
-            if low <= float(score) <= high
+            member for member, score in bucket.items() if low <= float(score) <= high
         ]
         for member in stale:
             bucket.pop(member, None)
@@ -131,9 +146,7 @@ class _QueueRedis:
             lock_key,
             cursor_key,
             reservation_key,
-        ) = (
-            str(item) for item in keys_and_args[:7]
-        )
+        ) = (str(item) for item in keys_and_args[:7])
         (
             now_raw,
             expiry_raw,

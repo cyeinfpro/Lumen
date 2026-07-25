@@ -4,10 +4,11 @@ retry.is_retriable() 仍把 moderation 视为 terminal（避免单 provider 浪�
 generation._decide_moderation_retry_upgrade() 在多 provider 部署下叠加上下文，
 让 task 层退避后换号再试。
 """
+
 from __future__ import annotations
 
 from app.retry import RetryDecision
-from app.tasks.generation import (
+from app.tasks.generation_parts.default_runtime import (
     _MODERATION_RETRY_CAP,
     _decide_moderation_retry_upgrade,
 )
@@ -75,9 +76,7 @@ def test_no_upgrade_when_cap_reached() -> None:
 
 def test_no_upgrade_when_all_providers_tried() -> None:
     # avoided=enabled-1 时本次失败后所有 enabled provider 都试过，terminal。
-    assert (
-        _upgrade(already_avoided_count=2, enabled_provider_count=3) is None
-    )
+    assert _upgrade(already_avoided_count=2, enabled_provider_count=3) is None
 
 
 def test_upgrade_keeps_soft_avoid_before_last_provider() -> None:
@@ -88,12 +87,14 @@ def test_upgrade_keeps_soft_avoid_before_last_provider() -> None:
 def test_upgrade_until_cap_with_many_providers() -> None:
     # 10 个 provider 时上限受 _MODERATION_RETRY_CAP 控制——不会试完所有 10 个。
     last_upgrade = _MODERATION_RETRY_CAP - 2
-    assert _upgrade(
-        already_avoided_count=last_upgrade, enabled_provider_count=10
-    ) is not None
-    assert _upgrade(
-        already_avoided_count=last_upgrade + 1, enabled_provider_count=10
-    ) is None
+    assert (
+        _upgrade(already_avoided_count=last_upgrade, enabled_provider_count=10)
+        is not None
+    )
+    assert (
+        _upgrade(already_avoided_count=last_upgrade + 1, enabled_provider_count=10)
+        is None
+    )
 
 
 def test_upgrade_recognizes_safety_policy_message_only() -> None:

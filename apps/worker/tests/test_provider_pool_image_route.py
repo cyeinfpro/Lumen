@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
+from app.provider_runtime.upstream_services import upstream_services
 
 
 def _make_pool(*configs: ProviderConfig) -> ProviderPool:
@@ -508,11 +509,11 @@ def test_is_image_rate_limit_error_classification(
     expected_is_rl: bool,
     expected_retry_after: float | None,
 ) -> None:
-    from app.upstream import UpstreamError, _is_image_rate_limit_error
+    from app.provider_runtime.errors import UpstreamError
 
     msg = exc_kwargs.pop("message_in", "boom")
     exc = UpstreamError(msg, **exc_kwargs)
-    is_rl, retry_after = _is_image_rate_limit_error(exc)
+    is_rl, retry_after = upstream_services().providers.is_image_rate_limit_error(exc)
     assert is_rl is expected_is_rl
     if expected_retry_after is not None:
         assert retry_after == expected_retry_after

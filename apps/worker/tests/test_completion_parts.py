@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from app import image_artifacts
-from app.tasks import completion
+from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts import (
+    artifact_codec,
     citation_text,
     context,
     context_loading,
@@ -138,7 +138,7 @@ def test_completion_facade_preserves_new_leaf_symbol_identity() -> None:
 
     assert (
         completion._decode_upstream_image_b64
-        is image_artifacts._decode_upstream_image_b64
+        is artifact_codec.decode_upstream_image_b64
     )
 
 
@@ -216,9 +216,7 @@ def test_completion_leaf_modules_do_not_reverse_import_facade() -> None:
                 assert not (node.module or "").endswith(".completion")
                 assert all(name.name != "completion" for name in node.names)
             elif isinstance(node, ast.Import):
-                assert all(
-                    name.name != "app.tasks.completion" for name in node.names
-                )
+                assert all(name.name != "app.tasks.completion" for name in node.names)
 
 
 def test_completion_facade_stays_strictly_below_3000_lines() -> None:

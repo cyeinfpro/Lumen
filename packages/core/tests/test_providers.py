@@ -418,7 +418,7 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     source_known_hosts = _write_known_hosts(tmp_path)
 
@@ -504,7 +504,7 @@ async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     source = Path(_write_known_hosts(tmp_path))
     link = tmp_path / "known_hosts-link"
     try:
@@ -550,7 +550,7 @@ async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
 async def test_resolve_ssh_proxy_rejects_missing_host_key_trust(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     launched = False
 
     def fake_which(name: str) -> str | None:
@@ -590,7 +590,7 @@ async def test_resolve_ssh_proxy_rejects_writable_known_hosts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     known_hosts_path = _write_known_hosts(tmp_path)
     os.chmod(known_hosts_path, 0o666)
     monkeypatch.setattr(
@@ -615,7 +615,7 @@ async def test_resolve_ssh_proxy_rejects_writable_known_hosts(
 async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     key_blob = b"synthetic-ed25519-host-key"
     encoded_key = base64.b64encode(key_blob).decode("ascii")
@@ -703,7 +703,7 @@ async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
 async def test_resolve_ssh_proxy_rejects_host_key_fingerprint_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     launched = False
     expected_blob = b"expected-host-key"
     presented_blob = b"attacker-host-key"
@@ -763,7 +763,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     proc = _FakeSshProcess()
 
@@ -823,7 +823,7 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNELS.clear()
+    provider_mod._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     proc = _FakeSshProcess()
     unlink_events: list[tuple[str, int | None, bool]] = []

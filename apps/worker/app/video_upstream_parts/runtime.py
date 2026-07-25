@@ -21,15 +21,37 @@ class AdapterRuntime:
     seedance_content: Callable[..., list[dict[str, Any]]]
 
 
-_runtime_factory: Callable[[], AdapterRuntime] | None = None
+class AdapterRuntimePort:
+    """Explicit owner for adapter runtime composition."""
+
+    def __init__(self) -> None:
+        self._factory: Callable[[], AdapterRuntime] | None = None
+
+    def install(self, factory: Callable[[], AdapterRuntime]) -> None:
+        if self._factory is not None and self._factory is not factory:
+            raise RuntimeError("video adapter runtime factory is already installed")
+        self._factory = factory
+
+    def current(self) -> AdapterRuntime:
+        if self._factory is None:
+            raise RuntimeError("video upstream runtime factory is not initialized")
+        return self._factory()
+
+
+_ADAPTER_RUNTIME_PORT = AdapterRuntimePort()
 
 
 def set_runtime_factory(factory: Callable[[], AdapterRuntime]) -> None:
-    global _runtime_factory
-    _runtime_factory = factory
+    _ADAPTER_RUNTIME_PORT.install(factory)
 
 
 def current_runtime() -> AdapterRuntime:
-    if _runtime_factory is None:
-        raise RuntimeError("video upstream runtime factory is not initialized")
-    return _runtime_factory()
+    return _ADAPTER_RUNTIME_PORT.current()
+
+
+__all__ = [
+    "AdapterRuntime",
+    "AdapterRuntimePort",
+    "current_runtime",
+    "set_runtime_factory",
+]

@@ -20,6 +20,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy.dialects import postgresql
 
 from app.routes import conversations
+from app.services.conversations import compaction as compaction_service
 
 
 # ---------- fakes ----------
@@ -66,7 +67,9 @@ class _Db:
         if "FROM conversations" in rendered:
             return _Result([self.conv] if self.conv is not None else [])
         if "FROM messages" in rendered:
-            return _Result([self.latest_message] if self.latest_message is not None else [])
+            return _Result(
+                [self.latest_message] if self.latest_message is not None else []
+            )
         if "FROM system_settings" in rendered:
             try:
                 params = statement.compile().params
@@ -194,6 +197,20 @@ def _user(user_id: str = "user-1") -> SimpleNamespace:
     )
 
 
+def test_context_summary_adapter_registry_is_explicit_and_restorable() -> None:
+    async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"status": "created"}
+
+    previous = compaction_service.install_context_summary_adapter(fake_ensure)
+    try:
+        adapter = compaction_service.import_worker_context_summary()
+        assert adapter is not None
+        assert adapter.ensure_context_summary is fake_ensure
+        assert compaction_service.import_ensure_context_summary() is fake_ensure
+    finally:
+        compaction_service.restore_context_summary_adapter(previous)
+
+
 # ---------- 1. owner success path ----------
 
 
@@ -245,9 +262,7 @@ async def test_compact_returns_summary_for_owner(
         _request(),
         _user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
-        conversations.ManualCompactIn(
-            extra_instruction="keep file paths", force=True
-        ),
+        conversations.ManualCompactIn(extra_instruction="keep file paths", force=True),
     )
 
     assert out["status"] == "ok"
@@ -276,6 +291,57 @@ async def test_compact_returns_summary_for_owner(
     )
 
 
+@pytest.mark.asyncio
+async def test_compact_uses_worker_queue_when_no_adapter_is_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis()
+
+    class Pool:
+        async def enqueue_job(self, name: str, *args: Any) -> None:
+            assert name == "manual_compact_conversation"
+            job_id = str(args[3])
+            key = conversations._manual_compact_job_key(
+                user_id="user-1",
+                conv_id="conv-1",
+                job_id=job_id,
+            )
+            redis.kv[key] = json.dumps(
+                {
+                    "status": "succeeded",
+                    "response": {
+                        "status": "ok",
+                        "compacted": True,
+                        "summary": {"tokens": 321},
+                    },
+                }
+            )
+
+    async def fake_pool() -> Pool:
+        return Pool()
+
+    previous = compaction_service.install_context_summary_adapter(None)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+    monkeypatch.setattr(conversations, "get_arq_pool", fake_pool)
+    try:
+        out = await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(force=True),
+        )
+    finally:
+        compaction_service.restore_context_summary_adapter(previous)
+
+    assert out == {
+        "status": "ok",
+        "compacted": True,
+        "summary": {"tokens": 321},
+    }
+
+
 # ---------- 2. cross-user 404 ----------
 
 
@@ -290,7 +356,9 @@ async def test_compact_404_for_other_user(
     async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("ensure_context_summary must not run for non-owners")
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
@@ -323,7 +391,9 @@ async def test_compact_409_when_no_messages(
     async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("ensure_context_summary must not run without messages")
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
@@ -353,7 +423,9 @@ async def test_compact_503_on_lock_busy(
         # already held and the post-wait re-read still misses.
         return None
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
@@ -389,7 +461,9 @@ async def test_compact_returns_false_when_below_budget(
     async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("budget gate must short-circuit before ensure")
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
@@ -446,7 +520,9 @@ async def test_compact_force_false_with_huge_safety_margin_invokes_upstream(
             "extra_instruction_hash": None,
         }
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
@@ -500,7 +576,9 @@ async def test_compact_enforces_cooldown_before_upstream(
     async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("cooldown must stop before upstream")
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: redis)
 
     with pytest.raises(HTTPException) as excinfo:
@@ -527,7 +605,9 @@ async def test_compact_enforces_circuit_before_upstream(
     async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("circuit breaker must stop before upstream")
 
-    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(
+        conversations, "_import_ensure_context_summary", lambda: fake_ensure
+    )
     monkeypatch.setattr(conversations, "get_redis", lambda: _Redis(circuit_open=True))
 
     with pytest.raises(HTTPException) as excinfo:
@@ -645,7 +725,8 @@ async def test_load_messages_for_compaction_has_limit() -> None:
     db = _Db(conv=None, latest_message=_message())
 
     await conversations._load_messages_for_compaction(
-        db, "conv-1"  # type: ignore[arg-type]
+        db,
+        "conv-1",  # type: ignore[arg-type]
     )
 
     rendered = str(db.statements[-1].compile(dialect=postgresql.dialect())).upper()

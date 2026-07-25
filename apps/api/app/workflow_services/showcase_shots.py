@@ -4,8 +4,27 @@ from __future__ import annotations
 
 from typing import cast
 
-from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant, Template
-from .showcase_runtime import runtime as _runtime
+from ..workflow_domain.showcase_shot_pool import (
+    SHOT_CLASS_ORDER,
+    ShotClass,
+    ShotVariant,
+    Template,
+    resolve_pool_band as _resolve_pool_band,
+    select_variants as _select_shot_variants,
+    shot_class_distribution as _shot_class_distribution,
+)
+from ..workflow_domain.showcase_shot_pool_adult import ADULT_POOL
+from ..workflow_domain.showcase_shot_pool_kids import CHILD_POOL, TODDLER_POOL
+from ..workflow_domain.immutables import freeze_mapping
+
+
+SHOT_POOL_BY_BAND = freeze_mapping(
+    {
+        "young_adult": ADULT_POOL,
+        "child": CHILD_POOL,
+        "toddler": TODDLER_POOL,
+    }
+)
 
 
 def _showcase_default_variant(
@@ -13,17 +32,14 @@ def _showcase_default_variant(
     shot_type: str,
     age_segment: str | None,
 ) -> ShotVariant | None:
-    runtime = _runtime()
-    band = runtime._resolve_pool_band(age_segment)
-    pool = runtime.SHOT_POOL_BY_BAND.get(band, runtime.ADULT_POOL)
+    band = _resolve_pool_band(age_segment)
+    pool = SHOT_POOL_BY_BAND.get(band, ADULT_POOL)
     template_key = cast(Template, template)
-    template_pool = pool.get(template_key) or runtime.ADULT_POOL.get(template_key)
+    template_pool = pool.get(template_key) or ADULT_POOL.get(template_key)
     if not template_pool:
         return None
     shot_key = cast(ShotClass, shot_type)
-    variants = template_pool.get(shot_key) or template_pool.get(
-        runtime.SHOT_CLASS_ORDER[0]
-    )
+    variants = template_pool.get(shot_key) or template_pool.get(SHOT_CLASS_ORDER[0])
     if not variants:
         return None
     for variant in variants:
@@ -39,13 +55,12 @@ def _showcase_pick_shot_variants(
     output_count: int,
     seed_key: str,
 ) -> list[tuple[ShotClass, ShotVariant]]:
-    runtime = _runtime()
-    band = runtime._resolve_pool_band(age_segment)
-    pool = runtime.SHOT_POOL_BY_BAND.get(band, runtime.ADULT_POOL)
+    band = _resolve_pool_band(age_segment)
+    pool = SHOT_POOL_BY_BAND.get(band, ADULT_POOL)
     template_key = cast(Template, template)
-    template_pool = pool.get(template_key) or runtime.ADULT_POOL.get(template_key) or {}
-    plan = runtime._shot_class_distribution(output_count)
-    variants = runtime._select_shot_variants(
+    template_pool = pool.get(template_key) or ADULT_POOL.get(template_key) or {}
+    plan = _shot_class_distribution(output_count)
+    variants = _select_shot_variants(
         pool=template_pool,
         plan=plan,
         seed_key=seed_key,
@@ -54,3 +69,8 @@ def _showcase_pick_shot_variants(
         ),
     )
     return list(zip(plan, variants))
+
+
+# Public workflow contracts.
+showcase_default_variant = _showcase_default_variant
+showcase_pick_shot_variants = _showcase_pick_shot_variants

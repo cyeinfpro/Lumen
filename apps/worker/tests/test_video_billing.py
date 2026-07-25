@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import video_artifacts, video_billing
-from app.tasks import video_generation
+from app.tasks.video_generation_parts import default_runtime as video_generation
 from app.video_upstream import PollResult
 from lumen_core.models import VideoGeneration
 

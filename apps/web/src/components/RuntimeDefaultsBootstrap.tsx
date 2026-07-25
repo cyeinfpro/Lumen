@@ -7,10 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getMe, type AuthUser } from "@/lib/apiClient";
 import { isPublicPath } from "@/lib/auth/publicPaths";
 import { AUTH_USER_QUERY_KEY } from "@/components/QueryProvider";
-import {
-  installHighRiskIdentityWriteGuard,
-  setSessionRuntimeStatus,
-} from "@/lib/runtimeResilience";
+import { setSessionRuntimeStatus } from "@/lib/runtimeResilience";
 import {
   getRedirectForHiddenNavPath,
   normalizeNavVisibility,
@@ -150,8 +147,6 @@ export function RuntimeDefaultsBootstrap({
   useLayoutEffect(() => {
     setSessionRuntimeStatus(identityStatus);
   }, [identityStatus]);
-
-  useEffect(() => installHighRiskIdentityWriteGuard(), []);
 
   useEffect(() => {
     if (!meQuery.data || identityUnavailable) return;

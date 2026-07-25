@@ -1,9 +1,5 @@
-"""Compatibility facade for the neutral apparel-library domain module."""
+"""Static compatibility re-export for apparel-library domain contracts."""
 
 from __future__ import annotations
 
-import sys
-
-from app.workflow_domain import apparel_library as _implementation
-
-sys.modules[__name__] = _implementation
+from app.workflow_domain.apparel_library import *  # noqa: F403

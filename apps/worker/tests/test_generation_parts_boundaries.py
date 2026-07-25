@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import asyncio
 import inspect
 from pathlib import Path
@@ -7,7 +9,22 @@ from typing import Any
 
 import pytest
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.tasks.generation_parts import (
     failure,
     lease,
@@ -161,27 +178,27 @@ async def test_lifecycle_checkpoint_uses_late_bound_exception_identity(
 
 def test_lifecycle_settlement_preserves_transaction_order() -> None:
     existing_source = inspect.getsource(lifecycle.settle_existing_generated_image)
-    success_start = existing_source.index("_g.logger.info(")
+    success_start = existing_source.index("generation_ports().logger.info(")
     cancelled = existing_source[:success_start]
     succeeded = existing_source[success_start:]
 
-    cancel_update = cancelled.index("_g._generation_attempt_update(")
+    cancel_update = cancelled.index("._generation_attempt_update(")
     cancel_release = cancelled.index(
-        "await _g.worker_billing.release_generation(",
+        "await generation_ports().worker_billing.release_generation(",
         cancel_update,
     )
     cancel_stage = cancelled.index(
-        "failure_delivery = _g._stage_generation_event(",
+        "failure_delivery = generation_ports()._stage_generation_event(",
         cancel_release,
     )
-    cancel_event = cancelled.index("_g.EV_GEN_FAILED", cancel_stage)
+    cancel_event = cancelled.index("generation_ports().EV_GEN_FAILED", cancel_stage)
     cancel_commit = cancelled.index("await session.commit()", cancel_event)
     cancel_flush = cancelled.index(
-        "await _g.worker_billing.flush_balance_cache_refreshes(session)",
+        "worker_billing.flush_balance_cache_refreshes(",
         cancel_commit,
     )
     cancel_deliver = cancelled.index(
-        "await _g._deliver_generation_event(redis, failure_delivery)",
+        "await generation_ports()._deliver_generation_event(redis, failure_delivery)",
         cancel_flush,
     )
     assert (
@@ -194,23 +211,26 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
         < cancel_deliver
     )
 
-    success_update = succeeded.index("_g._generation_attempt_update(")
+    success_update = succeeded.index("._generation_attempt_update(")
     success_settle = succeeded.index(
-        "await _g.worker_billing.settle_generation(",
+        "await generation_ports().worker_billing.settle_generation(",
         success_update,
     )
     success_stage = succeeded.index(
-        "success_delivery = _g._stage_generation_event(",
+        "success_delivery = generation_ports()._stage_generation_event(",
         success_settle,
     )
-    success_event = succeeded.index("_g.EV_GEN_SUCCEEDED", success_stage)
+    success_event = succeeded.index(
+        "generation_ports().EV_GEN_SUCCEEDED",
+        success_stage,
+    )
     success_commit = succeeded.index("await session.commit()", success_event)
     success_flush = succeeded.index(
-        "await _g.worker_billing.flush_balance_cache_refreshes(session)",
+        "worker_billing.flush_balance_cache_refreshes(",
         success_commit,
     )
     success_deliver = succeeded.index(
-        "await _g._deliver_generation_event(redis, success_delivery)",
+        "await generation_ports()._deliver_generation_event(redis, success_delivery)",
         success_flush,
     )
     assert (
@@ -224,23 +244,26 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
     )
 
     cancel_source = inspect.getsource(lifecycle.finalize_running_generation_cancel)
-    running_update = cancel_source.index("_g._generation_attempt_update(")
+    running_update = cancel_source.index("._generation_attempt_update(")
     running_release = cancel_source.index(
-        "await _g.worker_billing.release_generation(",
+        "await generation_ports().worker_billing.release_generation(",
         running_update,
     )
     running_stage = cancel_source.index(
-        "failure_delivery = _g._stage_generation_event(",
+        "failure_delivery = generation_ports()._stage_generation_event(",
         running_release,
     )
-    running_event = cancel_source.index("_g.EV_GEN_FAILED", running_stage)
+    running_event = cancel_source.index(
+        "generation_ports().EV_GEN_FAILED",
+        running_stage,
+    )
     running_commit = cancel_source.index("await session.commit()", running_event)
     running_flush = cancel_source.index(
-        "await _g.worker_billing.flush_balance_cache_refreshes(session)",
+        "worker_billing.flush_balance_cache_refreshes(",
         running_commit,
     )
     running_deliver = cancel_source.index(
-        "await _g._deliver_generation_event(redis, failure_delivery)",
+        "await generation_ports()._deliver_generation_event(redis, failure_delivery)",
         running_flush,
     )
     assert (
@@ -312,7 +335,9 @@ async def test_persistence_cleanup_uses_facade_delete_hook(
 
 def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     persistence_source = inspect.getsource(persistence._persist_bonus_generation)
-    settle = persistence_source.index("_g.worker_billing.settle_generation")
+    settle = persistence_source.index(
+        "generation_ports().worker_billing.settle_generation"
+    )
     stage = persistence_source.index("_stage_bonus_events(", settle)
     commit = persistence_source.index("await session.commit()", stage)
     flush = persistence_source.index(
@@ -322,14 +347,17 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     assert settle < stage < commit < flush
 
     stage_source = inspect.getsource(persistence._stage_bonus_events)
-    attached = stage_source.index("_g.EV_GEN_ATTACHED")
-    succeeded = stage_source.index("_g.EV_GEN_SUCCEEDED", attached)
+    attached = stage_source.index("generation_ports().EV_GEN_ATTACHED")
+    succeeded = stage_source.index(
+        "generation_ports().EV_GEN_SUCCEEDED",
+        attached,
+    )
     assert attached < succeeded
 
     facade_source = inspect.getsource(persistence.handle_dual_race_bonus_image)
     persist = facade_source.index("_persist_bonus_generation(")
     deliver = facade_source.index(
-        "await _g._deliver_generation_events",
+        "await generation_ports()._deliver_generation_events",
         persist,
     )
     assert persist < deliver

@@ -424,8 +424,8 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
       <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex min-w-0 items-start gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
-              <HardDrive className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent)]/25 bg-[var(--accent)]/12">
+              <HardDrive className="h-4 w-4 text-[var(--accent)]" />
             </div>
             <div className="min-w-0">
               <h3 className="type-card-title">存储后端</h3>
@@ -839,7 +839,7 @@ function BackendSwitch({
               "flex items-start gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 text-left transition-colors",
               "disabled:cursor-not-allowed disabled:opacity-60",
               active
-                ? "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/8"
+                ? "border-[var(--accent)]/45 bg-[var(--accent)]/8"
                 : "border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)]",
             )}
           >
@@ -847,14 +847,14 @@ function BackendSwitch({
               className={cn(
                 "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                 active
-                  ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/15"
+                  ? "border-[var(--accent)] bg-[var(--accent)]/15"
                   : "border-[var(--border)] bg-[var(--bg-2)]",
               )}
             >
               {active && (
                 <motion.span
                   layoutId="storage-radio-dot"
-                  className="h-2 w-2 rounded-full bg-[var(--color-lumen-amber)]"
+                  className="h-2 w-2 rounded-full bg-[var(--accent)]"
                   transition={{ type: "spring", stiffness: 380, damping: 26 }}
                 />
               )}

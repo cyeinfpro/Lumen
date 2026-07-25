@@ -326,3 +326,20 @@ class _CompletionToolTracker:
 
     def content(self) -> list[dict[str, Any]]:
         return [state.payload() for state in self._calls.values()]
+
+
+# Public contract consumed by the Completion runtime modules.
+CODE_INTERPRETER_TOOL_TYPE = _CODE_INTERPRETER_TOOL_TYPE
+CompletionToolTracker = _CompletionToolTracker
+FILE_SEARCH_TOOL_TYPE = _FILE_SEARCH_TOOL_TYPE
+IMAGE_GENERATION_TOOL_TYPE = _IMAGE_GENERATION_TOOL_TYPE
+ToolCallState = _ToolCallState
+WEB_SEARCH_TOOL_TYPE = _WEB_SEARCH_TOOL_TYPE
+extract_tool_call_update = _extract_tool_call_update
+first_str = _first_str
+merge_tool_call_state = _merge_tool_call_state
+normalize_tool_status = _normalize_tool_status
+normalize_tool_type = _normalize_tool_type
+summarize_tool_error = _summarize_tool_error
+tool_display_label = _tool_display_label
+tool_status_rank = _tool_status_rank

@@ -25,6 +25,7 @@ import secrets
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
+from types import MappingProxyType
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -64,8 +65,9 @@ from ..services.provider_config import (
     parse_provider_config as _parse_config,
     read_providers as _read_providers,
 )
+from .media_delivery import image_storage_path, image_storage_streaming_response
 from .messages import submit_user_message
-from .prompts import _resolve_provider_order, _stream_enhance
+from .prompts import resolve_provider_order, stream_enhance
 from lumen_core.providers import (
     parse_provider_bool,
     parse_proxy_item,
@@ -101,7 +103,7 @@ _LINK_CODE_TTL_SECONDS = 600  # 10 min
 _LINK_CODE_REDIS_PREFIX = "tg:link:"
 _LINK_CODE_CLAIM_SUFFIX = ":claim"
 _TG_CONV_TITLE = "Telegram Bot"
-_TG_CONV_MARKER = {"telegram": True}
+_TG_CONV_MARKER = MappingProxyType({"telegram": True})
 _BOT_BIND_CODE_LIMITER = RateLimiter(
     capacity=30,
     refill_per_sec=30 / 60,
@@ -731,13 +733,13 @@ async def enhance_prompt(
     """复用 /prompts/enhance 的内核，但聚合 SSE 增量为完整字符串。bot 端不需要流式。"""
     import json as _json
 
-    providers = [p for p in await _resolve_provider_order(db) if p.api_key.strip()]
+    providers = [p for p in await resolve_provider_order(db) if p.api_key.strip()]
     if not providers:
         raise _http("not_configured", "upstream API key not set", 503)
 
     parts: list[str] = []
     error: str | None = None
-    async for chunk in _stream_enhance(body.text, providers):
+    async for chunk in stream_enhance(body.text, providers):
         # chunk 形如 "data: {\"text\": \"...\"}\n\n" 或 "data: [DONE]\n\n" 或 "data: {\"error\": \"...\"}\n\n"
         if not chunk.startswith("data: "):
             continue
@@ -949,8 +951,6 @@ async def get_image_binary(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     """Bot 流式取图。复用 images 路由的 storage 工具，但鉴权用 BotUser。"""
-    from .images import _fs_path, _storage_streaming_response
-
     img = (
         await db.execute(
             select(Image).where(
@@ -962,8 +962,8 @@ async def get_image_binary(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
-    path = _fs_path(img.storage_key)
-    return _storage_streaming_response(
+    path = image_storage_path(img.storage_key)
+    return image_storage_streaming_response(
         path,
         media_type=img.mime,
         etag=f'"{img.sha256}"',

@@ -11,20 +11,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from dataclasses import dataclass
+from enum import StrEnum
 from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import (
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
+from aiogram.utils.token import TokenValidationError
+from aiohttp import ClientError
+from prometheus_client import Counter, start_http_server
 from redis import asyncio as aioredis
 
 from .api_client import ApiError, LumenApi
 from .config import settings
-from .handlers import build_root_router
+from .handlers import GenerationRuntime, build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
-from .proxy_manager import FailoverSession, ProxyManager, _normalize_proxy_url
+from .proxy_manager import FailoverSession, ProxyManager, normalize_proxy_url
 
 
 # FSM 状态过期时间。/new 走完一个生成或丢弃后状态被 clear()，正常路径不会留垃圾。
@@ -35,6 +46,192 @@ _FSM_STATE_TTL_SEC = 3600
 
 _CONTROL_CHANNEL = "admin:tgbot:control"
 _PAUSED_CONFIG_REFRESH_INTERVAL_SEC = 20.0
+_POLLING_NETWORK_BACKOFF_MAX_SEC = 60.0
+
+TGBOT_POLLING_FAILURES = Counter(
+    "tgbot_polling_failures_total",
+    "Telegram polling terminations classified by the process supervisor.",
+    labelnames=("class",),
+)
+
+
+class PollingTerminationClass(StrEnum):
+    NORMAL_STOP = "normal_stop"
+    NORMAL_CANCEL = "normal_cancel"
+    INVALID_CONFIGURATION = "invalid_configuration"
+    RECOVERABLE_NETWORK = "recoverable_network"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PollingTermination:
+    classification: PollingTerminationClass
+    error: BaseException | None = None
+
+
+class PollingSupervisorFailure(RuntimeError):
+    pass
+
+
+def _record_polling_failure(classification: PollingTerminationClass) -> None:
+    if classification not in {
+        PollingTerminationClass.NORMAL_STOP,
+        PollingTerminationClass.NORMAL_CANCEL,
+    }:
+        TGBOT_POLLING_FAILURES.labels(classification.value).inc()
+
+
+def _classify_polling_error(error: BaseException) -> PollingTerminationClass:
+    if isinstance(
+        error,
+        (
+            TokenValidationError,
+            TelegramUnauthorizedError,
+            TelegramForbiddenError,
+        ),
+    ):
+        return PollingTerminationClass.INVALID_CONFIGURATION
+    if isinstance(
+        error,
+        (
+            TelegramNetworkError,
+            TelegramServerError,
+            ClientError,
+            TimeoutError,
+            OSError,
+        ),
+    ):
+        return PollingTerminationClass.RECOVERABLE_NETWORK
+    return PollingTerminationClass.UNKNOWN
+
+
+async def _wait_for_polling_termination(
+    polling: asyncio.Task[None],
+    stop_event: asyncio.Event,
+) -> PollingTermination:
+    stop_wait = asyncio.create_task(stop_event.wait(), name="lumen-stopwait")
+    done, _pending = await asyncio.wait(
+        (polling, stop_wait),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if stop_wait in done:
+        polling.cancel()
+        try:
+            await polling
+        except asyncio.CancelledError:
+            return PollingTermination(PollingTerminationClass.NORMAL_STOP)
+        except Exception as exc:  # noqa: BLE001
+            return PollingTermination(_classify_polling_error(exc), exc)
+        return PollingTermination(PollingTerminationClass.NORMAL_STOP)
+
+    stop_wait.cancel()
+    try:
+        await stop_wait
+    except asyncio.CancelledError:
+        pass
+    if polling.cancelled():
+        return PollingTermination(PollingTerminationClass.NORMAL_CANCEL)
+    error = polling.exception()
+    if error is None:
+        error = PollingSupervisorFailure(
+            "Telegram polling returned before a stop was requested"
+        )
+    return PollingTermination(_classify_polling_error(error), error)
+
+
+async def _run_polling_supervisor(
+    *,
+    start_polling: Callable[[], Awaitable[None]],
+    stop_event: asyncio.Event,
+    logger: logging.Logger,
+    pause_invalid_configuration: Callable[[BaseException], Awaitable[None]],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> PollingTerminationClass:
+    network_backoff = 1.0
+    while not stop_event.is_set():
+        polling = asyncio.create_task(
+            start_polling(),
+            name="lumen-polling",
+        )
+        termination = await _wait_for_polling_termination(polling, stop_event)
+        classification = termination.classification
+        if classification in {
+            PollingTerminationClass.NORMAL_STOP,
+            PollingTerminationClass.NORMAL_CANCEL,
+        }:
+            logger.info("polling terminated class=%s", classification.value)
+            return classification
+
+        assert termination.error is not None
+        _record_polling_failure(classification)
+        if classification is PollingTerminationClass.INVALID_CONFIGURATION:
+            logger.error(
+                "polling terminated class=%s error=%s",
+                classification.value,
+                termination.error,
+            )
+            await pause_invalid_configuration(termination.error)
+            return classification
+        if classification is PollingTerminationClass.RECOVERABLE_NETWORK:
+            logger.warning(
+                "polling terminated class=%s error=%s; retry in %.1fs",
+                classification.value,
+                termination.error,
+                network_backoff,
+            )
+            await sleep(network_backoff)
+            network_backoff = min(
+                network_backoff * 2,
+                _POLLING_NETWORK_BACKOFF_MAX_SEC,
+            )
+            continue
+
+        logger.error(
+            "polling terminated class=%s",
+            classification.value,
+            exc_info=(
+                type(termination.error),
+                termination.error,
+                termination.error.__traceback__,
+            ),
+        )
+        raise PollingSupervisorFailure(
+            f"Telegram polling failed: {termination.error}"
+        ) from termination.error
+    return PollingTerminationClass.NORMAL_STOP
+
+
+async def _runtime_config_has_replacement_token(
+    api: LumenApi,
+    rejected_token: str,
+) -> bool:
+    access_cfg = await api.get_access_config()
+    if not bool(access_cfg.get("bot_enabled", True)):
+        return False
+    cfg = await api.get_runtime_config(avoid=[])
+    token = (cfg.get("bot_token") or settings.telegram_bot_token).strip()
+    return bool(token) and token != rejected_token
+
+
+def _start_metrics_server() -> object | None:
+    if settings.telegram_metrics_port <= 0:
+        return None
+    server, _thread = start_http_server(
+        settings.telegram_metrics_port,
+        addr=settings.telegram_metrics_host,
+    )
+    return server
+
+
+def _stop_metrics_server(server: object | None) -> None:
+    if server is None:
+        return
+    shutdown = getattr(server, "shutdown", None)
+    server_close = getattr(server, "server_close", None)
+    if callable(shutdown):
+        shutdown()
+    if callable(server_close):
+        server_close()
 
 
 async def _run_control_listener(stop_event: asyncio.Event) -> None:
@@ -259,7 +456,7 @@ async def _amain() -> None:
         bot_token = settings.telegram_bot_token
     if not initial_proxy_url:
         initial_proxy_url = settings.telegram_proxy_url.strip()
-    initial_proxy_url = _normalize_proxy_url(initial_proxy_url)
+    initial_proxy_url = normalize_proxy_url(initial_proxy_url)
 
     if not bot_enabled:
         try:
@@ -302,11 +499,32 @@ async def _amain() -> None:
         else None
     )
     defaults = DefaultBotProperties(parse_mode=None)
-    bot = (
-        Bot(token=bot_token, default=defaults, session=session)
-        if session is not None
-        else Bot(token=bot_token, default=defaults)
-    )
+    try:
+        bot = (
+            Bot(token=bot_token, default=defaults, session=session)
+            if session is not None
+            else Bot(token=bot_token, default=defaults)
+        )
+    except TokenValidationError as exc:
+        try:
+            _record_polling_failure(PollingTerminationClass.INVALID_CONFIGURATION)
+            logger.error(
+                "polling initialization failed class=%s error=%s",
+                PollingTerminationClass.INVALID_CONFIGURATION.value,
+                exc,
+            )
+            await _pause_until_restart_or_stop(
+                logger,
+                f"invalid Telegram bot token: {exc}",
+                level=logging.ERROR,
+                recovery_check=lambda: _runtime_config_has_replacement_token(
+                    api,
+                    bot_token,
+                ),
+            )
+        finally:
+            await api.aclose()
+        return
 
     # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
     # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
@@ -336,6 +554,7 @@ async def _amain() -> None:
 
     # DI：handler 用 `api: LumenApi` 注解就能拿到
     dp["api"] = api
+    dp["generation_runtime"] = GenerationRuntime()
 
     # 全局准入：拒非私聊 + 可选 TG user_id 白名单
     gate = AccessGate(api)
@@ -356,17 +575,33 @@ async def _amain() -> None:
 
     try:
         logger.info("starting polling; api=%s", settings.lumen_api_base)
-        polling = asyncio.create_task(
-            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
-            name="lumen-polling",
+
+        async def start_polling() -> None:
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+
+        async def pause_invalid_configuration(error: BaseException) -> None:
+            stop_event.set()
+            for task in (listener_task, control_task):
+                await _cancel_task(task)
+            await _pause_until_restart_or_stop(
+                logger,
+                f"invalid Telegram polling configuration: {error}",
+                level=logging.ERROR,
+                recovery_check=lambda: _runtime_config_has_replacement_token(
+                    api,
+                    bot_token,
+                ),
+            )
+
+        await _run_polling_supervisor(
+            start_polling=start_polling,
+            stop_event=stop_event,
+            logger=logger,
+            pause_invalid_configuration=pause_invalid_configuration,
         )
-        stop_wait = asyncio.create_task(stop_event.wait(), name="lumen-stopwait")
-        await asyncio.wait([polling, stop_wait], return_when=asyncio.FIRST_COMPLETED)
-        polling.cancel()
-        try:
-            await polling
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
     finally:
         stop_event.set()
         for t in (listener_task, control_task):
@@ -381,7 +616,14 @@ async def _amain() -> None:
 
 
 def main() -> None:
-    asyncio.run(_amain())
+    async def run() -> None:
+        metrics_server = _start_metrics_server()
+        try:
+            await _amain()
+        finally:
+            _stop_metrics_server(metrics_server)
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

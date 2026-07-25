@@ -25,7 +25,9 @@ class FakeApi:
         self.reports.append((name, success))
         return {}
 
-    async def get_runtime_config(self, avoid: list[str] | None = None) -> dict[str, Any]:
+    async def get_runtime_config(
+        self, avoid: list[str] | None = None
+    ) -> dict[str, Any]:
         self.avoids.append(list(avoid or []))
         name = self.names.pop(0)
         return {"proxy": {"name": name, "url": f"socks5://{name}"}}

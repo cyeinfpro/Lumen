@@ -10,7 +10,8 @@ os.environ.setdefault(
 
 import pytest
 
-from app.tasks import completion
+from app.tasks.completion_parts import default_runtime as completion
+from lumen_core.chat_tools import ToolStatus
 
 
 def test_configure_web_search_tool_adds_responses_tool_fields() -> None:
@@ -90,18 +91,9 @@ def test_extract_image_events_from_completed_response() -> None:
 
 
 def test_reasoning_effort_normalizes_minimal_to_none_for_upstream() -> None:
-    assert (
-        completion._normalize_reasoning_effort_for_upstream("minimal")
-        == "none"
-    )
-    assert (
-        completion._normalize_reasoning_effort_for_upstream("none")
-        == "none"
-    )
-    assert (
-        completion._normalize_reasoning_effort_for_upstream("high")
-        == "high"
-    )
+    assert completion._normalize_reasoning_effort_for_upstream("minimal") == "none"
+    assert completion._normalize_reasoning_effort_for_upstream("none") == "none"
+    assert completion._normalize_reasoning_effort_for_upstream("high") == "high"
 
 
 def test_completion_upstream_metadata_records_provider_for_request_events() -> None:
@@ -295,7 +287,7 @@ def test_tool_tracker_finalizes_active_calls_on_cancel() -> None:
         }
     )
 
-    published = tracker.finalize_active(completion.ToolStatus.CANCELLED.value)
+    published = tracker.finalize_active(ToolStatus.CANCELLED.value)
 
     assert published == [
         {
@@ -307,7 +299,7 @@ def test_tool_tracker_finalizes_active_calls_on_cancel() -> None:
         }
     ]
     assert tracker.content() == published
-    assert tracker.finalize_active(completion.ToolStatus.FAILED.value) == []
+    assert tracker.finalize_active(ToolStatus.FAILED.value) == []
 
 
 def test_tool_tracker_unknown_status_is_observable_not_running() -> None:

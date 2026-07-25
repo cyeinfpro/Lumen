@@ -174,6 +174,61 @@ async def test_canvas_feature_guard_fails_closed_when_setting_read_fails(
 
 
 @pytest.mark.asyncio
+async def test_nav_feature_guard_fails_closed_for_non_canvas_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def get_setting(_session, _spec):
+        raise RuntimeError("settings unavailable")
+
+    downstream_called = False
+
+    async def app(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    monkeypatch.setattr(main, "SessionLocal", SessionContext)
+    monkeypatch.setattr(main, "get_setting", get_setting)
+    wrapped = main._NavFeatureGuardMiddleware(app)
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await wrapped(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/videos",
+            "headers": [],
+        },
+        receive,
+        send,
+    )
+
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert start["status"] == 404
+    assert b"video is disabled" in body
+    assert downstream_called is False
+
+
+@pytest.mark.asyncio
 async def test_body_size_limit_counts_chunked_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

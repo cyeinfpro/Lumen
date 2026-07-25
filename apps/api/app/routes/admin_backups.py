@@ -336,6 +336,7 @@ async def _run_script(
 
 # ---- Schemas ----
 
+
 class BackupItem(BaseModel):
     timestamp: str  # e.g. 20260424-123000
     created_at: datetime
@@ -356,6 +357,7 @@ class RestoreIn(BaseModel):
 
 
 # ---- Listing ----
+
 
 def _parse_ts(name: str, suffix: str) -> str | None:
     """'20260424-123000.pg.dump.gz' → '20260424-123000'; 不符合返回 None。"""
@@ -452,6 +454,7 @@ async def list_backups(_admin: AdminUser) -> BackupListOut:
 
 
 # ---- Trigger backup now ----
+
 
 class BackupNowOut(BaseModel):
     timestamp: str | None = None
@@ -581,7 +584,9 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
     )
     try:
         lock = await lock_service.acquire(
-            operation="backup", owner=str(admin.id), ttl_sec=_BACKUP_TIMEOUT_SECONDS + 30
+            operation="backup",
+            owner=str(admin.id),
+            ttl_sec=_BACKUP_TIMEOUT_SECONDS + 30,
         )
     except LockBusy:
         raise _http(
@@ -691,9 +696,7 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
                 event_type="admin.backup.create.skipped",
                 details={"reason": "backup_skipped"},
             )
-            await lock_service.release(
-                lock, succeeded=False, reason="backup_skipped"
-            )
+            await lock_service.release(lock, succeeded=False, reason="backup_skipped")
             raise _http(
                 "backup_skipped",
                 "backup was skipped because another maintenance operation is running",
@@ -724,6 +727,7 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
 
 
 # ---- Restore ----
+
 
 class RestoreOut(BaseModel):
     accepted: bool
@@ -789,9 +793,7 @@ async def restore_backup(
             started_at,
             unit=_RESTORE_RUNNER_UNIT,
         ):
-            await lock_service.release(
-                lock, succeeded=False, reason="maintenance_busy"
-            )
+            await lock_service.release(lock, succeeded=False, reason="maintenance_busy")
             raise _http(
                 "maintenance_busy",
                 "another maintenance operation is running",
@@ -864,7 +866,9 @@ async def restore_backup(
             started_at,
         )
     except Exception:
-        await lock_service.release(lock, succeeded=False, reason="restore_launch_failed")
+        await lock_service.release(
+            lock, succeeded=False, reason="restore_launch_failed"
+        )
         raise
     finally:
         log_fh.close()
@@ -880,3 +884,9 @@ async def restore_backup(
         timestamp=ts,
         note="恢复已触发；服务会短暂不可用，约 30-60 秒后重新登录验证",
     )
+
+
+chmod_tolerate_eperm = _chmod_tolerate_eperm
+discover_scripts_dir = _discover_scripts_dir
+maintenance_marker_busy = _maintenance_marker_busy
+open_private_append = _open_private_append

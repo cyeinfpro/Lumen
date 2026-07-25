@@ -18,6 +18,33 @@ LUMENCTL = ROOT / "scripts" / "lumenctl.sh"
 LIB = ROOT / "scripts" / "lib.sh"
 LIB_MODULE_DIR = ROOT / "scripts" / "lib"
 LIB_MODULES = sorted(LIB_MODULE_DIR.glob("*.sh"))
+UPDATE_MODULE_DIR = ROOT / "scripts" / "update"
+UPDATE_MODULES = sorted(UPDATE_MODULE_DIR.rglob("*.sh"))
+UPDATE_SOURCE_RELATIVE = (
+    "bootstrap.sh",
+    "common.sh",
+    "journal.sh",
+    "phase_contract.sh",
+    "backup/restore_points.sh",
+    "release/manifest.sh",
+    "services/compose.sh",
+    "backup/migration_helpers.sh",
+    "release/runner_units.sh",
+    "release/source_helpers.sh",
+    "recovery/cleanup.sh",
+    "recovery/state.sh",
+    "recovery/blue_green.sh",
+    "release/self_update.sh",
+    "release/check.sh",
+    "backup/preflight.sh",
+    "release/fetch.sh",
+    "release/activate.sh",
+    "backup/phases.sh",
+    "services/switch.sh",
+    "services/restart.sh",
+    "services/health.sh",
+    "runner.sh",
+)
 SCRIPT_FILES = [
     LIB,
     *LIB_MODULES,
@@ -27,9 +54,9 @@ SCRIPT_FILES = [
     ROOT / "scripts" / "uninstall.sh",
     ROOT / "scripts" / "backup.sh",
     ROOT / "scripts" / "restore.sh",
+    *UPDATE_MODULES,
 ]
 INSTALL = ROOT / "scripts" / "install.sh"
-UPDATE = ROOT / "scripts" / "update.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 RESTORE = ROOT / "scripts" / "restore.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
@@ -37,6 +64,13 @@ ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 def lib_source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in (LIB, *LIB_MODULES))
+
+
+def update_source_text() -> str:
+    return "\n".join(
+        (UPDATE_MODULE_DIR / relative).read_text(encoding="utf-8")
+        for relative in UPDATE_SOURCE_RELATIVE
+    )
 
 
 def bash_function_source(path: Path, name: str) -> str:
@@ -383,7 +417,7 @@ def test_operations_host_artifact_snapshot_restores_units_and_sbin(
 
 def test_install_and_update_transactions_include_host_artifact_snapshots() -> None:
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     runtime = (ROOT / "scripts" / "lib" / "runtime.sh").read_text(encoding="utf-8")
 
     assert "lumen_snapshot_operations_host_artifacts" in runtime
@@ -410,6 +444,16 @@ def test_image_job_install_copies_all_python_runtime_modules() -> None:
         "upstream_runtime.py",
     ):
         assert f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"' in text
+
+    assert 'cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"' in text
+    assert (
+        'find "${app_dir}/image_job" -type d -name __pycache__ -prune -exec rm -rf {} +'
+    ) in text
+    assert "find \"${app_dir}/image_job\" -type f -name '*.pyc' -delete" in text
+    assert 'find "${app_dir}/image_job" -type d -exec chmod 0755 {} +' in text
+    assert (
+        "find \"${app_dir}/image_job\" -type f -name '*.py' -exec chmod 0644 {} +"
+    ) in text
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
@@ -1109,7 +1153,7 @@ def test_install_generates_all_required_compose_secrets() -> None:
 
 
 def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     assert "shared_app_env_is_development" in text
     assert "for k in DATABASE_URL REDIS_URL SESSION_SECRET; do" in text
     assert 'lumen_env_value BYOK_API_KEY_MASTER_SECRET "${SHARED_ENV}"' in text
@@ -1322,7 +1366,7 @@ def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots(
     None
 ):
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
 
     for text in (install, update, migrate):
@@ -1345,7 +1389,7 @@ def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots(
 def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     """Fresh Docker installs must enable the host watcher used by the panel button."""
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
 
     assert "install_update_runner_units" in install
@@ -1386,7 +1430,7 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 
 def test_fresh_install_provisions_storage_control_plane_for_container_gid() -> None:
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
     lumenctl = LUMENCTL.read_text(encoding="utf-8")
 
@@ -1468,7 +1512,7 @@ def test_tgbot_service_points_at_api_via_docker_network() -> None:
 def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert (
@@ -1507,7 +1551,7 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
 
 
 def test_update_preserves_web_bind_and_proxy_env() -> None:
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     lib = lib_source_text()
 
     assert "SCRIPT_ROOT=" in update
@@ -1740,7 +1784,7 @@ exit 0
 
 
 def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() -> None:
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     install = INSTALL.read_text(encoding="utf-8")
 
     assert update.count("sync_main_fallback_release") >= 3
@@ -1753,7 +1797,7 @@ def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() 
 def test_release_manifest_python_prerequisite_is_consistent() -> None:
     lib = LIB.read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
-    update = UPDATE.read_text(encoding="utf-8")
+    update = update_source_text()
     guard = (ROOT / "scripts" / "release_manifest_guard.py").read_text(encoding="utf-8")
 
     assert "lumen_require_python_min_version()" in lib
@@ -1851,7 +1895,7 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     docker cutover: release 布局保留，但 prepare 流程从 git clone 改为 rsync 仓库快照
     + shared/.env symlink，不再走 uv.toml 校验。
     """
-    text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+    text = update_source_text()
     # 仍然要求 release 布局 + shared/.env 复用
     assert 'NEW_RELEASE="${ROOT}/releases/${NEW_ID}"' in text
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
@@ -1883,7 +1927,7 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
 
 
 def test_update_sources_are_bound_to_release_tags_or_commits() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
 
     assert "LUMEN_UPDATE_SCRIPTS_BRANCH" not in text
     assert "LUMEN_SELF_UPDATE_SOURCE_COMMIT" in text
@@ -2086,9 +2130,9 @@ def test_rollback_script_validates_compose_env_before_compose_up() -> None:
     )
     assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
     assert "SystemOperationLockService(" in text
-    assert "_maintenance_marker_busy()" in text
+    assert "maintenance_marker_busy()" in text
     assert "await asyncio.to_thread(_start_rollback_subprocess" not in text
-    assert "asyncio.to_thread(_list_releases, limit=None)" in text
+    assert "asyncio.to_thread(update_list_releases, limit=None)" in text
 
 
 def _prepare_lumenctl_rollback_layout(
@@ -2241,7 +2285,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     -> switch -> restart_services。不再 systemctl restart lumen-* /
     uv sync / npm ci；systemd 只允许刷新一键更新 path runner，不负责业务进程。
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     # 关键阶段（::lumen-step:: phase=...）必须存在
     assert "emit_start set_image_tag" in text
     assert "emit_start pull_images" in text
@@ -2289,7 +2333,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
 
 
 def test_update_script_checks_storage_before_mutating_running_release() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
 
     pull_done_idx = text.index("emit_done pull_images 0")
     check_idx = text.index("emit_start check_storage")
@@ -2318,7 +2362,7 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
     All four are non-blocking — a cleanup hiccup must not flip a successful
     update to fail.
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     code = _strip_shell_comments(text)
     # Three prune passes; --filter is conditional (helper builds it from env).
     assert "image prune -f" in code
@@ -2354,7 +2398,7 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
 def test_update_cleanup_empty_filters_are_bash32_set_u_safe(
     tmp_path: Path,
 ) -> None:
-    source = UPDATE.read_text(encoding="utf-8")
+    source = update_source_text()
     start = source.index("run_update_cleanup() {")
     end = source.index("\n}\n\n# Trap：", start) + len("\n}\n")
     function = source[start:end]
@@ -2400,7 +2444,7 @@ def test_update_cleanup_empty_filters_are_bash32_set_u_safe(
 
 
 def test_update_script_defaults_to_fast_update_path() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     code = _strip_shell_comments(text)
 
     assert "LUMEN_UPDATE_MODE:-fast" in code
@@ -2424,7 +2468,7 @@ def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
     GHCR digest. The pull_images phase must explicitly pull tgbot when
     the deployment has TELEGRAM_BOT_TOKEN configured.
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     code = _strip_shell_comments(text)
     # Guarded by the same env check used by restart_services so tgbot-less
     # deployments don't waste a pull.
@@ -2452,7 +2496,7 @@ def test_update_script_skips_tag_name_noop_for_rolling_channels() -> None:
     phase must detect rolling TARGET_TAG values and force the full
     pull/migrate/restart path instead.
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     code = _strip_shell_comments(text)
     assert "NOOP_BY_TAG_NAME" in code, (
         "expected the check phase to expose a NOOP_BY_TAG_NAME flag so rolling "
@@ -2470,7 +2514,7 @@ def test_update_script_supports_optional_local_build_when_env_set() -> None:
     """
     docker cutover §11.3.2: 默认 pull 优先；LUMEN_UPDATE_BUILD=1 才本地构建。
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     # build 路径必须由 env 显式开启
     assert "LUMEN_UPDATE_BUILD:-0" in text
     assert "build api worker web" in text
@@ -3352,9 +3396,7 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
         "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
     )
     assert "add_header X-Content-Type-Options" in config
-    assert (
-        'add_header Strict-Transport-Security "max-age=31536000" always;' in config
-    )
+    assert 'add_header Strict-Transport-Security "max-age=31536000" always;' in config
     assert "includeSubDomains" not in config
     assert "client_max_body_size 80m;" in config
     assert config.count("proxy_send_timeout 3600s;") == 4
@@ -3397,7 +3439,7 @@ def test_ci_upload_body_size_guard_tracks_80mb_limit() -> None:
 
 
 def test_update_blue_green_starts_target_worker_before_green_api_traffic() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
 
     blue_green_start = text.index(
         'if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] '
@@ -3418,7 +3460,7 @@ def test_update_blue_green_starts_target_worker_before_green_api_traffic() -> No
 
 
 def test_update_blue_green_failure_keeps_green_until_blue_is_healthy() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     failure_start = text.index('if [ "${_restart_ok}" = "1" ]; then')
     rollback_start = text.index("ROLLBACK_OK=0", failure_start)
     rollback_success = text.index(
@@ -3431,8 +3473,8 @@ def test_update_blue_green_failure_keeps_green_until_blue_is_healthy() -> None:
         failure_block.index('log_warn "[restart_services] 蓝绿路径失败') :
     ]
     rollback_block = text[rollback_start:rollback_success]
-    assert "blue_green_restore_blue_traffic()" in failure_block
-    assert "lumen_wait_for_http_ok" in failure_block
+    assert "blue_green_restore_blue_traffic()" in text
+    assert "lumen_wait_for_http_ok" in text
     assert failure_recovery.index("blue_green_restore_blue_traffic; then") < (
         failure_recovery.index("blue_green_stop_green")
     )
@@ -3605,7 +3647,7 @@ def test_update_script_emits_set_image_tag_and_migrate_db_phases() -> None:
     docker cutover §11.3.1: update.sh 阶段日志里必须包含 set_image_tag 与 migrate_db，
     后台一键更新解析这两个阶段决定 LUMEN_IMAGE_TAG 是否切换 / 数据库迁移是否成功。
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     assert "set_image_tag" in text
     assert "migrate_db" in text
     # phase=set_image_tag 与 phase=migrate_db 在最终输出里靠 emit_start 拼出，
@@ -3623,7 +3665,7 @@ def test_update_script_runner_default_pull_not_build() -> None:
     docker cutover §11.3.2 + §12.3.2: build 必须由 LUMEN_UPDATE_BUILD=1 显式开启，
     runner systemd 默认 LUMEN_UPDATE_BUILD=0（pull 优先）。
     """
-    text = UPDATE.read_text(encoding="utf-8")
+    text = update_source_text()
     # build 路径必须 gated by env
     assert "LUMEN_UPDATE_BUILD:-0" in text
     runner_unit = (

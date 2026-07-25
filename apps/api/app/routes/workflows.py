@@ -1,4 +1,4 @@
-# ruff: noqa: F405
+# ruff: noqa: E402, F401, F405
 
 """Structured workflow routes.
 
@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
-from functools import partial
 from typing import Annotated
 
 import httpx  # noqa: F401 - library sync facade dependency
@@ -109,78 +107,97 @@ from ..billing_cache_state import invalidate_balance_cache  # noqa: F401
 from ..config import settings  # noqa: F401 - library facade dependency
 from ..redis_client import get_redis  # noqa: F401
 from ..runtime_settings import get_setting  # noqa: F401 - library facade dependency
-from ..workflow_services.serialization import (  # noqa: F401
-    _SHOWCASE_GPT55_REFERENCE_MAX_BYTES,
-    _WORKFLOW_CURSOR_VERSION,
-    _accessory_preview_request_key,
-    _clean_optional_text,
-    _clean_string_list,
-    _clean_style_tags,
-    _decode_workflow_cursor,
-    _dedupe_nonempty,
-    _dict_or_empty,
-    _encode_workflow_cursor,
-    _http,
-    _iso_now,
-    _now,
-    _safe_datetime,
-    _showcase_gpt55_reference_data_url,
-    _storage_path,
-    _storage_root,
-)
-from ..workflow_services.output_sync import (  # noqa: F401
+from ..workflow_services.serialization import (
+    SHOWCASE_GPT55_REFERENCE_MAX_BYTES as _SHOWCASE_GPT55_REFERENCE_MAX_BYTES,
+)  # noqa: F401
+from ..workflow_services.serialization import (
+    WORKFLOW_CURSOR_VERSION as _WORKFLOW_CURSOR_VERSION,
+)  # noqa: F401
+from ..workflow_services.serialization import (
+    accessory_preview_request_key as _accessory_preview_request_key,
+)  # noqa: F401
+from ..workflow_services.serialization import (
+    clean_optional_text as _clean_optional_text,
+)  # noqa: F401
+from ..workflow_services.serialization import clean_string_list as _clean_string_list  # noqa: F401
+from ..workflow_services.serialization import clean_style_tags as _clean_style_tags  # noqa: F401
+from ..workflow_services.serialization import (
+    decode_workflow_cursor as _decode_workflow_cursor,
+)  # noqa: F401
+from ..workflow_services.serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from ..workflow_services.serialization import dict_or_empty as _dict_or_empty  # noqa: F401
+from ..workflow_services.serialization import (
+    encode_workflow_cursor as _encode_workflow_cursor,
+)  # noqa: F401
+from ..workflow_services.serialization import http as _http  # noqa: F401
+from ..workflow_services.serialization import iso_now as _iso_now  # noqa: F401
+from ..workflow_services.serialization import now as _now  # noqa: F401
+from ..workflow_services.serialization import safe_datetime as _safe_datetime  # noqa: F401
+from ..workflow_services.serialization import (
+    showcase_gpt55_reference_data_url as _showcase_gpt55_reference_data_url,
+)  # noqa: F401
+from ..workflow_services.serialization import storage_path as _storage_path  # noqa: F401
+from ..workflow_services.serialization import storage_root as _storage_root  # noqa: F401
+from ..workflow_services.output_sync import (
     MODEL_CANDIDATE_COUNT,
     PRODUCT_ANALYSIS_FIELDS,
-    _candidate_generated_image_ids,
-    _clamp_score,
-    _coerce_string_list,
-    _extract_jsonish_value,
-    _failed_generation_output,
-    _generation_batch_outcome,
-    _load_quality_reports,
-    _lock_workflow_run_for_sync,
-    _merge_quality_summary_payload,
-    _normalize_product_analysis_payload,
-    _quality_payload_from_text,
-    _quality_summary_payload,
-    _showcase_expected_image_count,
-    _sync_quality_reports_from_tasks,
-    _sync_workflow_outputs,
-    _task_error_summary,
-    _try_parse_json_text,
 )
-from ..workflow_services import workflow_runtime as _workflow_runtime_service
+from ..workflow_services.output_sync import (
+    candidate_generated_image_ids as _candidate_generated_image_ids,
+)  # noqa: F401
+from ..workflow_services.output_sync import clamp_score as _clamp_score  # noqa: F401
+from ..workflow_services.output_sync import coerce_string_list as _coerce_string_list  # noqa: F401
+from ..workflow_services.output_sync import (
+    extract_jsonish_value as _extract_jsonish_value,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    failed_generation_output as _failed_generation_output,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    generation_batch_outcome as _generation_batch_outcome,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    load_quality_reports as _load_quality_reports,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    lock_workflow_run_for_sync as _lock_workflow_run_for_sync,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    merge_quality_summary_payload as _merge_quality_summary_payload,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    normalize_product_analysis_payload as _normalize_product_analysis_payload,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    quality_payload_from_text as _quality_payload_from_text,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    quality_summary_payload as _quality_summary_payload,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    showcase_expected_image_count as _showcase_expected_image_count,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    sync_quality_reports_from_tasks as _sync_quality_reports_from_tasks,
+)  # noqa: F401
+from ..workflow_services.output_sync import (
+    sync_workflow_outputs as _sync_workflow_outputs,
+)  # noqa: F401
+from ..workflow_services.output_sync import task_error_summary as _task_error_summary  # noqa: F401
+from ..workflow_services.output_sync import try_parse_json_text as _try_parse_json_text  # noqa: F401
 from ..workflow_services.workflow_runtime import *  # noqa: F403,F401
 from ..workflow_services import library_sync as _library_sync_service
 from ..workflow_services import showcase_preflight as _showcase_preflight_service
-from ..workflow_services.facade import bind_facade
 from ..workflow_domain.workflow_policy_exports import *  # noqa: F403,F401
 from .workflow_routes import apparel as _apparel_routes
 from .workflow_routes import model_library as _model_library_routes
 from .workflow_routes import poster as _poster_routes
-from .workflow_routes._facade import _PublishBundle
-from .messages import (  # noqa: F401
-    _create_assistant_task,
-    _publish_assistant_task,
-    _publish_message_appended,
-)
-
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 logger = logging.getLogger(__name__)
-_apparel_routes.export_to_facade(sys.modules[__name__])
-_model_library_routes.export_to_facade(sys.modules[__name__])
-_poster_routes.export_to_facade(sys.modules[__name__])
-POSTER_WORKFLOW_TYPE = _poster_routes.POSTER_WORKFLOW_TYPE
-POSTER_WORKFLOW_STEPS = _poster_routes.POSTER_WORKFLOW_STEPS
-_sync_poster_workflow_outputs = getattr(
-    sys.modules[__name__],
-    "_sync_poster_workflow_outputs",
-)
-_run_auto_tag_in_background = getattr(
-    sys.modules[__name__],
-    "_run_auto_tag_in_background",
-)
+
+
+from ..workflows.legacy_exports import *  # noqa: F403,F401
 
 
 class WorkflowAssetsAddIn(BaseModel):
@@ -191,348 +208,6 @@ class WorkflowAssetsAddIn(BaseModel):
 
 
 _WORKFLOW_ASSET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,63}$")
-WORKFLOW_TYPE = "apparel_model_showcase"
-WORKFLOW_STEPS = _showcase_preflight_service.WORKFLOW_STEPS
-SHOT_POOL_BY_BAND = _showcase_preflight_service.SHOT_POOL_BY_BAND
-ShotClass = _showcase_preflight_service.ShotClass
-ShotPool = _showcase_preflight_service.ShotPool
-ShotVariant = _showcase_preflight_service.ShotVariant
-Template = _showcase_preflight_service.Template
-CHILD_POOL = _showcase_preflight_service.CHILD_POOL
-TODDLER_POOL = _showcase_preflight_service.TODDLER_POOL
-_ShowcasePreflightProgressHook = (
-    _showcase_preflight_service._ShowcasePreflightProgressHook
-)
-_STATIC_REWRITE_REPLACEMENTS = _showcase_preflight_service._STATIC_REWRITE_REPLACEMENTS
-MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY = (
-    _library_sync_service.MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY
-)
-MODEL_LIBRARY_SYNC_PROXY_NAME_KEY = (
-    _library_sync_service.MODEL_LIBRARY_SYNC_PROXY_NAME_KEY
-)
-MODEL_LIBRARY_ROOT_KEY = _library_sync_service.MODEL_LIBRARY_ROOT_KEY
-_GITHUB_API_HOST = _library_sync_service._GITHUB_API_HOST
-_GITHUB_RAW_HOSTS = _library_sync_service._GITHUB_RAW_HOSTS
-# apparel-model-library 常量 + 纯 helper 全部从 _apparel_library 导入。
-# 这里 re-export 是为了让既有测试（apps/api/tests/test_workflows_route.py）
-# 仍能通过 `workflows._normalize_age_segment` 等私有路径访问。
-from app.routes._apparel_library import (  # noqa: E402, F401
-    MODEL_LIBRARY_AGE_SEGMENTS,
-    MODEL_LIBRARY_APPEARANCES,
-    MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
-    MODEL_LIBRARY_FOLDER_BY_AGE,
-    MODEL_LIBRARY_GENDER_SEGMENTS,
-    MODEL_LIBRARY_GENERATE_COUNTS,
-    MODEL_LIBRARY_GENERATE_STEP_KEY,
-    MODEL_LIBRARY_GENERATE_WORKER_ACTION,
-    MODEL_LIBRARY_IMAGE_SUFFIXES,
-    MODEL_LIBRARY_MAX_BINARY_BYTES,
-    MODEL_LIBRARY_MAX_GITHUB_DEPTH,
-    MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES,
-    MODEL_LIBRARY_MAX_GITHUB_FILES,
-    MODEL_LIBRARY_MAX_GITHUB_METADATA_BYTES,
-    MODEL_LIBRARY_MAX_GITHUB_RESPONSE_BYTES,
-    MODEL_LIBRARY_MAX_INDEX_BYTES,
-    MODEL_LIBRARY_MAX_SYNC_DOWNLOAD_BYTES,
-    MODEL_LIBRARY_SCHEMA_VERSION,
-    MODEL_LIBRARY_SOURCES,
-    MODEL_LIBRARY_SYNC_COOLDOWN_SECONDS,
-    MODEL_LIBRARY_SYNC_LEASE_RENEW_SECONDS,
-    MODEL_LIBRARY_SYNC_LEASE_SECONDS,
-    MODEL_LIBRARY_SYNC_MODES,
-    MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS,
-    WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
-    _SYNC_LOCK,
-    _age_segment_from_folder_name,
-    _gender_from_folder_name,
-    _library_item_url,
-    _model_library_folder_for_age,
-    _model_library_sync_file_lock,
-    _normalize_age_segment,
-    _normalize_appearance,
-    _normalize_model_gender,
-    _preset_id_from_path,
-    _title_from_preset_id,
-)
-
-_bind_library_service = partial(
-    bind_facade,
-    facade=sys.modules[__name__],
-    runtime=_library_sync_service.FACADE_RUNTIME,
-)
-_bind_showcase_service = partial(
-    bind_facade,
-    facade=sys.modules[__name__],
-    runtime=_showcase_preflight_service.FACADE_RUNTIME,
-)
-
-# Keep every extracted function route-bound so private monkeypatches resolve
-# through the historical workflows facade. Classes remain direct aliases.
-_write_json_atomic = _bind_library_service(_library_sync_service._write_json_atomic)
-_fsync_dir = _bind_library_service(_library_sync_service._fsync_dir)
-_read_file_bytes_bounded = _bind_library_service(
-    _library_sync_service._read_file_bytes_bounded
-)
-_read_json_file = _bind_library_service(_library_sync_service._read_json_file)
-_library_root = _bind_library_service(_library_sync_service._library_root)
-_library_index_path = _bind_library_service(_library_sync_service._library_index_path)
-_library_sync_state_path = _bind_library_service(
-    _library_sync_service._library_sync_state_path
-)
-_library_sync_lock_path = _bind_library_service(
-    _library_sync_service._library_sync_lock_path
-)
-_library_user_index_path = _bind_library_service(
-    _library_sync_service._library_user_index_path
-)
-_default_library_index = _bind_library_service(
-    _library_sync_service._default_library_index
-)
-_default_user_library_index = _bind_library_service(
-    _library_sync_service._default_user_library_index
-)
-_default_sync_state = _bind_library_service(_library_sync_service._default_sync_state)
-_github_contents_url = _bind_library_service(_library_sync_service._github_contents_url)
-_sync_mode = _bind_library_service(_library_sync_service._sync_mode)
-_model_library_http_client_kwargs = _bind_library_service(
-    _library_sync_service._model_library_http_client_kwargs
-)
-_resolve_model_library_sync_proxy = _bind_library_service(
-    _library_sync_service._resolve_model_library_sync_proxy
-)
-_can_sync_library = _bind_library_service(_library_sync_service._can_sync_library)
-_sync_state_out = _bind_library_service(_library_sync_service._sync_state_out)
-_model_library_item_out = _bind_library_service(
-    _library_sync_service._model_library_item_out
-)
-_load_global_library_index = _bind_library_service(
-    _library_sync_service._load_global_library_index
-)
-_load_user_library_index = _bind_library_service(
-    _library_sync_service._load_user_library_index
-)
-_save_global_library_index = _bind_library_service(
-    _library_sync_service._save_global_library_index
-)
-_save_user_library_index = _bind_library_service(
-    _library_sync_service._save_user_library_index
-)
-_remove_user_library_item_from_legacy_index = _bind_library_service(
-    _library_sync_service._remove_user_library_item_from_legacy_index
-)
-_hide_preset_in_legacy_user_library_index = _bind_library_service(
-    _library_sync_service._hide_preset_in_legacy_user_library_index
-)
-_save_sync_state = _bind_library_service(_library_sync_service._save_sync_state)
-_model_library_row_to_dict = _bind_library_service(
-    _library_sync_service._model_library_row_to_dict
-)
-_legacy_library_item_insert_values = _bind_library_service(
-    _library_sync_service._legacy_library_item_insert_values
-)
-_ensure_legacy_user_library_migrated = _bind_library_service(
-    _library_sync_service._ensure_legacy_user_library_migrated
-)
-_load_user_library_items = _bind_library_service(
-    _library_sync_service._load_user_library_items
-)
-_load_user_hidden_preset_ids = _bind_library_service(
-    _library_sync_service._load_user_hidden_preset_ids
-)
-_combined_library_items = _bind_library_service(
-    _library_sync_service._combined_library_items
-)
-_filter_library_items = _bind_library_service(
-    _library_sync_service._filter_library_items
-)
-_find_library_item = _bind_library_service(_library_sync_service._find_library_item)
-_guess_mime = _bind_library_service(_library_sync_service._guess_mime)
-_sha256_file_bounded = _bind_library_service(_library_sync_service._sha256_file_bounded)
-_open_library_storage_file = _bind_library_service(
-    _library_sync_service._open_library_storage_file
-)
-_stream_file = _bind_library_service(_library_sync_service._stream_file)
-_library_binary_response = _bind_library_service(
-    _library_sync_service._library_binary_response
-)
-_preset_storage_key = _bind_library_service(_library_sync_service._preset_storage_key)
-_preset_thumb_storage_key = _bind_library_service(
-    _library_sync_service._preset_thumb_storage_key
-)
-_write_bytes_replace = _bind_library_service(_library_sync_service._write_bytes_replace)
-_ModelLibrarySyncLimitExceeded = _library_sync_service._ModelLibrarySyncLimitExceeded
-_ModelLibrarySyncLeaseLost = _library_sync_service._ModelLibrarySyncLeaseLost
-_fetch_bytes = _bind_library_service(_library_sync_service._fetch_bytes)
-_fetch_github_download_bytes = _bind_library_service(
-    _library_sync_service._fetch_github_download_bytes
-)
-_github_api_child_url = _bind_library_service(
-    _library_sync_service._github_api_child_url
-)
-_decoded_url_path_segments = _bind_library_service(
-    _library_sync_service._decoded_url_path_segments
-)
-_validate_github_contents_url = _bind_library_service(
-    _library_sync_service._validate_github_contents_url
-)
-_validate_github_download_url = _bind_library_service(
-    _library_sync_service._validate_github_download_url
-)
-_walk_github_contents = _bind_library_service(
-    _library_sync_service._walk_github_contents
-)
-_metadata_from_github_file = _bind_library_service(
-    _library_sync_service._metadata_from_github_file
-)
-_github_entry_size = _bind_library_service(_library_sync_service._github_entry_size)
-_sync_lease_owner = _bind_library_service(_library_sync_service._sync_lease_owner)
-_claim_library_sync_lease_sync = _bind_library_service(
-    _library_sync_service._claim_library_sync_lease_sync
-)
-_claim_library_sync_lease = _bind_library_service(
-    _library_sync_service._claim_library_sync_lease
-)
-_renew_library_sync_lease_sync = _bind_library_service(
-    _library_sync_service._renew_library_sync_lease_sync
-)
-_renew_library_sync_lease = _bind_library_service(
-    _library_sync_service._renew_library_sync_lease
-)
-_complete_library_sync_lease_sync = _bind_library_service(
-    _library_sync_service._complete_library_sync_lease_sync
-)
-_complete_library_sync_lease = _bind_library_service(
-    _library_sync_service._complete_library_sync_lease
-)
-_fail_library_sync_lease_sync = _bind_library_service(
-    _library_sync_service._fail_library_sync_lease_sync
-)
-_fail_library_sync_lease = _bind_library_service(
-    _library_sync_service._fail_library_sync_lease
-)
-_cached_sync_response = _bind_library_service(
-    _library_sync_service._cached_sync_response
-)
-_sync_library_presets_from_github_folder = _bind_library_service(
-    _library_sync_service._sync_library_presets_from_github_folder
-)
-_do_sync_library_presets = _bind_library_service(
-    _library_sync_service._do_sync_library_presets
-)
-_owned_image = _bind_library_service(_library_sync_service._owned_image)
-_image_url = _bind_library_service(_library_sync_service._image_url)
-_model_library_download_filename = _bind_library_service(
-    _library_sync_service._model_library_download_filename
-)
-_model_library_image_metadata_from_fields = _bind_library_service(
-    _library_sync_service._model_library_image_metadata_from_fields
-)
-_create_user_image_from_preset = _bind_library_service(
-    _library_sync_service._create_user_image_from_preset
-)
-_add_user_library_item = _bind_library_service(
-    _library_sync_service._add_user_library_item
-)
-
-_showcase_prompt_brief = _bind_showcase_service(
-    _showcase_preflight_service._showcase_prompt_brief
-)
-_showcase_reference_image_ids = _bind_showcase_service(
-    _showcase_preflight_service._showcase_reference_image_ids
-)
-_validate_accessory_preview_image = _bind_showcase_service(
-    _showcase_preflight_service._validate_accessory_preview_image
-)
-_showcase_target_image_count = _bind_showcase_service(
-    _showcase_preflight_service._showcase_target_image_count
-)
-_validate_owned_images = _bind_showcase_service(
-    _showcase_preflight_service._validate_owned_images
-)
-_seed_steps = _bind_showcase_service(_showcase_preflight_service._seed_steps)
-_product_analysis_prompt = _bind_showcase_service(
-    _showcase_preflight_service._product_analysis_prompt
-)
-_candidate_prompt = _bind_showcase_service(
-    _showcase_preflight_service._candidate_prompt
-)
-_showcase_scene_label = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_label
-)
-_showcase_scene_card_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_card_direction
-)
-_showcase_scene_card_scene_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_card_scene_direction
-)
-_showcase_scene_card_action_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_card_action_direction
-)
-_showcase_scene_card_camera_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_card_camera_direction
-)
-_showcase_scene_card_text = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_card_text
-)
-_text_has_any = _bind_showcase_service(_showcase_preflight_service._text_has_any)
-_is_child_showcase = _bind_showcase_service(
-    _showcase_preflight_service._is_child_showcase
-)
-_showcase_scene_render_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_render_direction
-)
-_showcase_scene_framing_direction = _bind_showcase_service(
-    _showcase_preflight_service._showcase_scene_framing_direction
-)
-_showcase_visibility_policy = _bind_showcase_service(
-    _showcase_preflight_service._showcase_visibility_policy
-)
-_truncate_prompt_text = _bind_showcase_service(
-    _showcase_preflight_service._truncate_prompt_text
-)
-_join_lock_items = _bind_showcase_service(_showcase_preflight_service._join_lock_items)
-_compact_lock_text = _bind_showcase_service(
-    _showcase_preflight_service._compact_lock_text
-)
-_compact_product_identity = _bind_showcase_service(
-    _showcase_preflight_service._compact_product_identity
-)
-_showcase_garment_lock_prefix = _bind_showcase_service(
-    _showcase_preflight_service._showcase_garment_lock_prefix
-)
-_showcase_prompt = _bind_showcase_service(_showcase_preflight_service._showcase_prompt)
-_showcase_default_variant = _bind_showcase_service(
-    _showcase_preflight_service._showcase_default_variant
-)
-_showcase_pick_shot_variants = _bind_showcase_service(
-    _showcase_preflight_service._showcase_pick_shot_variants
-)
-_composition_shooting_brief = _bind_showcase_service(
-    _showcase_preflight_service._composition_shooting_brief
-)
-_guarded_shooting_brief = _bind_showcase_service(
-    _showcase_preflight_service._guarded_shooting_brief
-)
-_preserve_safe_motion_rewrite_instruction = _bind_showcase_service(
-    _showcase_preflight_service._preserve_safe_motion_rewrite_instruction
-)
-_rewrite_instruction_replaces_scene_or_composition = _bind_showcase_service(
-    _showcase_preflight_service._rewrite_instruction_replaces_scene_or_composition
-)
-_prepare_showcase_preflight_impl = _bind_showcase_service(
-    _showcase_preflight_service._prepare_showcase_preflight_impl
-)
-_showcase_request_input_json = _bind_showcase_service(
-    _showcase_preflight_service._showcase_request_input_json
-)
-_showcase_generation_context = _bind_showcase_service(
-    _showcase_preflight_service._showcase_generation_context
-)
-_prepare_durable_showcase_preflight = _bind_showcase_service(
-    _showcase_preflight_service._prepare_durable_showcase_preflight
-)
-_workflow_runtime_service.export_to_facade(sys.modules[__name__])
-
 HIDDEN_PROJECT_WORKFLOW_TYPES = frozenset(
     {
         WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,

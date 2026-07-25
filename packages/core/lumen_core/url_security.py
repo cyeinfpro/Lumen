@@ -13,7 +13,7 @@ from typing import Any, cast
 from urllib.parse import urljoin, urlsplit
 
 
-_PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
+_PRIVATE_HOSTS = frozenset({"localhost", "localhost.localdomain"})
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _DEFAULT_ERROR_BODY_MAX_BYTES = 64 * 1024
 _MAX_PINNED_CONNECT_CANDIDATES = 4

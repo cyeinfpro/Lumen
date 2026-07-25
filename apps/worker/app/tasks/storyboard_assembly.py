@@ -21,7 +21,7 @@ from lumen_core.models import Video, WorkflowRun, WorkflowStep, new_uuid7
 from ..db import SessionLocal, affected_rows
 from ..sse_publish import publish_event
 from ..storage import storage
-from .video_generation import _postprocess_video_bytes
+from ..video_artifacts import postprocess_video_bytes as _postprocess_video_bytes
 
 
 logger = logging.getLogger(__name__)

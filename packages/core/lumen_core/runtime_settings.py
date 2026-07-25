@@ -31,7 +31,7 @@ class SettingSpec:
     allowed_values: tuple[str, ...] | None = None
 
 
-SUPPORTED_SETTINGS: list[SettingSpec] = [
+SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(
         key="site.public_base_url",
         description=(
@@ -994,7 +994,7 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         parser=str,
         env_fallback="LUMEN_STORAGE_SMB_PASSWORD",
     ),
-]
+)
 
 
 def get_spec(key: str) -> SettingSpec | None:

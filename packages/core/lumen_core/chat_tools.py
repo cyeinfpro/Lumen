@@ -7,9 +7,12 @@ grow separate state machines.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 import math
 from typing import Any
+
+from .immutables import immutable_mapping
 
 
 class ToolStatus(StrEnum):
@@ -22,31 +25,33 @@ class ToolStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-UPSTREAM_STATUS_MAP: dict[str, ToolStatus] = {
-    "queued": ToolStatus.QUEUED,
-    "pending": ToolStatus.QUEUED,
-    "created": ToolStatus.QUEUED,
-    "in_progress": ToolStatus.RUNNING,
-    "running": ToolStatus.RUNNING,
-    "searching": ToolStatus.RUNNING,
-    "interpreting": ToolStatus.RUNNING,
-    "generating": ToolStatus.RUNNING,
-    "requires_action": ToolStatus.RUNNING,
-    "interrupted": ToolStatus.FAILED,
-    "completed": ToolStatus.SUCCEEDED,
-    "complete": ToolStatus.SUCCEEDED,
-    "succeeded": ToolStatus.SUCCEEDED,
-    "done": ToolStatus.SUCCEEDED,
-    "failed": ToolStatus.FAILED,
-    "incomplete": ToolStatus.FAILED,
-    "error": ToolStatus.FAILED,
-    "errored": ToolStatus.FAILED,
-    "cancelled": ToolStatus.CANCELLED,
-    "canceled": ToolStatus.CANCELLED,
-    "timeout": ToolStatus.TIMED_OUT,
-    "timed_out": ToolStatus.TIMED_OUT,
-    "expired": ToolStatus.TIMED_OUT,
-}
+UPSTREAM_STATUS_MAP: Mapping[str, ToolStatus] = immutable_mapping(
+    {
+        "queued": ToolStatus.QUEUED,
+        "pending": ToolStatus.QUEUED,
+        "created": ToolStatus.QUEUED,
+        "in_progress": ToolStatus.RUNNING,
+        "running": ToolStatus.RUNNING,
+        "searching": ToolStatus.RUNNING,
+        "interpreting": ToolStatus.RUNNING,
+        "generating": ToolStatus.RUNNING,
+        "requires_action": ToolStatus.RUNNING,
+        "interrupted": ToolStatus.FAILED,
+        "completed": ToolStatus.SUCCEEDED,
+        "complete": ToolStatus.SUCCEEDED,
+        "succeeded": ToolStatus.SUCCEEDED,
+        "done": ToolStatus.SUCCEEDED,
+        "failed": ToolStatus.FAILED,
+        "incomplete": ToolStatus.FAILED,
+        "error": ToolStatus.FAILED,
+        "errored": ToolStatus.FAILED,
+        "cancelled": ToolStatus.CANCELLED,
+        "canceled": ToolStatus.CANCELLED,
+        "timeout": ToolStatus.TIMED_OUT,
+        "timed_out": ToolStatus.TIMED_OUT,
+        "expired": ToolStatus.TIMED_OUT,
+    }
+)
 
 TERMINAL_TOOL_STATUSES = frozenset(
     {

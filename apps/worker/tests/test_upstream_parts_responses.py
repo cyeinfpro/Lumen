@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import inspect
 from typing import Any
 
 import pytest
 
-from app import upstream
 from app.upstream_parts import responses
 
 
@@ -110,7 +111,9 @@ def test_upstream_facades_keep_legacy_parameter_signatures() -> None:
     }
 
     for name, expected in expected_parameters.items():
-        signature = inspect.signature(getattr(upstream, name))
+        signature = inspect.signature(
+            getattr(upstream_services().core, name.lstrip("_"))
+        )
         assert tuple(signature.parameters) == expected
         assert all(
             parameter.default is inspect.Parameter.empty
@@ -127,10 +130,12 @@ def test_upstream_payload_facade_uses_current_nested_b64_facade(
         seen.append(value)
         return "patched-b64" if value == "selected" else None
 
-    monkeypatch.setattr(upstream, "_b64_value_if_str", fake_b64_value_if_str)
+    monkeypatch.setattr(
+        upstream_services().core, "b64_value_if_str", fake_b64_value_if_str
+    )
 
     assert (
-        upstream._extract_image_b64_from_payload(
+        upstream_services().core.extract_image_b64_from_payload(
             {"result": "skip", "b64_json": "selected"}
         )
         == "patched-b64"
@@ -144,6 +149,13 @@ def test_upstream_facades_resolve_extracted_helpers_at_call_time(
     def fake_extract(event: dict[str, Any]) -> str | None:
         return f"leaf:{event['result']}"
 
-    monkeypatch.setattr(responses, "_extract_response_image_b64", fake_extract)
+    monkeypatch.setattr(
+        upstream_services().responses,
+        "extract_response_image_b64",
+        fake_extract,
+    )
 
-    assert upstream._extract_response_image_b64({"result": "image"}) == "leaf:image"
+    assert (
+        upstream_services().core.extract_response_image_b64({"result": "image"})
+        == "leaf:image"
+    )

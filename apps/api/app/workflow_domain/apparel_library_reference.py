@@ -221,6 +221,12 @@ async def extract_reference_profile(
 
 __all__ = [
     "ReferenceProfile",
+    "_REFERENCE_EXTRACT_TOTAL_TIMEOUT_S",
+    "_REFERENCE_STORAGE_MISSING_NOTE",
+    "_REFERENCE_STORAGE_READ_FAILED_NOTE",
+    "_image_data_url",
+    "_ordered_response_providers",
+    "_storage_path",
     "auto_tag_owned_model_library_image",
     "extract_reference_profile",
 ]

@@ -23,12 +23,12 @@ from lumen_core.models import Conversation, Image, ImageVariant, Message
 
 from .context import PackedContext
 from .history import (
-    _SummaryBoundary,
-    _message_after_summary,
-    _message_created_at,
-    _role_eq,
-    _instructions_with_summary_guardrail,
-    _sticky_text_from_message,
+    SummaryBoundary as _SummaryBoundary,
+    instructions_with_summary_guardrail as _instructions_with_summary_guardrail,
+    message_after_summary as _message_after_summary,
+    message_created_at as _message_created_at,
+    role_eq as _role_eq,
+    sticky_text_from_message as _sticky_text_from_message,
 )
 
 
@@ -522,3 +522,9 @@ async def _build_input_from_history(
         system_prompt=system_prompt,
     )
     return packed.input_list
+
+
+# Public contract consumed by the Completion runtime modules.
+context_circuit_open = _context_circuit_open
+pick_current_user = _pick_current_user
+pick_first_user = _pick_first_user

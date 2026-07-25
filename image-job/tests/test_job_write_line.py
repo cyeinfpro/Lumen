@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import importlib.util
 import json
 import os
-import sys
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from io import BytesIO
@@ -21,20 +19,11 @@ from PIL import Image
 
 def load_app_module():
     asyncio.set_event_loop(asyncio.new_event_loop())
-    path = Path(__file__).resolve().parents[1] / "app.py"
-    module_dir = str(path.parent)
-    if module_dir not in sys.path:
-        sys.path.insert(0, module_dir)
-    spec = importlib.util.spec_from_file_location(
-        "image_job_write_line_under_test", path
-    )
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    module.ALLOW_LEGACY_BEARER_AUTH = True
-    return module
+    from .support import load_harness
+
+    app = load_harness()
+    app.ALLOW_LEGACY_BEARER_AUTH = True
+    return app
 
 
 def _png_bytes(color: tuple[int, int, int] = (128, 128, 128)) -> bytes:
@@ -212,9 +201,13 @@ def test_queue_full_rejects_without_persisting_failure_row(
 ) -> None:
     app = load_app_module()
     _configure_db(app, monkeypatch, tmp_path)
-    app._queue = asyncio.Queue(maxsize=1)
-    app._queued_ids = set()
-    app._inflight = set()
+
+    class _FullQueue:
+        @staticmethod
+        def full() -> bool:
+            return True
+
+    app._queue = _FullQueue()
 
     request = _JsonRequest(
         {
@@ -224,8 +217,6 @@ def test_queue_full_rejects_without_persisting_failure_row(
     )
 
     async def run() -> int:
-        app._queue.put_nowait("already-queued")
-        app._queued_ids.add("already-queued")
         with pytest.raises(HTTPException) as exc:
             await app.create_image_job(request)
         assert exc.value.status_code == 503
@@ -768,57 +759,18 @@ def test_retention_pass_uses_each_job_expiry_not_file_mtime(
     assert (live_dir / "image-1.png").is_file()
 
 
-def test_lifespan_second_start_reinitializes_runtime_state(monkeypatch) -> None:
-    app = load_app_module()
-    clients: list[Any] = []
+def test_runtime_instances_do_not_share_queue_state(tmp_path: Path) -> None:
+    from image_job.runtime import create_runtime
 
-    class _Client:
-        def __init__(self, **_kwargs: object) -> None:
-            self.closed = False
-            clients.append(self)
+    first = create_runtime()
+    second = create_runtime()
+    first.settings = first.settings.__class__(
+        **{**first.settings.__dict__, "db_path": tmp_path / "first.sqlite3"}
+    )
+    second.settings = second.settings.__class__(
+        **{**second.settings.__dict__, "db_path": tmp_path / "second.sqlite3"}
+    )
 
-        async def aclose(self) -> None:
-            self.closed = True
-
-    async def no_jobs(*_args: object, **_kwargs: object) -> list[Any]:
-        return []
-
-    async def no_op() -> None:
-        return None
-
-    async def idle(*_args: object) -> None:
-        await app._shutdown.wait()
-
-    monkeypatch.setattr(app, "init_storage_sync", lambda: None)
-    monkeypatch.setattr(app, "fail_interrupted_running_jobs", no_op)
-    monkeypatch.setattr(app, "db_all", no_jobs)
-    monkeypatch.setattr(app, "worker_loop", idle)
-    monkeypatch.setattr(app, "retention_sweeper", idle)
-    monkeypatch.setattr(app, "stuck_reconciler", idle)
-    monkeypatch.setattr(app.httpx, "AsyncClient", _Client)
-    monkeypatch.setattr(app, "CONCURRENCY", 1)
-    monkeypatch.setattr(app, "GRACEFUL_SHUTDOWN_S", 0)
-
-    async def run() -> tuple[tuple[int, int, int], tuple[int, int, int]]:
-        states: list[tuple[int, int, int]] = []
-        for index in range(2):
-            async with app.lifespan(app.app):
-                assert app._shutdown.is_set() is False
-                assert app._queue.qsize() == 0
-                states.append(
-                    (
-                        id(app._queue),
-                        id(app._queue_state_lock),
-                        id(app._shutdown),
-                    )
-                )
-                if index == 0:
-                    assert await app.enqueue_job("transient") == "enqueued"
-            assert app._shutdown.is_set() is True
-        return states[0], states[1]
-
-    first_state, second_state = asyncio.run(run())
-
-    assert first_state != second_state
-    assert len(clients) == 2
-    assert all(client.closed for client in clients)
+    assert first.queue.queue is not second.queue.queue
+    assert first.queue.shutdown_event is not second.queue.shutdown_event
+    assert first.queue.queued_ids is not second.queue.queued_ids

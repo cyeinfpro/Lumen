@@ -25,13 +25,15 @@ VIDEO_REFERENCE_IMAGE_MAX_SIDE = 2048
 VIDEO_REFERENCE_IMAGE_MIME = "image/jpeg"
 VIDEO_REFERENCE_IMAGE_QUALITY = 88
 MAX_IMAGE_PIXELS = 64_000_000
-_LINK_UNSUPPORTED_ERRNOS = {
-    errno.EPERM,
-    errno.EACCES,
-    errno.EXDEV,
-    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-    errno.EOPNOTSUPP,
-}
+_LINK_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EPERM,
+        errno.EACCES,
+        errno.EXDEV,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        errno.EOPNOTSUPP,
+    }
+)
 
 try:
     PILImage.MAX_IMAGE_PIXELS = max(

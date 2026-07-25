@@ -145,9 +145,9 @@ def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch)
             raise RuntimeError("thread failed")
 
     httpd = FakeHttpd()
-    monkeypatch.setattr(observability, "_metrics_server_started", False)
-    monkeypatch.setattr(observability, "_metrics_httpd", None)
-    monkeypatch.setattr(observability, "_metrics_thread", None)
+    monkeypatch.setattr(observability._METRICS_SERVER, "started", False)
+    monkeypatch.setattr(observability._METRICS_SERVER, "httpd", None)
+    monkeypatch.setattr(observability._METRICS_SERVER, "thread", None)
     monkeypatch.setattr(
         observability,
         "make_server",
@@ -159,8 +159,8 @@ def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch)
         observability.start_metrics_server(9101)
 
     assert httpd.closed is True
-    assert observability._metrics_httpd is None
-    assert observability._metrics_server_started is False
+    assert observability._METRICS_SERVER.httpd is None
+    assert observability._METRICS_SERVER.started is False
 
 
 @pytest.mark.asyncio
@@ -898,8 +898,7 @@ def test_worker_sentry_before_send_scrubs_worker_pii() -> None:
 
     assert scrubbed["request"]["headers"]["Authorization"] == "[redacted]"
     assert (
-        scrubbed["request"]["headers"]["X-Lumen-Upstream-Authorization"]
-        == "[redacted]"
+        scrubbed["request"]["headers"]["X-Lumen-Upstream-Authorization"] == "[redacted]"
     )
     assert scrubbed["request"]["headers"]["X-Requester"] == "[email]"
     assert scrubbed["request"]["cookies"] == "[redacted]"

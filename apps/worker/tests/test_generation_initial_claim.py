@@ -7,7 +7,20 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app import provider_pool
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
 
 
 class _Result:

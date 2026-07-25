@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import asyncio
 import socket
 from datetime import datetime, timedelta, timezone
@@ -503,7 +504,7 @@ async def test_resolve_user_credential_runtime_inactive_raises(
 
 @pytest.mark.asyncio
 async def test_is_byok_provider_drives_admin_pool_skip() -> None:
-    """Sanity: the helper used by upstream._is_byok_provider matches the runtime helper.
+    """Sanity: the helper used by upstream_services().providers.is_byok_provider matches the runtime helper.
 
     The full integration of guard-skipping admin pool calls lives in the
     failover loops; here we just lock in the prefix contract.

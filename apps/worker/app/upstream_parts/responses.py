@@ -198,3 +198,18 @@ def _extract_image_billable_count(payload: Any) -> int | None:
                 if count is not None:
                     return count
     return None
+
+
+extract_response_image_b64 = _extract_response_image_b64
+extract_response_revised_prompt = _extract_response_revised_prompt
+
+
+__all__ = [
+    "_b64_value_if_str",
+    "_extract_image_b64_from_payload",
+    "_extract_image_billable_count",
+    "_extract_response_image_b64",
+    "_extract_response_revised_prompt",
+    "extract_response_image_b64",
+    "extract_response_revised_prompt",
+]

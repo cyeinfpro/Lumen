@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from app.tasks import video_generation
+from app.tasks.video_generation_parts import default_runtime as video_generation
 from app.tasks.video_generation_parts import (
     lifecycle,
     persistence,

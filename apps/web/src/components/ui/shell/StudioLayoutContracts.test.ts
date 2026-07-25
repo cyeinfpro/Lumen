@@ -397,6 +397,6 @@ test("shared fields merge caller descriptions with error and hint ids", () => {
       /\[ariaDescribedBy, errorId, hintId\]\.filter\(Boolean\)\.join\(" "\)/,
     );
     match(fieldSource, /role="alert"/);
-    match(fieldSource, /text-\[var\(--text-muted\)\]/);
+    match(fieldSource, /text-\[var\(--fg-2\)\]/);
   }
 });

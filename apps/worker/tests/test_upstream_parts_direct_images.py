@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import base64
 import inspect
 from types import SimpleNamespace
@@ -7,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from app import upstream
 from app.upstream_parts import direct_images
 
 
@@ -152,7 +153,7 @@ async def test_direct_first_result_helper_uses_injected_results_facade() -> None
 
 def test_upstream_facades_keep_legacy_async_signatures() -> None:
     for name in ("_extract_image_results", "_extract_image_result"):
-        facade = getattr(upstream, name)
+        facade = getattr(upstream_services().core, name.lstrip("_"))
         signature = inspect.signature(facade)
 
         assert inspect.iscoroutinefunction(facade)
@@ -162,9 +163,7 @@ def test_upstream_facades_keep_legacy_async_signatures() -> None:
             "proxy_url",
         )
         assert signature.parameters["payload"].default is inspect.Parameter.empty
-        assert (
-            signature.parameters["status_code"].default is inspect.Parameter.empty
-        )
+        assert signature.parameters["status_code"].default is inspect.Parameter.empty
         assert signature.parameters["proxy_url"].kind is inspect.Parameter.KEYWORD_ONLY
         assert signature.parameters["proxy_url"].default is None
 
@@ -195,20 +194,30 @@ async def test_results_facade_resolves_dependencies_and_codes_at_call_time(
         seen.update(kwargs)
         return [("facade-result", None)]
 
-    monkeypatch.setattr(upstream, "_fetch_image_url_as_bytes", fake_fetch)
-    monkeypatch.setattr(upstream, "UpstreamError", CurrentUpstreamError)
     monkeypatch.setattr(
-        upstream,
+        upstream_services().direct, "fetch_image_url_as_bytes", fake_fetch
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
+        "UpstreamError",
+        CurrentUpstreamError,
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
         "EC",
         SimpleNamespace(
             BAD_RESPONSE=SimpleNamespace(value="current-bad-response"),
             NO_IMAGE_RETURNED=SimpleNamespace(value="current-no-image"),
         ),
     )
-    monkeypatch.setattr(direct_images, "_extract_image_results", fake_extract)
+    monkeypatch.setattr(
+        upstream_services().direct,
+        "extract_image_results",
+        fake_extract,
+    )
 
     payload = {"data": [{"b64_json": "ignored"}]}
-    assert await upstream._extract_image_results(
+    assert await upstream_services().core.extract_image_results(
         payload,
         207,
         proxy_url="http://current-proxy",
@@ -239,10 +248,12 @@ async def test_first_result_facade_chains_through_current_results_facade(
         seen.append((payload, status_code, proxy_url))
         return [("patched-first", "patched-prompt")]
 
-    monkeypatch.setattr(upstream, "_extract_image_results", fake_results_facade)
+    monkeypatch.setattr(
+        upstream_services().core, "extract_image_results", fake_results_facade
+    )
 
     payload = {"data": [{"b64_json": "ignored"}]}
-    assert await upstream._extract_image_result(
+    assert await upstream_services().core.extract_image_result(
         payload,
         208,
         proxy_url="http://chain-proxy",

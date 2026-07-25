@@ -39,6 +39,23 @@ GET  /images/temp/...
 GET  /refs/...
 ```
 
+Runtime probes are intentionally small:
+
+```text
+GET /livez   -> event loop liveness
+GET /readyz  -> repository, artifact path, workers, queue, shutdown readiness
+GET /health  -> compatibility alias for readiness
+GET /metrics -> authenticated internal queue/runtime metrics
+```
+
+The provided nginx snippets deny all probe and metrics paths on the public
+virtual host. Probe uvicorn directly on `127.0.0.1:8091`.
+
+`app.py` remains the deployment compatibility entrypoint. The application
+implementation is the normal `image_job` package, and `create_app()` stores an
+isolated runtime in `app.state.runtime`; importing the module does not start
+workers.
+
 Lumen authenticates to the sidecar with
 `Authorization: Bearer <IMAGE_JOB_SIDECAR_TOKEN>`. Job creation also sends the
 provider credential in `X-Lumen-Upstream-Authorization`; the sidecar stores and

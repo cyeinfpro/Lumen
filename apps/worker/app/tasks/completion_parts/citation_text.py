@@ -115,3 +115,11 @@ def _finalize_completion_text(text: str, response: dict[str, Any] | None) -> str
     completed_text = _extract_completed_output_text(response)
     base = completed_text or text
     return _apply_url_citations(base, _extract_url_citations(response))
+
+
+# Public contract consumed by the Completion runtime modules.
+apply_url_citations = _apply_url_citations
+extract_completed_output_text = _extract_completed_output_text
+extract_url_citations = _extract_url_citations
+finalize_completion_text = _finalize_completion_text
+markdown_link = _markdown_link

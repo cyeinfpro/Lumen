@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Callable
 
 
-_runtime_provider: Callable[[], Any] | None = None
+_runtime_provider: ContextVar[Callable[[], Any] | None] = ContextVar(
+    "billing_route_runtime_provider",
+    default=None,
+)
 
 
 def configure_runtime(provider: Callable[[], Any]) -> None:
@@ -16,13 +20,13 @@ def configure_runtime(provider: Callable[[], Any]) -> None:
     makes the dependency direction one-way.
     """
 
-    global _runtime_provider
-    _runtime_provider = provider
+    _runtime_provider.set(provider)
 
 
 def current_runtime() -> Any:
     """Return the currently configured route runtime."""
 
-    if _runtime_provider is None:
+    provider = _runtime_provider.get()
+    if provider is None:
         raise RuntimeError("billing route runtime has not been configured")
-    return _runtime_provider()
+    return provider()

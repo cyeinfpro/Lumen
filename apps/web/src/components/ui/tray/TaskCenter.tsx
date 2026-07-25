@@ -138,7 +138,7 @@ function TaskCenterHeader({
           "h-2 w-2 shrink-0 rounded-full",
           activeCount > 0
             ? "animate-pulse bg-[var(--accent)]"
-            : "bg-[var(--ok)]",
+            : "bg-[var(--success)]",
         )}
       />
       <h4 className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--fg-0)]">
@@ -312,7 +312,7 @@ function TaskHistorySummary({
           {presentation.title}
         </p>
         {presentation.succeeded && (
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--ok)]" />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success)]" />
         )}
         {presentation.active && (
           <Clock3 className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />

@@ -412,3 +412,6 @@ async def test_all_proxies(
         )
 
     return await asyncio.gather(*[_one(p) for p in proxies])
+
+
+load_proxies = _load_proxies

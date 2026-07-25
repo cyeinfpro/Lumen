@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
+from ..provider_runtime.probe_hooks import set_image_probe
+from ..provider_runtime.upstream_services import upstream_services
+
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -11,12 +13,12 @@ from lumen_core.providers import ProviderProxyDefinition
 
 from .transport import ImageProgressCallback
 
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
+
+async def run_image_probe(**kwargs: Any) -> tuple[str, str | None]:
+    return await upstream_services().responses.responses_image_stream(**kwargs)
 
 
-def _facade() -> Any:
-    """Resolve compatibility dependencies at call time for monkeypatch visibility."""
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
+set_image_probe(run_image_probe)
 
 
 def _json_payload_revised_prompt(payload: dict[str, Any]) -> str | None:
@@ -66,14 +68,13 @@ class _ImageStreamState:
 def _image_quality_from_body(
     body: dict[str, Any],
     requested_quality: str,
-    facade: Any,
 ) -> str:
     for tool in body.get("tools") or []:
         if isinstance(tool, dict) and tool.get("type") == "image_generation":
             tool_quality = tool.get("quality")
             if isinstance(tool_quality, str):
                 return tool_quality
-    return facade._normalize_image_quality(requested_quality)
+    return upstream_services().core.normalize_image_quality(requested_quality)
 
 
 def _json_payload_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -92,7 +93,6 @@ async def _consume_json_fallback_event(
     state: _ImageStreamState,
     event: dict[str, Any],
     *,
-    facade: Any,
     progress_callback: ImageProgressCallback | None,
     trace_id: str,
     action: str,
@@ -111,10 +111,10 @@ async def _consume_json_fallback_event(
 
     usage = _json_payload_usage(payload)
     if usage is not None:
-        facade._record_usage(usage)
-    billable = facade._extract_image_billable_count(payload)
+        upstream_services().core.record_usage(usage)
+    billable = upstream_services().core.extract_image_billable_count(payload)
     if billable is not None:
-        facade.logger.info(
+        upstream_services().infrastructure.logger.info(
             "responses fallback json payload images_count=%d "
             "trace_id=%s action=%s size=%s",
             billable,
@@ -123,12 +123,16 @@ async def _consume_json_fallback_event(
             size,
         )
 
-    extracted = facade._extract_image_b64_from_payload(payload)
+    extracted = upstream_services().core.extract_image_b64_from_payload(payload)
     if extracted:
         state.final_b64 = extracted
         state.revised_prompt = _json_payload_revised_prompt(payload)
-        await facade._emit_image_progress(progress_callback, "final_image")
-        await facade._emit_image_progress(progress_callback, "completed")
+        await upstream_services().transport.emit_image_progress(
+            progress_callback, "final_image"
+        )
+        await upstream_services().transport.emit_image_progress(
+            progress_callback, "completed"
+        )
         return
 
     error = payload.get("error")
@@ -140,9 +144,8 @@ async def _consume_json_fallback_event(
 def _terminal_event_error(
     event: dict[str, Any],
     event_type: Any,
-    facade: Any,
 ) -> dict[str, Any] | None:
-    if not facade._is_responses_error_terminal(event_type):
+    if not upstream_services().core.is_responses_error_terminal(event_type):
         return None
     response_object = event.get("response")
     error = None
@@ -158,7 +161,6 @@ def _terminal_event_error(
 def _output_item_error(
     event: dict[str, Any],
     *,
-    facade: Any,
     last_event_type: str | None,
 ) -> dict[str, Any] | None:
     if event.get("type") != "response.output_item.done":
@@ -167,8 +169,11 @@ def _output_item_error(
     if not isinstance(item, dict):
         return None
     item_type = item.get("type")
-    if isinstance(item_type, str) and item_type not in facade._KNOWN_OUTPUT_ITEM_TYPES:
-        facade.logger.warning(
+    if (
+        isinstance(item_type, str)
+        and item_type not in upstream_services().core.KNOWN_OUTPUT_ITEM_TYPES
+    ):
+        upstream_services().infrastructure.logger.warning(
             "output_item.done with unknown item.type=%r last_event=%s",
             item_type,
             last_event_type,
@@ -183,7 +188,6 @@ async def _consume_image_stream_event(
     state: _ImageStreamState,
     event: dict[str, Any],
     *,
-    facade: Any,
     progress_callback: ImageProgressCallback | None,
     trace_id: str,
     action: str,
@@ -192,11 +196,10 @@ async def _consume_image_stream_event(
     event_type = event.get("type")
     if isinstance(event_type, str):
         state.last_event_type = event_type
-    if event_type == facade._JSON_PAYLOAD_SENTINEL_TYPE:
+    if event_type == upstream_services().core.JSON_PAYLOAD_SENTINEL_TYPE:
         await _consume_json_fallback_event(
             state,
             event,
-            facade=facade,
             progress_callback=progress_callback,
             trace_id=trace_id,
             action=action,
@@ -206,7 +209,7 @@ async def _consume_image_stream_event(
 
     if event_type == "response.image_generation_call.partial_image":
         state.partial_count += 1
-        await facade._emit_image_progress(
+        await upstream_services().transport.emit_image_progress(
             progress_callback,
             "partial_image",
             index=event.get("partial_image_index", state.partial_count - 1),
@@ -217,22 +220,26 @@ async def _consume_image_stream_event(
             ),
         )
 
-    extracted = facade._extract_response_image_b64(event)
+    extracted = upstream_services().core.extract_response_image_b64(event)
     if extracted:
         state.final_b64 = extracted
         state.revised_prompt = (
-            facade._extract_response_revised_prompt(event) or state.revised_prompt
+            upstream_services().core.extract_response_revised_prompt(event)
+            or state.revised_prompt
         )
-        await facade._emit_image_progress(progress_callback, "final_image")
-    if facade._is_responses_success_terminal(event_type):
-        await facade._emit_image_progress(progress_callback, "completed")
+        await upstream_services().transport.emit_image_progress(
+            progress_callback, "final_image"
+        )
+    if upstream_services().core.is_responses_success_terminal(event_type):
+        await upstream_services().transport.emit_image_progress(
+            progress_callback, "completed"
+        )
 
-    terminal_error = _terminal_event_error(event, event_type, facade)
+    terminal_error = _terminal_event_error(event, event_type)
     if terminal_error is not None:
         state.upstream_error_detail = terminal_error
     item_error = _output_item_error(
         event,
-        facade=facade,
         last_event_type=state.last_event_type,
     )
     if item_error is not None:
@@ -254,7 +261,6 @@ def _upstream_error_identity(
 def _raise_missing_image(
     state: _ImageStreamState,
     *,
-    facade: Any,
     action: str,
     size: str,
     quality: str,
@@ -269,7 +275,7 @@ def _raise_missing_image(
         "partial_count": state.partial_count,
         "has_final_image": False,
         "trace_id": trace_id,
-        "upstream_error": facade._summarize_upstream_error_detail(
+        "upstream_error": upstream_services().core.summarize_upstream_error_detail(
             state.upstream_error_detail
         ),
     }
@@ -277,7 +283,7 @@ def _raise_missing_image(
         diagnostic["json_fallback_content_type"] = state.json_fallback_content_type
     if state.json_fallback_body_summary is not None:
         diagnostic["json_fallback_body_summary"] = state.json_fallback_body_summary
-    facade.logger.warning(
+    upstream_services().infrastructure.logger.warning(
         "responses fallback drained without image: %s",
         json.dumps(
             diagnostic,
@@ -290,10 +296,11 @@ def _raise_missing_image(
     upstream_code, upstream_message = _upstream_error_identity(
         state.upstream_error_detail
     )
-    raise facade.UpstreamError(
+    raise upstream_services().infrastructure.UpstreamError(
         upstream_message or "responses image fallback returned no image",
         status_code=200,
-        error_code=upstream_code or facade.EC.NO_IMAGE_RETURNED.value,
+        error_code=upstream_code
+        or upstream_services().infrastructure.EC.NO_IMAGE_RETURNED.value,
         payload={
             "path": "responses",
             "action": action,
@@ -329,13 +336,12 @@ async def _responses_image_stream(
     user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Use ``/v1/responses`` and ``image_generation`` as the streaming fallback."""
-    facade = _facade()
     proxy = proxy_override
     if base_url_override is not None and api_key_override is not None:
         base, api_key = base_url_override, api_key_override
     else:
-        runtime = await facade._resolve_runtime()
-        base, api_key, proxy = facade._runtime_parts(runtime)
+        runtime = await upstream_services().core.resolve_runtime()
+        base, api_key, proxy = upstream_services().core.runtime_parts(runtime)
         if pinned_target_override is None:
             pinned_target_override = getattr(runtime, "_byok_http_target", None)
 
@@ -344,14 +350,16 @@ async def _responses_image_stream(
         sidecar_base_url: str | None = None
         sidecar_token: str | None = None
         try:
-            sidecar_base_url = await facade._resolve_image_job_base_url()
-            sidecar_token = facade._image_job_sidecar_token()
+            sidecar_base_url = (
+                await upstream_services().direct.resolve_image_job_base_url()
+            )
+            sidecar_token = upstream_services().image_jobs.image_job_sidecar_token()
         except Exception as exc:  # noqa: BLE001
-            facade.logger.debug(
+            upstream_services().infrastructure.logger.debug(
                 "reference push sidecar configuration fallback err=%s",
                 exc,
             )
-        ref_urls = await facade._resolve_reference_image_urls(
+        ref_urls = await upstream_services().references.resolve_reference_image_urls(
             images,
             base_url=sidecar_base_url,
             api_key=sidecar_token,
@@ -359,7 +367,7 @@ async def _responses_image_stream(
         )
         image_urls = ref_urls or None
 
-    body = facade._build_responses_image_body(
+    body = upstream_services().image_jobs.build_responses_image_body(
         action=action,
         prompt=prompt,
         size=size,
@@ -372,24 +380,28 @@ async def _responses_image_stream(
         moderation=moderation,
         model=model,
     )
-    image_quality = _image_quality_from_body(body, quality, facade)
+    image_quality = _image_quality_from_body(body, quality)
     state = _ImageStreamState()
 
-    await facade._emit_image_progress(
+    await upstream_services().transport.emit_image_progress(
         progress_callback,
         "fallback_started",
         action=action,
         size=size,
     )
-    read_timeout_s = facade._select_image_read_timeout(size)
-    call_trace_id = facade._generate_trace_id()
-    call_headers = facade._auth_headers(api_key, trace_id=call_trace_id)
-    proxy_url = await facade.resolve_provider_proxy_url(proxy)
-    response_url = facade._responses_url(base)
+    read_timeout_s = upstream_services().direct.select_image_read_timeout(size)
+    call_trace_id = upstream_services().core.generate_trace_id()
+    call_headers = upstream_services().core.auth_headers(
+        api_key, trace_id=call_trace_id
+    )
+    proxy_url = await upstream_services().infrastructure.resolve_provider_proxy_url(
+        proxy
+    )
+    response_url = upstream_services().requests.responses_url(base)
     pinned_target = (
         None
         if proxy_url
-        else facade._validated_byok_target_for_request(
+        else upstream_services().requests.validated_byok_target_for_request(
             pinned_target_override,
             response_url,
         )
@@ -406,7 +418,9 @@ async def _responses_image_stream(
         }
         if pinned_target is not None:
             runtime_kwargs["pinned_target"] = pinned_target
-        sse_source = facade._iter_sse_with_runtime(**runtime_kwargs)
+        sse_source = upstream_services().responses.iter_sse_with_runtime(
+            **runtime_kwargs
+        )
     else:
         curl_kwargs: dict[str, Any] = {
             "url": response_url,
@@ -418,13 +432,12 @@ async def _responses_image_stream(
         }
         if pinned_target is not None:
             curl_kwargs["pinned_target"] = pinned_target
-        sse_source = facade._iter_sse_curl(**curl_kwargs)
+        sse_source = upstream_services().transport.iter_sse_curl(**curl_kwargs)
 
     async for event in sse_source:
         await _consume_image_stream_event(
             state,
             event,
-            facade=facade,
             progress_callback=progress_callback,
             trace_id=call_trace_id,
             action=action,
@@ -435,7 +448,6 @@ async def _responses_image_stream(
         return state.final_b64, state.revised_prompt
     _raise_missing_image(
         state,
-        facade=facade,
         action=action,
         size=size,
         quality=image_quality,

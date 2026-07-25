@@ -8,10 +8,11 @@ from typing import Any
 
 from lumen_core import billing as billing_core
 
-from .errors import _http
+from .errors import http_error as _http
 
 
-_ZERO_PRICE_ALLOWED_UNITS = {"long_context_threshold"}
+ZERO_PRICE_ALLOWED_UNITS = frozenset({"long_context_threshold"})
+_ZERO_PRICE_ALLOWED_UNITS = ZERO_PRICE_ALLOWED_UNITS
 
 
 def _parse_price_rows(content: str) -> list[dict[str, Any]]:
@@ -141,3 +142,23 @@ def _pricing_group_priorities(
             variant=variant,
         )
     return {group: next(iter(priorities)) for group, priorities in grouped.items()}
+
+
+parse_price_rows = _parse_price_rows
+openai_price_micro = _openai_price_micro
+rmb_to_micro_or_422 = _rmb_to_micro_or_422
+bulk_numeric_micro = _bulk_numeric_micro
+bulk_multiplier_x10000 = _bulk_multiplier_x10000
+validate_enabled_pricing_value = _validate_enabled_pricing_value
+pricing_group_priorities = _pricing_group_priorities
+
+__all__ = [
+    "ZERO_PRICE_ALLOWED_UNITS",
+    "bulk_multiplier_x10000",
+    "bulk_numeric_micro",
+    "openai_price_micro",
+    "parse_price_rows",
+    "pricing_group_priorities",
+    "rmb_to_micro_or_422",
+    "validate_enabled_pricing_value",
+]

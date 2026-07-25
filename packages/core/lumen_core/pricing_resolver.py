@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -19,24 +20,27 @@ from .pricing import (
     PRICING_SOURCE_REDIS,
 )
 from .pricing_fallback import fallback_pricing_for
+from .immutables import immutable_mapping
 
 
-UNIT_FIELD_MAP: dict[str, str] = {
-    "per_1k_tokens_in": "input_per_1k_micro",
-    "per_1k_tokens_out": "output_per_1k_micro",
-    "per_1k_tokens_cache_read": "cache_read_per_1k_micro",
-    "per_1k_tokens_cache_creation": "cache_creation_per_1k_micro",
-    "per_1k_tokens_cache_creation_5m": "cache_creation_5m_per_1k_micro",
-    "per_1k_tokens_cache_creation_1h": "cache_creation_1h_per_1k_micro",
-    "per_1k_tokens_image_output": "image_output_per_1k_micro",
-    "per_1k_tokens_reasoning": "reasoning_per_1k_micro",
-    "per_1k_tokens_input_priority": "input_priority_per_1k_micro",
-    "per_1k_tokens_output_priority": "output_priority_per_1k_micro",
-    "per_1k_tokens_cache_read_priority": "cache_read_priority_per_1k_micro",
-    "long_context_threshold": "long_context_threshold_tokens",
-    "long_context_input_multiplier": "long_context_input_multiplier_x10000",
-    "long_context_output_multiplier": "long_context_output_multiplier_x10000",
-}
+UNIT_FIELD_MAP: Mapping[str, str] = immutable_mapping(
+    {
+        "per_1k_tokens_in": "input_per_1k_micro",
+        "per_1k_tokens_out": "output_per_1k_micro",
+        "per_1k_tokens_cache_read": "cache_read_per_1k_micro",
+        "per_1k_tokens_cache_creation": "cache_creation_per_1k_micro",
+        "per_1k_tokens_cache_creation_5m": "cache_creation_5m_per_1k_micro",
+        "per_1k_tokens_cache_creation_1h": "cache_creation_1h_per_1k_micro",
+        "per_1k_tokens_image_output": "image_output_per_1k_micro",
+        "per_1k_tokens_reasoning": "reasoning_per_1k_micro",
+        "per_1k_tokens_input_priority": "input_priority_per_1k_micro",
+        "per_1k_tokens_output_priority": "output_priority_per_1k_micro",
+        "per_1k_tokens_cache_read_priority": "cache_read_priority_per_1k_micro",
+        "long_context_threshold": "long_context_threshold_tokens",
+        "long_context_input_multiplier": "long_context_input_multiplier_x10000",
+        "long_context_output_multiplier": "long_context_output_multiplier_x10000",
+    }
+)
 
 
 def pricing_to_json(pricing: ModelPricing) -> str:
@@ -127,7 +131,9 @@ def _select_rule_group(
 
 
 class PricingResolver:
-    def __init__(self, *, redis: Any | None = None, process_ttl_sec: float = 10.0) -> None:
+    def __init__(
+        self, *, redis: Any | None = None, process_ttl_sec: float = 10.0
+    ) -> None:
         self.redis = redis
         self.process_ttl_sec = max(0.0, process_ttl_sec)
         self._cache: dict[str, tuple[float, ModelPricing]] = {}
@@ -178,7 +184,9 @@ class PricingResolver:
         if pricing is None:
             pricing = fallback_pricing_for(model_key)
         if pricing is None:
-            pricing = ModelPricing(pricing_source=PRICING_SOURCE_MISSING).with_defaults()
+            pricing = ModelPricing(
+                pricing_source=PRICING_SOURCE_MISSING
+            ).with_defaults()
 
         self._cache[cache_key] = (
             now + self.process_ttl_sec,
@@ -203,20 +211,25 @@ class PricingResolver:
         variants = [channel, "default"] if channel else ["default"]
         for variant in [v for v in variants if v]:
             rows = (
-                await db.execute(
-                    select(PricingRule).where(
-                        PricingRule.scope == "chat_model",
-                        PricingRule.variant == variant,
-                        PricingRule.enabled.is_(True),
-                    )
-                    .order_by(
-                        PricingRule.priority.desc(),
-                        PricingRule.key.asc(),
-                        PricingRule.unit.asc(),
-                        PricingRule.id.asc(),
+                (
+                    await db.execute(
+                        select(PricingRule)
+                        .where(
+                            PricingRule.scope == "chat_model",
+                            PricingRule.variant == variant,
+                            PricingRule.enabled.is_(True),
+                        )
+                        .order_by(
+                            PricingRule.priority.desc(),
+                            PricingRule.key.asc(),
+                            PricingRule.unit.asc(),
+                            PricingRule.id.asc(),
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             selected = _select_rule_group(list(rows), model)
             pricing = pricing_from_rules(selected, source=PRICING_SOURCE_DB)
             if pricing is not None:

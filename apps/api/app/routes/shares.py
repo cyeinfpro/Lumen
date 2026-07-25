@@ -7,6 +7,7 @@ import secrets
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -47,12 +48,14 @@ MAX_MULTI_SHARE_IMAGES = 100
 DISPLAY_VARIANT = "display2048"
 PREVIEW_VARIANT = "preview1024"
 THUMB_VARIANT = "thumb256"
-ALLOWED_SHARE_VARIANTS = {DISPLAY_VARIANT, PREVIEW_VARIANT, THUMB_VARIANT}
-VARIANT_MEDIA_TYPE = {
-    DISPLAY_VARIANT: "image/webp",
-    PREVIEW_VARIANT: "image/webp",
-    THUMB_VARIANT: "image/jpeg",
-}
+ALLOWED_SHARE_VARIANTS = frozenset({DISPLAY_VARIANT, PREVIEW_VARIANT, THUMB_VARIANT})
+VARIANT_MEDIA_TYPE = MappingProxyType(
+    {
+        DISPLAY_VARIANT: "image/webp",
+        PREVIEW_VARIANT: "image/webp",
+        THUMB_VARIANT: "image/jpeg",
+    }
+)
 
 
 def _http(code: str, msg: str, http: int) -> HTTPException:

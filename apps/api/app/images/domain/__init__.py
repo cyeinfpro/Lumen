@@ -1,0 +1,1 @@
+"""Image artifact domain types."""

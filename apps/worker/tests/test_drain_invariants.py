@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
 
 
 class _FakeRedis:
@@ -191,7 +191,7 @@ def test_events_route_does_not_write_task_cancel_key() -> None:
     # 容忍注释中提及（用 codeblock 关键短语精确匹配可疑写入）
     forbidden_snippets = (
         '"task:{',  # f-string 拼 cancel key 的常见前缀
-        ":cancel\"",
+        ':cancel"',
         ":cancel'",
     )
     for snippet in forbidden_snippets:

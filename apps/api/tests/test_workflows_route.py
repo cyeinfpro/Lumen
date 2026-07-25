@@ -13,6 +13,16 @@ from pydantic import ValidationError
 from app.routes import _apparel_scene_planner as scene_planner
 from app.routes import _showcase_shot_pool as shot_pool
 from app.routes import workflows
+from app.workflow_domain import apparel_scene_planner as scene_planner_impl
+from app.workflow_services import (
+    library_items,
+    model_library_endpoints as model_library,
+    output_sync,
+    poster_endpoints as poster,
+    showcase_context,
+    showcase_preflight_steps,
+    workflow_runtime,
+)
 from lumen_core.constants import CompletionStatus, GenerationStatus, MAX_PROMPT_CHARS
 from lumen_core.schemas import (
     AccessoryPreviewCreateIn,
@@ -602,12 +612,14 @@ async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
         return True
 
     monkeypatch.setattr(
-        workflows,
+        workflow_runtime,
         "_release_soft_deleted_task_hold",
         release_soft_deleted_task_hold,
     )
     monkeypatch.setattr(
-        workflows, "_workflow_wallet_exists", lambda *_args, **_kwargs: False
+        workflow_runtime,
+        "_workflow_wallet_exists",
+        lambda *_args, **_kwargs: False,
     )
 
     out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
@@ -705,10 +717,14 @@ async def test_post_commit_workflow_generated_cleanup_runs_after_commit(
     ) -> None:
         queue_released.append((task_id, db.committed))
 
-    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
-    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(workflow_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(
-        workflows,
+        workflow_runtime,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        workflow_runtime,
         "_release_workflow_generation_queue_state",
         release_workflow_generation_queue_state,
     )
@@ -747,10 +763,14 @@ async def test_post_commit_workflow_generated_cleanup_keeps_cancel_when_cache_fa
     ) -> None:
         queue_released.append(task_id)
 
-    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
-    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(workflow_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(
-        workflows,
+        workflow_runtime,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        workflow_runtime,
         "_release_workflow_generation_queue_state",
         release_workflow_generation_queue_state,
     )
@@ -782,8 +802,12 @@ async def test_post_commit_workflow_generated_cleanup_invalidates_hold_only_clea
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append(user_id)
 
-    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
-    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(workflow_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        workflow_runtime,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
 
     await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
         user_id="user-1",
@@ -848,7 +872,9 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
 
     monkeypatch.setattr(workflows, "_get_run", fake_get_run)
     monkeypatch.setattr(
-        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+        workflows,
+        "_soft_delete_workflow_generated_images",
+        fake_cleanup,
     )
     db = _Db([], responses=[[conv]])
 
@@ -912,9 +938,11 @@ async def test_delete_apparel_model_library_job_cleans_generated_outputs(
             "completions_canceled": 0,
         }
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(model_library, "_get_run", fake_get_run)
     monkeypatch.setattr(
-        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+        model_library,
+        "_soft_delete_workflow_generated_images",
+        fake_cleanup,
     )
     db = _Db([])
 
@@ -961,7 +989,9 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
         }
 
     monkeypatch.setattr(
-        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+        model_library,
+        "_soft_delete_workflow_generated_images",
+        fake_cleanup,
     )
     db = _Db([], responses=[rows])
 
@@ -1244,13 +1274,13 @@ async def test_create_poster_masters_associates_brand_attachments(
     async def fake_build(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_get_owned_conversation", fake_conversation)
-    monkeypatch.setattr(workflows, "_create_poster_workflow_task", fake_create_task)
-    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build)
+    monkeypatch.setattr(poster, "_get_run", fake_get_run)
+    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "_step", fake_step)
+    monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
+    monkeypatch.setattr(poster, "_publish_bundles", fake_publish)
+    monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[]])
     out = await workflows.create_poster_masters(
@@ -1328,10 +1358,10 @@ async def test_approve_poster_master_persists_adjustments_for_next_step(
     async def fake_build(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build)
+    monkeypatch.setattr(poster, "_get_run", fake_get_run)
+    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "_step", fake_step)
+    monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[master], []])
     out = await workflows.approve_poster_master(
@@ -1433,14 +1463,14 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
     async def fake_build(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_poster_selected_master", fake_selected_master)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_get_owned_conversation", fake_conversation)
-    monkeypatch.setattr(workflows, "_create_poster_workflow_task", fake_create_task)
-    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build)
+    monkeypatch.setattr(poster, "_get_run", fake_get_run)
+    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "_poster_selected_master", fake_selected_master)
+    monkeypatch.setattr(poster, "_step", fake_step)
+    monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
+    monkeypatch.setattr(poster, "_publish_bundles", fake_publish)
+    monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[]])
     out = await workflows.create_poster_renders(
@@ -1568,11 +1598,15 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
         return {}
 
     monkeypatch.setattr(
-        workflows,
+        model_library,
         "_ensure_legacy_user_library_migrated",
         fake_ensure_legacy_user_library_migrated,
     )
-    monkeypatch.setattr(workflows, "_saved_image_id_set", fake_saved_image_id_set)
+    monkeypatch.setattr(
+        model_library,
+        "_saved_image_id_set",
+        fake_saved_image_id_set,
+    )
 
     async def fake_library_job(_db, *, run, saved_map):
         ts_map = {
@@ -1618,8 +1652,12 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
-    monkeypatch.setattr(workflows, "_job_from_library_run", fake_library_job)
-    monkeypatch.setattr(workflows, "_job_from_project_candidate_step", fake_project_job)
+    monkeypatch.setattr(model_library, "_job_from_library_run", fake_library_job)
+    monkeypatch.setattr(
+        model_library,
+        "_job_from_project_candidate_step",
+        fake_project_job,
+    )
 
     library_runs = [
         SimpleNamespace(id="library-1"),
@@ -1782,9 +1820,13 @@ async def test_find_library_item_falls_back_for_unprefixed_global_item_ids(
     async def noop_migrate(_db: Any, _user_id: str) -> bool:
         return False
 
-    monkeypatch.setattr(workflows, "_ensure_legacy_user_library_migrated", noop_migrate)
     monkeypatch.setattr(
-        workflows,
+        library_items,
+        "_ensure_legacy_user_library_migrated",
+        noop_migrate,
+    )
+    monkeypatch.setattr(
+        library_items,
         "_load_global_library_index",
         lambda: {"preset_items": [{"id": "legacy-global", "title": "legacy"}]},
     )
@@ -2223,10 +2265,14 @@ async def test_showcase_generation_context_requires_approved_model_approval(
     async def fail_selected_candidate(db: Any, run_id: str) -> Any:
         raise AssertionError("selected candidate must not bypass model_approval")
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_selected_candidate", fail_selected_candidate)
+    monkeypatch.setattr(showcase_context, "_get_run", fake_get_run)
+    monkeypatch.setattr(showcase_context, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(showcase_context, "_step", fake_step)
+    monkeypatch.setattr(
+        showcase_context,
+        "_selected_candidate",
+        fail_selected_candidate,
+    )
 
     with pytest.raises(HTTPException) as exc:
         await workflows._showcase_generation_context(  # noqa: SLF001
@@ -2663,10 +2709,14 @@ async def test_build_run_out_includes_model_library_reference_images(
             for image in images
         }
 
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
-    monkeypatch.setattr(workflows, "_load_quality_reports", fake_load_quality_reports)
-    monkeypatch.setattr(workflows, "_image_out_map", fake_image_out_map)
+    monkeypatch.setattr(output_sync, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflow_runtime, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(
+        workflow_runtime,
+        "_load_quality_reports",
+        fake_load_quality_reports,
+    )
+    monkeypatch.setattr(workflow_runtime, "_image_out_map", fake_image_out_map)
 
     db = _Db([], responses=[[candidate], [product_image, library_image]])
 
@@ -2757,15 +2807,19 @@ async def test_build_run_out_includes_dual_race_bonus_generations(
         assert images == []
         return {}
 
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
-    monkeypatch.setattr(workflows, "_load_quality_reports", fake_load_quality_reports)
+    monkeypatch.setattr(output_sync, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflow_runtime, "_load_steps", fake_load_steps)
     monkeypatch.setattr(
-        workflows,
+        workflow_runtime,
+        "_load_quality_reports",
+        fake_load_quality_reports,
+    )
+    monkeypatch.setattr(
+        workflow_runtime,
         "_workflow_generation_rows_from_task_ids",
         fake_generation_rows,
     )
-    monkeypatch.setattr(workflows, "_image_out_map", fake_image_out_map)
+    monkeypatch.setattr(workflow_runtime, "_image_out_map", fake_image_out_map)
 
     db = _Db([], responses=[[], []])
 
@@ -3632,8 +3686,16 @@ async def test_showcase_preflight_impl_runs_gpt55_merged_director(
             "fallback_reason": None,
         }
 
-    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_plan_scene_cards_with_gpt55",
+        fake_plan,
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_review_prompt_risk_with_gpt55",
+        fake_review,
+    )
     preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹", "胸袋"]},
@@ -3701,8 +3763,16 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
             continuity_anchor="accessory",
         )
 
-    monkeypatch.setattr(workflows, "_resolve_scene_provider_order", fake_resolve)
-    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_resolve_scene_provider_order",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_plan_scene_cards_with_gpt55",
+        fake_plan,
+    )
 
     await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
@@ -3781,8 +3851,16 @@ async def test_showcase_preflight_impl_reviews_director_brief_without_rewrite(
             "fallback_reason": None,
         }
 
-    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_plan_scene_cards_with_gpt55",
+        fake_plan,
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_review_prompt_risk_with_gpt55",
+        fake_review,
+    )
 
     preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
@@ -4007,9 +4085,21 @@ async def test_showcase_preflight_impl_uses_director_brief_for_risky_scene(
             "fallback_reason": None,
         }
 
-    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_compose_image_prompt_with_gpt55", fake_compose)
-    monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_plan_scene_cards_with_gpt55",
+        fake_plan,
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_compose_image_prompt_with_gpt55",
+        fake_compose,
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps,
+        "_review_prompt_risk_with_gpt55",
+        fake_review,
+    )
 
     preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
@@ -4053,7 +4143,7 @@ async def test_prompt_risk_review_treats_string_false_as_false(
             "rewrite_instruction": "",
         }
 
-    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
 
     review = await scene_planner.review_prompt_risk_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -4082,7 +4172,7 @@ async def test_prompt_risk_review_preserves_safe_dynamic_motion(
             "rewrite_instruction": "双手保持低位，保留落步动态。",
         }
 
-    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
 
     review = await scene_planner.review_prompt_risk_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -4860,7 +4950,11 @@ async def test_enqueue_model_library_reference_tasks_use_i2i_attachment_and_meta
         calls.append(kwargs)
         return SimpleNamespace(), None, [f"gen-{len(calls)}"]
 
-    monkeypatch.setattr(workflows, "_create_workflow_task", fake_create_workflow_task)
+    monkeypatch.setattr(
+        model_library,
+        "_create_workflow_task",
+        fake_create_workflow_task,
+    )
     body = ApparelModelLibraryGenerateIn(
         mode="reference_image",
         reference_image_id="img-ref",

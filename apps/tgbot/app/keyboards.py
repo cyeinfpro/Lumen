@@ -12,6 +12,7 @@ callback_data 严格 ≤ 64 字节（TG 限制）。本文件全部 callback_dat
 from __future__ import annotations
 
 import logging
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,44 +24,52 @@ _CALLBACK_DATA_MAX_BYTES = 64
 
 
 # UI 选项 → API 值的映射
-ASPECT_RATIOS: list[tuple[str, str]] = [
+ASPECT_RATIOS: tuple[tuple[str, str], ...] = (
     ("1:1", "1:1"),
     ("16:9", "16:9"),
     ("9:16", "9:16"),
     ("4:3", "4:3"),
     ("3:4", "3:4"),
     ("21:9", "21:9"),
-]
+)
 
-QUALITY_LABELS: list[tuple[str, str]] = [
+QUALITY_LABELS: tuple[tuple[str, str], ...] = (
     ("低", "low"),
     ("中", "medium"),
     ("高", "high"),
-]
+)
 
-COUNT_LABELS: list[tuple[str, int]] = [("1", 1), ("2", 2), ("4", 4), ("16", 16)]
+COUNT_LABELS: tuple[tuple[str, int], ...] = (
+    ("1", 1),
+    ("2", 2),
+    ("4", 4),
+    ("16", 16),
+)
 
-RESOLUTION_LABELS: list[tuple[str, str]] = [
+RESOLUTION_LABELS: tuple[tuple[str, str], ...] = (
     ("1K", "1k"),
     ("2K", "2k"),
     ("4K", "4k"),
-]
+)
 
-FORMAT_LABELS: list[tuple[str, str]] = [
+FORMAT_LABELS: tuple[tuple[str, str], ...] = (
     ("PNG 格式", "png"),
     ("JPG 格式", "jpeg"),
-]
+)
 
 
-DEFAULT_PARAMS: dict[str, object] = {
-    "aspect_ratio": "1:1",
-    "render_quality": "high",
-    "count": 1,
-    "resolution": "2k",
-    "output_format": "jpeg",
-    "fast": True,
-    "enhance": False,  # 提交 prompt 后先调 /telegram/prompts/enhance 让你选用优化版/手改后的版本/原文
-}
+DEFAULT_PARAMS = MappingProxyType(
+    {
+        "aspect_ratio": "1:1",
+        "render_quality": "high",
+        "count": 1,
+        "resolution": "2k",
+        "output_format": "jpeg",
+        "fast": True,
+        # 提交 prompt 后先调 enhance，让用户选择优化版、手改版或原文。
+        "enhance": False,
+    }
+)
 
 
 def _generation_callback_data(action: str, gen_id: str) -> str | None:
@@ -77,7 +86,13 @@ def _generation_callback_data(action: str, gen_id: str) -> str | None:
     return None
 
 
-def _row(builder: InlineKeyboardBuilder, label: str, options: list[tuple[str, object]], current: object, field: str) -> None:
+def _row(
+    builder: InlineKeyboardBuilder,
+    label: str,
+    options: list[tuple[str, object]],
+    current: object,
+    field: str,
+) -> None:
     for text, value in options:
         prefix = "✅ " if value == current else ""
         builder.button(text=f"{prefix}{text}", callback_data=f"cfg:{field}:{value}")
@@ -160,9 +175,7 @@ def retry_keyboard(gen_id: str) -> InlineKeyboardMarkup | None:
     if data is None:
         return None
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 重试", callback_data=data)]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="🔄 重试", callback_data=data)]]
     )
 
 
@@ -213,9 +226,7 @@ def post_success_keyboard(
         rows.append(link_row)
     if not rows:
         return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _https_url_or_none(value: str | None) -> str | None:

@@ -3,10 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import importlib.util
-import sys
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,17 +13,9 @@ from PIL import Image
 
 def load_app_module():
     asyncio.set_event_loop(asyncio.new_event_loop())
-    path = Path(__file__).resolve().parents[1] / "app.py"
-    module_dir = str(path.parent)
-    if module_dir not in sys.path:
-        sys.path.insert(0, module_dir)
-    spec = importlib.util.spec_from_file_location("image_job_app_under_test", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    from .support import load_harness
+
+    return load_harness()
 
 
 def test_validate_payload_normalizes_transparent_image_generation() -> None:
@@ -183,9 +172,7 @@ def test_responses_stream_flushes_unterminated_final_image_at_eof() -> None:
     final_b64 = _tiny_png_b64()
     payload = (
         'data: {"type":"response.output_item.done","item":'
-        '{"type":"image_generation_call","result":"'
-        + final_b64
-        + '"}}'
+        '{"type":"image_generation_call","result":"' + final_b64 + '"}}'
     ).encode("utf-8")
 
     class UnterminatedResponse:

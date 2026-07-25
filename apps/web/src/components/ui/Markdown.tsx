@@ -103,7 +103,7 @@ function CodeBlock({
           aria-label={copied ? copy.state.copied : "复制代码"}
           title={copied ? copy.state.copied : "复制代码"}
           className="text-[11px] gap-1"
-          leftIcon={copied ? <Check className="w-3 h-3 text-[var(--ok)]" /> : <Copy className="w-3 h-3" />}
+          leftIcon={copied ? <Check className="w-3 h-3 text-[var(--success)]" /> : <Copy className="w-3 h-3" />}
         >
           {copied ? copy.state.copied : copy.action.copy}
         </Button>

@@ -1216,25 +1216,29 @@ class ProviderPool(ProviderProbeMixin):
 # ---------------------------------------------------------------------------
 # 单例
 # ---------------------------------------------------------------------------
-_pool: ProviderPool | None = None
-_pool_lock = asyncio.Lock()
+@dataclass(slots=True)
+class ProviderPoolRuntime:
+    pool: ProviderPool | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_probe_at: float = 0.0
+    last_image_probe_at: float = 0.0
+
+
+_RUNTIME = ProviderPoolRuntime()
 
 
 async def get_pool() -> ProviderPool:
-    global _pool
-    if _pool is None:
-        async with _pool_lock:
-            if _pool is None:
-                _pool = ProviderPool()
-    return _pool
+    if _RUNTIME.pool is None:
+        async with _RUNTIME.lock:
+            if _RUNTIME.pool is None:
+                _RUNTIME.pool = ProviderPool()
+    return _RUNTIME.pool
 
 
 # ---------------------------------------------------------------------------
 # arq cron 探活入口
 # ---------------------------------------------------------------------------
 _DEFAULT_PROBE_INTERVAL_S = 120
-_last_probe_at: float = 0.0
-_last_image_probe_at: float = 0.0
 
 
 async def probe_providers(ctx: dict[str, Any]) -> int | None:
@@ -1247,8 +1251,6 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
     返回值：本轮跑了文本 probe 时返回 healthy 数（int）；跳过时返回 None
     （旧版返回 -1 看起来像错误码，arq cron 完成日志里会刷 `● -1` 噪音）。
     """
-    global _last_probe_at, _last_image_probe_at
-
     pool = await get_pool()
     redis = ctx.get("redis")
     # cron 第一次跑就把 redis 注入 pool（image route 配额检查依赖此引用）。
@@ -1279,8 +1281,8 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
     healthy: int | None = None
 
     # ---- 文本算术 probe ----
-    if text_interval > 0 and now - _last_probe_at >= text_interval:
-        _last_probe_at = now
+    if text_interval > 0 and now - _RUNTIME.last_probe_at >= text_interval:
+        _RUNTIME.last_probe_at = now
         results = await pool.probe_all()
         healthy = sum(1 for v in results.values() if v)
         total = len(results)
@@ -1293,8 +1295,8 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
             )
 
     # ---- image probe（独立间隔，默认 1h）----
-    if image_interval > 0 and now - _last_image_probe_at >= image_interval:
-        _last_image_probe_at = now
+    if image_interval > 0 and now - _RUNTIME.last_image_probe_at >= image_interval:
+        _RUNTIME.last_image_probe_at = now
         try:
             image_results = await pool.probe_image_all()
         except Exception:  # noqa: BLE001

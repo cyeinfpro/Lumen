@@ -11,19 +11,13 @@ import secrets
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
-
-
-_IMAGE_VERIFY_LOCK = getattr(Image, "_lumen_image_job_verify_lock", None)
-if _IMAGE_VERIFY_LOCK is None:
-    _IMAGE_VERIFY_LOCK = threading.RLock()
-    setattr(Image, "_lumen_image_job_verify_lock", _IMAGE_VERIFY_LOCK)
 
 
 @dataclass(frozen=True)
@@ -53,6 +47,11 @@ class ImageArtifactFacade:
     image_candidate_from_ref_fn: Callable[[dict[str, Any]], Any | None]
     candidate_filename_fn: Callable[[str, Any], tuple[str, str]]
     token_hex: Callable[[int], str] = secrets.token_hex
+    image_verify_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+        compare=False,
+    )
 
     def image_metadata(
         self,
@@ -64,7 +63,7 @@ class ImageArtifactFacade:
         fmt = ""
         max_pixels = self.max_image_pixels()
         try:
-            with _IMAGE_VERIFY_LOCK:
+            with self.image_verify_lock:
                 previous_max_pixels = Image.MAX_IMAGE_PIXELS
                 Image.MAX_IMAGE_PIXELS = max_pixels
                 try:

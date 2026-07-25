@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import base64
 import io as _io
 from typing import Any
@@ -62,7 +64,9 @@ class RecordingPool:
     def report_failure(self, name: str) -> None:
         self.calls.append(("report_failure", name, {}))
 
-    def report_image_success(self, name: str, *, endpoint_kind: str | None = None) -> None:
+    def report_image_success(
+        self, name: str, *, endpoint_kind: str | None = None
+    ) -> None:
         # endpoint_kind 仅作为 inflight 排序维度副产物；老 assertion 不关心，记 {}。
         _ = endpoint_kind
         self.calls.append(("report_image_success", name, {}))
@@ -128,7 +132,17 @@ def _make_per_provider_stream(
         api_key_override: str | None = None,
         **_kwargs: Any,
     ) -> tuple[str, str | None]:
-        _ = (prompt, size, action, images, quality, model, progress_callback, use_httpx, base_url_override)
+        _ = (
+            prompt,
+            size,
+            action,
+            images,
+            quality,
+            model,
+            progress_callback,
+            use_httpx,
+            base_url_override,
+        )
         # api_key_override 形如 "sk-acc1"，去掉前缀拿 provider name
         name = (api_key_override or "").removeprefix("sk-")
         beh = behaviors.get(name, "success")
@@ -147,7 +161,11 @@ def _make_per_provider_stream(
                 status_code=200,
                 error_code="server_error",
             )
-        if beh in {"moderation_blocked", "content_policy_violation", "safety_violation"}:
+        if beh in {
+            "moderation_blocked",
+            "content_policy_violation",
+            "safety_violation",
+        }:
             raise upstream.UpstreamError(
                 "Your request was rejected by the safety system.",
                 status_code=200,
@@ -156,7 +174,9 @@ def _make_per_provider_stream(
         raise AssertionError(f"unknown behavior: {beh}")
 
     monkeypatch.setattr(
-        upstream, "_responses_image_stream_with_retry", fake_stream_with_retry
+        upstream_services().retry,
+        "responses_image_stream_with_retry",
+        fake_stream_with_retry,
     )
 
 
@@ -210,7 +230,7 @@ async def test_first_account_rate_limited_failover_to_second(
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     _make_per_provider_stream(monkeypatch, {"acc1": "429", "acc2": "success"})
 
-    b64, _ = await upstream._responses_image_stream_with_failover(
+    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -237,11 +257,9 @@ async def test_first_account_server_error_failover_to_second(
         return pool
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
-    _make_per_provider_stream(
-        monkeypatch, {"acc1": "server_error", "acc2": "success"}
-    )
+    _make_per_provider_stream(monkeypatch, {"acc1": "server_error", "acc2": "success"})
 
-    b64, _ = await upstream._responses_image_stream_with_failover(
+    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -273,11 +291,9 @@ async def test_policy_error_failovers_to_second_provider(
         return pool
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
-    _make_per_provider_stream(
-        monkeypatch, {"acc1": error_code, "acc2": "success"}
-    )
+    _make_per_provider_stream(monkeypatch, {"acc1": error_code, "acc2": "success"})
 
-    b64, _ = await upstream._responses_image_stream_with_failover(
+    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -308,7 +324,7 @@ async def test_all_providers_fail_raises_all_providers_failed(
     )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream._responses_image_stream_with_failover(
+        await upstream_services().direct.responses_image_stream_with_failover(
             prompt="test",
             size="1024x1024",
             action="generate",
@@ -378,10 +394,12 @@ async def test_failover_keeps_progress_callback_for_second_provider(
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(
-        upstream, "_responses_image_stream_with_retry", fake_stream_with_retry
+        upstream_services().retry,
+        "responses_image_stream_with_retry",
+        fake_stream_with_retry,
     )
 
-    await upstream._responses_image_stream_with_failover(
+    await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -421,7 +439,7 @@ async def test_all_accounts_failed_propagates_when_pool_select_raises(
     # 不需要 _make_per_provider_stream，永远到不了
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream._responses_image_stream_with_failover(
+        await upstream_services().direct.responses_image_stream_with_failover(
             prompt="test",
             size="1024x1024",
             action="generate",
@@ -435,6 +453,7 @@ async def test_all_accounts_failed_propagates_when_pool_select_raises(
 
 
 # --- P2: failover 通知前端 -------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_failover_emits_provider_failover_progress_event(
@@ -457,7 +476,7 @@ async def test_failover_emits_provider_failover_progress_event(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    b64, _ = await upstream._responses_image_stream_with_failover(
+    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -468,7 +487,9 @@ async def test_failover_emits_provider_failover_progress_event(
     )
     assert b64 == PNG_B64
 
-    failover_events = [e for e in progress_events if e.get("type") == "provider_failover"]
+    failover_events = [
+        e for e in progress_events if e.get("type") == "provider_failover"
+    ]
     # acc1 → acc2 → acc3：两次切号
     assert len(failover_events) == 2
     assert failover_events[0]["from_provider"] == "acc1"
@@ -498,7 +519,7 @@ async def test_failover_does_not_emit_when_first_provider_succeeds(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    await upstream._responses_image_stream_with_failover(
+    await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -533,7 +554,7 @@ async def test_failover_emitted_on_policy_error(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    b64, _ = await upstream._responses_image_stream_with_failover(
+    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
         prompt="test",
         size="1024x1024",
         action="generate",
@@ -543,7 +564,9 @@ async def test_failover_emitted_on_policy_error(
         use_httpx=False,
     )
     assert b64 == PNG_B64
-    failover_events = [e for e in progress_events if e.get("type") == "provider_failover"]
+    failover_events = [
+        e for e in progress_events if e.get("type") == "provider_failover"
+    ]
     assert len(failover_events) == 1
     assert failover_events[0]["from_provider"] == "acc1"
 
@@ -570,7 +593,7 @@ async def test_failover_not_emitted_on_last_provider_failure(
         progress_events.append(event)
 
     with pytest.raises(upstream.UpstreamError):
-        await upstream._responses_image_stream_with_failover(
+        await upstream_services().direct.responses_image_stream_with_failover(
             prompt="test",
             size="1024x1024",
             action="generate",
@@ -580,7 +603,9 @@ async def test_failover_not_emitted_on_last_provider_failure(
             use_httpx=False,
         )
     # acc1 失败 → 切到 acc2（1 个 failover 事件）→ acc2 失败 → 没有下一个
-    failover_events = [e for e in progress_events if e.get("type") == "provider_failover"]
+    failover_events = [
+        e for e in progress_events if e.get("type") == "provider_failover"
+    ]
     assert len(failover_events) == 1
     assert failover_events[0]["from_provider"] == "acc1"
 
@@ -611,12 +636,16 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
         return PNG_B64, None
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
-    monkeypatch.setattr(upstream, "_image_job_run_once", fake_run_once)
-    monkeypatch.setattr(upstream, "_resolve_image_job_base_url", _resolved_job_base)
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+    )
+    monkeypatch.setattr(
+        upstream_services().direct, "resolve_image_job_base_url", _resolved_job_base
+    )
 
     progress_events: list[dict[str, Any]] = []
 
-    b64, _ = await upstream._image_job_with_failover(
+    b64, _ = await upstream_services().image_jobs.image_job_with_failover(
         action="generate",
         prompt="test",
         size="1024x1024",
@@ -635,7 +664,11 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
     assert any(e.get("type") == "endpoint_failover" for e in progress_events)
     assert any(e.get("type") == "provider_failover" for e in progress_events)
     if failure_kind == "429":
-        assert ("report_image_rate_limited", "acc1", {"retry_after_s": 12.0}) in pool.calls
+        assert (
+            "report_image_rate_limited",
+            "acc1",
+            {"retry_after_s": 12.0},
+        ) in pool.calls
     else:
         assert ("report_image_failure", "acc1", {}) in pool.calls
     assert pool.calls.count(("report_image_success", "acc2", {})) == 1

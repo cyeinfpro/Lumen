@@ -61,8 +61,8 @@ function ProviderPanelHeader({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/15">
-              <Server className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--accent)]/25 bg-[var(--accent)]/15">
+              <Server className="h-4 w-4 text-[var(--accent)]" />
             </div>
             <div>
               <h3 className="text-sm font-medium text-[var(--fg-0)]">

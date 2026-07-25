@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from dataclasses import dataclass
 from errno import EADDRINUSE
 from socketserver import ThreadingMixIn
 from typing import TYPE_CHECKING, Any
@@ -29,15 +30,17 @@ logger = logging.getLogger(__name__)
 # ---------- Sentry PII 脱敏 ----------
 
 _EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_SENSITIVE_HEADERS = {
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "x-csrf-token",
-    "x-api-key",
-    "x-auth-token",
-    "x-lumen-upstream-authorization",
-}
+_SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-csrf-token",
+        "x-api-key",
+        "x-auth-token",
+        "x-lumen-upstream-authorization",
+    }
+)
 _SENSITIVE_KEY_HINTS = (
     "password",
     "secret",
@@ -307,7 +310,7 @@ _ALLOWED_OUTCOMES = frozenset(
 _ALLOWED_IMAGE_OUTCOMES = frozenset({"success", "failure", "rate_limited"})
 
 # image route state 白名单（与 pool.get_status() 的 image.state 对齐）
-_ALLOWED_IMAGE_STATES = frozenset({"closed", "cooldown", "rate_limited"})
+IMAGE_ROUTE_STATES = frozenset({"closed", "cooldown", "rate_limited"})
 
 
 def safe_image_outcome(outcome: str | None) -> str:
@@ -402,9 +405,15 @@ def init_otel(service_name: str, endpoint: str) -> None:
 
 # ---------- Prometheus HTTP server ----------
 
-_metrics_server_started = False
-_metrics_httpd: Any | None = None
-_metrics_thread: Any | None = None
+
+@dataclass(slots=True)
+class MetricsServerRuntime:
+    started: bool = False
+    httpd: Any | None = None
+    thread: threading.Thread | None = None
+
+
+_METRICS_SERVER = MetricsServerRuntime()
 
 
 class _ThreadingMetricsWSGIServer(ThreadingMixIn, WSGIServer):
@@ -439,14 +448,15 @@ def start_metrics_server(
     host: str = "0.0.0.0",  # nosec B104
 ) -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
-    global _metrics_httpd, _metrics_server_started, _metrics_thread
-    if _metrics_server_started:
+    if _METRICS_SERVER.started:
         return
     # Empty configuration retains the container-network listener.
     bind_host = host.strip() or "0.0.0.0"  # nosec B104
     try:
-        _metrics_httpd, _metrics_thread = _start_metrics_wsgi_server(bind_host, port)
-        _metrics_server_started = True
+        httpd, thread = _start_metrics_wsgi_server(bind_host, port)
+        _METRICS_SERVER.httpd = httpd
+        _METRICS_SERVER.thread = thread
+        _METRICS_SERVER.started = True
         logger.info("worker metrics server started on %s:%d", bind_host, port)
     except OSError as exc:
         if getattr(exc, "errno", None) == EADDRINUSE:
@@ -476,11 +486,10 @@ def start_metrics_server(
 
 def stop_metrics_server() -> None:
     """Stop the prometheus HTTP server if startup later fails."""
-    global _metrics_httpd, _metrics_server_started, _metrics_thread
-    httpd = _metrics_httpd
-    _metrics_httpd = None
-    _metrics_thread = None
-    _metrics_server_started = False
+    httpd = _METRICS_SERVER.httpd
+    _METRICS_SERVER.httpd = None
+    _METRICS_SERVER.thread = None
+    _METRICS_SERVER.started = False
     if httpd is None:
         return
     try:
@@ -523,6 +532,7 @@ __all__ = [
     "task_duration_seconds",
     "upstream_calls_total",
     "wallet_overdrawn_total",
+    "IMAGE_ROUTE_STATES",
     "wallet_charge_lost_total",
     "billing_cost_micro_total",
     "billing_pricing_source_total",

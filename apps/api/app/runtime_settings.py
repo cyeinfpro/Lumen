@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import logging
 import json
+from types import MappingProxyType
 from typing import Iterable
 
 from sqlalchemy import delete, select
@@ -33,12 +34,14 @@ from lumen_core.schemas import SystemSettingItem
 
 logger = logging.getLogger(__name__)
 
-_IMAGE_PRIMARY_ROUTE_MAPPING: dict[str, tuple[str, str]] = {
-    "responses": ("auto", "responses"),
-    "image2": ("auto", "image2"),
-    "image_jobs": ("image_jobs_only", "responses"),
-    "dual_race": ("auto", "dual_race"),
-}
+_IMAGE_PRIMARY_ROUTE_MAPPING = MappingProxyType(
+    {
+        "responses": ("auto", "responses"),
+        "image2": ("auto", "image2"),
+        "image_jobs": ("image_jobs_only", "responses"),
+        "dual_race": ("auto", "dual_race"),
+    }
+)
 
 
 def image_primary_route_to_parts(raw: str | None) -> tuple[str, str]:
@@ -99,9 +102,8 @@ async def get_settings_view(db: AsyncSession) -> list[SystemSettingItem]:
         db_val = db_map.get(spec.key)
         env_val = os.environ.get(spec.env_fallback)
         # has_value: DB 非空 OR env 非空
-        has_value = (
-            bool((db_val is not None and db_val != ""))
-            or bool(env_val is not None and env_val != "")
+        has_value = bool((db_val is not None and db_val != "")) or bool(
+            env_val is not None and env_val != ""
         )
         # value 显示：DB 优先；敏感字段 mask 为 None
         if spec.sensitive:

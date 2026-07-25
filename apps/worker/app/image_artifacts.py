@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import importlib
 import io
 import logging
 import warnings
@@ -17,7 +16,7 @@ from PIL import Image as PILImage
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_UPSTREAM_IMAGE_FORMATS = {"PNG", "WEBP", "JPEG"}
+_ALLOWED_UPSTREAM_IMAGE_FORMATS = frozenset({"PNG", "WEBP", "JPEG"})
 _MAX_UPSTREAM_IMAGE_SIDE = 10000
 _MAX_UPSTREAM_IMAGE_BYTES = 50 * 1024 * 1024
 _MAX_UPSTREAM_IMAGE_B64_CHARS = ((_MAX_UPSTREAM_IMAGE_BYTES + 2) // 3) * 4
@@ -66,6 +65,24 @@ class _PostprocessedGeneratedImage:
     transparent_provider: str | None = None
     engine: str = "pil"
     executor_mode: str = "inline"
+
+
+class _BlurhashAdapter:
+    def encode(self, image: PILImage.Image) -> str:
+        from blurhash import encode
+
+        return encode(image, x_components=4, y_components=3)
+
+
+class _VipsAdapter:
+    def load(self) -> Any:
+        import pyvips
+
+        return pyvips
+
+
+_BLURHASH_ADAPTER = _BlurhashAdapter()
+_VIPS_ADAPTER = _VipsAdapter()
 
 
 def _sha256(data: bytes) -> str:
@@ -162,12 +179,10 @@ def _compute_blurhash(img: PILImage.Image) -> str | None:
     if width < 4 or height < 4:
         return None
     try:
-        _bh = importlib.import_module("blurhash")
-
         # blurhash 期望 RGB；用 thumbnail 来算快得多
         with img.convert("RGB") as small:
             small.thumbnail((64, 64))
-            return _bh.encode(small, x_components=4, y_components=3)
+            return _BLURHASH_ADAPTER.encode(small)
     except Exception as exc:  # noqa: BLE001
         logger.debug("blurhash failed: %s", exc)
         return None
@@ -254,7 +269,7 @@ def _make_variants_with_vips_sync(
     inspection: _GeneratedImageInspection,
 ) -> _ImageVariantBundle:
     _validate_raw_image_bytes(raw_image)
-    pyvips = importlib.import_module("pyvips")
+    pyvips = _VIPS_ADAPTER.load()
 
     image = pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
     display = _resize_vips_image(image, 2048)

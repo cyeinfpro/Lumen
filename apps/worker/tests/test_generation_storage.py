@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import asyncio
 import inspect
 import io
@@ -30,7 +32,22 @@ from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
 from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.tasks.generation_parts import (
     lifecycle,
     queue as generation_queue,
@@ -397,10 +414,16 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
 def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
     source = inspect.getsource(lifecycle.settle_existing_generated_image)
 
-    cancel_check = source.index("if await _g._is_cancelled(redis, task_id):")
-    release = source.index("await _g.worker_billing.release_generation(")
-    success_update = source.index("status=_g.GenerationStatus.SUCCEEDED.value")
-    settle = source.index("await _g.worker_billing.settle_generation(")
+    cancel_check = source.index(
+        "if await generation_ports()._is_cancelled(redis, task_id):"
+    )
+    release = source.index(
+        "await generation_ports().worker_billing.release_generation("
+    )
+    success_update = source.index(
+        "status=generation_ports().GenerationStatus.SUCCEEDED.value"
+    )
+    settle = source.index("await generation_ports().worker_billing.settle_generation(")
 
     assert cancel_check < release < success_update < settle
 

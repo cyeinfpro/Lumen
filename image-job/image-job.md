@@ -72,6 +72,13 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 
 ```text
 /opt/image-job/app.py
+/opt/image-job/image_job/__init__.py
+/opt/image-job/image_job/app_factory.py
+/opt/image-job/image_job/runtime.py
+/opt/image-job/image_job/application/
+/opt/image-job/image_job/adapters/
+/opt/image-job/image_job/domain/
+/opt/image-job/image_job/ports/
 /opt/image-job/image_artifacts.py
 /opt/image-job/image_url_security.py
 /opt/image-job/job_persistence.py
@@ -81,6 +88,11 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 /opt/image-job/README.md
 /opt/image-job/image-job.md
 ```
+
+`uvicorn app:app` 是兼容入口；实际 FastAPI 应用由
+`image_job.app_factory.create_app()` 创建。探针和 metrics 只允许从
+`127.0.0.1:8091` 访问，公网 nginx 配置会对
+`/health`、`/livez`、`/ready`、`/readyz`、`/metrics` 返回 404。
 
 数据目录需要服务进程可写：
 

@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, cast
+import logging
+from typing import Any
 
 from PIL import Image as PILImage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.constants import ImageSource, ImageVisibility
-from lumen_core.models import Image, ModelLibraryItem
-from lumen_core.schemas import ModelAgeSegment
+from lumen_core.model_image_metadata import build_model_image_metadata
+from lumen_core.models import Image, ModelLibraryItem, new_uuid7
 
-from .library_runtime import runtime as _runtime
+from ..workflow_domain.apparel_library import (
+    model_library_folder_for_age as _model_library_folder_for_age,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    normalize_age_segment as _normalize_age_segment,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    normalize_model_gender as _normalize_model_gender,
+)  # noqa: F401
+from .library_contracts import (
+    model_library_download_filename as _model_library_download_filename,
+)  # noqa: F401
+from .library_items import model_library_row_to_dict as _model_library_row_to_dict  # noqa: F401
+from .library_storage import guess_mime as _guess_mime  # noqa: F401
+from .library_storage import write_bytes_replace as _write_bytes_replace  # noqa: F401
+from .serialization import clean_optional_text as _clean_optional_text  # noqa: F401
+from .serialization import clean_style_tags as _clean_style_tags  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+from .serialization import storage_path as _storage_path  # noqa: F401
+
+logger = logging.getLogger("app.routes.workflows")
 
 
 async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Image:
-    runtime = _runtime()
     img = (
         await db.execute(
             select(Image).where(
@@ -27,7 +47,7 @@ async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Imag
         )
     ).scalar_one_or_none()
     if img is None:
-        raise runtime._http(
+        raise _http(
             "invalid_image", "image is not owned by current user or was deleted", 400
         )
     return img
@@ -35,29 +55,6 @@ async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Imag
 
 def _image_url(image_id: str) -> str:
     return f"/api/images/{image_id}/binary"
-
-
-def _model_library_download_filename(
-    *,
-    image_id: str,
-    mime: str | None,
-    age_segment: str | None,
-    gender: str | None,
-    appearance_direction: str | None,
-    style_tags: list[str],
-) -> str:
-    runtime = _runtime()
-    ext = "png"
-    if isinstance(mime, str) and mime.startswith("image/"):
-        ext = "jpg" if mime == "image/jpeg" else mime.removeprefix("image/")
-    return runtime.model_image_filename(
-        image_id=image_id,
-        ext=ext,
-        age_segment=cast(ModelAgeSegment | None, age_segment),
-        gender=gender,
-        appearance_direction=appearance_direction,
-        style_tags=style_tags,
-    )
 
 
 def _model_library_image_metadata_from_fields(
@@ -71,8 +68,7 @@ def _model_library_image_metadata_from_fields(
     source: str = "model_library",
     mime: str | None = None,
 ) -> dict[str, Any]:
-    runtime = _runtime()
-    payload = runtime.build_model_image_metadata(
+    payload = build_model_image_metadata(
         age_segment=age_segment,
         gender=gender,
         appearance_direction=appearance_direction,
@@ -82,7 +78,7 @@ def _model_library_image_metadata_from_fields(
     )
     return {
         "model_library": payload,
-        "suggested_filename": runtime._model_library_download_filename(
+        "suggested_filename": _model_library_download_filename(
             image_id=image_id,
             mime=mime,
             age_segment=age_segment,
@@ -99,7 +95,6 @@ async def _create_user_image_from_preset(
     user_id: str,
     item: dict[str, Any],
 ) -> Image:
-    runtime = _runtime()
     item_id = str(item.get("id") or "").strip()
     existing = (
         await db.execute(
@@ -113,9 +108,9 @@ async def _create_user_image_from_preset(
     if existing is not None:
         return existing
     image_key = str(item.get("image_storage_key") or "").strip()
-    path = runtime._storage_path(image_key)
+    path = _storage_path(image_key)
     if not path.is_file():
-        raise runtime._http("not_found", "preset image binary is missing", 404)
+        raise _http("not_found", "preset image binary is missing", 404)
     data = path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
     width = 0
@@ -124,23 +119,23 @@ async def _create_user_image_from_preset(
         with PILImage.open(path) as im:
             width, height = im.size
     except Exception:
-        runtime.logger.warning(
+        logger.warning(
             "failed to inspect preset image dimensions key=%s",
             image_key,
         )
-    image_id = runtime.new_uuid7()
+    image_id = new_uuid7()
     suffix = path.suffix.lower() or ".webp"
     copy_key = f"u/{user_id}/apparel-model-library/{image_id}{suffix}"
     # 先把字节落盘，再写 DB 行：避免 DB 行存在但二进制 404 的孤儿
-    copy_path = runtime._storage_path(copy_key)
-    runtime._write_bytes_replace(copy_path, data)
+    copy_path = _storage_path(copy_key)
+    _write_bytes_replace(copy_path, data)
     try:
         img = Image(
             id=image_id,
             user_id=user_id,
             source=ImageSource.UPLOADED.value,
             storage_key=copy_key,
-            mime=runtime._guess_mime(path),
+            mime=_guess_mime(path),
             width=width,
             height=height,
             size_bytes=copy_path.stat().st_size,
@@ -181,16 +176,15 @@ async def _add_user_library_item(
     standalone INSERT — concurrent favorites no longer race a shared
     JSON file.
     """
-    runtime = _runtime()
-    image = await runtime._owned_image(db, user_id=user_id, image_id=image_id)
-    normalized_age = runtime._normalize_age_segment(age_segment)
-    normalized_gender = runtime._normalize_model_gender(gender)
-    cleaned_appearance = runtime._clean_optional_text(
+    image = await _owned_image(db, user_id=user_id, image_id=image_id)
+    normalized_age = _normalize_age_segment(age_segment)
+    normalized_gender = _normalize_model_gender(gender)
+    cleaned_appearance = _clean_optional_text(
         appearance_direction,
         max_len=80,
     )
-    cleaned_tags = runtime._clean_style_tags(style_tags)
-    metadata_jsonb = runtime._model_library_image_metadata_from_fields(
+    cleaned_tags = _clean_style_tags(style_tags)
+    metadata_jsonb = _model_library_image_metadata_from_fields(
         image_id=image_id,
         age_segment=normalized_age,
         gender=normalized_gender,
@@ -201,7 +195,7 @@ async def _add_user_library_item(
         mime=getattr(image, "mime", None),
     )
     row = ModelLibraryItem(
-        id=f"user:{runtime.new_uuid7()}",
+        id=f"user:{new_uuid7()}",
         user_id=user_id,
         source=source,
         image_id=image_id,
@@ -210,7 +204,7 @@ async def _add_user_library_item(
         gender=normalized_gender,
         appearance_direction=cleaned_appearance,
         style_tags=cleaned_tags,
-        library_folder=runtime._model_library_folder_for_age(
+        library_folder=_model_library_folder_for_age(
             normalized_age,
             normalized_gender,
         ),
@@ -221,4 +215,13 @@ async def _add_user_library_item(
     image.metadata_jsonb = image_metadata
     db.add(row)
     await db.flush()
-    return runtime._model_library_row_to_dict(row)
+    return _model_library_row_to_dict(row)
+
+
+# Public workflow contracts.
+add_user_library_item = _add_user_library_item
+create_user_image_from_preset = _create_user_image_from_preset
+image_url = _image_url
+model_library_download_filename = _model_library_download_filename
+model_library_image_metadata_from_fields = _model_library_image_metadata_from_fields
+owned_image = _owned_image

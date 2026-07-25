@@ -48,27 +48,33 @@ from ._admin_common import (
     cleanup_marker_when_done,
     write_admin_audit_isolated,
 )
-from .admin_proxies import _load_proxies
+from .admin_proxies import load_proxies
 from .admin_backups import (
-    _chmod_tolerate_eperm,
-    _discover_scripts_dir,
-    _maintenance_marker_busy,
-    _open_private_append,
+    chmod_tolerate_eperm,
+    discover_scripts_dir,
+    maintenance_marker_busy,
+    open_private_append,
 )
 
-_marker_cleanup_tasks: set[asyncio.Task[None]] = set()
-_marker_cleanup_tasks_lock = threading.Lock()
+
+@dataclass
+class _MarkerCleanupState:
+    tasks: set[asyncio.Task[None]]
+    lock: threading.Lock
+
+
+_marker_cleanup_state = _MarkerCleanupState(tasks=set(), lock=threading.Lock())
 
 
 async def _shutdown_marker_cleanup_tasks() -> None:
-    with _marker_cleanup_tasks_lock:
-        tasks = list(_marker_cleanup_tasks)
+    with _marker_cleanup_state.lock:
+        tasks = list(_marker_cleanup_state.tasks)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    with _marker_cleanup_tasks_lock:
-        _marker_cleanup_tasks.difference_update(tasks)
+    with _marker_cleanup_state.lock:
+        _marker_cleanup_state.tasks.difference_update(tasks)
 
 
 @asynccontextmanager
@@ -150,7 +156,7 @@ def _ensure_update_not_running(marker: UpdateMarker | None) -> None:
 
 
 def _update_script() -> Path:
-    return _discover_scripts_dir() / "update.sh"
+    return discover_scripts_dir() / "update.sh"
 
 
 def _version_from_update_tag(tag: str) -> str | None:
@@ -369,12 +375,12 @@ def _write_marker(pid: int, started_at: str, unit: str | None = None) -> None:
     if unit:
         lines.append(f"unit={unit}")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(tmp, 0o600)
+    chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(marker)
 
 
 def _open_update_log() -> TextIO:
-    return _open_private_append(_update_log_path())
+    return open_private_append(_update_log_path())
 
 
 def _read_log_tail() -> str:
@@ -524,7 +530,7 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(tmp, 0o600)
+    chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(path)
     return path
 
@@ -782,14 +788,14 @@ def _start_update_via_path_unit(
     )
     request_tmp = request_path.with_suffix(f"{request_path.suffix}.tmp")
     request_tmp.write_text(request_text + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(request_tmp, 0o600)
+    chmod_tolerate_eperm(request_tmp, 0o600)
     request_tmp.replace(request_path)
 
     # 3) Trigger file. Content is the ISO timestamp; PathChanged on the path
     #    unit fires on close-after-write and starts the runner unit.
     trigger_tmp = trigger_path.with_suffix(f"{trigger_path.suffix}.tmp")
     trigger_tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(trigger_tmp, 0o600)
+    chmod_tolerate_eperm(trigger_tmp, 0o600)
     trigger_tmp.replace(trigger_path)
 
     # 4) Wait for the runner to come up. The path-watcher latency is normally
@@ -904,7 +910,7 @@ async def _resolve_update_proxy(
     if str(use_raw or "0").strip() != "1":
         return None, None
 
-    proxies = [proxy for proxy in await _load_proxies(db) if proxy.enabled]
+    proxies = [proxy for proxy in await load_proxies(db) if proxy.enabled]
     if not proxies:
         raise _http(
             "proxy_unavailable",
@@ -1221,7 +1227,7 @@ async def trigger_update(
         update_script=_update_script,
         read_marker=_read_marker,
         ensure_not_running=_ensure_update_not_running,
-        maintenance_marker_busy=_maintenance_marker_busy,
+        maintenance_marker_busy=maintenance_marker_busy,
         update_channel=_update_channel,
         update_allow_prerelease=_update_allow_prerelease,
         update_check_ttl=_update_check_ttl,
@@ -1263,15 +1269,15 @@ def _schedule_marker_cleanup_when_done(
     proc: subprocess.Popen[bytes],
 ) -> asyncio.Task[None]:
     task = asyncio.create_task(_cleanup_marker_when_done(proc))
-    with _marker_cleanup_tasks_lock:
-        _marker_cleanup_tasks.add(task)
+    with _marker_cleanup_state.lock:
+        _marker_cleanup_state.tasks.add(task)
     task.add_done_callback(_discard_marker_cleanup_task)
     return task
 
 
 def _discard_marker_cleanup_task(task: asyncio.Task[None]) -> None:
-    with _marker_cleanup_tasks_lock:
-        _marker_cleanup_tasks.discard(task)
+    with _marker_cleanup_state.lock:
+        _marker_cleanup_state.tasks.discard(task)
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
@@ -1311,3 +1317,17 @@ __all__ = [
     "_update_script",
     "_write_marker",
 ]
+
+# Stable peer-route integration contract.
+list_releases = _list_releases
+log_attempt_failure = _log_attempt_failure
+lumen_root = _lumen_root
+open_update_log = _open_update_log
+read_marker = _read_marker
+resolve_release = _resolve_release
+run_systemd_command = _run_systemd_command
+systemd_run_available = _systemd_run_available
+systemd_run_inline_attempts = _systemd_run_inline_attempts
+update_log_path = _update_log_path
+update_marker_path = _update_marker_path
+write_marker = _write_marker

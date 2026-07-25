@@ -7,6 +7,9 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import ModelCandidate
 
+from ..workflow_domain.apparel_scene_planner import (
+    build_garment_lock as _build_garment_lock,
+)
 from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant
 from .showcase_preflight_steps import (
     ShowcasePreflightProgressHook as _ShowcasePreflightProgressHook,
@@ -17,7 +20,6 @@ from .showcase_preflight_steps import (
     resolve_preflight_provider_order,
     review_prompt_records,
 )
-from .showcase_runtime import runtime as _runtime
 
 
 async def _prepare_showcase_preflight_impl(
@@ -43,7 +45,6 @@ async def _prepare_showcase_preflight_impl(
     reference_image_skips: list[dict[str, str]] | None = None,
     progress_hook: _ShowcasePreflightProgressHook | None = None,
 ) -> dict[str, Any]:
-    runtime = _runtime()
     request = ShowcasePreflightRequest(
         product_analysis=product_analysis,
         selected_candidate=selected_candidate,
@@ -66,10 +67,9 @@ async def _prepare_showcase_preflight_impl(
     )
     brief = selected_candidate.model_brief_json or {}
     model_summary = str(brief.get("summary") or user_prompt or "自然电商模特")
-    garment_lock = runtime._build_garment_lock(product_analysis)
-    provider_order = await resolve_preflight_provider_order(runtime, db, request)
+    garment_lock = _build_garment_lock(product_analysis)
+    provider_order = await resolve_preflight_provider_order(db, request)
     planning, scene_cards = await prepare_scene_planning(
-        runtime,
         db,
         request,
         garment_lock=garment_lock,
@@ -78,14 +78,12 @@ async def _prepare_showcase_preflight_impl(
         progress_hook=progress_hook,
     )
     per_image_prompts, prompt_records = await compose_prompt_records(
-        runtime,
         request,
         scene_cards,
         garment_lock=garment_lock,
         progress_hook=progress_hook,
     )
     prompt_reviews = await review_prompt_records(
-        runtime,
         db,
         request,
         prompt_records,
@@ -117,3 +115,8 @@ async def _prepare_showcase_preflight_impl(
         ],
         "gpt55_reference_image_skips": list(request.reference_image_skips or []),
     }
+
+
+# Public workflow contracts.
+ShowcasePreflightProgressHook = _ShowcasePreflightProgressHook
+prepare_showcase_preflight_impl = _prepare_showcase_preflight_impl

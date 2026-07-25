@@ -243,7 +243,7 @@ function VideoStatCard({
     accent === "green"
       ? "border-success-border"
       : accent === "amber"
-        ? "border-[var(--color-lumen-amber)]/20"
+        ? "border-[var(--accent)]/20"
         : "border-[var(--border)]";
 
   return (

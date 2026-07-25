@@ -101,7 +101,7 @@ function MemoryPanelHeader({
           className={
             disabled
               ? "h-8 text-xs text-[var(--fg-2)]"
-              : "h-8 text-xs border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+              : "h-8 text-xs border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
           }
         >
           {disabled ? "已关闭" : "已开启"}
@@ -137,7 +137,7 @@ function MemoryScopeControl({
         value={activeScopeId ?? ""}
         disabled={scopePending || scopes.length === 0 || !canQueryConversation}
         onChange={(event) => onScopeChange(event.target.value || null)}
-        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
       >
         <option value="">默认</option>
         {scopes

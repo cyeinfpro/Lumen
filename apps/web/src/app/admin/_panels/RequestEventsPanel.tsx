@@ -587,7 +587,7 @@ export function RequestEventsPanel() {
                               onClick={() =>
                                 setExpandedId(expanded ? null : event.id)
                               }
-                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
                               aria-label={expanded ? "收起详情" : "展开详情"}
                               aria-expanded={expanded}
                               aria-controls={detailId}
@@ -667,7 +667,7 @@ export function RequestEventsPanel() {
                     <button
                       type="button"
                       onClick={() => setExpandedId(expanded ? null : event.id)}
-                      className="w-full min-w-0 space-y-3 rounded-[var(--radius-panel)] text-left focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                      className="w-full min-w-0 space-y-3 rounded-[var(--radius-panel)] text-left focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
                       aria-expanded={expanded}
                       aria-controls={detailId}
                     >
@@ -863,7 +863,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
         openEventImages(event);
       }}
       disabled={!canOpen}
-      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2.5 text-xs text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2.5 text-xs text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
       aria-label={`查看 ${event.images.length} 张事件图片`}
     >
       <span className="flex shrink-0 -space-x-1">
@@ -887,7 +887,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
         {event.images.length}
       </span>
       {outputCount > 0 && (
-        <span className="rounded bg-[var(--color-lumen-amber)]/15 px-1.5 py-0.5 text-[10px] text-[var(--color-lumen-amber)]">
+        <span className="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">
           输出 {outputCount}
         </span>
       )}
@@ -908,7 +908,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
           </span>
           <StatusBadge status={event.status} />
           {outputCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--color-lumen-amber)]/20 bg-[var(--color-lumen-amber)]/10 px-1.5 py-0.5 text-[11px] text-[var(--color-lumen-amber)]">
+            <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--accent)]/20 bg-[var(--accent)]/10 px-1.5 py-0.5 text-[11px] text-[var(--accent)]">
               <ImageIcon className="h-3 w-3" />
               输出 {outputCount}
             </span>
@@ -978,7 +978,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                   openEventImages(event, image.id);
                 }}
                 disabled={!image.url}
-                className="group relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-left transition-colors hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="group relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-left transition-colors hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
               >
                 <img
                   src={imagePreviewSrc(image)}

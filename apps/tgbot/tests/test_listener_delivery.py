@@ -194,7 +194,9 @@ class ActiveNotifiedTracker(NotifiedTracker):
 
 
 class RecordingTracker:
-    def __init__(self, events: list[object], *, batch_remaining: int | None = 0) -> None:
+    def __init__(
+        self, events: list[object], *, batch_remaining: int | None = 0
+    ) -> None:
         self.events = events
         self.batch_remaining = batch_remaining
 
@@ -312,7 +314,7 @@ async def test_listener_rebuilds_empty_active_zset_from_legacy_stream(
             listener._FALLBACK_SCAN_CURSOR_KEY,
             "0",
             {"ex": listener._CURSOR_TTL_SECONDS},
-        )
+        ),
     ]
 
 
@@ -336,7 +338,9 @@ async def test_non_terminal_event_refreshes_tracker_and_active_membership(
     monkeypatch.setattr(listener, "tracker", refreshing_tracker)
     monkeypatch.setattr(listener, "_should_throttle_progress", lambda _gen_id: False)
 
-    async def fake_on_progress(_bot: object, _track: object, data: dict[str, object]) -> None:
+    async def fake_on_progress(
+        _bot: object, _track: object, data: dict[str, object]
+    ) -> None:
         progress_calls.append(str(data["generation_id"]))
 
     monkeypatch.setattr(listener, "_on_progress", fake_on_progress)
@@ -577,7 +581,9 @@ async def test_batch_finalize_decrements_once_per_generation_and_deletes_at_zero
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[object] = []
-    monkeypatch.setattr(listener, "tracker", RecordingTracker(events, batch_remaining=0))
+    monkeypatch.setattr(
+        listener, "tracker", RecordingTracker(events, batch_remaining=0)
+    )
 
     await listener._maybe_finalize_batch(
         RecordingBot(events),

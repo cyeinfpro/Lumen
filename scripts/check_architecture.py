@@ -13,6 +13,18 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_ROOT = ROOT / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from architecture_audit import (  # noqa: E402
+    collect_public_api_manifest,
+    collect_runtime_findings,
+    compare_inventory,
+    load_inventory,
+)
+
+
 DEFAULT_BASELINE = ROOT / "scripts" / "architecture-baseline.json"
 
 
@@ -286,6 +298,17 @@ def main() -> int:
     current_cycles = cycle_keys(cycles)
     errors = compare_violations(set(violations), baseline_violations)
     errors.extend(compare_cycles(current_cycles, baseline_cycles))
+    runtime_findings = collect_runtime_findings()
+    runtime_baseline, public_api_baseline = load_inventory()
+    public_api = collect_public_api_manifest()
+    errors.extend(
+        compare_inventory(
+            set(runtime_findings),
+            runtime_baseline,
+            public_api,
+            public_api_baseline,
+        )
+    )
     if errors:
         print("Architecture budget failed:", file=sys.stderr)
         for error in errors:
@@ -303,6 +326,7 @@ def main() -> int:
         "Architecture budget passed: "
         f"{len(current_cycles)} grandfathered cycles, "
         f"{len(violations)} grandfathered boundary violations; "
+        f"{len(runtime_findings)} runtime-coupling findings; "
         f"{removed_cycles} cycles and {removed_violations} violations removed."
     )
     return 0

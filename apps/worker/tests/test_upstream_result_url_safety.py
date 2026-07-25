@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 from typing import Any
 
 import pytest
 
-from app import upstream
+from app.upstream_parts import upstream_impl as upstream
 from lumen_core.url_security import (
     PublicHttpBodyTooLarge,
     PublicHttpDownload,
@@ -31,9 +33,11 @@ async def test_image_job_result_uses_bounded_dns_pinned_downloader(
         async def get(self, *_args: Any, **_kwargs: Any) -> Any:
             raise AssertionError("shared provider client must not download result URLs")
 
-    monkeypatch.setattr(upstream, "download_public_http_url", fake_download)
+    monkeypatch.setattr(
+        upstream_services().infrastructure, "download_public_http_url", fake_download
+    )
 
-    result = await upstream._download_image_job_result(
+    result = await upstream_services().image_jobs.download_image_job_result(
         client=UnsafeLegacyClient(),  # type: ignore[arg-type]
         image_url="http://image-job:8080/files/result.png",
         proxy_url="socks5://proxy.example:1080",
@@ -41,7 +45,7 @@ async def test_image_job_result_uses_bounded_dns_pinned_downloader(
     )
 
     assert result == b"png-bytes"
-    assert seen["max_bytes"] == upstream._IMAGE_JOB_DOWNLOAD_MAX_BYTES
+    assert seen["max_bytes"] == upstream_services().core.IMAGE_JOB_DOWNLOAD_MAX_BYTES
     assert seen["max_redirects"] == 5
     assert seen["allow_http"] is True
     assert seen["allowed_private_origins"] == ("http://image-job:8080/v1",)
@@ -55,10 +59,14 @@ async def test_result_download_rejects_non_public_url(
         assert url == "http://169.254.169.254/latest/meta-data"
         raise ValueError("base_url host is not allowed")
 
-    monkeypatch.setattr(upstream, "download_public_http_url", reject_result_url)
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
+        "download_public_http_url",
+        reject_result_url,
+    )
 
     with pytest.raises(upstream.UpstreamError) as excinfo:
-        await upstream._fetch_image_url_as_bytes(
+        await upstream_services().direct.fetch_image_url_as_bytes(
             "http://169.254.169.254/latest/meta-data"
         )
 
@@ -74,19 +82,26 @@ async def test_result_download_maps_stream_limit_to_stream_too_large(
     async def oversized(url: str, **_kwargs: Any) -> PublicHttpDownload:
         raise PublicHttpBodyTooLarge(
             url=url,
-            max_bytes=upstream._IMAGE_JOB_DOWNLOAD_MAX_BYTES,
-            received_bytes=upstream._IMAGE_JOB_DOWNLOAD_MAX_BYTES + 1,
+            max_bytes=upstream_services().core.IMAGE_JOB_DOWNLOAD_MAX_BYTES,
+            received_bytes=upstream_services().core.IMAGE_JOB_DOWNLOAD_MAX_BYTES + 1,
             status_code=200,
         )
 
-    monkeypatch.setattr(upstream, "download_public_http_url", oversized)
+    monkeypatch.setattr(
+        upstream_services().infrastructure, "download_public_http_url", oversized
+    )
 
     with pytest.raises(upstream.UpstreamError) as excinfo:
-        await upstream._fetch_image_url_as_bytes("https://cdn.example/oversized.png")
+        await upstream_services().direct.fetch_image_url_as_bytes(
+            "https://cdn.example/oversized.png"
+        )
 
     assert excinfo.value.status_code == 200
     assert excinfo.value.error_code == "stream_too_large"
-    assert excinfo.value.payload["bytes"] == upstream._IMAGE_JOB_DOWNLOAD_MAX_BYTES + 1
+    assert (
+        excinfo.value.payload["bytes"]
+        == upstream_services().core.IMAGE_JOB_DOWNLOAD_MAX_BYTES + 1
+    )
 
 
 @pytest.mark.asyncio
@@ -102,10 +117,14 @@ async def test_result_download_reports_final_redirect_http_status(
             redirects=1,
         )
 
-    monkeypatch.setattr(upstream, "download_public_http_url", missing)
+    monkeypatch.setattr(
+        upstream_services().infrastructure, "download_public_http_url", missing
+    )
 
     with pytest.raises(upstream.UpstreamError) as excinfo:
-        await upstream._fetch_image_url_as_bytes("https://gateway.example/result.png")
+        await upstream_services().direct.fetch_image_url_as_bytes(
+            "https://gateway.example/result.png"
+        )
 
     assert excinfo.value.status_code == 404
     assert excinfo.value.error_code == "upstream_error"

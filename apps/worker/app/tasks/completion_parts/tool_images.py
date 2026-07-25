@@ -17,12 +17,13 @@ from lumen_core.context_window import count_tokens
 from lumen_core.pricing import UsageTokens
 
 from ... import billing as worker_billing
-from ... import completion_billing, image_artifacts
-from ...upstream import UpstreamError
-from .tool_state import _IMAGE_GENERATION_TOOL_TYPE
+from ... import completion_billing
+from ...provider_runtime.errors import UpstreamError
+from .artifact_codec import decode_upstream_image_b64
+from .tool_state import IMAGE_GENERATION_TOOL_TYPE as _IMAGE_GENERATION_TOOL_TYPE
 
 
-_decode_upstream_image_b64 = image_artifacts._decode_upstream_image_b64
+_decode_upstream_image_b64 = decode_upstream_image_b64
 
 
 @dataclass(frozen=True)
@@ -1000,3 +1001,15 @@ async def _store_and_publish_completion_tool_image(
         },
     )
     return image_payload, budget_reserved_micro
+
+
+# Public contract consumed by the Completion runtime modules.
+CompletionUsageAccumulator = _CompletionUsageAccumulator
+completion_event_payload = _completion_event_payload
+decode_upstream_image_b64 = _decode_upstream_image_b64
+estimate_completion_request_input_tokens = _estimate_completion_request_input_tokens
+estimate_completion_tool_output_tokens = _estimate_completion_tool_output_tokens
+extract_image_events_from_response = _extract_image_events_from_response
+fallback_completion_usage_tokens = _fallback_completion_usage_tokens
+settle_cancelled_completion_billing = _settle_cancelled_completion_billing
+tool_image_dedupe_key = _tool_image_dedupe_key

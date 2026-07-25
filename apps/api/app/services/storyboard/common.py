@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Iterable
 
 from fastapi import HTTPException
@@ -16,7 +17,7 @@ from lumen_core.models import WorkflowRun, WorkflowStep
 STORYBOARD_WORKFLOW_TYPE = "storyboard"
 STORYBOARD_CHANNEL_PREFIX = "storyboard:"
 
-STORYBOARD_ASSET_KINDS = {"character", "scene", "prop"}
+STORYBOARD_ASSET_KINDS = frozenset({"character", "scene", "prop"})
 STORYBOARD_DEFAULT_MODEL = "seedance-2.0"
 STORYBOARD_DEFAULT_RESOLUTION = "720p"
 STORYBOARD_DEFAULT_ASPECT_RATIO = "16:9"
@@ -25,15 +26,17 @@ STORYBOARD_KEYFRAME_PARALLELISM = 4
 STORYBOARD_ASSEMBLY_WAITING_LEASE_S = 5 * 60
 STORYBOARD_ASSEMBLY_WORKER_LEASE_S = 2 * 60
 
-SHOT_STATUS_RANK = {
-    "draft": 0,
-    "approved": 1,
-    "keyframe_generating": 2,
-    "keyframe_ready": 3,
-    "keyframe_approved": 4,
-    "generating": 5,
-    "done": 6,
-}
+SHOT_STATUS_RANK = MappingProxyType(
+    {
+        "draft": 0,
+        "approved": 1,
+        "keyframe_generating": 2,
+        "keyframe_ready": 3,
+        "keyframe_approved": 4,
+        "generating": 5,
+        "done": 6,
+    }
+)
 
 
 def storyboard_channel(run_id: str) -> str:

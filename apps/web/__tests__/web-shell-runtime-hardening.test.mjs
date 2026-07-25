@@ -97,16 +97,16 @@ test("collapsed desktop sidebar is removed from focus navigation", () => {
   );
 });
 
-test("SSE replay truncation advances the reconnect cursor before closing", () => {
+test("SSE replay truncation triggers typed snapshot recovery before reconnect", () => {
   const useSSE = source("src/lib/useSSE.ts");
+  const contracts = source("src/lib/sse/contracts.ts");
+  const runtime = source("src/lib/sse/runtime.ts");
+  const machine = source("src/lib/sse/connectionMachine.ts");
 
-  match(useSSE, /INTERNAL_SSE_EVENT_NAMES = new Set\(\["replay_truncated"\]\)/);
-  match(
-    useSSE,
-    /const eventNames = new Set<string>\(INTERNAL_SSE_EVENT_NAMES\)/,
-  );
-  match(
-    useSSE,
-    /if \(INTERNAL_SSE_EVENT_NAMES\.has\(name\)\) \{\s*if \(ev\.lastEventId\) this\.lastEventId = ev\.lastEventId;\s*return;\s*\}\s*this\.dispatchNamed\(ev\);/,
-  );
+  match(contracts, /"replay_truncated"/);
+  match(useSSE, /recoverSnapshot\?: SnapshotAdapter/);
+  match(runtime, /this\.handleControl\(parsed\.event\)/);
+  match(runtime, /this\.recover\(effect\.reason\)/);
+  match(machine, /\{ kind: "recoverSnapshot", reason \}/);
+  doesNotMatch(useSSE, /INTERNAL_SSE_EVENT_NAMES/);
 });

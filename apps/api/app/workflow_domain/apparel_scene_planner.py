@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
@@ -30,16 +31,16 @@ from lumen_core.runtime_settings import get_spec
 from lumen_core.vision_tagging import extract_response_text, responses_url
 
 from ..runtime_settings import get_setting
+from .apparel_scene_planner_exports import APPAREL_SCENE_PLANNER_EXPORTS
 from .apparel_scene_fallbacks import (
-    _dict_or_empty,
-    _is_generic_scene_text,
-    _product_visibility_for_shot,
-    build_garment_lock,
     clean_text,
     compact_product_context_for_gpt55,
     coerce_bool,
     coerce_string_list,
+    dict_or_empty as _dict_or_empty,
     fallback_scene_cards_from_pool,
+    is_generic_scene_text as _is_generic_scene_text,
+    product_visibility_for_shot as _product_visibility_for_shot,
     scene_fingerprint,
 )
 from .apparel_scene_fallbacks import *  # noqa: F403,F401
@@ -53,11 +54,17 @@ SceneVariety = Literal["safe", "rich", "wild"]
 ScenePlannerMode = Literal["gpt55_preflight", "gpt55_batch_only", "rules_fallback"]
 ContinuityAnchor = Literal["none", "accessory", "pet", "location_series"]
 
-_PROVIDER_RR_COUNTERS: dict[int, int] = {}
-_PROVIDER_RR_LOCK = asyncio.Lock()
+
+@dataclass
+class _ProviderRoundRobinState:
+    counters: dict[int, int] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_PROVIDER_ROUND_ROBIN = _ProviderRoundRobinState()
 _DIRECTOR_MODEL = "gpt-5.5"
 _FALLBACK_MODEL = "gpt-5.4"
-_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _GPT55_PROVIDER_LIMIT_ENV = "LUMEN_SHOWCASE_GPT_PROVIDER_LIMIT"
 _GPT55_CALL_TIMEOUT_ENV = "LUMEN_SHOWCASE_GPT_CALL_TIMEOUT_SEC"
 _GPT55_DEFAULT_PROVIDER_LIMIT = 2
@@ -68,7 +75,7 @@ _GPT55_DEFAULT_TIMEOUT_SEC = 75.0
 _GPT55_ATTEMPT_TIMEOUT_SEC = 70.0
 _GPT55_DIRECTOR_RETRY_ENV = "LUMEN_SHOWCASE_GPT_DIRECTOR_RETRIES"
 _GPT55_DIRECTOR_DEFAULT_RETRIES = 1
-_REFERENCE_IMAGE_RETRY_STATUS = {400, 413, 415, 422}
+_REFERENCE_IMAGE_RETRY_STATUS = frozenset({400, 413, 415, 422})
 _REFERENCE_IMAGE_RETRY_TOKENS = (
     "input_image",
     "image_url",
@@ -1009,18 +1016,18 @@ def _validate_normalized_scene_card(
         raise ValueError(
             f"incomplete GPT scene_card for shot {index + 1}: {', '.join(missing)}"
         )
-    for field, label in (
+    for field_name, label in (
         ("micro_event", "micro_event"),
         ("pose", "pose"),
         ("motion", "motion"),
     ):
         if _is_generic_scene_text(
-            card.get(field),
+            card.get(field_name),
             shot_class=shot_class,
             label=shot_label,
         ):
             raise ValueError(
-                f"generic GPT {label} for shot {index + 1}: {card.get(field)}"
+                f"generic GPT {label} for shot {index + 1}: {card.get(field_name)}"
             )
     _reject_side_back_for_non_side_card(card, shot_class)
     card["fingerprint"] = scene_fingerprint(card)
@@ -1129,8 +1136,8 @@ async def resolve_scene_provider_order(db: AsyncSession) -> list[ProviderDefinit
     for err in errors:
         logger.warning("%s", err)
     providers = [p for p in providers if endpoint_kind_allowed(p, "responses")]
-    async with _PROVIDER_RR_LOCK:
-        return weighted_priority_order(providers, _PROVIDER_RR_COUNTERS)
+    async with _PROVIDER_ROUND_ROBIN.lock:
+        return weighted_priority_order(providers, _PROVIDER_ROUND_ROBIN.counters)
 
 
 async def _call_gpt55_json(
@@ -1463,21 +1470,4 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
-__all__ = [
-    "ContinuityAnchor",
-    "ScenePlannerMode",
-    "SceneStrategy",
-    "SceneVariety",
-    "build_garment_lock",
-    "coerce_bool",
-    "clean_text",
-    "compose_image_prompt_with_gpt55",
-    "fallback_prompt_composition",
-    "fallback_risk_review",
-    "fallback_scene_cards_from_pool",
-    "plan_scene_cards_with_gpt55",
-    "review_prompt_risk_with_gpt55",
-    "resolve_scene_provider_order",
-    "rules_fallback_planning",
-    "scene_fingerprint",
-]
+__all__ = APPAREL_SCENE_PLANNER_EXPORTS

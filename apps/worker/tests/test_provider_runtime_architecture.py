@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import importlib.util
 from pathlib import Path
 import sys
@@ -65,6 +67,18 @@ def test_worker_provider_facades_stay_below_file_size_budget() -> None:
     )
 
 
+def test_upstream_parts_do_not_import_or_read_parent_facade() -> None:
+    root = Path(__file__).resolve().parents[1] / "app" / "upstream_parts"
+    source = "\n".join(path.read_text() for path in sorted(root.glob("*.py")))
+
+    assert "_facade(" not in source
+    assert "_FacadeProxy" not in source
+    assert "_UPSTREAM_MODULE_NAME" not in source
+    assert "import_module(" not in source
+    assert "facade._" not in source
+    assert "_runtime._" not in source
+
+
 @pytest.mark.asyncio
 async def test_image_probe_hook_reads_current_upstream_facade(
     monkeypatch: pytest.MonkeyPatch,
@@ -78,6 +92,8 @@ async def test_image_probe_hook_reads_current_upstream_facade(
     async def fake_probe(**_kwargs: object) -> tuple[str, None]:
         return "x" * provider_pool._IMAGE_PROBE_MIN_B64_LEN, None
 
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_probe)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_probe
+    )
 
     assert await provider_pool.ProviderPool()._probe_image_one(provider)

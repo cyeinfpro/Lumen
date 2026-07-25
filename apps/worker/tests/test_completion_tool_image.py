@@ -10,8 +10,8 @@ import pytest
 from PIL import Image as PILImage
 
 from app.storage import LocalStorage
-from app.tasks import completion
-from app.tasks import generation
+from app.tasks.completion_parts import default_runtime as completion
+from app.tasks.generation_parts import default_runtime as generation
 from app.tasks.completion_parts import tool_images
 
 

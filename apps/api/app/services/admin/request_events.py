@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
@@ -49,16 +50,23 @@ class RequestEventsRuntime:
     image_variant_url: Callable[[str, str], str]
 
 
-_REQUEST_EVENT_STATUSES = {
-    "queued",
-    "running",
-    "streaming",
-    "succeeded",
-    "failed",
-    "canceled",
-}
-_REQUEST_EVENT_RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+_REQUEST_EVENT_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "streaming",
+        "succeeded",
+        "failed",
+        "canceled",
+    }
+)
+_REQUEST_EVENT_RANGE_HOURS = MappingProxyType({"24h": 24, "7d": 24 * 7, "30d": 24 * 30})
 _IMAGE_INFLIGHT_PREFIX = "generation:image_inflight:"
+
+# Public service contracts used by the route adapter. Keep the underscored
+# names above as compatibility aliases for existing operator/test imports.
+REQUEST_EVENT_STATUSES = _REQUEST_EVENT_STATUSES
+REQUEST_EVENT_RANGE_HOURS = _REQUEST_EVENT_RANGE_HOURS
 
 
 class _RequestEventImageOut(BaseModel):
@@ -337,11 +345,13 @@ def build_live_lanes_from_snapshot(
     return summary, [lane]
 
 
-_MODEL_SHORT_LABELS = {
-    UPSTREAM_MODEL: "image2",
-    DEFAULT_IMAGE_RESPONSES_MODEL: "5.4",
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST: "5.4 mini",
-}
+_MODEL_SHORT_LABELS = MappingProxyType(
+    {
+        UPSTREAM_MODEL: "image2",
+        DEFAULT_IMAGE_RESPONSES_MODEL: "5.4",
+        DEFAULT_IMAGE_RESPONSES_MODEL_FAST: "5.4 mini",
+    }
+)
 
 
 def short_model(name: str) -> str:
@@ -1064,3 +1074,6 @@ def _duration_ms(
             * 1000
         ),
     )
+
+
+duration_ms = _duration_ms

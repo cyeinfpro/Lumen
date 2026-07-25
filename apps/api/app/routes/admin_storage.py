@@ -73,20 +73,22 @@ _DEFAULT_ALLOWED_LOCAL_ROOTS = (
     "/mnt",
     "/media",
 )
-_FORBIDDEN_LOCAL_ROOTS = {
-    "/",
-    "/etc",
-    "/usr",
-    "/var",
-    "/var/lib",
-    "/srv",
-    "/mnt",
-    "/media",
-    "/opt",
-    "/opt/lumen",
-    "/opt/lumendata",
-    "/var/lib/lumen-storage",
-}
+_FORBIDDEN_LOCAL_ROOTS = frozenset(
+    {
+        "/",
+        "/etc",
+        "/usr",
+        "/var",
+        "/var/lib",
+        "/srv",
+        "/mnt",
+        "/media",
+        "/opt",
+        "/opt/lumen",
+        "/opt/lumendata",
+        "/var/lib/lumen-storage",
+    }
+)
 
 # Apply 流程会 docker stop lumen-api 自身，不能等太久；UI 走 polling 模式补全。
 _APPLY_INLINE_WAIT_SEC = 5.0
@@ -160,7 +162,9 @@ def _normalize_local_root(raw: str) -> str:
         )
     allowed_roots = _allowed_local_roots()
     candidate = Path(normalized)
-    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+    if not any(
+        candidate == root or root in candidate.parents for root in allowed_roots
+    ):
         allowed = ", ".join(str(item) for item in allowed_roots)
         raise _http(
             "local_root_not_allowed",

@@ -397,7 +397,7 @@ function ShareImageTile({
       <button
         type="button"
         onClick={() => onOpen(index)}
-        className="relative block w-full overflow-hidden bg-[var(--bg-0)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70"
+        className="relative block w-full overflow-hidden bg-[var(--bg-0)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70"
         style={frameStyle}
         aria-label={`查看第 ${index + 1} 张大图`}
       >
@@ -741,7 +741,7 @@ function ShareLightbox({
             type="button"
             onClick={() => onDownload(image)}
             disabled={downloading}
-            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] px-3 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:px-4"
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--accent)] px-3 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:px-4"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -795,9 +795,9 @@ function ShareFilmstrip({
             type="button"
             onClick={() => onSelect(index)}
             className={cn(
-              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]",
+              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
               index === activeIndex
-                ? "border-[var(--color-lumen-amber)] opacity-100"
+                ? "border-[var(--accent)] opacity-100"
                 : "border-white/15 opacity-[0.62] hover:opacity-90",
             )}
             aria-label={`查看第 ${index + 1} 张`}
@@ -961,7 +961,7 @@ function ShareNotice({ notice }: { notice: Notice | null }) {
         className={cn(
           "rounded-full border px-4 py-2 text-sm shadow-[var(--shadow-3)] backdrop-blur-xl",
           notice.kind === "success" &&
-            "border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/18 text-[var(--fg-0)]",
+            "border-[var(--accent)]/25 bg-[var(--accent)]/18 text-[var(--fg-0)]",
           notice.kind === "error" &&
             "border-danger-border bg-danger-soft text-danger",
           notice.kind === "info" &&

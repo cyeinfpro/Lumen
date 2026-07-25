@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import select
@@ -19,11 +20,13 @@ ReferenceIdFactory = Callable[..., str]
 ImagePublicUrl = Callable[..., Awaitable[tuple[str | None, dict[str, Any]]]]
 VideoPublicUrl = Callable[..., Awaitable[tuple[str, dict[str, Any]]]]
 
-_KIND_LABELS = {
-    "image": "Image",
-    "video": "Video",
-    "audio": "Audio",
-}
+_KIND_LABELS = MappingProxyType(
+    {
+        "image": "Image",
+        "video": "Video",
+        "audio": "Audio",
+    }
+)
 
 
 @dataclass

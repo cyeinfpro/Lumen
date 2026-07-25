@@ -10,6 +10,12 @@ import pytest
 from fastapi import HTTPException
 
 from app.routes import workflows
+from app.workflow_services import (
+    apparel_endpoints as apparel,
+    library_github,
+    library_storage,
+    library_sync,
+)
 from lumen_core.schemas import ApparelModelLibrarySyncOut
 
 
@@ -38,7 +44,7 @@ def test_model_library_json_read_is_size_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(workflows, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
+    monkeypatch.setattr(library_storage, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
     index_path = tmp_path / "index.json"
     index_path.write_bytes(b'{"large":true}')
 
@@ -101,8 +107,9 @@ async def test_sync_releases_process_lock_before_external_io(
         assert workflows._SYNC_LOCK.locked() is False  # noqa: SLF001
         return ApparelModelLibrarySyncOut(status="ok")
 
-    monkeypatch.setattr(workflows, "_claim_library_sync_lease", fake_claim)
-    monkeypatch.setattr(workflows, "_do_sync_library_presets", fake_do_sync)
+    dependencies = library_sync.APPAREL_LIBRARY_SYNC_DEPENDENCIES
+    monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
+    monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_do_sync)
 
     out = await workflows._sync_library_presets_from_github_folder(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
@@ -116,7 +123,7 @@ async def test_sync_releases_process_lock_before_external_io(
 async def test_github_walk_rejects_unbounded_file_listing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(workflows, "MODEL_LIBRARY_MAX_GITHUB_FILES", 2)
+    monkeypatch.setattr(library_github, "MODEL_LIBRARY_MAX_GITHUB_FILES", 2)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -145,7 +152,7 @@ async def test_github_walk_rejects_unbounded_file_listing(
 async def test_github_walk_rejects_excessive_directory_depth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(workflows, "MODEL_LIBRARY_MAX_GITHUB_DEPTH", 1)
+    monkeypatch.setattr(library_github, "MODEL_LIBRARY_MAX_GITHUB_DEPTH", 1)
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -175,7 +182,7 @@ async def test_github_walk_rejects_excessive_directory_depth(
 async def test_github_walk_rejects_excessive_directory_fanout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(workflows, "MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES", 2)
+    monkeypatch.setattr(library_github, "MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES", 2)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -234,12 +241,10 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
         "assets/apparel-model-presets?ref=main"
     )
     image_path = (
-        "assets/apparel-model-presets/05_adult/female/"
-        "adult-female-asian-001.webp"
+        "assets/apparel-model-presets/05_adult/female/adult-female-asian-001.webp"
     )
     thumb_path = (
-        "assets/apparel-model-presets/05_adult/female/"
-        "adult-female-asian-001.thumb.webp"
+        "assets/apparel-model-presets/05_adult/female/adult-female-asian-001.thumb.webp"
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -292,8 +297,12 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     item = index["preset_items"][0]
     assert item["github_sha"] == "github-image-sha"
     assert item["github_thumb_sha"] == "github-thumb-sha"
-    assert workflows._storage_path(item["image_storage_key"]).read_bytes() == image_bytes  # noqa: SLF001
-    assert workflows._storage_path(item["thumb_storage_key"]).read_bytes() == thumb_bytes  # noqa: SLF001
+    assert (
+        workflows._storage_path(item["image_storage_key"]).read_bytes() == image_bytes
+    )  # noqa: SLF001
+    assert (
+        workflows._storage_path(item["thumb_storage_key"]).read_bytes() == thumb_bytes
+    )  # noqa: SLF001
     state = workflows._read_json_file(  # noqa: SLF001
         workflows._library_sync_state_path(),  # noqa: SLF001
         workflows._default_sync_state(),  # noqa: SLF001
@@ -328,9 +337,9 @@ async def test_sync_route_closes_db_transaction_before_network(
         assert proxy_url is None
         return ApparelModelLibrarySyncOut(status="skipped")
 
-    monkeypatch.setattr(workflows, "_resolve_model_library_sync_proxy", fake_proxy)
+    monkeypatch.setattr(apparel, "_resolve_model_library_sync_proxy", fake_proxy)
     monkeypatch.setattr(
-        workflows,
+        apparel,
         "_sync_library_presets_from_github_folder",
         fake_sync,
     )

@@ -247,3 +247,23 @@ def _showcase_gpt55_reference_data_url(image: Image, raw: bytes) -> str | None:
             exc,
         )
         return None
+
+
+# Public workflow contracts.
+SHOWCASE_GPT55_REFERENCE_MAX_BYTES = _SHOWCASE_GPT55_REFERENCE_MAX_BYTES
+WORKFLOW_CURSOR_VERSION = _WORKFLOW_CURSOR_VERSION
+accessory_preview_request_key = _accessory_preview_request_key
+clean_optional_text = _clean_optional_text
+clean_string_list = _clean_string_list
+clean_style_tags = _clean_style_tags
+decode_workflow_cursor = _decode_workflow_cursor
+dedupe_nonempty = _dedupe_nonempty
+dict_or_empty = _dict_or_empty
+encode_workflow_cursor = _encode_workflow_cursor
+http = _http
+iso_now = _iso_now
+now = _now
+safe_datetime = _safe_datetime
+showcase_gpt55_reference_data_url = _showcase_gpt55_reference_data_url
+storage_path = _storage_path
+storage_root = _storage_root

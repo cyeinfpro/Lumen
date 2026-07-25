@@ -11,6 +11,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
 from fastapi import (
@@ -84,12 +85,14 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _CANVAS_ENABLED_KEY = "canvas.enabled"
-_NAV_VISIBILITY_SETTING_KEYS = {
-    "studio": "ui.nav.studio_visible",
-    "video": "ui.nav.video_visible",
-    "projects": "ui.nav.projects_visible",
-    "assets": "ui.nav.assets_visible",
-}
+_NAV_VISIBILITY_SETTING_KEYS = MappingProxyType(
+    {
+        "studio": "ui.nav.studio_visible",
+        "video": "ui.nav.video_visible",
+        "projects": "ui.nav.projects_visible",
+        "assets": "ui.nav.assets_visible",
+    }
+)
 
 # Why: strip control chars (incl. NUL/CR/LF/DEL) before persisting UA so log
 # injection / DB driver quirks can't slip through user-controlled headers.
@@ -160,7 +163,7 @@ if redis.call('HGET', KEYS[1], 'owner') == ARGV[1] then
 end
 return 0
 """
-_DEV_ENVS = {"dev", "development", "local", "test"}
+_DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE = (
     "verification failed; please verify your API key again"
 )

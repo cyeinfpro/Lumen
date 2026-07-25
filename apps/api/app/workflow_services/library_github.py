@@ -10,8 +10,42 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
-from ..workflow_domain.apparel_library import MODEL_LIBRARY_MAX_BINARY_BYTES
-from .library_runtime import runtime as _runtime
+from ..workflow_domain.apparel_library import (
+    MODEL_LIBRARY_IMAGE_SUFFIXES,
+    MODEL_LIBRARY_MAX_BINARY_BYTES,
+    MODEL_LIBRARY_MAX_GITHUB_DEPTH,
+    MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES,
+    MODEL_LIBRARY_MAX_GITHUB_FILES,
+    MODEL_LIBRARY_MAX_GITHUB_METADATA_BYTES,
+    MODEL_LIBRARY_MAX_GITHUB_RESPONSE_BYTES,
+)
+from ..workflow_domain.apparel_library import (
+    age_segment_from_folder_name as _age_segment_from_folder_name,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    gender_from_folder_name as _gender_from_folder_name,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    model_library_folder_for_age as _model_library_folder_for_age,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    preset_id_from_path as _preset_id_from_path,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    title_from_preset_id as _title_from_preset_id,
+)  # noqa: F401
+from .serialization import clean_optional_text as _clean_optional_text  # noqa: F401
+from .serialization import clean_style_tags as _clean_style_tags  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+
+
+_GITHUB_API_HOST = "api.github.com"
+_GITHUB_RAW_HOSTS = frozenset(
+    {
+        "raw.githubusercontent.com",
+        "media.githubusercontent.com",
+    }
+)
 
 
 class _ModelLibrarySyncLimitExceeded(ValueError):
@@ -57,11 +91,10 @@ async def _fetch_github_download_bytes(
     *,
     max_bytes: int = MODEL_LIBRARY_MAX_BINARY_BYTES,
 ) -> bytes:
-    runtime = _runtime()
-    clean_url = runtime._validate_github_download_url(url)
+    clean_url = _validate_github_download_url(url)
     if clean_url is None:
         raise ValueError("preset file download URL must be a GitHub raw URL")
-    return await runtime._fetch_bytes(client, clean_url, max_bytes=max_bytes)
+    return await _fetch_bytes(client, clean_url, max_bytes=max_bytes)
 
 
 def _github_api_child_url(base_url: str, child_name: str) -> str:
@@ -86,29 +119,28 @@ def _decoded_url_path_segments(url: str) -> list[str]:
 
 
 def _validate_github_contents_url(url: str) -> str:
-    runtime = _runtime()
     clean = (url or "").strip()
     parts = urlsplit(clean)
     if (
         parts.scheme != "https"
-        or (parts.hostname or "").lower() != runtime._GITHUB_API_HOST
+        or (parts.hostname or "").lower() != _GITHUB_API_HOST
         or parts.port is not None
         or parts.username is not None
         or parts.password is not None
     ):
-        raise runtime._http(
+        raise _http(
             "invalid_preset_sync_url",
             "preset sync URL must be a GitHub contents API URL",
             503,
         )
-    segments = runtime._decoded_url_path_segments(clean)
+    segments = _decoded_url_path_segments(clean)
     if (
         len(segments) < 5
         or segments[0] != "repos"
         or segments[3] != "contents"
         or any(segment in {"", ".", ".."} for segment in segments)
     ):
-        raise runtime._http(
+        raise _http(
             "invalid_preset_sync_url",
             "preset sync URL must be a GitHub contents API URL",
             503,
@@ -117,18 +149,17 @@ def _validate_github_contents_url(url: str) -> str:
 
 
 def _validate_github_download_url(url: str) -> str | None:
-    runtime = _runtime()
     clean = (url or "").strip()
     parts = urlsplit(clean)
     if (
         parts.scheme != "https"
-        or (parts.hostname or "").lower() not in runtime._GITHUB_RAW_HOSTS
+        or (parts.hostname or "").lower() not in _GITHUB_RAW_HOSTS
         or parts.port is not None
         or parts.username is not None
         or parts.password is not None
     ):
         return None
-    segments = runtime._decoded_url_path_segments(clean)
+    segments = _decoded_url_path_segments(clean)
     if len(segments) < 4 or any(segment in {"", ".", ".."} for segment in segments):
         return None
     return clean
@@ -150,8 +181,7 @@ async def _walk_github_contents(
     *,
     progress: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
-    runtime = _runtime()
-    root_url = runtime._validate_github_contents_url(contents_url)
+    root_url = _validate_github_contents_url(contents_url)
     pending: list[tuple[str, int]] = [(root_url, 0)]
     queued: set[str] = {root_url}
     visited: set[str] = set()
@@ -166,18 +196,16 @@ async def _walk_github_contents(
             continue
         visited.add(current_url)
         directory_count += 1
-        if directory_count > runtime.MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES:
+        if directory_count > MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES:
             raise _ModelLibrarySyncLimitExceeded(
                 "GitHub contents directory limit exceeded"
             )
-        remaining_metadata = (
-            runtime.MODEL_LIBRARY_MAX_GITHUB_METADATA_BYTES - metadata_bytes
-        )
-        raw = await runtime._fetch_bytes(
+        remaining_metadata = MODEL_LIBRARY_MAX_GITHUB_METADATA_BYTES - metadata_bytes
+        raw = await _fetch_bytes(
             client,
             current_url,
             max_bytes=min(
-                runtime.MODEL_LIBRARY_MAX_GITHUB_RESPONSE_BYTES,
+                MODEL_LIBRARY_MAX_GITHUB_RESPONSE_BYTES,
                 remaining_metadata,
             ),
             headers={"Accept": "application/vnd.github+json"},
@@ -190,13 +218,13 @@ async def _walk_github_contents(
             entry_type = entry.get("type")
             name = str(entry.get("name") or "")
             if entry_type == "dir":
-                if depth >= runtime.MODEL_LIBRARY_MAX_GITHUB_DEPTH:
+                if depth >= MODEL_LIBRARY_MAX_GITHUB_DEPTH:
                     raise _ModelLibrarySyncLimitExceeded(
                         "GitHub contents depth limit exceeded"
                     )
-                child_url = runtime._github_api_child_url(current_url, name)
+                child_url = _github_api_child_url(current_url, name)
                 if child_url not in queued:
-                    if len(queued) >= runtime.MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES:
+                    if len(queued) >= MODEL_LIBRARY_MAX_GITHUB_DIRECTORIES:
                         raise _ModelLibrarySyncLimitExceeded(
                             "GitHub contents directory limit exceeded"
                         )
@@ -204,7 +232,7 @@ async def _walk_github_contents(
                     pending.append((child_url, depth + 1))
             elif entry_type == "file":
                 files.append(entry)
-                if len(files) > runtime.MODEL_LIBRARY_MAX_GITHUB_FILES:
+                if len(files) > MODEL_LIBRARY_MAX_GITHUB_FILES:
                     raise _ModelLibrarySyncLimitExceeded(
                         "GitHub contents file limit exceeded"
                     )
@@ -214,19 +242,18 @@ async def _walk_github_contents(
 
 
 def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
-    runtime = _runtime()
     path_value = str(entry.get("path") or entry.get("name") or "").strip()
     if not path_value:
         return None
     path = Path(path_value)
     suffix = path.suffix.lower()
-    if suffix not in runtime.MODEL_LIBRARY_IMAGE_SUFFIXES:
+    if suffix not in MODEL_LIBRARY_IMAGE_SUFFIXES:
         return None
     stem = path.stem
     if stem.endswith(".thumb"):
         return None
     download_url = str(entry.get("download_url") or "").strip()
-    download_url = runtime._validate_github_download_url(download_url) or ""
+    download_url = _validate_github_download_url(download_url) or ""
     if not download_url:
         return None
     path_parts = [
@@ -237,7 +264,7 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
         (
             age
             for part in reversed(parent_dirs)
-            if (age := runtime._age_segment_from_folder_name(part)) is not None
+            if (age := _age_segment_from_folder_name(part)) is not None
         ),
         "user_favorites",
     )
@@ -245,11 +272,11 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
         (
             gender_value
             for part in reversed(parent_dirs)
-            if (gender_value := runtime._gender_from_folder_name(part)) is not None
+            if (gender_value := _gender_from_folder_name(part)) is not None
         ),
         None,
     )
-    preset_id = runtime._preset_id_from_path(path_value)
+    preset_id = _preset_id_from_path(path_value)
     lower_name = path.name.lower()
     gender = gender_from_folder
     if any(token in lower_name for token in ("female", "woman", "girl")):
@@ -282,19 +309,19 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "preset_id": preset_id,
         "version": 1,
-        "title": runtime._title_from_preset_id(preset_id),
+        "title": _title_from_preset_id(preset_id),
         "age_segment": age_segment,
-        "library_folder": runtime._model_library_folder_for_age(
+        "library_folder": _model_library_folder_for_age(
             age_segment,
             gender,
         ),
         "gender": gender,
         "appearance_direction": appearance,
-        "style_tags": runtime._clean_style_tags(words[:6]),
+        "style_tags": _clean_style_tags(words[:6]),
         "image_path": path_value,
         "download_url": download_url,
-        "sha": runtime._clean_optional_text(entry.get("sha"), max_len=80),
-        "prompt_hint": runtime._title_from_preset_id(preset_id),
+        "sha": _clean_optional_text(entry.get("sha"), max_len=80),
+        "prompt_hint": _title_from_preset_id(preset_id),
     }
 
 
@@ -309,3 +336,16 @@ def _github_entry_size(entry: dict[str, Any]) -> int | None:
     if size < 0:
         raise ValueError("invalid GitHub file size")
     return size
+
+
+# Public workflow contracts.
+ModelLibrarySyncLimitExceeded = _ModelLibrarySyncLimitExceeded
+decoded_url_path_segments = _decoded_url_path_segments
+fetch_bytes = _fetch_bytes
+fetch_github_download_bytes = _fetch_github_download_bytes
+github_api_child_url = _github_api_child_url
+github_entry_size = _github_entry_size
+metadata_from_github_file = _metadata_from_github_file
+validate_github_contents_url = _validate_github_contents_url
+validate_github_download_url = _validate_github_download_url
+walk_github_contents = _walk_github_contents

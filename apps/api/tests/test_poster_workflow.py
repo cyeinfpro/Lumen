@@ -24,6 +24,8 @@ from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
 
 from app.routes import workflows
+from app.services.poster_styles import workflow_lookup
+from app.workflow_services import poster_endpoints as poster
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
     PosterDesignWorkflowCreateIn,
@@ -153,7 +155,7 @@ def test_copy_analysis_approve_in_default_corrections() -> None:
 
 
 def test_poster_workflow_steps_match_design_doc() -> None:
-    assert workflows.POSTER_WORKFLOW_STEPS == [
+    assert workflows.POSTER_WORKFLOW_STEPS == (
         "copy_input",
         "style_selection",
         "copy_analysis",
@@ -161,7 +163,7 @@ def test_poster_workflow_steps_match_design_doc() -> None:
         "master_approval",
         "multi_size_generation",
         "delivery",
-    ]
+    )
 
 
 def test_poster_seed_steps_initial_status() -> None:
@@ -349,12 +351,10 @@ async def test_sync_promotes_copy_analysis_to_needs_review(
     )
 
     # 模拟 _load_steps 返回我们的 steps
-    async def fake_load_steps(
-        db: Any, run_id: str, *, lock: bool = False
-    ) -> list[Any]:
+    async def fake_load_steps(db: Any, run_id: str, *, lock: bool = False) -> list[Any]:
         return [copy_step]
 
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[completion], [], []])
     await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
@@ -410,12 +410,10 @@ async def test_sync_marks_master_step_needs_review_when_all_masters_ready(
         ),
     ]
 
-    async def fake_load_steps(
-        db: Any, run_id: str, *, lock: bool = False
-    ) -> list[Any]:
+    async def fake_load_steps(db: Any, run_id: str, *, lock: bool = False) -> list[Any]:
         return [master_step, approval_step]
 
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     # responses 顺序：master 行 + (per master image lookup + per master gens) → 简化为空
     db = _Db(responses=[masters, [], [], []])
     await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
@@ -475,12 +473,10 @@ async def test_sync_master_generation_ignores_ready_masters_from_previous_batch(
         SimpleNamespace(id="g-new", status="running"),
     ]
 
-    async def fake_load_steps(
-        db: Any, run_id: str, *, lock: bool = False
-    ) -> list[Any]:
+    async def fake_load_steps(db: Any, run_id: str, *, lock: bool = False) -> list[Any]:
         return [master_step, approval_step]
 
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[old_ready, new_pending], generations, [], []])
 
     await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
@@ -532,12 +528,10 @@ async def test_sync_render_generation_ignores_ready_renders_from_previous_batch(
     ]
     images = [SimpleNamespace(id="img-old", owner_generation_id="g-old")]
 
-    async def fake_load_steps(
-        db: Any, run_id: str, *, lock: bool = False
-    ) -> list[Any]:
+    async def fake_load_steps(db: Any, run_id: str, *, lock: bool = False) -> list[Any]:
         return [multi_step]
 
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [old_ready, new_pending], generations, images])
 
     await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
@@ -580,12 +574,10 @@ async def test_sync_render_revision_waits_for_active_revision_image(
     ]
     images = [SimpleNamespace(id="img-old", owner_generation_id="g-old")]
 
-    async def fake_load_steps(
-        db: Any, run_id: str, *, lock: bool = False
-    ) -> list[Any]:
+    async def fake_load_steps(db: Any, run_id: str, *, lock: bool = False) -> list[Any]:
         return [multi_step]
 
-    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [render], generations, images])
 
     await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
@@ -648,7 +640,9 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
         assert conversation_id == "conv-1"
         return conv
 
-    async def fake_create_task(*args: Any, **kwargs: Any) -> tuple[Any, None, list[str]]:
+    async def fake_create_task(
+        *args: Any, **kwargs: Any
+    ) -> tuple[Any, None, list[str]]:
         created_calls.append(kwargs)
         return SimpleNamespace(), None, ["retry-gen"]
 
@@ -658,13 +652,13 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
     async def fake_build_run_out(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync_poster)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_get_owned_conversation", fake_conversation)
-    monkeypatch.setattr(workflows, "_create_poster_workflow_task", fake_create_task)
-    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(poster, "_get_run", fake_get_run)
+    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(poster, "_step", fake_step)
+    monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
+    monkeypatch.setattr(poster, "_publish_bundles", fake_publish)
+    monkeypatch.setattr(poster, "_build_run_out", fake_build_run_out)
 
     db = _Db(responses=[[]])
     out = await workflows.create_poster_masters(
@@ -867,13 +861,16 @@ async def test_poster_load_style_reads_json_preset(
 ) -> None:
     """Preset styles live in the JSON index, not poster_style_items DB rows."""
 
+    async def fake_bootstrap() -> None:
+        return None
+
     async def fake_find_preset(
-        db: Any, *, user_id: str, style_id: str
+        db: Any, *, user_id: str, item_id: str
     ) -> dict[str, Any] | None:
         assert user_id == "user-1"
-        assert style_id == "preset:flat_illustration:v1"
+        assert item_id == "preset:flat_illustration:v1"
         return {
-            "id": style_id,
+            "id": item_id,
             "title": "扁平插画",
             "mood": "现代轻快",
             "prompt_template": "flat vector poster",
@@ -883,7 +880,12 @@ async def test_poster_load_style_reads_json_preset(
             "category": "illustration",
         }
 
-    monkeypatch.setattr(workflows, "_poster_find_preset_item", fake_find_preset)
+    monkeypatch.setattr(
+        workflow_lookup,
+        "bootstrap_local_presets_if_empty",
+        fake_bootstrap,
+    )
+    monkeypatch.setattr(workflow_lookup, "find_preset_item", fake_find_preset)
 
     db = _Db()
     style = await workflows._poster_load_style(  # noqa: SLF001
@@ -980,16 +982,16 @@ async def test_create_poster_design_workflow_smoke(
     ) -> None:
         return None
 
-    monkeypatch.setattr(workflows, "_poster_load_style", fake_load_style)
-    monkeypatch.setattr(workflows, "_validate_owned_images", fake_validate_owned_images)
+    monkeypatch.setattr(poster, "_poster_load_style", fake_load_style)
+    monkeypatch.setattr(poster, "_validate_owned_images", fake_validate_owned_images)
     monkeypatch.setattr(
-        workflows, "_get_or_create_workflow_conversation", fake_get_or_create_conv
+        poster, "_get_or_create_workflow_conversation", fake_get_or_create_conv
     )
-    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(
-        workflows, "_create_poster_workflow_task", fake_create_workflow_task
+        poster, "_create_poster_workflow_task", fake_create_workflow_task
     )
-    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish_bundles)
+    monkeypatch.setattr(poster, "_publish_bundles", fake_publish_bundles)
 
     body = PosterDesignWorkflowCreateIn(
         copy_text="限时五折，全场夏季新品",
@@ -1019,7 +1021,7 @@ async def test_create_poster_design_workflow_rejects_unknown_style(
     async def fake_load_style(db: Any, *, user_id: str, style_id: str) -> Any:
         raise workflows._http("style_not_found", "poster style not found", 404)  # noqa: SLF001
 
-    monkeypatch.setattr(workflows, "_poster_load_style", fake_load_style)
+    monkeypatch.setattr(poster, "_poster_load_style", fake_load_style)
 
     body = PosterDesignWorkflowCreateIn(copy_text="测试文案", style_id="missing")
     db = _Db()

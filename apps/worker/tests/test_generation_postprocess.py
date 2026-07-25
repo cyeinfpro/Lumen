@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import io
 import pickle
 from concurrent.futures import Executor
@@ -9,7 +11,22 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.tasks.generation_parts import postprocess
 
 
@@ -169,7 +186,7 @@ async def test_broken_process_pool_resets_cached_executor(
         )
 
     executor = BrokenExecutor()
-    monkeypatch.setattr(generation, "_IMAGE_POSTPROCESS_EXECUTOR", executor)
+    monkeypatch.setattr(generation._IMAGE_POSTPROCESS_RUNTIME, "executor", executor)
     monkeypatch.setattr(generation, "_make_image_variants_pil_only_sync", fake_pil_only)
 
     variants, mode = await generation._postprocess_image_variants(
@@ -179,7 +196,7 @@ async def test_broken_process_pool_resets_cached_executor(
 
     assert mode == "thread"
     assert variants.engine == "pil"
-    assert generation._IMAGE_POSTPROCESS_EXECUTOR is None
+    assert generation._IMAGE_POSTPROCESS_RUNTIME.executor is None
     assert shutdown_calls == [{"wait": False, "cancel_futures": True}]
 
 
@@ -191,7 +208,7 @@ def test_cached_postprocess_executor_does_not_resolve_workers(
     def fail_worker_resolution() -> int:
         raise AssertionError("cached executor must not resolve workers again")
 
-    monkeypatch.setattr(generation, "_IMAGE_POSTPROCESS_EXECUTOR", executor)
+    monkeypatch.setattr(generation._IMAGE_POSTPROCESS_RUNTIME, "executor", executor)
     monkeypatch.setattr(
         generation,
         "_resolve_image_postprocess_workers",
@@ -205,7 +222,7 @@ def test_process_pool_variant_facade_is_importable_and_picklable() -> None:
     restored = pickle.loads(pickle.dumps(generation._make_image_variants_sync))
 
     assert restored is generation._make_image_variants_sync
-    assert restored.__module__ == "app.tasks.generation"
+    assert restored.__module__ == "app.tasks.generation_parts.default_runtime"
     assert generation._IMAGE_POSTPROCESS_MODES is postprocess._IMAGE_POSTPROCESS_MODES
 
 

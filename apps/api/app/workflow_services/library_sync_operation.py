@@ -13,9 +13,10 @@ from typing import Any, Awaitable, Callable, Iterable, TypeVar
 from fastapi import HTTPException
 from lumen_core.schemas import ApparelModelLibrarySyncOut
 
-from .library_github import _ModelLibrarySyncLimitExceeded
-from .library_lease import _ModelLibrarySyncLeaseLost
-from .library_runtime import runtime as _runtime
+from .library_github import (
+    ModelLibrarySyncLimitExceeded as _ModelLibrarySyncLimitExceeded,
+)  # noqa: F401
+from .library_lease import ModelLibrarySyncLeaseLost as _ModelLibrarySyncLeaseLost  # noqa: F401
 
 
 _SyncResponseT = TypeVar("_SyncResponseT")
@@ -593,6 +594,9 @@ async def _do_poster_style_sync(
     )
 
 
+do_poster_style_sync = _do_poster_style_sync
+
+
 _APPAREL_SYNC_COMPARE_FIELDS = (
     "title",
     "age_segment",
@@ -985,11 +989,11 @@ def _map_apparel_sync_error(
 
 
 async def _sync_library_presets_from_github_folder(
+    runtime: Any,
     contents_url: str,
     *,
     proxy_url: str | None = None,
 ) -> ApparelModelLibrarySyncOut:
-    runtime = _runtime()
     if not contents_url:
         raise runtime._http(
             "sync_not_configured", "preset GitHub folder url is not configured", 503
@@ -1009,13 +1013,13 @@ async def _sync_library_presets_from_github_folder(
 
 
 async def _do_sync_library_presets(
+    runtime: Any,
     contents_url: str,
     state: dict[str, Any],
     *,
     proxy_url: str | None = None,
     lease_token: str | None = None,
 ) -> ApparelModelLibrarySyncOut:
-    runtime = _runtime()
     contents_url = runtime._validate_github_contents_url(contents_url)
     if lease_token is None:
         lease_token, state = await runtime._claim_library_sync_lease()
@@ -1053,3 +1057,8 @@ async def _do_sync_library_presets(
             message,
         ),
     )
+
+
+# Public workflow contracts.
+do_sync_library_presets = _do_sync_library_presets
+sync_library_presets_from_github_folder = _sync_library_presets_from_github_folder

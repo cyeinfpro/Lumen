@@ -2,35 +2,79 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import Image, ModelLibraryHiddenPreset, ModelLibraryItem, User
-from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.providers import (
+    ProviderProxyDefinition,
+    parse_proxy_json,
+    resolve_provider_proxy_url,
+)
+from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     ApparelModelLibraryItemOut,
     ApparelModelLibrarySyncStateOut,
 )
 
-from .library_runtime import runtime as _runtime
+from ..config import settings
+from ..runtime_settings import get_setting
+from ..workflow_domain.apparel_library import (
+    MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
+    MODEL_LIBRARY_SYNC_MODES,
+)
+from ..workflow_domain.apparel_library import library_item_url as _library_item_url  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    model_library_folder_for_age as _model_library_folder_for_age,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    normalize_age_segment as _normalize_age_segment,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    normalize_appearance as _normalize_appearance,
+)  # noqa: F401
+from ..workflow_domain.apparel_library import (
+    normalize_model_gender as _normalize_model_gender,
+)  # noqa: F401
+from .library_contracts import (
+    MODEL_LIBRARY_SYNC_PROXY_NAME_KEY,
+    MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY,
+)
+from .library_contracts import (
+    model_library_download_filename as _model_library_download_filename,
+)  # noqa: F401
+from .library_storage import default_sync_state as _default_sync_state  # noqa: F401
+from .library_storage import library_sync_state_path as _library_sync_state_path  # noqa: F401
+from .library_storage import library_user_index_path as _library_user_index_path  # noqa: F401
+from .library_storage import load_global_library_index as _load_global_library_index  # noqa: F401
+from .library_storage import load_user_library_index as _load_user_library_index  # noqa: F401
+from .library_storage import read_json_file as _read_json_file  # noqa: F401
+from .serialization import clean_optional_text as _clean_optional_text  # noqa: F401
+from .serialization import clean_style_tags as _clean_style_tags  # noqa: F401
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+from .serialization import now as _now  # noqa: F401
+from .serialization import safe_datetime as _safe_datetime  # noqa: F401
+
+logger = logging.getLogger("app.routes.workflows")
 
 
 def _github_contents_url() -> str:
-    return _runtime().settings.apparel_model_library_github_contents_url.strip()
+    return settings.apparel_model_library_github_contents_url.strip()
 
 
 def _sync_mode() -> str:
-    runtime = _runtime()
-    mode = runtime.settings.apparel_model_library_sync_mode.strip().lower()
-    return mode if mode in runtime.MODEL_LIBRARY_SYNC_MODES else "admin_only"
+    mode = settings.apparel_model_library_sync_mode.strip().lower()
+    return mode if mode in MODEL_LIBRARY_SYNC_MODES else "admin_only"
 
 
 def _model_library_http_client_kwargs(proxy_url: str | None = None) -> dict[str, Any]:
-    runtime = _runtime()
     kwargs: dict[str, Any] = {
-        "timeout": runtime.httpx.Timeout(runtime.MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS),
+        "timeout": httpx.Timeout(MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS),
     }
     if proxy_url:
         kwargs["proxy"] = proxy_url
@@ -40,39 +84,34 @@ def _model_library_http_client_kwargs(proxy_url: str | None = None) -> dict[str,
 async def _resolve_model_library_sync_proxy(
     db: AsyncSession,
 ) -> tuple[ProviderProxyDefinition | None, str | None]:
-    runtime = _runtime()
-    use_spec = runtime.get_spec(runtime.MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY)
-    use_raw = await runtime.get_setting(db, use_spec) if use_spec is not None else None
+    use_spec = get_spec(MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY)
+    use_raw = await get_setting(db, use_spec) if use_spec is not None else None
     if str(use_raw or "0").strip() != "1":
         return None, None
 
-    providers_spec = runtime.get_spec("providers")
+    providers_spec = get_spec("providers")
     raw_providers = (
-        await runtime.get_setting(db, providers_spec)
-        if providers_spec is not None
-        else None
+        await get_setting(db, providers_spec) if providers_spec is not None else None
     )
-    proxies, errors = runtime.parse_proxy_json(raw_providers)
+    proxies, errors = parse_proxy_json(raw_providers)
     for err in errors:
-        runtime.logger.warning("model library sync proxy config warning: %s", err)
+        logger.warning("model library sync proxy config warning: %s", err)
 
     enabled = [proxy for proxy in proxies if proxy.enabled]
     if not enabled:
-        raise runtime._http(
+        raise _http(
             "proxy_unavailable",
             "model library sync proxy pool is enabled but has no enabled proxies",
             409,
         )
 
-    name_spec = runtime.get_spec(runtime.MODEL_LIBRARY_SYNC_PROXY_NAME_KEY)
-    name_raw = (
-        await runtime.get_setting(db, name_spec) if name_spec is not None else None
-    )
+    name_spec = get_spec(MODEL_LIBRARY_SYNC_PROXY_NAME_KEY)
+    name_raw = await get_setting(db, name_spec) if name_spec is not None else None
     target_name = str(name_raw or "").strip()
     if target_name:
         proxy = next((p for p in enabled if p.name == target_name), None)
         if proxy is None:
-            raise runtime._http(
+            raise _http(
                 "proxy_not_found",
                 f"model library sync proxy '{target_name}' not found or disabled",
                 409,
@@ -80,9 +119,9 @@ async def _resolve_model_library_sync_proxy(
     else:
         proxy = enabled[0]
 
-    proxy_url = await runtime.resolve_provider_proxy_url(proxy)
+    proxy_url = await resolve_provider_proxy_url(proxy)
     if not proxy_url:
-        raise runtime._http(
+        raise _http(
             "proxy_resolve_failed",
             f"model library sync proxy '{proxy.name}' could not be resolved",
             409,
@@ -91,7 +130,7 @@ async def _resolve_model_library_sync_proxy(
 
 
 def _can_sync_library(user: User) -> bool:
-    mode = _runtime()._sync_mode()
+    mode = _sync_mode()
     if mode == "disabled":
         return False
     if mode == "any_authenticated":
@@ -100,40 +139,38 @@ def _can_sync_library(user: User) -> bool:
 
 
 def _sync_state_out(user: User) -> ApparelModelLibrarySyncStateOut:
-    runtime = _runtime()
-    state = runtime._read_json_file(
-        runtime._library_sync_state_path(),
-        runtime._default_sync_state(),
+    state = _read_json_file(
+        _library_sync_state_path(),
+        _default_sync_state(),
     )
     return ApparelModelLibrarySyncStateOut(
-        last_success_at=runtime._safe_datetime(state.get("last_success_at")),
-        last_error=runtime._clean_optional_text(
+        last_success_at=_safe_datetime(state.get("last_success_at")),
+        last_error=_clean_optional_text(
             state.get("last_error"),
             max_len=1000,
         ),
-        can_sync=runtime._can_sync_library(user),
-        github_contents_url=runtime._github_contents_url() or None,
+        can_sync=_can_sync_library(user),
+        github_contents_url=_github_contents_url() or None,
     )
 
 
 def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
-    runtime = _runtime()
     item_id = str(raw.get("id") or "").strip()
     source = str(raw.get("source") or "").strip()
     if source not in {"preset", "favorite", "user_upload", "generated"}:
         source = "user_upload"
-    image_id = runtime._clean_optional_text(raw.get("image_id"), max_len=64)
+    image_id = _clean_optional_text(raw.get("image_id"), max_len=64)
     image_url = (
         f"/api/images/{image_id}/binary"
         if image_id
-        else runtime._library_item_url(item_id, "binary")
+        else _library_item_url(item_id, "binary")
     )
     # user item 走 display2048 variant（按需 materialize）；preset 没有独立
     # display 变体，回落到 binary 原图。lightbox / 大图预览走这个。
     display_url = (
         f"/api/images/{image_id}/variants/display2048"
         if image_id
-        else runtime._library_item_url(item_id, "binary")
+        else _library_item_url(item_id, "binary")
     )
     # 卡片小封面用：user item 复用 display2048（thumb256 variant 不一定生成
     # 且 endpoint 不按需 materialize，回落到 display2048 较稳）；preset 自带
@@ -141,32 +178,30 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
     thumb_url = (
         f"/api/images/{image_id}/variants/display2048"
         if image_id
-        else runtime._library_item_url(item_id, "thumb")
+        else _library_item_url(item_id, "thumb")
     )
     created_at = (
-        runtime._safe_datetime(raw.get("created_at"))
-        or runtime._safe_datetime(raw.get("updated_at"))
-        or runtime._now()
+        _safe_datetime(raw.get("created_at"))
+        or _safe_datetime(raw.get("updated_at"))
+        or _now()
     )
     visibility_scope = "global_preset" if source == "preset" else "user_private"
-    style_tags = runtime._clean_style_tags(
-        raw.get("style_tags") or raw.get("tags") or []
-    )
-    gender = runtime._clean_optional_text(raw.get("gender"), max_len=40)
-    age_segment = runtime._normalize_age_segment(raw.get("age_segment"))
-    appearance_direction = runtime._clean_optional_text(
+    style_tags = _clean_style_tags(raw.get("style_tags") or raw.get("tags") or [])
+    gender = _clean_optional_text(raw.get("gender"), max_len=40)
+    age_segment = _normalize_age_segment(raw.get("age_segment"))
+    appearance_direction = _clean_optional_text(
         raw.get("appearance_direction"), max_len=80
     )
     metadata_filename = None
     metadata = raw.get("metadata_jsonb")
     if isinstance(metadata, dict):
-        metadata_filename = runtime._clean_optional_text(
+        metadata_filename = _clean_optional_text(
             metadata.get("suggested_filename"), max_len=160
         )
     if not metadata_filename and image_id:
         image_metadata = raw.get("image_metadata_jsonb")
         if isinstance(image_metadata, dict):
-            metadata_filename = runtime._clean_optional_text(
+            metadata_filename = _clean_optional_text(
                 image_metadata.get("suggested_filename"), max_len=160
             )
     return ApparelModelLibraryItemOut(
@@ -182,22 +217,22 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
         display_url=display_url,
         thumb_url=thumb_url,
         image_id=image_id,
-        preset_id=runtime._clean_optional_text(raw.get("preset_id"), max_len=160),
+        preset_id=_clean_optional_text(raw.get("preset_id"), max_len=160),
         version=raw.get("version") if isinstance(raw.get("version"), int) else None,
-        library_folder=runtime._clean_optional_text(
+        library_folder=_clean_optional_text(
             raw.get("library_folder")
-            or runtime._model_library_folder_for_age(
+            or _model_library_folder_for_age(
                 raw.get("age_segment"),
                 raw.get("gender"),
             ),
             max_len=40,
         ),
-        prompt_hint=runtime._clean_optional_text(
+        prompt_hint=_clean_optional_text(
             raw.get("prompt_hint"),
             max_len=300,
         ),
         download_filename=metadata_filename
-        or runtime._model_library_download_filename(
+        or _model_library_download_filename(
             image_id=image_id or item_id,
             mime=None,
             age_segment=age_segment,
@@ -206,7 +241,7 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
             style_tags=style_tags,
         ),
         created_at=created_at,
-        updated_at=runtime._safe_datetime(raw.get("updated_at")),
+        updated_at=_safe_datetime(raw.get("updated_at")),
     )
 
 
@@ -240,7 +275,6 @@ def _legacy_library_item_insert_values(
     raw: dict[str, Any],
     valid_image_ids: set[str],
 ) -> dict[str, Any] | None:
-    runtime = _runtime()
     item_id = str(raw.get("id") or "").strip()
     image_id = str(raw.get("image_id") or "").strip()
     if not item_id or not image_id or image_id not in valid_image_ids:
@@ -248,16 +282,16 @@ def _legacy_library_item_insert_values(
     source = str(raw.get("source") or "user_upload").strip()
     if source not in {"favorite", "user_upload", "generated"}:
         source = "user_upload"
-    normalized_age = runtime._normalize_age_segment(raw.get("age_segment"))
-    normalized_gender = runtime._normalize_model_gender(raw.get("gender"))
+    normalized_age = _normalize_age_segment(raw.get("age_segment"))
+    normalized_gender = _normalize_model_gender(raw.get("gender"))
     created_at = (
-        runtime._safe_datetime(
+        _safe_datetime(
             raw.get("created_at") if isinstance(raw.get("created_at"), str) else None
         )
-        or runtime._now()
+        or _now()
     )
     updated_at = (
-        runtime._safe_datetime(
+        _safe_datetime(
             raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None
         )
         or created_at
@@ -289,30 +323,28 @@ def _legacy_library_item_insert_values(
         "title": str(raw.get("title") or "").strip()[:120],
         "age_segment": normalized_age,
         "gender": normalized_gender,
-        "appearance_direction": runtime._clean_optional_text(
+        "appearance_direction": _clean_optional_text(
             raw.get("appearance_direction"), max_len=80
         ),
-        "style_tags": runtime._clean_style_tags(
-            raw.get("style_tags") or raw.get("tags") or []
-        ),
-        "library_folder": runtime._clean_optional_text(
+        "style_tags": _clean_style_tags(raw.get("style_tags") or raw.get("tags") or []),
+        "library_folder": _clean_optional_text(
             raw.get("library_folder")
-            or runtime._model_library_folder_for_age(
+            or _model_library_folder_for_age(
                 normalized_age,
                 normalized_gender,
             ),
             max_len=64,
         ),
-        "prompt_hint": runtime._clean_optional_text(
+        "prompt_hint": _clean_optional_text(
             raw.get("prompt_hint"),
             max_len=1000,
         ),
-        "auto_tagged_at": runtime._safe_datetime(
+        "auto_tagged_at": _safe_datetime(
             raw.get("auto_tagged_at")
             if isinstance(raw.get("auto_tagged_at"), str)
             else None
         ),
-        "auto_tag_notes": runtime._clean_optional_text(
+        "auto_tag_notes": _clean_optional_text(
             raw.get("auto_tag_notes"),
             max_len=200,
         ),
@@ -330,18 +362,17 @@ async def _ensure_legacy_user_library_migrated(db: AsyncSession, user_id: str) -
     functional by migrating valid rows on first access. It flushes, but leaves
     commit ownership to the route that called it.
     """
-    runtime = _runtime()
-    index_path = runtime._library_user_index_path(user_id)
+    index_path = _library_user_index_path(user_id)
     if not index_path.is_file():
         return False
-    index = runtime._load_user_library_index(user_id)
+    index = _load_user_library_index(user_id)
     raw_items = [item for item in (index.get("items") or []) if isinstance(item, dict)]
-    raw_hidden_ids = runtime._dedupe_nonempty(index.get("hidden_preset_ids") or [])
+    raw_hidden_ids = _dedupe_nonempty(index.get("hidden_preset_ids") or [])
     if not raw_items and not raw_hidden_ids:
         return False
 
     migrated = False
-    item_ids = runtime._dedupe_nonempty(str(item.get("id") or "") for item in raw_items)
+    item_ids = _dedupe_nonempty(str(item.get("id") or "") for item in raw_items)
     existing_item_ids: set[str] = set()
     if item_ids:
         rows = await db.execute(
@@ -349,9 +380,7 @@ async def _ensure_legacy_user_library_migrated(db: AsyncSession, user_id: str) -
         )
         existing_item_ids = set(rows.scalars().all())
 
-    image_ids = runtime._dedupe_nonempty(
-        str(item.get("image_id") or "") for item in raw_items
-    )
+    image_ids = _dedupe_nonempty(str(item.get("image_id") or "") for item in raw_items)
     valid_image_ids: set[str] = set()
     if image_ids:
         rows = await db.execute(
@@ -368,7 +397,7 @@ async def _ensure_legacy_user_library_migrated(db: AsyncSession, user_id: str) -
         for raw in raw_items
         if str(raw.get("id") or "").strip() not in existing_item_ids
         if (
-            values := runtime._legacy_library_item_insert_values(
+            values := _legacy_library_item_insert_values(
                 user_id=user_id,
                 raw=raw,
                 valid_image_ids=valid_image_ids,
@@ -413,7 +442,6 @@ async def _ensure_legacy_user_library_migrated(db: AsyncSession, user_id: str) -
 async def _load_user_library_items(
     db: AsyncSession, user_id: str
 ) -> list[dict[str, Any]]:
-    runtime = _runtime()
     rows = (
         await db.execute(
             select(ModelLibraryItem, Image.metadata_jsonb)
@@ -427,7 +455,7 @@ async def _load_user_library_items(
     ).all()
     out: list[dict[str, Any]] = []
     for row, image_metadata_jsonb in rows:
-        raw = runtime._model_library_row_to_dict(row)
+        raw = _model_library_row_to_dict(row)
         raw["image_metadata_jsonb"] = (
             dict(image_metadata_jsonb) if isinstance(image_metadata_jsonb, dict) else {}
         )
@@ -453,16 +481,15 @@ async def _load_user_hidden_preset_ids(db: AsyncSession, user_id: str) -> set[st
 async def _combined_library_items(
     db: AsyncSession, user_id: str
 ) -> tuple[list[dict[str, Any]], bool]:
-    runtime = _runtime()
-    migrated = await runtime._ensure_legacy_user_library_migrated(db, user_id)
-    global_index = runtime._load_global_library_index()
-    hidden = await runtime._load_user_hidden_preset_ids(db, user_id)
+    migrated = await _ensure_legacy_user_library_migrated(db, user_id)
+    global_index = _load_global_library_index()
+    hidden = await _load_user_hidden_preset_ids(db, user_id)
     preset_items = [
         dict(item)
         for item in global_index.get("preset_items", [])
         if isinstance(item, dict) and str(item.get("id") or "") not in hidden
     ]
-    user_items = await runtime._load_user_library_items(db, user_id)
+    user_items = await _load_user_library_items(db, user_id)
     return [*preset_items, *user_items], migrated
 
 
@@ -474,20 +501,17 @@ def _filter_library_items(
     appearance: str,
     q: str,
 ) -> list[dict[str, Any]]:
-    runtime = _runtime()
     query = q.strip().lower()
     filtered: list[dict[str, Any]] = []
     for item in items:
         item_source = str(item.get("source") or "")
         if source != "all" and item_source != source:
             continue
-        item_age = runtime._normalize_age_segment(item.get("age_segment"))
+        item_age = _normalize_age_segment(item.get("age_segment"))
         if age_segment != "all" and item_age != age_segment:
             continue
         if appearance != "all":
-            item_appearance = runtime._normalize_appearance(
-                item.get("appearance_direction")
-            )
+            item_appearance = _normalize_appearance(item.get("appearance_direction"))
             if item_appearance != appearance:
                 continue
         if query:
@@ -497,7 +521,7 @@ def _filter_library_items(
                     str(item.get("gender") or ""),
                     str(item.get("appearance_direction") or ""),
                     " ".join(
-                        runtime._clean_style_tags(
+                        _clean_style_tags(
                             item.get("style_tags") or item.get("tags") or []
                         )
                     ),
@@ -511,7 +535,7 @@ def _filter_library_items(
         filtered,
         key=lambda item: (
             source_rank.get(str(item.get("source") or ""), 9),
-            runtime._normalize_age_segment(item.get("age_segment")),
+            _normalize_age_segment(item.get("age_segment")),
             str(item.get("title") or ""),
             str(item.get("id") or ""),
         ),
@@ -527,11 +551,10 @@ async def _find_library_item(
     per-user deletes. User-owned rows must still point at a live image owned by
     the same user; stale or tampered library rows are not usable.
     """
-    runtime = _runtime()
-    await runtime._ensure_legacy_user_library_migrated(db, user_id)
+    await _ensure_legacy_user_library_migrated(db, user_id)
     if item_id.startswith("preset:") or not item_id.startswith("user:"):
         for item in (
-            runtime._load_global_library_index().get(
+            _load_global_library_index().get(
                 "preset_items",
                 [],
             )
@@ -541,7 +564,7 @@ async def _find_library_item(
                 continue
             if str(item.get("id") or "") != item_id:
                 continue
-            hidden = await runtime._load_user_hidden_preset_ids(db, user_id)
+            hidden = await _load_user_hidden_preset_ids(db, user_id)
             if item_id in hidden:
                 return None
             return dict(item)
@@ -560,5 +583,23 @@ async def _find_library_item(
         ).scalar_one_or_none()
         if row is None:
             return None
-        return runtime._model_library_row_to_dict(row)
+        return _model_library_row_to_dict(row)
     return None
+
+
+# Public workflow contracts.
+can_sync_library = _can_sync_library
+combined_library_items = _combined_library_items
+ensure_legacy_user_library_migrated = _ensure_legacy_user_library_migrated
+filter_library_items = _filter_library_items
+find_library_item = _find_library_item
+github_contents_url = _github_contents_url
+legacy_library_item_insert_values = _legacy_library_item_insert_values
+load_user_hidden_preset_ids = _load_user_hidden_preset_ids
+load_user_library_items = _load_user_library_items
+model_library_http_client_kwargs = _model_library_http_client_kwargs
+model_library_item_out = _model_library_item_out
+model_library_row_to_dict = _model_library_row_to_dict
+resolve_model_library_sync_proxy = _resolve_model_library_sync_proxy
+sync_mode = _sync_mode
+sync_state_out = _sync_state_out

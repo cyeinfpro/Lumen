@@ -7,9 +7,116 @@ can depend on these contracts without forming an import cycle.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Protocol
 
 from lumen_core.providers import DEFAULT_PROVIDER_PURPOSES, ProviderProxyDefinition
+
+
+@dataclass(frozen=True)
+class UpstreamTimeouts:
+    connect_s: float
+    read_s: float
+    write_s: float
+    pool_s: float
+
+
+@dataclass(frozen=True)
+class ImageJobEndpoint:
+    base_url: str
+    service_token: str = field(repr=False, compare=False)
+    allow_private_http: bool = True
+
+
+@dataclass(frozen=True)
+class ImageProgressEvent:
+    stage: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+class RuntimeSettingsPort(Protocol):
+    async def get_text(
+        self,
+        key: str,
+        default: str | None = None,
+    ) -> str | None: ...
+
+    async def get_int(self, key: str, default: int) -> int: ...
+
+
+class ProviderSelectorPort(Protocol):
+    async def candidates(
+        self,
+        *,
+        route: str,
+        endpoint_kind: str | None,
+        ignore_cooldown: bool,
+    ) -> Sequence["ProviderConfig"]: ...
+
+
+class ProgressPort(Protocol):
+    async def emit(self, event: ImageProgressEvent) -> None: ...
+
+
+class ClockPort(Protocol):
+    def monotonic(self) -> float: ...
+
+    def utcnow(self) -> datetime: ...
+
+
+class SupplierTransportPort(Protocol):
+    async def close(self) -> None: ...
+
+
+class ImageJobClientPort(Protocol):
+    async def submit(
+        self,
+        payload: dict[str, Any],
+        *,
+        upstream_api_key: str,
+        trace_id: str,
+        before_attempt: Callable[[int], Awaitable[None]] | None = None,
+    ) -> Any: ...
+
+    async def poll(
+        self,
+        handle: Any,
+        *,
+        trace_id: str,
+    ) -> Any: ...
+
+    async def upload_reference(
+        self,
+        raw: bytes,
+        mime: str,
+        *,
+        trace_id: str,
+    ) -> Any: ...
+
+    async def cancel(self, handle: Any, *, trace_id: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class ResultDownloadPort(Protocol):
+    async def download(
+        self,
+        url: str,
+        *,
+        allowed_base_url: str | None = None,
+    ) -> bytes: ...
+
+
+class UpstreamMetricsPort(Protocol):
+    def record_request(
+        self,
+        *,
+        endpoint: str,
+        status_code: int,
+        duration_s: float,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)

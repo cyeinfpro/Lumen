@@ -101,8 +101,8 @@ def test_estimate_system_prompt_tokens_uses_same_overhead_for_fallback():
 def test_estimate_message_tokens_counts_system_role_text(monkeypatch):
     import lumen_core.context_window as cw
 
-    monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
-    monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", True)
+    cw._TOKEN_COUNTER_RUNTIME.reset()
+    cw._TOKEN_COUNTER_RUNTIME.mark_unavailable()
 
     assert cw.estimate_message_tokens(
         Role.SYSTEM.value,
@@ -117,13 +117,16 @@ def test_estimate_message_tokens_ignores_empty_system_role():
 def test_estimate_message_tokens_ignores_non_list_attachments(monkeypatch):
     import lumen_core.context_window as cw
 
-    monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
-    monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", True)
+    cw._TOKEN_COUNTER_RUNTIME.reset()
+    cw._TOKEN_COUNTER_RUNTIME.mark_unavailable()
 
-    assert cw.estimate_message_tokens(
-        Role.USER.value,
-        {"text": "", "attachments": ({"image_id": "img-1"},)},
-    ) == 0
+    assert (
+        cw.estimate_message_tokens(
+            Role.USER.value,
+            {"text": "", "attachments": ({"image_id": "img-1"},)},
+        )
+        == 0
+    )
 
     assert cw.estimate_message_tokens(
         Role.USER.value,
@@ -134,13 +137,16 @@ def test_estimate_message_tokens_ignores_non_list_attachments(monkeypatch):
 def test_estimate_message_tokens_counts_only_list_attachments(monkeypatch):
     import lumen_core.context_window as cw
 
-    monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
-    monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", True)
+    cw._TOKEN_COUNTER_RUNTIME.reset()
+    cw._TOKEN_COUNTER_RUNTIME.mark_unavailable()
 
-    assert cw.estimate_message_tokens(
-        Role.USER.value,
-        {"attachments": [{"image_id": "img-1"}, {"image_id": ""}, "bad"]},
-    ) == MESSAGE_OVERHEAD_TOKENS + IMAGE_INPUT_ESTIMATED_TOKENS
+    assert (
+        cw.estimate_message_tokens(
+            Role.USER.value,
+            {"attachments": [{"image_id": "img-1"}, {"image_id": ""}, "bad"]},
+        )
+        == MESSAGE_OVERHEAD_TOKENS + IMAGE_INPUT_ESTIMATED_TOKENS
+    )
 
 
 def test_compare_message_position_orders_timestamp_then_id():

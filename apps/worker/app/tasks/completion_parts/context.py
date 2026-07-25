@@ -16,11 +16,11 @@ from lumen_core.context_window import (
 from lumen_core.models import Message
 
 from .history import (
-    _count_message_tokens,
-    _message_after_summary,
-    _sticky_text_from_message,
-    _summary_age_seconds,
-    _with_summary_guardrail,
+    count_message_tokens as _count_message_tokens,
+    message_after_summary as _message_after_summary,
+    sticky_text_from_message as _sticky_text_from_message,
+    summary_age_seconds as _summary_age_seconds,
+    with_summary_guardrail as _with_summary_guardrail,
 )
 
 
@@ -206,3 +206,11 @@ def _fallback_pack(
         _system_prompt=system_prompt,
         _recent_rows=selected,
     )
+
+
+# Public contract consumed by the Completion runtime modules.
+estimated_summary_source = _estimated_summary_source
+fallback_pack = _fallback_pack
+make_quality_probes = _make_quality_probes
+pack_with_existing_summary = _pack_with_existing_summary
+packed_with_input = _packed_with_input

@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-def _payload_from_gen(gen: dict, prompt: str, attachment_ids: list[str] | None = None) -> dict:
+def _payload_from_gen(
+    gen: dict, prompt: str, attachment_ids: list[str] | None = None
+) -> dict:
     """根据 get_generation 返回构造一个 create_generation payload。"""
     return {
         "prompt": prompt,
@@ -66,9 +68,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
     # 注意：种子里不要拌 cb.id —— Telegram 每次点同一按钮 cb.id 都不同，会
     # 让服务端 idempotency 去重失效（双击/网络重发都建任务）。用稳定 (chat,
     # gen) 作为种子，重复点击就是同一 key。
-    payload["idempotency_key"] = make_idempotency_key(
-        "redo", msg.chat.id, gen_id
-    )
+    payload["idempotency_key"] = make_idempotency_key("redo", msg.chat.id, gen_id)
     try:
         result = await api.create_generation(msg.chat.id, payload)
     except ApiError as exc:
@@ -81,9 +81,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     new_gen = new_ids[0]
-    status = await msg.answer(
-        f"⏳ 重画已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}"
-    )
+    status = await msg.answer(f"⏳ 重画已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}")
     try:
         await tracker.add(
             new_gen,
@@ -174,7 +172,9 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
         "aspect_ratio": data.get("source_aspect_ratio") or "1:1",
         "render_quality": data.get("source_render_quality") or "high",
         "count": 1,
-        "resolution": resolution_from_size(str(data.get("source_size_requested") or "")),
+        "resolution": resolution_from_size(
+            str(data.get("source_size_requested") or "")
+        ),
         "output_format": data.get("source_output_format") or "jpeg",
         "fast": bool(data.get("source_fast", False)),
         "attachment_image_ids": [image_id],
@@ -193,9 +193,7 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
         return
 
     new_gen = new_ids[0]
-    status = await message.answer(
-        f"⏳ 迭代已排队 #{new_gen[:8]}\n\n📝 {text[:200]}"
-    )
+    status = await message.answer(f"⏳ 迭代已排队 #{new_gen[:8]}\n\n📝 {text[:200]}")
     try:
         await tracker.add(
             new_gen,

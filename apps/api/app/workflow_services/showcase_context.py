@@ -6,10 +6,33 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import ModelCandidate, User, WorkflowStep
-from lumen_core.schemas import ShowcaseImagesCreateIn
+from lumen_core.schemas import AccessoryPlanIn, ShowcaseImagesCreateIn
 
+from ..workflow_domain.apparel_scene_planner import (
+    scene_fingerprint as _scene_fingerprint,
+)
 from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant
-from .showcase_runtime import runtime as _runtime
+from .output_sync import sync_workflow_outputs as _sync_workflow_outputs  # noqa: F401
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+from .showcase_inputs import (
+    showcase_reference_image_ids as _showcase_reference_image_ids,
+)  # noqa: F401
+from .showcase_inputs import showcase_target_image_count as _showcase_target_image_count  # noqa: F401
+from .showcase_inputs import (
+    validate_accessory_preview_image as _validate_accessory_preview_image,
+)  # noqa: F401
+from .showcase_orchestration import (
+    prepare_showcase_preflight_impl as _prepare_showcase_preflight_impl,
+)  # noqa: F401
+from .showcase_shots import showcase_pick_shot_variants as _showcase_pick_shot_variants  # noqa: F401
+from .workflow_runtime import get_owned_conversation as _get_owned_conversation  # noqa: F401
+from .workflow_runtime import get_run as _get_run  # noqa: F401
+from .workflow_runtime import (
+    infer_age_segment_from_workflow as _infer_age_segment_from_workflow,
+)  # noqa: F401
+from .workflow_runtime import selected_candidate as _selected_candidate  # noqa: F401
+from .workflow_runtime import step as _step  # noqa: F401
 
 
 def _showcase_request_input_json(
@@ -24,7 +47,6 @@ def _showcase_request_input_json(
     active_task_ids: list[str] | None = None,
     preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    runtime = _runtime()
     scene_cards = list((preflight or {}).get("scene_cards") or [])
     planning = (preflight or {}).get("planning") or {}
     payload: dict[str, Any] = {
@@ -50,8 +72,8 @@ def _showcase_request_input_json(
         "planner_version": "apparel-durable-outbox-v1",
         "active_task_ids": active_task_ids or [],
         "active_output_count": body.output_count,
-        "baseline_image_count": len(runtime._dedupe_nonempty(existing_image_ids)),
-        "target_image_count": runtime._showcase_target_image_count(
+        "baseline_image_count": len(_dedupe_nonempty(existing_image_ids)),
+        "target_image_count": _showcase_target_image_count(
             existing_image_ids=existing_image_ids,
             output_count=body.output_count,
         ),
@@ -65,7 +87,7 @@ def _showcase_request_input_json(
                 "scene_cards": scene_cards,
                 "scene_fingerprints": planning.get("scene_fingerprints")
                 or [
-                    card.get("fingerprint") or runtime._scene_fingerprint(card)
+                    card.get("fingerprint") or _scene_fingerprint(card)
                     for card in scene_cards
                 ],
                 "per_image_prompts": preflight.get("per_image_prompts") or [],
@@ -103,40 +125,39 @@ async def _showcase_generation_context(
     workflow_run_id: str,
     body: ShowcaseImagesCreateIn,
 ) -> dict[str, Any]:
-    runtime = _runtime()
-    run = await runtime._get_run(
+    run = await _get_run(
         db,
         user_id=user.id,
         run_id=workflow_run_id,
         lock=True,
     )
-    await runtime._sync_workflow_outputs(db, run)
-    product_step = await runtime._step(db, run.id, "product_analysis")
+    await _sync_workflow_outputs(db, run)
+    product_step = await _step(db, run.id, "product_analysis")
     if product_step.status != "approved":
-        raise runtime._http(
+        raise _http(
             "product_not_approved",
             "approve product analysis first",
             409,
         )
-    approval = await runtime._step(db, run.id, "model_approval")
+    approval = await _step(db, run.id, "model_approval")
     if approval.status != "approved":
-        raise runtime._http(
+        raise _http(
             "model_not_approved",
             "approve a model candidate first",
             409,
         )
-    candidate = await runtime._selected_candidate(db, run.id)
+    candidate = await _selected_candidate(db, run.id)
     if not candidate.contact_sheet_image_id:
-        raise runtime._http(
+        raise _http(
             "missing_model_reference", "selected model has no reference image", 409
         )
-    showcase = await runtime._step(db, run.id, "showcase_generation")
-    conv = await runtime._get_owned_conversation(
+    showcase = await _step(db, run.id, "showcase_generation")
+    conv = await _get_owned_conversation(
         db, user_id=user.id, conversation_id=run.conversation_id or ""
     )
-    age_segment = runtime._infer_age_segment_from_workflow(run)
+    age_segment = _infer_age_segment_from_workflow(run)
     seed_key = f"{run.id}:{body.template}:{body.output_count}:{showcase.task_ids and len(showcase.task_ids) or 0}"
-    shot_picks = runtime._showcase_pick_shot_variants(
+    shot_picks = _showcase_pick_shot_variants(
         template=body.template,
         age_segment=age_segment,
         output_count=body.output_count,
@@ -145,7 +166,7 @@ async def _showcase_generation_context(
 
     accessory_plan = (approval.input_json or {}).get("accessory_plan")
     if not isinstance(accessory_plan, dict):
-        accessory_plan = runtime.AccessoryPlanIn().model_dump()
+        accessory_plan = AccessoryPlanIn().model_dump()
     selected_accessory_image_id = (approval.input_json or {}).get(
         "selected_accessory_image_id"
     )
@@ -155,14 +176,14 @@ async def _showcase_generation_context(
         else None
     )
     if selected_accessory_ref_id:
-        selected_accessory_ref_id = await runtime._validate_accessory_preview_image(
+        selected_accessory_ref_id = await _validate_accessory_preview_image(
             db,
             user_id=user.id,
             run_id=run.id,
             approval_step=approval,
             image_id=selected_accessory_ref_id,
         )
-    ref_ids = runtime._showcase_reference_image_ids(
+    ref_ids = _showcase_reference_image_ids(
         product_image_ids=run.product_image_ids,
         model_image_id=candidate.contact_sheet_image_id,
         selected_accessory_image_id=selected_accessory_ref_id,
@@ -190,8 +211,7 @@ async def _prepare_durable_showcase_preflight(
     """Build prompts locally so only durable generation work remains after commit."""
     product_step: WorkflowStep = context["product_step"]
     candidate: ModelCandidate = context["candidate"]
-    runtime = _runtime()
-    preflight = await runtime._prepare_showcase_preflight_impl(
+    preflight = await _prepare_showcase_preflight_impl(
         db=db,
         product_analysis=product_step.output_json or {},
         selected_candidate=candidate,
@@ -217,3 +237,9 @@ async def _prepare_durable_showcase_preflight(
     preflight["planning"] = planning
     preflight["preflight_timed_out"] = False
     return preflight
+
+
+# Public workflow contracts.
+prepare_durable_showcase_preflight = _prepare_durable_showcase_preflight
+showcase_generation_context = _showcase_generation_context
+showcase_request_input_json = _showcase_request_input_json

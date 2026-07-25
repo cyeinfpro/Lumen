@@ -201,7 +201,7 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
               "h-9 min-w-16 rounded-full px-3 text-xs font-mono tabular-nums max-sm:min-h-11",
               "text-white/82 hover:bg-white/10 hover:text-white",
               "transition-colors duration-150 cursor-pointer",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
             )}
           >
             {formatZoom(props.activeZoom)}
@@ -303,7 +303,7 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
             "w-11 h-11 rounded-full border border-white/15",
             "bg-black/35 text-white backdrop-blur-xl hover:bg-white/15 hover:border-white/25",
             "active:scale-[0.94] transition-all duration-150 cursor-pointer",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
           )}
         >
           <X className="w-5 h-5" />
@@ -514,7 +514,7 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
                 "border border-white/10 bg-white/5 text-sm text-white/80",
                 "hover:border-white/25 hover:bg-white/10 hover:text-white",
                 "transition-colors duration-150 cursor-pointer",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
               )}
             >
               <ExternalLink className="h-4 w-4" />
@@ -526,12 +526,12 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
               disabled={props.downloadStatus === "downloading"}
               className={cn(
                 "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)] max-sm:min-h-11",
-                "border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/14",
+                "border border-[var(--accent)]/35 bg-[var(--accent)]/14",
                 "text-sm text-[var(--amber-100)]",
-                "hover:bg-[var(--color-lumen-amber)]/22",
+                "hover:bg-[var(--accent)]/22",
                 "disabled:cursor-wait disabled:opacity-70",
                 "transition-colors duration-150 cursor-pointer",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
               )}
             >
               <DownloadStatusIcon status={props.downloadStatus} />
@@ -573,11 +573,11 @@ function DesktopFooter(props: DesktopLightboxViewProps) {
           onClick={props.injectedAction.onClick}
           className={cn(
             "pointer-events-auto inline-flex items-center gap-2 rounded-full px-5 py-2.5",
-            "bg-[var(--color-lumen-amber)] text-black text-sm font-medium",
+            "bg-[var(--accent)] text-black text-sm font-medium",
             "shadow-[var(--shadow-amber)]",
             "hover:bg-[var(--amber-200)] active:scale-[0.97] transition-all duration-150",
             "disabled:cursor-not-allowed disabled:opacity-70",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
           )}
         >
           {props.injectedAction.pending ? (
@@ -675,9 +675,9 @@ function ThumbnailButton({
       className={cn(
         "relative shrink-0 w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
         "border transition-all duration-150",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
         active
-          ? "border-[var(--color-lumen-amber)] ring-1 ring-[var(--color-lumen-amber)]/60"
+          ? "border-[var(--accent)] ring-1 ring-[var(--accent)]/60"
           : "border-white/10 hover:border-white/40 opacity-70 hover:opacity-100",
       )}
     >
@@ -791,9 +791,9 @@ function ToolIconButton({
         "hover:border-white/15 hover:bg-white/10 hover:text-white",
         "disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-transparent disabled:hover:bg-transparent",
         "active:scale-[0.94] transition-all duration-150 cursor-pointer",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
         active &&
-          "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/16 text-[var(--amber-100)]",
+          "border-[var(--accent)]/45 bg-[var(--accent)]/16 text-[var(--amber-100)]",
         className,
       )}
     >
@@ -833,7 +833,7 @@ function TopButton({
         "hover:border-white/15 hover:bg-white/10 hover:text-white",
         "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent",
         "active:scale-[0.97] transition-all duration-150 cursor-pointer",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
       )}
     >
       {icon}
@@ -885,7 +885,7 @@ function SideChevron({
         "hover:bg-white/15 hover:text-white hover:border-white/25",
         "active:scale-[0.94] transition-all duration-150",
         "disabled:opacity-30 disabled:cursor-not-allowed",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
       )}
     >
       <Icon className="w-5 h-5" />

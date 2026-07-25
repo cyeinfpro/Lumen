@@ -12,35 +12,42 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
-_VIDEO_MIME_EXTENSIONS = {
-    "video/3gpp": ".3gp",
-    "video/3gpp2": ".3g2",
-    "video/mp2t": ".ts",
-    "video/mp4": ".mp4",
-    "video/mpeg": ".mpeg",
-    "video/ogg": ".ogv",
-    "video/quicktime": ".mov",
-    "video/webm": ".webm",
-    "video/x-flv": ".flv",
-    "video/x-m4v": ".m4v",
-    "video/x-matroska": ".mkv",
-    "video/x-ms-wmv": ".wmv",
-    "video/x-msvideo": ".avi",
-}
-_VIDEO_MIME_ALIASES = {
-    "video/avi": "video/x-msvideo",
-    "video/mov": "video/quicktime",
-    "video/mpegts": "video/mp2t",
-    "video/x-mov": "video/quicktime",
-}
-_OCTET_STREAM_MIMES = {
-    "",
-    "application/octet-stream",
-    "binary/octet-stream",
-}
+_VIDEO_MIME_EXTENSIONS = MappingProxyType(
+    {
+        "video/3gpp": ".3gp",
+        "video/3gpp2": ".3g2",
+        "video/mp2t": ".ts",
+        "video/mp4": ".mp4",
+        "video/mpeg": ".mpeg",
+        "video/ogg": ".ogv",
+        "video/quicktime": ".mov",
+        "video/webm": ".webm",
+        "video/x-flv": ".flv",
+        "video/x-m4v": ".m4v",
+        "video/x-matroska": ".mkv",
+        "video/x-ms-wmv": ".wmv",
+        "video/x-msvideo": ".avi",
+    }
+)
+_VIDEO_MIME_ALIASES = MappingProxyType(
+    {
+        "video/avi": "video/x-msvideo",
+        "video/mov": "video/quicktime",
+        "video/mpegts": "video/mp2t",
+        "video/x-mov": "video/quicktime",
+    }
+)
+_OCTET_STREAM_MIMES = frozenset(
+    {
+        "",
+        "application/octet-stream",
+        "binary/octet-stream",
+    }
+)
 _COPY_CHUNK_BYTES = 1024 * 1024
 
 

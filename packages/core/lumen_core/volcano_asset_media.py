@@ -59,11 +59,27 @@ _VIDEO_PROFILES = (
     {"crf": "26", "maxrate": "5M", "bufsize": "10M"},
     {"crf": "30", "maxrate": "3M", "bufsize": "6M"},
 )
-_VIDEO_TRANSCODE_SEMAPHORES: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop,
-    asyncio.Semaphore,
-] = weakref.WeakKeyDictionary()
-_VIDEO_TRANSCODE_SEMAPHORES_LOCK = threading.Lock()
+
+
+class _VideoTranscodeRuntime:
+    def __init__(self) -> None:
+        self.semaphores: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop,
+            asyncio.Semaphore,
+        ] = weakref.WeakKeyDictionary()
+        self.lock = threading.Lock()
+
+    def semaphore_for_running_loop(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        with self.lock:
+            semaphore = self.semaphores.get(loop)
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(2)
+                self.semaphores[loop] = semaphore
+            return semaphore
+
+
+_VIDEO_TRANSCODE_RUNTIME = _VideoTranscodeRuntime()
 
 
 class VolcanoAssetMediaError(RuntimeError):
@@ -211,13 +227,7 @@ def _install_file_atomic(
 
 
 def _video_transcode_semaphore() -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    with _VIDEO_TRANSCODE_SEMAPHORES_LOCK:
-        semaphore = _VIDEO_TRANSCODE_SEMAPHORES.get(loop)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(2)
-            _VIDEO_TRANSCODE_SEMAPHORES[loop] = semaphore
-        return semaphore
+    return _VIDEO_TRANSCODE_RUNTIME.semaphore_for_running_loop()
 
 
 def _even(value: float, *, minimum: int = 2) -> int:

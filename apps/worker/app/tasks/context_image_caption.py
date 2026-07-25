@@ -22,8 +22,9 @@ from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.models import Image
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
 
+from ..provider_runtime.errors import UpstreamError
+from ..provider_runtime.upstream_services import upstream_services
 from ..storage import storage
-from ..upstream import UpstreamError, _auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,10 @@ async def _call_upstream_one(
             resp = await client.post(
                 _responses_url(base_url),
                 json=body,
-                headers={**_auth_headers(api_key), "content-type": "application/json"},
+                headers={
+                    **upstream_services().core.auth_headers(api_key),
+                    "content-type": "application/json",
+                },
             )
     except httpx.TimeoutException as exc:
         raise UpstreamError(

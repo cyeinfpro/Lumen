@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass, field
 
 from aiogram import F, Router
 from aiogram.enums import ChatAction
@@ -30,11 +31,18 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-# 已为某 chat_id 记录过 token-revoked 的 warning，避免心跳每 4s 刷一条
-_HEARTBEAT_AUTH_LOGGED: set[int] = set()
+@dataclass
+class GenerationRuntime:
+    """Process-owned state shared by generation handlers through dispatcher DI."""
+
+    heartbeat_auth_logged: set[int] = field(default_factory=set)
 
 
-async def _chat_action_heartbeat(message: Message, action: ChatAction) -> None:
+async def _chat_action_heartbeat(
+    message: Message,
+    action: ChatAction,
+    runtime: GenerationRuntime,
+) -> None:
     bot = message.bot
     if bot is None:
         return
@@ -43,8 +51,8 @@ async def _chat_action_heartbeat(message: Message, action: ChatAction) -> None:
             await bot.send_chat_action(message.chat.id, action)
         except (TelegramUnauthorizedError, TelegramForbiddenError) as exc:
             # 401/403：bot token 失效或被踢出 chat。整个进程内 per-chat 只 warn 一次。
-            if message.chat.id not in _HEARTBEAT_AUTH_LOGGED:
-                _HEARTBEAT_AUTH_LOGGED.add(message.chat.id)
+            if message.chat.id not in runtime.heartbeat_auth_logged:
+                runtime.heartbeat_auth_logged.add(message.chat.id)
                 logger.warning(
                     "chat_action heartbeat auth failed chat=%s err=%r",
                     message.chat.id,
@@ -140,14 +148,21 @@ async def _submit_generation(
 
 
 @router.message(GenFlow.awaiting_prompt)
-async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
+async def on_prompt(
+    message: Message,
+    state: FSMContext,
+    api: LumenApi,
+    generation_runtime: GenerationRuntime,
+) -> None:
     prompt = message_prompt(message)
     if prompt == "/cancel":
         await state.clear()
         await message.answer("已取消。/new 重新开始。")
         return
     if is_slash_command(prompt):
-        await message.answer("当前正在等待提示词。请发送普通文本，或先 /cancel 再执行命令。")
+        await message.answer(
+            "当前正在等待提示词。请发送普通文本，或先 /cancel 再执行命令。"
+        )
         return
     if not prompt:
         await message.answer("提示词不能为空，请重新发送。")
@@ -165,7 +180,11 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
     if params.get("enhance"):
         notice = await message.answer("✨ 正在优化提示词…")
         heartbeat = asyncio.create_task(
-            _chat_action_heartbeat(message, ChatAction.TYPING)
+            _chat_action_heartbeat(
+                message,
+                ChatAction.TYPING,
+                generation_runtime,
+            )
         )
         try:
             enhanced = await api.enhance_prompt(message.chat.id, prompt)
@@ -203,7 +222,9 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
 
 
 @router.callback_query(GenFlow.confirming_enhanced, F.data.startswith("enh:"))
-async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> None:
+async def on_enhance_choice(
+    cb: CallbackQuery, state: FSMContext, api: LumenApi
+) -> None:
     choice = (cb.data or "").split(":", 1)[1] if cb.data else ""
     msg = await require_message(cb)
     if msg is None:
@@ -276,7 +297,9 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
         await message.answer("已放弃。/new 重新开始。")
         return
     if is_slash_command(text):
-        await message.answer("当前正在等待改好的提示词。请发送普通文本，或 /cancel 放弃。")
+        await message.answer(
+            "当前正在等待改好的提示词。请发送普通文本，或 /cancel 放弃。"
+        )
         return
     if not text:
         await message.answer("提示词不能为空，重新发送一条；/cancel 放弃。")

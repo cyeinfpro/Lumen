@@ -32,7 +32,9 @@ def _msg(role: str, text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_messages_token_count_empty_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_messages_token_count_empty_returns_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # 入空列表 + 空 system_prompt 时应返回 0，不应抛错。
     assert messages_token_count([]) == 0
     assert messages_token_count([], system_prompt="") == 0
@@ -44,8 +46,8 @@ def test_messages_token_count_includes_system_overhead(
     # 关掉 tiktoken 让结果可预测：纯走 estimate_text_tokens。
     import lumen_core.context_window as cw
 
-    monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
-    monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", True)
+    cw._TOKEN_COUNTER_RUNTIME.reset()
+    cw._TOKEN_COUNTER_RUNTIME.mark_unavailable()
 
     msgs = [_msg(Role.USER.value, "hello"), _msg(Role.ASSISTANT.value, "world")]
     user_cost = MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens("hello")
@@ -65,8 +67,8 @@ def test_messages_token_count_accepts_orm_like_objects(
     # SQLAlchemy ORM Message 没有 dict 接口，但有 role/content 属性，需兼容。
     import lumen_core.context_window as cw
 
-    monkeypatch.setattr(cw, "_TIKTOKEN_ENCODING", None)
-    monkeypatch.setattr(cw, "_TIKTOKEN_INIT_ATTEMPTED", True)
+    cw._TOKEN_COUNTER_RUNTIME.reset()
+    cw._TOKEN_COUNTER_RUNTIME.mark_unavailable()
 
     msg = SimpleNamespace(role=Role.USER.value, content={"text": "abc"})
     expected = MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens("abc")

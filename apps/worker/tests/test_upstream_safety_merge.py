@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.upstream import UpstreamError, _merge_fallback_errors
+from app.provider_runtime.errors import UpstreamError
+from app.provider_runtime.upstream_services import upstream_services
 
 
 def test_fallback_merge_promotes_wrapped_safety_block_to_terminal_code() -> None:
@@ -17,7 +18,7 @@ def test_fallback_merge_promotes_wrapped_safety_block_to_terminal_code() -> None
         },
     )
 
-    merged = _merge_fallback_errors(
+    merged = upstream_services().retry.merge_fallback_errors(
         [wrapped],
         error_code="fallback_lanes_failed",
         message="both lanes failed",
@@ -25,4 +26,3 @@ def test_fallback_merge_promotes_wrapped_safety_block_to_terminal_code() -> None
 
     assert merged.error_code == "moderation_blocked"
     assert merged.status_code == 200
-

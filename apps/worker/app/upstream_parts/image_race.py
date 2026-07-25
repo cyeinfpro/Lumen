@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from ..provider_runtime.upstream_services import upstream_services
+
 import asyncio
-import importlib
 import json
 from collections.abc import AsyncIterator, Iterable
 from contextlib import aclosing, suppress
@@ -12,13 +13,6 @@ from typing import Any
 
 from .image_execution import ImageExecutionRequest, ImageResult
 from .transport import ImageProgressCallback
-
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
-
-
-def _facade() -> Any:
-    """Resolve compatibility dependencies at call time for monkeypatch visibility."""
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
 
 
 def _drain_task_group_result(task_group: asyncio.Future[Any]) -> None:
@@ -31,7 +25,6 @@ async def _cancel_and_wait_tasks(
     *,
     label: str,
 ) -> None:
-    facade = _facade()
     pending = [task for task in tasks if not task.done()]
     if not pending:
         return
@@ -41,18 +34,18 @@ async def _cancel_and_wait_tasks(
     try:
         await asyncio.wait_for(
             asyncio.shield(grouped),
-            timeout=facade._RACE_CANCEL_WAIT_S,
+            timeout=upstream_services().core.RACE_CANCEL_WAIT_S,
         )
     except asyncio.TimeoutError:
-        grouped.add_done_callback(facade._drain_task_group_result)
-        facade.logger.warning(
+        grouped.add_done_callback(upstream_services().race.drain_task_group_result)
+        upstream_services().infrastructure.logger.warning(
             "%s cancel cleanup still pending after %.1fs for %d task(s)",
             label,
-            facade._RACE_CANCEL_WAIT_S,
+            upstream_services().core.RACE_CANCEL_WAIT_S,
             len(pending),
         )
     except asyncio.CancelledError:
-        grouped.add_done_callback(facade._drain_task_group_result)
+        grouped.add_done_callback(upstream_services().race.drain_task_group_result)
         raise
 
 
@@ -77,7 +70,6 @@ def _simultaneous_bonus_tasks(
 def _metadata_only_progress(
     progress_callback: ImageProgressCallback | None,
 ) -> ImageProgressCallback:
-    facade = _facade()
 
     async def _forward(event: dict[str, Any]) -> None:
         if event.get("type") != "provider_used":
@@ -96,7 +88,7 @@ def _metadata_only_progress(
             )
             if event.get(key) is not None
         }
-        await facade._emit_image_progress(
+        await upstream_services().transport.emit_image_progress(
             progress_callback,
             "provider_used",
             provider=event.get("provider"),
@@ -114,27 +106,27 @@ async def _cleanup_race_tasks(
     *,
     label: str,
 ) -> None:
-    facade = _facade()
     leftovers = [task for task in tasks if not task.done()]
     if not leftovers:
         return
     try:
-        await facade._cancel_and_wait_tasks(leftovers, label=label)
+        await upstream_services().race.cancel_and_wait_tasks(leftovers, label=label)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001
-        facade.logger.debug("%s failed", label, exc_info=True)
+        upstream_services().infrastructure.logger.debug(
+            "%s failed", label, exc_info=True
+        )
 
 
 def _responses_race_lane_count(
     request: ImageExecutionRequest,
     lanes: int,
 ) -> int:
-    facade = _facade()
     if request.provider_override is not None:
         return 1
-    pixels = facade._parse_size_pixels(request.size)
-    if pixels is not None and pixels > facade._RACE_SINGLE_LANE_PIXELS:
+    pixels = upstream_services().requests.parse_size_pixels(request.size)
+    if pixels is not None and pixels > upstream_services().core.RACE_SINGLE_LANE_PIXELS:
         return 1
     return lanes
 
@@ -144,8 +136,7 @@ async def _run_responses_lane(
     *,
     use_httpx: bool,
 ) -> ImageResult:
-    facade = _facade()
-    return await facade._responses_image_stream_with_failover(
+    return await upstream_services().direct.responses_image_stream_with_failover(
         **request.responses_kwargs(),
         use_httpx=use_httpx,
     )
@@ -175,7 +166,6 @@ async def _select_responses_race_winner(
     request: ImageExecutionRequest,
     tasks: list[asyncio.Task[ImageResult]],
 ) -> ImageResult:
-    facade = _facade()
     pending = set(tasks)
     errors: list[BaseException] = []
     while pending:
@@ -188,49 +178,49 @@ async def _select_responses_race_winner(
             if exc is None:
                 losers = [task for task in pending if not task.done()]
                 if losers:
-                    await facade._cancel_and_wait_tasks(
+                    await upstream_services().race.cancel_and_wait_tasks(
                         losers,
                         label=f"{request.action} race loser cleanup",
                     )
-                facade.logger.info(
+                upstream_services().infrastructure.logger.info(
                     "%s race: %s won, cancelled %d lane(s)",
                     request.action,
                     finished.get_name(),
                     len(losers),
                 )
                 return finished.result()
-            if isinstance(exc, facade.UpstreamCancelled):
+            if isinstance(exc, upstream_services().infrastructure.UpstreamCancelled):
                 losers = [task for task in pending if not task.done()]
                 if losers:
-                    await facade._cancel_and_wait_tasks(
+                    await upstream_services().race.cancel_and_wait_tasks(
                         losers,
                         label=f"{request.action} race cancelled cleanup",
                     )
-                facade.logger.info(
+                upstream_services().infrastructure.logger.info(
                     "%s race: cancelled by caller; aborting %d lane(s)",
                     request.action,
                     len(losers),
                 )
                 raise exc
             errors.append(exc)
-            facade.logger.warning(
+            upstream_services().infrastructure.logger.warning(
                 "%s race: %s failed: %r",
                 request.action,
                 finished.get_name(),
                 exc,
             )
-    facade.logger.warning(
+    upstream_services().infrastructure.logger.warning(
         "%s race: all %d lane(s) failed; summaries=%s",
         request.action,
         len(errors),
         json.dumps(
-            [facade._summarize_exception(error) for error in errors],
+            [upstream_services().retry.summarize_exception(error) for error in errors],
             ensure_ascii=False,
         )[:2000],
     )
-    raise facade._merge_fallback_errors(
+    raise upstream_services().retry.merge_fallback_errors(
         errors,
-        error_code=facade.EC.FALLBACK_LANES_FAILED.value,
+        error_code=upstream_services().infrastructure.EC.FALLBACK_LANES_FAILED.value,
         message=f"{request.action} fallback lanes all failed",
     )
 
@@ -286,18 +276,17 @@ async def _race_responses_image(
 async def _run_direct_image2_lane(
     request: ImageExecutionRequest,
 ) -> list[ImageResult]:
-    facade = _facade()
     if request.action == "edit":
         if not request.images:
-            raise facade.UpstreamError(
+            raise upstream_services().infrastructure.UpstreamError(
                 "edit action requires at least one reference image",
-                error_code=facade.EC.MISSING_INPUT_IMAGES.value,
+                error_code=upstream_services().infrastructure.EC.MISSING_INPUT_IMAGES.value,
                 status_code=400,
             )
-        return await facade._direct_edit_image_with_failover(
+        return await upstream_services().direct.direct_edit_image_with_failover(
             **request.direct_edit_kwargs()
         )
-    return await facade._direct_generate_image_with_failover(
+    return await upstream_services().direct.direct_generate_image_with_failover(
         **request.direct_generate_kwargs()
     )
 
@@ -313,9 +302,8 @@ async def _run_dual_image_job_lane(
     *,
     endpoint: str,
 ) -> list[ImageResult]:
-    facade = _facade()
     lane_request = request if endpoint == "generations" else request.with_mask(None)
-    result = await facade._image_job_with_failover(
+    result = await upstream_services().image_jobs.image_job_with_failover(
         **lane_request.action_kwargs(),
         endpoint_override=endpoint,
     )
@@ -327,17 +315,18 @@ def _dual_race_grace_seconds(
     *,
     image_jobs: bool,
 ) -> float:
-    facade = _facade()
-    pixels = facade._parse_size_pixels(request.size)
-    is_4k = pixels is not None and pixels > facade._IMAGE_4K_PIXELS
+    pixels = upstream_services().requests.parse_size_pixels(request.size)
+    is_4k = pixels is not None and pixels > upstream_services().core.IMAGE_4K_PIXELS
     if image_jobs:
         return (
-            facade._DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S
+            upstream_services().core.DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S
             if is_4k
-            else facade._DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S
+            else upstream_services().core.DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S
         )
     return (
-        facade._DUAL_RACE_BONUS_GRACE_4K_S if is_4k else facade._DUAL_RACE_BONUS_GRACE_S
+        upstream_services().core.DUAL_RACE_BONUS_GRACE_4K_S
+        if is_4k
+        else upstream_services().core.DUAL_RACE_BONUS_GRACE_S
     )
 
 
@@ -353,20 +342,22 @@ def _raise_dual_race_failure(
     *,
     race_name: str,
 ) -> None:
-    facade = _facade()
-    facade.logger.warning(
+    upstream_services().infrastructure.logger.warning(
         "%s %s: both lanes failed; summaries=%s",
         request.action,
         race_name,
         json.dumps(
-            [facade._truncate_lane_summary(lane, error) for lane, error in errors],
+            [
+                upstream_services().retry.truncate_lane_summary(lane, error)
+                for lane, error in errors
+            ],
             ensure_ascii=False,
         )[:2000],
     )
     merged_message = " | ".join(f"[{lane}] {error!s}" for lane, error in errors)
-    raise facade._merge_fallback_errors(
+    raise upstream_services().retry.merge_fallback_errors(
         [error for _, error in errors],
-        error_code=facade.EC.FALLBACK_LANES_FAILED.value,
+        error_code=upstream_services().infrastructure.EC.FALLBACK_LANES_FAILED.value,
         message=f"{request.action} {race_name}: {merged_message}",
     )
 
@@ -380,7 +371,6 @@ async def _select_dual_race_winner(
     race_name: str,
     abort_result_unknown: bool,
 ) -> _DualRaceWinner:
-    facade = _facade()
     pending = set(tasks)
     errors: list[tuple[str, BaseException]] = []
     while pending:
@@ -393,7 +383,7 @@ async def _select_dual_race_winner(
             lane_name = lane_names[finished]
             exc = finished.exception()
             if exc is None:
-                facade.logger.info(
+                upstream_services().infrastructure.logger.info(
                     "%s %s: %s won, loser keeps running (grace=%.0fs)",
                     request.action,
                     race_name,
@@ -402,16 +392,19 @@ async def _select_dual_race_winner(
                 )
                 pending.update(_simultaneous_bonus_tasks(simultaneous, finished))
                 return _DualRaceWinner(finished.result(), pending)
-            if isinstance(exc, facade.UpstreamCancelled):
+            if isinstance(exc, upstream_services().infrastructure.UpstreamCancelled):
                 raise exc
-            if abort_result_unknown and facade._is_direct_image_result_unknown(exc):
-                await facade._cancel_and_wait_tasks(
+            if (
+                abort_result_unknown
+                and upstream_services().direct.is_direct_image_result_unknown(exc)
+            ):
+                await upstream_services().race.cancel_and_wait_tasks(
                     pending,
                     label=f"{request.action} {race_name} result-unknown cleanup",
                 )
                 raise exc
             errors.append((lane_name, exc))
-            facade.logger.warning(
+            upstream_services().infrastructure.logger.warning(
                 "%s %s: %s failed: %r",
                 request.action,
                 race_name,
@@ -429,7 +422,6 @@ async def _await_dual_race_bonus(
     grace_seconds: float,
     race_name: str,
 ) -> list[ImageResult] | None:
-    facade = _facade()
     if not winner.pending:
         return None
     done, still_pending = await asyncio.wait(
@@ -438,11 +430,11 @@ async def _await_dual_race_bonus(
         return_when=asyncio.FIRST_COMPLETED,
     )
     if still_pending:
-        await facade._cancel_and_wait_tasks(
+        await upstream_services().race.cancel_and_wait_tasks(
             still_pending,
             label=f"{request.action} {race_name} bonus cleanup",
         )
-        facade.logger.info(
+        upstream_services().infrastructure.logger.info(
             "%s %s: loser exceeded grace=%.0fs, cancelled silently",
             request.action,
             race_name,
@@ -453,16 +445,16 @@ async def _await_dual_race_bonus(
     lane_name = lane_names[finished]
     exc = finished.exception()
     if exc is None:
-        facade.logger.info(
+        upstream_services().infrastructure.logger.info(
             "%s %s: bonus from %s succeeded",
             request.action,
             race_name,
             lane_name,
         )
         return finished.result()
-    if isinstance(exc, facade.UpstreamCancelled):
+    if isinstance(exc, upstream_services().infrastructure.UpstreamCancelled):
         return None
-    facade.logger.info(
+    upstream_services().infrastructure.logger.info(
         "%s %s: bonus %s failed silently: %r",
         request.action,
         race_name,

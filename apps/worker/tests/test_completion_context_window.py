@@ -13,7 +13,7 @@ os.environ.setdefault(
     "STORAGE_ROOT", str(Path(tempfile.gettempdir()) / "lumen-worker-test-storage")
 )
 
-from app.tasks import completion
+from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts import tool_images
 from lumen_core.constants import Role
 from lumen_core.context_window import SUMMARY_KIND, SUMMARY_VERSION

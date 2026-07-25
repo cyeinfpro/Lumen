@@ -23,8 +23,9 @@ from lumen_core.vision_tagging import (
     parse_poster_style_tagging_payload,
 )
 
+from ..provider_runtime.errors import UpstreamError
+from ..provider_runtime.upstream_services import upstream_services
 from ..storage import storage
-from ..upstream import UpstreamError, _auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ async def _call_upstream_one(
             proxy=proxy,
             purpose="poster_style_tagging",
             instructions=_TAGGING_INSTRUCTIONS,
-            auth_headers=_auth_headers(api_key),
+            auth_headers=upstream_services().core.auth_headers(api_key),
         )
     except VisionTaggingUpstreamError as exc:
         raise UpstreamError(

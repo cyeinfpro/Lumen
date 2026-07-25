@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import MappingProxyType
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -27,13 +28,15 @@ from ._helpers import mime_extension, require_message, truncate_text
 logger = logging.getLogger(__name__)
 router = Router()
 
-_STATUS_ICON = {
-    "queued": "⏳",
-    "running": "⚙️",
-    "succeeded": "✅",
-    "failed": "❌",
-    "canceled": "🚫",
-}
+_STATUS_ICON = MappingProxyType(
+    {
+        "queued": "⏳",
+        "running": "⚙️",
+        "succeeded": "✅",
+        "failed": "❌",
+        "canceled": "🚫",
+    }
+)
 
 
 @router.message(Command("tasks", "list"))
@@ -79,7 +82,9 @@ async def cmd_tasks(message: Message, api: LumenApi) -> None:
                 ]
             )
 
-    markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows) if keyboard_rows else None
+    markup = (
+        InlineKeyboardMarkup(inline_keyboard=keyboard_rows) if keyboard_rows else None
+    )
     await message.answer(truncate_text("\n".join(lines), 3900), reply_markup=markup)
 
 
@@ -115,7 +120,12 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
                     msg.chat.id, image_id
                 )
             except ApiError as exc:
-                logger.warning("task send: download failed gen=%s img=%s err=%s", gen_id, image_id, exc)
+                logger.warning(
+                    "task send: download failed gen=%s img=%s err=%s",
+                    gen_id,
+                    image_id,
+                    exc,
+                )
                 continue
             ext = mime_extension(mime)
             filename = f"{gen_id[:8]}-{idx + 1}.{ext}"

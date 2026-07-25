@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from weakref import WeakKeyDictionary
-
 import app.redis_client as redis_client
 
 
@@ -24,10 +21,7 @@ def _reset_redis_state(monkeypatch) -> list[FakeRedis]:
         return client
 
     monkeypatch.setattr(redis_client, "_new_redis", fake_new_redis)
-    monkeypatch.setattr(redis_client, "_redis_by_loop", WeakKeyDictionary())
-    monkeypatch.setattr(redis_client, "_redis", None)
-    monkeypatch.setattr(redis_client, "_redis_loop", None)
-    monkeypatch.setattr(redis_client, "_redis_pid", os.getpid())
+    monkeypatch.setattr(redis_client, "_redis_state", redis_client._RedisState())
     return created
 
 
@@ -69,4 +63,4 @@ def test_close_redis_closes_current_loop_client(monkeypatch) -> None:
 
     assert client is created[0]
     assert client.closed is True
-    assert redis_client._redis is None
+    assert redis_client._redis_state.client is None

@@ -79,7 +79,7 @@ export function Textarea({
         </p>
       ) : null}
       {hint ? (
-        <p id={hintId} className="type-caption text-[var(--text-muted)]">
+        <p id={hintId} className="type-caption text-[var(--fg-2)]">
           {hint}
         </p>
       ) : null}

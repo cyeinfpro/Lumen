@@ -1,6 +1,9 @@
 from aiogram import Router
 
 from . import actions, generation, menu, retry, start, tasks
+from .generation import GenerationRuntime
+
+__all__ = ["GenerationRuntime", "build_root_router"]
 
 
 def build_root_router() -> Router:

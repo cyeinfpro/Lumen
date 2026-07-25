@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import asyncio
 import inspect
 import json
@@ -12,7 +14,7 @@ import pytest
 from lumen_core.models import OutboxEvent
 
 from app import video_artifacts
-from app.tasks.video_generation import (
+from app.tasks.video_generation_parts.default_runtime import (
     _MAX_POLL_COUNT,
     _MAX_POLL_DURATION_S,
     _MAX_PROVIDER_POLL_DURATION_S,
@@ -23,7 +25,27 @@ from app.tasks.video_generation import (
     _video_exception_code,
     _video_exception_message,
 )
-from app.tasks import video_generation
+from app.tasks.video_generation_parts import default_runtime as video_generation
+from app.tasks.video_generation_parts.contracts import StoredVideo
+from app.video_provider_slots import (
+    VIDEO_PROVIDER_SLOT_STALE_AFTER_S,
+    VIDEO_PROVIDER_SLOT_TTL_S,
+)
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_video_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        video_generation,
+        video_generation.DEFAULT_VIDEO_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.video_upstream import (
     PollResult,
     VideoSubmitRequest,
@@ -722,14 +744,8 @@ async def test_invalid_artifact_terminal_event_is_staged_and_rolled_back_with_co
 
 
 def test_video_provider_slot_ttl_covers_tracking_window() -> None:
-    assert (
-        video_generation._VIDEO_PROVIDER_SLOT_STALE_AFTER_S  # noqa: SLF001
-        > _MAX_PROVIDER_POLL_DURATION_S
-    )
-    assert (
-        video_generation._VIDEO_PROVIDER_SLOT_TTL_S  # noqa: SLF001
-        > video_generation._VIDEO_PROVIDER_SLOT_STALE_AFTER_S  # noqa: SLF001
-    )
+    assert VIDEO_PROVIDER_SLOT_STALE_AFTER_S > _MAX_PROVIDER_POLL_DURATION_S
+    assert VIDEO_PROVIDER_SLOT_TTL_S > VIDEO_PROVIDER_SLOT_STALE_AFTER_S
 
 
 def test_video_pre_submit_terminal_paths_flush_balance_cache() -> None:
@@ -1026,7 +1042,7 @@ async def test_finalization_cancel_during_download_or_storage_never_settles_succ
         if cancel_phase == "storage":
             request_cancel()
         key = f"u/user-1/v/video-1/final/{artifact_attempt_id}/output.mp4"
-        return video_generation._StoredVideo(  # noqa: SLF001
+        return StoredVideo(
             video=SimpleNamespace(id="stored-video"),
             diagnostics={"output_mime": "video/mp4"},
             created_storage_keys=(key,),
@@ -1170,7 +1186,7 @@ async def test_finalization_terminal_race_rolls_back_only_current_attempt(
             return b"downloaded"
 
     async def store(*_args: object, **_kwargs: object) -> object:
-        return video_generation._StoredVideo(  # noqa: SLF001
+        return StoredVideo(
             video=SimpleNamespace(id="stored-video"),
             diagnostics={},
             created_storage_keys=(current_key,),
@@ -1230,7 +1246,7 @@ async def test_finalization_commit_failure_rolls_back_created_artifact(
             return b"downloaded"
 
     async def store(*_args: object, **_kwargs: object) -> object:
-        return video_generation._StoredVideo(  # noqa: SLF001
+        return StoredVideo(
             video=SimpleNamespace(id="stored-video"),
             diagnostics={"output_mime": "video/mp4"},
             created_storage_keys=(current_key,),

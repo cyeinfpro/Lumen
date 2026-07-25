@@ -3,12 +3,10 @@ import {
   ApiError,
   apiFetch,
   apiFetchNoContent,
-  ensureCsrfToken,
-  handle401,
   invalidateSessionClientState,
-  refreshCsrfToken,
   resumeSessionClientState,
 } from "./api/http";
+import { downloadClient } from "./api/downloadClient";
 import type { NoContent } from "./api/http";
 import type { BackendMessage } from "./api/conversations";
 import type {
@@ -568,82 +566,8 @@ export function redeemCode(code: string): Promise<RedemptionOut> {
 
 
 
-async function exportApiErrorFromResponse(res: Response): Promise<ApiError> {
-  let code = "http_error";
-  let message = `HTTP ${res.status}`;
-  const ct = res.headers.get("content-type") ?? "";
-  if (ct.includes("application/json")) {
-    const data = (await res.json().catch(() => null)) as unknown;
-    if (
-      data &&
-      typeof data === "object" &&
-      data !== null &&
-      "error" in data &&
-      typeof (data as { error: unknown }).error === "object"
-    ) {
-      const e = (data as { error: { code?: string; message?: string } }).error;
-      if (e.code) code = e.code;
-      if (e.message) message = e.message;
-    }
-    return new ApiError({ code, message, status: res.status, payload: data });
-  }
-  return new ApiError({ code, message, status: res.status });
-}
-
-// /me/export 返回 zip 流，apiFetch 默认按 JSON 解析无法处理，所以自己写。
 export async function exportMyData(): Promise<Blob> {
-  const url = `${API_BASE.replace(/\/$/, "")}/me/export`;
-  const doFetch = async (csrf: string | null): Promise<Response> => {
-    const headers = new Headers();
-    if (csrf) headers.set("x-csrf-token", csrf);
-    return fetch(url, {
-      method: "POST",
-      headers,
-      credentials: "include",
-    });
-  };
-
-  let res: Response;
-  try {
-    res = await doFetch(await ensureCsrfToken());
-  } catch (err) {
-    throw new ApiError({
-      code: "network_error",
-      message: err instanceof Error ? err.message : "network error",
-      status: 0,
-    });
-  }
-
-  if (res.status === 403) {
-    const err = await exportApiErrorFromResponse(res);
-    if (err.code !== "csrf_failed") throw err;
-    const fresh = await refreshCsrfToken().catch(() => null);
-    if (!fresh) throw err;
-    try {
-      res = await doFetch(fresh);
-    } catch (retryErr) {
-      throw new ApiError({
-        code: "network_error",
-        message: retryErr instanceof Error ? retryErr.message : "network error",
-        status: 0,
-      });
-    }
-  }
-
-  if (res.status === 401) {
-    handle401();
-    throw new ApiError({
-      code: "unauthorized",
-      message: "未登录或会话已失效",
-      status: 401,
-    });
-  }
-
-  if (!res.ok) {
-    throw await exportApiErrorFromResponse(res);
-  }
-
-  return res.blob();
+  return downloadClient.postBlob("/me/export");
 }
 
 export * from "./api/admin";

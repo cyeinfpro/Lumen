@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from PIL import Image as PILImage
 from PIL.PngImagePlugin import PngInfo
+
+from .immutables import immutable_mapping
 
 LUMEN_MODEL_METADATA_KEY = "lumen.model_library"
 LUMEN_MODEL_METADATA_SCHEMA = "model_library.v1"
@@ -23,43 +26,55 @@ EXIF_USER_COMMENT = 0x9286
 MODEL_FILENAME_PREFIX = "lumen-model"
 MODEL_FILENAME_MAX_CHARS = 96
 
-AGE_SLUG_BY_SEGMENT: dict[str, str] = {
-    "toddler": "toddler",
-    "child": "child",
-    "teen": "teen",
-    "young_adult": "young-adult",
-    "adult": "mature",
-    "middle_aged": "middle-aged",
-    "senior": "senior",
-}
-AGE_SEGMENT_BY_SLUG = {value: key for key, value in AGE_SLUG_BY_SEGMENT.items()}
+AGE_SLUG_BY_SEGMENT: Mapping[str, str] = immutable_mapping(
+    {
+        "toddler": "toddler",
+        "child": "child",
+        "teen": "teen",
+        "young_adult": "young-adult",
+        "adult": "mature",
+        "middle_aged": "middle-aged",
+        "senior": "senior",
+    }
+)
+AGE_SEGMENT_BY_SLUG = immutable_mapping(
+    {value: key for key, value in AGE_SLUG_BY_SEGMENT.items()}
+)
 
-APPEARANCE_SLUG_BY_VALUE: dict[str, str] = {
-    "asian": "asian",
-    "east_asian": "east-asian",
-    "southeast_asian": "southeast-asian",
-    "south_asian": "south-asian",
-    "european": "european",
-    "latin": "latin",
-    "middle_eastern": "middle-eastern",
-    "african": "african",
-    "mixed": "mixed",
-    "other": "other",
-}
-APPEARANCE_BY_SLUG = {value: key for key, value in APPEARANCE_SLUG_BY_VALUE.items()}
+APPEARANCE_SLUG_BY_VALUE: Mapping[str, str] = immutable_mapping(
+    {
+        "asian": "asian",
+        "east_asian": "east-asian",
+        "southeast_asian": "southeast-asian",
+        "south_asian": "south-asian",
+        "european": "european",
+        "latin": "latin",
+        "middle_eastern": "middle-eastern",
+        "african": "african",
+        "mixed": "mixed",
+        "other": "other",
+    }
+)
+APPEARANCE_BY_SLUG = immutable_mapping(
+    {value: key for key, value in APPEARANCE_SLUG_BY_VALUE.items()}
+)
 
-TAG_SLUG_BY_LABEL: dict[str, str] = {
-    "温柔亲和": "gentle-friendly",
-    "清冷高级": "cool-editorial",
-    "甜美活力": "sweet-bright",
-    "酷感街头": "cool-street",
-    "知性通勤": "smart-commute",
-    "极简中性": "minimal-neutral",
-    "运动阳光": "sporty-sunny",
-    "复古文艺": "retro-artistic",
-    "成熟稳重": "mature-composed",
-}
-TAG_LABEL_BY_SLUG = {value: key for key, value in TAG_SLUG_BY_LABEL.items()}
+TAG_SLUG_BY_LABEL: Mapping[str, str] = immutable_mapping(
+    {
+        "温柔亲和": "gentle-friendly",
+        "清冷高级": "cool-editorial",
+        "甜美活力": "sweet-bright",
+        "酷感街头": "cool-street",
+        "知性通勤": "smart-commute",
+        "极简中性": "minimal-neutral",
+        "运动阳光": "sporty-sunny",
+        "复古文艺": "retro-artistic",
+        "成熟稳重": "mature-composed",
+    }
+)
+TAG_LABEL_BY_SLUG = immutable_mapping(
+    {value: key for key, value in TAG_SLUG_BY_LABEL.items()}
+)
 
 _SAFE_SLUG_RE = re.compile(r"[^a-z0-9]+")
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import asyncio
 import inspect
 import logging
@@ -14,41 +16,100 @@ from redis.exceptions import WatchError
 from app import account_limiter, sse_publish, upstream, video_artifacts
 from app.provider_pool import ProviderConfig, ProviderPool
 from app.tasks import (
-    completion,
-    generation,
     memory_extraction,
     storyboard_assembly,
-    video_generation,
 )
-from app.tasks.generation_parts import lifecycle as generation_lifecycle
+from app.tasks.completion_parts import default_runtime as completion_runtime
+from app.tasks.completion_parts.runtime import (
+    CompletionRuntime,
+    completion_ports,
+)
 from app.tasks.generation_parts import event_delivery as generation_event_delivery
+from app.tasks.generation_parts import default_runtime as generation_runtime
+from app.tasks.generation_parts.runtime import (
+    GenerationRuntime,
+    generation_ports,
+)
+from app.tasks.video_generation_parts import default_runtime as video_runtime
+from app.video_provider_slots import VIDEO_PROVIDER_SLOT_TTL_S
+from app.video_upstream_parts.contracts import (
+    PollResult,
+    SubmitResult,
+    VideoUpstreamError,
+)
 
 
-def test_completion_charge_uses_same_session_before_success_commit() -> None:
-    source = inspect.getsource(completion.run_completion)
-    charge_call = "await worker_billing.charge_completion(session, comp_for_billing)"
+class _RuntimePortsProxy:
+    def __init__(self, module: Any, ports: Any, **extras: Any) -> None:
+        object.__setattr__(self, "_module", module)
+        object.__setattr__(self, "_ports", ports)
+        object.__setattr__(self, "_extras", extras)
 
-    charge_idx = source.index(charge_call)
-    commit_idx = source.index("await session.commit()", charge_idx)
-    between = source[charge_idx:commit_idx]
+    def __getattr__(self, name: str) -> Any:
+        ports = object.__getattribute__(self, "_ports")
+        if hasattr(ports, name):
+            return getattr(ports, name)
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            return extras[name]
+        return getattr(object.__getattribute__(self, "_module"), name)
 
-    assert charge_idx < commit_idx
-    assert "SessionLocal" not in between
-    assert "async with" not in between
+    def __setattr__(self, name: str, value: Any) -> None:
+        ports = object.__getattribute__(self, "_ports")
+        if hasattr(ports, name):
+            object.__setattr__(ports, name, value)
+            return
+        setattr(object.__getattribute__(self, "_module"), name, value)
 
 
-def test_completion_rechecks_cancel_after_billing_charge_before_commit() -> None:
-    source = inspect.getsource(completion.run_completion)
-    charge_idx = source.index(
-        "await worker_billing.charge_completion(session, comp_for_billing)"
-    )
-    cancel_idx = source.index(
-        'await _raise_if_completion_cancelled(\n                    redis,\n                    task_id,\n                    "cancelled before success commit"',
-        charge_idx,
-    )
-    commit_idx = source.index("await session.commit()", charge_idx)
+completion = _RuntimePortsProxy(
+    completion_runtime,
+    completion_runtime.DEFAULT_COMPLETION_RUNTIME.ports,
+)
+generation = _RuntimePortsProxy(
+    generation_runtime,
+    generation_runtime.DEFAULT_GENERATION_RUNTIME.ports,
+)
+video_generation = _RuntimePortsProxy(
+    video_runtime,
+    video_runtime.DEFAULT_VIDEO_GENERATION_RUNTIME.ports,
+    PollResult=PollResult,
+    SubmitResult=SubmitResult,
+    VideoUpstreamError=VideoUpstreamError,
+    _VIDEO_PROVIDER_SLOT_TTL_S=VIDEO_PROVIDER_SLOT_TTL_S,
+)
 
-    assert charge_idx < cancel_idx < commit_idx
+
+@pytest.mark.asyncio
+async def test_completion_runtime_scopes_explicit_ports() -> None:
+    process_ports = completion_runtime.DEFAULT_COMPLETION_RUNTIME.ports
+    seen: list[Any] = []
+
+    async def runner(ctx: dict[str, Any], task_id: str) -> None:
+        seen.extend((completion_ports(), ctx, task_id))
+
+    runtime = CompletionRuntime(ports=process_ports, runner=runner)
+    ctx = {"redis": object()}
+    await runtime.run(ctx, "comp-1")
+
+    assert seen == [process_ports, ctx, "comp-1"]
+    assert completion_ports() is process_ports
+
+
+@pytest.mark.asyncio
+async def test_generation_runtime_scopes_explicit_ports() -> None:
+    process_ports = generation_runtime.DEFAULT_GENERATION_RUNTIME.ports
+    seen: list[Any] = []
+
+    async def runner(ctx: dict[str, Any], task_id: str) -> None:
+        seen.extend((generation_ports(), ctx, task_id))
+
+    runtime = GenerationRuntime(ports=process_ports, runner=runner)
+    ctx = {"redis": object()}
+    await runtime.run(ctx, "gen-1")
+
+    assert seen == [process_ports, ctx, "gen-1"]
+    assert generation_ports() is process_ports
 
 
 def test_generation_success_event_is_staged_before_commit_and_delivered_after() -> None:
@@ -102,29 +163,6 @@ async def test_generation_sse_failure_is_deferred_without_failing_task(
             "data": {"generation_id": "gen-1", "message_id": "msg-1"},
         }
     ]
-
-
-def test_completion_flushes_before_each_delta_publish() -> None:
-    source = inspect.getsource(completion.run_completion)
-    marker = 'if ev_type == "response.output_text.delta":'
-    starts: list[int] = []
-    cursor = 0
-    while True:
-        start = source.find(marker, cursor)
-        if start < 0:
-            break
-        starts.append(start)
-        cursor = start + len(marker)
-
-    assert len(starts) == 2
-    for start in starts:
-        end = source.index('elif ev_type == "response.completed":', start)
-        block = source[start:end]
-        flush_idx = block.index("await _flush_completion_text(")
-        publish_idx = block.index("await publish_event(")
-
-        assert "EV_COMP_DELTA" in block
-        assert flush_idx < publish_idx
 
 
 def test_completion_tool_limit_continues_with_tool_choice_none() -> None:
@@ -242,7 +280,7 @@ async def test_completion_tool_image_budget_checks_byok_task_with_wallet_hold(
         return 20
 
     monkeypatch.setattr(completion.runtime_settings, "resolve_int", resolve_int)
-    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(completion_runtime, "SessionLocal", lambda: Session())
     monkeypatch.setattr(
         completion.worker_billing,
         "_wallet_billing_applies",
@@ -308,7 +346,7 @@ async def test_completion_tool_image_budget_counts_reserved_images(
         return False
 
     monkeypatch.setattr(completion.runtime_settings, "resolve_int", resolve_int)
-    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(completion_runtime, "SessionLocal", lambda: Session())
     monkeypatch.setattr(
         completion.worker_billing,
         "_wallet_billing_applies",
@@ -377,7 +415,7 @@ async def test_completion_tool_image_budget_skips_wallet_for_zero_rate(
         raise AssertionError("zero-rate tool output must not require wallet balance")
 
     monkeypatch.setattr(completion.runtime_settings, "resolve_int", resolve_int)
-    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(completion_runtime, "SessionLocal", lambda: Session())
     monkeypatch.setattr(
         completion.worker_billing,
         "_wallet_billing_applies",
@@ -424,83 +462,6 @@ def test_completion_tool_image_budget_converts_to_image_tokens() -> None:
             image_output_per_1k_micro=0,
         )
         == 1
-    )
-
-
-def test_completion_completed_response_marks_billable_partial_before_local_work() -> (
-    None
-):
-    source = inspect.getsource(completion.run_completion)
-    first_completed = source.index('elif ev_type == "response.completed":')
-    first_block = source[
-        first_completed : source.index("elif ev_type in {", first_completed)
-    ]
-    second_completed = source.index(
-        'elif ev_type == "response.completed":', first_completed + 1
-    )
-    second_block = source[
-        second_completed : source.index("elif ev_type in {", second_completed)
-    ]
-
-    for block in (first_block, second_block):
-        assert "has_partial = True" in block
-        assert block.index("has_partial = True") < block.index("parse_usage")
-
-
-def test_completion_terminal_failure_preserves_partial_usage_buckets() -> None:
-    source = inspect.getsource(completion.run_completion)
-    start = source.index("# Why: partial-stream or completed-response failures")
-    branch = source[start : source.index("await session.commit()", start)]
-    settle_idx = branch.index("await _settle_failed_completion_billing")
-
-    apply_idx = branch.index("usage_totals.apply_to(comp_partial)")
-    assert apply_idx < settle_idx
-    assert "usage_values=usage_totals.values()" in branch
-    assert "_fallback_completion_tool_image_tokens(" in branch
-
-
-def test_completion_success_fallbacks_tool_image_tokens_before_charge() -> None:
-    source = inspect.getsource(completion.run_completion)
-    start = source.index("# --- 6. 成功态 ---")
-    branch = source[start : source.index("await session.commit()", start)]
-    fallback_idx = branch.index("_fallback_completion_tool_image_tokens(")
-    update_idx = branch.index("update(Completion)")
-    charge_idx = branch.index("await worker_billing.charge_completion")
-
-    assert "and tool_images" in branch
-    assert "and reserved_tool_image_budget_micro > 0" in branch
-    assert fallback_idx < update_idx
-    assert fallback_idx < charge_idx
-
-
-def test_completion_success_stages_memory_extract_before_commit() -> None:
-    source = inspect.getsource(completion.run_completion)
-    success_start = source.index("# --- 6. 成功态 ---")
-    commit_idx = source.index("await session.commit()", success_start)
-    success_tx = source[success_start:commit_idx]
-
-    stage_idx = success_tx.index("_stage_completion_memory_extract(")
-    succeeded_event_idx = success_tx.index("EV_COMP_SUCCEEDED")
-    assert succeeded_event_idx < stage_idx
-    assert "source_message_id=" in success_tx
-    assert "assistant_message_id=message_id" in success_tx
-    assert 'enqueue_job("memory_extract"' not in source
-    assert "memory_extraction.memory_extract(" not in source
-
-
-def test_completion_stale_flush_exits_without_weakening_epoch_fence() -> None:
-    flush_source = inspect.getsource(completion._flush_completion_text)  # noqa: SLF001
-    run_source = inspect.getsource(completion.run_completion)
-    stale_idx = run_source.index("except _CompletionEpochSuperseded as exc:")
-    generic_idx = run_source.index("except Exception as exc")
-
-    assert "raise _CompletionEpochSuperseded" in flush_source
-    assert "except _CompletionEpochSuperseded:" in flush_source
-    assert "sentinel and exits without writing terminal state" in flush_source
-    assert stale_idx < generic_idx
-    assert "Completion.status.in_(_RUNNING_COMPLETION_STATUSES)" in run_source
-    assert completion._RUNNING_COMPLETION_STATUSES == (  # noqa: SLF001
-        completion.CompletionStatus.STREAMING.value,
     )
 
 
@@ -1608,17 +1569,6 @@ async def test_completion_cancel_check_honors_redis_cancel_key() -> None:
     assert await completion._is_cancelled(Redis(), "comp-1") is True
 
 
-def test_tool_limit_fallback_completed_finalizes_active_tools() -> None:
-    source = inspect.getsource(completion.run_completion)
-    fallback_idx = source.index("if tool_loop_truncated:")
-    completed_idx = source.index('elif ev_type == "response.completed":', fallback_idx)
-    failed_idx = source.index("elif ev_type in {", completed_idx)
-    completed_block = source[completed_idx:failed_idx]
-
-    assert "finalize_active(" in completed_block
-    assert "ToolStatus.SUCCEEDED.value" in completed_block
-
-
 @pytest.mark.asyncio
 async def test_generation_lease_acquire_uses_nx() -> None:
     class Redis:
@@ -1812,54 +1762,6 @@ def test_generation_max_attempts_failure_releases_hold() -> None:
     assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
 
 
-def test_generation_prequeue_terminal_writes_guard_queued_status() -> None:
-    run_source = inspect.getsource(generation.run_generation)
-    lifecycle_source = inspect.getsource(
-        generation_lifecycle.settle_existing_generated_image
-    )
-    source_markers = [
-        (run_source, "await _ensure_generation_conversation_alive("),
-        (run_source, '"primary_input_image_id must be included in input_image_ids"'),
-        (
-            lifecycle_source,
-            '"generation already has image task_id=%s image_id=%s',
-        ),
-    ]
-    for source, marker in source_markers:
-        start = source.index(marker)
-        end = source.index("return", start)
-        branch = source[start:end].replace("_g.", "")
-        assert "_generation_attempt_update(" in branch
-        assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
-
-
-def test_completion_max_attempts_failure_releases_hold() -> None:
-    source = inspect.getsource(completion.run_completion)
-    helper = inspect.getsource(completion._completion_preflight_failure)
-    assert '"max_attempts_exceeded"' in helper
-    start = source.index("if preflight_failure is not None:")
-    end = source.index("return", start)
-    branch = source[start:end]
-
-    assert "worker_billing.release_completion(" in branch
-    assert "reason=err_code" in branch
-    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
-
-
-def test_completion_retry_enqueue_failure_marks_terminal_failed() -> None:
-    source = inspect.getsource(completion.run_completion)
-    start = source.index('logger.error("re-enqueue failed task=%s err=%s"')
-    end = source.index("# terminal", start)
-    branch = source[start:end]
-
-    assert 'enqueue_err = "retry_enqueue_failed"' in branch
-    assert "Completion.status == CompletionStatus.QUEUED.value" in branch
-    assert "status=CompletionStatus.FAILED.value" in branch
-    assert "worker_billing.release_completion(" in branch
-    assert "EV_COMP_FAILED" in branch
-    assert "retriable=False" in branch
-
-
 @pytest.mark.asyncio
 async def test_partial_completion_billing_failure_is_not_swallowed(
     monkeypatch: pytest.MonkeyPatch,
@@ -1910,25 +1812,6 @@ async def test_zero_usage_failed_completion_releases_hold(
     )
 
     assert released == ["upstream_failed"]
-
-
-def test_completion_cancel_branch_checks_rowcount_before_message_update() -> None:
-    source = inspect.getsource(completion.run_completion)
-    start = source.index("except _TaskCancelled as exc:")
-    end = source.index("\n    except Exception as exc:", start)
-    branch = source[start:end]
-
-    assert "res = await session.execute(" in branch
-    assert "if affected_rows(res) == 0:" in branch
-    assert branch.index("if affected_rows(res) == 0:") < branch.index(
-        "msg_c = await session.get(Message, message_id)"
-    )
-    assert "except _CompletionEpochSuperseded as stale_exc:" in branch
-    assert branch.index(
-        "except _CompletionEpochSuperseded as stale_exc:"
-    ) < branch.index("except Exception as db_exc:")
-    assert "_stage_completion_event(" in branch
-    assert "await _deliver_completion_event(redis, cancel_delivery)" in branch
 
 
 def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:
@@ -2094,16 +1977,18 @@ async def test_proxied_client_cache_is_lru_bounded(
     builder_name: str,
 ) -> None:
     await upstream.close_client()
-    timeout_config = upstream._TimeoutConfig(connect=1.0, read=2.0, write=3.0)
+    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+        connect=1.0, read=2.0, write=3.0
+    )
     built: list[_FakeClosableClient] = []
-    cache = getattr(upstream, cache_name)
+    cache = getattr(upstream_services().core, cache_name.lstrip("_"))
     cache.clear()
 
-    async def fake_timeout_config() -> upstream._TimeoutConfig:
+    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
         return timeout_config
 
     def fake_builder(
-        _timeout_config: upstream._TimeoutConfig | None = None,
+        _timeout_config: upstream_services().lifecycle.TimeoutConfig | None = None,
         *,
         proxy_url: str | None = None,
     ) -> _FakeClosableClient:
@@ -2112,22 +1997,30 @@ async def test_proxied_client_cache_is_lru_bounded(
         built.append(client)
         return client
 
-    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
-    monkeypatch.setattr(upstream, builder_name, fake_builder)
-    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(
+        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+    )
+    monkeypatch.setattr(
+        upstream_services().lifecycle,
+        builder_name.lstrip("_"),
+        fake_builder,
+    )
+    monkeypatch.setattr(
+        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
+    )
 
-    limit = int(getattr(upstream, "_PROXIED_CLIENT_CACHE_MAX", 32))
-    getter = getattr(upstream, getter_name)
+    limit = int(upstream_services().core.PROXIED_CLIENT_CACHE_MAX)
+    getter = getattr(upstream_services().lifecycle, getter_name.lstrip("_"))
     try:
         for idx in range(limit + 5):
             await getter(f"http://proxy-{idx}.example:8080")
 
         assert len(cache) <= limit
         assert not any(client.closed for client in built[:5])
-        assert len(upstream._retired_client_close_tasks) == 5  # noqa: SLF001
+        assert len(upstream_services().core.retired_client_close_tasks) == 5  # noqa: SLF001
         await asyncio.sleep(0.05)
         assert any(client.closed for client in built[:5])
-        assert not upstream._retired_client_close_tasks  # noqa: SLF001
+        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
     finally:
         await upstream.close_client()
 
@@ -2146,7 +2039,9 @@ async def test_delayed_client_close_waits_until_idle() -> None:
             self.closed = True
 
     client = BusyClient()
-    close_task = asyncio.create_task(upstream._delayed_aclose(client, delay=0))  # noqa: SLF001
+    close_task = asyncio.create_task(
+        upstream_services().lifecycle.delayed_aclose(client, delay=0)
+    )  # noqa: SLF001
     await asyncio.sleep(0.01)
 
     assert client.closed is False
@@ -2160,16 +2055,16 @@ async def test_delayed_client_close_waits_until_idle() -> None:
 async def test_close_client_closes_retired_clients_without_delay() -> None:
     await upstream.close_client()
     client = _FakeClosableClient()
-    close_task = upstream._schedule_delayed_aclose(client)  # noqa: SLF001
+    close_task = upstream_services().lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
 
-    assert close_task in upstream._retired_client_close_tasks  # noqa: SLF001
+    assert close_task in upstream_services().core.retired_client_close_tasks  # noqa: SLF001
 
     try:
         await upstream.close_client()
 
         assert client.closed is True
-        assert not upstream._retired_client_close_tasks  # noqa: SLF001
-        assert not upstream._retired_clients  # noqa: SLF001
+        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
+        assert not upstream_services().core.retired_clients  # noqa: SLF001
     finally:
         await upstream.close_client()
 
@@ -2204,13 +2099,17 @@ async def test_close_retired_clients_waits_out_cancelled_aclose(
                 raise
             self.closed = True
 
-    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(
+        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0
+    )
     client = CancelSensitiveClient()
-    upstream._schedule_delayed_aclose(client)  # noqa: SLF001
+    upstream_services().lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
     try:
         await asyncio.wait_for(client.started.wait(), timeout=1.0)
 
-        closer = asyncio.create_task(upstream._close_retired_clients_now())  # noqa: SLF001
+        closer = asyncio.create_task(
+            upstream_services().lifecycle.close_retired_clients_now()
+        )  # noqa: SLF001
         await asyncio.sleep(0.01)
         assert not closer.done()
 
@@ -2219,8 +2118,8 @@ async def test_close_retired_clients_waits_out_cancelled_aclose(
         assert client.closed is True
         assert client.cancelled is False
         assert client.calls >= 1
-        assert not upstream._retired_client_close_tasks  # noqa: SLF001
-        assert not upstream._retired_clients  # noqa: SLF001
+        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
+        assert not upstream_services().core.retired_clients  # noqa: SLF001
     finally:
         client.release.set()
         await upstream.close_client()

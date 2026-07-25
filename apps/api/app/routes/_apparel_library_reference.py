@@ -1,9 +1,5 @@
-"""Compatibility facade for apparel reference-profile helpers."""
+"""Static compatibility re-export for apparel reference-profile helpers."""
 
 from __future__ import annotations
 
-import sys
-
-from app.workflow_domain import apparel_library_reference as _implementation
-
-sys.modules[__name__] = _implementation
+from app.workflow_domain.apparel_library_reference import *  # noqa: F403

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Iterable
 
-from .showcase_runtime import runtime as _runtime
+from .serialization import dict_or_empty as _dict_or_empty  # noqa: F401
 
 
 _UPPER_VISIBILITY_TOKENS = (
@@ -92,10 +92,9 @@ def _showcase_scene_label(value: Any) -> str:
 
 
 def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
-    runtime = _runtime()
     if not isinstance(scene_card, dict):
         return ""
-    camera = runtime._dict_or_empty(scene_card.get("camera"))
+    camera = _dict_or_empty(scene_card.get("camera"))
     props = scene_card.get("props")
     prop_line = (
         "、".join(str(item).strip() for item in props if str(item).strip())[:120]
@@ -114,7 +113,7 @@ def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
         return f"{label}：{text}" if text else ""
 
     camera_line = "，".join(
-        runtime._showcase_scene_label(item)
+        _showcase_scene_label(item)
         for item in (
             camera.get("distance"),
             camera.get("angle"),
@@ -133,7 +132,7 @@ def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
     parts = [
         kv(
             "场景风格",
-            runtime._showcase_scene_label(scene_card.get("scene_family")),
+            _showcase_scene_label(scene_card.get("scene_family")),
         ),
         kv("拍摄地点", scene_card.get("location")),
         kv("生活事件", scene_card.get("micro_event")),
@@ -146,7 +145,7 @@ def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
         kv("构图", scene_card.get("composition")),
         kv(
             "本张商品呈现",
-            runtime._showcase_scene_label(scene_card.get("product_visibility")),
+            _showcase_scene_label(scene_card.get("product_visibility")),
         ),
         kv("禁令", negative_line),
     ]
@@ -184,14 +183,13 @@ def _showcase_scene_card_action_direction(scene_card: dict[str, Any] | None) -> 
 
 
 def _showcase_scene_card_camera_direction(scene_card: dict[str, Any] | None) -> str:
-    runtime = _runtime()
     if not isinstance(scene_card, dict):
         return ""
-    camera = runtime._dict_or_empty(scene_card.get("camera"))
+    camera = _dict_or_empty(scene_card.get("camera"))
     camera_parts = [
-        runtime._showcase_scene_label(camera.get("distance")),
-        runtime._showcase_scene_label(camera.get("angle")),
-        runtime._showcase_scene_label(camera.get("lens_feel")),
+        _showcase_scene_label(camera.get("distance")),
+        _showcase_scene_label(camera.get("angle")),
+        _showcase_scene_label(camera.get("lens_feel")),
     ]
     parts = [
         " / ".join(part for part in camera_parts if part),
@@ -256,7 +254,6 @@ def _showcase_scene_render_direction(
     age_segment: str | None,
     model_summary: str,
 ) -> str:
-    runtime = _runtime()
     lighting = ""
     if isinstance(scene_card, dict):
         lighting = str(scene_card.get("lighting") or "").strip()
@@ -268,7 +265,7 @@ def _showcase_scene_render_direction(
     )
     if lighting_detail:
         light_part = f"{light_part}；{lighting_detail}"
-    if runtime._is_child_showcase(age_segment, model_summary):
+    if _is_child_showcase(age_segment, model_summary):
         return (
             f"真实自然儿童摄影质感，{light_part}；儿童肤质自然，有轻微真实皮肤纹理、"
             "自然红润和碎发，不成人化、不厚重磨皮；衣服布料纹理、明线和贴布细节真实，"
@@ -284,18 +281,17 @@ def _showcase_scene_framing_direction(
     scene_card: dict[str, Any] | None,
     fallback: str,
 ) -> str:
-    runtime = _runtime()
-    text = runtime._showcase_scene_card_text(scene_card)
+    text = _showcase_scene_card_text(scene_card)
     if not text:
         return fallback
     composition_detail = ""
     if isinstance(scene_card, dict):
         composition_detail = str(scene_card.get("composition_detail") or "").strip()
-    wants_hem = runtime._text_has_any(
+    wants_hem = _text_has_any(
         text,
         ("裙摆", "衣摆", "下摆", "hem"),
     )
-    if runtime._text_has_any(text, ("full_body", "全身", "head_to_toe")):
+    if _text_has_any(text, ("full_body", "全身", "head_to_toe")):
         base = "按本张方案做全身构图，头脚完整、透视自然，商品整体廓形和主要细节清楚"
         return f"{base}；{composition_detail}" if composition_detail else base
     if wants_hem:
@@ -304,7 +300,7 @@ def _showcase_scene_framing_direction(
             "不要裁掉正在展示的商品细节"
         )
         return f"{base}；{composition_detail}" if composition_detail else base
-    if runtime._text_has_any(
+    if _text_has_any(
         text,
         ("upper_body", "half_body", "close", "胸", "半身", "近景"),
     ):
@@ -317,18 +313,17 @@ def _showcase_scene_framing_direction(
 
 
 def _visibility_context(
-    runtime: Any,
     *,
     text: str,
     shot_type: str,
 ) -> _VisibilityContext:
     return _VisibilityContext(
         is_back_or_side=shot_type == "side_or_back"
-        or runtime._text_has_any(
+        or _text_has_any(
             text,
             ("背后", "后背", "背面", "后片", "侧面", "side", "back"),
         ),
-        wants_hem=runtime._text_has_any(
+        wants_hem=_text_has_any(
             text,
             ("裙摆", "衣摆", "下摆", "衣长", "hem"),
         ),
@@ -337,9 +332,9 @@ def _visibility_context(
             "front_full_body",
             "side_or_back",
         }
-        or runtime._text_has_any(text, ("full_body", "全身", "head_to_toe")),
+        or _text_has_any(text, ("full_body", "全身", "head_to_toe")),
         is_upper_or_detail=shot_type == "detail_half_body"
-        or runtime._text_has_any(
+        or _text_has_any(
             text,
             ("upper_body", "half_body", "close", "胸", "半身", "近景"),
         ),
@@ -347,20 +342,19 @@ def _visibility_context(
 
 
 def _visibility_bucket(
-    runtime: Any,
     item: str,
     context: _VisibilityContext,
 ) -> str:
-    is_back_detail = runtime._text_has_any(item, _BACK_DETAIL_TOKENS)
-    is_front_detail = runtime._text_has_any(item, _FRONT_DETAIL_TOKENS)
+    is_back_detail = _text_has_any(item, _BACK_DETAIL_TOKENS)
+    is_front_detail = _text_has_any(item, _FRONT_DETAIL_TOKENS)
     if context.is_back_or_side:
         if is_back_detail:
             return "visible"
         if is_front_detail:
             return "deferred"
-        if runtime._text_has_any(item, _SIDE_VISIBLE_TOKENS):
+        if _text_has_any(item, _SIDE_VISIBLE_TOKENS):
             return "visible"
-        if runtime._text_has_any(item, _LOWER_VISIBILITY_TOKENS) and (
+        if _text_has_any(item, _LOWER_VISIBILITY_TOKENS) and (
             context.wants_hem or context.wants_full_body
         ):
             return "visible"
@@ -368,12 +362,9 @@ def _visibility_bucket(
     if context.is_upper_or_detail:
         if is_back_detail:
             return "deferred"
-        if (
-            runtime._text_has_any(item, _LOWER_VISIBILITY_TOKENS)
-            and not context.wants_hem
-        ):
+        if _text_has_any(item, _LOWER_VISIBILITY_TOKENS) and not context.wants_hem:
             return "deferred"
-        if runtime._text_has_any(item, _UPPER_VISIBILITY_TOKENS):
+        if _text_has_any(item, _UPPER_VISIBILITY_TOKENS):
             return "visible"
         return "unclassified"
     return "deferred" if is_back_detail else "visible"
@@ -386,7 +377,6 @@ def _showcase_visibility_policy(
     scene_card: dict[str, Any] | None,
     shot_type: str,
 ) -> tuple[str, str]:
-    runtime = _runtime()
     preserve_items: list[str] = []
     if isinstance(garment_lock, dict) and isinstance(
         garment_lock.get("must_preserve"), list
@@ -401,12 +391,12 @@ def _showcase_visibility_policy(
             item.strip() for item in product_preserve.split("、") if item.strip()
         ]
 
-    text = runtime._showcase_scene_card_text(scene_card)
-    context = _visibility_context(runtime, text=text, shot_type=shot_type)
+    text = _showcase_scene_card_text(scene_card)
+    context = _visibility_context(text=text, shot_type=shot_type)
     visible: list[str] = []
     deferred: list[str] = []
     for item in preserve_items:
-        bucket = _visibility_bucket(runtime, item, context)
+        bucket = _visibility_bucket(item, context)
         if bucket == "visible" or (bucket == "unclassified" and len(visible) < 3):
             visible.append(item)
         else:
@@ -422,13 +412,9 @@ def _showcase_visibility_policy(
             visible = [str(item).strip() for item in priority if str(item).strip()]
     if not visible:
         visible = ["本张入镜的商品主体、领口、袖口、口袋/扣饰和布料纹理"]
-    visible_text = "、".join(
-        runtime._truncate_prompt_text(item, 30) for item in visible[:5]
-    )
+    visible_text = "、".join(_truncate_prompt_text(item, 30) for item in visible[:5])
     deferred_text = "、".join(
-        runtime._truncate_prompt_text(item, 30)
-        for item in deferred[:3]
-        if item not in visible
+        _truncate_prompt_text(item, 30) for item in deferred[:3] if item not in visible
     )
     return visible_text, deferred_text
 
@@ -444,18 +430,16 @@ def _truncate_prompt_text(text: str, limit: int) -> str:
 def _join_lock_items(value: Any, *, max_items: int = 4, max_len: int = 28) -> str:
     if not isinstance(value, list):
         return ""
-    runtime = _runtime()
     return "、".join(
-        runtime._truncate_prompt_text(str(item).strip(), max_len)
+        _truncate_prompt_text(str(item).strip(), max_len)
         for item in value[:max_items]
         if str(item).strip()
     )
 
 
 def _compact_lock_text(value: Any, *, max_items: int = 4, max_len: int = 28) -> str:
-    runtime = _runtime()
     if isinstance(value, list):
-        return runtime._join_lock_items(
+        return _join_lock_items(
             value,
             max_items=max_items,
             max_len=max_len,
@@ -464,7 +448,7 @@ def _compact_lock_text(value: Any, *, max_items: int = 4, max_len: int = 28) -> 
         parts = [
             part.strip() for part in re.split(r"[、,，;；]+", value) if part.strip()
         ]
-        return runtime._join_lock_items(
+        return _join_lock_items(
             parts,
             max_items=max_items,
             max_len=max_len,
@@ -476,16 +460,33 @@ def _compact_product_identity(
     garment_lock: dict[str, Any] | None,
     product_preserve: str,
 ) -> str:
-    runtime = _runtime()
     if isinstance(garment_lock, dict):
         category = str(garment_lock.get("category") or "").strip()
         if category and category != "服饰":
-            return runtime._truncate_prompt_text(category, 48)
+            return _truncate_prompt_text(category, 48)
         core = str(garment_lock.get("core_identity") or "").strip()
         if core:
-            return runtime._truncate_prompt_text(
+            return _truncate_prompt_text(
                 core.split("、")[0].strip() or core,
                 48,
             )
     first = product_preserve.split("、")[0].strip() if product_preserve else ""
-    return runtime._truncate_prompt_text(first or "这件服饰", 48)
+    return _truncate_prompt_text(first or "这件服饰", 48)
+
+
+# Public workflow contracts.
+compact_lock_text = _compact_lock_text
+compact_product_identity = _compact_product_identity
+is_child_showcase = _is_child_showcase
+join_lock_items = _join_lock_items
+showcase_scene_card_action_direction = _showcase_scene_card_action_direction
+showcase_scene_card_camera_direction = _showcase_scene_card_camera_direction
+showcase_scene_card_direction = _showcase_scene_card_direction
+showcase_scene_card_scene_direction = _showcase_scene_card_scene_direction
+showcase_scene_card_text = _showcase_scene_card_text
+showcase_scene_framing_direction = _showcase_scene_framing_direction
+showcase_scene_label = _showcase_scene_label
+showcase_scene_render_direction = _showcase_scene_render_direction
+showcase_visibility_policy = _showcase_visibility_policy
+text_has_any = _text_has_any
+truncate_prompt_text = _truncate_prompt_text

@@ -90,3 +90,11 @@ def _merge_completion_upstream_metadata(
     else:
         out.pop("service_tier", None)
     return out
+
+
+# Public contract consumed by the Completion runtime modules.
+completion_upstream_provider_event = _completion_upstream_provider_event
+content_str_list = _content_str_list
+merge_completion_upstream_metadata = _merge_completion_upstream_metadata
+normalize_reasoning_effort_for_upstream = _normalize_reasoning_effort_for_upstream
+split_csv_ids = _split_csv_ids

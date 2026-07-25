@@ -17,7 +17,7 @@ from lumen_core import billing as billing_core
 from lumen_core.models import RedemptionBatch, RedemptionCode
 from lumen_core.schemas import AdminRedemptionCodeCreateIn
 
-from .errors import _http
+from .errors import http_error as _http
 
 
 _DOWNLOAD_TOKEN_PREFIX = "billing:redemption_csv:"
@@ -262,3 +262,30 @@ def _redemption_batch_payload_matches(
             else batch_expires.astimezone(timezone.utc)
         )
     return payload_expires == batch_expires
+
+
+DOWNLOAD_TOKEN_PREFIX = _DOWNLOAD_TOKEN_PREFIX
+PLAINTEXT_BATCH_PREFIX = _PLAINTEXT_BATCH_PREFIX
+REDEMPTION_DOWNLOAD_TTL_SECONDS = _REDEMPTION_DOWNLOAD_TTL_SECONDS
+REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT = _REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT
+REDEMPTION_IDEMPOTENCY_NAMESPACE = _REDEMPTION_IDEMPOTENCY_NAMESPACE
+REDEMPTION_IDEMPOTENCY_TTL_SECONDS = _REDEMPTION_IDEMPOTENCY_TTL_SECONDS
+REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE = _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE
+REDEMPTION_ALREADY_USED_CONSTRAINT = _REDEMPTION_ALREADY_USED_CONSTRAINT
+REDEMPTION_REPLAY_CONSTRAINTS = _REDEMPTION_REPLAY_CONSTRAINTS
+REDEMPTION_KNOWN_CONSTRAINTS = _REDEMPTION_KNOWN_CONSTRAINTS
+integrity_constraint_name = _integrity_constraint_name
+client_idempotency_key = _client_idempotency_key
+redemption_request_hash = _redemption_request_hash
+redemption_idempotency_key = _redemption_idempotency_key
+redemption_batch_request_hash = _redemption_batch_request_hash
+redemption_batch_idempotency_key = _redemption_batch_idempotency_key
+redemption_batch_lock_identity = _redemption_batch_lock_identity
+redemption_usage_id = _redemption_usage_id
+redemption_idempotency_cache_key = _redemption_idempotency_cache_key
+redemption_status = _redemption_status
+redemption_plaintext_payload = _redemption_plaintext_payload
+redemption_csv_payload = _redemption_csv_payload
+redemption_csv_batch_id = _redemption_csv_batch_id
+require_redemption_download_batch = _require_redemption_download_batch
+redemption_batch_payload_matches = _redemption_batch_payload_matches
