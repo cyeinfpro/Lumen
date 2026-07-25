@@ -469,7 +469,9 @@ def test_generation_model_label_uses_fast_responses_model() -> None:
     )
 
     assert admin._generation_model_label(fast_responses) == "5.4 mini"
-    assert admin._generation_model_label(queued_fast_race) == "竞速中: 5.4 mini / image2"
+    assert (
+        admin._generation_model_label(queued_fast_race) == "竞速中: 5.4 mini / image2"
+    )
 
 
 def test_completion_upstream_request_exposes_provider_and_responses_route() -> None:
@@ -596,10 +598,10 @@ async def test_admin_delete_user_soft_deletes_and_runs_cleanup(monkeypatch):
     async def fake_audit(*_args, **kwargs):
         audits.append(kwargs)
 
-    monkeypatch.setattr(admin, "_cancel_account_active_tasks", fake_cancel)
+    monkeypatch.setattr(admin, "cancel_account_active_tasks", fake_cancel)
     monkeypatch.setattr(
         admin,
-        "_post_commit_account_task_cleanup",
+        "post_commit_account_task_cleanup",
         fake_post_commit,
     )
     monkeypatch.setattr(admin, "write_admin_audit", fake_audit)

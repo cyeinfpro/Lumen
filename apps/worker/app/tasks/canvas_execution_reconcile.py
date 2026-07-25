@@ -70,6 +70,13 @@ class _ProjectionBatch:
     finished_at: datetime | None
 
 
+class _CronJobs(tuple[Any, ...]):
+    """Immutable schedules that compose with legacy list-based schedules."""
+
+    def __radd__(self, other: list[Any]) -> list[Any]:
+        return [*other, *self]
+
+
 def _generation_fingerprint(generation: Generation) -> str | None:
     direct = getattr(generation, "request_fingerprint", None)
     if isinstance(direct, str) and direct:
@@ -516,8 +523,7 @@ async def _auto_select_is_current(
         )
     ).scalars()
     selections = {
-        row.node_id: (row.execution_id, int(row.output_index))
-        for row in rows
+        row.node_id: (row.execution_id, int(row.output_index)) for row in rows
     }
     return canvas_input_snapshot_matches_graph(
         canvas.graph_jsonb,
@@ -809,9 +815,9 @@ async def reconcile_canvas_executions(ctx: dict[str, Any]) -> int:
     return touched
 
 
-cron_jobs = [
-    cron(reconcile_canvas_executions, second={10, 40}, run_at_startup=False),
-]
+cron_jobs = _CronJobs(
+    (cron(reconcile_canvas_executions, second={10, 40}, run_at_startup=False),)
+)
 
 __all__ = [
     "cron_jobs",

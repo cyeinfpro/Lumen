@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import time
 from typing import Any
 
@@ -83,21 +85,31 @@ def test_provider_supports_route_responses_false_blocks_text_and_models() -> Non
     assert provider_supports_route(p, route="image", endpoint_kind="responses") is False
 
 
-def test_provider_supports_route_image_generations_false_only_blocks_generations() -> None:
+def test_provider_supports_route_image_generations_false_only_blocks_generations() -> (
+    None
+):
     p = _cfg("nogen", image_generations_supported=False)
-    assert provider_supports_route(p, route="image", endpoint_kind="generations") is False
+    assert (
+        provider_supports_route(p, route="image", endpoint_kind="generations") is False
+    )
     assert provider_supports_route(p, route="image", endpoint_kind="responses") is True
     # text 路由不依赖 image generations 能力
     assert provider_supports_route(p, route="text", endpoint_kind="responses") is True
 
 
-def test_provider_supports_route_image_responses_false_only_blocks_image_responses() -> None:
+def test_provider_supports_route_image_responses_false_only_blocks_image_responses() -> (
+    None
+):
     p = _cfg("noimgresp", image_responses_supported=False)
     assert provider_supports_route(p, route="image", endpoint_kind="responses") is False
-    assert provider_supports_route(p, route="image", endpoint_kind="generations") is True
+    assert (
+        provider_supports_route(p, route="image", endpoint_kind="generations") is True
+    )
 
 
-def test_provider_supports_route_image_unknown_endpoint_kind_allows_when_any_path_open() -> None:
+def test_provider_supports_route_image_unknown_endpoint_kind_allows_when_any_path_open() -> (
+    None
+):
     """endpoint_kind 未知（auto）时，只要至少一种 image 能力非显式 False 就允许。"""
     p_one_blocked = _cfg("partial", image_generations_supported=False)
     assert provider_supports_route(p_one_blocked, route="image", endpoint_kind=None)
@@ -107,7 +119,8 @@ def test_provider_supports_route_image_unknown_endpoint_kind_allows_when_any_pat
         image_responses_supported=False,
     )
     assert (
-        provider_supports_route(p_all_blocked, route="image", endpoint_kind=None) is False
+        provider_supports_route(p_all_blocked, route="image", endpoint_kind=None)
+        is False
     )
 
 
@@ -115,7 +128,9 @@ def test_provider_supports_route_image_unknown_endpoint_kind_allows_when_any_pat
 
 
 @pytest.mark.asyncio
-async def test_select_image_excludes_provider_with_image_responses_unsupported() -> None:
+async def test_select_image_excludes_provider_with_image_responses_unsupported() -> (
+    None
+):
     pool = _pool(
         _cfg("good"),
         _cfg("nogen", image_responses_supported=False),
@@ -128,7 +143,9 @@ async def test_select_image_excludes_provider_with_image_responses_unsupported()
 
 
 @pytest.mark.asyncio
-async def test_select_image_excludes_provider_with_image_generations_unsupported() -> None:
+async def test_select_image_excludes_provider_with_image_generations_unsupported() -> (
+    None
+):
     pool = _pool(
         _cfg("good"),
         _cfg("noimg", image_generations_supported=False),
@@ -234,7 +251,11 @@ async def test_image_job_endpoint_chain_skips_capability_unsupported_endpoint(
             return ["generations", "responses"]
 
         def record_endpoint_success(
-            self, _provider_name: str, _endpoint: str, *, latency_ms: float | None = None
+            self,
+            _provider_name: str,
+            _endpoint: str,
+            *,
+            latency_ms: float | None = None,
         ) -> None:
             return None
 
@@ -262,14 +283,20 @@ async def test_image_job_endpoint_chain_skips_capability_unsupported_endpoint(
     async def fake_record_image_call(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(upstream.provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(
-        upstream, "_resolve_image_job_base_url", fake_resolve_image_job_base_url
+        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
     )
-    monkeypatch.setattr(upstream, "_image_job_run_once", fake_run_once)
+    monkeypatch.setattr(
+        upstream_services().direct,
+        "resolve_image_job_base_url",
+        fake_resolve_image_job_base_url,
+    )
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+    )
     monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
 
-    result = await upstream._image_job_with_failover(
+    result = await upstream_services().image_jobs.image_job_with_failover(
         action="generate",
         prompt="p",
         size="1024x1024",
@@ -308,11 +335,15 @@ async def test_direct_generate_provider_override_blocks_unsupported_generations(
         calls += 1
         return "BBBB", None
 
-    monkeypatch.setattr(upstream.provider_pool, "get_pool", fake_get_pool)
-    monkeypatch.setattr(upstream, "_direct_generate_image_once", fake_direct_once)
+    monkeypatch.setattr(
+        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+    )
+    monkeypatch.setattr(
+        upstream_services().direct, "direct_generate_image_once", fake_direct_once
+    )
 
     with pytest.raises(Exception) as exc:
-        await upstream._direct_generate_image_with_failover(
+        await upstream_services().direct.direct_generate_image_with_failover(
             prompt="p",
             size="1024x1024",
             n=1,
@@ -353,11 +384,17 @@ async def test_image2_dispatch_skips_responses_fallback_when_capability_false(
         fallback_calls += 1
         return "BBBB", None
 
-    monkeypatch.setattr(upstream, "_direct_generate_image_with_failover", fake_direct_fail)
-    monkeypatch.setattr(upstream, "_race_responses_image", fake_responses_fallback)
+    monkeypatch.setattr(
+        upstream_services().direct,
+        "direct_generate_image_with_failover",
+        fake_direct_fail,
+    )
+    monkeypatch.setattr(
+        upstream_services().race, "race_responses_image", fake_responses_fallback
+    )
 
     with pytest.raises(Exception) as exc:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="generate",
             provider=provider,
             channel="stream",

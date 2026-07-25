@@ -85,14 +85,16 @@ def _gauge(
 # ---------- Sentry PII 脱敏 ----------
 
 _EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_SENSITIVE_HEADERS = {
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "x-csrf-token",
-    "x-api-key",
-    "x-auth-token",
-}
+_SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-csrf-token",
+        "x-api-key",
+        "x-auth-token",
+    }
+)
 _SENSITIVE_KEY_HINTS = (
     "password",
     "secret",
@@ -114,7 +116,9 @@ def _redact_string(value: str) -> str:
 def _scrub_value(key: str, value: Any) -> Any:
     lowered = (key or "").lower()
     parts = {part for part in re.split(r"[^a-z0-9]+", lowered) if part}
-    if lowered in _SENSITIVE_KEY_HINTS or any(hint in parts for hint in _SENSITIVE_KEY_HINTS):
+    if lowered in _SENSITIVE_KEY_HINTS or any(
+        hint in parts for hint in _SENSITIVE_KEY_HINTS
+    ):
         return "[redacted]"
     if isinstance(value, str):
         return _redact_string(value)
@@ -250,6 +254,7 @@ redemption_redeemed_total = _counter(
 
 # ---------- Sentry ----------
 
+
 def init_sentry(
     dsn: str,
     environment: str,
@@ -282,6 +287,7 @@ def init_sentry(
 
 # ---------- OpenTelemetry ----------
 
+
 def init_otel(
     service_name: str,
     endpoint: str,
@@ -305,7 +311,9 @@ def init_otel(
 
         resource = Resource.create({"service.name": service_name})
         provider = TracerProvider(resource=resource)
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+        )
         trace.set_tracer_provider(provider)
 
         # Instrument libraries（每个 import 都 try 独立，避免缺包时整体失败）
@@ -315,28 +323,36 @@ def init_otel(
             if app is not None:
                 FastAPIInstrumentor.instrument_app(app)
         except Exception as exc:  # noqa: BLE001
-            logger.error("OBS DISABLED: otel fastapi instrument failed: %s", exc, exc_info=exc)
+            logger.error(
+                "OBS DISABLED: otel fastapi instrument failed: %s", exc, exc_info=exc
+            )
 
         try:
             from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
             SQLAlchemyInstrumentor().instrument()
         except Exception as exc:  # noqa: BLE001
-            logger.error("OBS DISABLED: otel sqlalchemy instrument failed: %s", exc, exc_info=exc)
+            logger.error(
+                "OBS DISABLED: otel sqlalchemy instrument failed: %s", exc, exc_info=exc
+            )
 
         try:
             from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
             HTTPXClientInstrumentor().instrument()
         except Exception as exc:  # noqa: BLE001
-            logger.error("OBS DISABLED: otel httpx instrument failed: %s", exc, exc_info=exc)
+            logger.error(
+                "OBS DISABLED: otel httpx instrument failed: %s", exc, exc_info=exc
+            )
 
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
 
             RedisInstrumentor().instrument()
         except Exception as exc:  # noqa: BLE001
-            logger.error("OBS DISABLED: otel redis instrument failed: %s", exc, exc_info=exc)
+            logger.error(
+                "OBS DISABLED: otel redis instrument failed: %s", exc, exc_info=exc
+            )
 
         logger.info("otel initialized service=%s endpoint=%s", service_name, endpoint)
     except Exception as exc:  # noqa: BLE001
@@ -344,6 +360,7 @@ def init_otel(
 
 
 # ---------- Prometheus ----------
+
 
 def setup_prometheus(app: FastAPI) -> None:
     """挂 /metrics 端点并绑定默认 HTTP 指标。自定义 Counter 已在模块 top-level 注册。"""

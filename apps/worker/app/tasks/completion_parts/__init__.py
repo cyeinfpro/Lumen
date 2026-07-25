@@ -1,1 +1,1 @@
-"""Leaf helpers extracted from the completion task facade."""
+"""Leaf helpers for completion execution."""

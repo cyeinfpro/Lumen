@@ -29,6 +29,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol, TypeVar
 from urllib.parse import quote
 
+from .immutables import immutable_mapping
+
 
 IMAGE_EDIT_INPUT_TRANSPORT_VALUES = ("url", "file")
 DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT = "url"
@@ -139,13 +141,15 @@ class ProviderDefinition:
 IMAGE_JOBS_ENDPOINT_VALUES = ("auto", "generations", "responses")
 DEFAULT_LEGACY_PROVIDER_BASE_URL = "https://api.example.com"
 _MAX_PROVIDER_WEIGHT = 1000
-_PROXY_PROTOCOL_ALIASES = {
-    "s5": "socks5",
-    "socks": "socks5",
-    "socks5": "socks5",
-    "socks5h": "socks5",
-    "ssh": "ssh",
-}
+_PROXY_PROTOCOL_ALIASES = immutable_mapping(
+    {
+        "s5": "socks5",
+        "socks": "socks5",
+        "socks5": "socks5",
+        "socks5h": "socks5",
+        "ssh": "ssh",
+    }
+)
 _SSH_HOST_KEY_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}=?$")
 
 
@@ -827,8 +831,16 @@ class _SshTunnel:
     process: asyncio.subprocess.Process
 
 
-_SSH_TUNNELS: dict[str, _SshTunnel] = {}
-_SSH_TUNNEL_LOCK = asyncio.Lock()
+class _SshTunnelRuntime:
+    def __init__(self) -> None:
+        self.tunnels: dict[str, _SshTunnel] = {}
+        self.lock = asyncio.Lock()
+
+    def clear(self) -> None:
+        self.tunnels.clear()
+
+
+_SSH_TUNNEL_RUNTIME = _SshTunnelRuntime()
 _SSH_TUNNEL_START_ATTEMPTS = 3
 _SSH_TUNNEL_READY_CHECKS = 30
 
@@ -1236,7 +1248,7 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
 
 
 def _running_ssh_tunnel(key: str) -> _SshTunnel | None:
-    tunnel = _SSH_TUNNELS.get(key)
+    tunnel = _SSH_TUNNEL_RUNTIME.tunnels.get(key)
     if tunnel is None or tunnel.process.returncode is not None:
         return None
     return tunnel
@@ -1246,10 +1258,10 @@ async def _close_stale_ssh_tunnels(
     proxy: ProviderProxyDefinition,
     current_key: str,
 ) -> None:
-    for old_key, tunnel in list(_SSH_TUNNELS.items()):
+    for old_key, tunnel in list(_SSH_TUNNEL_RUNTIME.tunnels.items()):
         if old_key == current_key or not old_key.startswith(f"{proxy.name}\x1f"):
             continue
-        _SSH_TUNNELS.pop(old_key, None)
+        _SSH_TUNNEL_RUNTIME.tunnels.pop(old_key, None)
         await _terminate_process(tunnel.process)
 
 
@@ -1385,7 +1397,7 @@ async def _start_ssh_tunnel_attempt(
         )
         url, error = await _wait_for_ssh_tunnel(proc, local_port)
         if url is not None:
-            _SSH_TUNNELS[key] = _SshTunnel(url=url, process=proc)
+            _SSH_TUNNEL_RUNTIME.tunnels[key] = _SshTunnel(url=url, process=proc)
             tunnel_started = True
         return url, error
     finally:
@@ -1405,7 +1417,7 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
     if existing is not None:
         return existing.url
 
-    async with _SSH_TUNNEL_LOCK:
+    async with _SSH_TUNNEL_RUNTIME.lock:
         existing = _running_ssh_tunnel(key)
         if existing is not None:
             return existing.url
@@ -1440,8 +1452,8 @@ async def resolve_provider_proxy_url(
 
 
 async def close_provider_proxy_tunnels() -> None:
-    tunnels = list(_SSH_TUNNELS.values())
-    _SSH_TUNNELS.clear()
+    tunnels = list(_SSH_TUNNEL_RUNTIME.tunnels.values())
+    _SSH_TUNNEL_RUNTIME.clear()
     for tunnel in tunnels:
         await _terminate_process(tunnel.process)
 

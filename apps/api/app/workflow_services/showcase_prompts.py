@@ -4,10 +4,65 @@ from __future__ import annotations
 
 from typing import Any
 
+from lumen_core.constants import MAX_PROMPT_CHARS
 from lumen_core.models import ModelCandidate
 
-from ..workflow_domain.showcase_shot_pool import ShotVariant
-from .showcase_runtime import runtime as _runtime
+from ..workflow_domain.showcase_model_policy import (
+    compact_showcase_user_direction as _compact_showcase_user_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    infer_model_height_cm as _infer_model_height_cm,
+)  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    style_region_from_text as _style_region_from_text,
+)  # noqa: F401
+from ..workflow_domain.showcase_shot_pool import (
+    ShotVariant,
+    age_soft_constraint as _age_soft_constraint,
+)
+from ..workflow_domain.showcase_template_policy import (
+    showcase_composition_direction as _showcase_composition_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_template_policy import (
+    showcase_framing_direction as _showcase_framing_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_template_policy import (
+    showcase_pose_direction as _showcase_pose_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_template_policy import (
+    showcase_render_direction as _showcase_render_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_template_policy import (
+    template_requirement as _template_requirement,
+)  # noqa: F401
+from .serialization import dict_or_empty as _dict_or_empty  # noqa: F401
+from .showcase_scene_policy import compact_lock_text as _compact_lock_text  # noqa: F401
+from .showcase_scene_policy import compact_product_identity as _compact_product_identity  # noqa: F401
+from .showcase_scene_policy import join_lock_items as _join_lock_items  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_card_action_direction as _showcase_scene_card_action_direction,
+)  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_card_camera_direction as _showcase_scene_card_camera_direction,
+)  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_card_direction as _showcase_scene_card_direction,
+)  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_card_scene_direction as _showcase_scene_card_scene_direction,
+)  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_framing_direction as _showcase_scene_framing_direction,
+)  # noqa: F401
+from .showcase_scene_policy import showcase_scene_label as _showcase_scene_label  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_scene_render_direction as _showcase_scene_render_direction,
+)  # noqa: F401
+from .showcase_scene_policy import (
+    showcase_visibility_policy as _showcase_visibility_policy,
+)  # noqa: F401
+from .showcase_scene_policy import truncate_prompt_text as _truncate_prompt_text  # noqa: F401
+from .showcase_shots import showcase_default_variant as _showcase_default_variant  # noqa: F401
 
 
 def _showcase_prompt_brief(
@@ -28,9 +83,8 @@ def _showcase_prompt_brief(
     allow_background_people: bool = True,
     include_product_lock: bool = True,
 ) -> str:
-    runtime = _runtime()
     direction = template_direction.strip() or "背景与衣服图片搭配"
-    extra_direction = runtime._compact_showcase_user_direction(
+    extra_direction = _compact_showcase_user_direction(
         user_direction,
         style_region,
     )
@@ -69,7 +123,7 @@ def _showcase_prompt_brief(
         "",
     ]
     if include_product_lock:
-        compact_product_preserve = runtime._compact_lock_text(product_preserve)
+        compact_product_preserve = _compact_lock_text(product_preserve)
         lines.extend(
             [
                 "【商品 1:1 锁定】以商品图为准，保持同款同色同廓形；"
@@ -103,10 +157,9 @@ def _showcase_garment_lock_prefix(
     visible_preserve: str | None = None,
     deferred_preserve: str | None = None,
 ) -> str:
-    runtime = _runtime()
     visible_line = (visible_preserve or "").strip()
     deferred_line = (deferred_preserve or "").strip()
-    compact_visible = runtime._compact_lock_text(
+    compact_visible = _compact_lock_text(
         visible_line or product_preserve,
         max_items=5,
     )
@@ -123,11 +176,11 @@ def _showcase_garment_lock_prefix(
             f"【模特一致】{model_consistency}"
         )
         return f"{text}{compact_deferred_note}"
-    identity = runtime._compact_product_identity(
+    identity = _compact_product_identity(
         garment_lock,
         product_preserve,
     )
-    visibility = runtime._join_lock_items(
+    visibility = _join_lock_items(
         garment_lock.get("visibility_priority"),
         max_items=3,
     )
@@ -142,7 +195,6 @@ def _showcase_garment_lock_prefix(
 
 
 def _composed_showcase_prompt(
-    runtime: Any,
     *,
     lock_prefix: str,
     composed_prompt: str,
@@ -155,20 +207,20 @@ def _composed_showcase_prompt(
     prefix = (
         f"{lock_prefix}\n\n【本张拍摄方案】\n" if lock_prefix else "【本张拍摄方案】\n"
     )
-    if len(prefix) > runtime.MAX_PROMPT_CHARS - 600:
-        prefix = runtime._truncate_prompt_text(
+    if len(prefix) > MAX_PROMPT_CHARS - 600:
+        prefix = _truncate_prompt_text(
             prefix,
-            runtime.MAX_PROMPT_CHARS - 600,
+            MAX_PROMPT_CHARS - 600,
         )
     body = composed_prompt.strip()
     if not scene_direction:
-        return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
+        return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
 
     seed_parts: list[str] = []
     if isinstance(scene_card, dict):
-        camera = runtime._dict_or_empty(scene_card.get("camera"))
+        camera = _dict_or_empty(scene_card.get("camera"))
         camera_seed = "，".join(
-            runtime._showcase_scene_label(item)
+            _showcase_scene_label(item)
             for item in (
                 camera.get("distance"),
                 camera.get("angle"),
@@ -190,7 +242,7 @@ def _composed_showcase_prompt(
             "商品主体清楚，不遮挡。"
             if lock_prefix
             else "本张商品重点："
-            f"{runtime._compact_lock_text(visible_preserve) or visible_preserve}。"
+            f"{_compact_lock_text(visible_preserve) or visible_preserve}。"
         ),
     ]
     if shot_type != "side_or_back":
@@ -203,7 +255,7 @@ def _composed_showcase_prompt(
     if deferred_preserve:
         scene_rules.append("其它角度细节交给其它图，不要为它们破坏当前镜头。")
     body = f"{body}\n\n" + "".join(scene_rules)
-    return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
+    return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
 
 
 def _showcase_prompt(
@@ -225,7 +277,6 @@ def _showcase_prompt(
     allow_pet: bool = True,
     allow_background_people: bool = True,
 ) -> str:
-    runtime = _runtime()
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
     must_preserve = product_analysis.get("must_preserve")
@@ -238,7 +289,7 @@ def _showcase_prompt(
         else []
     )
     product_preserve = "、".join(preserve_items[:8]) or fallback_preserve
-    visible_preserve, deferred_preserve = runtime._showcase_visibility_policy(
+    visible_preserve, deferred_preserve = _showcase_visibility_policy(
         garment_lock=garment_lock,
         product_preserve=product_preserve,
         scene_card=scene_card,
@@ -249,12 +300,12 @@ def _showcase_prompt(
         height_cm = (
             int(height_cm_raw)
             if height_cm_raw is not None
-            else runtime._infer_model_height_cm(
+            else _infer_model_height_cm(
                 " ".join(part for part in (summary, user_prompt) if part)
             )
         )
     except (TypeError, ValueError):
-        height_cm = runtime._infer_model_height_cm(
+        height_cm = _infer_model_height_cm(
             " ".join(part for part in (summary, user_prompt) if part)
         )
     model_consistency = (
@@ -266,29 +317,29 @@ def _showcase_prompt(
         "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
     )
     if shot_variant is None:
-        shot_variant = runtime._showcase_default_variant(
+        shot_variant = _showcase_default_variant(
             template,
             shot_type,
             age_segment,
         )
     shot_direction = shot_variant["label"] if shot_variant else shot_type
     framing = shot_variant["framing"] if shot_variant else "product_first"
-    framing_direction = runtime._showcase_framing_direction(
+    framing_direction = _showcase_framing_direction(
         shot_type,
         framing,
         aspect_ratio,
     )
-    composition_extra = runtime._showcase_composition_direction(template)
+    composition_extra = _showcase_composition_direction(template)
     if composition_extra:
         framing_direction = f"{framing_direction}；{composition_extra}"
-    pose_direction = runtime._showcase_pose_direction(template)
-    soft = runtime._age_soft_constraint(age_segment)
+    pose_direction = _showcase_pose_direction(template)
+    soft = _age_soft_constraint(age_segment)
     if soft:
         pose_direction = f"{pose_direction}，{soft}"
     quality_direction = "4K 终稿" if final_quality == "4k" else "高质量"
-    style_region = runtime._style_region_from_text(summary)
+    style_region = _style_region_from_text(summary)
     lock_prefix = (
-        runtime._showcase_garment_lock_prefix(
+        _showcase_garment_lock_prefix(
             garment_lock=garment_lock,
             product_preserve=product_preserve,
             model_consistency=model_consistency,
@@ -298,10 +349,9 @@ def _showcase_prompt(
         if garment_lock is not None
         else ""
     )
-    scene_direction = runtime._showcase_scene_card_direction(scene_card)
+    scene_direction = _showcase_scene_card_direction(scene_card)
     if composed_prompt and composed_prompt.strip():
         return _composed_showcase_prompt(
-            runtime,
             lock_prefix=lock_prefix,
             composed_prompt=composed_prompt,
             scene_direction=scene_direction,
@@ -310,22 +360,22 @@ def _showcase_prompt(
             visible_preserve=visible_preserve,
             deferred_preserve=deferred_preserve,
         )
-    template_direction = runtime._template_requirement(
+    template_direction = _template_requirement(
         template, product_analysis, scene_environment
     )
-    render_direction = runtime._showcase_render_direction(
+    render_direction = _showcase_render_direction(
         template,
         scene_environment,
     )
     if scene_direction:
-        scene_only_direction = runtime._showcase_scene_card_scene_direction(scene_card)
+        scene_only_direction = _showcase_scene_card_scene_direction(scene_card)
         template_direction = scene_only_direction or scene_direction
-        render_direction = runtime._showcase_scene_render_direction(
+        render_direction = _showcase_scene_render_direction(
             scene_card,
             age_segment=age_segment,
             model_summary=summary,
         )
-        framing_direction = runtime._showcase_scene_framing_direction(
+        framing_direction = _showcase_scene_framing_direction(
             scene_card, framing_direction
         )
         shot_direction = f"本张可见性目标：{visible_preserve}"
@@ -336,14 +386,14 @@ def _showcase_prompt(
             )
         if deferred_preserve:
             shot_direction = f"{shot_direction}；其它角度细节不强求"
-        camera_direction = runtime._showcase_scene_card_camera_direction(scene_card)
+        camera_direction = _showcase_scene_card_camera_direction(scene_card)
         if camera_direction:
             shot_direction = f"{camera_direction}；{shot_direction}"
         pose_direction = (
-            runtime._showcase_scene_card_action_direction(scene_card)
+            _showcase_scene_card_action_direction(scene_card)
             or "只执行本张拍摄方案的动作和动态，不混入其它模板动作或旧 shot 文案"
         )
-    body = runtime._showcase_prompt_brief(
+    body = _showcase_prompt_brief(
         user_direction=user_prompt,
         template_direction=template_direction,
         product_preserve=visible_preserve,
@@ -363,12 +413,12 @@ def _showcase_prompt(
     if not lock_prefix:
         return body
     prefix = f"{lock_prefix}\n\n"
-    if len(prefix) > runtime.MAX_PROMPT_CHARS - 600:
-        prefix = runtime._truncate_prompt_text(
+    if len(prefix) > MAX_PROMPT_CHARS - 600:
+        prefix = _truncate_prompt_text(
             prefix,
-            runtime.MAX_PROMPT_CHARS - 600,
+            MAX_PROMPT_CHARS - 600,
         )
-    return prefix + body[: max(0, runtime.MAX_PROMPT_CHARS - len(prefix))]
+    return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
 
 
 def _composition_shooting_brief(composition: dict[str, Any]) -> str:
@@ -394,16 +444,13 @@ def _guarded_shooting_brief(
     *,
     rewrite_instruction: str,
 ) -> str:
-    runtime = _runtime()
     brief = shooting_brief.strip()
-    instruction = runtime._preserve_safe_motion_rewrite_instruction(
+    instruction = _preserve_safe_motion_rewrite_instruction(
         rewrite_instruction.strip()
     ) or (
         "简化动作和道具关系，避免任何手、头发、宠物、饮料杯、手机、包带或前景物遮挡商品主体。"
     )
-    replaces_scene = runtime._rewrite_instruction_replaces_scene_or_composition(
-        instruction
-    )
+    replaces_scene = _rewrite_instruction_replaces_scene_or_composition(instruction)
     lead = (
         "安全覆盖：以本安全覆盖重写当前拍摄方案；允许更换场景、构图、光线、镜头、"
         "空间层次、自然情绪、动作和道具；"
@@ -424,11 +471,10 @@ def _guarded_shooting_brief(
 
 
 def _preserve_safe_motion_rewrite_instruction(instruction: str) -> str:
-    runtime = _runtime()
     text = instruction.strip()
     if not text:
         return ""
-    for static_text, dynamic_text in runtime._STATIC_REWRITE_REPLACEMENTS:
+    for static_text, dynamic_text in _STATIC_REWRITE_REPLACEMENTS:
         text = text.replace(static_text, dynamic_text)
     static_tokens = (
         "稳定站定",
@@ -538,3 +584,16 @@ _STATIC_REWRITE_REPLACEMENTS = (
         "双手保持低位或打开在身体两侧，避开胸口、图案、口袋和衣身主体",
     ),
 )
+
+
+# Public workflow contracts.
+STATIC_REWRITE_REPLACEMENTS = _STATIC_REWRITE_REPLACEMENTS
+composition_shooting_brief = _composition_shooting_brief
+guarded_shooting_brief = _guarded_shooting_brief
+preserve_safe_motion_rewrite_instruction = _preserve_safe_motion_rewrite_instruction
+rewrite_instruction_replaces_scene_or_composition = (
+    _rewrite_instruction_replaces_scene_or_composition
+)
+showcase_garment_lock_prefix = _showcase_garment_lock_prefix
+showcase_prompt = _showcase_prompt
+showcase_prompt_brief = _showcase_prompt_brief

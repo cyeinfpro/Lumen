@@ -150,7 +150,9 @@ resolve_system_prompt_for_message = (
     _message_submission.resolve_system_prompt_for_message
 )
 
-ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+ALLOWED_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh"}
+)
 _SILENT_GENERATION_REQUEST_HASH_KEY = "request_hash"
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
 _CONFIRM_REPLY_YES_RE = re.compile(
@@ -658,6 +660,18 @@ async def _publish_assistant_task(**kwargs: Any) -> None:
         publish_sse_event_fn=publish_sse_event,
         log=logger,
     )
+
+
+async def create_assistant_task(**kwargs: Any) -> AssistantTaskResult:
+    """Public adapter that preserves legacy task-creation patch points."""
+
+    return await _create_assistant_task(**kwargs)
+
+
+async def publish_assistant_task(**kwargs: Any) -> None:
+    """Public adapter that preserves legacy task-publishing patch points."""
+
+    await _publish_assistant_task(**kwargs)
 
 
 async def _await_post_commit_publish(
@@ -1360,3 +1374,10 @@ async def get_message(
     if msg is None:
         raise _http("not_found", "message not found", 404)
     return MessageOut.model_validate(msg)
+
+
+publish_message_appended = _publish_message_appended
+DEFAULT_IMAGE_OUTPUT_FORMAT = _DEFAULT_IMAGE_OUTPUT_FORMAT
+await_post_commit_publish = _await_post_commit_publish
+idempotency_lookup_keys = _idempotency_lookup_keys
+message_alive_filters = _message_alive_filters

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .runtime import video_ports
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any
@@ -21,7 +22,6 @@ from ...video_upstream import (
     VideoProviderAdapter,
     VideoUpstreamError,
 )
-from ._facade import _g
 
 
 async def handle_video_upstream_poll_error(
@@ -31,18 +31,18 @@ async def handle_video_upstream_poll_error(
     *,
     lease_lost: asyncio.Event,
 ) -> None:
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before upstream error handling",
     )
-    if await _g._finish_cancelled_after_provider_poll_error(
+    if await video_ports()._finish_cancelled_after_provider_poll_error(
         redis,
         task_id,
         lease_lost=lease_lost,
         exc=exc,
     ):
         return
-    if await _g._schedule_poll_retry(
+    if await video_ports()._schedule_poll_retry(
         redis,
         task_id,
         exc,
@@ -51,8 +51,8 @@ async def handle_video_upstream_poll_error(
         return
     # Compatibility audit marker:
     # retryable_poll_error = _is_retryable_video_exception(exc)
-    retryable_poll_error = _g._is_retryable_video_exception(exc)
-    await _g._apply_poll_result(
+    retryable_poll_error = video_ports()._is_retryable_video_exception(exc)
+    await video_ports()._apply_poll_result(
         redis,
         task_id,
         PollResult(
@@ -61,14 +61,14 @@ async def handle_video_upstream_poll_error(
             upstream_billable=None,
             raw=exc.raw
             or {
-                "error": _g._video_exception_message(exc, phase="poll"),
-                "error_code": _g._video_exception_code(
+                "error": video_ports()._video_exception_message(exc, phase="poll"),
+                "error_code": video_ports()._video_exception_code(
                     exc,
                     default="upstream_unknown",
                 ),
             },
         ),
-        fallback_error_message=_g._video_exception_message(
+        fallback_error_message=video_ports()._video_exception_message(
             exc,
             phase="poll",
         ),
@@ -83,50 +83,50 @@ async def _handle_non_upstream_poll_error(
     *,
     lease_lost: asyncio.Event,
 ) -> None:
-    _g.logger.warning(
+    video_ports().logger.warning(
         "video poll failed task=%s err=%s",
         task_id,
         exc,
         exc_info=True,
     )
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before unexpected error handling",
     )
-    if not _g._is_retryable_video_exception(exc):
-        await _g._handle_unexpected_poll_exception(
+    if not video_ports()._is_retryable_video_exception(exc):
+        await video_ports()._handle_unexpected_poll_exception(
             redis,
             task_id,
             exc,
             lease_lost=lease_lost,
         )
         return
-    if await _g._schedule_poll_retry(
+    if await video_ports()._schedule_poll_retry(
         redis,
         task_id,
         exc,
         lease_lost=lease_lost,
     ):
         return
-    await _g._apply_poll_result(
+    await video_ports()._apply_poll_result(
         redis,
         task_id,
         PollResult(
             status="expired",
-            failure_class=_g._video_exception_code(
+            failure_class=video_ports()._video_exception_code(
                 exc,
                 default="upstream_unknown",
             ),
             upstream_billable=None,
             raw={
-                "error": _g._video_exception_message(exc, phase="poll"),
-                "error_code": _g._video_exception_code(
+                "error": video_ports()._video_exception_message(exc, phase="poll"),
+                "error_code": video_ports()._video_exception_code(
                     exc,
                     default="upstream_unknown",
                 ),
             },
         ),
-        fallback_error_message=_g._video_exception_message(
+        fallback_error_message=video_ports()._video_exception_message(
             exc,
             phase="poll",
         ),
@@ -141,12 +141,14 @@ async def _handle_poll_execution_error(
     *,
     lease_lost: asyncio.Event,
 ) -> None:
-    if isinstance(exc, _g._VideoLeaseLost):
-        _g.logger.warning("video poll lease lost task=%s err=%s", task_id, exc)
+    if isinstance(exc, video_ports()._VideoLeaseLost):
+        video_ports().logger.warning(
+            "video poll lease lost task=%s err=%s", task_id, exc
+        )
         return
     try:
         if isinstance(exc, VideoUpstreamError):
-            await _g._handle_video_upstream_poll_error(
+            await video_ports()._handle_video_upstream_poll_error(
                 redis,
                 task_id,
                 lease_lost=lease_lost,
@@ -159,8 +161,8 @@ async def _handle_poll_execution_error(
             exc,
             lease_lost=lease_lost,
         )
-    except _g._VideoLeaseLost as lease_exc:
-        _g.logger.warning(
+    except video_ports()._VideoLeaseLost as lease_exc:
+        video_ports().logger.warning(
             "video poll lease lost during error handling task=%s err=%s",
             task_id,
             lease_exc,
@@ -169,13 +171,13 @@ async def _handle_poll_execution_error(
 
 async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
     redis = ctx["redis"]
-    token = f"video-poll:{_g.new_uuid7()}"
-    if not await _g._acquire_lease(redis, task_id, token):
+    token = f"video-poll:{video_ports().new_uuid7()}"
+    if not await video_ports()._acquire_lease(redis, task_id, token):
         return
     stop_renewer = asyncio.Event()
     lease_lost = asyncio.Event()
     renewer = asyncio.create_task(
-        _g._lease_renewer(
+        video_ports()._lease_renewer(
             redis,
             task_id,
             token,
@@ -185,7 +187,7 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
     )
     adapter: VideoProviderAdapter | None = None
     try:
-        async with _g.SessionLocal() as session:
+        async with video_ports().SessionLocal() as session:
             generation = (
                 await session.execute(
                     select(VideoGeneration)
@@ -193,53 +195,56 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
                     .with_for_update(skip_locked=True)
                 )
             ).scalar_one_or_none()
-            if generation is None or generation.status in _g._TERMINAL_STATUSES:
+            if (
+                generation is None
+                or generation.status in video_ports()._TERMINAL_STATUSES
+            ):
                 return
             if not generation.provider_task_id:
-                await _g._enqueue_submit(
+                await video_ports()._enqueue_submit(
                     redis,
                     task_id,
-                    defer_s=_g._POLL_INTERVAL_S,
+                    defer_s=video_ports()._POLL_INTERVAL_S,
                 )
                 return
-            _g._raise_if_video_lease_lost(
+            video_ports()._raise_if_video_lease_lost(
                 lease_lost,
                 "video poll lease lost before provider resolution",
             )
-            provider = await _g._provider_for_generation(generation)
-            adapter = _g.adapter_for_provider(provider)
+            provider = await video_ports()._provider_for_generation(generation)
+            adapter = video_ports().adapter_for_provider(provider)
             provider_task_id = generation.provider_task_id
-            deadline_expired = generation.deadline_at <= _g._now()
+            deadline_expired = generation.deadline_at <= video_ports()._now()
             should_commit_poll_state = False
             if generation.cancel_requested_at is not None:
-                await _g._try_provider_cancel(
+                await video_ports()._try_provider_cancel(
                     adapter,
                     generation,
                     lease_lost=lease_lost,
                 )
                 should_commit_poll_state = True
             if deadline_expired:
-                diagnostics = _g._generation_diagnostics(generation)
+                diagnostics = video_ports()._generation_diagnostics(generation)
                 diagnostics.setdefault(
                     "deadline_expired_at",
-                    _g._now().isoformat(),
+                    video_ports()._now().isoformat(),
                 )
                 diagnostics["deadline_expired_polling_continues"] = True
                 generation.diagnostics = diagnostics
                 should_commit_poll_state = True
             if should_commit_poll_state:
-                _g._raise_if_video_lease_lost(
+                video_ports()._raise_if_video_lease_lost(
                     lease_lost,
                     "video poll lease lost before state commit",
                 )
                 await session.commit()
 
         poll = await adapter.poll(provider_task_id)
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost during provider poll",
         )
-        await _g._apply_poll_result(
+        await video_ports()._apply_poll_result(
             redis,
             task_id,
             poll,
@@ -257,7 +262,7 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
         stop_renewer.set()
         renewer.cancel()
         await asyncio.gather(renewer, return_exceptions=True)
-        await _g._release_lease(redis, task_id, token)
+        await video_ports()._release_lease(redis, task_id, token)
 
 
 def _poll_retry_delay(
@@ -267,11 +272,11 @@ def _poll_retry_delay(
     local_window_exhausted: bool,
 ) -> int:
     if local_window_exhausted:
-        return _g._EXTENDED_POLL_INTERVAL_S
+        return video_ports()._EXTENDED_POLL_INTERVAL_S
     remaining_s = int((generation.deadline_at - now).total_seconds())
     if remaining_s <= 1:
-        return _g._POLL_RETRY_DELAY_S
-    return max(1, min(_g._POLL_RETRY_DELAY_S, remaining_s - 1))
+        return video_ports()._POLL_RETRY_DELAY_S
+    return max(1, min(video_ports()._POLL_RETRY_DELAY_S, remaining_s - 1))
 
 
 async def _publish_and_enqueue_poll_retry(
@@ -283,35 +288,35 @@ async def _publish_and_enqueue_poll_retry(
     lease_lost: asyncio.Event | None,
 ) -> None:
     try:
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before retry event",
         )
-        await _g._publish(
+        await video_ports()._publish(
             redis,
             generation,
             EV_VIDEO_PROGRESS,
             retry_after_s=delay_s,
             retry_error_code=error_code,
         )
-    except _g._VideoLeaseLost:
+    except video_ports()._VideoLeaseLost:
         raise
     except Exception:
-        _g.logger.warning(
+        video_ports().logger.warning(
             "video poll retry publish failed task=%s",
             generation.id,
             exc_info=True,
         )
     try:
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before retry enqueue",
         )
-        await _g._enqueue_poll(redis, generation.id, defer_s=delay_s)
-    except _g._VideoLeaseLost:
+        await video_ports()._enqueue_poll(redis, generation.id, defer_s=delay_s)
+    except video_ports()._VideoLeaseLost:
         raise
     except Exception:
-        _g.logger.warning(
+        video_ports().logger.warning(
             "video poll retry enqueue failed task=%s",
             generation.id,
             exc_info=True,
@@ -325,13 +330,13 @@ async def schedule_poll_retry(
     *,
     lease_lost: asyncio.Event | None = None,
 ) -> bool:
-    if not _g._is_retryable_video_exception(exc):
+    if not video_ports()._is_retryable_video_exception(exc):
         return False
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before retry scheduling",
     )
-    async with _g.SessionLocal() as session:
+    async with video_ports().SessionLocal() as session:
         generation = (
             await session.execute(
                 select(VideoGeneration)
@@ -339,23 +344,25 @@ async def schedule_poll_retry(
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if generation is None or generation.status in _g._TERMINAL_STATUSES:
+        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
             return True
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before retry mutation",
         )
-        now = _g._now()
-        error_code = _g._video_exception_code(exc, default="upstream_unknown")
-        if _g._provider_tracking_window_exhausted(generation, now):
+        now = video_ports()._now()
+        error_code = video_ports()._video_exception_code(
+            exc, default="upstream_unknown"
+        )
+        if video_ports()._provider_tracking_window_exhausted(generation, now):
             return False
-        local_window_exhausted = _g._poll_window_exhausted(generation, now)
+        local_window_exhausted = video_ports()._poll_window_exhausted(generation, now)
         delay_s = _poll_retry_delay(
             generation,
             now=now,
             local_window_exhausted=local_window_exhausted,
         )
-        error_message = _g._video_exception_message(exc, phase="poll")
+        error_message = video_ports()._video_exception_message(exc, phase="poll")
         diagnostics = dict(generation.diagnostics or {})
         diagnostics.pop("unexpected_poll_attempts", None)
         diagnostics.pop("unexpected_poll_fingerprint", None)
@@ -365,13 +372,15 @@ async def schedule_poll_retry(
         if local_window_exhausted:
             diagnostics.setdefault("poll_window_exhausted_at", now.isoformat())
             diagnostics["extended_polling_continues"] = True
-            diagnostics["extended_poll_delay_s"] = _g._EXTENDED_POLL_INTERVAL_S
-            diagnostics["max_poll_count"] = _g._MAX_POLL_COUNT
-            diagnostics["max_poll_duration_s"] = _g._MAX_POLL_DURATION_S
-            diagnostics["max_provider_poll_duration_s"] = (
-                _g._MAX_PROVIDER_POLL_DURATION_S
+            diagnostics["extended_poll_delay_s"] = (
+                video_ports()._EXTENDED_POLL_INTERVAL_S
             )
-            elapsed_s = _g._poll_elapsed_s(generation, now)
+            diagnostics["max_poll_count"] = video_ports()._MAX_POLL_COUNT
+            diagnostics["max_poll_duration_s"] = video_ports()._MAX_POLL_DURATION_S
+            diagnostics["max_provider_poll_duration_s"] = (
+                video_ports()._MAX_PROVIDER_POLL_DURATION_S
+            )
+            elapsed_s = video_ports()._poll_elapsed_s(generation, now)
             if elapsed_s is not None:
                 diagnostics["poll_elapsed_s"] = elapsed_s
         retry_item = {
@@ -381,7 +390,7 @@ async def schedule_poll_retry(
             "message": error_message[:500],
             "next_retry_delay_s": delay_s,
         }
-        _g._append_bounded_history(
+        video_ports()._append_bounded_history(
             diagnostics,
             "poll_retry_history",
             retry_item,
@@ -400,12 +409,12 @@ async def schedule_poll_retry(
         generation.error_code = None
         generation.error_message = None
         generation.diagnostics = diagnostics
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before retry commit",
         )
         await session.commit()
-        _g.logger.info(
+        video_ports().logger.info(
             "video poll retry scheduled task=%s poll_count=%s delay_s=%s "
             "code=%s error=%s",
             generation.id,
@@ -431,11 +440,11 @@ async def handle_unexpected_poll_exception(
     *,
     lease_lost: asyncio.Event | None = None,
 ) -> None:
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before unexpected error persistence",
     )
-    async with _g.SessionLocal() as session:
+    async with video_ports().SessionLocal() as session:
         generation = (
             await session.execute(
                 select(VideoGeneration)
@@ -443,32 +452,34 @@ async def handle_unexpected_poll_exception(
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if generation is None or generation.status in _g._TERMINAL_STATUSES:
+        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
             return
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before unexpected error mutation",
         )
-        now = _g._now()
-        diagnostics = _g._generation_diagnostics(generation)
+        now = video_ports()._now()
+        diagnostics = video_ports()._generation_diagnostics(generation)
         try:
             previous_attempts = int(diagnostics.get("unexpected_poll_attempts") or 0)
         except (TypeError, ValueError):
             previous_attempts = 0
-        error_code = _g._video_exception_code(
+        error_code = video_ports()._video_exception_code(
             exc,
             default="poll_internal_error",
         )
-        error_message = _g._video_exception_message(exc, phase="poll")
+        error_message = video_ports()._video_exception_message(exc, phase="poll")
         fingerprint = f"{type(exc).__module__}.{type(exc).__qualname__}:{error_code}"
         if diagnostics.get("unexpected_poll_fingerprint") != fingerprint:
             previous_attempts = 0
-        tracking_exhausted = _g._provider_tracking_window_exhausted(
+        tracking_exhausted = video_ports()._provider_tracking_window_exhausted(
             generation,
             now,
         )
         attempt = previous_attempts + 1
-        terminal = tracking_exhausted or attempt >= _g._MAX_UNEXPECTED_POLL_ATTEMPTS
+        terminal = (
+            tracking_exhausted or attempt >= video_ports()._MAX_UNEXPECTED_POLL_ATTEMPTS
+        )
         item = {
             "at": now.isoformat(),
             "attempt": attempt,
@@ -476,7 +487,7 @@ async def handle_unexpected_poll_exception(
             "message": error_message[:500],
             "terminal": terminal,
         }
-        _g._append_bounded_history(
+        video_ports()._append_bounded_history(
             diagnostics,
             "unexpected_poll_history",
             item,
@@ -487,10 +498,12 @@ async def handle_unexpected_poll_exception(
             **item,
             "retryable": not terminal,
         }
-        diagnostics["max_unexpected_poll_attempts"] = _g._MAX_UNEXPECTED_POLL_ATTEMPTS
+        diagnostics["max_unexpected_poll_attempts"] = (
+            video_ports()._MAX_UNEXPECTED_POLL_ATTEMPTS
+        )
         generation.diagnostics = diagnostics
         if terminal:
-            await _g._finish_terminal_failure(
+            await video_ports()._finish_terminal_failure(
                 session,
                 redis,
                 generation,
@@ -504,7 +517,7 @@ async def handle_unexpected_poll_exception(
                         "error_code": error_code,
                         "unexpected_poll_attempts": attempt,
                         "max_unexpected_poll_attempts": (
-                            _g._MAX_UNEXPECTED_POLL_ATTEMPTS
+                            video_ports()._MAX_UNEXPECTED_POLL_ATTEMPTS
                         ),
                         "provider_tracking_window_exhausted": tracking_exhausted,
                         "upstream_cost_ambiguous": True,
@@ -516,9 +529,9 @@ async def handle_unexpected_poll_exception(
             return
 
         delay_s = (
-            _g._EXTENDED_POLL_INTERVAL_S
-            if _g._poll_window_exhausted(generation, now)
-            else _g._POLL_RETRY_DELAY_S
+            video_ports()._EXTENDED_POLL_INTERVAL_S
+            if video_ports()._poll_window_exhausted(generation, now)
+            else video_ports()._POLL_RETRY_DELAY_S
         )
         generation.status = VideoGenerationStatus.RUNNING.value
         if generation.progress_stage not in {
@@ -531,16 +544,16 @@ async def handle_unexpected_poll_exception(
         generation.next_poll_at = now + timedelta(seconds=delay_s)
         generation.error_code = None
         generation.error_message = None
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before unexpected error retry commit",
         )
         await session.commit()
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before unexpected error retry event",
         )
-        await _g._publish(
+        await video_ports()._publish(
             redis,
             generation,
             EV_VIDEO_PROGRESS,
@@ -548,11 +561,11 @@ async def handle_unexpected_poll_exception(
             retry_error_code=error_code,
             unexpected_retry_attempt=attempt,
         )
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before unexpected error retry enqueue",
         )
-        await _g._enqueue_poll(redis, generation.id, defer_s=delay_s)
+        await video_ports()._enqueue_poll(redis, generation.id, defer_s=delay_s)
 
 
 async def finish_cancelled_after_provider_poll_error(
@@ -562,15 +575,15 @@ async def finish_cancelled_after_provider_poll_error(
     *,
     lease_lost: asyncio.Event | None = None,
 ) -> bool:
-    if _g._video_exception_code(exc, default="upstream_unknown") != (
+    if video_ports()._video_exception_code(exc, default="upstream_unknown") != (
         "upstream_not_ready"
     ):
         return False
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before cancel reconciliation",
     )
-    async with _g.SessionLocal() as session:
+    async with video_ports().SessionLocal() as session:
         generation = (
             await session.execute(
                 select(VideoGeneration)
@@ -578,13 +591,13 @@ async def finish_cancelled_after_provider_poll_error(
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if generation is None or generation.status in _g._TERMINAL_STATUSES:
+        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
             return True
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before cancel terminal mutation",
         )
-        diagnostics = _g._generation_diagnostics(generation)
+        diagnostics = video_ports()._generation_diagnostics(generation)
         if generation.cancel_requested_at is None or not diagnostics.get(
             "cancel_sent_at"
         ):
@@ -598,7 +611,9 @@ async def finish_cancelled_after_provider_poll_error(
                     exc.raw
                     or {
                         "phase": "poll",
-                        "error": _g._video_exception_message(exc, phase="poll"),
+                        "error": video_ports()._video_exception_message(
+                            exc, phase="poll"
+                        ),
                         "error_code": "upstream_not_ready",
                     }
                 ),
@@ -610,7 +625,7 @@ async def finish_cancelled_after_provider_poll_error(
         }
         if lease_lost is not None:
             kwargs["lease_lost"] = lease_lost
-        await _g._finish_terminal_failure(
+        await video_ports()._finish_terminal_failure(
             session,
             redis,
             generation,
@@ -626,20 +641,20 @@ async def try_provider_cancel(
     *,
     lease_lost: asyncio.Event | None = None,
 ) -> None:
-    diagnostics = _g._generation_diagnostics(generation)
+    diagnostics = video_ports()._generation_diagnostics(generation)
     if diagnostics.get("cancel_sent_at") or diagnostics.get("cancel_unsupported_at"):
         return
     try:
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before provider cancel",
         )
         result = await adapter.cancel(generation.provider_task_id)
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost during provider cancel",
         )
-        attempted_at = _g._now().isoformat()
+        attempted_at = video_ports()._now().isoformat()
         diagnostics["cancel_attempted_at"] = attempted_at
         diagnostics["cancel_result"] = result.raw if result else None
         if result is None:
@@ -648,10 +663,10 @@ async def try_provider_cancel(
             diagnostics["cancel_sent_at"] = attempted_at
         else:
             diagnostics["cancel_rejected_at"] = attempted_at
-    except _g._VideoLeaseLost:
+    except video_ports()._VideoLeaseLost:
         raise
     except Exception as exc:  # noqa: BLE001
-        diagnostics["cancel_error_at"] = _g._now().isoformat()
+        diagnostics["cancel_error_at"] = video_ports()._now().isoformat()
         diagnostics["cancel_error"] = str(exc)[:500]
     generation.diagnostics = diagnostics
 
@@ -662,11 +677,11 @@ def _missing_result_poll(
     *,
     now: datetime,
 ) -> tuple[PollResult, int, bool]:
-    diagnostics = _g._generation_diagnostics(generation)
+    diagnostics = video_ports()._generation_diagnostics(generation)
     attempts = max(0, int(diagnostics.get("missing_result_url_attempts") or 0)) + 1
     should_retry = (
-        attempts <= _g._MAX_MISSING_RESULT_URL_POLLS
-        and not _g._provider_tracking_window_exhausted(generation, now)
+        attempts <= video_ports()._MAX_MISSING_RESULT_URL_POLLS
+        and not video_ports()._provider_tracking_window_exhausted(generation, now)
     )
     if should_retry:
         diagnostics["missing_result_url_attempts"] = attempts
@@ -713,11 +728,11 @@ async def apply_poll_result(
     adapter: VideoProviderAdapter | None = None,
     lease_lost: asyncio.Event | None = None,
 ) -> None:
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before result persistence",
     )
-    async with _g.SessionLocal() as session:
+    async with video_ports().SessionLocal() as session:
         generation = (
             await session.execute(
                 select(VideoGeneration)
@@ -725,18 +740,18 @@ async def apply_poll_result(
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if generation is None or generation.status in _g._TERMINAL_STATUSES:
+        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
             return
-        _g._raise_if_video_lease_lost(
+        video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost before result mutation",
         )
 
         if poll.status in {"queued", "running"}:
-            now = _g._now()
-            if not _g._provider_tracking_window_exhausted(generation, now):
+            now = video_ports()._now()
+            if not video_ports()._provider_tracking_window_exhausted(generation, now):
                 # Compatibility audit marker: await _continue_running_poll(
-                await _g._continue_running_poll(
+                await video_ports()._continue_running_poll(
                     session,
                     redis,
                     generation,
@@ -754,16 +769,18 @@ async def apply_poll_result(
                     **(poll.raw or {}),
                     "error": ("video task exceeded maximum provider tracking window"),
                     "poll_count": generation.poll_count,
-                    "max_poll_count": _g._MAX_POLL_COUNT,
-                    "max_poll_duration_s": _g._MAX_POLL_DURATION_S,
-                    "max_provider_poll_duration_s": (_g._MAX_PROVIDER_POLL_DURATION_S),
-                    "poll_elapsed_s": _g._poll_elapsed_s(generation, now),
+                    "max_poll_count": video_ports()._MAX_POLL_COUNT,
+                    "max_poll_duration_s": video_ports()._MAX_POLL_DURATION_S,
+                    "max_provider_poll_duration_s": (
+                        video_ports()._MAX_PROVIDER_POLL_DURATION_S
+                    ),
+                    "poll_elapsed_s": video_ports()._poll_elapsed_s(generation, now),
                 },
             )
 
         if poll.status == "succeeded":
             if not poll.video_url:
-                now = _g._now()
+                now = video_ports()._now()
                 poll, _attempts, should_retry = _missing_result_poll(
                     generation,
                     poll,
@@ -771,7 +788,7 @@ async def apply_poll_result(
                 )
                 if should_retry:
                     # Compatibility audit marker: await _continue_running_poll(
-                    await _g._continue_running_poll(
+                    await video_ports()._continue_running_poll(
                         session,
                         redis,
                         generation,
@@ -782,7 +799,7 @@ async def apply_poll_result(
                     return
             else:
                 try:
-                    await _g._finish_success(
+                    await video_ports()._finish_success(
                         session,
                         redis,
                         generation,
@@ -791,18 +808,18 @@ async def apply_poll_result(
                         lease_lost=lease_lost,
                     )
                 except InvalidVideoArtifactError as exc:
-                    await _g._finish_terminal_failure(
+                    await video_ports()._finish_terminal_failure(
                         session,
                         redis,
                         generation,
-                        _g._invalid_video_artifact_poll(poll, exc),
+                        video_ports()._invalid_video_artifact_poll(poll, exc),
                         fallback_error_message=str(exc)[:1000],
                         lease_lost=lease_lost,
-                        billing_reason=_g._INVALID_VIDEO_ARTIFACT_REASON,
+                        billing_reason=video_ports()._INVALID_VIDEO_ARTIFACT_REASON,
                     )
                 return
 
-        await _g._finish_terminal_failure(
+        await video_ports()._finish_terminal_failure(
             session,
             redis,
             generation,
@@ -821,21 +838,25 @@ async def continue_running_poll(
     now: datetime,
     lease_lost: asyncio.Event | None = None,
 ) -> None:
-    local_window_exhausted = _g._poll_window_exhausted(generation, now)
+    local_window_exhausted = video_ports()._poll_window_exhausted(generation, now)
     delay_s = (
-        _g._EXTENDED_POLL_INTERVAL_S if local_window_exhausted else _g._POLL_INTERVAL_S
+        video_ports()._EXTENDED_POLL_INTERVAL_S
+        if local_window_exhausted
+        else video_ports()._POLL_INTERVAL_S
     )
-    diagnostics = _g._generation_diagnostics(generation)
+    diagnostics = video_ports()._generation_diagnostics(generation)
     diagnostics.pop("unexpected_poll_attempts", None)
     diagnostics.pop("unexpected_poll_fingerprint", None)
     if local_window_exhausted:
         diagnostics.setdefault("poll_window_exhausted_at", now.isoformat())
         diagnostics["extended_polling_continues"] = True
         diagnostics["extended_poll_delay_s"] = delay_s
-        diagnostics["max_poll_count"] = _g._MAX_POLL_COUNT
-        diagnostics["max_poll_duration_s"] = _g._MAX_POLL_DURATION_S
-        diagnostics["max_provider_poll_duration_s"] = _g._MAX_PROVIDER_POLL_DURATION_S
-        elapsed_s = _g._poll_elapsed_s(generation, now)
+        diagnostics["max_poll_count"] = video_ports()._MAX_POLL_COUNT
+        diagnostics["max_poll_duration_s"] = video_ports()._MAX_POLL_DURATION_S
+        diagnostics["max_provider_poll_duration_s"] = (
+            video_ports()._MAX_PROVIDER_POLL_DURATION_S
+        )
+        elapsed_s = video_ports()._poll_elapsed_s(generation, now)
         if elapsed_s is not None:
             diagnostics["poll_elapsed_s"] = elapsed_s
 
@@ -851,27 +872,27 @@ async def continue_running_poll(
     generation.error_code = None
     generation.error_message = None
     generation.diagnostics = diagnostics
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before running-state commit",
     )
     await session.commit()
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before progress event",
     )
-    await _g._publish(
+    await video_ports()._publish(
         redis,
         generation,
         EV_VIDEO_PROGRESS,
         extended_polling=local_window_exhausted,
         retry_after_s=delay_s,
     )
-    _g._raise_if_video_lease_lost(
+    video_ports()._raise_if_video_lease_lost(
         lease_lost,
         "video poll lease lost before next poll enqueue",
     )
-    await _g._enqueue_poll(redis, generation.id, defer_s=delay_s)
+    await video_ports()._enqueue_poll(redis, generation.id, defer_s=delay_s)
 
 
 def cancelled_poll_during_finalization(poll: PollResult) -> PollResult:
@@ -897,7 +918,7 @@ def invalid_video_artifact_poll(
 ) -> PollResult:
     raw = {
         **(poll.raw or {}),
-        "reason": _g._INVALID_VIDEO_ARTIFACT_REASON,
+        "reason": video_ports()._INVALID_VIDEO_ARTIFACT_REASON,
         "phase": "artifact_validation",
         "provider_status": poll.status,
         "error": str(exc)[:1000],

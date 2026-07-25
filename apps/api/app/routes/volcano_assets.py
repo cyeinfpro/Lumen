@@ -87,7 +87,7 @@ from ._volcano_asset_retry import (
     RetryDependencies,
     retry_failed_operation,
 )
-from .videos import _video_provider_state
+from .videos import video_provider_state
 
 
 router = APIRouter(prefix="/video-assets", tags=["video-assets"])
@@ -155,7 +155,7 @@ async def _provider_state(
     *,
     model: str,
 ) -> tuple[VideoProviderDefinition | None, str | None]:
-    providers, errors = await _video_provider_state(db)
+    providers, errors = await video_provider_state(db)
     return _capability(providers, model=model, errors=errors)
 
 

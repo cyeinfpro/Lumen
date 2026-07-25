@@ -40,7 +40,7 @@ _ACTIVE_EXECUTION_STATUSES = (
     "reconciling",
     "canceling",
 )
-_TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled", "expired"}
+_TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "expired"})
 
 
 def _request_metadata(row: Any) -> dict[str, Any]:

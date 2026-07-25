@@ -195,3 +195,20 @@ def _instructions_with_summary_guardrail(
     if guardrail in base:
         return base
     return f"{base.rstrip()}\n\n{guardrail}"
+
+
+# Public contract consumed by the Completion runtime modules.
+STICKY_TEXT_CHAR_LIMIT = _STICKY_TEXT_CHAR_LIMIT
+SummaryBoundary = _SummaryBoundary
+count_message_tokens = _count_message_tokens
+instructions_with_summary_guardrail = _instructions_with_summary_guardrail
+message_after_summary = _message_after_summary
+message_created_at = _message_created_at
+role_eq = _role_eq
+sticky_text_from_message = _sticky_text_from_message
+summary_age_seconds = _summary_age_seconds
+summary_compressed_at = _summary_compressed_at
+summary_covers_boundary = _summary_covers_boundary
+summary_created_at = _summary_created_at
+truncate_sticky_text = _truncate_sticky_text
+with_summary_guardrail = _with_summary_guardrail

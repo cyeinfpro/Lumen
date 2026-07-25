@@ -623,8 +623,8 @@ async def test_maybe_enqueue_auto_title_uses_stable_cross_worker_job_id(
         async def execute(self, _stmt: Any) -> _Result:
             return _Result()
 
-    with auto_title._title_cache_lock:  # noqa: SLF001
-        auto_title._title_cache.clear()  # noqa: SLF001
+    with auto_title._RUNTIME.lock:  # noqa: SLF001
+        auto_title._RUNTIME.cache.clear()  # noqa: SLF001
     monkeypatch.setattr(auto_title, "SessionLocal", lambda: _FakeSession())
     redis = _FakeRedisEnqueue()
 

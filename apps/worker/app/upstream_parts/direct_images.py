@@ -108,3 +108,9 @@ async def _extract_image_result(
             proxy_url=proxy_url,
         )
     )[0]
+
+
+__all__ = [
+    "_extract_image_result",
+    "_extract_image_results",
+]

@@ -214,7 +214,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     "auth-control px-3 " +
                     (confirmMismatch
                       ? "border-danger-border focus:border-danger focus:ring-danger/20"
-                      : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
+                      : "border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-[var(--accent)]/25")
                   }
                 />
                 {confirmMismatch && (

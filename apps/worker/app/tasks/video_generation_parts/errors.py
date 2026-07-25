@@ -11,15 +11,17 @@ from ...video_upstream import VideoUpstreamError
 
 
 SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
-RETRYABLE_VIDEO_ERROR_CODES = {
-    "capacity",
-    "fetch_failed",
-    "provider_error",
-    "upstream_network_error",
-    "upstream_not_ready",
-    "upstream_timeout",
-    "upstream_unknown",
-}
+RETRYABLE_VIDEO_ERROR_CODES = frozenset(
+    {
+        "capacity",
+        "fetch_failed",
+        "provider_error",
+        "upstream_network_error",
+        "upstream_not_ready",
+        "upstream_timeout",
+        "upstream_unknown",
+    }
+)
 
 
 def video_exception_code(exc: Exception, *, default: str) -> str:

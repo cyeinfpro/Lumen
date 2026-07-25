@@ -20,24 +20,29 @@ from .output_sync_steps import (
     sync_product_analysis_step,
     sync_showcase_outputs,
 )
-from .output_values import (  # noqa: F401
-    MODEL_CANDIDATE_COUNT,
-    PRODUCT_ANALYSIS_FIELDS,
-    _candidate_generated_image_ids,
-    _clamp_score,
-    _coerce_string_list,
-    _extract_jsonish_value,
-    _failed_generation_output,
-    _generation_batch_outcome,
-    _merge_quality_summary_payload,
-    _normalize_product_analysis_payload,
-    _quality_payload_from_text,
-    _quality_summary_payload,
-    _showcase_expected_image_count,
-    _task_error_summary,
-    _try_parse_json_text,
-)
-from .serialization import _dedupe_nonempty
+from .output_values import MODEL_CANDIDATE_COUNT, PRODUCT_ANALYSIS_FIELDS  # noqa: F401
+from .output_values import (
+    candidate_generated_image_ids as _candidate_generated_image_ids,
+)  # noqa: F401
+from .output_values import clamp_score as _clamp_score  # noqa: F401
+from .output_values import coerce_string_list as _coerce_string_list  # noqa: F401
+from .output_values import extract_jsonish_value as _extract_jsonish_value  # noqa: F401
+from .output_values import failed_generation_output as _failed_generation_output  # noqa: F401
+from .output_values import generation_batch_outcome as _generation_batch_outcome  # noqa: F401
+from .output_values import (
+    merge_quality_summary_payload as _merge_quality_summary_payload,
+)  # noqa: F401
+from .output_values import (
+    normalize_product_analysis_payload as _normalize_product_analysis_payload,
+)  # noqa: F401
+from .output_values import quality_payload_from_text as _quality_payload_from_text  # noqa: F401
+from .output_values import quality_summary_payload as _quality_summary_payload  # noqa: F401
+from .output_values import (
+    showcase_expected_image_count as _showcase_expected_image_count,
+)  # noqa: F401
+from .output_values import task_error_summary as _task_error_summary  # noqa: F401
+from .output_values import try_parse_json_text as _try_parse_json_text  # noqa: F401
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
 
 
 def _first_images_by_generation(images: Iterable[Image]) -> dict[str, Image]:
@@ -215,3 +220,23 @@ async def _sync_workflow_outputs(
     await sync_model_candidate_outputs(db, run, steps, hooks)
     await sync_accessory_outputs(db, run, steps, hooks)
     await sync_showcase_outputs(db, run, steps, hooks)
+
+
+# Public workflow contracts.
+candidate_generated_image_ids = _candidate_generated_image_ids
+clamp_score = _clamp_score
+coerce_string_list = _coerce_string_list
+extract_jsonish_value = _extract_jsonish_value
+failed_generation_output = _failed_generation_output
+generation_batch_outcome = _generation_batch_outcome
+load_quality_reports = _load_quality_reports
+lock_workflow_run_for_sync = _lock_workflow_run_for_sync
+merge_quality_summary_payload = _merge_quality_summary_payload
+normalize_product_analysis_payload = _normalize_product_analysis_payload
+quality_payload_from_text = _quality_payload_from_text
+quality_summary_payload = _quality_summary_payload
+showcase_expected_image_count = _showcase_expected_image_count
+sync_quality_reports_from_tasks = _sync_quality_reports_from_tasks
+sync_workflow_outputs = _sync_workflow_outputs
+task_error_summary = _task_error_summary
+try_parse_json_text = _try_parse_json_text

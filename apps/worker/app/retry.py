@@ -129,11 +129,13 @@ _UPSTREAM_WRAPPED_FAILURE_MARKERS = (
     "response.failed",
     "no upstream account",
 )
-_TERMINAL_HTTP_STATUSES = {400, 401, 403, 404, 422}
-_EXPLICIT_RATE_LIMIT_CODES = {
-    EC.RATE_LIMIT_ERROR.value,
-    EC.RATE_LIMIT_EXCEEDED.value,
-}
+_TERMINAL_HTTP_STATUSES = frozenset({400, 401, 403, 404, 422})
+_EXPLICIT_RATE_LIMIT_CODES = frozenset(
+    {
+        EC.RATE_LIMIT_ERROR.value,
+        EC.RATE_LIMIT_EXCEEDED.value,
+    }
+)
 
 
 @dataclass(frozen=True)

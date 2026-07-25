@@ -735,7 +735,7 @@ function ProxyEditRow({
                 onChange={(e) => onChange({ password: e.target.value })}
                 autoComplete="new-password"
                 placeholder={draft.has_password_on_server ? "已设置（留空不改）" : "代理需要鉴权时填"}
-                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm font-mono transition-colors"
+                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm font-mono transition-colors"
               />
               <IconButton
                 variant="ghost"
@@ -889,7 +889,7 @@ function Field({
         value={value}
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors"
       />
       <span className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</span>
     </label>
@@ -922,7 +922,7 @@ function FieldInline({
         inputMode={inputMode}
         autoComplete="off"
         className={
-          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors " +
           (mono ? "font-mono" : "")
         }
       />
@@ -947,7 +947,7 @@ function FieldSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

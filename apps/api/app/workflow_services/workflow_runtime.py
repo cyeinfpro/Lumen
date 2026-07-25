@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-import importlib
 import logging
 import re
-import sys
 from typing import Any, Iterable
 
 from sqlalchemy import or_, select, update
@@ -45,30 +43,32 @@ from lumen_core.schemas import (
 from ..billing_cache_state import invalidate_balance_cache  # noqa: F401
 from ..db import affected_rows
 from ..redis_client import get_redis  # noqa: F401
+from ..services.message_submission import (
+    create_assistant_task as _create_assistant_task,
+    publish_assistant_task as _publish_assistant_task,
+    publish_message_appended as _publish_message_appended,
+)
 from ..services.generation_queue import release_generation_queue_state
-from ..workflow_domain.apparel_library import _normalize_age_segment
+from ..workflow_domain.apparel_library import (
+    normalize_age_segment as _normalize_age_segment,
+)  # noqa: F401
 from ..workflow_domain.showcase_model_policy import (
-    _accessory_age_direction,
-    _accessory_strength_direction,
-)
-from ..workflow_domain.workflow_contracts import _PublishBundle
-from .facade import FacadeRuntime
-from .output_sync import (
-    _coerce_string_list,
-    _load_quality_reports,  # noqa: F401
-)
-from .serialization import (
-    _clean_string_list,
-    _dedupe_nonempty,
-    _http,
-    _now,  # noqa: F401
-)
+    accessory_age_direction as _accessory_age_direction,
+)  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    accessory_strength_direction as _accessory_strength_direction,
+)  # noqa: F401
+from ..workflow_domain.workflow_contracts import PublishBundle as _PublishBundle  # noqa: F401
+from .output_sync import coerce_string_list as _coerce_string_list  # noqa: F401
+from .output_sync import load_quality_reports as _load_quality_reports  # noqa: F401
+from .serialization import clean_string_list as _clean_string_list  # noqa: F401
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+from .serialization import now as _now  # noqa: F401
 
 
-FACADE_RUNTIME = FacadeRuntime("workflow-runtime-facade")
-_SERVICE_MODULE = f"{__package__}.workflow_runtime"
 WORKFLOW_TYPE = "apparel_model_showcase"
-WORKFLOW_STEPS = [
+WORKFLOW_STEPS = (
     "upload_product",
     "product_analysis",
     "model_settings",
@@ -77,9 +77,9 @@ WORKFLOW_STEPS = [
     "showcase_generation",
     "quality_review",
     "delivery",
-]
+)
 POSTER_WORKFLOW_TYPE = "poster_design"
-POSTER_WORKFLOW_STEPS = [
+POSTER_WORKFLOW_STEPS = (
     "copy_input",
     "style_selection",
     "copy_analysis",
@@ -87,16 +87,9 @@ POSTER_WORKFLOW_STEPS = [
     "master_approval",
     "multi_size_generation",
     "delivery",
-]
+)
 _WORKFLOW_ASSET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,63}$")
 logger = logging.getLogger("app.routes.workflows")
-
-
-def _runtime() -> Any:
-    module = sys.modules.get(_SERVICE_MODULE)
-    if module is None:
-        module = importlib.import_module(_SERVICE_MODULE)
-    return FACADE_RUNTIME.current(module)
 
 
 def _primary_candidate_image_id(candidate: ModelCandidate) -> str | None:
@@ -192,7 +185,7 @@ async def _get_or_create_workflow_conversation(
     workflow_type: str = WORKFLOW_TYPE,
 ) -> Conversation:
     if conversation_id:
-        conv = await _runtime()._get_owned_conversation(
+        conv = await _get_owned_conversation(
             db, user_id=user.id, conversation_id=conversation_id
         )
         params = dict(conv.default_params or {})
@@ -268,11 +261,25 @@ async def _step(db: AsyncSession, run_id: str, step_key: str) -> WorkflowStep:
     return row
 
 
+async def _selected_candidate(db: AsyncSession, run_id: str) -> ModelCandidate:
+    candidate = (
+        await db.execute(
+            select(ModelCandidate).where(
+                ModelCandidate.workflow_run_id == run_id,
+                ModelCandidate.status == "selected",
+            )
+        )
+    ).scalar_one_or_none()
+    if candidate is None:
+        raise _http("model_not_approved", "approve a model candidate first", 409)
+    return candidate
+
+
 async def _workflow_steps_and_candidates(
     db: AsyncSession,
     run: WorkflowRun,
 ) -> tuple[list[WorkflowStep], list[ModelCandidate]]:
-    steps = await _runtime()._load_steps(db, run.id)
+    steps = await _load_steps(db, run.id)
     candidates = list(
         (
             await db.execute(
@@ -448,16 +455,9 @@ async def _post_commit_workflow_generated_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    runtime = _runtime()
-    queued_generation_ids = runtime._cleanup_string_list(
-        cleanup, "queued_generation_ids"
-    )
-    running_generation_ids = runtime._cleanup_string_list(
-        cleanup, "running_generation_ids"
-    )
-    streaming_completion_ids = runtime._cleanup_string_list(
-        cleanup, "streaming_completion_ids"
-    )
+    queued_generation_ids = _cleanup_string_list(cleanup, "queued_generation_ids")
+    running_generation_ids = _cleanup_string_list(cleanup, "running_generation_ids")
+    streaming_completion_ids = _cleanup_string_list(cleanup, "streaming_completion_ids")
     released_holds = cleanup.get("holds_released")
     if (
         not queued_generation_ids
@@ -466,7 +466,7 @@ async def _post_commit_workflow_generated_cleanup(
     ):
         if isinstance(released_holds, int) and released_holds > 0:
             try:
-                await runtime.invalidate_balance_cache(user_id)
+                await invalidate_balance_cache(user_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "workflow delete balance cache invalidation failed user=%s err=%s",
@@ -475,10 +475,10 @@ async def _post_commit_workflow_generated_cleanup(
                 )
         return
 
-    redis = runtime.get_redis()
+    redis = get_redis()
     for task_id in queued_generation_ids:
         try:
-            await runtime._release_workflow_generation_queue_state(redis, task_id)
+            await _release_workflow_generation_queue_state(redis, task_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "workflow delete image_queue release failed task=%s err=%s",
@@ -496,7 +496,7 @@ async def _post_commit_workflow_generated_cleanup(
             )
     if isinstance(released_holds, int) and released_holds > 0:
         try:
-            await runtime.invalidate_balance_cache(user_id)
+            await invalidate_balance_cache(user_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "workflow delete balance cache invalidation failed user=%s err=%s",
@@ -543,14 +543,13 @@ async def _soft_delete_workflow_generated_images(
     Images explicitly saved into the user's model library are preserved; those
     are no longer just transient task outputs.
     """
-    runtime = _runtime()
     if getattr(run, "deleted_at", None) is not None:
-        return runtime._empty_workflow_generated_cleanup()
+        return _empty_workflow_generated_cleanup()
 
-    steps, candidates = await runtime._workflow_steps_and_candidates(db, run)
-    task_ids = runtime._workflow_direct_task_ids(steps, candidates)
-    image_ids = runtime._workflow_direct_image_ids(steps, candidates)
-    generation_rows = await runtime._workflow_generation_rows_from_task_ids(
+    steps, candidates = await _workflow_steps_and_candidates(db, run)
+    task_ids = _workflow_direct_task_ids(steps, candidates)
+    image_ids = _workflow_direct_image_ids(steps, candidates)
+    generation_rows = await _workflow_generation_rows_from_task_ids(
         db,
         user_id=run.user_id,
         task_ids=task_ids,
@@ -588,7 +587,7 @@ async def _soft_delete_workflow_generated_images(
             queued_generation_rows,
             queued_generation_ids,
             running_generation_ids,
-        ) = runtime._cancel_workflow_generation_rows(
+        ) = _cancel_workflow_generation_rows(
             canceled_generation_rows,
             deleted_at=deleted_at,
             cancel_message=cancel_message,
@@ -637,13 +636,13 @@ async def _soft_delete_workflow_generated_images(
     if (
         not should_release_queued_holds
         and (queued_generation_rows or queued_completion_rows)
-        and await runtime._workflow_wallet_exists(db, run.user_id)
+        and await _workflow_wallet_exists(db, run.user_id)
     ):
         should_release_queued_holds = True
     if should_release_queued_holds:
         for generation in queued_generation_rows:
             released_holds += int(
-                await runtime._release_soft_deleted_task_hold(
+                await _release_soft_deleted_task_hold(
                     db,
                     user_id=run.user_id,
                     ref_type="generation",
@@ -653,7 +652,7 @@ async def _soft_delete_workflow_generated_images(
             )
         for completion in queued_completion_rows:
             released_holds += int(
-                await runtime._release_soft_deleted_task_hold(
+                await _release_soft_deleted_task_hold(
                     db,
                     user_id=run.user_id,
                     ref_type="completion",
@@ -686,7 +685,7 @@ async def _soft_delete_workflow_generated_images(
         )
         deleted_images = affected_rows(result)
 
-    cleanup = runtime._empty_workflow_generated_cleanup()
+    cleanup = _empty_workflow_generated_cleanup()
     cleanup.update(
         {
             "images_deleted": deleted_images,
@@ -832,7 +831,7 @@ async def _create_workflow_task(
     db.add(user_msg)
     await db.flush()
 
-    result = await _runtime()._create_assistant_task(
+    result = await _create_assistant_task(
         db=db,
         user_id=user.id,
         account_mode=getattr(user, "account_mode", "wallet"),
@@ -882,15 +881,15 @@ async def _publish_bundles(
     conv_id: str,
     bundles: list[_PublishBundle],
 ) -> None:
-    redis = _runtime().get_redis()
+    redis = get_redis()
     for bundle in bundles:
-        await _runtime()._publish_message_appended(
+        await _publish_message_appended(
             redis=redis,
             user_id=user_id,
             conv_id=conv_id,
             message_ids=bundle.message_ids,
         )
-        await _runtime()._publish_assistant_task(
+        await _publish_assistant_task(
             db=db,
             redis=redis,
             user_id=user_id,
@@ -955,7 +954,7 @@ def _image_params(
 
 
 def _candidate_image_params() -> ImageParamsIn:
-    params = _runtime()._image_params(
+    params = _image_params(
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
@@ -967,7 +966,7 @@ def _candidate_image_params() -> ImageParamsIn:
 
 
 def _accessory_preview_image_params() -> ImageParamsIn:
-    params = _runtime()._image_params(
+    params = _image_params(
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
@@ -989,7 +988,7 @@ def _merge_product_corrections(
         if value is not None:
             final[key] = value
     final["user_corrections"] = raw_corrections
-    final["confirmed_at"] = _runtime()._now().isoformat()
+    final["confirmed_at"] = _now().isoformat()
     return final
 
 
@@ -1147,9 +1146,8 @@ async def _attach_workflow_assets(
             404,
         )
 
-    runtime = _runtime()
-    step = await runtime._step(db, run.id, clean_step_key)
-    now = added_at or runtime._now()
+    step = await _step(db, run.id, clean_step_key)
+    now = added_at or _now()
     records = _workflow_asset_records(
         run=run,
         image_ids=deduped_image_ids,
@@ -1193,8 +1191,7 @@ async def _image_out_map(db: AsyncSession, images: list[Image]) -> dict[str, Ima
     for image_id, kind in variant_rows:
         variant_map.setdefault(image_id, set()).add(kind)
     return {
-        image.id: _runtime()._image_to_out(image, variant_map.get(image.id))
-        for image in images
+        image.id: _image_to_out(image, variant_map.get(image.id)) for image in images
     }
 
 
@@ -1248,8 +1245,7 @@ def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut
 
 async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
     """Build a response projection without reconciling or writing workflow state."""
-    runtime = _runtime()
-    steps = await runtime._load_steps(db, run.id)
+    steps = await _load_steps(db, run.id)
     candidates = list(
         (
             await db.execute(
@@ -1261,7 +1257,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
         .scalars()
         .all()
     )
-    reports = await runtime._load_quality_reports(db, run.id)
+    reports = await _load_quality_reports(db, run.id)
 
     # 先拉海报相关行；poster_masters/renders 的 image_id 和 task_ids 要
     # 加入下面 owned_images / generations 的扫描集合。
@@ -1312,7 +1308,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
 
     generations: list[Generation] = []
     if all_task_ids:
-        generations = await runtime._workflow_generation_rows_from_task_ids(
+        generations = await _workflow_generation_rows_from_task_ids(
             db,
             user_id=run.user_id,
             task_ids=list(all_task_ids),
@@ -1358,7 +1354,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
     else:
         owned_images = []
 
-    image_map = await runtime._image_out_map(db, owned_images)
+    image_map = await _image_out_map(db, owned_images)
     product_image_ids = set(run.product_image_ids or [])
     product_images = [
         image_map[iid] for iid in (run.product_image_ids or []) if iid in image_map
@@ -1420,7 +1416,7 @@ def _list_item_from_run(
         created_at=run.created_at,
         updated_at=run.updated_at,
         output_count=output_count,
-        next_action=_runtime()._next_action_for(run),
+        next_action=_next_action_for(run),
     )
 
 
@@ -1469,21 +1465,27 @@ FACADE_EXPORTS = (
     "_build_run_out",
     "_list_item_from_run",
 )
-
-
-def export_to_facade(facade: Any) -> None:
-    """Install route-bound aliases while keeping service imports route-free."""
-
-    from .facade import bind_facade
-
-    for name in FACADE_EXPORTS:
-        value = getattr(sys.modules[_SERVICE_MODULE], name)
-        setattr(
-            facade,
-            name,
-            bind_facade(value, facade=facade, runtime=FACADE_RUNTIME),
-        )
-    facade._PublishBundle = _PublishBundle
-
-
 __all__ = [*FACADE_EXPORTS, "_PublishBundle"]
+
+
+# Public workflow contracts.
+accessory_plan_from_product_analysis = _accessory_plan_from_product_analysis
+build_run_out = _build_run_out
+candidate_image_params = _candidate_image_params
+coerce_accessory_plan_payload = _coerce_accessory_plan_payload
+create_workflow_task = _create_workflow_task
+get_or_create_workflow_conversation = _get_or_create_workflow_conversation
+get_owned_conversation = _get_owned_conversation
+get_run = _get_run
+image_out_map = _image_out_map
+image_params = _image_params
+infer_age_segment_from_workflow = _infer_age_segment_from_workflow
+load_steps = _load_steps
+merge_product_corrections = _merge_product_corrections
+metadata_model_profile_from_prompt = _metadata_model_profile_from_prompt
+post_commit_workflow_generated_cleanup = _post_commit_workflow_generated_cleanup
+publish_bundles = _publish_bundles
+selected_candidate = _selected_candidate
+soft_delete_workflow_generated_images = _soft_delete_workflow_generated_images
+step = _step
+workflow_generation_rows_from_task_ids = _workflow_generation_rows_from_task_ids

@@ -484,22 +484,43 @@ def _is_upstream_model_unavailable_message(message: str) -> bool:
     )
 
 
+# Public parser contract. Private spellings remain implementation details for
+# same-module helpers and compatibility aliases in ``video_upstream``.
+absolute_url = _absolute_url
+billable = _billable
+collapse_url_path_slashes = _collapse_url_path_slashes
+duration_usage_total_tokens = _duration_usage_total_tokens
+explicit_video_result_url = _explicit_video_result_url
+failure_class = _failure_class
+http_error = _http_error
+int_or_none = _int_or_none
+nested_get = _nested_get
+provider_task_id = _provider_task_id
+provider_task_path_segment = _provider_task_path_segment
+response_json = _response_json
+safety_identifier = _safety_identifier
+status = _status
+submit_headers = _submit_headers
+usage_total_tokens = _usage_total_tokens
+video_url = _video_url
+
+
 __all__ = [
-    "_absolute_url",
-    "_billable",
-    "_collapse_url_path_slashes",
-    "_duration_usage_total_tokens",
-    "_explicit_video_result_url",
-    "_failure_class",
-    "_http_error",
-    "_int_or_none",
-    "_nested_get",
-    "_provider_task_id",
-    "_provider_task_path_segment",
-    "_response_json",
-    "_safety_identifier",
-    "_status",
-    "_submit_headers",
-    "_usage_total_tokens",
-    "_video_url",
+    "absolute_url",
+    "billable",
+    "collapse_url_path_slashes",
+    "duration_usage_total_tokens",
+    "explicit_video_result_url",
+    "failure_class",
+    "http_error",
+    "int_or_none",
+    "nested_get",
+    "provider_task_id",
+    "provider_task_path_segment",
+    "response_json",
+    "safety_identifier",
+    "status",
+    "submit_headers",
+    "usage_total_tokens",
+    "video_url",
 ]

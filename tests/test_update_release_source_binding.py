@@ -7,7 +7,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATE = ROOT / "scripts" / "update.sh"
+UPDATE_MODULE_DIR = ROOT / "scripts" / "update"
+UPDATE_SOURCE_RELATIVE = (
+    "release/manifest.sh",
+    "release/source_helpers.sh",
+    "release/fetch.sh",
+    "release/activate.sh",
+)
+
+
+def _update_source() -> str:
+    return "\n".join(
+        (UPDATE_MODULE_DIR / relative).read_text(encoding="utf-8")
+        for relative in UPDATE_SOURCE_RELATIVE
+    )
 
 
 def _bash_function(source: str, name: str) -> str:
@@ -17,7 +30,7 @@ def _bash_function(source: str, name: str) -> str:
 
 
 def _binding_harness(tmp_path: Path) -> Path:
-    source = UPDATE.read_text(encoding="utf-8")
+    source = _update_source()
     functions = "\n".join(
         _bash_function(source, name)
         for name in (
@@ -110,7 +123,7 @@ def test_release_source_binding_accepts_only_matching_40_byte_commit(
 
 
 def test_formal_release_collects_source_commit_from_allowed_proofs() -> None:
-    source = UPDATE.read_text(encoding="utf-8")
+    source = _update_source()
 
     assert 'git rev-parse --verify "${RELEASE_SOURCE_REF}^{commit}"' in source
     assert "org.opencontainers.image.revision" in source
@@ -121,7 +134,7 @@ def test_formal_release_collects_source_commit_from_allowed_proofs() -> None:
 
 
 def test_no_git_official_release_defaults_to_immutable_image_source() -> None:
-    source = UPDATE.read_text(encoding="utf-8")
+    source = _update_source()
     mandatory = source.index(
         'if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ ! -d "${REPO_DIR}/.git" ]; then'
     )
@@ -141,7 +154,7 @@ def test_no_git_official_release_defaults_to_immutable_image_source() -> None:
 
 
 def test_official_manifest_is_bound_after_fetch_without_changing_compat_paths() -> None:
-    source = UPDATE.read_text(encoding="utf-8")
+    source = _update_source()
     fetch = source.index("prepare_official_release_source_manifest")
     verify = source.index(
         "verify_release_source_manifest_binding \\\n"

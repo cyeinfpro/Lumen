@@ -18,14 +18,16 @@ from pathlib import Path
 from typing import Any
 
 
-ALLOWED_SQLITE_JOURNAL_MODES = {
-    "WAL",
-    "DELETE",
-    "TRUNCATE",
-    "PERSIST",
-    "MEMORY",
-    "OFF",
-}
+ALLOWED_SQLITE_JOURNAL_MODES = frozenset(
+    {
+        "WAL",
+        "DELETE",
+        "TRUNCATE",
+        "PERSIST",
+        "MEMORY",
+        "OFF",
+    }
+)
 _SQLITE_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -93,13 +95,15 @@ def _ensure_column(
 _REFS_LEGACY_TABLE = "refs_legacy_auth_migration"
 _REFS_MIGRATION_TABLE = "refs_auth_migration_new"
 _REFS_REBUILD_TABLE = "refs_auth_migration_rebuild"
-_REFS_REQUIRED_COLUMNS = {
-    "sha256",
-    "token",
-    "ext",
-    "size",
-    "created_at",
-}
+_REFS_REQUIRED_COLUMNS = frozenset(
+    {
+        "sha256",
+        "token",
+        "ext",
+        "size",
+        "created_at",
+    }
+)
 
 
 def _table_info(

@@ -23,3 +23,7 @@ class _PublishBundle:
 
 
 __all__ = ["_PublishBundle"]
+
+
+# Public workflow contracts.
+PublishBundle = _PublishBundle

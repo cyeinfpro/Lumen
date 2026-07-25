@@ -172,7 +172,7 @@ export function GlobalTaskTray() {
               exit={{ opacity: 0, y: 24, scale: 0.98 }}
               transition={SPRING.sheet}
               className={cn(
-                "pointer-events-auto mobile-dialog-sheet flex min-h-0 w-full flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-[var(--border)] bg-[var(--surface)] shadow-lumen-card backdrop-blur-xl sm:mb-3 sm:w-[23rem] sm:rounded-[var(--radius-sheet)]",
+                "pointer-events-auto mobile-dialog-sheet flex min-h-0 w-full flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-[var(--border)] bg-[var(--surface-glass)] shadow-lumen-card backdrop-blur-xl sm:mb-3 sm:w-[23rem] sm:rounded-[var(--radius-sheet)]",
               )}
               role="dialog"
               aria-modal="true"
@@ -208,7 +208,7 @@ export function GlobalTaskTray() {
               onClick={() => setTaskTrayMinimized(false)}
               aria-label={badge.label}
               className={cn(
-                "pointer-events-auto relative inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--fg-0)] shadow-lumen-card backdrop-blur-xl transition",
+                "pointer-events-auto relative inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-glass)] text-[var(--fg-0)] shadow-lumen-card backdrop-blur-xl transition",
                 "hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               )}
             >

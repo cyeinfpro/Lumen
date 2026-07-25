@@ -146,7 +146,7 @@ export function InvitesPanel() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 placeholder:text-[var(--fg-2)] transition-colors"
             />
           </FormField>
           <FormField id="invite-new-days" label="有效期（天）">
@@ -158,7 +158,7 @@ export function InvitesPanel() {
               inputMode="numeric"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 transition-colors"
             />
           </FormField>
           <FormField id="invite-new-role" label="角色">
@@ -166,7 +166,7 @@ export function InvitesPanel() {
               id="invite-new-role"
               value={role}
               onChange={(e) => setRole(e.target.value as "member" | "admin")}
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 transition-colors"
             >
               <option value="member">成员</option>
               <option value="admin">管理员</option>
@@ -199,10 +199,10 @@ export function InvitesPanel() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.2 }}
-              className="rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/[0.06] p-4 space-y-3"
+              className="rounded-[var(--radius-card)] border border-[var(--accent)]/35 bg-[var(--accent)]/[0.06] p-4 space-y-3"
             >
               <div className="flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 type-overline text-[var(--color-lumen-amber)]">
+                <span className="inline-flex items-center gap-1.5 type-overline text-[var(--accent)]">
                   <Check className="w-3.5 h-3.5" /> 新邀请已生成
                 </span>
                 <IconButton
@@ -576,7 +576,7 @@ function Field({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/30">
         <UserCog className="w-3 h-3" />
         管理员
       </span>

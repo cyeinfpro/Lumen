@@ -136,17 +136,15 @@ test("image prewarm cache is bounded and concurrency-limited", () => {
   match(preload, /map\.delete\(victim\)/);
 });
 
-test("SSE recovery requests are coalesced instead of dropped while busy", () => {
-  const provider = source("src/components/SSEProvider.tsx");
+test("SSE replay recovery is leader-owned and singleflight", () => {
+  const runtime = source("src/lib/sse/runtime.ts");
+  const coordinator = source("src/lib/sse/replayCoordinator.ts");
 
-  match(provider, /SSE_RECOVERY_COALESCE_MS = 600/);
-  match(provider, /queuedRecoveryRef/);
-  match(provider, /recoveryDisposedRef/);
-  match(provider, /mergeRecoveryRequest/);
-  match(
-    provider,
-    /hydrateTasks: current\.hydrateTasks \|\| next\.hydrateTasks/,
-  );
+  match(runtime, /if \(this\.leader\) void this\.recover\(effect\.reason\)/);
+  match(runtime, /type: "recovery_complete"/);
+  match(runtime, /type: "recovery_failed"/);
+  match(coordinator, /if \(this\.flight\) return this\.flight/);
+  match(coordinator, /if \(this\.flight === flight\) this\.flight = null/);
 });
 
 test("shared prompt enhancement aborts stale work and composer pills guard duplicate submits", () => {
@@ -173,13 +171,15 @@ test("shared prompt enhancement aborts stale work and composer pills guard dupli
 });
 
 test("api fetch preserves native abort semantics", () => {
-  const http = source("src/lib/api/http.ts");
+  const transport = source("src/lib/api/transport.ts");
+  const requestSignal = source("src/lib/api/requestSignal.ts");
 
-  match(http, /err instanceof Error && err\.name === "AbortError"/);
-  match(http, /throw err;/);
+  match(transport, /error instanceof Error && error\.name === "AbortError"/);
+  match(transport, /throw error;/);
+  match(requestSignal, /if \(source === "caller"\) throw abortReason\(callerSignal\)/);
   match(
-    http,
-    /parseApiError\(res\.status, data\)\.code === CSRF_FAILED_CODE/,
+    transport,
+    /parseApiError\(response\.status, data\)\.code !== "csrf_failed"/,
   );
 });
 

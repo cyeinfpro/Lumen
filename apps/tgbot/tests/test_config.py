@@ -113,6 +113,130 @@ def test_paused_config_refresh_interval_is_bounded() -> None:
     assert 15 <= main._PAUSED_CONFIG_REFRESH_INTERVAL_SEC <= 30
 
 
+def test_polling_error_classification_is_explicit() -> None:
+    assert (
+        main._classify_polling_error(main.TokenValidationError("bad token"))
+        is main.PollingTerminationClass.INVALID_CONFIGURATION
+    )
+    assert (
+        main._classify_polling_error(OSError("network down"))
+        is main.PollingTerminationClass.RECOVERABLE_NETWORK
+    )
+    assert (
+        main._classify_polling_error(RuntimeError("bug"))
+        is main.PollingTerminationClass.UNKNOWN
+    )
+
+
+@pytest.mark.asyncio
+async def test_polling_supervisor_treats_stop_as_normal() -> None:
+    stop_event = asyncio.Event()
+
+    async def start_polling() -> None:
+        await asyncio.Event().wait()
+
+    async def pause_invalid(_error: BaseException) -> None:
+        pytest.fail("normal stop must not pause configuration")
+
+    task = asyncio.create_task(
+        main._run_polling_supervisor(
+            start_polling=start_polling,
+            stop_event=stop_event,
+            logger=logging.getLogger("test-polling-stop"),
+            pause_invalid_configuration=pause_invalid,
+        )
+    )
+    await asyncio.sleep(0)
+    stop_event.set()
+
+    assert await asyncio.wait_for(task, timeout=1) is (
+        main.PollingTerminationClass.NORMAL_STOP
+    )
+
+
+@pytest.mark.asyncio
+async def test_polling_supervisor_retries_recoverable_network_failure() -> None:
+    stop_event = asyncio.Event()
+    attempts = 0
+    sleeps: list[float] = []
+
+    async def start_polling() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary network failure")
+        stop_event.set()
+
+    async def pause_invalid(_error: BaseException) -> None:
+        pytest.fail("network failure must not pause configuration")
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    result = await main._run_polling_supervisor(
+        start_polling=start_polling,
+        stop_event=stop_event,
+        logger=logging.getLogger("test-polling-network"),
+        pause_invalid_configuration=pause_invalid,
+        sleep=fake_sleep,
+    )
+
+    assert result is main.PollingTerminationClass.NORMAL_STOP
+    assert attempts == 2
+    assert sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_polling_supervisor_pauses_invalid_configuration() -> None:
+    paused: list[BaseException] = []
+    counter = main.TGBOT_POLLING_FAILURES.labels(
+        main.PollingTerminationClass.INVALID_CONFIGURATION.value
+    )
+    before = counter._value.get()
+
+    async def start_polling() -> None:
+        raise main.TokenValidationError("invalid token")
+
+    async def pause_invalid(error: BaseException) -> None:
+        paused.append(error)
+
+    result = await main._run_polling_supervisor(
+        start_polling=start_polling,
+        stop_event=asyncio.Event(),
+        logger=logging.getLogger("test-polling-config"),
+        pause_invalid_configuration=pause_invalid,
+    )
+
+    assert result is main.PollingTerminationClass.INVALID_CONFIGURATION
+    assert len(paused) == 1
+    assert counter._value.get() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_polling_supervisor_reraises_unknown_failure_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("test-polling-unknown")
+    caplog.set_level(logging.ERROR, logger=logger.name)
+
+    async def start_polling() -> None:
+        raise RuntimeError("polling bug")
+
+    async def pause_invalid(_error: BaseException) -> None:
+        pytest.fail("unknown failure must not pause configuration")
+
+    with pytest.raises(main.PollingSupervisorFailure) as exc:
+        await main._run_polling_supervisor(
+            start_polling=start_polling,
+            stop_event=asyncio.Event(),
+            logger=logger,
+            pause_invalid_configuration=pause_invalid,
+        )
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert any(record.exc_info for record in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_control_listener_turns_admin_restart_into_clean_stop(
     monkeypatch: pytest.MonkeyPatch,

@@ -352,7 +352,7 @@ function SignupForm({
         已有账号？{" "}
         <Link
           href="/login"
-          className="text-[var(--color-lumen-amber)] hover:underline"
+          className="text-[var(--accent)] hover:underline"
         >
           直接登录
         </Link>
@@ -392,7 +392,7 @@ function InvitePasswordFields({
       : "text-[var(--fg-2)]";
   const confirmInputTone = confirmMismatch
     ? "border-danger-border focus:border-danger focus:ring-danger/20"
-    : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25";
+    : "border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-[var(--accent)]/25";
 
   return (
     <>
@@ -635,7 +635,7 @@ function InfoLine({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/30">
         <UserCog className="w-3 h-3" />
         admin
       </span>

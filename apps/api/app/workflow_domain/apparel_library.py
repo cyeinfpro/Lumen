@@ -292,6 +292,7 @@ def _title_from_preset_id(preset_id: str) -> str:
 
 
 __all__ = [
+    "_APPEARANCE_ALIASES",
     "MODEL_LIBRARY_AGE_SEGMENTS",
     "MODEL_LIBRARY_APPEARANCES",
     "MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS",
@@ -329,3 +330,17 @@ __all__ = [
     "_preset_id_from_path",
     "_title_from_preset_id",
 ]
+
+
+# Public workflow contracts.
+SYNC_LOCK = _SYNC_LOCK
+age_segment_from_folder_name = _age_segment_from_folder_name
+gender_from_folder_name = _gender_from_folder_name
+library_item_url = _library_item_url
+model_library_folder_for_age = _model_library_folder_for_age
+model_library_sync_file_lock = _model_library_sync_file_lock
+normalize_age_segment = _normalize_age_segment
+normalize_appearance = _normalize_appearance
+normalize_model_gender = _normalize_model_gender
+preset_id_from_path = _preset_id_from_path
+title_from_preset_id = _title_from_preset_id

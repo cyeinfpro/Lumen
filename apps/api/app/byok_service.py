@@ -64,7 +64,7 @@ from .runtime_settings import get_setting  # type: ignore[attr-defined]
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
-_DEV_ENVS = {"dev", "development", "local", "test"}
+_DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 _MODEL_UNAVAILABLE_MARKERS = (
     "model_not_found",
     "model_not_available",
@@ -164,7 +164,9 @@ async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
     )
 
 
-def retention_policy_from_settings(settings_out: ByokSettingsOut) -> ByokRetentionPolicy:
+def retention_policy_from_settings(
+    settings_out: ByokSettingsOut,
+) -> ByokRetentionPolicy:
     return ByokRetentionPolicy(
         hide_enabled=bool(
             getattr(settings_out, "retention_hide_enabled", BYOK_DEFAULT_HIDE_ENABLED)
@@ -192,8 +194,15 @@ def retention_policy_from_settings(settings_out: ByokSettingsOut) -> ByokRetenti
 # explicitly so changes propagate within one round-trip per process.
 # This cache intentionally crosses request boundaries — settings are
 # global and not user-scoped, so leaking values across users is fine.
-_BYOK_SETTINGS_CACHE: tuple[float, ByokSettingsOut] | None = None
 _BYOK_SETTINGS_TTL_SECONDS = 30.0
+
+
+@dataclass
+class _ByokSettingsCacheState:
+    value: tuple[float, ByokSettingsOut] | None = None
+
+
+_byok_settings_cache_state = _ByokSettingsCacheState()
 
 
 async def read_byok_settings_cached(db: AsyncSession) -> ByokSettingsOut:
@@ -202,20 +211,18 @@ async def read_byok_settings_cached(db: AsyncSession) -> ByokSettingsOut:
     Use this on hot read paths (POST /messages). For write paths or when
     consistency matters within the same request, prefer read_byok_settings.
     """
-    global _BYOK_SETTINGS_CACHE
     now = time.monotonic()
-    cached = _BYOK_SETTINGS_CACHE
+    cached = _byok_settings_cache_state.value
     if cached is not None and now - cached[0] < _BYOK_SETTINGS_TTL_SECONDS:
         return cached[1]
     fresh = await read_byok_settings(db)
-    _BYOK_SETTINGS_CACHE = (now, fresh)
+    _byok_settings_cache_state.value = (now, fresh)
     return fresh
 
 
 def invalidate_byok_settings_cache() -> None:
     """Clear the BYOK settings cache. Call after admin PATCH commits."""
-    global _BYOK_SETTINGS_CACHE
-    _BYOK_SETTINGS_CACHE = None
+    _byok_settings_cache_state.value = None
 
 
 async def supplier_to_out(

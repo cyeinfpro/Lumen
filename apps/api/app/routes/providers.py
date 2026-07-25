@@ -205,7 +205,7 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
     )
 
 
-_IMAGE_JOBS_ENDPOINT_VALUES = {"auto", "generations", "responses"}
+_IMAGE_JOBS_ENDPOINT_VALUES = frozenset({"auto", "generations", "responses"})
 
 
 def _normalize_image_jobs_endpoint(raw: Any) -> str:

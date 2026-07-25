@@ -11,12 +11,14 @@
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import json
 from typing import Any
 
 import pytest
 
-from app import upstream
+from app.upstream_parts import upstream_impl as upstream
 
 
 # ---------------------------------------------------------------------------
@@ -25,19 +27,37 @@ from app import upstream
 
 
 def test_is_responses_success_terminal_accepts_completed_and_done() -> None:
-    assert upstream._is_responses_success_terminal("response.completed") is True
-    assert upstream._is_responses_success_terminal("response.done") is True
-    assert upstream._is_responses_success_terminal("response.failed") is False
-    assert upstream._is_responses_success_terminal(None) is False
-    assert upstream._is_responses_success_terminal(123) is False
+    assert (
+        upstream_services().core.is_responses_success_terminal("response.completed")
+        is True
+    )
+    assert (
+        upstream_services().core.is_responses_success_terminal("response.done") is True
+    )
+    assert (
+        upstream_services().core.is_responses_success_terminal("response.failed")
+        is False
+    )
+    assert upstream_services().core.is_responses_success_terminal(None) is False
+    assert upstream_services().core.is_responses_success_terminal(123) is False
 
 
 def test_is_responses_error_terminal_accepts_failed_incomplete_error() -> None:
-    assert upstream._is_responses_error_terminal("response.failed") is True
-    assert upstream._is_responses_error_terminal("response.incomplete") is True
-    assert upstream._is_responses_error_terminal("error") is True
-    assert upstream._is_responses_error_terminal("response.completed") is False
-    assert upstream._is_responses_error_terminal("response.done") is False
+    assert (
+        upstream_services().core.is_responses_error_terminal("response.failed") is True
+    )
+    assert (
+        upstream_services().core.is_responses_error_terminal("response.incomplete")
+        is True
+    )
+    assert upstream_services().core.is_responses_error_terminal("error") is True
+    assert (
+        upstream_services().core.is_responses_error_terminal("response.completed")
+        is False
+    )
+    assert (
+        upstream_services().core.is_responses_error_terminal("response.done") is False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +67,7 @@ def test_is_responses_error_terminal_accepts_failed_incomplete_error() -> None:
 
 def test_extract_image_b64_from_image_api_data_b64_json() -> None:
     payload = {"data": [{"b64_json": "AAAA", "revised_prompt": "p"}]}
-    assert upstream._extract_image_b64_from_payload(payload) == "AAAA"
+    assert upstream_services().core.extract_image_b64_from_payload(payload) == "AAAA"
 
 
 def test_extract_image_b64_from_responses_output_result() -> None:
@@ -57,7 +77,7 @@ def test_extract_image_b64_from_responses_output_result() -> None:
             {"type": "image_generation_call", "result": "BBBB"},
         ]
     }
-    assert upstream._extract_image_b64_from_payload(payload) == "BBBB"
+    assert upstream_services().core.extract_image_b64_from_payload(payload) == "BBBB"
 
 
 def test_extract_image_b64_from_response_wrapper_with_content_array() -> None:
@@ -68,23 +88,26 @@ def test_extract_image_b64_from_response_wrapper_with_content_array() -> None:
             ]
         }
     }
-    assert upstream._extract_image_b64_from_payload(payload) == "CCCC"
+    assert upstream_services().core.extract_image_b64_from_payload(payload) == "CCCC"
 
 
 def test_extract_image_b64_from_event_wrapper_item() -> None:
     payload = {"item": {"type": "image_generation_call", "result": "DDDD"}}
-    assert upstream._extract_image_b64_from_payload(payload) == "DDDD"
+    assert upstream_services().core.extract_image_b64_from_payload(payload) == "DDDD"
 
 
 def test_extract_image_b64_returns_none_for_url_only_data() -> None:
     payload = {"data": [{"url": "https://cdn.example/missing.png"}]}
-    assert upstream._extract_image_b64_from_payload(payload) is None
+    assert upstream_services().core.extract_image_b64_from_payload(payload) is None
 
 
 def test_extract_image_b64_returns_none_for_non_dict() -> None:
-    assert upstream._extract_image_b64_from_payload(None) is None
-    assert upstream._extract_image_b64_from_payload("string") is None
-    assert upstream._extract_image_b64_from_payload([{"b64_json": "x"}]) is None
+    assert upstream_services().core.extract_image_b64_from_payload(None) is None
+    assert upstream_services().core.extract_image_b64_from_payload("string") is None
+    assert (
+        upstream_services().core.extract_image_b64_from_payload([{"b64_json": "x"}])
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -93,29 +116,40 @@ def test_extract_image_b64_returns_none_for_non_dict() -> None:
 
 
 def test_extract_image_billable_count_from_usage_images() -> None:
-    assert upstream._extract_image_billable_count({"usage": {"images": 3}}) == 3
+    assert (
+        upstream_services().core.extract_image_billable_count({"usage": {"images": 3}})
+        == 3
+    )
 
 
 def test_extract_image_billable_count_from_response_usage_images() -> None:
     payload = {"response": {"usage": {"images": 2}}}
-    assert upstream._extract_image_billable_count(payload) == 2
+    assert upstream_services().core.extract_image_billable_count(payload) == 2
 
 
 def test_extract_image_billable_count_from_tool_usage_image_gen() -> None:
     payload = {"tool_usage": {"image_gen": {"images": 4}}}
-    assert upstream._extract_image_billable_count(payload) == 4
+    assert upstream_services().core.extract_image_billable_count(payload) == 4
 
 
 def test_extract_image_billable_count_rejects_negative_and_bool() -> None:
-    assert upstream._extract_image_billable_count({"usage": {"images": -1}}) is None
+    assert (
+        upstream_services().core.extract_image_billable_count({"usage": {"images": -1}})
+        is None
+    )
     # bool 是 int 子类——不能误判 True == 1
-    assert upstream._extract_image_billable_count({"usage": {"images": True}}) is None
+    assert (
+        upstream_services().core.extract_image_billable_count(
+            {"usage": {"images": True}}
+        )
+        is None
+    )
 
 
 def test_extract_image_billable_count_returns_none_when_missing() -> None:
-    assert upstream._extract_image_billable_count({}) is None
-    assert upstream._extract_image_billable_count({"usage": {}}) is None
-    assert upstream._extract_image_billable_count(None) is None
+    assert upstream_services().core.extract_image_billable_count({}) is None
+    assert upstream_services().core.extract_image_billable_count({"usage": {}}) is None
+    assert upstream_services().core.extract_image_billable_count(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +206,18 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, client: _FakeClient) -> None:
     async def fake_resolve_runtime() -> tuple[str, str]:
         return "https://upstream.example/v1", "test-key"
 
-    async def fake_timeout_config() -> upstream._TimeoutConfig:
-        return upstream._TimeoutConfig(connect=10.0, read=180.0, write=30.0)
+    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+        return upstream_services().lifecycle.TimeoutConfig(
+            connect=10.0, read=180.0, write=30.0
+        )
 
-    monkeypatch.setattr(upstream, "_get_client", fake_get_client)
-    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
-    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
+    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(
+        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+    )
+    monkeypatch.setattr(
+        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+    )
 
 
 def _valid_body() -> dict[str, Any]:
@@ -326,18 +366,26 @@ def _patch_image_stream_runtime(
     async def fake_get_client(*_a: Any, **_kw: Any) -> _StubClient:
         return client
 
-    async def fake_timeout_config() -> upstream._TimeoutConfig:
-        return upstream._TimeoutConfig(connect=10.0, read=180.0, write=30.0)
+    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+        return upstream_services().lifecycle.TimeoutConfig(
+            connect=10.0, read=180.0, write=30.0
+        )
 
     async def curl_must_not_run(**_: Any):
         for event in ():
             yield event
         raise AssertionError("curl path must not run for httpx test")
 
-    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
-    monkeypatch.setattr(upstream, "_get_client", fake_get_client)
-    monkeypatch.setattr(upstream, "_resolve_timeout_config", fake_timeout_config)
-    monkeypatch.setattr(upstream, "_iter_sse_curl", curl_must_not_run)
+    monkeypatch.setattr(
+        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+    )
+    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(
+        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+    )
+    monkeypatch.setattr(
+        upstream_services().transport, "iter_sse_curl", curl_must_not_run
+    )
 
 
 @pytest.mark.asyncio
@@ -353,7 +401,7 @@ async def test_responses_image_stream_handles_image_api_json_payload(
     client = _StubClient(response)
     _patch_image_stream_runtime(monkeypatch, client)
 
-    b64, revised = await upstream._responses_image_stream(
+    b64, revised = await upstream_services().responses.responses_image_stream(
         prompt="hi",
         size="1024x1024",
         action="generate",
@@ -385,7 +433,7 @@ async def test_responses_image_stream_handles_responses_object_json_payload(
     client = _StubClient(response)
     _patch_image_stream_runtime(monkeypatch, client)
 
-    b64, revised = await upstream._responses_image_stream(
+    b64, revised = await upstream_services().responses.responses_image_stream(
         prompt="hi",
         size="1024x1024",
         action="generate",
@@ -407,7 +455,7 @@ async def test_responses_image_stream_json_payload_without_image_includes_diagno
     _patch_image_stream_runtime(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream._responses_image_stream(
+        await upstream_services().responses.responses_image_stream(
             prompt="hi",
             size="1024x1024",
             action="generate",
@@ -435,7 +483,7 @@ async def test_responses_image_stream_json_payload_records_usage(
         if isinstance(usage, dict):
             captured.append(usage)
 
-    monkeypatch.setattr(upstream, "_record_usage", fake_record_usage)
+    monkeypatch.setattr(upstream_services().core, "record_usage", fake_record_usage)
 
     payload = {
         "data": [{"b64_json": PNG_B64}],
@@ -445,7 +493,7 @@ async def test_responses_image_stream_json_payload_records_usage(
     client = _StubClient(response)
     _patch_image_stream_runtime(monkeypatch, client)
 
-    b64, _ = await upstream._responses_image_stream(
+    b64, _ = await upstream_services().responses.responses_image_stream(
         prompt="hi",
         size="1024x1024",
         action="generate",
@@ -473,12 +521,14 @@ async def test_responses_image_stream_treats_response_done_as_success(
             "response": {"status": "done"},
         }
 
-    monkeypatch.setattr(upstream, "_iter_sse_curl", fake_iter_curl)
+    monkeypatch.setattr(upstream_services().transport, "iter_sse_curl", fake_iter_curl)
 
     async def fake_resolve_runtime() -> tuple[str, str]:
         return "https://upstream.example/v1", "test-key"
 
-    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
+    monkeypatch.setattr(
+        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+    )
 
     progress_events: list[str] = []
 
@@ -487,7 +537,7 @@ async def test_responses_image_stream_treats_response_done_as_success(
         if isinstance(et, str):
             progress_events.append(et)
 
-    b64, _ = await upstream._responses_image_stream(
+    b64, _ = await upstream_services().responses.responses_image_stream(
         prompt="hi",
         size="1024x1024",
         action="generate",

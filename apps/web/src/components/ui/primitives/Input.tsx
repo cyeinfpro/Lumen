@@ -100,7 +100,7 @@ export function Input({
       {hint ? (
         <p
           id={hintId}
-          className="type-caption text-[var(--text-muted)]"
+          className="type-caption text-[var(--fg-2)]"
         >
           {hint}
         </p>

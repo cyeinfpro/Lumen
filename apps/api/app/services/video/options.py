@@ -58,9 +58,9 @@ PriceOptionsLoader = Callable[
     Awaitable[list[VideoPriceOptionOut]],
 ]
 
-DEFAULT_VIDEO_DURATIONS = list(SUPPORTED_VIDEO_DURATIONS_S)
-DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p", "4k"]
-DEFAULT_VIDEO_ASPECT_RATIOS = [
+DEFAULT_VIDEO_DURATIONS = tuple(SUPPORTED_VIDEO_DURATIONS_S)
+DEFAULT_VIDEO_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
+DEFAULT_VIDEO_ASPECT_RATIOS = (
     "adaptive",
     "16:9",
     "9:16",
@@ -68,7 +68,7 @@ DEFAULT_VIDEO_ASPECT_RATIOS = [
     "4:3",
     "3:4",
     "21:9",
-]
+)
 VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(DEFAULT_VIDEO_RESOLUTIONS)
 }

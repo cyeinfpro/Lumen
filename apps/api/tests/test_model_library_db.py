@@ -17,6 +17,12 @@ from typing import Any
 import pytest
 
 from app.routes import workflows
+from app.workflow_services import (
+    library_items,
+    library_materialization,
+    library_storage,
+    model_library_endpoints,
+)
 from lumen_core.models import ModelLibraryItem
 
 
@@ -86,16 +92,20 @@ class _LegacyMigrationDb:
         self.flushes += 1
 
 
-async def _noop_owned_image(_db: Any, *, user_id: str, image_id: str) -> SimpleNamespace:
+async def _noop_owned_image(
+    _db: Any, *, user_id: str, image_id: str
+) -> SimpleNamespace:
     return SimpleNamespace(id=image_id, user_id=user_id)
 
 
 @pytest.mark.asyncio
-async def test_add_user_library_item_inserts_one_row_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_add_user_library_item_inserts_one_row_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Concurrent favorites must each add exactly one row to the
     session — no shared JSON read-modify-write that could lose updates.
     """
-    monkeypatch.setattr(workflows, "_owned_image", _noop_owned_image)
+    monkeypatch.setattr(library_materialization, "_owned_image", _noop_owned_image)
     db = _ConcurrentDb()
 
     async def _favorite(image_id: str, title: str) -> dict[str, Any]:
@@ -116,7 +126,9 @@ async def test_add_user_library_item_inserts_one_row_per_call(monkeypatch: pytes
     )
 
     assert len(results) == 8
-    assert len(db.added) == 8, "every favorite must INSERT a row regardless of concurrency"
+    assert len(db.added) == 8, (
+        "every favorite must INSERT a row regardless of concurrency"
+    )
     assert all(isinstance(row, ModelLibraryItem) for row in db.added)
     image_ids_added = {row.image_id for row in db.added}
     assert image_ids_added == {f"img-{i}" for i in range(8)}
@@ -151,9 +163,14 @@ async def test_legacy_user_library_is_lazily_migrated(
         "utf-8",
     )
     monkeypatch.setattr(
-        workflows,
+        library_items,
         "_library_user_index_path",
         lambda _user_id: index_path,
+    )
+    monkeypatch.setattr(
+        library_items,
+        "_load_user_library_index",
+        lambda _user_id: json.loads(index_path.read_text("utf-8")),
     )
     db = _LegacyMigrationDb(
         [
@@ -174,7 +191,10 @@ async def test_legacy_user_library_is_lazily_migrated(
     assert db.flushes == 1
     rendered = [str(statement) for statement in db.statements]
     assert any("INSERT INTO model_library_items" in statement for statement in rendered)
-    assert any("INSERT INTO model_library_hidden_presets" in statement for statement in rendered)
+    assert any(
+        "INSERT INTO model_library_hidden_presets" in statement
+        for statement in rendered
+    )
 
 
 @pytest.mark.asyncio
@@ -200,9 +220,14 @@ async def test_legacy_user_library_skips_items_without_valid_image(
         "utf-8",
     )
     monkeypatch.setattr(
-        workflows,
+        library_items,
         "_library_user_index_path",
         lambda _user_id: index_path,
+    )
+    monkeypatch.setattr(
+        library_items,
+        "_load_user_library_index",
+        lambda _user_id: json.loads(index_path.read_text("utf-8")),
     )
     db = _LegacyMigrationDb(
         [
@@ -242,7 +267,7 @@ def test_delete_user_item_removes_legacy_index_entry(
         "utf-8",
     )
     monkeypatch.setattr(
-        workflows,
+        library_storage,
         "_library_user_index_path",
         lambda _user_id: index_path,
     )
@@ -272,7 +297,7 @@ def test_hide_preset_updates_legacy_hidden_index(
         "utf-8",
     )
     monkeypatch.setattr(
-        workflows,
+        library_storage,
         "_library_user_index_path",
         lambda _user_id: index_path,
     )
@@ -337,10 +362,16 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
     row = _empty_item()
     db = _SingleRowDb(row)
 
-    async def _empty_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+    async def _empty_upstream(
+        _db: Any, *, image_id: str, user_id: str
+    ) -> dict[str, Any]:
         return {}
 
-    monkeypatch.setattr(workflows, "_api_call_tagging_upstream", _empty_upstream)
+    monkeypatch.setattr(
+        model_library_endpoints,
+        "_api_call_tagging_upstream",
+        _empty_upstream,
+    )
 
     out = await workflows._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
@@ -348,7 +379,9 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
 
     assert out.style_tags == []
     assert out.appearance_direction is None
-    assert row.auto_tagged_at is None, "empty vision payload must not flag the row identified"
+    assert row.auto_tagged_at is None, (
+        "empty vision payload must not flag the row identified"
+    )
     assert row.style_tags == []
     assert db.commits == 0
 
@@ -360,7 +393,9 @@ async def test_auto_tag_writes_when_provider_returns_signal(
     row = _empty_item()
     db = _SingleRowDb(row)
 
-    async def _vision_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+    async def _vision_upstream(
+        _db: Any, *, image_id: str, user_id: str
+    ) -> dict[str, Any]:
         return {
             "style_tags": ["minimal", "soft"],
             "appearance_direction": "asian",
@@ -369,7 +404,11 @@ async def test_auto_tag_writes_when_provider_returns_signal(
             "notes": "soft natural light",
         }
 
-    monkeypatch.setattr(workflows, "_api_call_tagging_upstream", _vision_upstream)
+    monkeypatch.setattr(
+        model_library_endpoints,
+        "_api_call_tagging_upstream",
+        _vision_upstream,
+    )
 
     out = await workflows._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
@@ -396,14 +435,20 @@ async def test_auto_tag_preserves_user_filled_appearance(
     row.appearance_direction = "european"  # user filled in advance
     db = _SingleRowDb(row)
 
-    async def _vision_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+    async def _vision_upstream(
+        _db: Any, *, image_id: str, user_id: str
+    ) -> dict[str, Any]:
         return {
             "style_tags": ["editorial"],
             "appearance_direction": "asian",
             "gender": "female",
         }
 
-    monkeypatch.setattr(workflows, "_api_call_tagging_upstream", _vision_upstream)
+    monkeypatch.setattr(
+        model_library_endpoints,
+        "_api_call_tagging_upstream",
+        _vision_upstream,
+    )
 
     await workflows._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
@@ -421,10 +466,16 @@ async def test_auto_tag_appends_existing_style_tags(
     row.style_tags = ["温柔亲和"]
     db = _SingleRowDb(row)
 
-    async def _vision_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+    async def _vision_upstream(
+        _db: Any, *, image_id: str, user_id: str
+    ) -> dict[str, Any]:
         return {"style_tags": ["温柔亲和", "清冷高级"]}
 
-    monkeypatch.setattr(workflows, "_api_call_tagging_upstream", _vision_upstream)
+    monkeypatch.setattr(
+        model_library_endpoints,
+        "_api_call_tagging_upstream",
+        _vision_upstream,
+    )
 
     await workflows._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"

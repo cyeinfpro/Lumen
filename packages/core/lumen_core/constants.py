@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+
+from .immutables import immutable_mapping
 
 
 # --- request limits ---
@@ -119,14 +122,16 @@ class VideoGenerationErrorCode(StrEnum):
 
 
 # 粗 → 细的归并。前端不识别细阶段时降级到对应粗值。
-GENERATION_STAGE_FALLBACK: dict[str, str] = {
-    "provider_selected": "rendering",
-    "stream_started": "rendering",
-    "partial_received": "rendering",
-    "final_received": "finalizing",
-    "processing": "finalizing",
-    "storing": "finalizing",
-}
+GENERATION_STAGE_FALLBACK: Mapping[str, str] = immutable_mapping(
+    {
+        "provider_selected": "rendering",
+        "stream_started": "rendering",
+        "partial_received": "rendering",
+        "final_received": "finalizing",
+        "processing": "finalizing",
+        "storing": "finalizing",
+    }
+)
 
 
 class GenerationErrorCode(StrEnum):
@@ -375,29 +380,33 @@ DEFAULT_IMAGE_INSTRUCTIONS = ""
 # 这里按 error.type 优先映射到内部 GenerationErrorCode；upstream.py 仍负责原样落库 error.code，
 # 前端 errorMessages.ts 用这里收敛后的码取中文文案。
 
-UPSTREAM_TYPE_TO_CODE: dict[str, GenerationErrorCode] = {
-    # OpenAI 官方约定的 error.type 字面量
-    "invalid_request_error": GenerationErrorCode.UPSTREAM_INVALID_REQUEST,
-    "rate_limit_error": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
-    "server_error": GenerationErrorCode.UPSTREAM_SERVER_ERROR,
-    "authentication_error": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
-    "permission_error": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
-    # 网关 / 反代偶尔会回这两种
-    "timeout": GenerationErrorCode.UPSTREAM_TIMEOUT,
-    "timeout_error": GenerationErrorCode.UPSTREAM_TIMEOUT,
-    # 上游可能直接回 context_length_exceeded（部分 vendor 把它挂在 type 上）
-    "context_length_exceeded": GenerationErrorCode.UPSTREAM_CONTEXT_TOO_LONG,
-}
+UPSTREAM_TYPE_TO_CODE: Mapping[str, GenerationErrorCode] = immutable_mapping(
+    {
+        # OpenAI 官方约定的 error.type 字面量
+        "invalid_request_error": GenerationErrorCode.UPSTREAM_INVALID_REQUEST,
+        "rate_limit_error": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
+        "server_error": GenerationErrorCode.UPSTREAM_SERVER_ERROR,
+        "authentication_error": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
+        "permission_error": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
+        # 网关 / 反代偶尔会回这两种
+        "timeout": GenerationErrorCode.UPSTREAM_TIMEOUT,
+        "timeout_error": GenerationErrorCode.UPSTREAM_TIMEOUT,
+        # 上游可能直接回 context_length_exceeded（部分 vendor 把它挂在 type 上）
+        "context_length_exceeded": GenerationErrorCode.UPSTREAM_CONTEXT_TOO_LONG,
+    }
+)
 
 # 部分上游会把语义放在 error.code 而不是 error.type；这里同时给一份 code 级别的兜底映射。
-UPSTREAM_CODE_TO_CODE: dict[str, GenerationErrorCode] = {
-    "context_length_exceeded": GenerationErrorCode.UPSTREAM_CONTEXT_TOO_LONG,
-    "rate_limit_exceeded": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
-    "insufficient_quota": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
-    "invalid_api_key": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
-    "request_canceled": GenerationErrorCode.UPSTREAM_CANCELLED,
-    "request_cancelled": GenerationErrorCode.UPSTREAM_CANCELLED,
-}
+UPSTREAM_CODE_TO_CODE: Mapping[str, GenerationErrorCode] = immutable_mapping(
+    {
+        "context_length_exceeded": GenerationErrorCode.UPSTREAM_CONTEXT_TOO_LONG,
+        "rate_limit_exceeded": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
+        "insufficient_quota": GenerationErrorCode.UPSTREAM_RATE_LIMITED,
+        "invalid_api_key": GenerationErrorCode.UPSTREAM_AUTH_ERROR,
+        "request_canceled": GenerationErrorCode.UPSTREAM_CANCELLED,
+        "request_cancelled": GenerationErrorCode.UPSTREAM_CANCELLED,
+    }
+)
 
 
 # --- Poster Style Library（V1.1 海报工作流） ---

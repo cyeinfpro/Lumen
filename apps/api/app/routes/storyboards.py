@@ -39,8 +39,8 @@ from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..redis_client import get_redis
 from ..sse_publish import publish_sse_event
-from .messages import _create_assistant_task, _publish_message_appended
-from .videos import _create_video_generation_record, _video_out
+from .messages import create_assistant_task, publish_message_appended
+from .videos import create_video_generation_record, video_out
 from ..services.storyboard import assembly as storyboard_assembly
 from ..services.storyboard import output_sync as storyboard_output_sync
 from ..services.storyboard import patching as storyboard_patching
@@ -93,7 +93,7 @@ router = APIRouter(prefix="/storyboards", tags=["storyboards"])
 logger = logging.getLogger(__name__)
 
 STORYBOARD_CHANNEL_PREFIX = "storyboard:"
-STORYBOARD_ASSET_KINDS = {"character", "scene", "prop"}
+STORYBOARD_ASSET_KINDS = frozenset({"character", "scene", "prop"})
 STORYBOARD_ASSEMBLY_WORKER_LEASE_S = (
     storyboard_assembly.STORYBOARD_ASSEMBLY_WORKER_LEASE_S
 )
@@ -278,7 +278,7 @@ def _shot_out(
         assets_by_id=assets_by_id,
         video_generations=video_generations,
         videos_by_generation=videos_by_generation,
-        video_out_fn=_video_out,
+        video_out_fn=video_out,
         shot_source_hash_fn=_shot_source_hash,
     )
 
@@ -303,7 +303,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> StoryboardRunOut
         run,
         sync_outputs=_sync_storyboard_outputs,
         load_steps=_load_steps,
-        video_out_fn=_video_out,
+        video_out_fn=video_out,
         shot_source_hash_fn=_shot_source_hash,
     )
 
@@ -352,7 +352,7 @@ async def _create_storyboard_image_task(
     db.add(user_msg)
     await db.flush()
     md = _run_metadata(run)
-    result = await _create_assistant_task(
+    result = await create_assistant_task(
         db=db,
         user_id=user.id,
         account_mode=getattr(user, "account_mode", "wallet"),
@@ -443,7 +443,7 @@ async def _enqueue_storyboard_image_task(
         task=task,
         redis_factory=get_redis,
         pool_factory=get_arq_pool,
-        publish_message_fn=_publish_message_appended,
+        publish_message_fn=publish_message_appended,
         publish_sse_fn=publish_sse_event,
     )
 
@@ -1231,7 +1231,7 @@ async def submit_shot(
             "idempotency_key": idempotency_key,
         }
     )
-    video_out = await _create_video_generation_record(
+    video_out = await create_video_generation_record(
         db,
         video_body,
         user,

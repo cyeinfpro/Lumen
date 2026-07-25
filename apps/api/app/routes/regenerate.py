@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -47,17 +48,19 @@ from ..deps import CurrentUser, verify_csrf
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services.generation_queue import release_generation_queue_state
 from .messages import (
-    _DEFAULT_IMAGE_OUTPUT_FORMAT,
-    _await_post_commit_publish,
-    _create_assistant_task,
-    _idempotency_lookup_keys,
-    _message_alive_filters,
-    _publish_assistant_task,
-    _publish_message_appended,
+    DEFAULT_IMAGE_OUTPUT_FORMAT as _DEFAULT_IMAGE_OUTPUT_FORMAT,
+    await_post_commit_publish as _await_post_commit_publish,
+    create_assistant_task as _create_assistant_task,
+    idempotency_lookup_keys as _idempotency_lookup_keys,
+    message_alive_filters as _message_alive_filters,
+    publish_assistant_task as _publish_assistant_task,
+    publish_message_appended as _publish_message_appended,
     resolve_system_prompt_for_message,
 )
-from .tasks import _release_generation_queue_state
+
+_release_generation_queue_state = release_generation_queue_state
 
 
 router = APIRouter()
@@ -268,16 +271,18 @@ async def _post_commit_regenerate_cancel_cleanup(
             )
 
 
-_INTENT_BY_STR: dict[str, Intent] = {
-    "chat": Intent.CHAT,
-    "vision_qa": Intent.VISION_QA,
-    "text_to_image": Intent.TEXT_TO_IMAGE,
-    "image_to_image": Intent.IMAGE_TO_IMAGE,
-}
-_IMAGE_RENDER_QUALITY_VALUES = {"auto", "low", "medium", "high"}
-_IMAGE_OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
-_IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
-_IMAGE_MODERATION_VALUES = {"auto", "low"}
+_INTENT_BY_STR = MappingProxyType(
+    {
+        "chat": Intent.CHAT,
+        "vision_qa": Intent.VISION_QA,
+        "text_to_image": Intent.TEXT_TO_IMAGE,
+        "image_to_image": Intent.IMAGE_TO_IMAGE,
+    }
+)
+_IMAGE_RENDER_QUALITY_VALUES = frozenset(("auto", "low", "medium", "high"))
+_IMAGE_OUTPUT_FORMAT_VALUES = frozenset(("png", "jpeg", "webp"))
+_IMAGE_BACKGROUND_VALUES = frozenset(("auto", "opaque", "transparent"))
+_IMAGE_MODERATION_VALUES = frozenset(("auto", "low"))
 
 
 async def _default_image_output_format(db: AsyncSession) -> str:

@@ -7,6 +7,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable
 from urllib.parse import urljoin
 
@@ -25,15 +26,14 @@ from .video_artifacts import (
     UnsupportedVideoMediaError,
     detect_video_media,
 )
-from .video_upstream_content import (
-    _clean_reference_label as _clean_reference_label,
-    _prompt_with_official_reference_names as _prompt_with_official_reference_names,
-    _prompt_with_reference_order as _prompt_with_reference_order,
-    _reference_anchor_token as _reference_anchor_token,
-    _reference_order_aliases as _reference_order_aliases,
+from .video_upstream_parts.content import (
     build_seedance_content,
+    clean_reference_label,
+    prompt_with_official_reference_names,
+    prompt_with_reference_order,
+    reference_anchor_token,
+    reference_order_aliases,
 )
-from .video_upstream_parts import parsing as _parsing
 from .video_upstream_parts.adapters import (
     DashScopeHappyHorseAdapter,
     FakeVideoAdapter,
@@ -41,7 +41,7 @@ from .video_upstream_parts.adapters import (
     VolcanoNewApiVideoAdapter,
     VolcanoSeedanceAdapter,
     VolcanoThirdPartySeedanceAdapter,
-    _require_http_url as _require_http_url,
+    require_http_url,
 )
 from .video_upstream_parts.contracts import (
     CancelResult,
@@ -55,36 +55,65 @@ from .video_upstream_parts.contracts import (
 )
 from .video_upstream_parts.runtime import AdapterRuntime, set_runtime_factory
 
-_provider_task_path_segment = _parsing._provider_task_path_segment
-_nested_get = _parsing._nested_get
-_int_or_none = _parsing._int_or_none
-_status = _parsing._status
-_failure_class = _parsing._failure_class
-_billable = _parsing._billable
-_video_url = _parsing._video_url
-_explicit_video_result_url = _parsing._explicit_video_result_url
-_absolute_url = _parsing._absolute_url
-_collapse_url_path_slashes = _parsing._collapse_url_path_slashes
-_usage_total_tokens = _parsing._usage_total_tokens
-_duration_usage_total_tokens = _parsing._duration_usage_total_tokens
-_provider_task_id = _parsing._provider_task_id
-_submit_headers = _parsing._submit_headers
-_safety_identifier = _parsing._safety_identifier
-_response_json = _parsing._response_json
-_http_error = _parsing._http_error
+from .video_upstream_parts.parsing import (
+    absolute_url,
+    billable,
+    collapse_url_path_slashes,
+    duration_usage_total_tokens,
+    explicit_video_result_url,
+    failure_class,
+    http_error,
+    int_or_none,
+    nested_get,
+    provider_task_id,
+    provider_task_path_segment,
+    response_json,
+    safety_identifier,
+    status,
+    submit_headers,
+    usage_total_tokens,
+    video_url,
+)
+
+# These names are a compatibility surface for worker tests and integrations.
+_clean_reference_label = clean_reference_label
+_prompt_with_official_reference_names = prompt_with_official_reference_names
+_prompt_with_reference_order = prompt_with_reference_order
+_reference_anchor_token = reference_anchor_token
+_reference_order_aliases = reference_order_aliases
+_require_http_url = require_http_url
+_absolute_url = absolute_url
+_billable = billable
+_collapse_url_path_slashes = collapse_url_path_slashes
+_duration_usage_total_tokens = duration_usage_total_tokens
+_explicit_video_result_url = explicit_video_result_url
+_failure_class = failure_class
+_http_error = http_error
+_int_or_none = int_or_none
+_nested_get = nested_get
+_provider_task_id = provider_task_id
+_provider_task_path_segment = provider_task_path_segment
+_response_json = response_json
+_safety_identifier = safety_identifier
+_status = status
+_submit_headers = submit_headers
+_usage_total_tokens = usage_total_tokens
+_video_url = video_url
 
 _OMNI_FALLBACK_IMAGE_MAX_BYTES = 64 * 1024 * 1024
 _SEEDANCE_INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 _VIDEO_FETCH_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_IMAGE_MIME_ALIASES = {
-    "image/gif": "image/gif",
-    "image/jpeg": "image/jpeg",
-    "image/jpg": "image/jpeg",
-    "image/pjpeg": "image/jpeg",
-    "image/png": "image/png",
-    "image/webp": "image/webp",
-    "image/x-png": "image/png",
-}
+_IMAGE_MIME_ALIASES = MappingProxyType(
+    {
+        "image/gif": "image/gif",
+        "image/jpeg": "image/jpeg",
+        "image/jpg": "image/jpeg",
+        "image/pjpeg": "image/jpeg",
+        "image/png": "image/png",
+        "image/webp": "image/webp",
+        "image/x-png": "image/png",
+    }
+)
 
 
 def _image_response_mime(response: httpx.Response, fallback: str | None) -> str | None:

@@ -18,6 +18,7 @@ import json
 import logging
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
@@ -35,8 +36,9 @@ from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy
 import httpx
 
 from ..db import SessionLocal, affected_rows
+from ..provider_runtime.errors import UpstreamError
+from ..provider_runtime.upstream_services import upstream_services
 from ..sse_publish import publish_event
-from ..upstream import UpstreamError, _auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +52,20 @@ _TITLE_INSTRUCTIONS = (
 _HISTORY_WINDOW = 4
 _MAX_PROMPT_CHARS = 1200  # 每条消息文本最大保留长度，避免 prompt 爆炸
 
+
 # 内存缓存：避免对已有标题的会话反复查 DB
 # 正条目（title 已非默认）存 _TITLE_CONFIRMED_SENTINEL，永不过期；
 # 负条目（title 仍是占位符）存时间戳，TTL 后允许重新检查。
 # 旧版本曾配 _title_cache_pending set 做并发 dedupe，但 cache 时间戳本身已经能
 # 覆盖那个窗口（先 stamp 再做 IO，DB/enqueue 失败也会被 60s TTL 自然冷却），
 # 多一个 set 反而增加 race 面，移除。
-_title_cache: dict[str, float] = {}
-_title_cache_lock = Lock()
+@dataclass(slots=True)
+class AutoTitleRuntime:
+    cache: dict[str, float] = field(default_factory=dict)
+    lock: Lock = field(default_factory=Lock)
+
+
+_RUNTIME = AutoTitleRuntime()
 _TITLE_CONFIRMED_SENTINEL: float = -1.0
 _TITLE_CACHE_TTL_S = 60.0
 
@@ -112,8 +120,8 @@ def _default_title_condition() -> Any:
 
 
 def _mark_title_confirmed(conversation_id: str) -> None:
-    with _title_cache_lock:
-        _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+    with _RUNTIME.lock:
+        _RUNTIME.cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
 
 
 async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
@@ -126,8 +134,8 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
     仅当缓存 miss 或缓存为旧时间戳（待确认状态）时才查 DB。
     """
     now = time.monotonic()
-    with _title_cache_lock:
-        cache_entry = _title_cache.get(conversation_id)
+    with _RUNTIME.lock:
+        cache_entry = _RUNTIME.cache.get(conversation_id)
         if cache_entry is not None:
             if cache_entry == _TITLE_CONFIRMED_SENTINEL:
                 return  # permanently cached: title is set
@@ -139,7 +147,7 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
         # 仍能 dedupe；不过同一个 cache 时间戳本身 + 60s TTL 已经足够覆盖这个窗
         # 口。stamp 提前到这里：成功/失败都在 60s 内不再重试，避免上游短暂故障
         # 时被反复戳。confirmed sentinel 走单独分支（DB 查到非占位标题时）。
-        _title_cache[conversation_id] = now
+        _RUNTIME.cache[conversation_id] = now
     try:
         async with SessionLocal() as session:
             row = (
@@ -347,7 +355,10 @@ async def _call_upstream_one(
         "stream": False,
         "store": False,
     }
-    headers = {**_auth_headers(api_key), "content-type": "application/json"}
+    headers = {
+        **upstream_services().core.auth_headers(api_key),
+        "content-type": "application/json",
+    }
     try:
         proxy_url = await resolve_provider_proxy_url(proxy)
         async with httpx.AsyncClient(

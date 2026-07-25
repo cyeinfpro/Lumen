@@ -117,7 +117,9 @@ async def test_download_cleans_partial_file_when_stream_space_check_fails(
     ]
 
     def disk_usage(_path: str) -> DiskUsage:
-        free = free_values.pop(0) if free_values else api_client._MIN_FREE_DISK_BYTES + 5  # noqa: SLF001
+        free = (
+            free_values.pop(0) if free_values else api_client._MIN_FREE_DISK_BYTES + 5
+        )  # noqa: SLF001
         return DiskUsage(1024, 0, free)
 
     monkeypatch.setattr(api_client.settings, "download_tmp_dir", str(tmp_path))

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import importlib
 import io
 from collections.abc import Callable
 
@@ -10,7 +9,8 @@ import pytest
 from PIL import Image as PILImage
 
 from app import image_artifacts
-from app.tasks import completion, generation
+from app.tasks.completion_parts import default_runtime as completion
+from app.tasks.generation_parts import default_runtime as generation
 
 
 def _image_bytes(
@@ -217,18 +217,11 @@ def test_pil_variants_resize_to_limits_without_upscaling() -> None:
 def test_make_image_variants_falls_back_when_libvips_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_import_module = importlib.import_module
+    class UnavailableVips:
+        def load(self) -> None:
+            raise ModuleNotFoundError("pyvips")
 
-    def import_without_pyvips(name: str):
-        if name == "pyvips":
-            raise ModuleNotFoundError(name)
-        return real_import_module(name)
-
-    monkeypatch.setattr(
-        image_artifacts.importlib,
-        "import_module",
-        import_without_pyvips,
-    )
+    monkeypatch.setattr(image_artifacts, "_VIPS_ADAPTER", UnavailableVips())
 
     result = image_artifacts._make_image_variants_sync(_image_bytes())
 
@@ -264,11 +257,9 @@ def test_generation_facade_preserves_type_and_leaf_function_identity() -> None:
     for name in identity_names:
         assert getattr(generation, name) is getattr(image_artifacts, name)
 
-    assert completion._generation_compute_blurhash is image_artifacts._compute_blurhash
-    assert completion._make_display is image_artifacts._make_display
-    assert completion._make_preview is image_artifacts._make_preview
-    assert completion._make_thumb is image_artifacts._make_thumb
-    assert completion._sha256 is image_artifacts._sha256
+    tiny = PILImage.new("RGB", (2, 2))
+    assert completion._generation_compute_blurhash(tiny) is None
+    assert completion._sha256(b"artifact") == image_artifacts._sha256(b"artifact")
 
 
 def test_generation_variant_facades_resolve_extracted_functions_at_call_time(
@@ -295,22 +286,41 @@ def test_generation_variant_facades_resolve_extracted_functions_at_call_time(
     )
     calls: list[tuple[str, bytes]] = []
 
-    def fake_standard(raw_image: bytes) -> image_artifacts._ImageVariantBundle:
+    inspection = image_artifacts._GeneratedImageInspection(
+        orig_format="PNG",
+        width=1,
+        height=1,
+        has_transparency=False,
+    )
+
+    def fake_standard(
+        raw_image: bytes,
+        received_inspection: image_artifacts._GeneratedImageInspection,
+    ) -> image_artifacts._ImageVariantBundle:
+        assert received_inspection is inspection
         calls.append(("standard", raw_image))
         return standard
 
-    def fake_pil_only(raw_image: bytes) -> image_artifacts._ImageVariantBundle:
+    def fake_pil_only(
+        raw_image: bytes,
+        received_inspection: image_artifacts._GeneratedImageInspection | None = None,
+    ) -> image_artifacts._ImageVariantBundle:
         calls.append(("pil-only", raw_image))
         return pil_only
 
     monkeypatch.setattr(
-        image_artifacts,
-        "_make_image_variants_sync",
+        generation,
+        "_inspect_generated_image_sync",
+        lambda _raw_image: inspection,
+    )
+    monkeypatch.setattr(
+        generation._image_artifacts,
+        "make_variants_with_vips_sync",
         fake_standard,
     )
     monkeypatch.setattr(
-        image_artifacts,
-        "_make_image_variants_pil_only_sync",
+        generation._image_artifacts,
+        "make_variants_with_pil_sync",
         fake_pil_only,
     )
 

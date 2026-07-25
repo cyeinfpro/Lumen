@@ -33,7 +33,7 @@ from lumen_core.schemas import (
 from ...audit import hash_email
 from ...db import get_db
 from ...deps import AdminUser, CurrentUser, verify_csrf
-from ...services.billing.usage import _CHARGE_KINDS
+from ...services.billing.usage import CHARGE_KINDS as _CHARGE_KINDS
 from .compat import current_runtime
 
 

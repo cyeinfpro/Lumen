@@ -41,7 +41,7 @@ _IMAGE_JOB_PLACEHOLDER_HOSTS = frozenset(
     }
 )
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
-_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _PRIVATE_IP_NETWORKS = tuple(
     ipaddress.ip_network(cidr)
     for cidr in (
@@ -167,6 +167,25 @@ class Settings(BaseSettings):
     app_port: int = _DEFAULT_API_PORT
     storage_root: str = "/opt/lumendata/storage"
     backup_root: str = "/opt/lumendata/backup"
+    image_upload_global_concurrency: int = Field(
+        default=2,
+        ge=1,
+        alias="LUMEN_IMAGE_UPLOAD_GLOBAL_CONCURRENCY",
+    )
+    image_upload_global_peak_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=64 * 1024 * 1024,
+        alias="LUMEN_IMAGE_UPLOAD_GLOBAL_PEAK_BYTES",
+    )
+    image_upload_lease_ttl_seconds: int = Field(
+        default=120,
+        ge=30,
+        alias="LUMEN_IMAGE_UPLOAD_LEASE_TTL_SECONDS",
+    )
+    image_upload_capacity_degraded_policy: str = Field(
+        default="",
+        alias="LUMEN_IMAGE_UPLOAD_CAPACITY_DEGRADED_POLICY",
+    )
     lumen_scripts_dir: str = ""
     public_base_url: str = _DEFAULT_PUBLIC_BASE_URL
     cors_allow_origins: str = _DEFAULT_CORS_ALLOW_ORIGINS

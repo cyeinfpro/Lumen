@@ -52,16 +52,18 @@ COUNT_CAP = 10_000
 
 # ---------- 支持的 aspect ratio 白名单 ----------
 
-_ALLOWED_RATIOS = {
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:5",
-    "3:4",
-    "21:9",
-    "10:7",
-    "7:10",
-}
+_ALLOWED_RATIOS = frozenset(
+    {
+        "1:1",
+        "16:9",
+        "9:16",
+        "4:5",
+        "3:4",
+        "21:9",
+        "10:7",
+        "7:10",
+    }
+)
 
 
 def _bool_option(value: object, default: bool = False) -> bool:

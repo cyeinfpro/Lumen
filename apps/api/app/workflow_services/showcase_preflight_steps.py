@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import ModelCandidate
 
+from ..workflow_domain.apparel_scene_planner import (
+    compose_image_prompt_with_gpt55 as _compose_image_prompt_with_gpt55,
+    fallback_risk_review as _fallback_risk_review,
+    plan_scene_cards_with_gpt55 as _plan_scene_cards_with_gpt55,
+    resolve_scene_provider_order as _resolve_scene_provider_order,
+    review_prompt_risk_with_gpt55 as _review_prompt_risk_with_gpt55,
+    rules_fallback_planning as _rules_fallback_scene_planning,
+)
 from ..workflow_domain.showcase_shot_pool import ShotClass, ShotVariant
+from .showcase_prompts import composition_shooting_brief as _composition_shooting_brief  # noqa: F401
+from .showcase_prompts import guarded_shooting_brief as _guarded_shooting_brief  # noqa: F401
+from .showcase_prompts import showcase_prompt as _build_showcase_prompt  # noqa: F401
+
+
+logger = logging.getLogger("app.routes.workflows")
 
 
 ShowcasePreflightProgressHook = Callable[
@@ -58,16 +73,15 @@ def _serialized_shot_picks(
 
 
 async def resolve_preflight_provider_order(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
 ) -> Any:
     if request.scene_planner == "rules_fallback":
         return None
     try:
-        return await runtime._resolve_scene_provider_order(db)
+        return await _resolve_scene_provider_order(db)
     except Exception as exc:  # noqa: BLE001
-        runtime.logger.warning(
+        logger.warning(
             "apparel scene provider resolution failed (will retry per call): %s",
             exc,
         )
@@ -75,10 +89,9 @@ async def resolve_preflight_provider_order(
 
 
 def _rules_fallback_planning(
-    runtime: Any,
     request: ShowcasePreflightRequest,
 ) -> dict[str, Any]:
-    return runtime._rules_fallback_scene_planning(
+    return _rules_fallback_scene_planning(
         product_analysis=request.product_analysis,
         template=request.template,
         scene_environment=request.scene_environment,
@@ -94,7 +107,6 @@ def _rules_fallback_planning(
 
 
 async def _initial_scene_planning(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
     *,
@@ -112,7 +124,7 @@ async def _initial_scene_planning(
             0,
             total,
         )
-        return _rules_fallback_planning(runtime, request)
+        return _rules_fallback_planning(request)
     await notify_preflight_progress(
         progress_hook,
         "director",
@@ -120,7 +132,7 @@ async def _initial_scene_planning(
         0,
         total,
     )
-    return await runtime._plan_scene_cards_with_gpt55(
+    return await _plan_scene_cards_with_gpt55(
         db,
         product_analysis=request.product_analysis,
         garment_lock=garment_lock,
@@ -143,7 +155,6 @@ async def _initial_scene_planning(
 
 
 async def prepare_scene_planning(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
     *,
@@ -153,7 +164,6 @@ async def prepare_scene_planning(
     progress_hook: ShowcasePreflightProgressHook | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     planning = await _initial_scene_planning(
-        runtime,
         db,
         request,
         garment_lock=garment_lock,
@@ -171,7 +181,7 @@ async def prepare_scene_planning(
         0,
         len(request.shot_picks),
     )
-    planning = _rules_fallback_planning(runtime, request)
+    planning = _rules_fallback_planning(request)
     return planning, list(planning.get("scene_cards") or [])
 
 
@@ -243,7 +253,6 @@ def _prompt_item(
 
 
 def _showcase_prompt(
-    runtime: Any,
     request: ShowcasePreflightRequest,
     *,
     shot_type: ShotClass,
@@ -252,7 +261,7 @@ def _showcase_prompt(
     garment_lock: dict[str, Any],
     composed_prompt: str,
 ) -> str:
-    return runtime._showcase_prompt(
+    return _build_showcase_prompt(
         product_analysis=request.product_analysis,
         selected_candidate=request.selected_candidate,
         accessory_plan=request.accessory_plan,
@@ -273,7 +282,6 @@ def _showcase_prompt(
 
 
 async def compose_prompt_records(
-    runtime: Any,
     request: ShowcasePreflightRequest,
     scene_cards: list[dict[str, Any]],
     *,
@@ -296,7 +304,6 @@ async def compose_prompt_records(
             total,
         )
         final_prompt = _showcase_prompt(
-            runtime,
             request,
             shot_type=shot_type,
             variant=variant,
@@ -355,7 +362,6 @@ def _rewrite_instruction(review: dict[str, Any]) -> str:
 
 
 async def _attempt_safe_rewrite(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
     record: dict[str, Any],
@@ -374,7 +380,7 @@ async def _attempt_safe_rewrite(
     variant = record["variant"]
     scene_card = record["scene_card"]
     prompt_item = record["prompt_item"]
-    rewritten = await runtime._compose_image_prompt_with_gpt55(
+    rewritten = await _compose_image_prompt_with_gpt55(
         db,
         base_prompt=str(record["final_prompt"] or ""),
         product_analysis=request.product_analysis,
@@ -389,11 +395,10 @@ async def _attempt_safe_rewrite(
         provider_order=provider_order,
         reference_images=request.reference_images,
     )
-    rewritten_brief = runtime._composition_shooting_brief(rewritten)
+    rewritten_brief = _composition_shooting_brief(rewritten)
     if not rewritten_brief:
         return review
     rewritten_prompt = _showcase_prompt(
-        runtime,
         request,
         shot_type=shot_type,
         variant=variant,
@@ -408,7 +413,7 @@ async def _attempt_safe_rewrite(
         index - 1,
         review_total,
     )
-    rewritten_review = await runtime._review_prompt_risk_with_gpt55(
+    rewritten_review = await _review_prompt_risk_with_gpt55(
         db,
         final_prompt=rewritten_prompt,
         garment_lock=garment_lock,
@@ -434,7 +439,6 @@ async def _attempt_safe_rewrite(
 
 
 def _apply_guarded_prompt(
-    runtime: Any,
     request: ShowcasePreflightRequest,
     record: dict[str, Any],
     *,
@@ -443,12 +447,11 @@ def _apply_guarded_prompt(
     rewrite_instruction: str,
 ) -> dict[str, Any]:
     scene_card = record["scene_card"]
-    guarded_brief = runtime._guarded_shooting_brief(
+    guarded_brief = _guarded_shooting_brief(
         str(scene_card.get("shooting_brief") or ""),
         rewrite_instruction=rewrite_instruction,
     )
     guarded_prompt = _showcase_prompt(
-        runtime,
         request,
         shot_type=record["shot_type"],
         variant=record["variant"],
@@ -477,7 +480,6 @@ def _apply_guarded_prompt(
 
 
 async def _review_prompt_record(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
     record: dict[str, Any],
@@ -493,7 +495,7 @@ async def _review_prompt_record(
     index = int(record["index"])
     scene_card = record["scene_card"]
     if not use_gpt_review:
-        review = runtime._fallback_risk_review(
+        review = _fallback_risk_review(
             scene_card=scene_card,
             reason="rules_fallback_preflight",
         )
@@ -512,7 +514,7 @@ async def _review_prompt_record(
         index - 1,
         review_total,
     )
-    review = await runtime._review_prompt_risk_with_gpt55(
+    review = await _review_prompt_risk_with_gpt55(
         db,
         final_prompt=str(record["final_prompt"] or ""),
         garment_lock=garment_lock,
@@ -530,7 +532,6 @@ async def _review_prompt_record(
             review_total,
         )
         review = await _attempt_safe_rewrite(
-            runtime,
             db,
             request,
             record,
@@ -545,7 +546,6 @@ async def _review_prompt_record(
         )
         if review.get("must_rewrite"):
             review = _apply_guarded_prompt(
-                runtime,
                 request,
                 record,
                 garment_lock=garment_lock,
@@ -563,7 +563,6 @@ async def _review_prompt_record(
 
 
 async def review_prompt_records(
-    runtime: Any,
     db: AsyncSession,
     request: ShowcasePreflightRequest,
     prompt_records: list[dict[str, Any]],
@@ -583,7 +582,6 @@ async def review_prompt_records(
     review_total = len(prompt_records)
     for record in prompt_records:
         review = await _review_prompt_record(
-            runtime,
             db,
             request,
             record,

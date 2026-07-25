@@ -12,7 +12,7 @@ from lumen_core.video_providers import (
 )
 
 from ..video_artifacts import DownloadedVideo, downloaded_video_from_bytes
-from ..video_upstream_content import _prompt_with_reference_order
+from .content import prompt_with_reference_order as _prompt_with_reference_order
 from .contracts import (
     CancelResult,
     PollResult,
@@ -22,23 +22,23 @@ from .contracts import (
     VideoUpstreamError,
 )
 from .parsing import (
-    _absolute_url,
-    _billable,
-    _collapse_url_path_slashes,
-    _duration_usage_total_tokens,
-    _explicit_video_result_url,
-    _failure_class,
-    _http_error,
-    _int_or_none,
-    _nested_get,
-    _provider_task_id,
-    _provider_task_path_segment,
-    _response_json,
-    _safety_identifier,
-    _status,
-    _submit_headers,
-    _usage_total_tokens,
-    _video_url,
+    absolute_url as _absolute_url,
+    billable as _billable,
+    collapse_url_path_slashes as _collapse_url_path_slashes,
+    duration_usage_total_tokens as _duration_usage_total_tokens,
+    explicit_video_result_url as _explicit_video_result_url,
+    failure_class as _failure_class,
+    http_error as _http_error,
+    int_or_none as _int_or_none,
+    nested_get as _nested_get,
+    provider_task_id as _provider_task_id,
+    provider_task_path_segment as _provider_task_path_segment,
+    response_json as _response_json,
+    safety_identifier as _safety_identifier,
+    status as _status,
+    submit_headers as _submit_headers,
+    usage_total_tokens as _usage_total_tokens,
+    video_url as _video_url,
 )
 from .runtime import AdapterRuntime, current_runtime
 
@@ -1094,6 +1094,9 @@ def _require_http_url(raw: str | None, *, field: str) -> str:
     return value
 
 
+require_http_url = _require_http_url
+
+
 __all__ = [
     "DashScopeHappyHorseAdapter",
     "FakeVideoAdapter",
@@ -1101,4 +1104,5 @@ __all__ = [
     "VolcanoNewApiVideoAdapter",
     "VolcanoSeedanceAdapter",
     "VolcanoThirdPartySeedanceAdapter",
+    "require_http_url",
 ]

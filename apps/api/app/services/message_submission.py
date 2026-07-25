@@ -9,6 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
@@ -77,13 +78,13 @@ from ..task_billing import (
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_SOURCE_LIMIT = MAX_PROMPT_CHARS
-IMAGE_OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
+IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp"})
 DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 
 _VECTOR_STORE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
-_IMAGE_MODERATION_VALUES = {"auto", "low"}
+_IMAGE_BACKGROUND_VALUES = frozenset({"auto", "opaque", "transparent"})
+_IMAGE_MODERATION_VALUES = frozenset({"auto", "low"})
 _TRANSPARENT_BACKGROUND_RE = re.compile(
     r"透明(?:底|背景|底色)|去背|抠图|免抠|无背景|"
     r"transparent\s+(?:background|bg)|background\s+transparent|"
@@ -105,22 +106,25 @@ _TRANSPARENT_BACKGROUND_NEGATIVE_CONTEXT_RE = re.compile(
     r"scenery|lighting|shadows?|text|pattern|elements?)\b",
     re.IGNORECASE,
 )
-_PROMPT_CONTROL_TRANSLATION = {i: " " for i in range(32) if i not in (9, 10, 13)}
-_PROMPT_CONTROL_TRANSLATION[127] = " "
+_PROMPT_CONTROL_TRANSLATION = MappingProxyType(
+    {**{i: " " for i in range(32) if i not in (9, 10, 13)}, 127: " "}
+)
 _SYSTEM_PROMPT_SECTION_TAG_RE = re.compile(r"(\[/?)(SYSTEM_[A-Z0-9_]+)(\])")
 _SYSTEM_PROMPT_SECTION_TAG_ESCAPE = "\u200b"
-_CHAT_TOOL_BUDGET_SETTINGS: dict[str, tuple[str, str]] = {
-    "web_search": ("chat.tool_web_search_micro", "CHAT_TOOL_WEB_SEARCH_MICRO"),
-    "file_search": ("chat.tool_file_search_micro", "CHAT_TOOL_FILE_SEARCH_MICRO"),
-    "code_interpreter": (
-        "chat.tool_code_interpreter_micro",
-        "CHAT_TOOL_CODE_INTERPRETER_MICRO",
-    ),
-    "image_generation": (
-        "chat.tool_image_generation_micro",
-        "CHAT_TOOL_IMAGE_GENERATION_MICRO",
-    ),
-}
+_CHAT_TOOL_BUDGET_SETTINGS = MappingProxyType(
+    {
+        "web_search": ("chat.tool_web_search_micro", "CHAT_TOOL_WEB_SEARCH_MICRO"),
+        "file_search": ("chat.tool_file_search_micro", "CHAT_TOOL_FILE_SEARCH_MICRO"),
+        "code_interpreter": (
+            "chat.tool_code_interpreter_micro",
+            "CHAT_TOOL_CODE_INTERPRETER_MICRO",
+        ),
+        "image_generation": (
+            "chat.tool_image_generation_micro",
+            "CHAT_TOOL_IMAGE_GENERATION_MICRO",
+        ),
+    }
+)
 _MAX_TOOL_INVOCATIONS_DEFAULT = 8
 
 AsyncCallable = Callable[..., Awaitable[Any]]

@@ -17,6 +17,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from redis.exceptions import WatchError
@@ -106,22 +107,28 @@ class SSEPublishRetryableError(RuntimeError):
         )
 
 
-# GEN-P2 ts_ms 单调：仅保证当前 worker 进程内 last value。多 API/worker
-# 进程间不可比较；前端需要用 Redis stream id 做 replay cursor / 严格排序，
-# ts_ms 只作为显示/粗略时间提示。
-_LAST_TS_MS = 0
-# P2-3/P3-6: 多 publish_event 并发时 _LAST_TS_MS 的读改写非原子，可能被覆盖导致
-# 两条事件拿到同一 ts_ms。模块级初始化避免 check-then-set 懒构造竞态。
-_TS_LOCK = asyncio.Lock()
+@dataclass(slots=True)
+class _SseTimestampRuntime:
+    """Worker-process-local monotonic timestamp state."""
+
+    last_ts_ms: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+# GEN-P2 ts_ms only orders events within one worker process. Redis stream IDs
+# remain the cross-process replay and ordering authority.
+_TIMESTAMP_RUNTIME = _SseTimestampRuntime()
+# Compatibility read-only reference for existing observability assertions.
+_TS_LOCK = _TIMESTAMP_RUNTIME.lock
 
 
 async def _monotonic_ts_ms() -> int:
-    global _LAST_TS_MS
-    async with _TS_LOCK:
+    runtime = _TIMESTAMP_RUNTIME
+    async with runtime.lock:
         now = int(time.time() * 1000)
-        if now <= _LAST_TS_MS:
-            now = _LAST_TS_MS + 1
-        _LAST_TS_MS = now
+        if now <= runtime.last_ts_ms:
+            now = runtime.last_ts_ms + 1
+        runtime.last_ts_ms = now
         return now
 
 

@@ -7,6 +7,7 @@ import {
   type RuntimeResilienceSnapshot,
   useRuntimeResilience,
 } from "@/lib/runtimeResilience";
+import { replaceWithLogin } from "@/lib/auth/navigation";
 
 function sessionIsHealthy(status: RuntimeResilienceSnapshot): boolean {
   return status.session === "authenticated" || status.session === "public";
@@ -52,7 +53,7 @@ export function RuntimeResilienceStatus() {
 
   const recover = () => {
     if (unauthorized) {
-      window.location.assign("/login");
+      replaceWithLogin();
       return;
     }
     requestRuntimeRecovery();

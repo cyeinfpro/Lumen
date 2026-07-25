@@ -944,6 +944,12 @@ install_image_job() {
     as_sudo install -m 0644 "${ROOT}/image-job/request_bodies.py" "${app_dir}/request_bodies.py"
     as_sudo install -m 0644 "${ROOT}/image-job/runtime_config.py" "${app_dir}/runtime_config.py"
     as_sudo install -m 0644 "${ROOT}/image-job/upstream_runtime.py" "${app_dir}/upstream_runtime.py"
+    as_sudo rm -rf "${app_dir}/image_job"
+    as_sudo cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"
+    as_sudo find "${app_dir}/image_job" -type d -name __pycache__ -prune -exec rm -rf {} +
+    as_sudo find "${app_dir}/image_job" -type f -name '*.pyc' -delete
+    as_sudo find "${app_dir}/image_job" -type d -exec chmod 0755 {} +
+    as_sudo find "${app_dir}/image_job" -type f -name '*.py' -exec chmod 0644 {} +
     as_sudo install -m 0644 "${ROOT}/image-job/requirements.txt" "${app_dir}/requirements.txt"
     as_sudo install -m 0644 "${ROOT}/image-job/README.md" "${app_dir}/README.md"
     as_sudo install -m 0644 "${ROOT}/image-job/image-job.md" "${app_dir}/image-job.md"

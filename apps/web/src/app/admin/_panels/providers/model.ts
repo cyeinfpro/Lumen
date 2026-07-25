@@ -7,7 +7,7 @@ import type {
 } from "@/lib/types";
 
 export const WEIGHT_COLORS = [
-  "var(--color-lumen-amber)",
+  "var(--accent)",
   "#6366f1",
   "#ec4899",
   "#14b8a6",

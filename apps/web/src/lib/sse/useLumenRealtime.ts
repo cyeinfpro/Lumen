@@ -1,0 +1,421 @@
+"use client";
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
+import {
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
+import { getTask, type BackendCompletion } from "@/lib/apiClient";
+import { logError } from "@/lib/logger";
+import {
+  AUTH_USER_QUERY_KEY,
+  userBillingQueryKeys,
+  userConversationQueryKeys,
+  userMemoryQueryKeys,
+  userScopedQueryKey,
+} from "@/lib/queries/userScope";
+import { qk } from "@/lib/queries/queryKeys";
+import {
+  registerRuntimeRecovery,
+  setRealtimeRuntimeStatus,
+} from "@/lib/runtimeResilience";
+import { useSSE, type SSEHandlers } from "@/lib/useSSE";
+import {
+  disposeChatStoreRuntime,
+  useChatStore,
+} from "@/store/useChatStore";
+import type {
+  AssistantMessage,
+  Generation,
+  Message,
+} from "@/lib/types";
+import {
+  createLumenEffectRegistry,
+  type LumenRealtimeEffectContext,
+} from "./eventEffects";
+import { EventRouter } from "./eventRouter";
+import type { SnapshotAdapter } from "./replayCoordinator";
+import type { SnapshotScope } from "./snapshotScopes";
+
+const EVENT_NAMES = [
+  "generation.queued",
+  "generation.started",
+  "generation.progress",
+  "generation.partial_image",
+  "generation.succeeded",
+  "generation.failed",
+  "generation.canceled",
+  "generation.retrying",
+  "completion.queued",
+  "completion.started",
+  "completion.progress",
+  "completion.delta",
+  "completion.thinking_delta",
+  "completion.image",
+  "completion.succeeded",
+  "completion.failed",
+  "completion.restarted",
+  "message.intent_resolved",
+  "conv.message.appended",
+  "conv.renamed",
+  "memory.writes",
+  "conversation.memory.updated",
+  "user.notice",
+  "account_settings_updated",
+] as const;
+
+const MAX_CHANNELS = 62;
+const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
+
+function sortedTaskIds(ids: Iterable<string>): string[] {
+  return [...new Set(ids)].sort();
+}
+
+function generationTaskIds(
+  generations: Record<string, Generation>,
+): string[] {
+  return sortedTaskIds(
+    Object.values(generations)
+      .filter(
+        (generation) =>
+          (generation.status === "queued" ||
+            generation.status === "running") &&
+          !generation.id.startsWith("opt-"),
+      )
+      .map((generation) => generation.id),
+  );
+}
+
+function assistantTaskIds(messages: Message[]): string[] {
+  const ids: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const assistant = message as AssistantMessage;
+    if (
+      assistant.status !== "pending" &&
+      assistant.status !== "streaming"
+    ) {
+      continue;
+    }
+    if (
+      assistant.completion_id &&
+      !assistant.completion_id.startsWith("opt-")
+    ) {
+      ids.push(assistant.completion_id);
+    }
+    for (const generationId of assistant.generation_ids ?? []) {
+      if (!generationId.startsWith("opt-")) ids.push(generationId);
+    }
+    if (
+      assistant.generation_id &&
+      !assistant.generation_id.startsWith("opt-")
+    ) {
+      ids.push(assistant.generation_id);
+    }
+  }
+  return sortedTaskIds(ids);
+}
+
+function completionIds(messages: Message[]): string[] {
+  return sortedTaskIds(
+    messages.flatMap((message) => {
+      if (message.role !== "assistant") return [];
+      const assistant = message as AssistantMessage;
+      return (assistant.status === "pending" ||
+        assistant.status === "streaming") &&
+        assistant.completion_id &&
+        !assistant.completion_id.startsWith("opt-")
+        ? [assistant.completion_id]
+        : [];
+    }),
+  );
+}
+
+function completionStatus(
+  status: BackendCompletion["status"],
+): AssistantMessage["status"] | null {
+  if (status === "queued") return "pending";
+  if (status === "streaming") return "streaming";
+  if (status === "succeeded") return "succeeded";
+  if (status === "failed") return "failed";
+  if (status === "canceled") return "canceled";
+  return null;
+}
+
+function applyCompletionSnapshot(fresh: BackendCompletion): void {
+  const now = Date.now();
+  useChatStore.setState((state) => {
+    let changed = false;
+    const messages = state.messages.map((message) => {
+      const update = updateCompletionMessage(message, fresh, now);
+      changed ||= update.changed;
+      return update.message;
+    });
+    return changed ? { messages } : state;
+  });
+}
+
+function updateCompletionMessage(
+  message: Message,
+  fresh: BackendCompletion,
+  now: number,
+): { message: Message; changed: boolean } {
+  if (
+    message.role !== "assistant" ||
+    (message as AssistantMessage).completion_id !== fresh.id
+  ) {
+    return { message, changed: false };
+  }
+  const previous = message as AssistantMessage;
+  const next = { ...previous };
+  applyCompletionStatus(next, fresh, now);
+  applyCompletionText(next, fresh, now);
+  const changed =
+    next.status !== previous.status ||
+    next.text !== previous.text ||
+    next.last_delta_at !== previous.last_delta_at ||
+    next.stream_started_at !== previous.stream_started_at;
+  return { message: changed ? next : message, changed };
+}
+
+function applyCompletionStatus(
+  message: AssistantMessage,
+  fresh: BackendCompletion,
+  now: number,
+): void {
+  const status = completionStatus(fresh.status);
+  if (status && status !== message.status) message.status = status;
+  if (status === "streaming" && !message.stream_started_at) {
+    message.stream_started_at = now;
+  }
+}
+
+function applyCompletionText(
+  message: AssistantMessage,
+  fresh: BackendCompletion,
+  now: number,
+): void {
+  const serverText = typeof fresh.text === "string" ? fresh.text : "";
+  if (
+    serverText &&
+    (fresh.status === "succeeded" ||
+      serverText.length >= (message.text ?? "").length)
+  ) {
+    message.text = serverText;
+    message.last_delta_at = now;
+  }
+}
+
+async function refreshCompletions(): Promise<void> {
+  const ids = completionIds(useChatStore.getState().messages).slice(0, 16);
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        applyCompletionSnapshot(await getTask("completions", id));
+      } catch (error) {
+        logError(error, {
+          scope: "sse-snapshot",
+          extra: { task: "completion", id },
+        });
+        throw error;
+      }
+    }),
+  );
+}
+
+function channelsFor(
+  userId: string | null,
+  conversationId: string | null,
+  taskIds: readonly string[],
+): string[] {
+  const channels: string[] = [];
+  const add = (channel: string) => {
+    if (!channels.includes(channel) && channels.length < MAX_CHANNELS) {
+      channels.push(channel);
+    }
+  };
+  if (userId) add(`user:${userId}`);
+  if (conversationId) add(`conv:${conversationId}`);
+  for (const id of taskIds) add(`task:${id}`);
+  return channels;
+}
+
+async function invalidateSnapshotQueries(
+  queryClient: QueryClient,
+  userId: string | null,
+  scopes: readonly SnapshotScope[],
+): Promise<void> {
+  const jobs: Array<Promise<unknown>> = [];
+  if (scopes.includes("identity") || scopes.includes("runtimeDefaults")) {
+    jobs.push(
+      queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY }),
+    );
+  }
+  if (scopes.includes("conversations")) {
+    jobs.push(
+      queryClient.invalidateQueries({
+        queryKey: qk.user(userId).conversationsAll(),
+      }),
+    );
+  }
+  if (scopes.includes("activeTasks")) {
+    jobs.push(
+      queryClient.invalidateQueries({
+        queryKey: userScopedQueryKey(userId, ["tasks"]),
+      }),
+    );
+  }
+  if (scopes.includes("wallet")) {
+    jobs.push(
+      queryClient.invalidateQueries({
+        queryKey: userBillingQueryKeys.all(userId),
+      }),
+    );
+  }
+  await Promise.all(jobs);
+}
+
+export function useLumenRealtime(): void {
+  const userId = useChatStore((state) => state.currentUserId);
+  const conversationId = useChatStore((state) => state.currentConvId);
+  const generations = useChatStore((state) => state.generations);
+  const messages = useChatStore((state) => state.messages);
+  const queryClient = useQueryClient();
+  const lastSnapshotAt = useRef(0);
+
+  const taskIds = useMemo(
+    () => sortedTaskIds([
+      ...generationTaskIds(generations),
+      ...assistantTaskIds(messages),
+    ]),
+    [generations, messages],
+  );
+  const channels = useMemo(
+    () => channelsFor(userId, conversationId, taskIds),
+    [conversationId, taskIds, userId],
+  );
+
+  const effectContext = useMemo<LumenRealtimeEffectContext>(
+    () => ({
+      applyStoreEvent(name, payload) {
+        useChatStore.getState().applySSEEvent(name, payload);
+      },
+      invalidateTasks() {
+        void queryClient.invalidateQueries({
+          queryKey: userScopedQueryKey(userId, ["tasks"]),
+        });
+      },
+      invalidateConversations() {
+        void queryClient.invalidateQueries({
+          queryKey: qk.user(userId).conversationsAll(),
+        });
+      },
+      invalidateMemorySettings() {
+        void queryClient.invalidateQueries({
+          queryKey: userMemoryQueryKeys.settings(userId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: userMemoryQueryKeys.scopes(userId),
+        });
+      },
+      invalidateConversationMemory(nextConversationId) {
+        void queryClient.invalidateQueries({
+          queryKey: userConversationQueryKeys.usedMemories(
+            userId,
+            nextConversationId,
+          ),
+        });
+      },
+    }),
+    [queryClient, userId],
+  );
+  const router = useMemo(
+    () => new EventRouter(createLumenEffectRegistry(EVENT_NAMES, effectContext)),
+    [effectContext],
+  );
+  const handlers = useMemo<SSEHandlers>(
+    () =>
+      Object.fromEntries(
+        EVENT_NAMES.map((name) => [
+          name,
+          (payload: unknown, cursor: string) => {
+            if (!payload || typeof payload !== "object") return;
+            router.route({
+              kind: "domain",
+              type: name,
+              version: 1,
+              payload: payload as Record<string, unknown>,
+              cursor: cursor || undefined,
+            });
+          },
+        ]),
+      ),
+    [router],
+  );
+
+  const recoverSnapshot = useCallback<SnapshotAdapter>(
+    async (scopes) => {
+      const store = useChatStore.getState();
+      const results = await Promise.allSettled([
+        store.hydrateActiveTasks(),
+        store.pollInflightTasks({ maxChecks: 50 }),
+        refreshCompletions(),
+        invalidateSnapshotQueries(queryClient, userId, scopes),
+      ]);
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((failure) => failure.reason),
+          "realtime snapshot recovery failed",
+        );
+      }
+      lastSnapshotAt.current = Date.now();
+      return { syncedAt: lastSnapshotAt.current };
+    },
+    [queryClient, userId],
+  );
+
+  const { status, reconnect } = useSSE(channels, handlers, {
+    recoverSnapshot,
+    onOpen: () => {
+      if (Date.now() - lastSnapshotAt.current > RECENT_SNAPSHOT_WINDOW_MS) {
+        void recoverSnapshot([
+          "identity",
+          "conversations",
+          "activeTasks",
+          "wallet",
+          "runtimeDefaults",
+        ], { kind: "replay_gap", reason: "connection_open" }).catch((error) => {
+          logError(error, { scope: "sse-open-snapshot" });
+        });
+      }
+    },
+  });
+
+  useEffect(() => {
+    setRealtimeRuntimeStatus(channels.length > 0 ? status : "idle");
+  }, [channels.length, status]);
+
+  useEffect(
+    () =>
+      registerRuntimeRecovery("realtime", () => {
+        reconnect();
+      }),
+    [reconnect],
+  );
+
+  useEffect(
+    () => () => {
+      disposeChatStoreRuntime();
+    },
+    [],
+  );
+}

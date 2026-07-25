@@ -17,13 +17,15 @@ from lumen_core.constants import GenerationErrorCode as EC
 
 from .config import settings
 
-_LINK_UNSUPPORTED_ERRNOS = {
-    errno.EPERM,
-    errno.EACCES,
-    errno.EXDEV,
-    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-    errno.EOPNOTSUPP,
-}
+_LINK_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EPERM,
+        errno.EACCES,
+        errno.EXDEV,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        errno.EOPNOTSUPP,
+    }
+)
 _LINK_FALLBACK_MAX_ATTEMPTS = 3
 
 

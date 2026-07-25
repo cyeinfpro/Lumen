@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 _T = TypeVar("_T")
-_DEV_ENVS = {"dev", "development", "local", "test"}
+_DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 
 
 async def _resolve_redis_result(value: Awaitable[_T] | _T) -> _T:

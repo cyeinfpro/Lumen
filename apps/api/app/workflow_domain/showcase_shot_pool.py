@@ -204,6 +204,8 @@ __all__ = [
     "ShotPool",
     "ShotVariant",
     "Template",
+    "_FRONT_BIASED_SHOT_SEQUENCE",
+    "_seed_from",
     "age_soft_constraint",
     "resolve_pool_band",
     "select_variants",

@@ -13,8 +13,8 @@ from lumen_core.schemas import ImageParamsIn
 from lumen_core.sizing import ResolvedSize
 
 
-_IMAGE_BILLING_TIER_VALUES = {"1k", "2k", "4k"}
-_IMAGE_RENDER_QUALITY_VALUES = {"low", "medium", "high"}
+_IMAGE_BILLING_TIER_VALUES = frozenset({"1k", "2k", "4k"})
+_IMAGE_RENDER_QUALITY_VALUES = frozenset({"low", "medium", "high"})
 
 
 @dataclass(frozen=True)
@@ -87,9 +87,7 @@ async def user_rate_multiplier_x10000(
     if not isinstance(db, AsyncSession):
         return 10_000
     raw = (
-        await db.execute(
-            select(User.billing_rate_multiplier).where(User.id == user_id)
-        )
+        await db.execute(select(User.billing_rate_multiplier).where(User.id == user_id))
     ).scalar_one_or_none()
     return rate_multiplier_x10000(raw)
 

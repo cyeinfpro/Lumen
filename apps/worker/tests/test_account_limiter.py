@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import asyncio
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +19,7 @@ from typing import Any
 import pytest
 from redis.exceptions import WatchError
 
-from app import account_limiter, upstream
+from app import account_limiter
 
 
 class FakeRedis:
@@ -741,7 +743,7 @@ async def test_upstream_accounting_unavailable_does_not_discard_success(
 
     monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
 
-    recorded = await upstream._record_admin_image_call_or_raise(
+    recorded = await upstream_services().providers.record_admin_image_call_or_raise(
         Pool(),
         SimpleNamespace(
             name="acc1",
@@ -768,20 +770,20 @@ async def test_upstream_reservation_uses_stable_task_attempt_call_identity() -> 
         image_daily_quota=80,
         purposes=("image",),
     )
-    token = upstream.push_image_quota_context("task-1", 3)
+    token = upstream_services().core.push_image_quota_context("task-1", 3)
     try:
-        first = await upstream._reserve_admin_image_call(  # noqa: SLF001
+        first = await upstream_services().providers.reserve_admin_image_call(  # noqa: SLF001
             Pool(),
             provider,
             route="responses",
         )
-        second = await upstream._reserve_admin_image_call(  # noqa: SLF001
+        second = await upstream_services().providers.reserve_admin_image_call(  # noqa: SLF001
             Pool(),
             provider,
             route="generations",
         )
     finally:
-        upstream.pop_image_quota_context(token)
+        upstream_services().core.pop_image_quota_context(token)
 
     assert first is not None
     assert second is not None
@@ -809,24 +811,26 @@ async def test_upstream_quota_claim_confirms_without_post_success_redis_write(
         raise AssertionError("reserved success must not perform a second Redis write")
 
     monkeypatch.setattr(account_limiter, "record_image_call", fail_record)
-    scope_token = upstream.push_image_quota_context("task-1", 1)
+    scope_token = upstream_services().core.push_image_quota_context("task-1", 1)
     try:
-        async with upstream._image_quota_claim(  # noqa: SLF001
+        async with upstream_services().providers.image_quota_claim(  # noqa: SLF001
             Pool(),
             provider,
             route="responses",
         ) as reservation:
             assert reservation is not None
             reservation.state = "started"
-            confirmed = await upstream._record_admin_image_call_or_raise(
-                Pool(),
-                provider,
-                task_id="task-1",
+            confirmed = (
+                await upstream_services().providers.record_admin_image_call_or_raise(
+                    Pool(),
+                    provider,
+                    task_id="task-1",
+                )
             )
             assert confirmed is True
             assert reservation.state == "confirmed"
     finally:
-        upstream.pop_image_quota_context(scope_token)
+        upstream_services().core.pop_image_quota_context(scope_token)
 
 
 @pytest.mark.asyncio
@@ -842,9 +846,9 @@ async def test_upstream_quota_claim_releases_when_request_never_started() -> Non
         image_rate_limit="1/min",
         image_daily_quota=80,
     )
-    scope_token = upstream.push_image_quota_context("task-1", 1)
+    scope_token = upstream_services().core.push_image_quota_context("task-1", 1)
     try:
-        async with upstream._image_quota_claim(  # noqa: SLF001
+        async with upstream_services().providers.image_quota_claim(  # noqa: SLF001
             Pool(),
             provider,
             route="responses",
@@ -853,7 +857,7 @@ async def test_upstream_quota_claim_releases_when_request_never_started() -> Non
             assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
         assert reservation.state == "released"
     finally:
-        upstream.pop_image_quota_context(scope_token)
+        upstream_services().core.pop_image_quota_context(scope_token)
 
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
 

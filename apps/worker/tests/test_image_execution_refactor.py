@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import asyncio
 from types import SimpleNamespace
 from typing import Any
@@ -70,12 +72,14 @@ async def test_auto_provider_without_image_jobs_does_not_read_sidecar_config(
     def unexpected_token_read() -> str:
         raise AssertionError("disabled image jobs must not read sidecar config")
 
-    monkeypatch.setattr(upstream, "_image_job_sidecar_token", unexpected_token_read)
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_sidecar_token", unexpected_token_read
+    )
 
     route = await image_dispatch._prepare_provider_route(
         _request(provider_override=provider, mask=None),
-        channel=upstream._IMAGE_CHANNEL_AUTO,
-        engine=upstream._IMAGE_ROUTE_RESPONSES,
+        channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+        engine=upstream_services().core.IMAGE_ROUTE_RESPONSES,
     )
 
     assert route.use_jobs is False
@@ -101,7 +105,11 @@ async def test_auto_falls_back_to_stream_when_sidecar_configuration_is_unavailab
         image_jobs_base_url=provider_base_url,
     )
     events: list[dict[str, Any]] = []
-    monkeypatch.setattr(upstream.settings, "image_job_sidecar_token", sidecar_token)
+    monkeypatch.setattr(
+        upstream_services().infrastructure.settings,
+        "image_job_sidecar_token",
+        sidecar_token,
+    )
 
     route = await image_dispatch._prepare_provider_route(
         _request(
@@ -109,8 +117,8 @@ async def test_auto_falls_back_to_stream_when_sidecar_configuration_is_unavailab
             mask=None,
             progress_callback=events.append,
         ),
-        channel=upstream._IMAGE_CHANNEL_AUTO,
-        engine=upstream._IMAGE_ROUTE_RESPONSES,
+        channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+        engine=upstream_services().core.IMAGE_ROUTE_RESPONSES,
     )
 
     assert route.use_jobs is False
@@ -123,13 +131,15 @@ async def test_image_jobs_only_reports_configuration_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = SimpleNamespace(name="jobs-provider", image_jobs_enabled=True)
-    monkeypatch.setattr(upstream.settings, "image_job_sidecar_token", "")
+    monkeypatch.setattr(
+        upstream_services().infrastructure.settings, "image_job_sidecar_token", ""
+    )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await image_dispatch._prepare_provider_route(
             _request(provider_override=provider, mask=None),
-            channel=upstream._IMAGE_CHANNEL_IMAGE_JOBS_ONLY,
-            engine=upstream._IMAGE_ROUTE_RESPONSES,
+            channel=upstream_services().core.IMAGE_CHANNEL_IMAGE_JOBS_ONLY,
+            engine=upstream_services().core.IMAGE_ROUTE_RESPONSES,
         )
 
     assert exc_info.value.status_code == 503
@@ -158,9 +168,15 @@ async def test_effective_image_jobs_only_configuration_is_validated_at_startup(
         calls.append("base_url")
         return "https://image-job.internal"
 
-    monkeypatch.setattr(upstream, "_resolve_image_channel", strict_channel)
-    monkeypatch.setattr(upstream, "_image_job_sidecar_token", valid_token)
-    monkeypatch.setattr(upstream, "_resolve_image_job_base_url", valid_base_url)
+    monkeypatch.setattr(
+        upstream_services().core, "resolve_image_channel", strict_channel
+    )
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_sidecar_token", valid_token
+    )
+    monkeypatch.setattr(
+        upstream_services().direct, "resolve_image_job_base_url", valid_base_url
+    )
 
     await upstream.validate_effective_image_job_configuration()
 
@@ -175,14 +191,14 @@ async def test_mask_dispatch_rejects_empty_reference_bytes(
         raise AssertionError("empty mask references must fail before dispatch")
 
     monkeypatch.setattr(
-        upstream,
-        "_direct_edit_image_with_failover",
+        upstream_services().direct,
+        "direct_edit_image_with_failover",
         unexpected_direct,
     )
     provider = SimpleNamespace(name="mask-provider", image_jobs_enabled=False)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=provider,
             channel="stream_only",
@@ -202,7 +218,10 @@ async def test_mask_dispatch_rejects_empty_reference_bytes(
         ):
             pass
 
-    assert exc_info.value.error_code == upstream.EC.MISSING_INPUT_IMAGES.value
+    assert (
+        exc_info.value.error_code
+        == upstream_services().infrastructure.EC.MISSING_INPUT_IMAGES.value
+    )
     assert str(exc_info.value) == "mask requires at least one reference image"
 
 
@@ -220,16 +239,18 @@ async def test_responses_fallback_preserves_missing_edit_input_error(
     async def unexpected_direct(**_kwargs: Any) -> list[tuple[str, str | None]]:
         raise AssertionError("missing edit input must fail before direct dispatch")
 
-    monkeypatch.setattr(upstream, "_race_responses_image", failed_responses)
     monkeypatch.setattr(
-        upstream,
-        "_direct_edit_image_with_failover",
+        upstream_services().race, "race_responses_image", failed_responses
+    )
+    monkeypatch.setattr(
+        upstream_services().direct,
+        "direct_edit_image_with_failover",
         unexpected_direct,
     )
     provider = SimpleNamespace(name="edit-provider", image_jobs_enabled=False)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=provider,
             channel="stream_only",
@@ -248,7 +269,10 @@ async def test_responses_fallback_preserves_missing_edit_input_error(
         ):
             pass
 
-    assert exc_info.value.error_code == upstream.EC.MISSING_INPUT_IMAGES.value
+    assert (
+        exc_info.value.error_code
+        == upstream_services().infrastructure.EC.MISSING_INPUT_IMAGES.value
+    )
     assert str(exc_info.value) == "edit action requires at least one reference image"
 
 
@@ -276,12 +300,12 @@ async def test_responses_race_waits_for_loser_cleanup(
         return "late", None
 
     monkeypatch.setattr(
-        upstream,
-        "_responses_image_stream_with_failover",
+        upstream_services().direct,
+        "responses_image_stream_with_failover",
         fake_responses,
     )
 
-    result = await upstream._race_responses_image(
+    result = await upstream_services().race.race_responses_image(
         action="generate",
         prompt="image",
         size="1024x1024",
@@ -315,17 +339,17 @@ async def test_dispatch_close_propagates_to_dual_race_cleanup(
         return "late", None
 
     monkeypatch.setattr(
-        upstream,
-        "_direct_generate_image_with_failover",
+        upstream_services().direct,
+        "direct_generate_image_with_failover",
         fake_image2,
     )
     monkeypatch.setattr(
-        upstream,
-        "_responses_image_stream_with_failover",
+        upstream_services().direct,
+        "responses_image_stream_with_failover",
         fake_responses,
     )
     provider = SimpleNamespace(name="race-provider", image_jobs_enabled=False)
-    image_iter = upstream._run_image_once_for_provider(
+    image_iter = upstream_services().dispatch.run_image_once_for_provider(
         action="generate",
         provider=provider,
         channel="stream_only",
@@ -372,25 +396,33 @@ async def test_image_job_cancellation_releases_selected_provider_inflight(
         return "https://image-job.example"
 
     async def cancelled_run(**_kwargs: Any) -> tuple[str, str | None]:
-        raise upstream.UpstreamCancelled("cancelled")
+        raise upstream_services().infrastructure.UpstreamCancelled("cancelled")
 
-    monkeypatch.setattr(upstream.provider_pool, "get_pool", fake_get_pool)
-    monkeypatch.setattr(upstream, "_pool_select_compat", fake_select)
-    monkeypatch.setattr(upstream, "_resolve_image_job_base_url", fake_base_url)
-    monkeypatch.setattr(upstream, "_image_job_run_once", cancelled_run)
     monkeypatch.setattr(
-        upstream,
-        "_image_request_attempt_claim",
+        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+    )
+    monkeypatch.setattr(
+        upstream_services().providers, "pool_select_compat", fake_select
+    )
+    monkeypatch.setattr(
+        upstream_services().direct, "resolve_image_job_base_url", fake_base_url
+    )
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_run_once", cancelled_run
+    )
+    monkeypatch.setattr(
+        upstream_services().providers,
+        "image_request_attempt_claim",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        upstream,
-        "_pool_release_inflight",
+        upstream_services().providers,
+        "pool_release_inflight",
         lambda _pool, name, endpoint: releases.append((name, endpoint)),
     )
 
-    with pytest.raises(upstream.UpstreamCancelled):
-        await upstream._image_job_with_failover(
+    with pytest.raises(upstream_services().infrastructure.UpstreamCancelled):
+        await upstream_services().image_jobs.image_job_with_failover(
             action="generate",
             prompt="image",
             size="1024x1024",

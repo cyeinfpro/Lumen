@@ -628,7 +628,7 @@ function LightboxThumbnailStrip({
               "relative h-12 w-12 shrink-0 overflow-hidden rounded-[var(--radius-panel)] border",
               "bg-black/45 shadow-sm transition-all duration-200",
               active
-                ? "scale-105 border-white opacity-100 ring-2 ring-[var(--color-lumen-amber)]/80"
+                ? "scale-105 border-white opacity-100 ring-2 ring-[var(--accent)]/80"
                 : "border-white/10 opacity-60 active:opacity-100",
             )}
           >
@@ -645,7 +645,7 @@ function LightboxThumbnailStrip({
             {active ? (
               <span
                 aria-hidden
-                className="absolute inset-x-1.5 bottom-1 h-[2px] rounded-full bg-[var(--color-lumen-amber)]"
+                className="absolute inset-x-1.5 bottom-1 h-[2px] rounded-full bg-[var(--accent)]"
               />
             ) : null}
           </button>
@@ -732,7 +732,7 @@ function LightboxInjectedAction({
         tabIndex={chromeVisible ? undefined : -1}
         className={cn(
           "pointer-events-auto inline-flex h-11 items-center gap-2 rounded-full px-5",
-          "bg-[var(--color-lumen-amber)] text-[14px] font-semibold text-black",
+          "bg-[var(--accent)] text-[14px] font-semibold text-black",
           "shadow-[var(--shadow-amber)] transition-transform active:scale-95",
           "disabled:cursor-not-allowed disabled:opacity-70",
         )}

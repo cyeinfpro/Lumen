@@ -10,11 +10,26 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATE = ROOT / "scripts" / "update.sh"
+UPDATE_MODULE_DIR = ROOT / "scripts" / "update"
+UPDATE_SOURCE_RELATIVE = (
+    "common.sh",
+    "backup/restore_points.sh",
+    "backup/migration_helpers.sh",
+    "recovery/state.sh",
+    "backup/preflight.sh",
+    "backup/phases.sh",
+)
+
+
+def _update_source() -> str:
+    return "\n".join(
+        (UPDATE_MODULE_DIR / relative).read_text(encoding="utf-8")
+        for relative in UPDATE_SOURCE_RELATIVE
+    )
 
 
 def _function_source(name: str) -> str:
-    text = UPDATE.read_text(encoding="utf-8")
+    text = _update_source()
     match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
     assert match is not None, f"{name} not found"
     return match.group(0)
@@ -285,12 +300,12 @@ def test_noninteractive_fast_update_requires_restore_point_before_stop() -> None
     assert "missing_required_restore_point" in result.stdout
     assert "拒绝停止旧服务或执行 Alembic" in result.stderr
 
-    text = UPDATE.read_text(encoding="utf-8")
+    text = _update_source()
     migrate_start = text.index("# Phase: migrate_db")
-    guard_index = text.index("elif ! guard_migration_restore_point; then", migrate_start)
-    stop_index = text.index(
-        'lumen_compose_in "${NEW_RELEASE}" stop -t', migrate_start
+    guard_index = text.index(
+        "elif ! guard_migration_restore_point; then", migrate_start
     )
+    stop_index = text.index('lumen_compose_in "${NEW_RELEASE}" stop -t', migrate_start)
     run_index = text.index("UPDATE_MIGRATION_STARTED=1", migrate_start)
     assert guard_index < stop_index < run_index
 

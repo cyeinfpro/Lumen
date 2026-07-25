@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import asyncio
 from types import SimpleNamespace
 from typing import Any
@@ -7,7 +9,29 @@ from typing import Any
 import pytest
 
 from app import sse_publish
-from app.tasks import completion
+from app.tasks.completion_parts import default_runtime as completion
+from .task_parts_runtime_testing import synchronize_module_ports
+from lumen_core.constants import (
+    EV_COMP_DELTA,
+    EV_COMP_FAILED,
+    EV_COMP_PROGRESS,
+    EV_COMP_STARTED,
+    EV_COMP_SUCCEEDED,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sync_completion_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        completion,
+        completion.DEFAULT_COMPLETION_RUNTIME.ports,
+    ):
+        yield
+
+
 from lumen_core.models import OutboxEvent
 
 
@@ -252,10 +276,10 @@ async def test_run_completion_setup_lease_loss_does_not_mutate_row(
 @pytest.mark.parametrize(
     ("event_name", "event_data"),
     [
-        (completion.EV_COMP_STARTED, {"completion_id": "comp-1"}),
-        (completion.EV_COMP_DELTA, {"completion_id": "comp-1", "text_delta": "x"}),
+        (EV_COMP_STARTED, {"completion_id": "comp-1"}),
+        (EV_COMP_DELTA, {"completion_id": "comp-1", "text_delta": "x"}),
         (
-            completion.EV_COMP_PROGRESS,
+            EV_COMP_PROGRESS,
             {"completion_id": "comp-1", "stage": "tool_call"},
         ),
     ],
@@ -323,9 +347,9 @@ async def test_completion_publish_failure_stages_stable_sse_redrive(
 @pytest.mark.parametrize(
     ("event_name", "event_data"),
     [
-        (completion.EV_COMP_SUCCEEDED, {"text": "done"}),
-        (completion.EV_COMP_FAILED, {"code": "upstream_error"}),
-        (completion.EV_COMP_FAILED, {"code": "cancelled"}),
+        (EV_COMP_SUCCEEDED, {"text": "done"}),
+        (EV_COMP_FAILED, {"code": "upstream_error"}),
+        (EV_COMP_FAILED, {"code": "cancelled"}),
     ],
 )
 async def test_terminal_completion_publish_failure_keeps_outbox_for_redrive(

@@ -8,22 +8,25 @@ from typing import Any, Iterable
 
 from lumen_core.models import Generation, ModelCandidate, QualityReport
 
-from .serialization import _dedupe_nonempty, _dict_or_empty
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from .serialization import dict_or_empty as _dict_or_empty  # noqa: F401
 
 
 MODEL_CANDIDATE_COUNT = 3
 
-PRODUCT_ANALYSIS_FIELDS = {
-    "category",
-    "color",
-    "material_guess",
-    "silhouette",
-    "key_details",
-    "must_preserve",
-    "risks",
-    "styling_recommendations",
-    "background_recommendation",
-}
+PRODUCT_ANALYSIS_FIELDS = frozenset(
+    {
+        "category",
+        "color",
+        "material_guess",
+        "silhouette",
+        "key_details",
+        "must_preserve",
+        "risks",
+        "styling_recommendations",
+        "background_recommendation",
+    }
+)
 
 
 def _showcase_expected_image_count(
@@ -295,3 +298,19 @@ def _merge_quality_summary_payload(
         payload["review_tasks"] = review_tasks
         payload["review_task_count"] = len(review_tasks)
     return payload
+
+
+# Public workflow contracts.
+candidate_generated_image_ids = _candidate_generated_image_ids
+clamp_score = _clamp_score
+coerce_string_list = _coerce_string_list
+extract_jsonish_value = _extract_jsonish_value
+failed_generation_output = _failed_generation_output
+generation_batch_outcome = _generation_batch_outcome
+merge_quality_summary_payload = _merge_quality_summary_payload
+normalize_product_analysis_payload = _normalize_product_analysis_payload
+quality_payload_from_text = _quality_payload_from_text
+quality_summary_payload = _quality_summary_payload
+showcase_expected_image_count = _showcase_expected_image_count
+task_error_summary = _task_error_summary
+try_parse_json_text = _try_parse_json_text

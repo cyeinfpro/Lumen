@@ -9,9 +9,20 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
 from lumen_core.constants import EV_GEN_ATTACHED, EV_GEN_SUCCEEDED
 from lumen_core.models import Generation, Image
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(monkeypatch: pytest.MonkeyPatch):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
 
 
 class _FakeSession:

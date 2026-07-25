@@ -19,8 +19,11 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 ComplexityBudget = MODULE.ComplexityBudget
+MetricBudget = MODULE.MetricBudget
 compare_budgets = MODULE.compare_budgets
 compare_file_budgets = MODULE.compare_file_budgets
+compare_metric_budgets = MODULE.compare_metric_budgets
+collect_python_metrics = MODULE.collect_python_metrics
 collect_violations = MODULE.collect_violations
 function_identities = MODULE.function_identities
 
@@ -139,4 +142,79 @@ def test_file_size_gate_only_allows_oversized_files_to_shrink() -> None:
 
     assert compare_file_budgets({"existing.py": 2001}, baseline) == [
         "oversized source file grew: existing.py 2000 -> 2001",
+    ]
+
+
+def test_update_shell_modules_use_strict_600_line_limit(tmp_path: Path) -> None:
+    update_dir = tmp_path / "scripts" / "update"
+    update_dir.mkdir(parents=True)
+    acceptable = update_dir / "acceptable.sh"
+    oversized = update_dir / "oversized.sh"
+    acceptable.write_text("line\n" * 599, encoding="utf-8")
+    oversized.write_text("line\n" * 600, encoding="utf-8")
+
+    original_root = MODULE.ROOT
+    MODULE.ROOT = tmp_path
+    try:
+        findings = MODULE.collect_oversized_files(("scripts/update",))
+    finally:
+        MODULE.ROOT = original_root
+
+    assert findings == {"scripts/update/oversized.sh": 600}
+    assert compare_file_budgets(findings, {}) == [
+        "new oversized source file: scripts/update/oversized.sh (600 > 599 lines)"
+    ]
+
+
+def test_python_metrics_report_multiple_complexity_dimensions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.py"
+    nested = "\n".join(
+        [
+            "def large(a, b, c, d, e, f, g, h, i, j, k, l, m):",
+            "    if a:",
+            "        if b:",
+            "            if c:",
+            "                if d:",
+            "                    if e:",
+            "                        if f:",
+            "                            if g:",
+            *["                                value = 1" for _ in range(195)],
+        ]
+    )
+    source.write_text(nested + "\n", encoding="utf-8")
+
+    original_root = MODULE.ROOT
+    MODULE.ROOT = tmp_path
+    try:
+        metrics = collect_python_metrics(("module.py",))
+    finally:
+        MODULE.ROOT = original_root
+
+    key = "module.py::large"
+    assert metrics["function_lines"][key].value > MODULE.MAX_FUNCTION_LINES
+    assert metrics["function_parameters"][key].value == 13
+    assert metrics["nesting_depth"][key].value == 7
+
+
+def test_multi_dimensional_metrics_only_allow_debt_to_shrink() -> None:
+    baseline = {
+        "function_lines": {"module.py::large": MetricBudget(250)},
+        "function_parameters": {},
+        "nesting_depth": {},
+    }
+    current = {
+        "function_lines": {"module.py::large": MetricBudget(220)},
+        "function_parameters": {"module.py::wide": MetricBudget(14)},
+        "nesting_depth": {},
+    }
+
+    assert compare_metric_budgets(current, baseline) == [
+        "new function_parameters violation: module.py::wide (value=14)"
+    ]
+    current["function_lines"]["module.py::large"] = MetricBudget(251)
+    assert compare_metric_budgets(current, baseline) == [
+        "function_lines grew: module.py::large 250 -> 251",
+        "new function_parameters violation: module.py::wide (value=14)",
     ]

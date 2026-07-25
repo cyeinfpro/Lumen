@@ -1,630 +1,72 @@
-import { isPublicPath } from "@/lib/auth/publicPaths";
+import { activatePrivateClientState } from "@/lib/auth/privateStateCleanup";
 import {
-  activatePrivateCanvasPersistence,
-  clearPrivateCanvasPersistence,
-} from "#canvas-persistence";
+  coordinateUnauthorized,
+  invalidateSessionClientState,
+} from "@/lib/auth/authFailureCoordinator";
+import { safeAuthNextPath } from "@/lib/auth/navigation";
+import { API_BASE } from "./baseUrl";
+import { commandClient } from "./commandClient";
+import { csrfService } from "./csrf";
+import { ApiError } from "./errors";
+import { queryClient } from "./queryClient";
+import {
+  DEFAULT_API_TIMEOUT_MS,
+  deadline,
+  type RequestBudget,
+} from "./requestBudget";
+import { uploadClient } from "./uploadClient";
 
-// Lumen 前端统一 API 客户端（DESIGN §3.1 / §5.x）
-//
-// API_BASE 解析（优先级从高到低）：
-//   1. 显式 NEXT_PUBLIC_API_BASE（编译期注入，跨域 / 子域部署时用）
-//   2. 浏览器运行时 → "/api"（同源相对路径；由 src/proxy.ts / 外层反代转发到后端）
-//   3. SSR / build fallback → http://127.0.0.1:8000（生产 SSR 极少用到 API）
-//
-// 这样生产部署只需要外层 nginx 把 https://domain/* 一律透传到 web:3000；
-// 不用再在反代层配 /api 路由 —— Next.js proxy 会把 /api/* 和 /events 内部
-// 转发到 LUMEN_BACKEND_URL（默认 http://127.0.0.1:8000）。
-//
-// 所有请求带 credentials:"include" 以携带会话 cookie；写操作附 X-CSRF-Token。
-// 401 一次性触发重定向到 /login（仅客户端环境）。非 2xx 抛 ApiError。
-//
-// 注意：本文件只做"薄封装"；不做请求缓存 / 重试 / 乐观更新（那些由 store 层处理）。
-
-function computeApiBase(): string {
-  const explicit = process.env.NEXT_PUBLIC_API_BASE?.trim();
-  if (explicit) return explicit.replace(/\/$/, "");
-  // 默认永远是同源 "/api" —— 无论浏览器还是 SSR 渲染。
-  // 关键：imageBinaryUrl / eventUrl / shareImageUrl 等会被 render 成 <img src>、
-  // 传到客户端 HTML。如果 SSR 期用绝对地址（localhost:8000），会被 baked 进 HTML
-  // 导致浏览器跑 HTTP 被 mixed-content 拦。
-  // 相对 "/api/..." 浏览器解析时自动拼成 https://<host>/api/...（同源）。
-  //
-  // 副作用：如果真有 server component 需要 fetch API，它得拿 LUMEN_BACKEND_URL
-  // 自己拼绝对地址（目前没有这种调用；所有 apiFetch 只在 "use client" 组件中跑）。
-  return "/api";
-}
-
-export const API_BASE = computeApiBase();
+export {
+  API_BASE,
+  ApiError,
+  DEFAULT_API_TIMEOUT_MS,
+  invalidateSessionClientState,
+  safeAuthNextPath,
+};
 
 export type NoContent = undefined;
 
 export type ApiFetchInit = RequestInit & {
-  /**
-   * Mark endpoints that intentionally return HTTP 204. This keeps call sites from
-   * claiming a JSON shape for an empty response.
-   */
   expectNoContent?: boolean;
   /**
-   * Total request budget in milliseconds. Requests have no synthetic deadline
-   * unless a caller opts in; uploads and operational APIs can legitimately run
-   * longer than a single global budget.
+   * @deprecated Prefer a typed client and RequestBudget. Omitted requests use
+   * the standard 30 second total deadline.
    */
-  timeoutMs?: number | null;
+  timeoutMs?: number;
 };
 
-export const DEFAULT_API_TIMEOUT_MS = 30_000;
-
-export function safeAuthNextPath(
-  raw: string,
-  origin?: string,
-): string {
-  const trimmed = typeof raw === "string" ? raw.trim() : "";
-  if (!trimmed || trimmed.startsWith("//")) return "/";
-  try {
-    const base =
-      origin ??
-      (typeof window !== "undefined"
-        ? window.location.origin
-        : "http://localhost");
-    const parsed = new URL(trimmed, base);
-    if (parsed.origin !== new URL(base).origin) return "/";
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "/";
-    if (!parsed.pathname.startsWith("/") || isPublicPath(parsed.pathname)) {
-      return "/";
-    }
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch {
-    return "/";
-  }
+function compatibilityBudget(timeoutMs: number | undefined):
+  | RequestBudget
+  | undefined {
+  if (timeoutMs === undefined) return undefined;
+  return deadline(timeoutMs);
 }
 
-// 只在客户端、且一次页面生命周期内只做一次跳转，防止多并发 401 风暴。
-let _redirecting = false;
-// 已经在公开页（/login、/reset-password、/invite/*）就不要再跳 /login，
-// 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → replace("/login") → 重载 → 再 401，会死循环刷新。
-export function handle401() {
-  const privateStateCleanup = invalidateSessionClientState();
-  if (typeof window === "undefined") return;
-  if (_redirecting) return;
-  if (isPublicPath(window.location.pathname)) return;
-  _redirecting = true;
-  const currentPath = safeAuthNextPath(
-    `${window.location.pathname}${window.location.search}${window.location.hash}`,
-    window.location.origin,
-  );
-  const loginPath = `/login?next=${encodeURIComponent(currentPath)}`;
-  // 必须整页 replace：document teardown 会清空 React Query、Zustand 与模块级
-  // 私有内存缓存，同时不会把已失效的受保护页面留在 history 中。
-  void privateStateCleanup.finally(() => {
-    try {
-      window.location.replace(loginPath);
-    } catch {
-      _redirecting = false;
-    }
-  });
-}
-
-function readCookie(name: string): string | null {
-  if (typeof document === "undefined") return null;
-  const cookies = document.cookie ? document.cookie.split("; ") : [];
-  for (const raw of cookies) {
-    const eq = raw.indexOf("=");
-    if (eq < 0) continue;
-    const k = raw.slice(0, eq);
-    if (k === name) {
-      const value = raw.slice(eq + 1);
-      try {
-        return decodeURIComponent(value);
-      } catch (e) {
-        // Cookie 值含损坏的 URI 编码（例如不完整的 %XX）会让 decodeURIComponent 抛 URIError，
-        // 不能让该异常中止整个请求流程（CSRF 读取失败会引发所有写操作失败）。
-        try {
-          console.warn("[readCookie] failed to decode", name, e);
-        } catch {
-          /* console 不可用时忽略 */
-        }
-        return value;
-      }
-    }
-  }
-  return null;
-}
-
-export class ApiError extends Error {
-  code: string;
-  status: number;
-  payload?: unknown;
-  constructor(opts: {
-    code: string;
-    message: string;
-    status: number;
-    payload?: unknown;
-  }) {
-    super(opts.message);
-    this.name = "ApiError";
-    this.code = opts.code;
-    this.status = opts.status;
-    this.payload = opts.payload;
-  }
-}
-
-interface ParsedApiError {
-  code: string;
-  message: string;
-}
-
-function parseErrorObject(value: unknown): Partial<ParsedApiError> | null {
-  if (!value || typeof value !== "object" || !("error" in value)) return null;
-  const error = (value as { error?: unknown }).error;
-  if (!error || typeof error !== "object") return null;
-  const record = error as { code?: unknown; message?: unknown };
-  return {
-    code: typeof record.code === "string" ? record.code : undefined,
-    message: typeof record.message === "string" ? record.message : undefined,
-  };
-}
-
-function parseValidationDetail(detail: unknown): string | null {
-  if (!Array.isArray(detail) || detail.length === 0) return null;
-  const first = detail[0];
-  if (!first || typeof first !== "object" || !("msg" in first)) return null;
-  const message = (first as { msg?: unknown }).msg;
-  return typeof message === "string" && message.trim() ? message : null;
-}
-
-function parseDetailError(
-  detail: unknown,
-  fallback: ParsedApiError,
-): ParsedApiError {
-  if (typeof detail === "string" && detail.trim()) {
-    return { ...fallback, message: detail };
-  }
-  const nested = parseErrorObject(detail);
-  return {
-    code: nested?.code ?? fallback.code,
-    message:
-      nested?.message ?? parseValidationDetail(detail) ?? fallback.message,
-  };
-}
-
-function normalizeRequestTooLarge(
-  status: number,
-  error: ParsedApiError,
-): ParsedApiError {
-  return status === 413 && error.message === `HTTP ${status}`
-    ? { code: "request_too_large", message: "上传文件过大，请压缩后重试" }
-    : error;
-}
-
-function parseApiError(status: number, data: unknown): ParsedApiError {
-  const fallback = { code: "http_error", message: `HTTP ${status}` };
-  const direct = parseErrorObject(data);
-  if (direct) {
-    return {
-      code: direct.code ?? fallback.code,
-      message: direct.message ?? fallback.message,
-    };
-  }
-  if (data && typeof data === "object" && "detail" in data) {
-    return normalizeRequestTooLarge(
-      status,
-      parseDetailError((data as { detail?: unknown }).detail, fallback),
-    );
-  }
-  const error =
-    typeof data === "string" && data.trim()
-      ? { ...fallback, message: data.trim() }
-      : fallback;
-  return normalizeRequestTooLarge(status, error);
-}
-
-function networkRequestError(err: unknown): Error {
-  if (err instanceof Error && err.name === "AbortError") return err;
-  return new ApiError({
-    code: "network_error",
-    message: err instanceof Error ? err.message : "network error",
-    status: 0,
-  });
-}
-
-// 写操作（POST/PUT/PATCH/DELETE）需要 X-CSRF-Token。GET/HEAD 不附。
-const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const CSRF_FAILED_CODE = "csrf_failed";
-
-// API 重启 / 临时网络抖动时，fetch 会直接 throw（请求从未抵达服务器），这种情况重试是
-// 安全的——服务端不会看到任何重复请求。HTTP 502/503/504 只重试 GET/HEAD 或显式带
-// Idempotency-Key 的写请求，避免无法判断服务端是否已部分处理的写操作被重复执行。
-const NETWORK_RETRY_MAX = 2;
-const NETWORK_RETRY_DELAYS_MS = [400, 1200];
-const RETRYABLE_HTTP_STATUSES = new Set([502, 503, 504]);
-type RequestAbortSource = "caller" | "timeout" | null;
-
-type RequestSignalContext = {
-  signal?: AbortSignal;
-  abortSource: () => RequestAbortSource;
-  abortReason: () => unknown;
-  cleanup: () => void;
-};
-
-type CsrfRefreshFlight = {
-  epoch: number;
-  controller: AbortController;
-  promise: Promise<string | null>;
-};
-
-let _csrfRefreshEpoch = 0;
-let _csrfRefreshFlight: CsrfRefreshFlight | null = null;
-
-function requestSignal(
-  callerSignal: AbortSignal | null | undefined,
-  timeoutMs: number | null | undefined,
-): RequestSignalContext {
-  if (timeoutMs === null) {
-    return {
-      signal: callerSignal ?? undefined,
-      abortSource: () => (callerSignal?.aborted ? "caller" : null),
-      abortReason: () => abortReason(callerSignal),
-      cleanup: () => undefined,
-    };
-  }
-  const normalizedTimeout =
-    typeof timeoutMs === "number" &&
-    Number.isFinite(timeoutMs) &&
-    timeoutMs > 0
-      ? timeoutMs
-      : DEFAULT_API_TIMEOUT_MS;
-  const controller = new AbortController();
-  let source: RequestAbortSource = null;
-  const onCallerAbort = () => {
-    if (source) return;
-    source = "caller";
-    controller.abort(abortReason(callerSignal));
-  };
-  if (callerSignal?.aborted) {
-    onCallerAbort();
-  } else {
-    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
-  }
-  const timeout = setTimeout(() => {
-    if (source) return;
-    source = "timeout";
-    controller.abort(new DOMException("Request timed out", "TimeoutError"));
-  }, normalizedTimeout);
-  return {
-    signal: controller.signal,
-    abortSource: () => source,
-    abortReason: () =>
-      source === "caller"
-        ? abortReason(callerSignal)
-        : controller.signal.reason,
-    cleanup: () => {
-      clearTimeout(timeout);
-      callerSignal?.removeEventListener("abort", onCallerAbort);
-    },
-  };
-}
-
-function abortReason(
-  signal: AbortSignal | null | undefined,
-): unknown {
+function isUploadBody(body: BodyInit | null | undefined): body is FormData | Blob {
   return (
-    signal?.reason ??
-    new DOMException("The operation was aborted", "AbortError")
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof Blob !== "undefined" && body instanceof Blob)
   );
 }
 
-function requestFailure(
-  err: unknown,
-  context: RequestSignalContext,
-): never {
-  const source = context.abortSource();
-  if (source === "caller") throw context.abortReason();
-  if (source === "timeout") {
-    throw new ApiError({
-      code: "request_timeout",
-      message: "请求超时，请稍后重试",
-      status: 0,
-      payload: err,
-    });
-  }
-  throw networkRequestError(err);
+export function handle401(): void {
+  coordinateUnauthorized();
 }
 
 export function invalidateCsrfTokenRefresh(): void {
-  _csrfRefreshEpoch += 1;
-  const flight = _csrfRefreshFlight;
-  _csrfRefreshFlight = null;
-  flight?.controller.abort(
-    new DOMException("CSRF refresh invalidated", "AbortError"),
-  );
+  csrfService.invalidate();
 }
 
-export function invalidateSessionClientState(): Promise<void> {
-  invalidateCsrfTokenRefresh();
-  return clearPrivateCanvasPersistence();
+export function refreshCsrfToken(signal?: AbortSignal): Promise<string | null> {
+  return csrfService.refresh(signal);
+}
+
+export function ensureCsrfToken(signal?: AbortSignal): Promise<string | null> {
+  return csrfService.token(signal);
 }
 
 export function resumeSessionClientState(userId: string): Promise<void> {
-  return activatePrivateCanvasPersistence(userId);
-}
-
-async function retryDelay(
-  delayMs: number,
-  signal: AbortSignal | null | undefined,
-): Promise<void> {
-  if (!signal) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    return;
-  }
-  if (signal.aborted) throw abortReason(signal);
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, delayMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function hasIdempotencyKey(headers: Headers): boolean {
-  return headers.has("Idempotency-Key") || headers.has("idempotency-key");
-}
-
-function canRetryHttp(method: string, headers: Headers): boolean {
-  if (method === "GET" || method === "HEAD") {
-    return true;
-  }
-  return hasIdempotencyKey(headers);
-}
-
-function apiUrl(path: string): string {
-  return path.startsWith("http")
-    ? path
-    : `${API_BASE.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
-}
-
-function isBinaryBody(body: BodyInit | null | undefined): boolean {
-  return (
-    (typeof FormData !== "undefined" && body instanceof FormData) ||
-    (typeof Blob !== "undefined" && body instanceof Blob) ||
-    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
-    (typeof ArrayBuffer !== "undefined" &&
-      (body instanceof ArrayBuffer ||
-        ArrayBuffer.isView(body as ArrayBufferView)))
-  );
-}
-
-function addJsonContentType(
-  headers: Headers,
-  body: BodyInit | null | undefined,
-): void {
-  if (!isBinaryBody(body) && body && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-}
-
-async function addCsrfHeader(
-  headers: Headers,
-  method: string,
-  path: string,
-): Promise<void> {
-  if (!WRITE_METHODS.has(method)) return;
-  const csrf = await ensureCsrfToken();
-  if (csrf && !headers.has("x-csrf-token")) {
-    headers.set("x-csrf-token", csrf);
-    return;
-  }
-  if (!csrf && process.env.NODE_ENV !== "production") {
-    console.warn("[apiFetch] missing CSRF token for write request", {
-      method,
-      path,
-    });
-  }
-}
-
-async function requestHeaders(
-  fetchInit: RequestInit,
-  method: string,
-  path: string,
-): Promise<Headers> {
-  const headers = new Headers(fetchInit.headers ?? {});
-  addJsonContentType(headers, fetchInit.body);
-  await addCsrfHeader(headers, method, path);
-  return headers;
-}
-
-function sessionCookieSecureSignal(
-  res: Response,
-  data: unknown,
-): boolean | null {
-  const header = res.headers.get("x-lumen-session-cookie-secure")?.trim();
-  if (header === "1" || header === "true") return true;
-  if (header === "0" || header === "false") return false;
-  if (!data || typeof data !== "object") return null;
-  const direct = (data as { session_cookie_secure?: unknown })
-    .session_cookie_secure;
-  if (typeof direct === "boolean") return direct;
-  const detail = (data as { detail?: unknown }).detail;
-  if (!detail || typeof detail !== "object") return null;
-  const nested = (detail as { session_cookie_secure?: unknown })
-    .session_cookie_secure;
-  return typeof nested === "boolean" ? nested : null;
-}
-
-function unauthorizedError(res: Response, data: unknown): ApiError {
-  handle401();
-  const sessionCookieSecure = sessionCookieSecureSignal(res, data);
-  return new ApiError({
-    code: "unauthorized",
-    message: "未登录或会话已失效",
-    status: 401,
-    payload:
-      sessionCookieSecure === null
-        ? data
-        : { response: data, session_cookie_secure: sessionCookieSecure },
-  });
-}
-
-async function responseData(res: Response): Promise<unknown> {
-  const contentType = res.headers.get("content-type") ?? "";
-  return contentType.includes("application/json")
-    ? await res.json().catch(() => null)
-    : await res.text().catch(() => null);
-}
-
-type ReadResponse = {
-  response: Response;
-  data: unknown;
-};
-
-async function fetchResponse(
-  url: string,
-  requestInit: RequestInit,
-  retryable: boolean,
-  abortContext: RequestSignalContext,
-): Promise<ReadResponse> {
-  let response: Response;
-  try {
-    response = await fetchWithRetryableHttp(url, requestInit, retryable);
-  } catch (err) {
-    requestFailure(err, abortContext);
-  }
-  if (response.status === 204) return { response, data: undefined };
-  const data = await responseData(response);
-  if (response.status === 401) throw unauthorizedError(response, data);
-  return { response, data };
-}
-
-async function retryAfterCsrfFailure(
-  url: string,
-  requestInit: RequestInit,
-  method: string,
-  headers: Headers,
-  abortContext: RequestSignalContext,
-): Promise<ReadResponse | null> {
-  const fresh = await refreshCsrfToken().catch(() => null);
-  if (!fresh) return null;
-  const retryHeaders = new Headers(headers);
-  retryHeaders.set("x-csrf-token", fresh);
-  return fetchResponse(
-    url,
-    { ...requestInit, headers: retryHeaders },
-    canRetryHttp(method, retryHeaders),
-    abortContext,
-  );
-}
-
-async function fetchWithNetworkRetry(
-  url: string,
-  init: RequestInit,
-  retryable = true,
-): Promise<Response> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= NETWORK_RETRY_MAX; attempt++) {
-    try {
-      return await fetch(url, init);
-    } catch (err) {
-      // 用户主动 abort 直接抛，不重试
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      // 传入的 signal 已 aborted 也不重试
-      const sig = (init as { signal?: AbortSignal }).signal;
-      if (sig && sig.aborted) throw err;
-      if (!retryable) throw err;
-      lastErr = err;
-      if (attempt < NETWORK_RETRY_MAX) {
-        await retryDelay(
-          NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200,
-          sig,
-        );
-      }
-    }
-  }
-  throw lastErr;
-}
-
-async function fetchWithRetryableHttp(
-  url: string,
-  init: RequestInit,
-  retryable: boolean,
-): Promise<Response> {
-  let attempt = 0;
-  let res: Response;
-  while (true) {
-    res = await fetchWithNetworkRetry(url, init, retryable);
-    if (
-      !retryable ||
-      !RETRYABLE_HTTP_STATUSES.has(res.status) ||
-      attempt >= NETWORK_RETRY_MAX
-    ) {
-      break;
-    }
-    await retryDelay(
-      NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200,
-      init.signal,
-    );
-    attempt += 1;
-  }
-  if (attempt > 0 && !res.ok && process.env.NODE_ENV !== "production") {
-    console.warn("[apiFetch] retryable HTTP request still failed", {
-      status: res.status,
-      attempts: attempt + 1,
-    });
-  }
-  return res;
-}
-
-async function requestFreshCsrfToken(
-  epoch: number,
-  signal: AbortSignal,
-): Promise<string | null> {
-  const url = `${API_BASE.replace(/\/$/, "")}/auth/csrf`;
-  const timeoutContext = requestSignal(signal, DEFAULT_API_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetchWithNetworkRetry(url, {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-      signal: timeoutContext.signal,
-    });
-  } finally {
-    timeoutContext.cleanup();
-  }
-  if (epoch !== _csrfRefreshEpoch || signal.aborted) return null;
-  if (res.status === 401) {
-    handle401();
-    return null;
-  }
-  if (!res.ok) return null;
-  const data = (await res.json().catch(() => null)) as
-    | { csrf_token?: unknown }
-    | null;
-  if (epoch !== _csrfRefreshEpoch || signal.aborted) return null;
-  return typeof data?.csrf_token === "string"
-    ? data.csrf_token
-    : readCookie("csrf");
-}
-
-export function refreshCsrfToken(): Promise<string | null> {
-  if (typeof document === "undefined") return Promise.resolve(null);
-  const epoch = _csrfRefreshEpoch;
-  if (_csrfRefreshFlight?.epoch === epoch) {
-    return _csrfRefreshFlight.promise;
-  }
-  const controller = new AbortController();
-  const promise = requestFreshCsrfToken(epoch, controller.signal).finally(() => {
-    if (_csrfRefreshFlight?.promise === promise) _csrfRefreshFlight = null;
-  });
-  _csrfRefreshFlight = { epoch, controller, promise };
-  return promise;
-}
-
-export async function ensureCsrfToken(): Promise<string | null> {
-  return readCookie("csrf") ?? (await refreshCsrfToken().catch(() => null));
+  return activatePrivateClientState(userId);
 }
 
 export async function apiFetch(
@@ -637,63 +79,31 @@ export async function apiFetch<T = unknown>(
 ): Promise<T>;
 export async function apiFetch<T = unknown>(
   path: string,
-  init?: ApiFetchInit,
+  init: ApiFetchInit = {},
 ): Promise<T | NoContent> {
   const {
     expectNoContent = false,
-    timeoutMs = null,
-    ...fetchInit
-  } = init ?? {};
-  const method = (fetchInit.method ?? "GET").toUpperCase();
-  const url = apiUrl(path);
-  const abortContext = requestSignal(fetchInit.signal, timeoutMs);
-  try {
-    const headers = await requestHeaders(fetchInit, method, path);
-    if (abortContext.signal?.aborted) {
-      requestFailure(abortContext.signal.reason, abortContext);
-    }
-    const requestInit = {
-      ...fetchInit,
-      method,
-      headers,
-      credentials: "include" as RequestCredentials,
-      signal: abortContext.signal,
-    };
-    let { response: res, data } = await fetchResponse(
-      url,
-      requestInit,
-      canRetryHttp(method, headers),
-      abortContext,
-    );
-
-    if (
-      res.status === 403 &&
-      WRITE_METHODS.has(method) &&
-      parseApiError(res.status, data).code === CSRF_FAILED_CODE
-    ) {
-      const retried = await retryAfterCsrfFailure(
-        url,
-        requestInit,
-        method,
-        headers,
-        abortContext,
-      );
-      if (retried) ({ response: res, data } = retried);
-    }
-
-    if (!res.ok) {
-      const { code, message } = parseApiError(res.status, data);
-      throw new ApiError({ code, message, status: res.status, payload: data });
-    }
-
-    if (expectNoContent) {
-      return undefined;
-    }
-
-    return data as T;
-  } finally {
-    abortContext.cleanup();
+    timeoutMs,
+    ...requestInit
+  } = init;
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  const budget = compatibilityBudget(timeoutMs);
+  if (method === "GET" || method === "HEAD") {
+    return queryClient.get<T>(path, { ...requestInit, budget });
   }
+  if (isUploadBody(requestInit.body)) {
+    return uploadClient.send<T>(path, requestInit.body, {
+      ...requestInit,
+      method: method as "POST" | "PUT" | "PATCH",
+      budget,
+    });
+  }
+  return commandClient.request<T>(path, {
+    ...requestInit,
+    method: method as "POST" | "PUT" | "PATCH" | "DELETE",
+    budget,
+    expectNoContent,
+  });
 }
 
 export function apiFetchNoContent(

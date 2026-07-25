@@ -151,7 +151,7 @@ async def test_trigger_update_rejects_mutable_latest_tag(
     (script_dir / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     monkeypatch.setattr(admin_update.settings, "lumen_scripts_dir", str(script_dir))
     monkeypatch.setattr(admin_update, "_read_marker", lambda: None)
-    monkeypatch.setattr(admin_update, "_maintenance_marker_busy", lambda: False)
+    monkeypatch.setattr(admin_update, "maintenance_marker_busy", lambda: False)
 
     async def false_value(_db: Any) -> bool:
         return False
@@ -190,7 +190,7 @@ async def test_trigger_update_requires_confirmed_target_tag_match(
     (script_dir / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     monkeypatch.setattr(admin_update.settings, "lumen_scripts_dir", str(script_dir))
     monkeypatch.setattr(admin_update, "_read_marker", lambda: None)
-    monkeypatch.setattr(admin_update, "_maintenance_marker_busy", lambda: False)
+    monkeypatch.setattr(admin_update, "maintenance_marker_busy", lambda: False)
     audits: list[dict[str, Any]] = []
 
     async def fake_resolve_update_proxy(_db: Any) -> tuple[None, None]:
@@ -215,7 +215,9 @@ async def test_trigger_update_requires_confirmed_target_tag_match(
         async def check(self, **_kwargs: Any) -> SimpleNamespace:
             return SimpleNamespace(resolved_image_tag="v1.2.3")
 
-    monkeypatch.setattr(admin_update, "_resolve_update_proxy", fake_resolve_update_proxy)
+    monkeypatch.setattr(
+        admin_update, "_resolve_update_proxy", fake_resolve_update_proxy
+    )
     monkeypatch.setattr(admin_update, "_update_channel", fake_update_channel)
     monkeypatch.setattr(
         admin_update,
@@ -723,7 +725,9 @@ def test_list_releases_limit_none_returns_all_release_dirs(tmp_path: Path) -> No
     for idx in range(admin_update._RELEASE_LIST_LIMIT + 2):
         (releases / f"20260607-{idx:02d}").mkdir()
 
-    assert len(admin_update._list_releases(tmp_path)) == admin_update._RELEASE_LIST_LIMIT
+    assert (
+        len(admin_update._list_releases(tmp_path)) == admin_update._RELEASE_LIST_LIMIT
+    )
     assert len(admin_update._list_releases(tmp_path, limit=None)) == (
         admin_update._RELEASE_LIST_LIMIT + 2
     )
@@ -735,6 +739,10 @@ async def test_marker_cleanup_task_registry_discards_finished_tasks(
     monkeypatch: pytest.MonkeyPatch,
     module: Any,
 ) -> None:
+    def retained_tasks() -> set[asyncio.Task[None]]:
+        state = getattr(module, "_marker_cleanup_state", None)
+        return state.tasks if state is not None else module._marker_cleanup_tasks
+
     release_cleanup = asyncio.Event()
 
     async def fake_cleanup(_proc: Any) -> None:
@@ -745,13 +753,13 @@ async def test_marker_cleanup_task_registry_discards_finished_tasks(
 
     task = module._schedule_marker_cleanup_when_done(Mock())
     try:
-        assert task in module._marker_cleanup_tasks
+        assert task in retained_tasks()
 
         release_cleanup.set()
         await asyncio.wait_for(task, timeout=1.0)
         await asyncio.sleep(0)
 
-        assert task not in module._marker_cleanup_tasks
+        assert task not in retained_tasks()
     finally:
         release_cleanup.set()
         await module._shutdown_marker_cleanup_tasks()
@@ -763,6 +771,10 @@ async def test_marker_cleanup_shutdown_cancels_retained_tasks(
     monkeypatch: pytest.MonkeyPatch,
     module: Any,
 ) -> None:
+    def retained_tasks() -> set[asyncio.Task[None]]:
+        state = getattr(module, "_marker_cleanup_state", None)
+        return state.tasks if state is not None else module._marker_cleanup_tasks
+
     async def fake_cleanup(_proc: Any) -> None:
         await asyncio.Event().wait()
 
@@ -771,12 +783,12 @@ async def test_marker_cleanup_shutdown_cancels_retained_tasks(
 
     task = module._schedule_marker_cleanup_when_done(Mock())
 
-    assert task in module._marker_cleanup_tasks
+    assert task in retained_tasks()
 
     await module._shutdown_marker_cleanup_tasks()
 
     assert task.cancelled()
-    assert task not in module._marker_cleanup_tasks
+    assert task not in retained_tasks()
 
 
 @pytest.mark.asyncio
@@ -808,7 +820,7 @@ async def test_resolve_update_proxy_uses_named_proxy(
         return "socks5h://127.0.0.1:1080"
 
     monkeypatch.setattr(admin_update, "get_setting", fake_get_setting)
-    monkeypatch.setattr(admin_update, "_load_proxies", fake_load_proxies)
+    monkeypatch.setattr(admin_update, "load_proxies", fake_load_proxies)
     monkeypatch.setattr(admin_update, "resolve_provider_proxy_url", fake_resolve)
 
     proxy, proxy_url = await admin_update._resolve_update_proxy(object())  # type: ignore[arg-type]

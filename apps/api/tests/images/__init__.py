@@ -1,0 +1,1 @@
+"""Image artifact saga tests."""

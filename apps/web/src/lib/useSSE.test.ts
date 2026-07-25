@@ -41,6 +41,6 @@ test("SSE retry delay grows exponentially and remains capped", () => {
 
 test("SSE defaults to infinite retry and exposes immediate reconnect", () => {
   match(source, /DEFAULT_MAX_RETRY_COUNT = Number\.POSITIVE_INFINITY/);
-  match(source, /reconnectNow\(\): void/);
+  match(source, /runtimeRef\.current\?\.reconnect\(\)/);
   match(source, /return \{ status, reconnect \};/);
 });

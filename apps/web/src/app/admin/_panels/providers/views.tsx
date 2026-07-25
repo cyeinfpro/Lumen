@@ -87,7 +87,7 @@ export function StatsRow({
         label="探活"
         value={
           probing ? (
-            <Loader2 className="w-4 h-4 animate-spin text-[var(--color-lumen-amber)]" />
+            <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
           ) : healthy !== null ? (
             `${healthy}/${enabled}`
           ) : (
@@ -132,7 +132,7 @@ function StatCard({
       : accent === "red"
         ? "border-danger-border"
         : accent === "amber"
-          ? "border-[var(--color-lumen-amber)]/20"
+          ? "border-[var(--accent)]/20"
           : "border-[var(--border)]";
 
   return (
@@ -261,7 +261,7 @@ export function AutoProbeSettings({
             value={interval}
             onChange={(e) => onChangeInterval(Number(e.target.value))}
             disabled={saving}
-            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-[var(--radius-card)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--color-lumen-amber)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
+            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-[var(--radius-card)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--accent)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
               backgroundRepeat: "no-repeat",
@@ -318,7 +318,7 @@ export function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
                       rate >= 95
                         ? "text-success"
                         : rate >= 80
-                          ? "text-[var(--color-lumen-amber)]"
+                          ? "text-[var(--accent)]"
                           : "text-danger"
                     }`}
                   >

@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 from datetime import date as date_cls
+from types import MappingProxyType
 from datetime import datetime, time, timedelta, timezone
 from typing import Annotated, Any, Literal
 
@@ -52,46 +53,50 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _TASK_CURSOR_VERSION = 1
-_TASK_KIND_RANK = {"completion": 0, "generation": 1}
+_TASK_KIND_RANK = MappingProxyType({"completion": 0, "generation": 1})
 
-_TERMINAL_ERROR_CODES = {
-    "authentication_error",
-    "permission_error",
-    "unauthorized",
-    "invalid_api_key",
-    "NO_ACTIVE_API_KEY",
-    "no_active_api_key",
-    "INSUFFICIENT_BALANCE",
-    "insufficient_credits",
-    "WALLET_FROZEN",
-    "wallet_frozen",
-    "invalid_request_error",
-    "invalid_request",
-    "invalid_param",
-    "invalid_value",
-    "validation_error",
-    "prompt_too_long",
-    "bad_reference_image",
-    "reference_missing",
-    "missing_input_images",
-    "reference_image_too_large",
-    "moderation_blocked",
-    "content_policy_violation",
-    "safety_violation",
-    "no_mask_capable_provider",
-}
-_WAITING_PROVIDER_CODES = {
-    "all_accounts_failed",
-    "all_providers_failed",
-    "provider_exhausted",
-    "no_providers",
-    "rate_limit_error",
-    "rate_limit_exceeded",
-    "upstream_rate_limited",
-    "quota_exceeded",
-    "service_unavailable",
-    "upstream_error",
-}
+_TERMINAL_ERROR_CODES = frozenset(
+    {
+        "authentication_error",
+        "permission_error",
+        "unauthorized",
+        "invalid_api_key",
+        "NO_ACTIVE_API_KEY",
+        "no_active_api_key",
+        "INSUFFICIENT_BALANCE",
+        "insufficient_credits",
+        "WALLET_FROZEN",
+        "wallet_frozen",
+        "invalid_request_error",
+        "invalid_request",
+        "invalid_param",
+        "invalid_value",
+        "validation_error",
+        "prompt_too_long",
+        "bad_reference_image",
+        "reference_missing",
+        "missing_input_images",
+        "reference_image_too_large",
+        "moderation_blocked",
+        "content_policy_violation",
+        "safety_violation",
+        "no_mask_capable_provider",
+    }
+)
+_WAITING_PROVIDER_CODES = frozenset(
+    {
+        "all_accounts_failed",
+        "all_providers_failed",
+        "provider_exhausted",
+        "no_providers",
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "upstream_rate_limited",
+        "quota_exceeded",
+        "service_unavailable",
+        "upstream_error",
+    }
+)
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:

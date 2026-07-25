@@ -3,23 +3,23 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
 
 
 def _load_worker_sse_publish() -> Any:
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "worker"
-        / "app"
-        / "sse_publish.py"
-    )
+    path = Path(__file__).resolve().parents[2] / "worker" / "app" / "sse_publish.py"
     spec = importlib.util.spec_from_file_location("worker_sse_publish_under_test", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
     return module
 
 

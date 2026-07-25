@@ -352,7 +352,7 @@ export default function AdminPage() {
           <p className="text-lg">仅管理员可访问</p>
           <Link
             href="/"
-            className="text-sm text-[var(--color-lumen-amber)] hover:underline mt-2 inline-block"
+            className="text-sm text-[var(--accent)] hover:underline mt-2 inline-block"
           >
             返回首页
           </Link>

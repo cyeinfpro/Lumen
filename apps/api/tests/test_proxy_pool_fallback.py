@@ -1,4 +1,5 @@
 """Local-cooldown fallback for proxy_pool when Redis writes fail."""
+
 from __future__ import annotations
 
 import pytest
@@ -19,9 +20,9 @@ def _make_proxy(name: str) -> ProviderProxyDefinition:
 
 @pytest.fixture(autouse=True)
 def _clear_local_cooldown():
-    proxy_pool._local_cooldown.clear()
+    proxy_pool._proxy_pool_state.local_cooldown.clear()
     yield
-    proxy_pool._local_cooldown.clear()
+    proxy_pool._proxy_pool_state.local_cooldown.clear()
 
 
 class _SetFailRedis:
@@ -126,8 +127,9 @@ async def test_local_cooldown_capped_to_short_window() -> None:
     await proxy_pool.report_failure(
         redis, "p4", failure_threshold=1, cooldown_seconds=3600
     )
-    expiry = proxy_pool._local_cooldown.get("p4")
+    expiry = proxy_pool._proxy_pool_state.local_cooldown.get("p4")
     assert expiry is not None
     import time as _t
+
     remaining = expiry - _t.monotonic()
     assert remaining <= proxy_pool._LOCAL_COOLDOWN_TTL_SECONDS + 1

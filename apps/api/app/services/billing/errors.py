@@ -7,8 +7,15 @@ from typing import Any
 from fastapi import HTTPException
 
 
-def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
+def http_error(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
     err: dict[str, Any] = {"code": code, "message": msg}
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+# Compatibility name retained for the historical billing route facade.
+_http = http_error
+
+
+__all__ = ["http_error"]

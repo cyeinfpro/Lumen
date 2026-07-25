@@ -499,7 +499,7 @@ function ByokModeSettings({
         ))}
       </div>
       {currentMode === null && (
-        <p className="flex items-start gap-2 text-xs text-[var(--color-lumen-amber)]/90">
+        <p className="flex items-start gap-2 text-xs text-[var(--accent)]/90">
           <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
           当前是自定义组合（未匹配预设模式），点上方任意卡片可重置。
         </p>
@@ -891,7 +891,7 @@ function Overview({
 function OverviewItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border-subtle)] text-[var(--color-lumen-amber)]">
+      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border-subtle)] text-[var(--accent)]">
         {icon}
       </span>
       <div className="flex flex-col">
@@ -912,7 +912,7 @@ function ModeCard({ def, active, onSelect }: { def: ModeDef; active: boolean; on
       className={
         "text-left rounded-[var(--radius-panel)] border p-3 transition-colors " +
         (active
-          ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10"
+          ? "border-[var(--accent)]/60 bg-[var(--accent)]/10"
           : "border-[var(--border)] bg-[var(--bg-2)] hover:bg-[var(--bg-3)]")
       }
     >
@@ -920,7 +920,7 @@ function ModeCard({ def, active, onSelect }: { def: ModeDef; active: boolean; on
         <span
           className={
             "flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] " +
-            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-[var(--bg-2)] text-[var(--fg-1)]")
+            (active ? "bg-[var(--accent)] text-black" : "bg-[var(--bg-2)] text-[var(--fg-1)]")
           }
         >
           <Icon className="w-3.5 h-3.5" />
@@ -1184,7 +1184,7 @@ function FieldText({
         onBlur={onBlur ? (e) => onBlur(e.target.value) : undefined}
         placeholder={placeholder}
         className={
-          "h-10 rounded-[var(--radius-control)] bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-3)] transition-colors " +
+          "h-10 rounded-[var(--radius-control)] bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25 placeholder:text-[var(--fg-3)] transition-colors " +
           (error ? "border-danger-border" : "border-[var(--border)]")
         }
       />
@@ -1225,7 +1225,7 @@ function FieldNumber({
         max={max}
         value={value}
         onChange={(e) => onChange(clampInt(e.target.value, min, max))}
-        className="h-10 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+        className="h-10 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
       />
       {hint && <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>}
     </label>
@@ -1247,7 +1247,7 @@ function PurposesField({ purposes, onToggle }: { purposes: ByokPurpose[]; onTogg
               className={
                 "px-2.5 py-1 rounded-[var(--radius-card)] border text-xs transition-colors " +
                 (active
-                  ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
+                  ? "bg-[var(--accent)] text-black border-[var(--accent)]"
                   : "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)] hover:bg-[var(--bg-3)]")
               }
             >

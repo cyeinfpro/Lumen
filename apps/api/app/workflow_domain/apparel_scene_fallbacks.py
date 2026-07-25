@@ -6,6 +6,7 @@ import hashlib
 import re
 from typing import Any, Iterable
 
+from .immutables import freeze_mapping
 
 __all__ = [
     "_SHOT_CAMERA",
@@ -60,259 +61,277 @@ def _sanitize_shooting_brief(value: Any, *, max_len: int = 1800) -> str:
     )
 
 
-_SHOT_CAMERA = {
-    "front_full_body": {
-        "distance": "full_body",
-        "angle": "eye_level",
-        "lens_feel": "natural_standard",
-        "orientation": "vertical",
-    },
-    "natural_pose": {
-        "distance": "full_body",
-        "angle": "front_three_quarter",
-        "lens_feel": "handheld_standard",
-        "orientation": "vertical",
-    },
-    "detail_half_body": {
-        "distance": "half_body",
-        "angle": "eye_level",
-        "lens_feel": "natural_standard",
-        "orientation": "vertical",
-    },
-    "side_or_back": {
-        "distance": "full_body",
-        "angle": "side_or_back",
-        "lens_feel": "natural_standard",
-        "orientation": "vertical",
-    },
-}
+_SHOT_CAMERA = freeze_mapping(
+    {
+        "front_full_body": {
+            "distance": "full_body",
+            "angle": "eye_level",
+            "lens_feel": "natural_standard",
+            "orientation": "vertical",
+        },
+        "natural_pose": {
+            "distance": "full_body",
+            "angle": "front_three_quarter",
+            "lens_feel": "handheld_standard",
+            "orientation": "vertical",
+        },
+        "detail_half_body": {
+            "distance": "half_body",
+            "angle": "eye_level",
+            "lens_feel": "natural_standard",
+            "orientation": "vertical",
+        },
+        "side_or_back": {
+            "distance": "full_body",
+            "angle": "side_or_back",
+            "lens_feel": "natural_standard",
+            "orientation": "vertical",
+        },
+    }
+)
 
-_TEMPLATE_FAMILY = {
-    "white_ecommerce": "clean_ecommerce",
-    "premium_studio": "premium_studio",
-    "urban_commute": "urban_street",
-    "lifestyle": "designed_lifestyle",
-    "daily_snapshot": "daily_life",
-    "natural_phone_snapshot": "phone_snapshot",
-    "social_seed": "social_seeding",
-}
+_TEMPLATE_FAMILY = freeze_mapping(
+    {
+        "white_ecommerce": "clean_ecommerce",
+        "premium_studio": "premium_studio",
+        "urban_commute": "urban_street",
+        "lifestyle": "designed_lifestyle",
+        "daily_snapshot": "daily_life",
+        "natural_phone_snapshot": "phone_snapshot",
+        "social_seed": "social_seeding",
+    }
+)
 
-_FALLBACK_FAMILY_POOLS = {
-    "indoor_rich": (
-        "premium_studio",
-        "designed_lifestyle",
-        "daily_life",
-        "phone_snapshot",
-    ),
-    "outdoor_rich": (
-        "urban_street",
-        "outdoor_daily",
-        "social_seeding",
-        "phone_snapshot",
-    ),
-    "editorial": (
-        "premium_studio",
-        "designed_lifestyle",
-        "urban_street",
-        "social_seeding",
-    ),
-}
+_FALLBACK_FAMILY_POOLS = freeze_mapping(
+    {
+        "indoor_rich": (
+            "premium_studio",
+            "designed_lifestyle",
+            "daily_life",
+            "phone_snapshot",
+        ),
+        "outdoor_rich": (
+            "urban_street",
+            "outdoor_daily",
+            "social_seeding",
+            "phone_snapshot",
+        ),
+        "editorial": (
+            "premium_studio",
+            "designed_lifestyle",
+            "urban_street",
+            "social_seeding",
+        ),
+    }
+)
 
-_FALLBACK_LOCATION_POOLS: dict[str, tuple[str, ...]] = {
-    "clean_ecommerce": (
-        "近白底自然光摄影区",
-        "浅灰背景的极简电商棚",
-        "米白墙面和浅色地面的干净拍摄区",
-        "无缝白背景前的自然站位区",
-    ),
-    "premium_studio": (
-        "带侧窗光的极简摄影棚角落",
-        "灰白墙面和木地板的高级棚拍空间",
-        "画廊式浅色走廊",
-        "柔光灯下的干净布景区",
-    ),
-    "urban_street": (
-        "咖啡店门口的人行道",
-        "城市斑马线旁的街角",
-        "玻璃橱窗外的街边",
-        "树影落下的社区街道",
-        "地铁口外的开阔人行区",
-    ),
-    "outdoor_daily": (
-        "公园步道边",
-        "小区楼下的绿化步道",
-        "便利店外的街边台阶",
-        "河边栏杆旁的步行道",
-        "阳光下的校园式步道",
-    ),
-    "designed_lifestyle": (
-        "自然采光的客厅一角",
-        "书店过道旁",
-        "木质长桌边的生活空间",
-        "酒店大堂边缘的安静区域",
-        "浅色楼梯转角",
-    ),
-    "daily_life": (
-        "窗边玄关",
-        "家中餐桌旁",
-        "开放式厨房边缘",
-        "阳台门口的自然光区域",
-        "衣帽架旁的生活角落",
-    ),
-    "phone_snapshot": (
-        "朋友视角的街边随手拍位置",
-        "窗边自然光下的手机抓拍位置",
-        "店外台阶旁的手机竖拍位置",
-        "走廊尽头的自然手机视角",
-        "公园座椅旁的随手拍位置",
-    ),
-    "social_seeding": (
-        "精品店门口的种草街拍位",
-        "咖啡店外的小桌旁",
-        "展览空间外的自然打卡位",
-        "街边绿植和玻璃窗之间",
-        "生活方式店的入口旁",
-    ),
-}
+_FALLBACK_LOCATION_POOLS = freeze_mapping(
+    {
+        "clean_ecommerce": (
+            "近白底自然光摄影区",
+            "浅灰背景的极简电商棚",
+            "米白墙面和浅色地面的干净拍摄区",
+            "无缝白背景前的自然站位区",
+        ),
+        "premium_studio": (
+            "带侧窗光的极简摄影棚角落",
+            "灰白墙面和木地板的高级棚拍空间",
+            "画廊式浅色走廊",
+            "柔光灯下的干净布景区",
+        ),
+        "urban_street": (
+            "咖啡店门口的人行道",
+            "城市斑马线旁的街角",
+            "玻璃橱窗外的街边",
+            "树影落下的社区街道",
+            "地铁口外的开阔人行区",
+        ),
+        "outdoor_daily": (
+            "公园步道边",
+            "小区楼下的绿化步道",
+            "便利店外的街边台阶",
+            "河边栏杆旁的步行道",
+            "阳光下的校园式步道",
+        ),
+        "designed_lifestyle": (
+            "自然采光的客厅一角",
+            "书店过道旁",
+            "木质长桌边的生活空间",
+            "酒店大堂边缘的安静区域",
+            "浅色楼梯转角",
+        ),
+        "daily_life": (
+            "窗边玄关",
+            "家中餐桌旁",
+            "开放式厨房边缘",
+            "阳台门口的自然光区域",
+            "衣帽架旁的生活角落",
+        ),
+        "phone_snapshot": (
+            "朋友视角的街边随手拍位置",
+            "窗边自然光下的手机抓拍位置",
+            "店外台阶旁的手机竖拍位置",
+            "走廊尽头的自然手机视角",
+            "公园座椅旁的随手拍位置",
+        ),
+        "social_seeding": (
+            "精品店门口的种草街拍位",
+            "咖啡店外的小桌旁",
+            "展览空间外的自然打卡位",
+            "街边绿植和玻璃窗之间",
+            "生活方式店的入口旁",
+        ),
+    }
+)
 
-_FALLBACK_ENVIRONMENT_DETAILS: dict[str, tuple[str, ...]] = {
-    "clean_ecommerce": (
-        "背景只保留浅色墙面和地面交界线，空间干净但不死白",
-        "地面有轻微真实阴影，服装边缘和背景分离清楚",
-        "画面没有多余陈列，留出呼吸感让商品成为第一视觉",
-    ),
-    "premium_studio": (
-        "灰白墙面、木地板和远处柔和墙角形成真实空间深度",
-        "背景有极简家具或墙面转角的低存在感层次，不抢服装",
-        "地板反光很弱，人物脚下有自然落影，棚拍空间不空洞",
-    ),
-    "urban_street": (
-        "远处店招、橱窗或街沿虚化成城市层次，主体周围保持干净",
-        "地面斑马线、路缘或玻璃反光提供生活感，但不贴近衣服主体",
-        "背景路人只在远处虚化出现，画面重点仍在模特和服装",
-    ),
-    "outdoor_daily": (
-        "树影、步道和远处建筑形成轻微纵深，背景不过度杂乱",
-        "脚下地面和身后绿植有真实距离，人物不会贴在背景上",
-        "远景保留日常环境线索，前景不遮挡服装主体",
-    ),
-    "designed_lifestyle": (
-        "室内软装、墙面和地面材质形成生活质感，布置克制干净",
-        "背景只保留一两个低存在感物件，空间真实但不喧宾夺主",
-        "人物离背景有一小段距离，形成自然景深和空间层次",
-    ),
-    "daily_life": (
-        "生活物件保持在远处或边缘，像真实家居随手拍但不凌乱",
-        "窗边、地面和家具边线形成真实室内空间，不做空白棚拍",
-        "背景有轻微日常痕迹，所有道具都避开服装主体",
-    ),
-    "phone_snapshot": (
-        "背景有轻微手机抓拍的不完美边缘和真实空间线索",
-        "远处环境自然虚化，主体周围不堆道具",
-        "画面像朋友随手记录，保留真实距离和轻微生活感",
-    ),
-    "social_seeding": (
-        "背景有精品店或咖啡店的低存在感氛围，主体周围干净",
-        "玻璃、绿植或门框只作为边缘层次，不遮挡衣服",
-        "空间有轻微打卡感，但动作保持日常自然",
-    ),
-}
+_FALLBACK_ENVIRONMENT_DETAILS = freeze_mapping(
+    {
+        "clean_ecommerce": (
+            "背景只保留浅色墙面和地面交界线，空间干净但不死白",
+            "地面有轻微真实阴影，服装边缘和背景分离清楚",
+            "画面没有多余陈列，留出呼吸感让商品成为第一视觉",
+        ),
+        "premium_studio": (
+            "灰白墙面、木地板和远处柔和墙角形成真实空间深度",
+            "背景有极简家具或墙面转角的低存在感层次，不抢服装",
+            "地板反光很弱，人物脚下有自然落影，棚拍空间不空洞",
+        ),
+        "urban_street": (
+            "远处店招、橱窗或街沿虚化成城市层次，主体周围保持干净",
+            "地面斑马线、路缘或玻璃反光提供生活感，但不贴近衣服主体",
+            "背景路人只在远处虚化出现，画面重点仍在模特和服装",
+        ),
+        "outdoor_daily": (
+            "树影、步道和远处建筑形成轻微纵深，背景不过度杂乱",
+            "脚下地面和身后绿植有真实距离，人物不会贴在背景上",
+            "远景保留日常环境线索，前景不遮挡服装主体",
+        ),
+        "designed_lifestyle": (
+            "室内软装、墙面和地面材质形成生活质感，布置克制干净",
+            "背景只保留一两个低存在感物件，空间真实但不喧宾夺主",
+            "人物离背景有一小段距离，形成自然景深和空间层次",
+        ),
+        "daily_life": (
+            "生活物件保持在远处或边缘，像真实家居随手拍但不凌乱",
+            "窗边、地面和家具边线形成真实室内空间，不做空白棚拍",
+            "背景有轻微日常痕迹，所有道具都避开服装主体",
+        ),
+        "phone_snapshot": (
+            "背景有轻微手机抓拍的不完美边缘和真实空间线索",
+            "远处环境自然虚化，主体周围不堆道具",
+            "画面像朋友随手记录，保留真实距离和轻微生活感",
+        ),
+        "social_seeding": (
+            "背景有精品店或咖啡店的低存在感氛围，主体周围干净",
+            "玻璃、绿植或门框只作为边缘层次，不遮挡衣服",
+            "空间有轻微打卡感，但动作保持日常自然",
+        ),
+    }
+)
 
-_FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
-    "front_full_body": (
-        "从画面外小步走进光线里，刚被镜头叫住",
-        "顺着场景向前走近两步，在脚步落地瞬间抬眼",
-        "从门口轻快走出，身体还带着向前的惯性",
-        "穿过光影区域时回头看向镜头，脚步还没完全停稳",
-        "沿着背景线条小跑后放慢，手臂自然摆动但不遮挡衣服",
-    ),
-    "natural_pose": (
-        "向镜头走近时突然被叫住，眼神刚转回来",
-        "绕过场景边缘半步转身，衣摆跟着轻轻摆动",
-        "和镜头外的人回应后笑着继续往前走",
-        "一只手在身体侧边带起衣摆外缘，避开商品主体",
-        "沿着场景向前走时被高速快门自然抓拍",
-    ),
-    "detail_half_body": (
-        "抬手轻整理袖口，胸前和领口保持清楚",
-        "手指从衣摆外缘掠过展示面料垂感",
-        "肩颈放松地看向一侧，衣领细节清楚",
-        "低头检查纽扣或拉链，手不压住主体",
-        "自然抬臂把发丝拨到肩后，手臂避开胸前图案",
-    ),
-    "side_or_back": (
-        "侧身迈上一步时自然回头，脚步仍在移动",
-        "从座位旁起身转向镜头，衣摆有轻微摆动",
-        "看向橱窗时半转身体，侧面轮廓被光线勾出",
-        "转过街角前被叫住，身体还保留转身惯性",
-        "背向前走半步后自然回望，后脚刚离开地面",
-    ),
-}
+_FALLBACK_EVENTS_BY_SHOT = freeze_mapping(
+    {
+        "front_full_body": (
+            "从画面外小步走进光线里，刚被镜头叫住",
+            "顺着场景向前走近两步，在脚步落地瞬间抬眼",
+            "从门口轻快走出，身体还带着向前的惯性",
+            "穿过光影区域时回头看向镜头，脚步还没完全停稳",
+            "沿着背景线条小跑后放慢，手臂自然摆动但不遮挡衣服",
+        ),
+        "natural_pose": (
+            "向镜头走近时突然被叫住，眼神刚转回来",
+            "绕过场景边缘半步转身，衣摆跟着轻轻摆动",
+            "和镜头外的人回应后笑着继续往前走",
+            "一只手在身体侧边带起衣摆外缘，避开商品主体",
+            "沿着场景向前走时被高速快门自然抓拍",
+        ),
+        "detail_half_body": (
+            "抬手轻整理袖口，胸前和领口保持清楚",
+            "手指从衣摆外缘掠过展示面料垂感",
+            "肩颈放松地看向一侧，衣领细节清楚",
+            "低头检查纽扣或拉链，手不压住主体",
+            "自然抬臂把发丝拨到肩后，手臂避开胸前图案",
+        ),
+        "side_or_back": (
+            "侧身迈上一步时自然回头，脚步仍在移动",
+            "从座位旁起身转向镜头，衣摆有轻微摆动",
+            "看向橱窗时半转身体，侧面轮廓被光线勾出",
+            "转过街角前被叫住，身体还保留转身惯性",
+            "背向前走半步后自然回望，后脚刚离开地面",
+        ),
+    }
+)
 
-_FALLBACK_POSES_BY_SHOT: dict[str, tuple[str, ...]] = {
-    "front_full_body": (
-        "一脚刚落在前方的全身动态姿态，肩颈放松",
-        "身体三分之二正面向镜头走近，双手在低位自然摆动",
-        "重心正从后脚转到前脚，前脚轻点地面",
-        "步伐刚停下但身体仍有前进惯性的全身姿态",
-    ),
-    "natural_pose": (
-        "身体三分之二正面移动中回头，头部自然看向镜头附近",
-        "轻快前行动作，手部保持低位并避开商品主体",
-        "上半身放松向前带动，视线偏离镜头一点",
-        "正面微侧的小幅移动姿态，脚步方向和视线形成张力",
-    ),
-    "detail_half_body": (
-        "半身微侧，手部动作避开胸前主体",
-        "肩线自然，手指只触碰袖口或衣摆边缘",
-        "头部微低，上半身保持服装细节清楚",
-        "手臂打开一点，领口和胸前完整可见",
-    ),
-    "side_or_back": (
-        "侧身站位，肩背轮廓完整",
-        "回头看向镜头，身体保持侧后角度",
-        "小步转身，背部或侧面廓形清楚",
-        "一肩靠近镜头，另一侧自然后退",
-    ),
-}
+_FALLBACK_POSES_BY_SHOT = freeze_mapping(
+    {
+        "front_full_body": (
+            "一脚刚落在前方的全身动态姿态，肩颈放松",
+            "身体三分之二正面向镜头走近，双手在低位自然摆动",
+            "重心正从后脚转到前脚，前脚轻点地面",
+            "步伐刚停下但身体仍有前进惯性的全身姿态",
+        ),
+        "natural_pose": (
+            "身体三分之二正面移动中回头，头部自然看向镜头附近",
+            "轻快前行动作，手部保持低位并避开商品主体",
+            "上半身放松向前带动，视线偏离镜头一点",
+            "正面微侧的小幅移动姿态，脚步方向和视线形成张力",
+        ),
+        "detail_half_body": (
+            "半身微侧，手部动作避开胸前主体",
+            "肩线自然，手指只触碰袖口或衣摆边缘",
+            "头部微低，上半身保持服装细节清楚",
+            "手臂打开一点，领口和胸前完整可见",
+        ),
+        "side_or_back": (
+            "侧身站位，肩背轮廓完整",
+            "回头看向镜头，身体保持侧后角度",
+            "小步转身，背部或侧面廓形清楚",
+            "一肩靠近镜头，另一侧自然后退",
+        ),
+    }
+)
 
-_FALLBACK_MOTIONS_BY_SHOT: dict[str, tuple[str, ...]] = {
-    "front_full_body": (
-        "脚步落地的瞬间被凝住，衣摆有清楚的自然摆动",
-        "身体向镜头前进的惯性仍在，重心真实可见",
-        "从移动到停下的半拍，动作幅度中等但商品主体清楚",
-        "手臂随步伐自然摆到身体两侧，避开胸前和图案区域",
-    ),
-    "natural_pose": (
-        "小步前行中的自然定格，脚尖和衣摆都带出方向感",
-        "正面微侧移动带出衣服褶皱和身体节奏",
-        "手部低位随步伐摆动，主体不被遮挡",
-        "视线和身体方向不同步的高速抓拍感",
-    ),
-    "detail_half_body": (
-        "手指轻整理细节，衣服纹理和结构清楚",
-        "肩颈有轻微动作，胸前保持无遮挡",
-        "袖口或领口被轻轻调整但不改变款式",
-        "近距离自然呼吸感，面料褶皱可信",
-    ),
-    "side_or_back": (
-        "轻微转身带出侧面或背面廓形",
-        "一步未落稳的自然抓拍",
-        "回头动作很小，身体比例稳定",
-        "衣摆随转身轻微移动",
-    ),
-}
+_FALLBACK_MOTIONS_BY_SHOT = freeze_mapping(
+    {
+        "front_full_body": (
+            "脚步落地的瞬间被凝住，衣摆有清楚的自然摆动",
+            "身体向镜头前进的惯性仍在，重心真实可见",
+            "从移动到停下的半拍，动作幅度中等但商品主体清楚",
+            "手臂随步伐自然摆到身体两侧，避开胸前和图案区域",
+        ),
+        "natural_pose": (
+            "小步前行中的自然定格，脚尖和衣摆都带出方向感",
+            "正面微侧移动带出衣服褶皱和身体节奏",
+            "手部低位随步伐摆动，主体不被遮挡",
+            "视线和身体方向不同步的高速抓拍感",
+        ),
+        "detail_half_body": (
+            "手指轻整理细节，衣服纹理和结构清楚",
+            "肩颈有轻微动作，胸前保持无遮挡",
+            "袖口或领口被轻轻调整但不改变款式",
+            "近距离自然呼吸感，面料褶皱可信",
+        ),
+        "side_or_back": (
+            "轻微转身带出侧面或背面廓形",
+            "一步未落稳的自然抓拍",
+            "回头动作很小，身体比例稳定",
+            "衣摆随转身轻微移动",
+        ),
+    }
+)
 
-_GENERIC_SCENE_TEXT = {
-    "正面全身",
-    "自然动作",
-    "半身细节",
-    "上身细节",
-    "侧面背面",
-    "自然站姿",
-    "自然站定",
-    "自然穿搭抓拍",
-}
+_GENERIC_SCENE_TEXT = frozenset(
+    {
+        "正面全身",
+        "自然动作",
+        "半身细节",
+        "上身细节",
+        "侧面背面",
+        "自然站姿",
+        "自然站定",
+        "自然穿搭抓拍",
+    }
+)
 
 
 def _is_generic_scene_text(value: Any, *, shot_class: str, label: str) -> bool:
@@ -378,22 +397,24 @@ def _dict_or_empty(value: Any) -> dict[str, Any]:
     return {}
 
 
-_GENERIC_PRODUCT_KEYWORDS = {
-    "unknown",
-    "需人工复核",
-    "服饰",
-    "颜色",
-    "版型",
-    "款式",
-    "廓形",
-    "领口",
-    "袖型",
-    "衣长",
-    "面料观感",
-    "图案/logo",
-    "纽扣/拉链/口袋/缝线",
-    "可见商品细节",
-}
+_GENERIC_PRODUCT_KEYWORDS = frozenset(
+    {
+        "unknown",
+        "需人工复核",
+        "服饰",
+        "颜色",
+        "版型",
+        "款式",
+        "廓形",
+        "领口",
+        "袖型",
+        "衣长",
+        "面料观感",
+        "图案/logo",
+        "纽扣/拉链/口袋/缝线",
+        "可见商品细节",
+    }
+)
 
 
 def _append_product_keyword(out: list[str], value: Any, *, max_len: int = 50) -> None:
@@ -950,6 +971,12 @@ def _product_visibility_for_shot(shot_class: str) -> str:
     if shot_class == "side_or_back":
         return "side_or_back_silhouette"
     return "front_full_body"
+
+
+# Public contracts for modules that retain local legacy aliases.
+dict_or_empty = _dict_or_empty
+is_generic_scene_text = _is_generic_scene_text
+product_visibility_for_shot = _product_visibility_for_shot
 
 
 def scene_fingerprint(card: dict[str, Any]) -> str:

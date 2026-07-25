@@ -131,7 +131,7 @@ function TaskThumbnail({
         </span>
       )}
       {presentation.succeeded && (
-        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--ok)]">
+        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--success)]">
           <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />
         </span>
       )}

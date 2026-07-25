@@ -33,7 +33,7 @@ const TONE = {
       "text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:text-[var(--amber-400)] focus-visible:ring-[var(--amber-400)]/60",
     divider: "border-[var(--border-subtle)]",
     badge:
-      "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/12 text-[var(--fg-0)]",
+      "border-[var(--accent)]/35 bg-[var(--accent)]/12 text-[var(--fg-0)]",
   },
   media: {
     card: "border-white/10 bg-white/[0.04]",
@@ -42,10 +42,10 @@ const TONE = {
     text: "text-white/84",
     muted: "text-white/72",
     button:
-      "border border-white/10 bg-white/5 text-white/72 hover:border-white/25 hover:bg-white/10 hover:text-white focus-visible:ring-[var(--color-lumen-amber)]/70",
+      "border border-white/10 bg-white/5 text-white/72 hover:border-white/25 hover:bg-white/10 hover:text-white focus-visible:ring-[var(--accent)]/70",
     divider: "border-white/10",
     badge:
-      "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/16 text-[var(--amber-100)]",
+      "border-[var(--accent)]/35 bg-[var(--accent)]/16 text-[var(--amber-100)]",
   },
 } satisfies Record<LightboxDetailsTone, Record<string, string>>;
 

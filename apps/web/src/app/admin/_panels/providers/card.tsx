@@ -188,7 +188,7 @@ function ProviderPurposeSelector({
             className={
               "inline-flex items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
               (checked
-                ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+                ? "border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
                 : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
             }
             title={
@@ -201,7 +201,7 @@ function ProviderPurposeSelector({
               className={
                 "flex h-3 w-3 items-center justify-center rounded border " +
                 (checked
-                  ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
+                  ? "border-[var(--accent)] bg-[var(--accent)] text-black"
                   : "border-[var(--border-strong)]")
               }
               aria-hidden
@@ -323,7 +323,7 @@ function ProviderProbeMetadata({
     probe.latency_ms < 500
       ? "text-success"
       : probe.latency_ms < 2000
-        ? "text-[var(--color-lumen-amber)]"
+        ? "text-[var(--accent)]"
         : "text-danger";
   return (
     <>
@@ -348,7 +348,7 @@ function ProviderStatsMetadata({
     stats.success_rate >= 0.95
       ? "text-success"
       : stats.success_rate >= 0.8
-        ? "text-[var(--color-lumen-amber)]"
+        ? "text-[var(--accent)]"
         : "text-danger";
   return (
     <>
@@ -409,7 +409,7 @@ function ProbeStatusBadge({
 }) {
   if (probing) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/10 px-2 py-0.5 text-xs text-[var(--color-lumen-amber)]">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-2 py-0.5 text-xs text-[var(--accent)]">
         <Loader2 className="h-3 w-3 animate-spin" />
       </span>
     );

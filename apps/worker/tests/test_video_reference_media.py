@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import base64
 from types import SimpleNamespace
 
@@ -7,8 +9,26 @@ import httpx
 import pytest
 
 from app import video_upstream as video_upstream_module
-from app.tasks import video_generation as video_generation_tasks
-from app.tasks.video_generation import _reference_media_bytes, _try_provider_cancel
+from app.tasks.video_generation_parts import default_runtime as video_generation_tasks
+from app.tasks.video_generation_parts.default_runtime import (
+    _reference_media_bytes,
+    _try_provider_cancel,
+)
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_video_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with synchronize_module_ports(
+        monkeypatch,
+        video_generation_tasks,
+        video_generation_tasks.DEFAULT_VIDEO_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.video_upstream import (
     CancelResult,
     DashScopeHappyHorseAdapter,

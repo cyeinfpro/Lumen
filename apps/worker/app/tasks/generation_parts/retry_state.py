@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .runtime import generation_ports
 import asyncio
 import math
 import random
@@ -9,10 +10,6 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from ._facade import GenerationFacade
-
-_g = GenerationFacade()
-bind_generation_facade = _g.bind
 
 MAX_ATTEMPTS = 5
 STALE_ATTEMPT_REQUEUE_DELAY_S = 5
@@ -27,20 +24,24 @@ def bounded_next_attempt(current_attempt: int | None) -> tuple[int, bool]:
     except (TypeError, ValueError):
         current = 0
     current = max(0, current)
-    if current >= _g._MAX_ATTEMPTS:
+    if current >= generation_ports()._MAX_ATTEMPTS:
         return current, False
     return current + 1, True
 
 
 def base_retry_backoff_seconds(attempt: int) -> float:
     idx = max(0, int(attempt) - 1)
-    if idx < len(_g.RETRY_BACKOFF_SECONDS):
-        return float(_g.RETRY_BACKOFF_SECONDS[idx])
-    last = float(_g.RETRY_BACKOFF_SECONDS[-1]) if _g.RETRY_BACKOFF_SECONDS else 1.0
-    overflow = idx - len(_g.RETRY_BACKOFF_SECONDS) + 1
+    if idx < len(generation_ports().RETRY_BACKOFF_SECONDS):
+        return float(generation_ports().RETRY_BACKOFF_SECONDS[idx])
+    last = (
+        float(generation_ports().RETRY_BACKOFF_SECONDS[-1])
+        if generation_ports().RETRY_BACKOFF_SECONDS
+        else 1.0
+    )
+    overflow = idx - len(generation_ports().RETRY_BACKOFF_SECONDS) + 1
     return min(
         last * (2**overflow),
-        float(_g._RETRY_BACKOFF_MAX_SECONDS),
+        float(generation_ports()._RETRY_BACKOFF_MAX_SECONDS),
     )
 
 
@@ -49,7 +50,7 @@ def retry_delay_seconds(
     *,
     jitter_ratio: float = RETRY_JITTER_RATIO,
 ) -> float:
-    base = _g._base_retry_backoff_seconds(attempt)
+    base = generation_ports()._base_retry_backoff_seconds(attempt)
     if base <= 0 or jitter_ratio <= 0:
         return base
     return base + random.uniform(0, base * jitter_ratio)
@@ -58,7 +59,7 @@ def retry_delay_seconds(
 def retry_not_before_ttl(delay: float) -> int:
     return max(
         1,
-        math.ceil(delay + _g._IMAGE_QUEUE_NOT_BEFORE_GRACE_S),
+        math.ceil(delay + generation_ports()._IMAGE_QUEUE_NOT_BEFORE_GRACE_S),
     )
 
 
@@ -68,12 +69,16 @@ def generation_attempt_update(
     *,
     statuses: tuple[str, ...] | None = None,
 ) -> Any:
-    statement = _g.update(_g.Generation).where(
-        _g.Generation.id == task_id,
-        _g.Generation.attempt == attempt_epoch,
+    statement = (
+        generation_ports()
+        .update(generation_ports().Generation)
+        .where(
+            generation_ports().Generation.id == task_id,
+            generation_ports().Generation.attempt == attempt_epoch,
+        )
     )
     if statuses:
-        statement = statement.where(_g.Generation.status.in_(statuses))
+        statement = statement.where(generation_ports().Generation.status.in_(statuses))
     return statement
 
 
@@ -84,7 +89,7 @@ def ensure_generation_updated(
 ) -> None:
     rowcount = getattr(result, "rowcount", None)
     if rowcount == 0:
-        raise _g._StaleGenerationAttempt(
+        raise generation_ports()._StaleGenerationAttempt(
             f"generation {task_id} attempt {attempt_epoch} no longer owns row"
         )
 
@@ -96,13 +101,14 @@ async def ensure_generation_attempt_current(
 ) -> None:
     current_attempt = (
         await session.execute(
-            _g.select(_g.Generation.attempt)
-            .where(_g.Generation.id == task_id)
+            generation_ports()
+            .select(generation_ports().Generation.attempt)
+            .where(generation_ports().Generation.id == task_id)
             .with_for_update()
         )
     ).scalar_one_or_none()
     if current_attempt != attempt_epoch:
-        raise _g._StaleGenerationAttempt(
+        raise generation_ports()._StaleGenerationAttempt(
             f"generation {task_id} attempt moved from "
             f"{attempt_epoch} to {current_attempt}"
         )
@@ -122,37 +128,42 @@ async def mark_generation_attempt_failed(
 ) -> bool:
     failure_delivery = None
     try:
-        async with _g.SessionLocal() as session:
+        async with generation_ports().SessionLocal() as session:
             result = await session.execute(
-                _g._generation_attempt_update(
+                generation_ports()
+                ._generation_attempt_update(
                     task_id,
                     attempt,
                     statuses=statuses,
-                ).values(
-                    status=_g.GenerationStatus.FAILED.value,
-                    progress_stage=_g.GenerationStage.FINALIZING,
+                )
+                .values(
+                    status=generation_ports().GenerationStatus.FAILED.value,
+                    progress_stage=generation_ports().GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
                     error_code=error_code,
                     error_message=error_message,
                 )
             )
-            _g._ensure_generation_updated(result, task_id, attempt)
-            message = await session.get(_g.Message, message_id)
-            if message is not None and message.status != _g.MessageStatus.CANCELED:
-                message.status = _g.MessageStatus.FAILED
+            generation_ports()._ensure_generation_updated(result, task_id, attempt)
+            message = await session.get(generation_ports().Message, message_id)
+            if (
+                message is not None
+                and message.status != generation_ports().MessageStatus.CANCELED
+            ):
+                message.status = generation_ports().MessageStatus.FAILED
             if not retriable:
-                generation = await session.get(_g.Generation, task_id)
+                generation = await session.get(generation_ports().Generation, task_id)
                 if generation is not None:
-                    await _g.worker_billing.release_generation(
+                    await generation_ports().worker_billing.release_generation(
                         session,
                         generation,
                         reason=error_code,
                     )
-            failure_delivery = _g._stage_generation_event(
+            failure_delivery = generation_ports()._stage_generation_event(
                 session,
                 user_id,
-                _g.task_channel(task_id),
-                _g.EV_GEN_FAILED,
+                generation_ports().task_channel(task_id),
+                generation_ports().EV_GEN_FAILED,
                 {
                     "generation_id": task_id,
                     "message_id": message_id,
@@ -162,9 +173,11 @@ async def mark_generation_attempt_failed(
                 },
             )
             await session.commit()
-            await _g.worker_billing.flush_balance_cache_refreshes(session)
-    except _g._StaleGenerationAttempt as stale_exc:
-        _g.logger.info(
+            await generation_ports().worker_billing.flush_balance_cache_refreshes(
+                session
+            )
+    except generation_ports()._StaleGenerationAttempt as stale_exc:
+        generation_ports().logger.info(
             "generation failed update skipped by stale attempt "
             "task=%s attempt=%s err=%s",
             task_id,
@@ -175,7 +188,7 @@ async def mark_generation_attempt_failed(
 
     if failure_delivery is None:
         raise RuntimeError("generation failure outbox event was not staged")
-    await _g._deliver_generation_event(redis, failure_delivery)
+    await generation_ports()._deliver_generation_event(redis, failure_delivery)
     return True
 
 
@@ -193,23 +206,25 @@ async def mark_generation_attempt_retrying(
     max_attempts: int,
 ) -> bool:
     try:
-        async with _g.SessionLocal() as session:
+        async with generation_ports().SessionLocal() as session:
             result = await session.execute(
-                _g._generation_attempt_update(
+                generation_ports()
+                ._generation_attempt_update(
                     task_id,
                     attempt,
-                    statuses=_g._RUNNING_GENERATION_STATUSES,
-                ).values(
-                    status=_g.GenerationStatus.QUEUED.value,
-                    progress_stage=_g.GenerationStage.QUEUED,
+                    statuses=generation_ports()._RUNNING_GENERATION_STATUSES,
+                )
+                .values(
+                    status=generation_ports().GenerationStatus.QUEUED.value,
+                    progress_stage=generation_ports().GenerationStage.QUEUED,
                     error_code=error_code,
                     error_message=error_message,
                 )
             )
-            _g._ensure_generation_updated(result, task_id, attempt)
+            generation_ports()._ensure_generation_updated(result, task_id, attempt)
             await session.commit()
-    except _g._StaleGenerationAttempt as stale_exc:
-        _g.logger.info(
+    except generation_ports()._StaleGenerationAttempt as stale_exc:
+        generation_ports().logger.info(
             "generation retry update skipped by stale attempt "
             "task=%s attempt=%s err=%s",
             task_id,
@@ -220,11 +235,11 @@ async def mark_generation_attempt_retrying(
 
     try:
         await redis.set(
-            _g._image_queue_not_before_key(task_id),
+            generation_ports()._image_queue_not_before_key(task_id),
             str(time.time() + delay),
-            ex=_g._retry_not_before_ttl(delay),
+            ex=generation_ports()._retry_not_before_ttl(delay),
         )
-        enqueued = await _g._enqueue_generation_once(
+        enqueued = await generation_ports()._enqueue_generation_once(
             redis,
             task_id,
             defer_by=delay,
@@ -233,10 +248,12 @@ async def mark_generation_attempt_retrying(
         if not enqueued:
             return False
     except Exception as enqueue_exc:  # noqa: BLE001
-        _g.logger.error("re-enqueue failed task=%s err=%s", task_id, enqueue_exc)
+        generation_ports().logger.error(
+            "re-enqueue failed task=%s err=%s", task_id, enqueue_exc
+        )
         enqueue_error = "retry_enqueue_failed"
         enqueue_message = f"failed to enqueue retry: {enqueue_exc}"
-        await _g._mark_generation_attempt_failed(
+        await generation_ports()._mark_generation_attempt_failed(
             redis,
             task_id=task_id,
             message_id=message_id,
@@ -246,17 +263,17 @@ async def mark_generation_attempt_retrying(
             error_message=enqueue_message[:2000],
             retriable=False,
             statuses=(
-                _g.GenerationStatus.QUEUED.value,
-                _g.GenerationStatus.RUNNING.value,
+                generation_ports().GenerationStatus.QUEUED.value,
+                generation_ports().GenerationStatus.RUNNING.value,
             ),
         )
         return False
 
-    await _g.publish_event(
+    await generation_ports().publish_event(
         redis,
         user_id,
-        _g.task_channel(task_id),
-        _g.EV_GEN_RETRYING,
+        generation_ports().task_channel(task_id),
+        generation_ports().EV_GEN_RETRYING,
         {
             "generation_id": task_id,
             "message_id": message_id,
@@ -282,18 +299,20 @@ async def maybe_requeue_stale_generation_attempt(
     if attempt <= 0:
         return False
     try:
-        async with _g.SessionLocal() as session:
+        async with generation_ports().SessionLocal() as session:
             row = (
                 await session.execute(
-                    _g.select(
-                        _g.Generation.status,
-                        _g.Generation.message_id,
-                        _g.Generation.user_id,
+                    generation_ports()
+                    .select(
+                        generation_ports().Generation.status,
+                        generation_ports().Generation.message_id,
+                        generation_ports().Generation.user_id,
                     )
                     .where(
-                        _g.Generation.id == task_id,
-                        _g.Generation.attempt == attempt,
-                        _g.Generation.status == _g.GenerationStatus.QUEUED.value,
+                        generation_ports().Generation.id == task_id,
+                        generation_ports().Generation.attempt == attempt,
+                        generation_ports().Generation.status
+                        == generation_ports().GenerationStatus.QUEUED.value,
                     )
                     .with_for_update(skip_locked=True)
                 )
@@ -302,8 +321,8 @@ async def maybe_requeue_stale_generation_attempt(
                 return False
             _status, message_id, user_id = row
             await session.rollback()
-    except _g._StaleGenerationAttempt as stale_exc:
-        _g.logger.info(
+    except generation_ports()._StaleGenerationAttempt as stale_exc:
+        generation_ports().logger.info(
             "stale attempt requeue skipped task=%s attempt=%s err=%s",
             task_id,
             attempt,
@@ -311,7 +330,7 @@ async def maybe_requeue_stale_generation_attempt(
         )
         return False
     except Exception as exc:  # noqa: BLE001
-        _g.logger.warning(
+        generation_ports().logger.warning(
             "stale attempt requeue check failed task=%s attempt=%s err=%s",
             task_id,
             attempt,
@@ -321,9 +340,9 @@ async def maybe_requeue_stale_generation_attempt(
 
     try:
         await redis.set(
-            _g._image_queue_not_before_key(task_id),
+            generation_ports()._image_queue_not_before_key(task_id),
             str(time.time() + delay),
-            ex=_g._retry_not_before_ttl(delay),
+            ex=generation_ports()._retry_not_before_ttl(delay),
         )
         await redis.enqueue_job(
             "run_generation",
@@ -332,7 +351,7 @@ async def maybe_requeue_stale_generation_attempt(
             _job_try=attempt + 1,
         )
     except Exception as exc:  # noqa: BLE001
-        _g.logger.warning(
+        generation_ports().logger.warning(
             "stale attempt re-enqueue failed task=%s attempt=%s err=%s",
             task_id,
             attempt,
@@ -340,16 +359,16 @@ async def maybe_requeue_stale_generation_attempt(
         )
         return False
 
-    await _g.publish_event(
+    await generation_ports().publish_event(
         redis,
         str(user_id),
-        _g.task_channel(task_id),
-        _g.EV_GEN_RETRYING,
+        generation_ports().task_channel(task_id),
+        generation_ports().EV_GEN_RETRYING,
         {
             "generation_id": task_id,
             "message_id": str(message_id),
             "attempt": attempt,
-            "max_attempts": _g._MAX_ATTEMPTS,
+            "max_attempts": generation_ports()._MAX_ATTEMPTS,
             "retry_delay_seconds": delay,
             "error_code": "stale_attempt_requeued",
             "error_message": f"stale attempt requeued: {reason}"[:2000],
@@ -368,14 +387,14 @@ async def await_with_lease_guard(
     cancel_poll_interval_s: float = 1.0,
 ) -> Any:
     if lease_lost.is_set():
-        raise _g._LeaseLost("generation lease renewer failed")
+        raise generation_ports()._LeaseLost("generation lease renewer failed")
 
     async def wait_cancelled() -> None:
         assert redis is not None
         assert task_id is not None
         interval_s = max(0.05, float(cancel_poll_interval_s))
         while True:
-            if await _g._is_cancelled(redis, task_id):
+            if await generation_ports()._is_cancelled(redis, task_id):
                 return
             await asyncio.sleep(interval_s)
 
@@ -398,12 +417,12 @@ async def await_with_lease_guard(
             work_task.cancel()
             with suppress(asyncio.CancelledError):
                 await work_task
-            raise _g._LeaseLost("generation lease renewer failed")
+            raise generation_ports()._LeaseLost("generation lease renewer failed")
         if cancel_task is not None and cancel_task in done:
             work_task.cancel()
             with suppress(asyncio.CancelledError):
                 await work_task
-            raise _g._TaskCancelled("cancelled during upstream call")
+            raise generation_ports()._TaskCancelled("cancelled during upstream call")
         return await work_task
     finally:
         if not work_task.done():
@@ -433,7 +452,7 @@ async def consume_image_iter_close_result(
     except (asyncio.CancelledError, GeneratorExit):
         pass
     except Exception:  # noqa: BLE001
-        _g.logger.debug(
+        generation_ports().logger.debug(
             "generation image iterator aclose failed task=%s",
             task_id,
             exc_info=True,
@@ -448,7 +467,7 @@ async def anext_image_with_guards(
     task_id: str,
 ) -> tuple[str, str | None] | None:
     try:
-        return await _g._await_with_lease_guard(
+        return await generation_ports()._await_with_lease_guard(
             image_iter.__anext__(),
             lease_lost,
             redis=redis,
@@ -462,22 +481,22 @@ def classify_exception(
     exc: BaseException,
     has_partial: bool,
 ) -> Any:
-    if isinstance(exc, _g.StorageDiskFullError):
-        return _g.is_retriable(
-            _g.EC.DISK_FULL.value,
+    if isinstance(exc, generation_ports().StorageDiskFullError):
+        return generation_ports().is_retriable(
+            generation_ports().EC.DISK_FULL.value,
             None,
             has_partial,
             error_message=str(exc),
         )
     if isinstance(exc, TimeoutError):
-        return _g.is_retriable(
+        return generation_ports().is_retriable(
             "timeout",
             None,
             has_partial,
             error_message=str(exc),
         )
-    if isinstance(exc, _g.UpstreamError):
-        return _g.is_retriable(
+    if isinstance(exc, generation_ports().UpstreamError):
+        return generation_ports().is_retriable(
             exc.error_code,
             exc.status_code,
             has_partial,
@@ -486,25 +505,25 @@ def classify_exception(
     if isinstance(
         exc,
         (
-            _g.httpx.ConnectError,
-            _g.httpx.ReadTimeout,
-            _g.httpx.RemoteProtocolError,
+            generation_ports().httpx.ConnectError,
+            generation_ports().httpx.ReadTimeout,
+            generation_ports().httpx.RemoteProtocolError,
         ),
     ):
-        return _g.is_retriable(
+        return generation_ports().is_retriable(
             "upstream_error",
             None,
             has_partial,
             error_message=str(exc),
         )
-    if isinstance(exc, _g.httpx.HTTPError):
-        return _g.is_retriable(
+    if isinstance(exc, generation_ports().httpx.HTTPError):
+        return generation_ports().is_retriable(
             "upstream_error",
             None,
             has_partial,
             error_message=str(exc),
         )
-    return _g.RetryDecision(False, f"unhandled {type(exc).__name__}")
+    return generation_ports().RetryDecision(False, f"unhandled {type(exc).__name__}")
 
 
 def safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
@@ -514,7 +533,9 @@ def safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
     details: dict[str, Any] = {}
     transparent_qc = payload.get("transparent_qc")
     if isinstance(transparent_qc, dict):
-        sanitized_qc = _g._sanitize_transparent_qc_payload(transparent_qc)
+        sanitized_qc = generation_ports()._sanitize_transparent_qc_payload(
+            transparent_qc
+        )
         if sanitized_qc:
             details["transparent_qc"] = sanitized_qc
     transparent_provider = payload.get("transparent_provider")
@@ -580,7 +601,7 @@ def decide_moderation_retry_upgrade(
 ) -> Any | None:
     if base_decision.retriable:
         return None
-    if not _g.is_moderation_block(err_code, err_msg):
+    if not generation_ports().is_moderation_block(err_code, err_msg):
         return None
     if is_dual_race or not reserved_provider_name:
         return None
@@ -590,7 +611,7 @@ def decide_moderation_retry_upgrade(
         return None
     if already_avoided_count + 1 >= min(cap, enabled_provider_count):
         return None
-    return _g.RetryDecision(
+    return generation_ports().RetryDecision(
         retriable=True,
         reason="moderation_blocked try_next_provider",
     )

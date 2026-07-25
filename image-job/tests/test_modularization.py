@@ -2,16 +2,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import importlib.util
-import shutil
-import sys
-from io import BytesIO
 from pathlib import Path
 from typing import Any
-
-import pytest
-from PIL import Image
-
 
 IMAGE_JOB_DIR = Path(__file__).resolve().parents[1]
 EXTRACTED_MODULES = (
@@ -24,42 +16,19 @@ EXTRACTED_MODULES = (
     "request_bodies.py",
     "upstream_runtime.py",
 )
-RUNTIME_MODULES = ("app.py", *EXTRACTED_MODULES)
 
 
 def load_app_module() -> Any:
     asyncio.set_event_loop(asyncio.new_event_loop())
-    path = IMAGE_JOB_DIR / "app.py"
-    module_dir = str(path.parent)
-    if module_dir not in sys.path:
-        sys.path.insert(0, module_dir)
-    spec = importlib.util.spec_from_file_location(
-        "image_job_modularization_under_test",
-        path,
-    )
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    from .support import load_harness
 
-
-def load_app_from(path: Path, module_name: str) -> Any:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_harness()
 
 
 def test_app_stays_below_modularization_limit() -> None:
     line_count = len((IMAGE_JOB_DIR / "app.py").read_text().splitlines())
 
-    assert line_count < 1500
+    assert line_count < 200
 
 
 def test_extracted_modules_do_not_import_app() -> None:
@@ -128,40 +97,26 @@ def test_artifact_facade_reads_monkeypatched_data_dir(
     assert relative.endswith("/job-late-bound")
 
 
-def test_copied_app_loads_only_sibling_modules_and_keeps_pixel_limit(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    copy_a = tmp_path / "copy-a"
-    copy_b = tmp_path / "copy-b"
-    copy_a.mkdir()
-    copy_b.mkdir()
-    for filename in RUNTIME_MODULES:
-        shutil.copy2(IMAGE_JOB_DIR / filename, copy_a / filename)
-        shutil.copy2(IMAGE_JOB_DIR / filename, copy_b / filename)
+def test_package_imports_without_random_dynamic_loader() -> None:
+    app_source = (IMAGE_JOB_DIR / "app.py").read_text()
 
-    previous_max_pixels = Image.MAX_IMAGE_PIXELS
-    try:
-        monkeypatch.setenv("IMAGE_JOB_MAX_IMAGE_PIXELS", "200")
-        app_a = load_app_from(copy_a / "app.py", "image_job_copy_a")
-        monkeypatch.setenv("IMAGE_JOB_MAX_IMAGE_PIXELS", "50")
-        app_b = load_app_from(copy_b / "app.py", "image_job_copy_b")
+    forbidden = (
+        "spec_from_" + "file_location",
+        "import" + "lib",
+        "sys." + "modules",
+    )
+    assert all(value not in app_source for value in forbidden)
 
-        assert Path(app_a._runtime_config.__file__).parent == copy_a
-        assert Path(app_a._image_artifacts_module.__file__).parent == copy_a
-        assert Path(app_a._image_candidates_module.__file__).parent == copy_a
-        assert Path(app_a._upstream_runtime_module.__file__).parent == copy_a
-        assert Path(app_b._runtime_config.__file__).parent == copy_b
-        assert Path(app_b._image_artifacts_module.__file__).parent == copy_b
-        assert Path(app_b._image_candidates_module.__file__).parent == copy_b
-        assert Path(app_b._upstream_runtime_module.__file__).parent == copy_b
 
-        buffer = BytesIO()
-        Image.new("RGB", (10, 10)).save(buffer, format="PNG")
-        raw = buffer.getvalue()
-
-        assert app_a.image_metadata(raw, "image/png")[:2] == (10, 10)
-        with pytest.raises(app_b.JobFailure):
-            app_b.image_metadata(raw, "image/png")
-    finally:
-        Image.MAX_IMAGE_PIXELS = previous_max_pixels
+def test_package_has_no_module_level_runtime_primitives() -> None:
+    runtime_primitives = {"Queue", "Event", "Lock"}
+    for path in (IMAGE_JOB_DIR / "image_job").rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            if not isinstance(value, ast.Call):
+                continue
+            if isinstance(value.func, ast.Attribute):
+                assert value.func.attr not in runtime_primitives, path

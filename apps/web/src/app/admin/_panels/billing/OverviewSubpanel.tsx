@@ -94,7 +94,7 @@ function BootstrapCard({
   return (
     <Card variant="subtle" padding="lg" className="space-y-4">
       <div className="flex items-center gap-2">
-        <ShieldAlert className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+        <ShieldAlert className="h-4 w-4 text-[var(--accent)]" />
         <p className="type-card-title">首次启用</p>
       </div>
       <div className="grid gap-3 md:grid-cols-[120px_auto]">

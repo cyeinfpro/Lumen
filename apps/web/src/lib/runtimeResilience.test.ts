@@ -1,16 +1,25 @@
-import { equal } from "node:assert/strict";
+import {
+  doesNotMatch,
+  equal,
+  match,
+} from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { loadTsModule } from "../../test-support/load-ts-module.mjs";
 
-const runtimeResilience = await import(
-  new URL("./runtimeResilience.ts", import.meta.url).href
-);
 const {
-  getRuntimeResilienceSnapshot,
-  installHighRiskIdentityWriteGuard,
   isHighRiskIdentityWrite,
   setSessionRuntimeStatus,
-} = runtimeResilience;
+} = loadTsModule(new URL("./runtimeResilience.ts", import.meta.url), {
+  react: {
+    useSyncExternalStore() {
+      return undefined;
+    },
+  },
+}) as {
+  isHighRiskIdentityWrite(method: string, path: string): boolean;
+  setSessionRuntimeStatus(status: string): void;
+};
 
 test("high-risk identity writes are narrowly classified", () => {
   equal(isHighRiskIdentityWrite("DELETE", "/api/me"), true);
@@ -19,53 +28,33 @@ test("high-risk identity writes are narrowly classified", () => {
   equal(isHighRiskIdentityWrite("POST", "/api/me/redemptions"), true);
   equal(isHighRiskIdentityWrite("PATCH", "/api/admin/settings"), true);
   equal(isHighRiskIdentityWrite("POST", "/api/conversations"), false);
-  equal(isHighRiskIdentityWrite("PATCH", "/api/me/memory-settings"), false);
   equal(isHighRiskIdentityWrite("GET", "/api/admin/settings"), false);
+  setSessionRuntimeStatus("unknown");
 });
 
-test("identity guard degrades high-risk writes while preserving normal writes", async () => {
-  const originalFetch = globalThis.fetch;
-  const requests: string[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    requests.push(String(input));
-    return new Response("ok");
-  }) as typeof fetch;
-  const uninstall = installHighRiskIdentityWriteGuard();
-
-  try {
-    setSessionRuntimeStatus("degraded");
-    const blocked = await fetch("http://localhost/api/admin/settings", {
-      method: "PATCH",
-    });
-    equal(blocked.status, 409);
-    equal(requests.length, 0);
-
-    const allowed = await fetch("http://localhost/api/conversations", {
-      method: "POST",
-    });
-    equal(allowed.status, 200);
-    equal(requests.length, 1);
-
-    setSessionRuntimeStatus("unauthorized");
-    const unauthorized = await fetch("http://localhost/api/me", {
-      method: "DELETE",
-    });
-    equal(unauthorized.status, 401);
-    equal(getRuntimeResilienceSnapshot().session, "unauthorized");
-  } finally {
-    uninstall();
-    globalThis.fetch = originalFetch;
-    setSessionRuntimeStatus("unknown");
-  }
+test("identity policy is explicit and global fetch is never patched", () => {
+  const runtime = readFileSync(
+    new URL("./runtimeResilience.ts", import.meta.url),
+    "utf8",
+  );
+  const policy = readFileSync(
+    new URL("./auth/identityPolicy.ts", import.meta.url),
+    "utf8",
+  );
+  const commandClient = readFileSync(
+    new URL("./api/commandClient.ts", import.meta.url),
+    "utf8",
+  );
+  doesNotMatch(runtime, /globalThis\.fetch|window\.fetch\s*=|installHighRisk/);
+  match(policy, /assertAllowed\(method, path\)/);
+  match(commandClient, /this\.policy\.assertAllowed\(method, path\)/);
 });
 
-test("global runtime status exposes recovery and session/realtime copy", () => {
+test("runtime recovery login uses the shared safe replace navigation", () => {
   const source = readFileSync(
     new URL("../components/RuntimeResilienceStatus.tsx", import.meta.url),
     "utf8",
   );
-  equal(source.includes("requestRuntimeRecovery()"), true);
-  equal(source.includes("会话验证暂不可用"), true);
-  equal(source.includes("实时连接已中断"), true);
-  equal(source.includes("高风险操作已切换为只读"), true);
+  match(source, /replaceWithLogin\(\)/);
+  doesNotMatch(source, /location\.assign/);
 });

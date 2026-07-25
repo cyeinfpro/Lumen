@@ -163,10 +163,7 @@ async def test_add_uses_fake_clock_and_retains_membership_for_48_hours() -> None
     assert (
         "zadd",
         tracker_mod.ACTIVE_USER_STREAMS_KEY,
-        {
-            "user-1": 1_000
-            + tracker_mod.ACTIVE_USER_STREAM_TTL_SECONDS
-        },
+        {"user-1": 1_000 + tracker_mod.ACTIVE_USER_STREAM_TTL_SECONDS},
     ) in redis.pipe.calls
     assert (
         "expire",

@@ -1,4 +1,8 @@
 import { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./http";
+import { longOperationClient } from "./longOperationClient";
+import { deadline } from "./requestBudget";
+
+const ADMIN_OPERATION_BUDGET = deadline(15 * 60_000);
 import type { NoContent } from "./http";
 import type {
   AdminRequestEventsOut,
@@ -109,19 +113,31 @@ export function backupNow(): Promise<{
   timestamp?: string | null;
   stderr_tail?: string | null;
 }> {
-  return apiFetch<{
+  return longOperationClient.run<{
     ok: boolean;
     timestamp?: string | null;
     stderr_tail?: string | null;
-  }>("/admin/backups/now", { method: "POST", body: JSON.stringify({}) });
+  }>("/admin/backups/now", {
+    method: "POST",
+    body: JSON.stringify({}),
+    budget: ADMIN_OPERATION_BUDGET,
+  });
 }
 
 export function restoreBackup(
   timestamp: string,
 ): Promise<{ accepted: boolean; timestamp: string; note: string }> {
-  return apiFetch<{ accepted: boolean; timestamp: string; note: string }>(
+  return longOperationClient.run<{
+    accepted: boolean;
+    timestamp: string;
+    note: string;
+  }>(
     "/admin/backups/restore",
-    { method: "POST", body: JSON.stringify({ timestamp }) },
+    {
+      method: "POST",
+      body: JSON.stringify({ timestamp }),
+      budget: ADMIN_OPERATION_BUDGET,
+    },
   );
 }
 
@@ -277,9 +293,10 @@ export function checkAdminUpdate(force = false): Promise<AdminUpdateCheckOut> {
 export function triggerAdminUpdate(
   body: AdminUpdateTriggerIn = {},
 ): Promise<AdminUpdateTriggerOut> {
-  return apiFetch<AdminUpdateTriggerOut>("/admin/update", {
+  return longOperationClient.run<AdminUpdateTriggerOut>("/admin/update", {
     method: "POST",
     body: JSON.stringify(body),
+    budget: ADMIN_OPERATION_BUDGET,
   });
 }
 
@@ -291,17 +308,22 @@ export function listAdminReleases(): Promise<ReleaseInfo[]> {
 export function rollbackAdminRelease(
   release_id: string,
 ): Promise<AdminRollbackOut> {
-  return apiFetch<AdminRollbackOut>("/admin/release/rollback", {
+  return longOperationClient.run<AdminRollbackOut>("/admin/release/rollback", {
     method: "POST",
     body: JSON.stringify({ release_id }),
+    budget: ADMIN_OPERATION_BUDGET,
   });
 }
 
 export function rollbackPreviousAdminRelease(): Promise<AdminRollbackOut> {
-  return apiFetch<AdminRollbackOut>("/admin/update/rollback-previous", {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
+  return longOperationClient.run<AdminRollbackOut>(
+    "/admin/update/rollback-previous",
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+      budget: ADMIN_OPERATION_BUDGET,
+    },
+  );
 }
 
 // SSE 端点。EventSource 不允许自定义 header，但 cookie 由 withCredentials 自动带；

@@ -24,6 +24,7 @@ import re
 import shlex
 import subprocess
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncIterator
@@ -41,33 +42,41 @@ from ._admin_common import (
     cleanup_marker_when_done,
     write_admin_audit_isolated,
 )
-from .admin_backups import _maintenance_marker_busy
+from .admin_backups import maintenance_marker_busy
 from .admin_update import (
     ReleaseInfo,
-    _list_releases,
-    _log_attempt_failure,
-    _lumen_root,
-    _open_update_log,
-    _read_marker,
-    _resolve_release,
-    _run_systemd_command,
-    _systemd_run_available,
-    _systemd_run_inline_attempts,
-    _update_log_path,
-    _update_marker_path,
-    _write_marker,
+    list_releases as update_list_releases,
+    log_attempt_failure as update_log_attempt_failure,
+    lumen_root as update_lumen_root,
+    open_update_log as update_open_update_log,
+    read_marker as update_read_marker,
+    resolve_release as update_resolve_release,
+    run_systemd_command as update_run_systemd_command,
+    systemd_run_available as update_systemd_run_available,
+    systemd_run_inline_attempts as update_systemd_run_inline_attempts,
+    update_log_path as update_update_log_path,
+    update_marker_path as update_update_marker_path,
+    write_marker as update_write_marker,
 )
 
-_marker_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+@dataclass
+class _MarkerCleanupRuntime:
+    tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+
+_marker_cleanup_runtime = _MarkerCleanupRuntime()
+# Historical tests and operators accessed the holder under this name.
+_marker_cleanup_state = _marker_cleanup_runtime
 
 
 async def _shutdown_marker_cleanup_tasks() -> None:
-    tasks = list(_marker_cleanup_tasks)
+    tasks = list(_marker_cleanup_runtime.tasks)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    _marker_cleanup_tasks.difference_update(tasks)
+    _marker_cleanup_runtime.tasks.difference_update(tasks)
 
 
 @asynccontextmanager
@@ -118,7 +127,9 @@ async def _read_db_alembic_head(db: AsyncSession) -> str | None:
     which is the correct answer for a brand-new DB that hasn't been stamped.
     """
     try:
-        result = await db.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
+        result = await db.execute(
+            text("SELECT version_num FROM alembic_version LIMIT 1")
+        )
         row = result.first()
     except Exception:
         return None
@@ -140,7 +151,7 @@ async def list_releases(_admin: AdminUser) -> list[ReleaseInfo]:
     Useful for the rollback selector UI which doesn't otherwise need the full
     update status payload (log_tail / phases / running flag).
     """
-    return await asyncio.to_thread(_list_releases)
+    return await asyncio.to_thread(update_list_releases)
 
 
 def _build_rollback_script(*, target_id: str, lumen_root: Path) -> str:
@@ -299,7 +310,7 @@ ROLLBACK_DUR=$(((ROLLBACK_T1_S - ROLLBACK_T0_S) * 1000))
 echo "::lumen-step:: phase=rollback status=done rc=$restart_rc dur_ms=$ROLLBACK_DUR ts=$(ts)"
 
 # Clean the marker so the SSE stream / status endpoint flips back to running=False.
-rm -f "{shlex.quote(str(_update_marker_path()))}"
+rm -f "{shlex.quote(str(update_update_marker_path()))}"
 """
 
 
@@ -321,33 +332,33 @@ def _start_rollback_systemd_unit(
     ``_start_update_systemd_unit``.
     """
     unit = _rollback_unit_name(started_at)
-    log_path = _update_log_path()
-    root = _lumen_root()
+    log_path = update_update_log_path()
+    root = update_lumen_root()
     env = os.environ.copy()
     env["LUMEN_UPDATE_SYSTEMD_UNIT"] = unit
     runtime_dir = f"/run/user/{os.getuid()}"
     env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
     env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
 
-    _write_marker(0, started_at.isoformat(), unit=unit)
+    update_write_marker(0, started_at.isoformat(), unit=unit)
     attempted: list[str] = []
 
-    for label, command in _systemd_run_inline_attempts(
+    for label, command in update_systemd_run_inline_attempts(
         unit=unit,
         root=root,
         log_path=log_path,
         inline_script=inline_script,
     ):
         attempted.append(label)
-        result = _run_systemd_command(command, env, root)
+        result = update_run_systemd_command(command, env, root)
         if result.returncode == 0:
             return unit, attempted
-        _log_attempt_failure(log_fh, label, result)
+        update_log_attempt_failure(log_fh, label, result)
 
     # Every attempt failed; clear the marker so a follow-up trigger isn't
     # blocked by a phantom lock.
     try:
-        _update_marker_path().unlink()
+        update_update_marker_path().unlink()
     except OSError:
         pass
     return None, attempted
@@ -357,16 +368,16 @@ def _schedule_marker_cleanup_when_done(
     proc: subprocess.Popen[bytes],
 ) -> asyncio.Task[None]:
     task = asyncio.create_task(_cleanup_marker_when_done(proc))
-    _marker_cleanup_tasks.add(task)
-    task.add_done_callback(_marker_cleanup_tasks.discard)
+    _marker_cleanup_runtime.tasks.add(task)
+    task.add_done_callback(_marker_cleanup_runtime.tasks.discard)
     return task
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
     await cleanup_marker_when_done(
         proc,
-        read_marker_fn=_read_marker,
-        marker_path_fn=_update_marker_path,
+        read_marker_fn=update_read_marker,
+        marker_path_fn=update_update_marker_path,
     )
 
 
@@ -386,7 +397,9 @@ async def rollback_release(
         raise _http("invalid_request", "release_id is required", 422)
 
     lock_service = SystemOperationLockService(
-        fallback_busy=lambda: _read_marker() is not None or _maintenance_marker_busy()
+        fallback_busy=lambda: (
+            update_read_marker() is not None or maintenance_marker_busy()
+        )
     )
     lock = None
     try:
@@ -400,19 +413,23 @@ async def rollback_release(
             409,
         )
 
-    lumen_root = _lumen_root()
+    release_root = update_lumen_root()
     launched = False
     release_reason = "launch_failed"
     try:
-        release_dir = await asyncio.to_thread(_resolve_release, lumen_root, target_id)
+        release_dir = await asyncio.to_thread(
+            update_resolve_release,
+            release_root,
+            target_id,
+        )
         if release_dir is None:
             release_reason = "release_not_found"
             raise _http("release_not_found", f"release '{target_id}' not found", 404)
 
-        releases = await asyncio.to_thread(_list_releases, limit=None)
+        releases = await asyncio.to_thread(update_list_releases, limit=None)
         target = next((r for r in releases if r.id == target_id), None)
         if target is None:
-            # _resolve_release succeeded but the release lacks .lumen_release.json;
+            # update_resolve_release succeeded but the release lacks .lumen_release.json;
             # fall through with a synthetic entry so the operator at least sees
             # the swap happen, but flag schema_unknown so they know we couldn't
             # validate the alembic head.
@@ -420,7 +437,9 @@ async def rollback_release(
 
         if target.is_current:
             release_reason = "already_current"
-            raise _http("already_current", f"release '{target_id}' is already current", 409)
+            raise _http(
+                "already_current", f"release '{target_id}' is already current", 409
+            )
 
         # Schema gate. A release whose expected head differs from the live DB
         # head means rolling back without first running ``alembic downgrade``
@@ -441,9 +460,12 @@ async def rollback_release(
             )
 
         started_at = datetime.now(timezone.utc)
-        inline_script = _build_rollback_script(target_id=target_id, lumen_root=lumen_root)
+        inline_script = _build_rollback_script(
+            target_id=target_id,
+            lumen_root=release_root,
+        )
 
-        log_fh = _open_update_log()
+        log_fh = update_open_update_log()
         unit: str | None = None
         pid: int | None = None
         proc: subprocess.Popen[bytes] | None = None
@@ -454,7 +476,7 @@ async def rollback_release(
             )
             log_fh.flush()
 
-            if _systemd_run_available():
+            if update_systemd_run_available():
                 unit, _attempts = await asyncio.to_thread(
                     _start_rollback_systemd_unit,
                     inline_script=inline_script,
@@ -469,7 +491,7 @@ async def rollback_release(
                 log_fh.flush()
                 proc = subprocess.Popen(
                     ["/usr/bin/env", "bash", "-lc", inline_script],
-                    cwd=str(_lumen_root()),
+                    cwd=str(release_root),
                     stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
@@ -477,7 +499,7 @@ async def rollback_release(
                     close_fds=True,
                 )
                 pid = proc.pid
-                _write_marker(proc.pid, started_at.isoformat())
+                update_write_marker(proc.pid, started_at.isoformat())
         finally:
             log_fh.close()
 
@@ -508,7 +530,9 @@ async def rollback_release(
         if unit is None and pid is None:
             # Both systemd-run and subprocess failed (e.g. exec missing). Surface
             # 500 instead of returning accepted=True for an aborted rollback.
-            raise _http("rollback_launch_failed", "could not launch rollback runner", 500)
+            raise _http(
+                "rollback_launch_failed", "could not launch rollback runner", 500
+            )
 
         return RollbackOut(
             accepted=True,
@@ -522,9 +546,7 @@ async def rollback_release(
         )
     finally:
         if lock is not None:
-            await lock_service.release(
-                lock, succeeded=launched, reason=release_reason
-            )
+            await lock_service.release(lock, succeeded=launched, reason=release_reason)
 
 
 @update_router.post(
@@ -537,7 +559,7 @@ async def rollback_previous_release(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RollbackOut:
-    releases = await asyncio.to_thread(_list_releases, limit=None)
+    releases = await asyncio.to_thread(update_list_releases, limit=None)
     previous = next((r for r in releases if r.is_previous), None)
     if previous is None:
         raise _http("no_previous", "no previous release is available", 409)

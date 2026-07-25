@@ -37,7 +37,7 @@ _SUCCESS_REPORT_INTERVAL_SEC = 60.0
 _FAILED_NAME_COOLDOWN_SEC = 60.0
 
 
-def _normalize_proxy_url(url: str) -> str:
+def normalize_proxy_url(url: str) -> str:
     """aiogram 用 aiohttp_socks，python-socks 不认 `socks5h://`，只认 `socks5://`。
     runtime-config 返回的是 `socks5h://...`（h = remote DNS），把 h 去掉转成 `socks5://`。
     httpx 那边两种都接受，所以仅在 bot 入口做这一次归一就够了。
@@ -48,7 +48,12 @@ def _normalize_proxy_url(url: str) -> str:
     if value.startswith("socks5h://"):
         value = "socks5://" + value[len("socks5h://") :]
     parts = urlsplit(value)
-    if parts.scheme and parts.scheme.lower() not in {"socks4", "socks5", "http", "https"}:
+    if parts.scheme and parts.scheme.lower() not in {
+        "socks4",
+        "socks5",
+        "http",
+        "https",
+    }:
         logger.warning("unsupported telegram proxy scheme: %s", parts.scheme)
         return ""
     return value
@@ -82,7 +87,7 @@ class ProxyManager:
         proxy = cfg.get("proxy")
         if proxy and isinstance(proxy, dict):
             self.current_name = str(proxy.get("name") or "")
-            self.current_url = _normalize_proxy_url(str(proxy.get("url") or ""))
+            self.current_url = normalize_proxy_url(str(proxy.get("url") or ""))
         return cfg
 
     async def failover(self) -> bool:
@@ -115,7 +120,7 @@ class ProxyManager:
                 return False
 
             new_name = str(proxy.get("name") or "")
-            new_url = _normalize_proxy_url(str(proxy.get("url") or ""))
+            new_url = normalize_proxy_url(str(proxy.get("url") or ""))
             if new_name == self.current_name:
                 # 没换到新的，避免空转
                 return False
@@ -176,7 +181,9 @@ class FailoverSession(AiohttpSession):
                 last_exc = exc
                 logger.warning(
                     "tg request error attempt=%d via %s err=%r",
-                    attempt + 1, self._manager.current_name, exc,
+                    attempt + 1,
+                    self._manager.current_name,
+                    exc,
                 )
                 swapped = await self._manager.failover()
                 if not swapped or not retry_safe:

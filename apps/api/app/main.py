@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import faulthandler
@@ -267,7 +268,12 @@ def _feature_disabled_response(feature: str) -> JSONResponse:
 
 
 class _NavFeatureGuardMiddleware:
-    """Block direct API access when the matching user-facing page is hidden."""
+    """Block direct API access when the matching server feature is disabled.
+
+    The current settings keys are retained for compatibility with the admin UI,
+    but they are server-side gates as well as navigation hints. A settings
+    storage failure therefore fails closed for every protected feature.
+    """
 
     def __init__(self, app):  # type: ignore[no-untyped-def]
         self.app = app
@@ -304,11 +310,15 @@ class _NavFeatureGuardMiddleware:
                         return
         except Exception:  # noqa: BLE001
             logger.warning("feature guard setting read failed", exc_info=True)
-            if canvas_matched is not None:
-                response = _feature_disabled_response("canvas")
-                await response(scope, receive, send)
-                return
-            await self.app(scope, receive, send)
+            feature = (
+                "canvas"
+                if canvas_matched is not None
+                else matched[0]
+                if matched is not None
+                else "protected feature"
+            )
+            response = _feature_disabled_response(feature)
+            await response(scope, receive, send)
             return
         await self.app(scope, receive, send)
 
@@ -440,6 +450,15 @@ async def lifespan(app: FastAPI):
         logger.warning("billing cache route wiring failed", exc_info=True)
     # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
     await get_arq_pool()
+    from .images.application.reconcile_runtime import (
+        image_artifact_reconciler_loop,
+    )
+
+    image_reconcile_stop = asyncio.Event()
+    image_reconcile_task = asyncio.create_task(
+        image_artifact_reconciler_loop(image_reconcile_stop),
+        name="image-artifact-reconciler",
+    )
     # Opportunistic only: if tiktoken's cache is cold and the metadata download is
     # slow, token counting falls back to a local estimate instead of blocking API
     # request handlers.
@@ -447,6 +466,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        image_reconcile_stop.set()
+        image_reconcile_task.cancel()
+        await asyncio.gather(image_reconcile_task, return_exceptions=True)
         await billing_cache.stop_workers()
         try:
             from .routes import billing as billing_routes

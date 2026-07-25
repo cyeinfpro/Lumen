@@ -276,7 +276,7 @@ export function TelegramPanel() {
                     className={
                       "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-xs transition-colors " +
                       (sel
-                        ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
+                        ? "bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]"
                         : "bg-[var(--bg-2)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-3)]")
                     }
                     disabled={!p.enabled}
@@ -307,7 +307,7 @@ export function TelegramPanel() {
                   className={
                     "text-left p-3 rounded-[var(--radius-card)] border text-xs transition-colors " +
                     (active
-                      ? "bg-[var(--color-lumen-amber)]/10 border-[var(--color-lumen-amber)]/40"
+                      ? "bg-[var(--accent)]/10 border-[var(--accent)]/40"
                       : "bg-[var(--bg-2)] border-[var(--border)] hover:bg-[var(--bg-3)]")
                   }
                 >
@@ -316,7 +316,7 @@ export function TelegramPanel() {
                     <span
                       className={
                         "text-sm " +
-                        (active ? "text-[var(--color-lumen-amber)] font-medium" : "text-[var(--fg-0)]")
+                        (active ? "text-[var(--accent)] font-medium" : "text-[var(--fg-0)]")
                       }
                     >
                       {s.label}
@@ -505,7 +505,7 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           autoComplete="off"
           className={
-            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors " +
             (mono ? "font-mono" : "")
           }
         />
@@ -551,7 +551,7 @@ function ToggleField({
         className={
           "shrink-0 mt-0.5 w-11 h-6 rounded-full transition-colors relative " +
           (on
-            ? "bg-[var(--color-lumen-amber)]"
+            ? "bg-[var(--accent)]"
             : "bg-[var(--bg-3)] border border-[var(--border)]")
         }
       >

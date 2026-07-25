@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from importlib import import_module
 
 from sqlalchemy import DateTime, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from uuid_extensions import uuid7
 
 
 def new_uuid7() -> str:
-    uuid7 = import_module("uuid_extensions").uuid7
     return str(uuid7())
 
 

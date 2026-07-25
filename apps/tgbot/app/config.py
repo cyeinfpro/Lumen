@@ -64,10 +64,13 @@ class Settings(BaseSettings):
     download_tmp_dir: str = ""
 
     log_level: str = "INFO"
+    telegram_metrics_host: str = "127.0.0.1"
+    telegram_metrics_port: int = 0
 
     # 仅允许这些 TG user_id（数字）使用 bot；逗号分隔。空 = 不限制（仅靠 chat_id 绑定）。
     # 与 telegram_bindings 形成双因子：拿到 X-Bot-Token 又知道 chat_id 也没用，因为
     # 进 bot 这层会先按 from_user.id 拒掉。
     telegram_allowed_user_ids: str = ""
+
 
 settings = Settings()

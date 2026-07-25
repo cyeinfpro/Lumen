@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 
-_PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
+_PRIVATE_HOSTS = frozenset({"localhost", "localhost.localdomain"})
 _FORBIDDEN_HOST_NETWORKS = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),

@@ -173,6 +173,6 @@ ALLOWED_FIXED_ENDPOINTS = (
 )
 ALLOWED_PREFIX_ENDPOINTS = ("/v1beta/models/",)
 
-IMAGE_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
+IMAGE_OUTPUT_FORMATS = frozenset({"png", "jpeg", "webp"})
 DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 DEFAULT_IMAGE_OUTPUT_COMPRESSION = 0

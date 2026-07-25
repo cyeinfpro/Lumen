@@ -12,7 +12,7 @@ import mimetypes
 import os
 import secrets
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
@@ -74,8 +74,6 @@ router = APIRouter(
     dependencies=[Depends(verify_csrf)],
 )
 
-_PROVIDER_RR_COUNTERS: dict[int, int] = {}
-_PROVIDER_RR_LOCK = asyncio.Lock()
 _RETRYABLE_HTTP_STATUS = _prompt_upstream.RETRYABLE_HTTP_STATUS
 _FALLBACK_400_MARKERS = _prompt_upstream.FALLBACK_400_MARKERS
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
@@ -87,7 +85,18 @@ _PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS = 10.0
 _PROMPT_ENHANCE_READ_TIMEOUT_SECONDS = 25.0
 _PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS = 10.0
 _PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS = 10.0
-_PROMPT_ENHANCE_RELEASE_TASKS: set[asyncio.Task[None]] = set()
+
+
+@dataclass
+class _PromptRuntimeState:
+    provider_rr_counters: dict[int, int] = field(default_factory=dict)
+    provider_rr_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    release_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+
+_prompt_runtime_state = _PromptRuntimeState()
+# Compatibility view for tests that reset the historical round-robin counter.
+_PROVIDER_RR_COUNTERS = _prompt_runtime_state.provider_rr_counters
 
 _EnhanceAttempt = _prompt_upstream.EnhanceAttempt
 _EnhanceProviderError = _prompt_upstream.EnhanceProviderError
@@ -146,8 +155,10 @@ async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
     for err in errors:
         logger.warning("%s", err)
     providers = [p for p in providers if _provider_allows_prompt_enhance(p)]
-    async with _PROVIDER_RR_LOCK:
-        return weighted_priority_order(providers, _PROVIDER_RR_COUNTERS)
+    async with _prompt_runtime_state.provider_rr_lock:
+        return weighted_priority_order(
+            providers, _prompt_runtime_state.provider_rr_counters
+        )
 
 
 def _build_enhance_body(
@@ -860,10 +871,10 @@ async def _release_prompt_enhance_hold(
 
 
 def _track_prompt_enhance_release_task(task: asyncio.Task[None]) -> None:
-    _PROMPT_ENHANCE_RELEASE_TASKS.add(task)
+    _prompt_runtime_state.release_tasks.add(task)
 
     def _done(completed: asyncio.Task[None]) -> None:
-        _PROMPT_ENHANCE_RELEASE_TASKS.discard(completed)
+        _prompt_runtime_state.release_tasks.discard(completed)
         with suppress(asyncio.CancelledError):
             exc = completed.exception()
             if exc is not None:
@@ -1040,6 +1051,10 @@ async def enhance_prompt(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+resolve_provider_order = _resolve_provider_order
+stream_enhance = _stream_enhance
 
 
 @router.post("/video/enhance")

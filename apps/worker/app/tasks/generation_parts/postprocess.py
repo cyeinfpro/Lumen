@@ -21,10 +21,10 @@ from ...background_removal import (
     TransparentPipelineFailure,
     TransparentPipelineOutput,
 )
-from ...upstream import UpstreamError
+from ...provider_runtime.errors import UpstreamError
 
 
-_IMAGE_POSTPROCESS_MODES = {"inline", "thread", "process_pool"}
+_IMAGE_POSTPROCESS_MODES = frozenset({"inline", "thread", "process_pool"})
 
 ImageVariantMaker = Callable[[bytes], image_artifacts._ImageVariantBundle]
 

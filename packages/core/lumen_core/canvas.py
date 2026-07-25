@@ -39,6 +39,7 @@ from .canvas_schemas import (
     UpdateNodeMetaOperation,
 )
 from .constants import MAX_PROMPT_CHARS
+from .immutables import immutable_mapping
 
 
 class CanvasMutationError(ValueError):
@@ -858,21 +859,23 @@ def _apply_document_settings(
     state.graph_data["settings"] = operation.settings.model_dump(mode="python")
 
 
-_OPERATION_HANDLERS: dict[type[Any], Any] = {
-    AddNodeOperation: _apply_add_node,
-    UpdateNodeConfigOperation: _apply_update_node_config,
-    UpdateNodeMetaOperation: _apply_update_node_meta,
-    MoveNodesOperation: _apply_move_nodes,
-    ResizeNodeOperation: _apply_resize_node,
-    RemoveNodesOperation: _apply_remove_nodes,
-    AddEdgeOperation: _apply_add_edge,
-    UpdateEdgeOperation: _apply_update_edge,
-    RemoveEdgesOperation: _apply_remove_edges,
-    AddFrameOperation: _apply_add_frame,
-    UpdateFrameOperation: _apply_update_frame,
-    RemoveFrameOperation: _apply_remove_frame,
-    UpdateDocumentSettingsOperation: _apply_document_settings,
-}
+_OPERATION_HANDLERS: Mapping[type[Any], Any] = immutable_mapping(
+    {
+        AddNodeOperation: _apply_add_node,
+        UpdateNodeConfigOperation: _apply_update_node_config,
+        UpdateNodeMetaOperation: _apply_update_node_meta,
+        MoveNodesOperation: _apply_move_nodes,
+        ResizeNodeOperation: _apply_resize_node,
+        RemoveNodesOperation: _apply_remove_nodes,
+        AddEdgeOperation: _apply_add_edge,
+        UpdateEdgeOperation: _apply_update_edge,
+        RemoveEdgesOperation: _apply_remove_edges,
+        AddFrameOperation: _apply_add_frame,
+        UpdateFrameOperation: _apply_update_frame,
+        RemoveFrameOperation: _apply_remove_frame,
+        UpdateDocumentSettingsOperation: _apply_document_settings,
+    }
+)
 
 
 def apply_canvas_mutation(

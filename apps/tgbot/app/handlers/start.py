@@ -47,8 +47,7 @@ async def cmd_start(message: Message, command: CommandObject, api: LumenApi) -> 
             )
         except ApiError as exc:
             await message.answer(
-                f"❌ 绑定失败：{exc.message}\n\n"
-                "请回到 Lumen 网站重新生成绑定码后再试。"
+                f"❌ 绑定失败：{exc.message}\n\n请回到 Lumen 网站重新生成绑定码后再试。"
             )
             return
         await message.answer(

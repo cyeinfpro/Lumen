@@ -245,26 +245,13 @@ def test_upload_write_falls_back_when_hardlink_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_upload_rolls_back_original_and_normalized_ref_on_commit_failure(
+async def test_upload_route_delegates_commit_recovery_to_command_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FailingCommitDb:
-        def __init__(self) -> None:
-            self.added: list[Any] = []
-            self.rolled_back = False
-
-        def add(self, value: Any) -> None:
-            self.added.append(value)
-
-        async def flush(self) -> None:
-            self.added[-1].id = "img-upload"
-
-        async def commit(self) -> None:
-            raise RuntimeError("commit failed")
-
-        async def rollback(self) -> None:
-            self.rolled_back = True
+    class _FailingService:
+        async def execute(self, **_kwargs: Any) -> Any:
+            raise RuntimeError("commit outcome unresolved")
 
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -272,19 +259,19 @@ async def test_upload_rolls_back_original_and_normalized_ref_on_commit_failure(
     monkeypatch.setattr(settings, "storage_root", str(tmp_path))
     monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
     monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
-    db = _FailingCommitDb()
+    monkeypatch.setattr(
+        images,
+        "_upload_command_service",
+        lambda: _FailingService(),
+    )
 
-    with pytest.raises(RuntimeError, match="commit failed"):
+    with pytest.raises(RuntimeError, match="commit outcome unresolved"):
         await images.upload_image(
             SimpleNamespace(id="user-1"),
-            db,  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             file=_UploadFile(_png_bytes("RGB", (16, 16), (10, 20, 30))),  # type: ignore[arg-type]
             purpose=None,
         )
-
-    assert db.rolled_back is True
-    assert not (tmp_path / "u" / "user-1" / "uploads" / "img-upload.png").exists()
-    assert not (tmp_path / "u" / "user-1" / "uploads" / "img-upload.ref.webp").exists()
 
 
 def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
@@ -368,32 +355,26 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class StopAfterPrepare(RuntimeError):
-        pass
-
     captured: dict[str, Any] = {}
 
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    def fake_prepare(
-        _staged: Any,
-        _filename: str | None,
-        **kwargs: Any,
-    ) -> Any:
-        captured.update(kwargs)
-        raise StopAfterPrepare
+    class _CaptureService:
+        async def execute(self, **kwargs: Any) -> Image:
+            captured["policy"] = kwargs["policy"]
+            raise RuntimeError("stop after policy")
 
     monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
     monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
     monkeypatch.setattr(settings, "storage_root", str(tmp_path))
     monkeypatch.setattr(
-        images.upload_pipeline,
-        "prepare_image_upload",
-        fake_prepare,
+        images,
+        "_upload_command_service",
+        lambda: _CaptureService(),
     )
 
-    with pytest.raises(StopAfterPrepare):
+    with pytest.raises(RuntimeError, match="stop after policy"):
         await images.upload_image(
             SimpleNamespace(id="user-1"),
             object(),  # type: ignore[arg-type]
@@ -401,10 +382,7 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
             purpose="volcano_asset",
         )
 
-    assert (
-        captured["max_long_side"]
-        == images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
-    )
+    assert captured["policy"].max_long_side == images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
 
 
 def test_mask_filename_requests_strict_preflight() -> None:

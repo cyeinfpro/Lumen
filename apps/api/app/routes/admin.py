@@ -11,6 +11,7 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Annotated, Any, Awaitable, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -50,11 +51,13 @@ from .images import (
     ALLOWED_VARIANTS,
     DISPLAY_VARIANT,
     VARIANT_MEDIA_TYPE,
-    _ensure_display_variant,
-    _fs_path,
-    _storage_streaming_response,
 )
-from .me import _cancel_account_active_tasks, _post_commit_account_task_cleanup
+from .media_delivery import (
+    ensure_display_variant,
+    image_storage_path,
+    image_storage_streaming_response,
+)
+from .me import cancel_account_active_tasks, post_commit_account_task_cleanup
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -227,8 +230,8 @@ def _iso_z(dt: datetime) -> str:
 
 # Request-event compatibility facade.  Keep the old private names available
 # because operators and tests import them directly.
-_REQUEST_EVENT_STATUSES = _request_events._REQUEST_EVENT_STATUSES
-_REQUEST_EVENT_RANGE_HOURS = _request_events._REQUEST_EVENT_RANGE_HOURS
+_REQUEST_EVENT_STATUSES = _request_events.REQUEST_EVENT_STATUSES
+_REQUEST_EVENT_RANGE_HOURS = _request_events.REQUEST_EVENT_RANGE_HOURS
 _request_provider = _request_events.request_provider
 _request_provider_from_attempts = _request_events.request_provider_from_attempts
 _request_route = _request_events.request_route
@@ -263,7 +266,7 @@ def _duration_ms(
     *,
     now: datetime,
 ) -> int | None:
-    return _request_events._duration_ms(started_at, finished_at, now)
+    return _request_events.duration_ms(started_at, finished_at, now)
 
 
 def _normalize_request_event_status(status: str | None) -> str | None:
@@ -862,7 +865,7 @@ async def delete_user(
         .where(Image.user_id == target.id, Image.deleted_at.is_(None))
         .values(deleted_at=now)
     )
-    task_cleanup = await _cancel_account_active_tasks(
+    task_cleanup = await cancel_account_active_tasks(
         db,
         user_id=target.id,
         canceled_at=now,
@@ -885,7 +888,7 @@ async def delete_user(
         autocommit=False,
     )
     await db.commit()
-    await _post_commit_account_task_cleanup(user_id=target.id, cleanup=task_cleanup)
+    await post_commit_account_task_cleanup(user_id=target.id, cleanup=task_cleanup)
     return {"ok": True}
 
 
@@ -927,8 +930,8 @@ async def get_admin_image_binary(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
-    return _storage_streaming_response(
-        _fs_path(img.storage_key),
+    return image_storage_streaming_response(
+        image_storage_path(img.storage_key),
         media_type=img.mime,
         etag=f'"{img.sha256}"',
         cache_control="private, max-age=31536000, immutable",
@@ -962,10 +965,10 @@ async def get_admin_image_variant(
     if variant is None:
         if kind != DISPLAY_VARIANT:
             raise _http("not_found", "variant not found", 404)
-        variant = await _ensure_display_variant(db, img)
+        variant = await ensure_display_variant(db, img)
         await db.commit()
-    return _storage_streaming_response(
-        _fs_path(variant.storage_key),
+    return image_storage_streaming_response(
+        image_storage_path(variant.storage_key),
         media_type=VARIANT_MEDIA_TYPE.get(kind, "application/octet-stream"),
         etag=f'"{variant.image_id}-{variant.kind}"',
         cache_control="private, max-age=31536000, immutable",
@@ -996,13 +999,15 @@ DlqTaskKind = Literal[
 
 DlqKind = DlqTaskKind | Literal["sse"]
 
-_DLQ_KIND_BY_EVENT_TYPE: dict[str, DlqKind] = {
-    "outbox.generation": "generation",
-    "outbox.completion": "completion",
-    "outbox.video_generation": "video_generation",
-    "outbox.storyboard_assembly": "storyboard_assembly",
-    "outbox.sse": "sse",
-}
+_DLQ_KIND_BY_EVENT_TYPE = MappingProxyType(
+    {
+        "outbox.generation": "generation",
+        "outbox.completion": "completion",
+        "outbox.video_generation": "video_generation",
+        "outbox.storyboard_assembly": "storyboard_assembly",
+        "outbox.sse": "sse",
+    }
+)
 
 
 async def _dlq_task_exists(

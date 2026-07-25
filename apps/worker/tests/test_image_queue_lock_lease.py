@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import asyncio
 import time
 from types import SimpleNamespace
@@ -8,7 +10,20 @@ from typing import Any
 import pytest
 from redis.exceptions import WatchError
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
+from .task_parts_runtime_testing import synchronize_module_ports
+
+
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(monkeypatch: pytest.MonkeyPatch):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
 from app.tasks.generation_parts import queue, queue_claim
 
 

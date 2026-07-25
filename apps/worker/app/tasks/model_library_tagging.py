@@ -23,17 +23,14 @@ from lumen_core.vision_tagging import (
     TAGGING_TOTAL_TIMEOUT_S,
     AutoTagResult,
     VisionTaggingUpstreamError,
-    _clean_style_tags,
-    _normalize_age_segment,
-    _normalize_gender,
-    _strip_markdown_fences,
     call_vision_tagging_upstream_one,
     image_record_to_data_url,
     parse_model_library_tagging_payload,
 )
 
+from ..provider_runtime.errors import UpstreamError
+from ..provider_runtime.upstream_services import upstream_services
 from ..storage import storage
-from ..upstream import UpstreamError, _auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +40,37 @@ _PER_PROVIDER_RETRY_BACKOFF_S = PER_PROVIDER_RETRY_BACKOFF_S
 _TAGGING_TOTAL_TIMEOUT_S = TAGGING_TOTAL_TIMEOUT_S
 _TAGGING_INSTRUCTIONS = MODEL_LIBRARY_TAGGING_INSTRUCTIONS
 _parse_tagging_payload = parse_model_library_tagging_payload
+
+
+def _strip_markdown_fences(value: str) -> str:
+    return value.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
+
+def _clean_style_tags(values: list[Any]) -> list[str]:
+    return [str(value).strip()[:8] for value in values if str(value).strip()][:12]
+
+
+def _normalize_age_segment(value: Any) -> str | None:
+    aliases = {"young": "young_adult", "kids": "child", "middleaged": "middle_aged"}
+    normalized = str(value).strip().lower() if isinstance(value, str) else ""
+    return aliases.get(
+        normalized,
+        normalized
+        if normalized in {"child", "young_adult", "adult", "middle_aged", "senior"}
+        else None,
+    )
+
+
+def _normalize_gender(value: Any) -> str | None:
+    aliases = {
+        "woman": "female",
+        "girl": "female",
+        "female": "female",
+        "m": "male",
+        "man": "male",
+        "male": "male",
+    }
+    return aliases.get(str(value).strip().lower()) if isinstance(value, str) else None
 
 
 async def _image_data_url(image_record: Any) -> str | None:
@@ -81,7 +109,7 @@ async def _call_upstream_one(
             proxy=proxy,
             purpose="model_library_tagging",
             instructions=_TAGGING_INSTRUCTIONS,
-            auth_headers=_auth_headers(api_key),
+            auth_headers=upstream_services().core.auth_headers(api_key),
         )
     except VisionTaggingUpstreamError as exc:
         raise UpstreamError(

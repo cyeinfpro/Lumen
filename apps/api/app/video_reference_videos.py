@@ -26,13 +26,15 @@ VIDEO_REFERENCE_VIDEO_KIND = "video_ref_seedance_r2v_mp4"
 VIDEO_REFERENCE_VIDEO_MIME = "video/mp4"
 VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT = 2_086_876
 VIDEO_REFERENCE_VIDEO_MAX_SIDE = 1920
-_LINK_UNSUPPORTED_ERRNOS = {
-    errno.EPERM,
-    errno.EACCES,
-    errno.EXDEV,
-    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-    errno.EOPNOTSUPP,
-}
+_LINK_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EPERM,
+        errno.EACCES,
+        errno.EXDEV,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        errno.EOPNOTSUPP,
+    }
+)
 
 
 class VideoReferenceVideoError(RuntimeError):
@@ -216,7 +218,11 @@ def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
     raw_streams = raw.get("streams") if isinstance(raw, dict) else None
     streams = raw_streams if isinstance(raw_streams, list) else []
     video_stream = next(
-        (item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"),
+        (
+            item
+            for item in streams
+            if isinstance(item, dict) and item.get("codec_type") == "video"
+        ),
         None,
     )
     if not isinstance(video_stream, dict):
@@ -224,7 +230,11 @@ def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
             "invalid_video", "reference video has no video stream", 400
         )
     audio_stream = next(
-        (item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"),
+        (
+            item
+            for item in streams
+            if isinstance(item, dict) and item.get("codec_type") == "audio"
+        ),
         None,
     )
     duration = _float_or_none(video_stream.get("duration")) or _float_or_none(
@@ -234,7 +244,9 @@ def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
         "duration_ms": int(duration * 1000) if duration is not None else 0,
-        "fps": _fps(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")),
+        "fps": _fps(
+            video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")
+        ),
         "has_audio": audio_stream is not None,
     }
 
@@ -360,9 +372,10 @@ async def ensure_video_reference_video_variant(
     ).scalar_one_or_none() or video
 
     existing = video_reference_variant_metadata(video)
-    if existing is not None and _storage_path(
-        storage_root, str(existing["storage_key"])
-    ).is_file():
+    if (
+        existing is not None
+        and _storage_path(storage_root, str(existing["storage_key"])).is_file()
+    ):
         return existing
 
     source_path = _storage_path(storage_root, video.storage_key)

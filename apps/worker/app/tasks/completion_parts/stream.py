@@ -12,15 +12,17 @@ from typing import Any
 from lumen_core.chat_tools import ToolStatus
 from lumen_core.constants import GenerationErrorCode as EC
 
-from ...upstream import UpstreamCancelled, UpstreamError
-from .tool_state import _CompletionToolTracker
+from ...provider_runtime.errors import UpstreamCancelled, UpstreamError
+from .tool_state import CompletionToolTracker as _CompletionToolTracker
 
 
-_REASONING_DELTA_EVENT_TYPES = {
-    "response.reasoning_summary_text.delta",
-    "response.reasoning_text.delta",
-    "response.reasoning_summary.delta",
-}
+_REASONING_DELTA_EVENT_TYPES = frozenset(
+    {
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary.delta",
+    }
+)
 
 
 class _TaskCancelled(RuntimeError):
@@ -259,3 +261,15 @@ async def _iter_completion_stream_with_abort(
         if callable(close):
             with suppress(Exception):
                 await close()
+
+
+# Public contract consumed by the Completion runtime modules.
+LeaseLost = _LeaseLost
+REASONING_DELTA_EVENT_TYPES = _REASONING_DELTA_EVENT_TYPES
+TaskCancelled = _TaskCancelled
+ToolIdleTimeout = _ToolIdleTimeout
+extract_reasoning_delta = _extract_reasoning_delta
+extract_reasoning_text_from_item = _extract_reasoning_text_from_item
+extract_reasoning_text_from_response = _extract_reasoning_text_from_response
+next_completion_stream_event = _next_completion_stream_event
+raise_for_terminal_response_event = _raise_for_terminal_response_event

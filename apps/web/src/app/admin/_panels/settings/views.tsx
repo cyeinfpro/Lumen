@@ -448,12 +448,12 @@ function SettingCardAnnotations({
         </p>
       )}
       {op?.kind === "set" && (
-        <p className="mt-3 text-xs text-[var(--color-lumen-amber)]/90">
+        <p className="mt-3 text-xs text-[var(--accent)]/90">
           保存后改为：{formatValue(op.value, meta)}
         </p>
       )}
       {op?.kind === "clear" && (
-        <p className="mt-3 text-xs text-[var(--color-lumen-amber)]/90">
+        <p className="mt-3 text-xs text-[var(--accent)]/90">
           保存后清除该项
         </p>
       )}

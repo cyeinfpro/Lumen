@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     Annotated,
     Any,
@@ -63,13 +64,15 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     )
 
 
-_EXT_BY_MIME = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
-}
+_EXT_BY_MIME = MappingProxyType(
+    {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }
+)
 _EXPORT_BATCH_SIZE = 500
 _EXPORT_CHUNK_SIZE = 64 * 1024
 # Why: capacity=2 (instead of 1) so a transient redis blip mid-export — which
@@ -321,9 +324,9 @@ async def _cancel_account_memory_extractions(
 
 
 async def _release_account_generation_queue_state(redis: Any, task_id: str) -> None:
-    from .tasks import _release_generation_queue_state
+    from ..services.generation_queue import release_generation_queue_state
 
-    await _release_generation_queue_state(redis, task_id)
+    await release_generation_queue_state(redis, task_id)
 
 
 async def _post_commit_account_task_cleanup(
@@ -354,8 +357,7 @@ async def _post_commit_account_task_cleanup(
                 await invalidate_balance_cache(user_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "account deletion balance cache invalidation failed "
-                    "user=%s err=%s",
+                    "account deletion balance cache invalidation failed user=%s err=%s",
                     user_id,
                     exc,
                 )
@@ -874,3 +876,7 @@ async def revoke_my_session(
         )
         await db.commit()
     return None
+
+
+cancel_account_active_tasks = _cancel_account_active_tasks
+post_commit_account_task_cleanup = _post_commit_account_task_cleanup

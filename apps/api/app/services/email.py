@@ -14,7 +14,7 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-_DEV_ENVS = {"dev", "development", "local", "test"}
+_DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 
 
 class EmailDeliveryError(RuntimeError):

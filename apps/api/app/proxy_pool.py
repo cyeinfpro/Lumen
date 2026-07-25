@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -45,31 +46,40 @@ _FAIL_TTL_SECONDS = 300
 # they only add to it. TTL kept short on purpose: each process makes its own
 # local decision and the canonical cooldown lives in Redis.
 _LOCAL_COOLDOWN_TTL_SECONDS = 30
-_local_cooldown: dict[str, float] = {}
+
+
+@dataclass
+class _ProxyPoolState:
+    local_cooldown: dict[str, float] = field(default_factory=dict)
+
+
+_proxy_pool_state = _ProxyPoolState()
 
 
 def _local_cooldown_mark(name: str, ttl_seconds: float | None = None) -> None:
     if not name:
         return
-    ttl = ttl_seconds if ttl_seconds and ttl_seconds > 0 else _LOCAL_COOLDOWN_TTL_SECONDS
+    ttl = (
+        ttl_seconds if ttl_seconds and ttl_seconds > 0 else _LOCAL_COOLDOWN_TTL_SECONDS
+    )
     # Cap to local TTL: longer Redis cooldowns are still authoritative; the
     # local set is just a same-process safety net for the next few picks.
     ttl = min(float(ttl), float(_LOCAL_COOLDOWN_TTL_SECONDS))
-    _local_cooldown[name] = time.monotonic() + ttl
+    _proxy_pool_state.local_cooldown[name] = time.monotonic() + ttl
 
 
 def _local_cooldown_active(name: str) -> bool:
-    expiry = _local_cooldown.get(name)
+    expiry = _proxy_pool_state.local_cooldown.get(name)
     if expiry is None:
         return False
     if expiry <= time.monotonic():
-        _local_cooldown.pop(name, None)
+        _proxy_pool_state.local_cooldown.pop(name, None)
         return False
     return True
 
 
 def _local_cooldown_clear(name: str) -> None:
-    _local_cooldown.pop(name, None)
+    _proxy_pool_state.local_cooldown.pop(name, None)
 
 
 def health_key(name: str) -> str:
@@ -165,19 +175,24 @@ async def report_failure(
                 _local_cooldown_mark(name, ttl_seconds=cooldown_seconds)
                 logger.warning(
                     "proxy %s cooldown SET failed (local fallback): %s",
-                    name, exc,
+                    name,
+                    exc,
                 )
                 return True
             logger.warning(
                 "proxy %s into cooldown after %d failures (cooldown=%ds)",
-                name, n, cooldown_seconds,
+                name,
+                n,
+                cooldown_seconds,
             )
     except Exception as exc:  # noqa: BLE001
         # INCR/EXPIRE failed entirely: we can't tell how many recent failures
         # exist, but we know this call failed. Apply a single short local
         # cooldown so the same proxy isn't immediately retried in-process.
         _local_cooldown_mark(name)
-        logger.warning("report_failure failed name=%s err=%s (local fallback)", name, exc)
+        logger.warning(
+            "report_failure failed name=%s err=%s (local fallback)", name, exc
+        )
     return triggered
 
 

@@ -8,7 +8,8 @@ from lumen_core.models import WalletTransaction
 from lumen_core.schemas import BillingUsageByKindOut
 
 
-_CHARGE_KINDS = ("charge", "charge_completion")
+CHARGE_KINDS = ("charge", "charge_completion")
+_CHARGE_KINDS = CHARGE_KINDS
 
 
 def _meta_int(mapping: dict[str, Any], key: str) -> int:
@@ -78,3 +79,17 @@ def _usage_total(usage: BillingUsageByKindOut) -> int:
         + usage.image
         + usage.reasoning
     )
+
+
+meta_int = _meta_int
+scaled_meta_cost = _scaled_meta_cost
+usage_by_kind = _usage_by_kind
+usage_total = _usage_total
+
+__all__ = [
+    "CHARGE_KINDS",
+    "meta_int",
+    "scaled_meta_cost",
+    "usage_by_kind",
+    "usage_total",
+]

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from ..provider_runtime.upstream_services import service_name, upstream_services
+
 import asyncio
-import importlib
 import inspect
 import json
 import math
@@ -23,7 +24,6 @@ from .sse_transport import CurlSSEEventParser, CurlSSEProcess, decode_sse_event
 
 ImageProgressCallback = Callable[[dict[str, Any]], Any]
 
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
 _CURL_TEMP_FILE_MODE = 0o600
 _CURL_STDERR_MAX_BYTES = 64 * 1024
 _DEFAULT_JSON_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
@@ -37,11 +37,6 @@ class _CurlOutputTooLarge(Exception):
         self.label = label
         self.max_bytes = max_bytes
         self.received_bytes = received_bytes
-
-
-def _facade() -> Any:
-    """Resolve the compatibility module at call time for monkeypatch visibility."""
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
 
 
 def _curl_timeout_arg(timeout_s: float) -> str:
@@ -129,11 +124,12 @@ async def _stage_curl_secret_config(
     proxy_url: str | None,
     pinned_target: Any | None,
 ) -> str:
-    facade = _facade()
     effective_target = (
         None
         if proxy_url is not None
-        else facade._validated_byok_target_for_request(pinned_target, url)
+        else upstream_services().requests.validated_byok_target_for_request(
+            pinned_target, url
+        )
     )
     fd, config_path = _secure_mkstemp(
         prefix="lumen_curl_",
@@ -158,25 +154,24 @@ async def _stage_curl_secret_config(
     return config_path
 
 
-def _configured_limit(facade: Any, name: str, default: int) -> int:
+def _configured_limit(name: str, default: int) -> int:
     try:
-        value = int(getattr(facade, name))
+        value = int(getattr(upstream_services().core, service_name(name)))
     except (AttributeError, TypeError, ValueError):
         return default
     return max(0, value)
 
 
-def _json_response_limit(facade: Any) -> int:
+def _json_response_limit() -> int:
     return _configured_limit(
-        facade,
         "_NON_SSE_JSON_MAX_BYTES",
         _DEFAULT_JSON_RESPONSE_MAX_BYTES,
     )
 
 
-def _error_response_limit(facade: Any) -> int:
+def _error_response_limit() -> int:
     return min(
-        _json_response_limit(facade),
+        _json_response_limit(),
         _DEFAULT_ERROR_RESPONSE_MAX_BYTES,
     )
 
@@ -306,7 +301,6 @@ async def _stage_multipart_bytes_to_tmp(
     files: list[tuple[str, tuple[str, bytes, str]]],
 ) -> tuple[list[tuple[str, str, str, str]], list[str]]:
     """Stage multipart byte payloads once so retries reuse the same files."""
-    facade = _facade()
     staged: list[tuple[str, str, str, str]] = []
     tmpfiles: list[str] = []
     try:
@@ -317,7 +311,9 @@ async def _stage_multipart_bytes_to_tmp(
             )
             tmpfiles.append(tmp_path)
             try:
-                await asyncio.to_thread(facade._write_bytes_file, fd, raw)
+                await asyncio.to_thread(
+                    upstream_services().transport.write_bytes_file, fd, raw
+                )
             finally:
                 os.close(fd)
             staged.append((field_name, tmp_path, filename, mime))
@@ -340,7 +336,6 @@ async def _curl_post_multipart_using_paths(
     pinned_target: Any = _AMBIENT_PINNED_TARGET,
 ) -> tuple[int, dict[str, Any]]:
     """Curl multipart POST against caller-owned, pre-staged file paths."""
-    facade = _facade()
     proc: asyncio.subprocess.Process | None = None
     config_path: str | None = None
     try:
@@ -367,10 +362,10 @@ async def _curl_post_multipart_using_paths(
         status_marker = "\n__HTTP_STATUS__:"
         status_marker_b = status_marker.encode("ascii")
         cmd = [
-            facade._CURL_BIN,
+            upstream_services().core.CURL_BIN,
             "-sS",
             "-m",
-            facade._curl_timeout_arg(timeout_s),
+            upstream_services().transport.curl_timeout_arg(timeout_s),
             "-w",
             f"{status_marker}%{{http_code}}",
             "--config",
@@ -387,9 +382,11 @@ async def _curl_post_multipart_using_paths(
             )
         except OSError as exc:
             raise httpx.ConnectError(
-                f"curl executable failed to start: {facade._CURL_BIN!r}: {exc}"
+                f"curl executable failed to start: {upstream_services().core.CURL_BIN!r}: {exc}"
             ) from exc
-        curl_timeout_s = float(facade._curl_timeout_arg(timeout_s))
+        curl_timeout_s = float(
+            upstream_services().transport.curl_timeout_arg(timeout_s)
+        )
         guard_timeout_s = curl_timeout_s + min(
             5.0,
             max(0.25, curl_timeout_s * 0.1),
@@ -399,7 +396,7 @@ async def _curl_post_multipart_using_paths(
                 _collect_curl_output(
                     proc,
                     stdout_max_bytes=(
-                        _json_response_limit(facade) + len(status_marker_b) + 16
+                        _json_response_limit() + len(status_marker_b) + 16
                     ),
                 ),
                 timeout=guard_timeout_s,
@@ -430,10 +427,10 @@ async def _curl_post_multipart_using_paths(
                 f"curl output missing status marker (head={stdout_b[:200]!r})"
             )
         body_b, _, status_b = stdout_b.rpartition(status_marker_b)
-        if len(body_b) > _json_response_limit(facade):
+        if len(body_b) > _json_response_limit():
             raise httpx.HTTPError(
                 "curl multipart response exceeded its byte limit "
-                f"max_bytes={_json_response_limit(facade)} "
+                f"max_bytes={_json_response_limit()} "
                 f"received_bytes={len(body_b)}"
             )
         body_s = body_b.decode("utf-8", "replace")
@@ -445,7 +442,7 @@ async def _curl_post_multipart_using_paths(
     except asyncio.CancelledError:
         raise
     finally:
-        await facade._terminate_curl_proc_group(proc)
+        await upstream_services().transport.terminate_curl_proc_group(proc)
         if config_path is not None:
             with suppress(OSError):
                 os.unlink(config_path)
@@ -462,12 +459,14 @@ async def _curl_post_multipart(
     pinned_target: Any | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Stage multipart bytes, send them with curl, and always unlink them."""
-    facade = _facade()
     staged: list[tuple[str, str, str, str]] = []
     tmpfiles: list[str] = []
     try:
-        staged, tmpfiles = await facade._stage_multipart_bytes_to_tmp(files)
-        return await facade._curl_post_multipart_using_paths(
+        (
+            staged,
+            tmpfiles,
+        ) = await upstream_services().transport.stage_multipart_bytes_to_tmp(files)
+        return await upstream_services().transport.curl_post_multipart_using_paths(
             url=url,
             data=data,
             staged_files=staged,
@@ -489,11 +488,9 @@ class _CurlSSEReader:
         self,
         stream: Any,
         *,
-        facade: Any,
         idle_timeout_s: float,
     ) -> None:
         self._stream = stream
-        self._facade = facade
         self._idle_timeout_s = max(0.001, float(idle_timeout_s))
         self._buffer = bytearray()
         self._search_from = 0
@@ -525,44 +522,44 @@ class _CurlSSEReader:
                     timeout=self._idle_timeout_s,
                 )
             except asyncio.TimeoutError as exc:
-                raise self._facade.UpstreamError(
+                raise upstream_services().infrastructure.UpstreamError(
                     f"curl sse idle timeout after {self._idle_timeout_s:.0f}s",
-                    error_code=self._facade.EC.SSE_CURL_FAILED.value,
+                    error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
                     status_code=None,
                 ) from exc
             if not chunk:
                 self._stream_eof = True
                 continue
             self._byte_count += len(chunk)
-            if self._byte_count > self._facade._SSE_MAX_BYTES:
-                raise self._facade.UpstreamError(
+            if self._byte_count > upstream_services().core.SSE_MAX_BYTES:
+                raise upstream_services().infrastructure.UpstreamError(
                     "sse exceeded max bytes",
-                    error_code=self._facade.EC.STREAM_TOO_LARGE.value,
+                    error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
                     status_code=200,
                 )
             self._buffer.extend(chunk)
             if (
-                len(self._buffer) > self._facade._SSE_MAX_LINE_BYTES
+                len(self._buffer) > upstream_services().core.SSE_MAX_LINE_BYTES
                 and b"\n" not in self._buffer
             ):
-                raise self._facade.UpstreamError(
+                raise upstream_services().infrastructure.UpstreamError(
                     "sse exceeded max line bytes",
-                    error_code=self._facade.EC.STREAM_TOO_LARGE.value,
+                    error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
                     status_code=200,
                 )
 
     def _record_line(self, line: bytes) -> None:
         self._line_count += 1
-        if len(line) > self._facade._SSE_MAX_LINE_BYTES:
-            raise self._facade.UpstreamError(
+        if len(line) > upstream_services().core.SSE_MAX_LINE_BYTES:
+            raise upstream_services().infrastructure.UpstreamError(
                 "sse exceeded max line bytes",
-                error_code=self._facade.EC.STREAM_TOO_LARGE.value,
+                error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
                 status_code=200,
             )
-        if self._line_count > self._facade._SSE_MAX_LINES:
-            raise self._facade.UpstreamError(
+        if self._line_count > upstream_services().core.SSE_MAX_LINES:
+            raise upstream_services().infrastructure.UpstreamError(
                 "sse exceeded max lines",
-                error_code=self._facade.EC.STREAM_TOO_LARGE.value,
+                error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
                 status_code=200,
             )
 
@@ -614,10 +611,10 @@ class _CurlSSEReader:
     ) -> None:
         if len(body) <= max_bytes:
             return
-        raise self._facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             f"{label} exceeds max bytes",
             status_code=status_code or None,
-            error_code=self._facade.EC.STREAM_TOO_LARGE.value,
+            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
             payload={
                 "path": "responses",
                 "method": "POST",
@@ -652,14 +649,12 @@ async def _read_curl_stderr(stream: Any) -> bytes:
 
 async def _read_curl_response_head(
     reader: _CurlSSEReader,
-    *,
-    facade: Any,
 ) -> tuple[int, dict[str, str]]:
     status_line = await reader.next_line()
     if not status_line:
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             "curl sse empty response",
-            error_code=facade.EC.SSE_CURL_FAILED.value,
+            error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
             status_code=0,
         )
     status_text = status_line.decode("utf-8", "replace").strip()
@@ -678,8 +673,6 @@ async def _read_curl_response_head(
 
 async def _iter_curl_sse_events(
     reader: _CurlSSEReader,
-    *,
-    facade: Any,
 ) -> AsyncIterator[dict[str, Any]]:
     parser = CurlSSEEventParser()
     while True:
@@ -688,12 +681,12 @@ async def _iter_curl_sse_events(
             break
         event = parser.feed_line(raw)
         if event is not None:
-            facade._maybe_record_usage_from_event(event)
+            upstream_services().transport.maybe_record_usage_from_event(event)
             yield event
 
     event = parser.finish()
     if event is not None:
-        facade._maybe_record_usage_from_event(event)
+        upstream_services().transport.maybe_record_usage_from_event(event)
         yield event
 
 
@@ -716,12 +709,10 @@ async def _iter_sse_curl(
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream a curl POST and parse bounded SSE or an allowed JSON fallback.
 
-    The facade supplies all policy and hooks at call time: error classes,
-    100000-line/80MB/32MB stream limits, trace and usage recording, log context,
-    curl binary selection, and process cleanup.
+    Runtime bindings supply stream limits, trace and usage recording, log
+    context, curl binary selection, and process cleanup.
     """
-    facade = _facade()
-    trace_id = headers.get("x-trace-id") or facade._generate_trace_id()
+    trace_id = headers.get("x-trace-id") or upstream_services().core.generate_trace_id()
     fd, body_path = _secure_mkstemp(
         prefix="lumen_sse_body_",
         suffix=".json",
@@ -733,7 +724,9 @@ async def _iter_sse_curl(
 
     try:
         try:
-            await asyncio.to_thread(facade._write_json_body_file, fd, json_body)
+            await asyncio.to_thread(
+                upstream_services().transport.write_json_body_file, fd, json_body
+            )
         finally:
             process.close_body_fd()
 
@@ -746,7 +739,7 @@ async def _iter_sse_curl(
             )
         )
         cmd = [
-            facade._CURL_BIN,
+            upstream_services().core.CURL_BIN,
             "-sS",
             "-N",
             "-i",
@@ -759,34 +752,30 @@ async def _iter_sse_curl(
         try:
             proc = await process.start(cmd, stderr_reader=_read_curl_stderr)
         except OSError as exc:
-            raise facade.UpstreamError(
-                f"curl sse executable failed to start: {facade._CURL_BIN!r}: {exc}",
-                error_code=facade.EC.SSE_CURL_FAILED.value,
+            raise upstream_services().infrastructure.UpstreamError(
+                f"curl sse executable failed to start: {upstream_services().core.CURL_BIN!r}: {exc}",
+                error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
                 status_code=None,
             ) from exc
         assert proc.stdout is not None
 
         reader = _CurlSSEReader(
             proc.stdout,
-            facade=facade,
             idle_timeout_s=timeout_s,
         )
-        status_code, response_headers = await _read_curl_response_head(
-            reader,
-            facade=facade,
-        )
+        status_code, response_headers = await _read_curl_response_head(reader)
         final_status = status_code
 
         if not 200 <= status_code < 300:
             err_raw = await reader.drain(
-                max_bytes=_error_response_limit(facade),
+                max_bytes=_error_response_limit(),
                 label="upstream error payload",
                 status_code=status_code,
                 url=url,
                 trace_id=trace_id,
             )
             err_text = err_raw.decode("utf-8", "replace")
-            facade.logger.warning(
+            upstream_services().infrastructure.logger.warning(
                 "curl sse non-2xx status=%s url=%s body=%.1000s "
                 "trace_id=%s x_request_id=%s",
                 status_code,
@@ -799,8 +788,8 @@ async def _iter_sse_curl(
                 payload = json.loads(err_text)
             except Exception:  # noqa: BLE001
                 payload = {"raw": err_text[:2000]}
-            raise facade._with_error_context(
-                facade._parse_error(
+            raise upstream_services().core.with_error_context(
+                upstream_services().core.parse_error(
                     payload if isinstance(payload, dict) else {},
                     status_code or 0,
                 ),
@@ -813,7 +802,7 @@ async def _iter_sse_curl(
             content_type = response_headers.get("content-type", "")
             if "text/event-stream" not in content_type.lower():
                 body_bytes = await reader.drain(
-                    max_bytes=_json_response_limit(facade),
+                    max_bytes=_json_response_limit(),
                     label="non-sse json payload",
                     status_code=status_code,
                     url=url,
@@ -823,10 +812,10 @@ async def _iter_sse_curl(
                 try:
                     json_payload = json.loads(body_text)
                 except Exception as exc:  # noqa: BLE001
-                    raise facade.UpstreamError(
+                    raise upstream_services().infrastructure.UpstreamError(
                         f"non-sse payload is not valid JSON: {exc}",
                         status_code=status_code,
-                        error_code=facade.EC.BAD_RESPONSE.value,
+                        error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
                         payload={
                             "path": "responses",
                             "method": "POST",
@@ -837,38 +826,38 @@ async def _iter_sse_curl(
                         },
                     ) from exc
                 yield {
-                    "type": facade._JSON_PAYLOAD_SENTINEL_TYPE,
+                    "type": upstream_services().core.JSON_PAYLOAD_SENTINEL_TYPE,
                     "payload": json_payload,
                     "content_type": content_type,
                 }
                 rc = await process.wait()
                 if rc != 0:
                     stderr_s = await _curl_stderr_text(process.stderr_task)
-                    facade.logger.debug(
+                    upstream_services().infrastructure.logger.debug(
                         "curl json fallback exited rc=%s stderr=%.500s",
                         rc,
                         stderr_s,
                     )
                 return
 
-        async for event in _iter_curl_sse_events(reader, facade=facade):
+        async for event in _iter_curl_sse_events(reader):
             yield event
 
         rc = await process.wait()
         if rc != 0:
             stderr_s = await _curl_stderr_text(process.stderr_task)
-            raise facade.UpstreamError(
+            raise upstream_services().infrastructure.UpstreamError(
                 f"curl sse exited rc={rc} stderr={stderr_s[:500]}",
-                error_code=facade.EC.SSE_CURL_FAILED.value,
+                error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
                 status_code=200,
             )
     except asyncio.CancelledError:
         raise
     finally:
-        await process.cleanup(facade._terminate_curl_proc_group)
+        await process.cleanup(upstream_services().transport.terminate_curl_proc_group)
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
-            facade._log_upstream_call(
+            upstream_services().core.log_upstream_call(
                 endpoint="responses",
                 status=final_status,
                 duration_ms=duration_ms,
@@ -876,20 +865,21 @@ async def _iter_sse_curl(
                 response_headers=response_headers,
             )
         except Exception:  # noqa: BLE001
-            facade.logger.debug("failed to log upstream call meta", exc_info=True)
+            upstream_services().infrastructure.logger.debug(
+                "failed to log upstream call meta", exc_info=True
+            )
 
 
 def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
     """Record terminal usage and warn about unknown response output types."""
-    facade = _facade()
     usage = event.get("usage")
     if not isinstance(usage, dict):
         response = event.get("response")
         if isinstance(response, dict):
             usage = response.get("usage")
     if isinstance(usage, dict):
-        facade._record_usage(usage)
-    if facade._is_responses_success_terminal(event.get("type")):
+        upstream_services().core.record_usage(usage)
+    if upstream_services().core.is_responses_success_terminal(event.get("type")):
         response = event.get("response")
         if isinstance(response, dict):
             outputs = response.get("output")
@@ -899,9 +889,10 @@ def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
                         item_type = item.get("type")
                         if (
                             isinstance(item_type, str)
-                            and item_type not in facade._KNOWN_OUTPUT_ITEM_TYPES
+                            and item_type
+                            not in upstream_services().core.KNOWN_OUTPUT_ITEM_TYPES
                         ):
-                            facade.logger.warning(
+                            upstream_services().infrastructure.logger.warning(
                                 "upstream output item with unknown type=%r; skipping",
                                 item_type,
                             )
@@ -914,14 +905,15 @@ async def _emit_image_progress(
 ) -> None:
     if progress_callback is None:
         return
-    facade = _facade()
     event = {"type": event_type, **payload}
     try:
         result = progress_callback(event)
         if inspect.isawaitable(result):
             await result
     except Exception:  # noqa: BLE001
-        facade.logger.warning("image progress callback failed", exc_info=True)
+        upstream_services().infrastructure.logger.warning(
+            "image progress callback failed", exc_info=True
+        )
 
 
 __all__ = [

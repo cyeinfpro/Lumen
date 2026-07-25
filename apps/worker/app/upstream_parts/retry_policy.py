@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from ..provider_runtime.upstream_services import upstream_services
+
 import asyncio
-import importlib
 import json
 from typing import Any, Awaitable, Callable
 
@@ -11,21 +12,13 @@ from lumen_core.providers import ProviderProxyDefinition
 
 from .transport import ImageProgressCallback
 
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
-
-
-def _facade() -> Any:
-    """Resolve compatibility dependencies at call time for monkeypatch visibility."""
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
-
 
 def _summarize_exception(exc: BaseException) -> dict[str, Any]:
-    facade = _facade()
     item: dict[str, Any] = {
         "type": exc.__class__.__name__,
         "message": str(exc),
     }
-    if isinstance(exc, facade.UpstreamError):
+    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
         item["status_code"] = exc.status_code
         item["error_code"] = exc.error_code
         if exc.payload:
@@ -34,13 +27,12 @@ def _summarize_exception(exc: BaseException) -> dict[str, Any]:
 
 
 def _truncate_lane_summary(lane: str, exc: BaseException) -> dict[str, Any]:
-    facade = _facade()
     out: dict[str, Any] = {
         "lane": lane,
         "type": type(exc).__name__,
         "message": str(exc)[:200],
     }
-    if isinstance(exc, facade.UpstreamError):
+    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
         out["status_code"] = exc.status_code
         out["error_code"] = exc.error_code
         payload = exc.payload or {}
@@ -53,44 +45,40 @@ def _truncate_lane_summary(lane: str, exc: BaseException) -> dict[str, Any]:
 
 
 def _is_retryable_fallback_exception(exc: BaseException) -> bool:
-    facade = _facade()
-    if isinstance(exc, facade.UpstreamError):
-        if exc.status_code in facade._RETRY_STATUS:
+    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
+        if exc.status_code in upstream_services().core.RETRY_STATUS:
             return True
         if exc.status_code == 429:
             return True
-        return exc.error_code in facade._FALLBACK_RETRY_ERROR_CODES
-    return isinstance(exc, facade._RETRY_HTTPX_EXC)
+        return exc.error_code in upstream_services().core.FALLBACK_RETRY_ERROR_CODES
+    return isinstance(exc, upstream_services().core.RETRY_HTTPX_EXC)
 
 
 def _fallback_retry_backoff_seconds(attempt: int) -> float:
-    facade = _facade()
     return min(
-        facade._FALLBACK_RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1)),
-        facade._FALLBACK_RETRY_BACKOFF_MAX_S,
+        upstream_services().core.FALLBACK_RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1)),
+        upstream_services().core.FALLBACK_RETRY_BACKOFF_MAX_S,
     )
 
 
 def _max_attempts_for_exception(exc: BaseException) -> int:
     """Return the fallback retry budget for the current error shape."""
-    facade = _facade()
-    if isinstance(exc, facade.UpstreamError):
+    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
         if exc.status_code == 429:
-            return facade._FALLBACK_MAX_ATTEMPTS_429
+            return upstream_services().core.FALLBACK_MAX_ATTEMPTS_429
         if exc.status_code is not None and 500 <= exc.status_code < 600:
-            return facade._FALLBACK_MAX_ATTEMPTS_5XX
+            return upstream_services().core.FALLBACK_MAX_ATTEMPTS_5XX
         if exc.status_code is not None and 400 <= exc.status_code < 500:
-            return facade._FALLBACK_MAX_ATTEMPTS_4XX
-        return facade._FALLBACK_MAX_ATTEMPTS
-    if isinstance(exc, facade._RETRY_HTTPX_EXC):
-        return facade._FALLBACK_MAX_ATTEMPTS_5XX
-    return facade._FALLBACK_MAX_ATTEMPTS
+            return upstream_services().core.FALLBACK_MAX_ATTEMPTS_4XX
+        return upstream_services().core.FALLBACK_MAX_ATTEMPTS
+    if isinstance(exc, upstream_services().core.RETRY_HTTPX_EXC):
+        return upstream_services().core.FALLBACK_MAX_ATTEMPTS_5XX
+    return upstream_services().core.FALLBACK_MAX_ATTEMPTS
 
 
 def _retry_after_seconds(exc: BaseException) -> float | None:
     """Read and cap a retry-after hint from an upstream error payload."""
-    facade = _facade()
-    if not isinstance(exc, facade.UpstreamError):
+    if not isinstance(exc, upstream_services().infrastructure.UpstreamError):
         return None
     payload = exc.payload or {}
     candidates: list[Any] = []
@@ -109,7 +97,7 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
         except (TypeError, ValueError):
             continue
         if seconds > 0:
-            return min(seconds, facade._FALLBACK_429_MAX_WAIT_S)
+            return min(seconds, upstream_services().core.FALLBACK_429_MAX_WAIT_S)
     return None
 
 
@@ -119,23 +107,24 @@ def _merge_fallback_errors(
     error_code: str,
     message: str,
 ) -> Any:
-    facade = _facade()
     if not errors:
-        return facade.UpstreamError(
+        return upstream_services().infrastructure.UpstreamError(
             message,
             status_code=200,
             error_code=error_code,
         )
-    if any(facade._mentions_safety_policy(exc) for exc in errors):
+    if any(upstream_services().retry.mentions_safety_policy(exc) for exc in errors):
         payload: dict[str, Any] = {
             "path": "responses",
-            "errors": [facade._summarize_exception(exc) for exc in errors],
+            "errors": [
+                upstream_services().retry.summarize_exception(exc) for exc in errors
+            ],
             "wrapped_error_code": error_code,
         }
-        merged = facade.UpstreamError(
+        merged = upstream_services().infrastructure.UpstreamError(
             "request blocked by upstream safety policy",
             status_code=200,
-            error_code=facade.EC.MODERATION_BLOCKED.value,
+            error_code=upstream_services().infrastructure.EC.MODERATION_BLOCKED.value,
             payload=payload,
         )
         if len(errors) > 1:
@@ -146,12 +135,14 @@ def _merge_fallback_errors(
     first = errors[0]
     status_code = 200
     merged_payload: dict[str, Any] = {}
-    if isinstance(first, facade.UpstreamError):
+    if isinstance(first, upstream_services().infrastructure.UpstreamError):
         status_code = first.status_code or 200
         merged_payload.update(first.payload)
     merged_payload.setdefault("path", "responses")
-    merged_payload["errors"] = [facade._summarize_exception(exc) for exc in errors]
-    merged = facade.UpstreamError(
+    merged_payload["errors"] = [
+        upstream_services().retry.summarize_exception(exc) for exc in errors
+    ]
+    merged = upstream_services().infrastructure.UpstreamError(
         message,
         status_code=status_code,
         error_code=error_code,
@@ -168,13 +159,12 @@ def _provider_error_details(
     providers: list[Any],
     errors: list[BaseException],
 ) -> list[dict[str, Any]]:
-    facade = _facade()
     details: list[dict[str, Any]] = []
     for provider, exc in zip(providers, errors, strict=False):
         details.append(
             {
                 "provider": getattr(provider, "name", None),
-                **facade._summarize_exception(exc),
+                **upstream_services().retry.summarize_exception(exc),
             }
         )
     return details
@@ -182,33 +172,42 @@ def _provider_error_details(
 
 def _mentions_safety_policy(exc: BaseException) -> bool:
     """Detect safety blocks hidden inside fallback/provider wrapper errors."""
-    facade = _facade()
     text = str(exc).lower()
-    if any(marker in text for marker in facade._SAFETY_POLICY_ERROR_MARKERS):
+    if any(
+        marker in text
+        for marker in upstream_services().core.SAFETY_POLICY_ERROR_MARKERS
+    ):
         return True
-    if isinstance(exc, facade.UpstreamError) and exc.payload:
+    if (
+        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        and exc.payload
+    ):
         try:
             payload_text = json.dumps(exc.payload, ensure_ascii=False).lower()
         except Exception:  # noqa: BLE001
             payload_text = repr(exc.payload).lower()
         if any(
-            marker in payload_text for marker in facade._SAFETY_POLICY_ERROR_MARKERS
+            marker in payload_text
+            for marker in upstream_services().core.SAFETY_POLICY_ERROR_MARKERS
         ):
             return True
     nested = getattr(exc, "exceptions", None)
     if nested and any(
-        isinstance(child, BaseException) and facade._mentions_safety_policy(child)
+        isinstance(child, BaseException)
+        and upstream_services().retry.mentions_safety_policy(child)
         for child in nested
     ):
         return True
     cause = getattr(exc, "__cause__", None)
-    if isinstance(cause, BaseException) and facade._mentions_safety_policy(cause):
+    if isinstance(
+        cause, BaseException
+    ) and upstream_services().retry.mentions_safety_policy(cause):
         return True
     context = getattr(exc, "__context__", None)
     return isinstance(
         context,
         BaseException,
-    ) and facade._mentions_safety_policy(context)
+    ) and upstream_services().retry.mentions_safety_policy(context)
 
 
 def _should_continue_image_provider_failover(
@@ -217,17 +216,17 @@ def _should_continue_image_provider_failover(
     retriable: bool,
 ) -> bool:
     """True when another image provider may handle the same request."""
-    facade = _facade()
-    if facade._is_quota_accounting_unavailable(exc):
+    if upstream_services().providers.is_quota_accounting_unavailable(exc):
         return False
     if retriable:
         return True
     if (
-        isinstance(exc, facade.UpstreamError)
-        and exc.error_code in facade._IMAGE_PROVIDER_FAILOVER_ERROR_CODES
+        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        and exc.error_code
+        in upstream_services().core.IMAGE_PROVIDER_FAILOVER_ERROR_CODES
     ):
         return True
-    return facade._mentions_safety_policy(exc)
+    return upstream_services().retry.mentions_safety_policy(exc)
 
 
 def _merge_image_path_errors(
@@ -238,13 +237,12 @@ def _merge_image_path_errors(
     fallback_path: str,
     fallback_error: BaseException,
 ) -> Any:
-    facade = _facade()
     status_code = 502
     payload: dict[str, Any] = {}
-    if isinstance(primary_error, facade.UpstreamError):
+    if isinstance(primary_error, upstream_services().infrastructure.UpstreamError):
         status_code = primary_error.status_code or status_code
         payload.update(primary_error.payload)
-    elif isinstance(fallback_error, facade.UpstreamError):
+    elif isinstance(fallback_error, upstream_services().infrastructure.UpstreamError):
         status_code = fallback_error.status_code or status_code
         payload.update(fallback_error.payload)
     payload.setdefault("path", primary_path)
@@ -253,18 +251,18 @@ def _merge_image_path_errors(
     payload["path_errors"] = [
         {
             "path": primary_path,
-            **facade._summarize_exception(primary_error),
+            **upstream_services().retry.summarize_exception(primary_error),
         },
         {
             "path": fallback_path,
-            **facade._summarize_exception(fallback_error),
+            **upstream_services().retry.summarize_exception(fallback_error),
         },
     ]
     message = f"{action} image paths failed: {primary_path}, {fallback_path}"
-    merged = facade.UpstreamError(
+    merged = upstream_services().infrastructure.UpstreamError(
         message,
         status_code=status_code,
-        error_code=facade.EC.PROVIDER_EXHAUSTED.value,
+        error_code=upstream_services().infrastructure.EC.PROVIDER_EXHAUSTED.value,
         payload=payload,
     )
     merged.__cause__ = BaseExceptionGroup(
@@ -296,19 +294,20 @@ async def _responses_image_stream_with_retry(
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """Retry the Responses image stream with error-specific budgets."""
-    facade = _facade()
     errors: list[BaseException] = []
     attempt = 0
     hard_cap = max(
-        facade._FALLBACK_MAX_ATTEMPTS,
-        facade._FALLBACK_MAX_ATTEMPTS_5XX,
-        facade._FALLBACK_MAX_ATTEMPTS_429,
-        facade._FALLBACK_MAX_ATTEMPTS_4XX,
+        upstream_services().core.FALLBACK_MAX_ATTEMPTS,
+        upstream_services().core.FALLBACK_MAX_ATTEMPTS_5XX,
+        upstream_services().core.FALLBACK_MAX_ATTEMPTS_429,
+        upstream_services().core.FALLBACK_MAX_ATTEMPTS_4XX,
     )
-    outer_attempt = facade._image_retry_attempt_ctx.get()
+    outer_attempt = upstream_services().core.image_retry_attempt_ctx.get()
     while attempt < hard_cap:
         effective_attempt = outer_attempt + attempt
-        cv_token = facade._image_retry_attempt_ctx.set(effective_attempt)
+        cv_token = upstream_services().core.image_retry_attempt_ctx.set(
+            effective_attempt
+        )
         try:
             if before_attempt is not None:
                 await before_attempt(attempt + 1)
@@ -338,43 +337,53 @@ async def _responses_image_stream_with_retry(
                 kwargs["moderation"] = moderation
             if user_id is not None:
                 kwargs["user_id"] = user_id
-            return await facade._responses_image_stream(**kwargs)
-        except (asyncio.CancelledError, facade.UpstreamCancelled):
+            return await upstream_services().responses.responses_image_stream(**kwargs)
+        except (
+            asyncio.CancelledError,
+            upstream_services().infrastructure.UpstreamCancelled,
+        ):
             raise
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
             attempt += 1
-            attempts_for_this = facade._max_attempts_for_exception(exc)
+            attempts_for_this = upstream_services().retry.max_attempts_for_exception(
+                exc
+            )
             if (
                 attempt >= attempts_for_this
-                or not facade._is_retryable_fallback_exception(exc)
+                or not upstream_services().retry.is_retryable_fallback_exception(exc)
             ):
-                raise facade._merge_fallback_errors(
+                raise upstream_services().retry.merge_fallback_errors(
                     errors,
                     error_code=(
                         exc.error_code
-                        if isinstance(exc, facade.UpstreamError) and exc.error_code
+                        if isinstance(
+                            exc, upstream_services().infrastructure.UpstreamError
+                        )
+                        and exc.error_code
                         else "responses_fallback_failed"
                     ),
                     message=str(exc) or "responses fallback failed",
                 ) from exc
-            retry_after = facade._retry_after_seconds(exc)
+            retry_after = upstream_services().retry.retry_after_seconds(exc)
             if retry_after is not None:
                 backoff = retry_after
             elif (
                 isinstance(
                     exc,
-                    facade.UpstreamError,
+                    upstream_services().infrastructure.UpstreamError,
                 )
                 and exc.status_code == 429
             ):
                 backoff = min(
-                    facade._FALLBACK_429_DEFAULT_WAIT_S,
-                    facade._FALLBACK_429_MAX_WAIT_S,
+                    upstream_services().core.FALLBACK_429_DEFAULT_WAIT_S,
+                    upstream_services().core.FALLBACK_429_MAX_WAIT_S,
                 )
             else:
-                backoff = facade._fallback_retry_backoff_seconds(attempt)
-            facade.logger.warning(
+                backoff = upstream_services().retry.fallback_retry_backoff_seconds(
+                    attempt
+                )
+            upstream_services().infrastructure.logger.warning(
                 "responses fallback retrying action=%s size=%s attempt=%d/%d "
                 "backoff=%.1fs err=%r",
                 action,
@@ -386,10 +395,10 @@ async def _responses_image_stream_with_retry(
             )
             await asyncio.sleep(backoff)
         finally:
-            facade._image_retry_attempt_ctx.reset(cv_token)
-    raise facade._merge_fallback_errors(
+            upstream_services().core.image_retry_attempt_ctx.reset(cv_token)
+    raise upstream_services().retry.merge_fallback_errors(
         errors,
-        error_code=facade.EC.RESPONSES_FALLBACK_FAILED.value,
+        error_code=upstream_services().infrastructure.EC.RESPONSES_FALLBACK_FAILED.value,
         message="responses fallback exhausted retry budget",
     )
 

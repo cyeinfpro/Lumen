@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 from typing import Any
 
 import pytest
 
-from app import account_limiter, upstream
+from app import account_limiter
 from app.provider_pool import (
     ProviderConfig,
     ProviderHealth,
@@ -112,12 +114,12 @@ async def test_pool_select_compat_downgrades_then_applies_live_filters(
         return provider.name != "file-blocked"
 
     monkeypatch.setattr(
-        upstream,
-        "_provider_allows_image_endpoint",
+        upstream_services().providers,
+        "provider_allows_image_endpoint",
         allows_endpoint,
     )
 
-    selected = await upstream._pool_select_compat(
+    selected = await upstream_services().providers.pool_select_compat(
         LegacyPool(),
         route="image",
         endpoint_kind="responses",
@@ -148,7 +150,9 @@ async def test_pool_select_compat_does_not_swallow_internal_type_error() -> None
             raise TypeError("provider transformation failed")
 
     with pytest.raises(TypeError, match="provider transformation failed"):
-        await upstream._pool_select_compat(BrokenPool(), route="image")
+        await upstream_services().providers.pool_select_compat(
+            BrokenPool(), route="image"
+        )
 
 
 def test_response_candidate_order_preserves_injected_short_circuit() -> None:

@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
+from ..provider_runtime.upstream_services import upstream_services
+
 from typing import Any
 from urllib.parse import quote
 
-from ..config import validate_image_job_base_url
-
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
-
-
-def _facade() -> Any:
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
+from ..upstream_clients.url_validation import validate_image_job_control_url
 
 
 def _validated_byok_target_for_request(
@@ -24,11 +19,10 @@ def _validated_byok_target_for_request(
     try:
         return validate_byok_http_target(target, url)
     except ValueError as exc:
-        facade = _facade()
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             "validated BYOK target does not match request URL",
             status_code=403,
-            error_code=facade.EC.UPSTREAM_INVALID_REQUEST.value,
+            error_code=upstream_services().infrastructure.EC.UPSTREAM_INVALID_REQUEST.value,
             payload={"url": url},
         ) from exc
 
@@ -59,14 +53,16 @@ def _image_job_status_url(base: str, job_id: str) -> str:
 
 
 def _validate_image_job_base_url(raw_base: str) -> str:
-    facade = _facade()
     try:
-        return validate_image_job_base_url(raw_base)
+        return validate_image_job_control_url(
+            raw_base,
+            allow_private_http=True,
+        )
     except ValueError as exc:
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             f"image job configuration unavailable: {exc}",
             status_code=503,
-            error_code=facade.EC.SERVICE_UNAVAILABLE.value,
+            error_code=upstream_services().infrastructure.EC.SERVICE_UNAVAILABLE.value,
             payload={
                 "path": "image-jobs",
                 "configuration": "sidecar_url",

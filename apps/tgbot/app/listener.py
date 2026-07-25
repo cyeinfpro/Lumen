@@ -31,7 +31,10 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from aiogram import Bot
@@ -54,12 +57,14 @@ from .tracker import (
 
 logger = logging.getLogger(__name__)
 
-_STAGE_LABELS = {
-    "queued": "排队中",
-    "understanding": "理解提示词",
-    "rendering": "绘制中",
-    "finalizing": "收尾",
-}
+_STAGE_LABELS = MappingProxyType(
+    {
+        "queued": "排队中",
+        "understanding": "理解提示词",
+        "rendering": "绘制中",
+        "finalizing": "收尾",
+    }
+)
 
 # 同 gen_id 5s 内最多 edit 一次进度，防 TG flood limit。终态事件（succeeded/failed）
 # 不受节流，必发。
@@ -69,15 +74,35 @@ _PROGRESS_THROTTLE_SEC = 5.0
 # 每个 gen 至少一条；cap 兜底防长跑用户多累积导致进程内存泄漏。
 # 2000 entry × ~200 bytes ≈ 400 KB worst case，对 bot 进程毫无压力。
 _PROGRESS_CACHE_CAP = 2000
-_PROGRESS_LAST_EDIT: "OrderedDict[str, float]" = OrderedDict()
 _CHAT_SEND_INTERVAL_SEC = 1.05
-_CHAT_SEND_LOCKS: dict[int, asyncio.Lock] = {}
-_CHAT_SEND_NEXT_AT: "OrderedDict[int, float]" = OrderedDict()
 _CHAT_SEND_CACHE_CAP = 2048
 
-# 跨 user 上限。每个 user worker 内部已经串行；这个 sem 限的是多 user 同时
-# 大批量收尾时打 TG 的并发上限。
-_DISPATCH_SEM = asyncio.Semaphore(8)
+
+@dataclass
+class ListenerRuntimeState:
+    """Mutable state owned by one listener lifecycle."""
+
+    progress_last_edit: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    chat_send_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    chat_send_next_at: OrderedDict[int, float] = field(default_factory=OrderedDict)
+    dispatch_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(8)
+    )
+
+
+_LISTENER_RUNTIME: ContextVar[ListenerRuntimeState | None] = ContextVar(
+    "tgbot_listener_runtime",
+    default=None,
+)
+
+
+def _listener_runtime() -> ListenerRuntimeState:
+    runtime = _LISTENER_RUNTIME.get()
+    if runtime is None:
+        runtime = ListenerRuntimeState()
+        _LISTENER_RUNTIME.set(runtime)
+    return runtime
+
 
 # winner SUCCEEDED 之后，dual_race bonus 还没发 EV_GEN_ATTACHED；listener 不能
 # 立刻 tracker.remove(parent)，否则 attached 来了 precheck 查不到 parent 直接丢，
@@ -108,9 +133,7 @@ _CURSOR_TTL_SECONDS = ACTIVE_USER_STREAM_TTL_SECONDS + 3600
 # generation_id 对应 TgBot tracker 时才回填，避免把全部 Web 用户订阅进来。
 _FALLBACK_SCAN_LEASE_KEY = f"{ACTIVE_USER_STREAMS_KEY}:fallback-scan-lease"
 _FALLBACK_SCAN_CURSOR_KEY = f"{ACTIVE_USER_STREAMS_KEY}:fallback-scan-cursor"
-_FALLBACK_STREAM_CURSOR_PREFIX = (
-    f"{ACTIVE_USER_STREAMS_KEY}:fallback-stream-cursor:"
-)
+_FALLBACK_STREAM_CURSOR_PREFIX = f"{ACTIVE_USER_STREAMS_KEY}:fallback-stream-cursor:"
 _FALLBACK_SCAN_LEASE_SECONDS = 60
 _FALLBACK_SCAN_COUNT = 16
 _FALLBACK_EMPTY_SCAN_BATCHES = 4
@@ -143,50 +166,56 @@ def _decode(s: Any) -> str:
 
 
 def _should_throttle_progress(gen_id: str) -> bool:
+    progress_last_edit = _listener_runtime().progress_last_edit
     now = time.monotonic()
-    last = _PROGRESS_LAST_EDIT.get(gen_id, 0.0)
+    last = progress_last_edit.get(gen_id, 0.0)
     if now - last < _PROGRESS_THROTTLE_SEC:
         return True
     # LRU 写入：先 pop 再插入末尾保证最新使用 → 末尾。超 cap 从头部剔除最旧。
-    if gen_id in _PROGRESS_LAST_EDIT:
-        _PROGRESS_LAST_EDIT.move_to_end(gen_id)
-    _PROGRESS_LAST_EDIT[gen_id] = now
-    while len(_PROGRESS_LAST_EDIT) > _PROGRESS_CACHE_CAP:
-        _PROGRESS_LAST_EDIT.popitem(last=False)
+    if gen_id in progress_last_edit:
+        progress_last_edit.move_to_end(gen_id)
+    progress_last_edit[gen_id] = now
+    while len(progress_last_edit) > _PROGRESS_CACHE_CAP:
+        progress_last_edit.popitem(last=False)
     return False
 
 
 def _chat_send_lock(chat_id: int) -> asyncio.Lock:
-    lock = _CHAT_SEND_LOCKS.get(chat_id)
+    runtime = _listener_runtime()
+    lock = runtime.chat_send_locks.get(chat_id)
     if lock is None:
         lock = asyncio.Lock()
-        _CHAT_SEND_LOCKS[chat_id] = lock
+        runtime.chat_send_locks[chat_id] = lock
     return lock
 
 
 async def _wait_chat_send_slot(chat_id: int) -> None:
+    runtime = _listener_runtime()
     lock = _chat_send_lock(chat_id)
     async with lock:
         now = time.monotonic()
-        next_at = _CHAT_SEND_NEXT_AT.get(chat_id, 0.0)
+        next_at = runtime.chat_send_next_at.get(chat_id, 0.0)
         if next_at > now:
             await asyncio.sleep(next_at - now)
-        _CHAT_SEND_NEXT_AT[chat_id] = time.monotonic() + _CHAT_SEND_INTERVAL_SEC
-        _CHAT_SEND_NEXT_AT.move_to_end(chat_id)
+        runtime.chat_send_next_at[chat_id] = time.monotonic() + _CHAT_SEND_INTERVAL_SEC
+        runtime.chat_send_next_at.move_to_end(chat_id)
         # 超 cap 只 evict cold entry：next_at + 60s 仍未到现在的（=已经空闲
         # >60s），才连同 lock 一起移除。无条件 popitem(last=False) 会在持有
         # 者还没 release lock 时把 lock 弹掉，并发 send_document 触发 429。
-        if len(_CHAT_SEND_NEXT_AT) > _CHAT_SEND_CACHE_CAP:
+        if len(runtime.chat_send_next_at) > _CHAT_SEND_CACHE_CAP:
             cold_threshold = time.monotonic() - 60.0
             stale: list[int] = []
-            for cid, nxt in _CHAT_SEND_NEXT_AT.items():
+            for cid, nxt in runtime.chat_send_next_at.items():
                 if nxt < cold_threshold:
                     stale.append(cid)
-                    if len(_CHAT_SEND_NEXT_AT) - len(stale) <= _CHAT_SEND_CACHE_CAP:
+                    if (
+                        len(runtime.chat_send_next_at) - len(stale)
+                        <= _CHAT_SEND_CACHE_CAP
+                    ):
                         break
             for cid in stale:
-                _CHAT_SEND_NEXT_AT.pop(cid, None)
-                _CHAT_SEND_LOCKS.pop(cid, None)
+                runtime.chat_send_next_at.pop(cid, None)
+                runtime.chat_send_locks.pop(cid, None)
 
 
 async def _chat_action_heartbeat(
@@ -270,8 +299,8 @@ def _stream_generation_ids(entries: Any) -> list[str]:
         data = envelope.get("data") if isinstance(envelope, dict) else None
         if not isinstance(data, dict):
             continue
-        for field in ("generation_id", "parent_generation_id"):
-            gen_id = str(data.get(field) or "").strip()
+        for data_field in ("generation_id", "parent_generation_id"):
+            gen_id = str(data.get(data_field) or "").strip()
             if gen_id and gen_id not in seen:
                 seen.add(gen_id)
                 generation_ids.append(gen_id)
@@ -317,7 +346,9 @@ async def _recover_active_user_ids(
                 continue
             event_cursor_key = _fallback_stream_cursor_key(user_id)
             raw_event_cursor = await redis.get(event_cursor_key)
-            event_cursor = _decode(raw_event_cursor).strip() if raw_event_cursor else "+"
+            event_cursor = (
+                _decode(raw_event_cursor).strip() if raw_event_cursor else "+"
+            )
             if event_cursor != "+":
                 parts = event_cursor.split("-", 1)
                 if len(parts) != 2 or not all(part.isdigit() for part in parts):
@@ -426,6 +457,9 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
     继续重试不退出（systemd Restart=always 已经够，进程死不死无关紧要；listener
     死了用户拿不到推送，比"退出让 systemd 拉起"更糟）。
     """
+    runtime_token: Token[ListenerRuntimeState | None] = _LISTENER_RUNTIME.set(
+        ListenerRuntimeState()
+    )
     backoff = 1.0
     consecutive_failures = 0
     redis: aioredis.Redis | None = None
@@ -467,9 +501,7 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
 
             # 起新 user worker；取消已不活跃的订阅，避免连接池随历史用户增长。
             stale_tasks = [
-                workers.pop(uid)
-                for uid in list(workers)
-                if uid not in user_ids
+                workers.pop(uid) for uid in list(workers) if uid not in user_ids
             ]
             for task in stale_tasks:
                 task.cancel()
@@ -509,6 +541,7 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
                 await redis.aclose()
             except Exception:  # noqa: BLE001
                 pass
+        _LISTENER_RUNTIME.reset(runtime_token)
 
 
 async def _user_worker(
@@ -562,7 +595,7 @@ async def _user_worker(
                     await _save_cursor(redis, user_id, entry_id)
                     continue
                 try:
-                    async with _DISPATCH_SEM:
+                    async with _listener_runtime().dispatch_semaphore:
                         await _dispatch(
                             bot,
                             api,
@@ -747,10 +780,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
     # 已经注册过（异常重投 / replay），跳过
     if await tracker.get(bonus_id) is not None:
         return
-    text = (
-        f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n"
-        f"📝 {_truncate(parent.prompt, 200)}"
-    )
+    text = f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
     bonus_status = await bot.send_message(chat_id=parent.chat_id, text=text)
     try:
         await tracker.add(
@@ -801,7 +831,9 @@ async def _finish_succeeded_cleanup(bot: Bot, gen_id: str, track) -> None:
         asyncio.create_task(_expire_tracker(gen_id, _PARENT_GRACE_AFTER_SUCCESS_SEC))
 
 
-async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]) -> None:
+async def _on_succeeded(
+    bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]
+) -> None:
     if not await tracker.begin_delivery(gen_id):
         # Already notified means Telegram confirmed the terminal delivery.
         # If the sender still holds the delivery lock, keep the cursor here
@@ -829,7 +861,9 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                 detail = await api.get_generation(track.chat_id, gen_id)
                 image_ids = detail.get("image_ids") or []
             except ApiError as exc:
-                logger.warning("succeeded fallback get failed gen=%s err=%s", gen_id, exc)
+                logger.warning(
+                    "succeeded fallback get failed gen=%s err=%s", gen_id, exc
+                )
                 image_ids = []
         else:
             image_ids = [
@@ -850,7 +884,9 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                 try:
                     detail = await api.get_generation(track.chat_id, gen_id)
                 except ApiError as exc:
-                    logger.warning("succeeded link detail get failed gen=%s err=%s", gen_id, exc)
+                    logger.warning(
+                        "succeeded link detail get failed gen=%s err=%s", gen_id, exc
+                    )
             # batch 模式 placeholder 已经把 prompt 显示过一次；每张图的 caption 不再带原文，
             # 让会话更紧凑。单任务保持完整 caption（用户没有别处能看到 prompt）。
             if track.batch_id:
@@ -913,7 +949,9 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
                         )
                         sent_count += 1
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning("send_document failed gen=%s err=%r", gen_id, exc)
+                        logger.warning(
+                            "send_document failed gen=%s err=%r", gen_id, exc
+                        )
                         break
                 delivered = sent_count == len(downloads)
     finally:
@@ -970,7 +1008,9 @@ async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None
                 )
             except TelegramBadRequest:
                 await bot.send_message(
-                    chat_id=track.chat_id, text=text, reply_markup=retry_keyboard(gen_id)
+                    chat_id=track.chat_id,
+                    text=text,
+                    reply_markup=retry_keyboard(gen_id),
                 )
         if not await tracker.mark_notified(gen_id, release_lock=False):
             raise RuntimeError(f"terminal delivery marker failed gen={gen_id}")

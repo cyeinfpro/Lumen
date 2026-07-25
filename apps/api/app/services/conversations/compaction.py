@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
-import sys
+import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib import import_module
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException, Request
@@ -46,6 +46,33 @@ MANUAL_COMPACT_JOB_TTL_SECONDS = 24 * 3600
 MANUAL_COMPACT_ACTIVE_TTL_SECONDS = 30 * 60
 MANUAL_COMPACT_RETRY_AFTER_SECONDS = 2
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ContextSummaryAdapter:
+    ensure_context_summary: Callable[..., Awaitable[dict[str, Any] | None]]
+
+
+class _ContextSummaryAdapterRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._adapter: ContextSummaryAdapter | None = None
+
+    def install(
+        self,
+        adapter: ContextSummaryAdapter | None,
+    ) -> ContextSummaryAdapter | None:
+        with self._lock:
+            previous = self._adapter
+            self._adapter = adapter
+            return previous
+
+    def current(self) -> ContextSummaryAdapter | None:
+        with self._lock:
+            return self._adapter
+
+
+_CONTEXT_SUMMARY_ADAPTERS = _ContextSummaryAdapterRegistry()
 
 
 def not_found() -> HTTPException:
@@ -457,31 +484,102 @@ async def _delete_quietly(redis: Any, key: str) -> None:
         logger.debug("redis cleanup failed key=%s", key, exc_info=True)
 
 
-def import_worker_context_summary() -> Any | None:
-    module_name = "apps.worker.app.tasks.context_summary"
-    try:
-        return import_module(module_name)
-    except ModuleNotFoundError:
-        pass
-    except Exception:
-        logger.warning("worker context summary import failed", exc_info=True)
-        return None
-    project_root = str(Path(__file__).resolve().parents[5])
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    try:
-        return import_module(module_name)
-    except ModuleNotFoundError:
-        logger.warning("worker context summary module not found")
-        return None
-    except Exception:
-        logger.warning("worker context summary import failed", exc_info=True)
-        return None
+def install_context_summary_adapter(
+    ensure_context_summary: Callable[..., Awaitable[dict[str, Any] | None]] | None,
+) -> ContextSummaryAdapter | None:
+    adapter = (
+        ContextSummaryAdapter(ensure_context_summary)
+        if ensure_context_summary is not None
+        else None
+    )
+    return _CONTEXT_SUMMARY_ADAPTERS.install(adapter)
+
+
+def restore_context_summary_adapter(
+    adapter: ContextSummaryAdapter | None,
+) -> None:
+    _CONTEXT_SUMMARY_ADAPTERS.install(adapter)
+
+
+def import_worker_context_summary() -> ContextSummaryAdapter | None:
+    """Compatibility accessor backed by explicit process composition."""
+    return _CONTEXT_SUMMARY_ADAPTERS.current()
 
 
 def import_ensure_context_summary() -> Any | None:
     module = import_worker_context_summary()
     return getattr(module, "ensure_context_summary", None) if module else None
+
+
+async def _wait_for_compact_job(
+    *,
+    redis: Any,
+    user_id: str,
+    conv_id: str,
+    job_id: str,
+    timeout_s: float,
+    request: Request,
+) -> dict[str, Any]:
+    job_key = manual_compact_job_key(
+        user_id=user_id,
+        conv_id=conv_id,
+        job_id=job_id,
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, timeout_s)
+    while True:
+        try:
+            job = await redis_get_json(redis, job_key)
+        except Exception as exc:
+            raise service_unavailable("upstream_error", request=request) from exc
+        payload = compact_payload_from_job(job, job_id=job_id)
+        if payload is not None and payload.get("status") != "pending":
+            if payload.get("status") == "failed":
+                raise service_unavailable(
+                    str(payload.get("reason") or "upstream_error"),
+                    request=request,
+                )
+            return payload
+        if loop.time() >= deadline:
+            raise service_unavailable("upstream_error", request=request)
+        await asyncio.sleep(0.25)
+
+
+async def _compact_via_worker_queue(
+    *,
+    user_id: str,
+    conv_id: str,
+    boundary_id: str,
+    extra_instruction: str | None,
+    target_tokens: int,
+    input_budget: int,
+    summary_timeout_s: float,
+    model: str,
+    redis: Any,
+    request: Request,
+    get_arq_pool_fn: Callable[[], Awaitable[Any]],
+) -> dict[str, Any]:
+    pending = await enqueue_manual_compact_job(
+        user_id=user_id,
+        conv_id=conv_id,
+        boundary_id=boundary_id,
+        extra_instruction=extra_instruction,
+        target_tokens=target_tokens,
+        input_budget=input_budget,
+        summary_timeout_s=summary_timeout_s,
+        model=model,
+        redis=redis,
+        cooldown_seconds=0,
+        get_arq_pool_fn=get_arq_pool_fn,
+    )
+    return await _wait_for_compact_job(
+        redis=redis,
+        user_id=user_id,
+        conv_id=conv_id,
+        job_id=str(pending["job_id"]),
+        timeout_s=summary_timeout_s + 5.0,
+        request=request,
+    )
 
 
 async def compact_conversation(
@@ -565,7 +663,19 @@ async def compact_conversation(
     )
     ensure = import_ensure_fn()
     if ensure is None:
-        raise service_unavailable("upstream_error", request=request)
+        return await _compact_via_worker_queue(
+            user_id=user.id,
+            conv_id=conv.id,
+            boundary_id=boundary.id,
+            extra_instruction=body.extra_instruction,
+            target_tokens=target_tokens,
+            input_budget=input_budget,
+            summary_timeout_s=summary_timeout_s,
+            model=model,
+            redis=redis,
+            request=request,
+            get_arq_pool_fn=get_arq_pool_fn,
+        )
     runtime_settings = {
         "context.summary_target_tokens": target_tokens,
         "context.summary_input_budget": input_budget,
@@ -710,6 +820,7 @@ __all__ = [
     "build_compact_summary_payload",
     "enqueue_manual_compact_job",
     "get_compact_conversation_status",
+    "install_context_summary_adapter",
     "import_ensure_context_summary",
     "import_worker_context_summary",
     "load_messages_for_compaction",
@@ -719,4 +830,5 @@ __all__ = [
     "redis_get_json",
     "redis_set_json",
     "redis_set_nx_json",
+    "restore_context_summary_adapter",
 ]

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterator, Literal, cast
+from types import MappingProxyType
 
 from fastapi import (
     APIRouter,
@@ -91,16 +92,20 @@ _VIDEO_LIST_LIMIT_MAX = 100
 _VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 _VIDEO_REFERENCE_UPLOAD_MAX_COUNT = 20
 _VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES = 1024 * 1024 * 1024
-_VIDEO_REFERENCE_MIME_EXT = {
-    "video/mp4": "mp4",
-    "video/quicktime": "mov",
-}
-_VIDEO_TERMINAL_STATUSES = {
-    VideoGenerationStatus.SUCCEEDED.value,
-    VideoGenerationStatus.FAILED.value,
-    VideoGenerationStatus.CANCELED.value,
-    VideoGenerationStatus.EXPIRED.value,
-}
+_VIDEO_REFERENCE_MIME_EXT = MappingProxyType(
+    {
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+    }
+)
+_VIDEO_TERMINAL_STATUSES = frozenset(
+    {
+        VideoGenerationStatus.SUCCEEDED.value,
+        VideoGenerationStatus.FAILED.value,
+        VideoGenerationStatus.CANCELED.value,
+        VideoGenerationStatus.EXPIRED.value,
+    }
+)
 
 
 def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
@@ -1267,3 +1272,8 @@ async def video_poster(
         last_modified=video.updated_at,
         immutable=True,
     )
+
+
+video_out = _video_out
+create_video_generation_record = _create_video_generation_record
+video_provider_state = _video_provider_state

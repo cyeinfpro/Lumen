@@ -5,24 +5,26 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypeGuard
 
 from .constants import DEFAULT_CHAT_INSTRUCTIONS, Role
+from .immutables import immutable_mapping
 
 
 CONTEXT_TOTAL_TOKEN_TARGET = 256_000
 CONTEXT_RESPONSE_TOKEN_RESERVE = 56_000
-CONTEXT_INPUT_TOKEN_BUDGET = (
-    CONTEXT_TOTAL_TOKEN_TARGET - CONTEXT_RESPONSE_TOKEN_RESERVE
-)
+CONTEXT_INPUT_TOKEN_BUDGET = CONTEXT_TOTAL_TOKEN_TARGET - CONTEXT_RESPONSE_TOKEN_RESERVE
 FALLBACK_INPUT_TOKEN_BUDGET = 128_000
-MODEL_INPUT_BUDGETS: dict[str, int] = {
-    # 维护建议：仅放已经确认通过 api.example.com 真实测试的模型；未知 slug 走 fallback
-    "gpt-5.4": 200_000,
-    "gpt-5.4-mini": 200_000,
-    "gpt-5.5": 200_000,
-}
+MODEL_INPUT_BUDGETS = immutable_mapping(
+    {
+        # 维护建议：仅放已经确认通过 api.example.com 真实测试的模型；未知 slug 走 fallback
+        "gpt-5.4": 200_000,
+        "gpt-5.4-mini": 200_000,
+        "gpt-5.5": 200_000,
+    }
+)
 
 
 def get_input_budget(model_slug: str | None) -> int:
@@ -108,9 +110,7 @@ def estimate_message_tokens(role: str, content: dict[str, Any] | None) -> int:
         if not isinstance(attachments, list):
             attachments = []
         image_count = sum(
-            1
-            for att in attachments
-            if isinstance(att, dict) and att.get("image_id")
+            1 for att in attachments if isinstance(att, dict) and att.get("image_id")
         )
         if not text and image_count == 0:
             return 0
@@ -215,13 +215,114 @@ def compose_summary_guardrail() -> str:
 # tiktoken 加载失败时回落 estimate_text_tokens，业务无感降级。
 
 _logger = logging.getLogger(__name__)
-_TIKTOKEN_ENCODING = None
-_TIKTOKEN_INIT_ATTEMPTED = False
-_TIKTOKEN_LOCK = threading.Lock()
-_TIKTOKEN_LOAD_THREAD: threading.Thread | None = None
-_TIKTOKEN_LOADING = False
-_TIKTOKEN_LOAD_WARNED = False
-_TOKEN_COUNTER_MODE = "auto"
+
+
+def _load_o200k_encoding() -> Any:
+    import tiktoken
+
+    return tiktoken.get_encoding("o200k_base")
+
+
+class _TokenCounterRuntime:
+    def __init__(self, loader: Callable[[], Any] = _load_o200k_encoding) -> None:
+        self._loader = loader
+        self._lock = threading.Lock()
+        self._encoding: Any | None = None
+        self._init_attempted = False
+        self._load_thread: threading.Thread | None = None
+        self._loading = False
+        self._load_warned = False
+        self._mode = "auto"
+
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            return self._mode
+
+    def set_mode_if_auto(self, mode: str) -> None:
+        with self._lock:
+            if self._mode == "auto":
+                self._mode = mode
+
+    def set_mode(self, mode: str) -> None:
+        with self._lock:
+            self._mode = mode
+
+    def reset(self, loader: Callable[[], Any] | None = None) -> None:
+        thread = self._load_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                raise RuntimeError("tiktoken loader did not stop during reset")
+        with self._lock:
+            if loader is not None:
+                self._loader = loader
+            self._encoding = None
+            self._init_attempted = False
+            self._load_thread = None
+            self._loading = False
+            self._load_warned = False
+            self._mode = "auto"
+
+    def mark_unavailable(self) -> None:
+        with self._lock:
+            self._encoding = None
+            self._init_attempted = True
+
+    def _load_encoding(self) -> None:
+        try:
+            encoding = self._loader()
+            with self._lock:
+                self._encoding = encoding
+                self._init_attempted = True
+                self._loading = False
+            _logger.info("context_window.tiktoken_loaded encoding=o200k_base")
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._encoding = None
+                self._init_attempted = True
+                self._loading = False
+            _logger.warning(
+                "context_window.tiktoken_unavailable err=%r; "
+                "falling back to estimate_text_tokens",
+                exc,
+            )
+
+    def get_encoding(self, timeout_sec: float | None = None) -> Any | None:
+        with self._lock:
+            if self._init_attempted:
+                return self._encoding
+            if self._load_thread is None or (
+                not self._loading and not self._load_thread.is_alive()
+            ):
+                self._loading = True
+                self._load_warned = False
+                self._load_thread = threading.Thread(
+                    target=self._load_encoding,
+                    name="lumen-tiktoken-loader",
+                    daemon=True,
+                )
+                self._load_thread.start()
+            thread = self._load_thread
+
+        timeout = _tiktoken_load_timeout(0.05 if timeout_sec is None else timeout_sec)
+        if thread is not None and timeout > 0:
+            thread.join(timeout)
+
+        with self._lock:
+            if self._init_attempted:
+                return self._encoding
+            if not self._load_warned:
+                self._load_warned = True
+                _logger.warning(
+                    "context_window.tiktoken_loading_slow timeout_sec=%s; "
+                    "falling back to estimate_text_tokens",
+                    timeout,
+                )
+            return self._encoding
+
+
+_TOKEN_COUNTER_RUNTIME = _TokenCounterRuntime()
 
 
 def _tiktoken_load_timeout(default: float) -> float:
@@ -234,73 +335,9 @@ def _tiktoken_load_timeout(default: float) -> float:
         return default
 
 
-def _load_tiktoken_encoding() -> None:
-    """Load tiktoken in a daemon thread.
-
-    tiktoken may fetch encoding metadata over HTTPS when its cache is cold.
-    That code path has no short read timeout, so doing it inline can freeze API
-    request handlers. Keep the precise counter opportunistic and let callers use
-    the cheap local estimate while the encoding warms.
-    """
-    global _TIKTOKEN_ENCODING, _TIKTOKEN_INIT_ATTEMPTED, _TIKTOKEN_LOADING
-    try:
-        import tiktoken
-
-        # gpt-5.x 没有官方 encoding；o200k_base 是当前最接近的近似（gpt-4o 系列同款）
-        enc = tiktoken.get_encoding("o200k_base")
-        with _TIKTOKEN_LOCK:
-            _TIKTOKEN_ENCODING = enc
-            _TIKTOKEN_INIT_ATTEMPTED = True
-            _TIKTOKEN_LOADING = False
-        _logger.info("context_window.tiktoken_loaded encoding=o200k_base")
-    except Exception as exc:  # noqa: BLE001
-        with _TIKTOKEN_LOCK:
-            _TIKTOKEN_ENCODING = None
-            _TIKTOKEN_INIT_ATTEMPTED = True
-            _TIKTOKEN_LOADING = False
-        _logger.warning(
-            "context_window.tiktoken_unavailable err=%r; falling back to estimate_text_tokens",
-            exc,
-        )
-
-
 def _get_tiktoken_encoding(timeout_sec: float | None = None):
     """Lazily load tiktoken o200k_base encoding. Returns None on failure."""
-    global _TIKTOKEN_LOAD_THREAD, _TIKTOKEN_LOADING, _TIKTOKEN_LOAD_WARNED
-    if _TIKTOKEN_INIT_ATTEMPTED:
-        return _TIKTOKEN_ENCODING
-
-    with _TIKTOKEN_LOCK:
-        if _TIKTOKEN_INIT_ATTEMPTED:
-            return _TIKTOKEN_ENCODING
-        if _TIKTOKEN_LOAD_THREAD is None or (
-            not _TIKTOKEN_LOADING and not _TIKTOKEN_LOAD_THREAD.is_alive()
-        ):
-            _TIKTOKEN_LOADING = True
-            _TIKTOKEN_LOAD_WARNED = False
-            _TIKTOKEN_LOAD_THREAD = threading.Thread(
-                target=_load_tiktoken_encoding,
-                name="lumen-tiktoken-loader",
-                daemon=True,
-            )
-            _TIKTOKEN_LOAD_THREAD.start()
-        thread = _TIKTOKEN_LOAD_THREAD
-
-    timeout = _tiktoken_load_timeout(0.05 if timeout_sec is None else timeout_sec)
-    if thread is not None and timeout > 0:
-        thread.join(timeout)
-
-    with _TIKTOKEN_LOCK:
-        if _TIKTOKEN_INIT_ATTEMPTED:
-            return _TIKTOKEN_ENCODING
-        if not _TIKTOKEN_LOAD_WARNED:
-            _TIKTOKEN_LOAD_WARNED = True
-            _logger.warning(
-                "context_window.tiktoken_loading_slow timeout_sec=%s; "
-                "falling back to estimate_text_tokens",
-                timeout,
-            )
-    return _TIKTOKEN_ENCODING
+    return _TOKEN_COUNTER_RUNTIME.get_encoding(timeout_sec)
 
 
 def count_tokens(text: str | None) -> int:
@@ -309,21 +346,16 @@ def count_tokens(text: str | None) -> int:
     """
     if not text:
         return 0
-    global _TOKEN_COUNTER_MODE
     # Note: once estimate mode is set, never switch back even if tiktoken loads later —
     # keeps token-count semantics stable across one task (sticky by design). 中途切换
     # 会让同一段对话历史在不同轮次给出不同 token 数，触发 compact/截断阈值抖动。
-    if _TOKEN_COUNTER_MODE == "estimate":
+    if _TOKEN_COUNTER_RUNTIME.mode == "estimate":
         return estimate_text_tokens(text)
     enc = _get_tiktoken_encoding()
     if enc is None:
-        with _TIKTOKEN_LOCK:
-            if _TOKEN_COUNTER_MODE == "auto":
-                _TOKEN_COUNTER_MODE = "estimate"
+        _TOKEN_COUNTER_RUNTIME.set_mode_if_auto("estimate")
         return estimate_text_tokens(text)
-    with _TIKTOKEN_LOCK:
-        if _TOKEN_COUNTER_MODE == "auto":
-            _TOKEN_COUNTER_MODE = "tiktoken"
+    _TOKEN_COUNTER_RUNTIME.set_mode_if_auto("tiktoken")
     try:
         return len(enc.encode(text, disallowed_special=()))
     except Exception as exc:  # noqa: BLE001
@@ -334,13 +366,11 @@ def count_tokens(text: str | None) -> int:
 def warm_tiktoken(timeout_sec: float = 1.0) -> bool:
     """Pre-load tiktoken at process start to avoid first-request latency.
     Returns True if successfully loaded, False otherwise."""
-    global _TOKEN_COUNTER_MODE
     loaded = _get_tiktoken_encoding(timeout_sec=timeout_sec) is not None
-    with _TIKTOKEN_LOCK:
-        if loaded:
-            _TOKEN_COUNTER_MODE = "tiktoken"
-        elif _TOKEN_COUNTER_MODE == "auto":
-            _TOKEN_COUNTER_MODE = "estimate"
+    if loaded:
+        _TOKEN_COUNTER_RUNTIME.set_mode("tiktoken")
+    else:
+        _TOKEN_COUNTER_RUNTIME.set_mode_if_auto("estimate")
     return loaded
 
 

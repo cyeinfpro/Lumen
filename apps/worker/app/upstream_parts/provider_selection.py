@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
+from ..provider_runtime.upstream_services import upstream_services
+
 import asyncio
 import contextvars
-import importlib
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
-
-_UPSTREAM_MODULE_NAME = __name__.rsplit(".upstream_parts.", 1)[0] + ".upstream"
-
-
-def _facade() -> Any:
-    """Resolve compatibility dependencies at call time for monkeypatch visibility."""
-    return importlib.import_module(_UPSTREAM_MODULE_NAME)
 
 
 def _provider_pool_redis(pool: Any) -> Any:
@@ -62,8 +56,9 @@ def _provider_attempt_context(
     exc: BaseException | None = None,
     endpoint_attempt: int | None = None,
 ) -> dict[str, Any]:
-    facade = _facade()
-    out: dict[str, Any] = {"byok": facade._is_byok_provider(provider)}
+    out: dict[str, Any] = {
+        "byok": upstream_services().providers.is_byok_provider(provider)
+    }
     if attempt is not None:
         out["attempt"] = attempt
     if endpoint_attempt is not None:
@@ -74,7 +69,7 @@ def _provider_attempt_context(
         out["status"] = status
     if reason:
         out["attempt_reason"] = reason
-    if isinstance(exc, facade.UpstreamError):
+    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
         if exc.error_code:
             out["error_code"] = exc.error_code
         if exc.status_code is not None:
@@ -138,14 +133,15 @@ def _provider_endpoint_locked_error(
     provider: Any,
     endpoint_kind: str,
 ) -> Any | None:
-    facade = _facade()
-    if facade.endpoint_kind_allowed(provider, endpoint_kind):
+    if upstream_services().infrastructure.endpoint_kind_allowed(
+        provider, endpoint_kind
+    ):
         return None
     provider_name = getattr(provider, "name", "unknown")
     configured = getattr(provider, "image_jobs_endpoint", "auto")
-    return facade.UpstreamError(
+    return upstream_services().infrastructure.UpstreamError(
         f"provider {provider_name} locked to {configured}; refuses {endpoint_kind}",
-        error_code=facade.EC.NO_PROVIDERS.value,
+        error_code=upstream_services().infrastructure.EC.NO_PROVIDERS.value,
         status_code=503,
         payload={
             "provider": str(provider_name),
@@ -160,17 +156,16 @@ def _provider_capability_error(
     provider: Any,
     endpoint_kind: str,
 ) -> Any | None:
-    facade = _facade()
-    if facade.provider_supports_route(
+    if upstream_services().infrastructure.provider_supports_route(
         provider,
         route="image",
         endpoint_kind=endpoint_kind,
     ):
         return None
     provider_name = getattr(provider, "name", "unknown")
-    return facade.UpstreamError(
+    return upstream_services().infrastructure.UpstreamError(
         f"provider {provider_name} does not support image endpoint {endpoint_kind}",
-        error_code=facade.EC.NO_PROVIDERS.value,
+        error_code=upstream_services().infrastructure.EC.NO_PROVIDERS.value,
         status_code=503,
         payload={
             "provider": str(provider_name),
@@ -184,19 +179,24 @@ def _provider_endpoint_unavailable_error(
     provider: Any,
     endpoint_kind: str,
 ) -> Any | None:
-    facade = _facade()
-    return facade._provider_endpoint_locked_error(
+    return upstream_services().providers.provider_endpoint_locked_error(
         provider,
         endpoint_kind,
-    ) or facade._provider_capability_error(provider, endpoint_kind)
+    ) or upstream_services().providers.provider_capability_error(
+        provider, endpoint_kind
+    )
 
 
 def _provider_allows_image_endpoint(
     provider: Any,
     endpoint_kind: str,
 ) -> bool:
-    facade = _facade()
-    return facade._provider_endpoint_unavailable_error(provider, endpoint_kind) is None
+    return (
+        upstream_services().providers.provider_endpoint_unavailable_error(
+            provider, endpoint_kind
+        )
+        is None
+    )
 
 
 def _pool_select_kwargs(
@@ -281,12 +281,13 @@ def _filter_legacy_select_result(
     requires_mask: bool,
     mask_transport_required: bool,
 ) -> list[Any]:
-    facade = _facade()
     if endpoint_fallback and endpoint_kind is not None:
         providers = [
             provider
             for provider in providers
-            if facade._provider_allows_image_endpoint(provider, endpoint_kind)
+            if upstream_services().providers.provider_allows_image_endpoint(
+                provider, endpoint_kind
+            )
         ]
     if requires_mask:
         return _filter_mask_providers(
@@ -333,8 +334,7 @@ def _is_image_rate_limit_error(
     exc: BaseException,
 ) -> tuple[bool, float | None]:
     """Recognize image account quota and concurrency exhaustion errors."""
-    facade = _facade()
-    if not isinstance(exc, facade.UpstreamError):
+    if not isinstance(exc, upstream_services().infrastructure.UpstreamError):
         return False, None
     code = (getattr(exc, "error_code", None) or "").lower()
     message = str(exc).lower()
@@ -346,15 +346,15 @@ def _is_image_rate_limit_error(
         or "quota" in message
         or "concurrency limit exceeded" in message
     ):
-        return True, facade._retry_after_seconds(exc)
+        return True, upstream_services().retry.retry_after_seconds(exc)
     return False, None
 
 
 def _is_quota_accounting_unavailable(exc: BaseException) -> bool:
-    facade = _facade()
     return (
-        isinstance(exc, facade.UpstreamError)
-        and exc.error_code == facade.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value
+        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        and exc.error_code
+        == upstream_services().infrastructure.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value
     )
 
 
@@ -374,22 +374,23 @@ async def _reserve_admin_image_call(
     *,
     route: str,
 ) -> Any | None:
-    facade = _facade()
-    if facade._is_byok_provider(provider) or not facade._provider_has_image_quota(
+    if upstream_services().providers.is_byok_provider(
         provider
-    ):
+    ) or not upstream_services().providers.provider_has_image_quota(provider):
         return None
     from .. import account_limiter
 
     provider_name = str(getattr(provider, "name", "unknown"))
-    reservation_member = facade._next_image_quota_member(provider_name, route)
+    reservation_member = upstream_services().core.next_image_quota_member(
+        provider_name, route
+    )
     reserved_at = time.time()
-    redis = facade._provider_pool_redis(pool)
+    redis = upstream_services().providers.provider_pool_redis(pool)
     if redis is None:
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             "quota reservation unavailable",
             status_code=503,
-            error_code=facade.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+            error_code=upstream_services().infrastructure.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
             payload={
                 "provider": provider_name,
                 "reservation_member": reservation_member,
@@ -406,10 +407,10 @@ async def _reserve_admin_image_call(
             now=reserved_at,
         )
     except account_limiter.AccountLimiterUnavailable as exc:
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             "quota reservation unavailable",
             status_code=503,
-            error_code=facade.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+            error_code=upstream_services().infrastructure.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
             payload={
                 "provider": provider_name,
                 "reservation_member": reservation_member,
@@ -417,17 +418,17 @@ async def _reserve_admin_image_call(
             },
         ) from exc
     if not allowed:
-        raise facade.UpstreamError(
+        raise upstream_services().infrastructure.UpstreamError(
             "image account quota exhausted",
             status_code=429,
-            error_code=facade.EC.RATE_LIMIT_ERROR.value,
+            error_code=upstream_services().infrastructure.EC.RATE_LIMIT_ERROR.value,
             payload={
                 "provider": provider_name,
                 "reservation_member": member or reservation_member,
                 "retry_after": retry_after,
             },
         )
-    return facade._ImageQuotaReservation(
+    return upstream_services().core.ImageQuotaReservation(
         provider_name=provider_name,
         member=member or reservation_member,
         reserved_at=reserved_at,
@@ -441,8 +442,7 @@ def _image_request_attempt_claim(
     route: str,
 ) -> Callable[[int], Awaitable[None]]:
     async def claim(attempt: int) -> None:
-        facade = _facade()
-        reservation = await facade._reserve_admin_image_call(
+        reservation = await upstream_services().providers.reserve_admin_image_call(
             pool,
             provider,
             route=f"{route}:attempt-{attempt}",
@@ -457,20 +457,19 @@ async def _release_unused_image_reservation(
     pool: Any,
     reservation: Any | None,
 ) -> None:
-    facade = _facade()
     if reservation is None or reservation.state != "reserved":
         return
     from .. import account_limiter
 
     try:
         released = await account_limiter.release_quota(
-            facade._provider_pool_redis(pool),
+            upstream_services().providers.provider_pool_redis(pool),
             reservation.provider_name,
             reservation.member,
             reserved_at=reservation.reserved_at,
         )
     except account_limiter.AccountLimiterUnavailable:
-        facade.logger.exception(
+        upstream_services().infrastructure.logger.exception(
             "unused image quota reservation release failed provider=%s member=%s",
             reservation.provider_name,
             reservation.member,
@@ -487,29 +486,32 @@ async def _image_quota_claim(
     *,
     route: str,
 ) -> AsyncIterator[Any | None]:
-    facade = _facade()
     quota_pool = pool
     reservation: Any | None = None
     token: contextvars.Token[Any | None] | None = None
-    if not facade._is_byok_provider(provider) and facade._provider_has_image_quota(
+    if not upstream_services().providers.is_byok_provider(
         provider
-    ):
+    ) and upstream_services().providers.provider_has_image_quota(provider):
         if quota_pool is None:
-            quota_pool = await facade.provider_pool.get_pool()
-        reservation = await facade._reserve_admin_image_call(
+            quota_pool = (
+                await upstream_services().infrastructure.provider_pool.get_pool()
+            )
+        reservation = await upstream_services().providers.reserve_admin_image_call(
             quota_pool,
             provider,
             route=route,
         )
         if reservation is not None:
-            token = facade._image_quota_reservation_ctx.set(reservation)
+            token = upstream_services().core.image_quota_reservation_ctx.set(
+                reservation
+            )
     try:
         yield reservation
     finally:
         if token is not None:
-            facade._image_quota_reservation_ctx.reset(token)
+            upstream_services().core.image_quota_reservation_ctx.reset(token)
         if quota_pool is not None:
-            await facade._release_unused_image_reservation(
+            await upstream_services().providers.release_unused_image_reservation(
                 quota_pool,
                 reservation,
             )
@@ -521,9 +523,8 @@ async def _record_admin_image_call_or_raise(
     *,
     task_id: str = "",
 ) -> bool:
-    facade = _facade()
     provider_name = str(getattr(provider, "name", provider))
-    reservation = facade._image_quota_reservation_ctx.get()
+    reservation = upstream_services().core.image_quota_reservation_ctx.get()
     if (
         reservation is not None
         and reservation.provider_name == provider_name
@@ -531,14 +532,14 @@ async def _record_admin_image_call_or_raise(
     ):
         reservation.state = "confirmed"
         return True
-    if not facade._provider_has_image_quota(provider):
+    if not upstream_services().providers.provider_has_image_quota(provider):
         return True
     from .. import account_limiter
 
     try:
         await asyncio.shield(
             account_limiter.record_image_call(
-                facade._provider_pool_redis(pool),
+                upstream_services().providers.provider_pool_redis(pool),
                 provider_name,
                 task_id=task_id,
             )
@@ -546,7 +547,7 @@ async def _record_admin_image_call_or_raise(
         return True
     except account_limiter.AccountLimiterUnavailable as exc:
         retry_after = account_limiter.REDIS_ERROR_RETRY_AFTER_S
-        facade.logger.error(
+        upstream_services().infrastructure.logger.error(
             "quota accounting deferred after upstream success provider=%s "
             "task=%s retry_after=%.1fs err=%s",
             provider_name,

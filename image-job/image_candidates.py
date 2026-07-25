@@ -22,7 +22,7 @@ _IMAGE_SIGNATURES: tuple[bytes, ...] = (
     b"\x00\x00\x00\x0cftypheic",
     b"\x00\x00\x00\x18ftypheic",
 )
-_IMAGE_DOWNLOAD_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_IMAGE_DOWNLOAD_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _IMAGE_DOWNLOAD_ERROR_BODY_MAX_BYTES = 64 * 1024
 _RESPONSES_PARTIAL_TYPE_HINT = ".partial_image"
 _RESPONSES_SUCCESS_TERMINAL_EVENTS = frozenset({"response.completed", "response.done"})

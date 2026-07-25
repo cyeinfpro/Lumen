@@ -8,7 +8,29 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import Generation, Image, WorkflowRun, WorkflowStep
 
-from .showcase_runtime import runtime as _runtime
+from ..workflow_domain.showcase_model_policy import age_direction as _age_direction  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    height_requirement as _height_requirement,
+)  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    infer_candidate_gender as _infer_candidate_gender,
+)  # noqa: F401
+from ..workflow_domain.showcase_model_policy import (
+    model_diversity_anchor as _model_diversity_anchor,
+)  # noqa: F401
+from .serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
+from .serialization import http as _http  # noqa: F401
+
+WORKFLOW_STEPS = (
+    "upload_product",
+    "product_analysis",
+    "model_settings",
+    "model_candidates",
+    "model_approval",
+    "showcase_generation",
+    "quality_review",
+    "delivery",
+)
 
 
 def _showcase_reference_image_ids(
@@ -17,9 +39,8 @@ def _showcase_reference_image_ids(
     model_image_id: str | None,
     selected_accessory_image_id: str | None,
 ) -> list[str]:
-    runtime = _runtime()
     model_reference_id = selected_accessory_image_id or model_image_id
-    return runtime._dedupe_nonempty(
+    return _dedupe_nonempty(
         [
             *product_image_ids,
             model_reference_id or "",
@@ -35,9 +56,8 @@ async def _validate_accessory_preview_image(
     approval_step: WorkflowStep,
     image_id: str,
 ) -> str:
-    runtime = _runtime()
-    if image_id not in set(runtime._dedupe_nonempty(approval_step.image_ids or [])):
-        raise runtime._http(
+    if image_id not in set(_dedupe_nonempty(approval_step.image_ids or [])):
+        raise _http(
             "invalid_accessory_image", "selected accessory preview is invalid", 400
         )
     valid_image_id = (
@@ -61,7 +81,7 @@ async def _validate_accessory_preview_image(
         )
     ).scalar_one_or_none()
     if valid_image_id is None:
-        raise runtime._http(
+        raise _http(
             "invalid_accessory_image", "selected accessory preview is invalid", 400
         )
     return str(valid_image_id)
@@ -72,7 +92,7 @@ def _showcase_target_image_count(
     existing_image_ids: Iterable[str],
     output_count: int,
 ) -> int:
-    return len(_runtime()._dedupe_nonempty(existing_image_ids)) + output_count
+    return len(_dedupe_nonempty(existing_image_ids)) + output_count
 
 
 async def _validate_owned_images(
@@ -83,16 +103,15 @@ async def _validate_owned_images(
     min_count: int = 1,
     max_count: int | None = None,
 ) -> list[str]:
-    runtime = _runtime()
-    ids = runtime._dedupe_nonempty(image_ids)
+    ids = _dedupe_nonempty(image_ids)
     if len(ids) < min_count:
-        raise runtime._http(
+        raise _http(
             "missing_image",
             f"at least {min_count} image required",
             422,
         )
     if max_count is not None and len(ids) > max_count:
-        raise runtime._http(
+        raise _http(
             "too_many_images",
             f"at most {max_count} images allowed",
             422,
@@ -111,7 +130,7 @@ async def _validate_owned_images(
         .all()
     )
     if set(rows) != set(ids):
-        raise runtime._http(
+        raise _http(
             "invalid_image",
             "one or more images are not owned by the current user or were deleted",
             400,
@@ -120,9 +139,8 @@ async def _validate_owned_images(
 
 
 def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
-    runtime = _runtime()
     steps: list[WorkflowStep] = []
-    for key in runtime.WORKFLOW_STEPS:
+    for key in WORKFLOW_STEPS:
         status = "waiting_input"
         input_json: dict[str, Any] = {}
         output_json: dict[str, Any] = {}
@@ -176,17 +194,16 @@ def _candidate_prompt(
     candidate_index: int,
     avoid: list[str],
 ) -> str:
-    runtime = _runtime()
     product_category = str(product_analysis.get("category") or "adult apparel")
     base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
     style = style_prompt.strip() or "clean premium ecommerce model, refined, natural"
-    age_requirement = runtime._age_direction(style)
-    height_requirement = runtime._height_requirement(style)
+    age_requirement = _age_direction(style)
+    height_requirement = _height_requirement(style)
     avoid_text = ", ".join(item.strip() for item in avoid if item and item.strip())
     avoid_line = f"Avoid: {avoid_text}." if avoid_text else ""
-    diversity = runtime._model_diversity_anchor(
+    diversity = _model_diversity_anchor(
         candidate_index=candidate_index,
-        gender=runtime._infer_candidate_gender(style_prompt, product_analysis),
+        gender=_infer_candidate_gender(style_prompt, product_analysis),
     )
     return " ".join(
         part
@@ -216,3 +233,13 @@ def _candidate_prompt(
         ]
         if part
     ).strip()
+
+
+# Public workflow contracts.
+candidate_prompt = _candidate_prompt
+product_analysis_prompt = _product_analysis_prompt
+seed_steps = _seed_steps
+showcase_reference_image_ids = _showcase_reference_image_ids
+showcase_target_image_count = _showcase_target_image_count
+validate_accessory_preview_image = _validate_accessory_preview_image
+validate_owned_images = _validate_owned_images

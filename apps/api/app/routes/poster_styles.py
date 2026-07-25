@@ -1,4 +1,4 @@
-# ruff: noqa: F401
+# ruff: noqa: F401, F405
 """Poster-style library HTTP facade.
 
 The route module intentionally keeps the historical private names used by
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Awaitable, Callable, Iterable
@@ -73,52 +73,13 @@ from ..services.poster_styles import sync as poster_style_sync
 from ..services.poster_styles import tagging as poster_style_tagging
 from ..services.poster_styles import storage as poster_style_storage
 from ..workflow_services.library_sync_operation import (
-    _do_poster_style_sync,
+    do_poster_style_sync as _do_poster_style_sync,
 )
-from ._poster_library import (
-    POSTER_STYLE_FETCH_TIMEOUT_S,
-    POSTER_STYLE_GENERATE_STEP_KEY,
-    POSTER_STYLE_GENERATE_WORKER_ACTION,
-    POSTER_STYLE_MAX_GITHUB_DEPTH,
-    POSTER_STYLE_MAX_GITHUB_DIRECTORIES,
-    POSTER_STYLE_MAX_GITHUB_FILES,
-    POSTER_STYLE_MAX_GITHUB_METADATA_BYTES,
-    POSTER_STYLE_MAX_GITHUB_RESPONSE_BYTES,
-    POSTER_STYLE_MAX_INDEX_BYTES,
-    POSTER_STYLE_MAX_META_BYTES,
-    POSTER_STYLE_MAX_PRESET_ITEMS,
-    POSTER_STYLE_MAX_REDIRECTS,
-    POSTER_STYLE_MAX_SYNC_DOWNLOAD_BYTES,
-    POSTER_STYLE_ROOT_KEY,
-    POSTER_STYLE_SCHEMA_VERSION,
-    POSTER_STYLE_SYNC_COOLDOWN_S,
-    POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S,
-    POSTER_STYLE_SYNC_LEASE_RENEW_SECONDS,
-    POSTER_STYLE_SYNC_LEASE_SECONDS,
-    POSTER_STYLE_SYNC_MODE_KEY,
-    POSTER_STYLE_SYNC_PROXY_NAME_KEY,
-    POSTER_STYLE_SYNC_USE_PROXY_POOL_KEY,
-    WORKFLOW_TYPE_POSTER_STYLE_GENERATE,
-    _DEFAULT_GITHUB_CONTENTS_URL,
-    _DEFAULT_SYNC_MODE,
-    _SYNC_LOCK,
-    _category_from_folder_name,
-    _clean_optional_text,
-    _github_contents_url,
-    _library_item_url,
-    _library_sample_url,
-    _metadata_from_meta_json,
-    _normalize_category,
-    _normalize_palette,
-    _normalize_recommended_aspects,
-    _normalize_style_tags,
-    _poster_style_folder_for_category,
-    _poster_style_sync_file_lock,
-    _preset_item_id,
-    _preset_storage_key,
-    _preset_thumb_storage_key,
-    _scan_local_presets,
+from .messages import (
+    create_assistant_task as _create_assistant_task,
+    publish_assistant_task as _publish_assistant_task,
 )
+from ..services.poster_styles.library import *  # noqa: F403
 
 router = APIRouter(prefix="/poster-styles", tags=["poster-styles"])
 logger = logging.getLogger(__name__)
@@ -133,12 +94,21 @@ _GITHUB_RAW_HOSTS = frozenset(
 _HTTP_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _POSTER_STYLE_AUTO_TAG_CONCURRENCY = poster_style_tagging.auto_tag_concurrency()
-_POSTER_STYLE_AUTO_TAG_SEMAPHORE: asyncio.Semaphore | None = None
-_POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+@dataclass
+class _AutoTagSemaphoreState:
+    semaphore: asyncio.Semaphore | None = None
+    loop: asyncio.AbstractEventLoop | None = None
+
+
+_AUTO_TAG_SEMAPHORE_STATE = _AutoTagSemaphoreState()
 
 
 def _runtime() -> Any:
-    return sys.modules[__name__]
+    from . import poster_styles
+
+    return poster_styles
 
 
 def get_redis() -> Any:
@@ -154,17 +124,12 @@ def _poster_style_auto_tag_concurrency() -> int:
 
 
 def _poster_style_auto_tag_semaphore() -> asyncio.Semaphore:
-    global _POSTER_STYLE_AUTO_TAG_SEMAPHORE, _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP
     loop = asyncio.get_running_loop()
-    if (
-        _POSTER_STYLE_AUTO_TAG_SEMAPHORE is None
-        or _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP is not loop
-    ):
-        _POSTER_STYLE_AUTO_TAG_SEMAPHORE = asyncio.Semaphore(
-            _poster_style_auto_tag_concurrency()
-        )
-        _POSTER_STYLE_AUTO_TAG_SEMAPHORE_LOOP = loop
-    return _POSTER_STYLE_AUTO_TAG_SEMAPHORE
+    state = _AUTO_TAG_SEMAPHORE_STATE
+    if state.semaphore is None or state.loop is not loop:
+        state.semaphore = asyncio.Semaphore(_poster_style_auto_tag_concurrency())
+        state.loop = loop
+    return state.semaphore
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
@@ -939,15 +904,10 @@ async def _create_user_message(
 
 
 async def _poster_style_create_assistant_task(**kwargs: Any) -> Any:
-    # Keep the route-specific billing/credential adapters used by messages.
-    from .messages import _create_assistant_task
-
     return await _create_assistant_task(**kwargs)
 
 
 async def _poster_style_publish_assistant_task(**kwargs: Any) -> None:
-    from .messages import _publish_assistant_task
-
     await _publish_assistant_task(**kwargs)
 
 

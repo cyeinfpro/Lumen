@@ -1988,3 +1988,56 @@ async def test_reconcile_requeues_stale_completion_and_publishes_event(monkeypat
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_terminal_apply_and_release_are_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = Generation(
+        id="gen-idempotent",
+        user_id="user-1",
+        message_id="msg-gen",
+        status="running",
+        progress_stage="rendering",
+        attempt=5,
+    )
+    completion = Completion(
+        id="comp-idempotent",
+        user_id="user-1",
+        message_id="msg-comp",
+        status="streaming",
+        progress_stage="streaming",
+        attempt=3,
+    )
+    session = _patch_recon_session_local(
+        monkeypatch,
+        [generation],
+        [completion],
+    )
+    _patch_publish_event(monkeypatch)
+    releases: list[str] = []
+
+    async def release_generation(*_args, **_kwargs) -> None:
+        releases.append("generation")
+
+    async def release_completion(*_args, **_kwargs) -> None:
+        releases.append("completion")
+
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "release_generation",
+        release_generation,
+    )
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "release_completion",
+        release_completion,
+    )
+
+    redis = FakeRedis()
+    assert await outbox.reconcile_tasks({"redis": redis}) == 2
+    assert await outbox.reconcile_tasks({"redis": redis}) == 0
+
+    assert releases == ["generation", "completion"]
+    assert [event.kind for event in session.outbox_events] == ["sse", "sse"]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ from .providers import (
     parse_proxy_item,
     weighted_priority_order,
 )
+from .immutables import immutable_mapping, immutable_nested_mapping
 
 VIDEO_PROVIDER_KINDS = (
     "volcano",
@@ -38,17 +40,23 @@ SEEDANCE_20_MAX_DURATION_S = 15
 SEEDANCE_20_SMART_DURATION_S = -1
 SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
 SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
-VIDEO_REFERENCE_MEDIA_LIMITS: dict[str, dict[str, int]] = {
-    "volcano": {"image": 9, "video": 3, "audio": 3},
-    "volcano_third_party": {"image": 9, "video": 3},
-    "volcano_newapi": {"image": 4, "video": 3, "audio": 1},
-    "dashscope": {"image": 9},
-    "omni_flash": {"image": 9},
-    "fake": {"image": 9, "video": 3},
-}
-_VOLCANO_DOMESTIC_MODEL_ALIASES = {
-    "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
-}
+VIDEO_REFERENCE_MEDIA_LIMITS: Mapping[str, Mapping[str, int]] = (
+    immutable_nested_mapping(
+        {
+            "volcano": {"image": 9, "video": 3, "audio": 3},
+            "volcano_third_party": {"image": 9, "video": 3},
+            "volcano_newapi": {"image": 4, "video": 3, "audio": 1},
+            "dashscope": {"image": 9},
+            "omni_flash": {"image": 9},
+            "fake": {"image": 9, "video": 3},
+        }
+    )
+)
+_VOLCANO_DOMESTIC_MODEL_ALIASES = immutable_mapping(
+    {
+        "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
+    }
+)
 Seedance20Variant = Literal["standard", "fast", "mini"]
 _VOLCANO_REGION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEEDANCE_20_VARIANT_PATTERNS: tuple[

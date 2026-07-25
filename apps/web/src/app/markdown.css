@@ -1,0 +1,170 @@
+@import "highlight.js/styles/github-dark.css";
+
+.lumen-md {
+  color: var(--fg-0);
+  font-size: inherit;
+  line-height: 1.75;
+  word-wrap: break-word;
+}
+
+.lumen-md > * + * {
+  margin-top: 0.85rem;
+}
+
+.lumen-md p {
+  margin: 0;
+  max-width: 65ch;
+}
+
+.lumen-md > .overflow-x-auto {
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+.lumen-md p,
+.lumen-md li,
+.lumen-md blockquote,
+.lumen-md td,
+.lumen-md th {
+  overflow-wrap: anywhere;
+}
+
+.lumen-md.lumen-md-desktop-compact {
+  line-height: 1.46;
+}
+
+.lumen-md.lumen-md-desktop-compact > * + * {
+  margin-top: 0.5rem;
+}
+
+.lumen-md.lumen-md-desktop-compact p,
+.lumen-md.lumen-md-desktop-compact li {
+  max-width: 100%;
+}
+
+.lumen-md h1,
+.lumen-md h2,
+.lumen-md h3,
+.lumen-md h4 {
+  color: var(--fg-0);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.3;
+  margin-top: 1.25rem;
+}
+
+.lumen-md h1 { font-size: 1.5rem; }
+.lumen-md h2 { font-size: 1.25rem; }
+.lumen-md h3 { font-size: 1.1rem; }
+.lumen-md h4 { font-size: 1rem; }
+
+.lumen-md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--markdown-link-decoration);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 160ms ease;
+}
+
+.lumen-md a:hover {
+  text-decoration-color: var(--accent);
+}
+
+.lumen-md ul,
+.lumen-md ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.lumen-md ul { list-style: disc; }
+.lumen-md ol { list-style: decimal; }
+.lumen-md li { margin: 0.35rem 0; max-width: 65ch; }
+.lumen-md li > p { display: inline; }
+
+.lumen-md blockquote {
+  border-left: 2px solid var(--markdown-accent-border);
+  color: var(--fg-1);
+  margin: 0;
+  padding-left: 0.875rem;
+}
+
+.lumen-md hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 1rem 0;
+}
+
+.lumen-md code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+}
+
+.lumen-md :not(pre) > code {
+  background: var(--markdown-inline-code-bg);
+  border: 1px solid var(--markdown-code-border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-0);
+  padding: 0.1rem 0.35rem;
+}
+
+.lumen-md pre {
+  -webkit-overflow-scrolling: touch;
+  background: var(--markdown-code-bg);
+  border: 1px solid var(--markdown-code-border);
+  border-radius: var(--radius-lg);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 0.875rem 1rem;
+}
+
+.lumen-md pre code {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: inherit;
+  padding: 0;
+}
+
+.lumen-md table {
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  min-width: max-content;
+  width: 100%;
+}
+
+.lumen-md th,
+.lumen-md td {
+  border: 1px solid var(--markdown-table-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+.lumen-md th {
+  background: var(--markdown-table-header-bg);
+  font-weight: 600;
+}
+
+.lumen-md tbody tr {
+  transition: background-color 140ms ease;
+}
+
+.lumen-md tbody tr:hover {
+  background: var(--markdown-table-hover-bg);
+}
+
+.lumen-md img {
+  border-radius: var(--radius-md);
+  height: auto;
+  max-width: 100%;
+}
+
+.lumen-md input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin-right: 0.35rem;
+}

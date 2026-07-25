@@ -11,6 +11,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import httpx
@@ -31,30 +32,34 @@ VALID_MODEL_LIBRARY_AGE_SEGMENTS: frozenset[str] = frozenset(
         "senior",
     }
 )
-_AGE_ALIASES: dict[str, str] = {
-    "young": "young_adult",
-    "youngadult": "young_adult",
-    "young-adult": "young_adult",
-    "kid": "child",
-    "kids": "child",
-    "baby": "toddler",
-    "elder": "senior",
-    "elderly": "senior",
-    "old": "senior",
-    "middleaged": "middle_aged",
-    "middle-aged": "middle_aged",
-    "teenager": "teen",
-}
-_GENDER_ALIASES: dict[str, str] = {
-    "female": "female",
-    "woman": "female",
-    "girl": "female",
-    "f": "female",
-    "male": "male",
-    "man": "male",
-    "boy": "male",
-    "m": "male",
-}
+_AGE_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "young": "young_adult",
+        "youngadult": "young_adult",
+        "young-adult": "young_adult",
+        "kid": "child",
+        "kids": "child",
+        "baby": "toddler",
+        "elder": "senior",
+        "elderly": "senior",
+        "old": "senior",
+        "middleaged": "middle_aged",
+        "middle-aged": "middle_aged",
+        "teenager": "teen",
+    }
+)
+_GENDER_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "female": "female",
+        "woman": "female",
+        "girl": "female",
+        "f": "female",
+        "male": "male",
+        "man": "male",
+        "boy": "male",
+        "m": "male",
+    }
+)
 
 MODEL_LIBRARY_TAGGING_INSTRUCTIONS = (
     "你是模特库自动打标签助手。仔细分析这张模特图，输出严格 JSON。\n\n"
@@ -109,39 +114,41 @@ _VALID_POSTER_CATEGORIES: frozenset[str] = frozenset(
         "other",
     }
 )
-_POSTER_CATEGORY_ALIASES: dict[str, str] = {
-    "illustrated": "illustration",
-    "vector": "illustration",
-    "flat": "illustration",
-    "3d_render": "3d",
-    "3drender": "3d",
-    "render": "3d",
-    "minimalism": "minimal",
-    "minimalist": "minimal",
-    "typography": "minimal",
-    "retro_pop": "retro",
-    "pop": "retro",
-    "chinese": "traditional",
-    "oriental": "traditional",
-    "editorial": "photo",
-    "photography": "photo",
-    "扁平": "illustration",
-    "插画": "illustration",
-    "矢量": "illustration",
-    "三维": "3d",
-    "立体": "3d",
-    "极简": "minimal",
-    "简约": "minimal",
-    "字体": "minimal",
-    "复古": "retro",
-    "波普": "retro",
-    "中式": "traditional",
-    "国风": "traditional",
-    "东方": "traditional",
-    "摄影": "photo",
-    "杂志": "photo",
-    "其他": "other",
-}
+_POSTER_CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "illustrated": "illustration",
+        "vector": "illustration",
+        "flat": "illustration",
+        "3d_render": "3d",
+        "3drender": "3d",
+        "render": "3d",
+        "minimalism": "minimal",
+        "minimalist": "minimal",
+        "typography": "minimal",
+        "retro_pop": "retro",
+        "pop": "retro",
+        "chinese": "traditional",
+        "oriental": "traditional",
+        "editorial": "photo",
+        "photography": "photo",
+        "扁平": "illustration",
+        "插画": "illustration",
+        "矢量": "illustration",
+        "三维": "3d",
+        "立体": "3d",
+        "极简": "minimal",
+        "简约": "minimal",
+        "字体": "minimal",
+        "复古": "retro",
+        "波普": "retro",
+        "中式": "traditional",
+        "国风": "traditional",
+        "东方": "traditional",
+        "摄影": "photo",
+        "杂志": "photo",
+        "其他": "other",
+    }
+)
 
 TAGGING_HTTP_TIMEOUT_S = 25.0
 TAGGING_TOTAL_TIMEOUT_S = 60.0

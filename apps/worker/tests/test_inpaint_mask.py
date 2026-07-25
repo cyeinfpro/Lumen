@@ -12,6 +12,8 @@ Layered:
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import io as _io
 import time
 from types import SimpleNamespace
@@ -22,12 +24,25 @@ from PIL import Image as _PILImage
 
 from app import upstream
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
 from app.tasks.generation_parts import references
+from .task_parts_runtime_testing import synchronize_module_ports
 from lumen_core.constants import GenerationErrorCode as EC
 
 
-def _make_png(size: tuple[int, int] = (8, 8), color: tuple[int, int, int] = (200, 200, 200)) -> bytes:
+@pytest.fixture(autouse=True)
+def _sync_generation_ports(monkeypatch: pytest.MonkeyPatch):
+    with synchronize_module_ports(
+        monkeypatch,
+        generation,
+        generation.DEFAULT_GENERATION_RUNTIME.ports,
+    ):
+        yield
+
+
+def _make_png(
+    size: tuple[int, int] = (8, 8), color: tuple[int, int, int] = (200, 200, 200)
+) -> bytes:
     buf = _io.BytesIO()
     _PILImage.new("RGB", size, color=color).save(buf, format="PNG")
     return buf.getvalue()
@@ -43,7 +58,9 @@ def _make_mask_png(size: tuple[int, int] = (8, 8)) -> bytes:
     return buf.getvalue()
 
 
-def _make_partial_alpha_mask_png(size: tuple[int, int] = (8, 8), alpha: int = 128) -> bytes:
+def _make_partial_alpha_mask_png(
+    size: tuple[int, int] = (8, 8), alpha: int = 128
+) -> bytes:
     """RGBA mask 但 alpha 为 partial（1-254 之间）；用于测试 worker 兜底二值化。"""
     buf = _io.BytesIO()
     _PILImage.new("RGBA", size, color=(255, 255, 255, alpha)).save(buf, format="PNG")
@@ -54,7 +71,7 @@ def _make_partial_alpha_mask_png(size: tuple[int, int] = (8, 8), alpha: int = 12
 
 
 def test_wrap_inpaint_prompt_keeps_user_intent_inside() -> None:
-    wrapped = upstream._wrap_inpaint_prompt("add a red hat")
+    wrapped = upstream_services().direct.wrap_inpaint_prompt("add a red hat")
     # 关键不变量：前缀 / 后缀稳定，user intent 夹在中间。
     assert wrapped.startswith("Inside the masked region, add a red hat")
     assert "Preserve everything outside the mask exactly" in wrapped
@@ -65,20 +82,20 @@ def test_wrap_inpaint_prompt_includes_blend_directive() -> None:
     """第四行 fill-context 让 remove/replace 类指令下模型用周围像素自然过渡填充，
     避免"Inside the masked region, remove the apple." 类 prompt 模型填黑/灰。
     """
-    wrapped = upstream._wrap_inpaint_prompt("remove the apple")
+    wrapped = upstream_services().direct.wrap_inpaint_prompt("remove the apple")
     assert "Blend the result seamlessly with the surrounding unchanged area." in wrapped
 
 
 def test_wrap_inpaint_prompt_strips_user_intent() -> None:
     # 用户输入两端空白不应改变模板形态（cache prefix 稳定的前提）。
-    wrapped = upstream._wrap_inpaint_prompt("   add a hat   ")
+    wrapped = upstream_services().direct.wrap_inpaint_prompt("   add a hat   ")
     assert wrapped.startswith("Inside the masked region, add a hat.")
 
 
 def test_wrap_inpaint_prompt_prefix_is_stable_for_cache() -> None:
     # 不同 user_intent → 前缀（"Inside the masked region, "）字面完全一致。
-    a = upstream._wrap_inpaint_prompt("foo")
-    b = upstream._wrap_inpaint_prompt("bar baz")
+    a = upstream_services().direct.wrap_inpaint_prompt("foo")
+    b = upstream_services().direct.wrap_inpaint_prompt("bar baz")
     assert a.split(",", 1)[0] == b.split(",", 1)[0] == "Inside the masked region"
 
 
@@ -86,12 +103,20 @@ def test_wrap_inpaint_prompt_prefix_is_stable_for_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_edit_image_once_includes_mask_field(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_direct_edit_image_once_includes_mask_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, Any] = {}
 
-    async def fake_curl_post_multipart(*, url: str, data: dict[str, str],
-                                       files: list[Any], headers: dict[str, str],
-                                       timeout_s: float, proxy_url: str | None = None) -> tuple[int, dict[str, Any]]:
+    async def fake_curl_post_multipart(
+        *,
+        url: str,
+        data: dict[str, str],
+        files: list[Any],
+        headers: dict[str, str],
+        timeout_s: float,
+        proxy_url: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         captured["files"] = files
         captured["data"] = data
         # Return a minimal valid OpenAI image response payload
@@ -109,14 +134,22 @@ async def test_direct_edit_image_once_includes_mask_field(monkeypatch: pytest.Mo
     async def fake_resolve_proxy(*_a: Any, **_k: Any) -> str | None:
         return None
 
-    monkeypatch.setattr(upstream, "_curl_post_multipart", fake_curl_post_multipart)
-    monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
-    monkeypatch.setattr(upstream, "resolve_provider_proxy_url", fake_resolve_proxy)
+    monkeypatch.setattr(
+        upstream_services().transport, "curl_post_multipart", fake_curl_post_multipart
+    )
+    monkeypatch.setattr(
+        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
+        "resolve_provider_proxy_url",
+        fake_resolve_proxy,
+    )
 
     img = _make_png()
     mask = _make_mask_png()
 
-    await upstream._direct_edit_image_once(
+    await upstream_services().direct.direct_edit_image_once(
         prompt="hi",
         size="1024x1024",
         images=[img],
@@ -144,23 +177,37 @@ async def test_direct_edit_image_once_includes_mask_field(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_direct_edit_image_once_omits_mask_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_direct_edit_image_once_omits_mask_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """mask=None 时不带这个字段，保持现有 i2i 行为。"""
     captured: dict[str, Any] = {}
 
-    async def fake_curl_post_multipart(*, url: str, data: dict[str, str],
-                                       files: list[Any], headers: dict[str, str],
-                                       timeout_s: float, proxy_url: str | None = None) -> tuple[int, dict[str, Any]]:
+    async def fake_curl_post_multipart(
+        *,
+        url: str,
+        data: dict[str, str],
+        files: list[Any],
+        headers: dict[str, str],
+        timeout_s: float,
+        proxy_url: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         captured["files"] = files
         return 200, {"data": [{"b64_json": "aGVsbG8="}]}  # noqa: S105
 
     async def fake_resolve_proxy(*_a: Any, **_k: Any) -> str | None:
         return None
 
-    monkeypatch.setattr(upstream, "_curl_post_multipart", fake_curl_post_multipart)
-    monkeypatch.setattr(upstream, "resolve_provider_proxy_url", fake_resolve_proxy)
+    monkeypatch.setattr(
+        upstream_services().transport, "curl_post_multipart", fake_curl_post_multipart
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
+        "resolve_provider_proxy_url",
+        fake_resolve_proxy,
+    )
 
-    await upstream._direct_edit_image_once(
+    await upstream_services().direct.direct_edit_image_once(
         prompt="hi",
         size="1024x1024",
         images=[_make_png()],
@@ -273,13 +320,13 @@ async def test_select_mask_transport_required_default_filters() -> None:
 async def test_pool_select_compat_mask_transport_false_keeps_url_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """upstream._pool_select_compat 兜底过滤层也应该在 mask_transport_required=False
+    """upstream_services().providers.pool_select_compat 兜底过滤层也应该在 mask_transport_required=False
     时跳过 transport 过滤——避免 direct 路径被 url 模式 provider 错杀。"""
     pool = _make_pool(
         _cfg("url-a", transport="url"),
         _cfg("file-a", transport="file"),
     )
-    providers = await upstream._pool_select_compat(
+    providers = await upstream_services().providers.pool_select_compat(
         pool,
         route="image",
         requires_mask=True,
@@ -301,7 +348,7 @@ async def test_pool_select_compat_legacy_mock_mask_transport_false_no_filter() -
                 _cfg("file-a", transport="file"),
             ]
 
-    providers = await upstream._pool_select_compat(
+    providers = await upstream_services().providers.pool_select_compat(
         LegacyPool(),
         route="image",
         requires_mask=True,
@@ -354,7 +401,9 @@ def test_resize_mask_rejects_invalid_bytes() -> None:
     assert ei.value.error_code == EC.BAD_REFERENCE_IMAGE.value
 
 
-def test_resize_mask_rejects_invalid_reference_bytes_without_mask_false_positive() -> None:
+def test_resize_mask_rejects_invalid_reference_bytes_without_mask_false_positive() -> (
+    None
+):
     """A bad reference must not be misreported as a mask resize or retriable error."""
     mask = _make_mask_png(size=(32, 32))
     with pytest.raises(upstream.UpstreamError) as ei:
@@ -611,7 +660,9 @@ def test_inpaint_size_facade_uses_current_limits(
 
 
 @pytest.mark.asyncio
-async def test_edit_image_wraps_prompt_when_mask_present(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_edit_image_wraps_prompt_when_mask_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """edit_image() 在 mask 不为空时把 prompt 包成 invariant 模板，并把同一份 mask
     向下游 _dispatch_image 透传一次。"""
     seen: dict[str, Any] = {}
@@ -623,7 +674,9 @@ async def test_edit_image_wraps_prompt_when_mask_present(monkeypatch: pytest.Mon
         for result in ():
             yield result
 
-    monkeypatch.setattr(upstream, "_dispatch_image", fake_dispatch_image)
+    monkeypatch.setattr(
+        upstream_services().dispatch, "dispatch_image", fake_dispatch_image
+    )
 
     img = _make_png()
     mask = _make_mask_png()
@@ -646,7 +699,9 @@ async def test_edit_image_wraps_prompt_when_mask_present(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_edit_image_does_not_wrap_prompt_when_mask_none(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_edit_image_does_not_wrap_prompt_when_mask_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """mask=None 时 prompt 原样发，保持现有 i2i 行为。"""
     seen: dict[str, Any] = {}
 
@@ -656,7 +711,9 @@ async def test_edit_image_does_not_wrap_prompt_when_mask_none(monkeypatch: pytes
         for result in ():
             yield result
 
-    monkeypatch.setattr(upstream, "_dispatch_image", fake_dispatch_image)
+    monkeypatch.setattr(
+        upstream_services().dispatch, "dispatch_image", fake_dispatch_image
+    )
 
     async def _drain() -> None:
         async for _ in upstream.edit_image(
@@ -715,11 +772,27 @@ def _install_run_image_once_stubs(
         calls["race_responses_image"] = kwargs
         return ("aGVsbG8=", None)  # noqa: S106
 
-    monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job_failover)
-    monkeypatch.setattr(upstream, "_direct_edit_image_with_failover", fake_direct_edit_failover)
-    monkeypatch.setattr(upstream, "_dual_race_image_action", fake_dual_race_image_action)
-    monkeypatch.setattr(upstream, "_dual_race_image_jobs_action", fake_dual_race_image_jobs_action)
-    monkeypatch.setattr(upstream, "_race_responses_image", fake_race_responses_image)
+    monkeypatch.setattr(
+        upstream_services().image_jobs,
+        "image_job_with_failover",
+        fake_image_job_failover,
+    )
+    monkeypatch.setattr(
+        upstream_services().direct,
+        "direct_edit_image_with_failover",
+        fake_direct_edit_failover,
+    )
+    monkeypatch.setattr(
+        upstream_services().race, "dual_race_image_action", fake_dual_race_image_action
+    )
+    monkeypatch.setattr(
+        upstream_services().race,
+        "dual_race_image_jobs_action",
+        fake_dual_race_image_jobs_action,
+    )
+    monkeypatch.setattr(
+        upstream_services().race, "race_responses_image", fake_race_responses_image
+    )
     return calls
 
 
@@ -732,11 +805,11 @@ async def test_mask_task_with_dual_race_engine_skips_responses_lane(
     calls = _install_run_image_once_stubs(monkeypatch)
 
     async def _drain() -> None:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=_StubProvider(image_jobs_enabled=True),
-            channel=upstream._IMAGE_CHANNEL_AUTO,
-            engine=upstream._IMAGE_ROUTE_DUAL_RACE,
+            channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+            engine=upstream_services().core.IMAGE_ROUTE_DUAL_RACE,
             prompt="hi",
             size="1024x1024",
             images=[_make_png()],
@@ -771,11 +844,11 @@ async def test_mask_task_with_responses_engine_skips_responses_path(
     calls = _install_run_image_once_stubs(monkeypatch)
 
     async def _drain() -> None:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=_StubProvider(image_jobs_enabled=True),
-            channel=upstream._IMAGE_CHANNEL_AUTO,
-            engine=upstream._IMAGE_ROUTE_RESPONSES,
+            channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+            engine=upstream_services().core.IMAGE_ROUTE_RESPONSES,
             prompt="hi",
             size="1024x1024",
             images=[_make_png()],
@@ -807,11 +880,11 @@ async def test_mask_task_use_jobs_false_goes_direct_edit(
     calls = _install_run_image_once_stubs(monkeypatch)
 
     async def _drain() -> None:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=_StubProvider(image_jobs_enabled=False),
-            channel=upstream._IMAGE_CHANNEL_STREAM_ONLY,
-            engine=upstream._IMAGE_ROUTE_DUAL_RACE,
+            channel=upstream_services().core.IMAGE_CHANNEL_STREAM_ONLY,
+            engine=upstream_services().core.IMAGE_ROUTE_DUAL_RACE,
             prompt="hi",
             size="1024x1024",
             images=[_make_png()],
@@ -844,11 +917,11 @@ async def test_mask_with_generate_action_raises_invalid_request(
     _install_run_image_once_stubs(monkeypatch)
 
     async def _drain() -> None:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="generate",
             provider=_StubProvider(),
-            channel=upstream._IMAGE_CHANNEL_AUTO,
-            engine=upstream._IMAGE_ROUTE_DUAL_RACE,
+            channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+            engine=upstream_services().core.IMAGE_ROUTE_DUAL_RACE,
             prompt="hi",
             size="1024x1024",
             images=None,
@@ -878,11 +951,11 @@ async def test_non_mask_task_dual_race_unaffected(
     calls = _install_run_image_once_stubs(monkeypatch)
 
     async def _drain() -> None:
-        async for _ in upstream._run_image_once_for_provider(
+        async for _ in upstream_services().dispatch.run_image_once_for_provider(
             action="edit",
             provider=_StubProvider(image_jobs_enabled=True),
-            channel=upstream._IMAGE_CHANNEL_AUTO,
-            engine=upstream._IMAGE_ROUTE_DUAL_RACE,
+            channel=upstream_services().core.IMAGE_CHANNEL_AUTO,
+            engine=upstream_services().core.IMAGE_ROUTE_DUAL_RACE,
             prompt="hi",
             size="1024x1024",
             images=[_make_png()],

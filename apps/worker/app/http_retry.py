@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-RETRY_STATUS = {502, 503, 504}
+RETRY_STATUS = frozenset({502, 503, 504})
 DEFAULT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
 DEFAULT_ERROR_RESPONSE_MAX_BYTES = 64 * 1024
 RETRY_HTTPX_EXC: tuple[type[BaseException], ...] = (

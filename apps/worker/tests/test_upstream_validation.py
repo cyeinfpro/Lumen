@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import logging
 import math
 import sys
@@ -8,20 +10,18 @@ import pytest
 
 
 def test_curl_timeout_arg_rounds_up_and_never_disables_timeout() -> None:
-    from app import upstream
 
-    assert upstream._curl_timeout_arg(0.1) == "1"
-    assert upstream._curl_timeout_arg(0.999) == "1"
-    assert upstream._curl_timeout_arg(1.1) == "2"
-    assert upstream._curl_timeout_arg(10.0) == "10"
-    assert upstream._curl_timeout_arg(-5.0) == "1"
-    assert upstream._curl_timeout_arg(math.inf) == "1"
+    assert upstream_services().transport.curl_timeout_arg(0.1) == "1"
+    assert upstream_services().transport.curl_timeout_arg(0.999) == "1"
+    assert upstream_services().transport.curl_timeout_arg(1.1) == "2"
+    assert upstream_services().transport.curl_timeout_arg(10.0) == "10"
+    assert upstream_services().transport.curl_timeout_arg(-5.0) == "1"
+    assert upstream_services().transport.curl_timeout_arg(math.inf) == "1"
 
 
 def test_upstream_error_detail_summary_redacts_sensitive_text() -> None:
-    from app import upstream
 
-    summary = upstream._summarize_upstream_error_detail(
+    summary = upstream_services().core.summarize_upstream_error_detail(
         {
             "code": "policy_violation",
             "type": "invalid_request_error",
@@ -41,24 +41,27 @@ def test_upstream_error_detail_summary_redacts_sensitive_text() -> None:
 def test_configure_pil_max_image_pixels_logs_failure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from app import upstream
 
     class BrokenPIL:
-        MAX_IMAGE_PIXELS = upstream._MAX_REFERENCE_IMAGE_PIXELS + 1
+        MAX_IMAGE_PIXELS = upstream_services().core.MAX_REFERENCE_IMAGE_PIXELS + 1
 
         def __setattr__(self, _name: str, _value: object) -> None:
             raise RuntimeError("cannot configure")
 
-    monkeypatch.setattr(upstream, "PILImage", BrokenPIL())
+    monkeypatch.setattr(upstream_services().infrastructure, "PILImage", BrokenPIL())
 
-    with caplog.at_level(logging.WARNING, logger=upstream.logger.name):
-        upstream._configure_pil_max_image_pixels()
+    with caplog.at_level(
+        logging.WARNING, logger=upstream_services().infrastructure.logger.name
+    ):
+        upstream_services().core.configure_pil_max_image_pixels()
 
     assert "failed to configure PIL MAX_IMAGE_PIXELS" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_validate_provider_base_url_allows_http_private_and_internal_hosts() -> None:
+async def test_validate_provider_base_url_allows_http_private_and_internal_hosts() -> (
+    None
+):
     from app.validation import validate_provider_base_url
 
     assert await validate_provider_base_url("http://127.0.0.1:8000/v1/") == (

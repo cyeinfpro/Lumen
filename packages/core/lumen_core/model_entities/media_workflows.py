@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -32,6 +33,12 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_images_parent", "parent_image_id"),
         Index("ix_images_user_alive_created", "user_id", "deleted_at", "created_at"),
         Index(
+            "ix_images_artifact_reconcile",
+            "artifact_status",
+            "reconcile_after",
+            "updated_at",
+        ),
+        Index(
             "ix_images_owner_alive_created",
             "owner_generation_id",
             "deleted_at",
@@ -39,6 +46,16 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
             "id",
         ),
         UniqueConstraint("storage_key", name="uq_images_storage_key"),
+        CheckConstraint(
+            "artifact_status IN "
+            "('staging', 'processing', 'publishing', 'ready', "
+            "'failed', 'deleting', 'deleted')",
+            name="ck_images_artifact_status",
+        ),
+        CheckConstraint(
+            "publish_attempt >= 0",
+            name="ck_images_publish_attempt",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -69,6 +86,22 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
     )
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
         JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+    artifact_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="ready", server_default="ready"
+    )
+    artifact_manifest_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+    publish_attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    reconcile_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_artifact_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

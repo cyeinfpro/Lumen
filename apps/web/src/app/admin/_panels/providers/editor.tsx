@@ -87,7 +87,7 @@ export const DraftCard = forwardRef<HTMLDivElement, DraftCardProps>(
           (expanded
             ? hasErrors
               ? "border-danger-border bg-danger-soft"
-              : "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/[0.04]"
+              : "border-[var(--accent)]/45 bg-[var(--accent)]/[0.04]"
             : "border-[var(--border)] bg-[var(--bg-1)]/60")
         }
       >
@@ -371,7 +371,7 @@ function PurposeField({
               className={
                 "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (checked
-                  ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+                  ? "border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
                   : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
               }
             >
@@ -379,7 +379,7 @@ function PurposeField({
                 className={
                   "flex h-3.5 w-3.5 items-center justify-center rounded border " +
                   (checked
-                    ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
+                    ? "border-[var(--accent)] bg-[var(--accent)] text-black"
                     : "border-[var(--border-strong)]")
                 }
                 aria-hidden
@@ -750,7 +750,7 @@ function fieldCls(hasError: boolean): string {
   if (hasError) {
     return `${base} border-danger-border focus:border-danger-border focus:ring-danger/25`;
   }
-  return `${base} border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25`;
+  return `${base} border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-[var(--accent)]/25`;
 }
 
 function Field({

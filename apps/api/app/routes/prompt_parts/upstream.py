@@ -15,7 +15,7 @@ from ...task_billing import EnhanceUsageCapture, enhance_pricing_snapshot_key
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_HTTP_STATUS = {408, 409, 425, 429}
+RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429})
 FALLBACK_400_MARKERS = (
     "model",
     "service_tier",

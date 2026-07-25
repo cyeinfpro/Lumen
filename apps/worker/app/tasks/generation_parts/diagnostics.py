@@ -11,22 +11,26 @@ from typing import Any
 DIAG_STRING_LIMIT = 500
 DIAG_COLLECTION_LIMIT = 20
 PROVIDER_ATTEMPT_ERROR_LIMIT = 300
-PRIVATE_DIAGNOSTIC_KEYS = {
-    "provider",
-    "actual_provider",
-    "actual_endpoint",
-    "proxy_name",
-    "proxy_enabled",
-    "debug_id",
-}
-PRIVATE_PROVIDER_ATTEMPT_KEYS = {
-    "provider",
-    "actual_provider",
-    "endpoint",
-    "actual_endpoint",
-    "proxy_name",
-    "proxy_enabled",
-}
+PRIVATE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "provider",
+        "actual_provider",
+        "actual_endpoint",
+        "proxy_name",
+        "proxy_enabled",
+        "debug_id",
+    }
+)
+PRIVATE_PROVIDER_ATTEMPT_KEYS = frozenset(
+    {
+        "provider",
+        "actual_provider",
+        "endpoint",
+        "actual_endpoint",
+        "proxy_name",
+        "proxy_enabled",
+    }
+)
 PRIVATE_PROVIDER_PROGRESS_KEYS = PRIVATE_PROVIDER_ATTEMPT_KEYS | {
     "from_provider",
     "from_endpoint",

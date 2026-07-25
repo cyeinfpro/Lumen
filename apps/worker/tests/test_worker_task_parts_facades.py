@@ -11,21 +11,19 @@ from app.tasks.video_generation_parts import errors as video_errors
 from app.tasks.volcano_assets_parts import receipts as volcano_receipts
 
 
-def test_extracted_helpers_remain_available_from_task_facades() -> None:
-    assert completion._split_csv_ids is request_metadata._split_csv_ids
-    assert (
-        completion._merge_completion_upstream_metadata
-        is request_metadata._merge_completion_upstream_metadata
-    )
+def test_worker_task_entrypoints_do_not_reexport_private_part_helpers() -> None:
+    assert not hasattr(completion, "_split_csv_ids")
+    assert not hasattr(completion, "_merge_completion_upstream_metadata")
+    assert request_metadata._split_csv_ids("a,b") == ["a", "b"]
     assert context_summary._SummaryRequest is context_summary_results.SummaryRequest
     assert (
         context_summary._worker_compact_summary_payload
         is context_summary_results.worker_compact_summary_payload
     )
-    assert video_generation._video_exception_code is video_errors.video_exception_code
-    assert (
-        video_generation._append_bounded_history is video_errors.append_bounded_history
-    )
+    assert not hasattr(video_generation, "_video_exception_code")
+    assert not hasattr(video_generation, "_append_bounded_history")
+    assert callable(video_errors.video_exception_code)
+    assert callable(video_errors.append_bounded_history)
     assert volcano_assets._receipt_result is volcano_receipts.receipt_result
     assert (
         volcano_assets._validated_receipt_result

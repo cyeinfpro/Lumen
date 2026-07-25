@@ -6,14 +6,27 @@ Image probe：1024x1024 低质量生图，必须真返回 base64 (>= 1KB) 才算
 
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import asyncio
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
 import pytest
 
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
+from app.provider_runtime.probe_runtime import (
+    DEFAULT_PROVIDER_PROBE_RUNTIME,
+    use_provider_probe_runtime,
+)
+
+
+def _probe_runtime(**changes: Any):
+    return use_provider_probe_runtime(
+        replace(DEFAULT_PROVIDER_PROBE_RUNTIME, **changes)
+    )
 
 
 def _cfg(name: str = "acc1") -> ProviderConfig:
@@ -263,8 +276,8 @@ async def test_probe_one_returns_true_when_answer_is_9801(
     def fake_async_client(*_a: Any, **_kw: Any) -> _StubAsyncClient:
         return stub
 
-    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
-    ok = await pool._probe_one(pool._providers[0])
+    with _probe_runtime(async_client_factory=fake_async_client):
+        ok = await pool._probe_one(pool._providers[0])
     assert ok is True
     # 探活请求一定带正确 prompt + gpt-5.4-mini
     assert stub.posts[0]["json"]["model"] == "gpt-5.4-mini"
@@ -278,8 +291,8 @@ async def test_probe_one_returns_false_when_answer_is_wrong(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9802"}))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-    ok = await pool._probe_one(pool._providers[0])
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        ok = await pool._probe_one(pool._providers[0])
     assert ok is False
 
 
@@ -299,9 +312,8 @@ async def test_probe_one_rejects_9801_outside_output_text(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     stub = _StubAsyncClient(_StubResponse(200, payload))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-
-    assert await pool._probe_one(pool._providers[0]) is False
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -310,8 +322,8 @@ async def test_probe_one_returns_false_on_5xx(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     stub = _StubAsyncClient(_StubResponse(503, {"error": "down"}))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-    ok = await pool._probe_one(pool._providers[0])
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        ok = await pool._probe_one(pool._providers[0])
     assert ok is False
 
 
@@ -322,8 +334,8 @@ async def test_probe_one_returns_false_on_4xx_auth(
     """旧实现 4xx 也算 healthy；新算术 probe 4xx 算 fail（auth/quota 都不是真活）。"""
     pool = _make_pool(_cfg("acc1"))
     stub = _StubAsyncClient(_StubResponse(401, {"error": "unauthorized"}))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-    ok = await pool._probe_one(pool._providers[0])
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        ok = await pool._probe_one(pool._providers[0])
     assert ok is False
 
 
@@ -343,8 +355,8 @@ async def test_probe_one_returns_false_on_network_error(
         async def post(self, *_a: Any, **_kw: Any) -> Any:
             raise httpx.ConnectError("DNS failed")
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: _BoomClient())
-    ok = await pool._probe_one(pool._providers[0])
+    with _probe_runtime(async_client_factory=lambda *a, **kw: _BoomClient()):
+        ok = await pool._probe_one(pool._providers[0])
     assert ok is False
 
 
@@ -363,8 +375,8 @@ async def test_probe_one_extracts_from_output_array(
         ]
     }
     stub = _StubAsyncClient(_StubResponse(200, payload))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-    assert await pool._probe_one(pool._providers[0]) is True
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        assert await pool._probe_one(pool._providers[0]) is True
 
 
 @pytest.mark.asyncio
@@ -379,8 +391,8 @@ async def test_probe_one_extracts_from_sse_response(
         'data: {"type":"response.completed"}\n\n'
     )
     stub = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-    assert await pool._probe_one(pool._providers[0]) is True
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        assert await pool._probe_one(pool._providers[0]) is True
 
 
 @pytest.mark.asyncio
@@ -400,9 +412,8 @@ async def test_probe_one_rejects_9801_in_non_output_sse(
 ) -> None:
     pool = _make_pool(_cfg("acc1"))
     stub = _StubAsyncClient(_StubResponse(200, ValueError("not json"), raw))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-
-    assert await pool._probe_one(pool._providers[0]) is False
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        assert await pool._probe_one(pool._providers[0]) is False
 
 
 @pytest.mark.asyncio
@@ -414,9 +425,8 @@ async def test_probe_one_skips_generation_locked_provider_without_http(
     def fail_async_client(*_a: Any, **_kw: Any) -> Any:
         raise AssertionError("locked provider should not call /v1/responses")
 
-    monkeypatch.setattr(httpx, "AsyncClient", fail_async_client)
-
-    assert await pool._probe_one(pool._providers[0]) is True
+    with _probe_runtime(async_client_factory=fail_async_client):
+        assert await pool._probe_one(pool._providers[0]) is True
 
 
 # --- image probe ------------------------------------------------------------
@@ -438,9 +448,9 @@ async def test_probe_image_one_succeeds_with_real_b64(
         assert kwargs["base_url_override"] == pool._providers[0].base_url
         return fake_b64, None
 
-    from app import upstream
-
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_stream
+    )
     ok = await pool._probe_image_one(pool._providers[0])
     assert ok is True
 
@@ -454,9 +464,9 @@ async def test_probe_image_one_fails_when_b64_too_short(
     async def fake_stream(**_kw: Any) -> tuple[str, str | None]:
         return "tiny", None
 
-    from app import upstream
-
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_stream
+    )
     ok = await pool._probe_image_one(pool._providers[0])
     assert ok is False
 
@@ -473,7 +483,9 @@ async def test_probe_image_one_fails_on_upstream_error(
             "moderation_blocked", error_code="moderation_blocked", status_code=200
         )
 
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_stream
+    )
     ok = await pool._probe_image_one(pool._providers[0])
     assert ok is False
 
@@ -483,12 +495,13 @@ async def test_probe_image_one_skips_generation_locked_provider_without_response
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_locked_cfg())
-    from app import upstream
 
     async def fail_stream(**_kw: Any) -> tuple[str, str | None]:
         raise AssertionError("locked provider should not call /v1/responses")
 
-    monkeypatch.setattr(upstream, "_responses_image_stream", fail_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fail_stream
+    )
 
     assert await pool._probe_image_one(pool._providers[0]) is True
 
@@ -543,7 +556,9 @@ async def test_probe_image_all_calls_per_provider_and_reports(
             return "A" * 5000, None
         raise upstream.UpstreamError("server_error", error_code="server_error")
 
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_stream
+    )
 
     results = await pool.probe_image_all()
     assert results == {"good": True, "bad": False}
@@ -559,9 +574,8 @@ async def test_probe_all_skips_generation_locked_provider(
 ) -> None:
     pool = _make_pool(_locked_cfg(), _cfg("responses"))
     stub = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: stub)
-
-    results = await pool.probe_all()
+    with _probe_runtime(async_client_factory=lambda *a, **kw: stub):
+        results = await pool.probe_all()
 
     assert results == {"responses": True}
     assert len(stub.posts) == 1
@@ -572,7 +586,6 @@ async def test_probe_image_all_skips_generation_locked_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = _make_pool(_locked_cfg(), _cfg("responses"))
-    from app import upstream
 
     calls: list[str] = []
 
@@ -580,7 +593,9 @@ async def test_probe_image_all_skips_generation_locked_provider(
         calls.append(kwargs["api_key_override"])
         return "A" * 5000, None
 
-    monkeypatch.setattr(upstream, "_responses_image_stream", fake_stream)
+    monkeypatch.setattr(
+        upstream_services().responses, "responses_image_stream", fake_stream
+    )
 
     results = await pool.probe_image_all()
 
@@ -618,7 +633,8 @@ def test_open_circuit_fallback_failure_keeps_cooldown_deadline(
     monkeypatch.setattr(provider_pool_module.time, "monotonic", lambda: now)
 
     assert [p.name for p in pool._select_ordered()] == ["acc1"]
-    pool.report_failure("acc1")
+    with _probe_runtime(monotonic=lambda: now):
+        pool.report_failure("acc1")
 
     assert h.consecutive_failures == 3
     assert h.cooldown_until == now + 30.0
@@ -647,7 +663,8 @@ def test_open_fallback_finishing_after_deadline_does_not_reopen_circuit(
     assert [p.name for p in pool._select_ordered()] == ["acc1"]
     assert h.half_open_probe_inflight is False
     clock[0] = original_deadline + 1.0
-    pool.report_failure("acc1")
+    with _probe_runtime(monotonic=lambda: clock[0]):
+        pool.report_failure("acc1")
 
     assert h.consecutive_failures == 3
     assert h.cooldown_until == original_deadline
@@ -725,8 +742,9 @@ def test_half_open_probe_failure_reopens_circuit_and_releases_slot(
     assert provider.name == "acc1"
     assert h.half_open_probe_inflight is True
 
-    with pool.text_attempt(provider) as attempt:
-        attempt.report_failure()
+    with _probe_runtime(monotonic=lambda: now):
+        with pool.text_attempt(provider) as attempt:
+            attempt.report_failure()
 
     assert h.half_open_probe_inflight is False
     assert h.half_open_probe_token is None
@@ -774,7 +792,6 @@ def test_open_fallback_failure_does_not_release_concurrent_half_open_owner(
 
 @pytest.mark.asyncio
 async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import provider_pool as provider_pool_module
 
     providers = [_cfg(f"acc{i}") for i in range(5)]
     pool = _make_pool(*providers)
@@ -791,11 +808,10 @@ async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> 
         finally:
             active -= 1
 
-    monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
-    monkeypatch.setitem(pool.probe_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2)
     monkeypatch.setattr(pool, "_probe_one", fake_probe)
 
-    results = await pool.probe_all()
+    with _probe_runtime(probe_max_concurrency=2):
+        results = await pool.probe_all()
 
     assert results == {provider.name: True for provider in providers}
     assert max_active <= 2
@@ -805,7 +821,6 @@ async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_probe_image_all_limits_parallelism(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool as provider_pool_module
 
     providers = [_cfg(f"acc{i}") for i in range(5)]
     pool = _make_pool(*providers)
@@ -822,11 +837,10 @@ async def test_probe_image_all_limits_parallelism(
         finally:
             active -= 1
 
-    monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
-    monkeypatch.setitem(pool.probe_image_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2)
     monkeypatch.setattr(pool, "_probe_image_one", fake_probe)
 
-    results = await pool.probe_image_all()
+    with _probe_runtime(probe_max_concurrency=2):
+        results = await pool.probe_image_all()
 
     assert results == {provider.name: True for provider in providers}
     assert max_active <= 2
@@ -898,7 +912,7 @@ async def test_probe_providers_skips_image_probe_when_interval_zero(
 async def test_probe_providers_runs_image_probe_when_interval_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """interval > 0 时 cron 应触发 probe_image_all 并复位 _last_image_probe_at。"""
+    """interval > 0 时 cron 应触发 probe_image_all 并更新时间戳。"""
     from app import provider_pool, runtime_settings
 
     async def fake_resolve_int(key: str, default: int) -> int:
@@ -926,10 +940,10 @@ async def test_probe_providers_runs_image_probe_when_interval_set(
         return {"acc1": True}
 
     monkeypatch.setattr(pool, "probe_image_all", fake_probe_image_all)
-    # 强制 _last_image_probe_at 远早于 now，让 interval 判定通过
+    # 强制 runtime 时间戳远早于 now，让 interval 判定通过。
     # 用 -1e9 而不是 0.0：CI 上 fresh 进程的 time.monotonic() 可能 < 1800，
     # 0.0 - now 不一定 >= image_interval；负大值绝对管够。
-    monkeypatch.setattr(provider_pool, "_last_image_probe_at", -1e9)
+    monkeypatch.setattr(provider_pool._RUNTIME, "last_image_probe_at", -1e9)
 
     await provider_pool.probe_providers({})
     assert image_probe_called is True

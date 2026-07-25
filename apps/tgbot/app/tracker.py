@@ -234,7 +234,9 @@ class Tracker:
         # bytes → str
         d: dict[str, str] = {
             (k.decode() if isinstance(k, (bytes, bytearray)) else str(k)): (
-                v.decode("utf-8", errors="replace") if isinstance(v, (bytes, bytearray)) else str(v)
+                v.decode("utf-8", errors="replace")
+                if isinstance(v, (bytes, bytearray))
+                else str(v)
             )
             for k, v in raw.items()
         }
@@ -302,7 +304,9 @@ class Tracker:
 
     async def remove(self, gen_id: str) -> None:
         client = self._client()
-        await client.delete(_key(gen_id), _notified_key(gen_id), _delivering_key(gen_id))
+        await client.delete(
+            _key(gen_id), _notified_key(gen_id), _delivering_key(gen_id)
+        )
 
     async def init_batch(self, batch_id: str, count: int) -> None:
         if not batch_id or count <= 0:

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.tasks import generation
+from app.tasks.generation_parts import default_runtime as generation
 
 
 def test_classify_inflight_lane_image2_routes() -> None:
-    assert generation._classify_inflight_lane("image2", "images/generations") == "lane_a"
+    assert (
+        generation._classify_inflight_lane("image2", "images/generations") == "lane_a"
+    )
     assert generation._classify_inflight_lane("image2_direct", None) == "lane_a"
 
 

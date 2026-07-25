@@ -10,6 +10,7 @@ import secrets
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
@@ -83,51 +84,51 @@ from ..observability import (
 from ..ratelimit import RateLimiter, client_ip
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
-from ..services.billing.errors import _http as _http
+from ..services.billing.errors import http_error as _http
 from ..services.billing.pricing_units import BULK_RATE_UNITS as _BULK_RATE_UNITS
 from ..services.billing.pricing_values import (
-    _ZERO_PRICE_ALLOWED_UNITS as _ZERO_PRICE_ALLOWED_UNITS,
-    _bulk_multiplier_x10000 as _bulk_multiplier_x10000,
-    _bulk_numeric_micro as _bulk_numeric_micro,
-    _openai_price_micro as _openai_price_micro,
-    _parse_price_rows as _parse_price_rows,
-    _pricing_group_priorities as _pricing_group_priorities,
-    _rmb_to_micro_or_422 as _rmb_to_micro_or_422,
-    _validate_enabled_pricing_value as _validate_enabled_pricing_value,
+    ZERO_PRICE_ALLOWED_UNITS as _ZERO_PRICE_ALLOWED_UNITS,
+    bulk_multiplier_x10000 as _bulk_multiplier_x10000,
+    bulk_numeric_micro as _bulk_numeric_micro,
+    openai_price_micro as _openai_price_micro,
+    parse_price_rows as _parse_price_rows,
+    pricing_group_priorities as _pricing_group_priorities,
+    rmb_to_micro_or_422 as _rmb_to_micro_or_422,
+    validate_enabled_pricing_value as _validate_enabled_pricing_value,
 )
 from ..services.billing.redemption_values import (
-    _DOWNLOAD_TOKEN_PREFIX as _DOWNLOAD_TOKEN_PREFIX,
-    _PLAINTEXT_BATCH_PREFIX as _PLAINTEXT_BATCH_PREFIX,
-    _REDEMPTION_ALREADY_USED_CONSTRAINT as _REDEMPTION_ALREADY_USED_CONSTRAINT,
-    _REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT as _REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT,
-    _REDEMPTION_DOWNLOAD_TTL_SECONDS as _REDEMPTION_DOWNLOAD_TTL_SECONDS,
-    _REDEMPTION_IDEMPOTENCY_NAMESPACE as _REDEMPTION_IDEMPOTENCY_NAMESPACE,
-    _REDEMPTION_IDEMPOTENCY_TTL_SECONDS as _REDEMPTION_IDEMPOTENCY_TTL_SECONDS,
-    _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE as _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE,
-    _REDEMPTION_KNOWN_CONSTRAINTS as _REDEMPTION_KNOWN_CONSTRAINTS,
-    _REDEMPTION_REPLAY_CONSTRAINTS as _REDEMPTION_REPLAY_CONSTRAINTS,
-    _client_idempotency_key as _client_idempotency_key,
-    _integrity_constraint_name as _integrity_constraint_name,
-    _redemption_batch_idempotency_key as _redemption_batch_idempotency_key,
-    _redemption_batch_lock_identity as _redemption_batch_lock_identity,
-    _redemption_batch_payload_matches as _redemption_batch_payload_matches,
-    _redemption_batch_request_hash as _redemption_batch_request_hash,
-    _redemption_csv_batch_id as _redemption_csv_batch_id,
-    _redemption_csv_payload as _redemption_csv_payload,
-    _redemption_idempotency_cache_key as _redemption_idempotency_cache_key,
-    _redemption_idempotency_key as _redemption_idempotency_key,
-    _redemption_plaintext_payload as _redemption_plaintext_payload,
-    _redemption_request_hash as _redemption_request_hash,
-    _redemption_status as _redemption_status,
-    _redemption_usage_id as _redemption_usage_id,
-    _require_redemption_download_batch as _require_redemption_download_batch,
+    DOWNLOAD_TOKEN_PREFIX as _DOWNLOAD_TOKEN_PREFIX,
+    PLAINTEXT_BATCH_PREFIX as _PLAINTEXT_BATCH_PREFIX,
+    REDEMPTION_ALREADY_USED_CONSTRAINT as _REDEMPTION_ALREADY_USED_CONSTRAINT,
+    REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT as _REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT,
+    REDEMPTION_DOWNLOAD_TTL_SECONDS as _REDEMPTION_DOWNLOAD_TTL_SECONDS,
+    REDEMPTION_IDEMPOTENCY_NAMESPACE as _REDEMPTION_IDEMPOTENCY_NAMESPACE,
+    REDEMPTION_IDEMPOTENCY_TTL_SECONDS as _REDEMPTION_IDEMPOTENCY_TTL_SECONDS,
+    REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE as _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE,
+    REDEMPTION_KNOWN_CONSTRAINTS as _REDEMPTION_KNOWN_CONSTRAINTS,
+    REDEMPTION_REPLAY_CONSTRAINTS as _REDEMPTION_REPLAY_CONSTRAINTS,
+    client_idempotency_key as _client_idempotency_key,
+    integrity_constraint_name as _integrity_constraint_name,
+    redemption_batch_idempotency_key as _redemption_batch_idempotency_key,
+    redemption_batch_lock_identity as _redemption_batch_lock_identity,
+    redemption_batch_payload_matches as _redemption_batch_payload_matches,
+    redemption_batch_request_hash as _redemption_batch_request_hash,
+    redemption_csv_batch_id as _redemption_csv_batch_id,
+    redemption_csv_payload as _redemption_csv_payload,
+    redemption_idempotency_cache_key as _redemption_idempotency_cache_key,
+    redemption_idempotency_key as _redemption_idempotency_key,
+    redemption_plaintext_payload as _redemption_plaintext_payload,
+    redemption_request_hash as _redemption_request_hash,
+    redemption_status as _redemption_status,
+    redemption_usage_id as _redemption_usage_id,
+    require_redemption_download_batch as _require_redemption_download_batch,
 )
 from ..services.billing.usage import (
-    _CHARGE_KINDS as _CHARGE_KINDS,
-    _meta_int as _meta_int,
-    _scaled_meta_cost as _scaled_meta_cost,
-    _usage_by_kind as _usage_by_kind,
-    _usage_total as _usage_total,
+    CHARGE_KINDS as _CHARGE_KINDS,
+    meta_int as _meta_int,
+    scaled_meta_cost as _scaled_meta_cost,
+    usage_by_kind as _usage_by_kind,
+    usage_total as _usage_total,
 )
 from ..services.billing.wallet_activity import (
     money_out as _money,
@@ -166,11 +167,13 @@ _BILLING_AUDIT_EVENT_PREFIXES = (
     "account.mode_change",
     "billing.",
 )
-_BILLING_WINDOWS: dict[str, timedelta] = {
-    "5h": timedelta(hours=5),
-    "1d": timedelta(days=1),
-    "7d": timedelta(days=7),
-}
+_BILLING_WINDOWS = MappingProxyType(
+    {
+        "5h": timedelta(hours=5),
+        "1d": timedelta(days=1),
+        "7d": timedelta(days=7),
+    }
+)
 MAX_ADMIN_ADJUST_MICRO = 1_000_000 * billing_core.MICRO_RMB
 MAX_ADMIN_NEGATIVE_BALANCE_MICRO = 100_000 * billing_core.MICRO_RMB
 

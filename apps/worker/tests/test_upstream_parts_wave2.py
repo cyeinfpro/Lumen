@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.provider_runtime.upstream_services import upstream_services
+
 import io
 from types import SimpleNamespace
 from typing import Any
@@ -7,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app import upstream
+from app.upstream_parts import upstream_impl as upstream
 from app.upstream_parts import (
     image_stream,
     reference_images,
@@ -33,14 +35,22 @@ def test_wave2_modules_are_exposed_through_upstream_facade() -> None:
         "_resolve_reference_image_urls",
     )
     for name in reference_exports:
-        assert getattr(upstream, name) is getattr(reference_images, name)
+        assert getattr(upstream_services().references, name.lstrip("_")) is getattr(
+            reference_images, name
+        )
 
-    assert upstream._responses_image_stream is image_stream._responses_image_stream
-    assert upstream._iter_sse_with_runtime is responses_client._iter_sse_with_runtime
-    assert upstream._iter_sse is responses_client._iter_sse
+    assert (
+        upstream_services().responses.responses_image_stream
+        is image_stream._responses_image_stream
+    )
+    assert (
+        upstream_services().responses.iter_sse_with_runtime
+        is responses_client._iter_sse_with_runtime
+    )
+    assert upstream_services().responses.iter_sse is responses_client._iter_sse
     assert upstream.stream_completion is responses_client.stream_completion
     assert upstream.responses_call is not responses_client.responses_call
-    assert upstream.responses_call.__module__ == "app.upstream"
+    assert upstream.responses_call.__module__ == "app.upstream_parts.upstream_impl"
     for name in (
         "_api_base",
         "_responses_url",
@@ -51,12 +61,14 @@ def test_wave2_modules_are_exposed_through_upstream_facade() -> None:
         "_validate_image_job_base_url",
         "_validated_byok_target_for_request",
     ):
-        assert getattr(upstream, name) is getattr(request_targets, name)
+        assert getattr(upstream_services().requests, name.lstrip("_")) is getattr(
+            request_targets, name
+        )
 
 
 def test_request_target_helpers_preserve_encoding_and_byok_origin_checks() -> None:
     assert (
-        upstream._image_job_status_url(
+        upstream_services().requests.image_job_status_url(
             "https://image-job.example/v1/",
             "job/with space",
         )
@@ -68,14 +80,14 @@ def test_request_target_helpers_preserve_encoding_and_byok_origin_checks() -> No
         ("203.0.113.20",),
     )
     assert (
-        upstream._validated_byok_target_for_request(
+        upstream_services().requests.validated_byok_target_for_request(
             target,
             "https://byok.example/v1/responses",
         )
         is target
     )
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        upstream._validated_byok_target_for_request(
+        upstream_services().requests.validated_byok_target_for_request(
             target,
             "https://other.example/v1/responses",
         )
@@ -86,21 +98,25 @@ def test_request_target_helpers_preserve_encoding_and_byok_origin_checks() -> No
 def test_reference_limits_are_read_from_late_bound_facade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(upstream, "_MAX_REFERENCE_IMAGE_BYTES", 3)
+    monkeypatch.setattr(upstream_services().core, "MAX_REFERENCE_IMAGE_BYTES", 3)
     with pytest.raises(upstream.UpstreamError) as bytes_error:
-        upstream._normalize_reference_image(b"four")
+        upstream_services().references.normalize_reference_image(b"four")
     assert bytes_error.value.status_code == 413
     assert bytes_error.value.error_code == "reference_image_too_large"
 
     source = io.BytesIO()
-    upstream.PILImage.new("RGB", (2, 1), color=(1, 2, 3)).save(
+    upstream_services().infrastructure.PILImage.new(
+        "RGB", (2, 1), color=(1, 2, 3)
+    ).save(
         source,
         format="PNG",
     )
-    monkeypatch.setattr(upstream, "_MAX_REFERENCE_IMAGE_BYTES", 1024 * 1024)
-    monkeypatch.setattr(upstream, "_MAX_REFERENCE_IMAGE_PIXELS", 1)
+    monkeypatch.setattr(
+        upstream_services().core, "MAX_REFERENCE_IMAGE_BYTES", 1024 * 1024
+    )
+    monkeypatch.setattr(upstream_services().core, "MAX_REFERENCE_IMAGE_PIXELS", 1)
     with pytest.raises(upstream.UpstreamError) as pixels_error:
-        upstream._normalize_reference_image(source.getvalue())
+        upstream_services().references.normalize_reference_image(source.getvalue())
     assert pixels_error.value.status_code == 413
     assert pixels_error.value.error_code == "reference_image_too_large"
 
@@ -137,11 +153,19 @@ async def test_reference_url_live_uses_resolved_target_and_pinned_transport(
             seen["head_url"] = url
             return SimpleNamespace(status_code=204)
 
-    monkeypatch.setattr(upstream, "resolve_public_http_target", fake_resolve)
-    monkeypatch.setattr(upstream, "pinned_async_http_transport", fake_pinned)
-    monkeypatch.setattr(upstream.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        upstream_services().infrastructure, "resolve_public_http_target", fake_resolve
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure, "pinned_async_http_transport", fake_pinned
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure.httpx, "AsyncClient", FakeClient
+    )
 
-    assert await upstream._reference_url_is_live("https://user.example/reference.webp")
+    assert await upstream_services().references.reference_url_is_live(
+        "https://user.example/reference.webp"
+    )
     assert seen["resolved"] == (
         "https://user.example/reference.webp",
         True,
@@ -180,9 +204,11 @@ async def test_reference_sidecar_push_disables_redirects_and_environment_proxy(
             seen["post_kwargs"] = kwargs
             return FakeResponse()
 
-    monkeypatch.setattr(upstream.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        upstream_services().infrastructure.httpx, "AsyncClient", FakeClient
+    )
 
-    result = await upstream._push_reference_to_image_job(
+    result = await upstream_services().references.push_reference_to_image_job(
         b"normalized-webp",
         "image/webp",
         base_url="https://sidecar.example/",
@@ -195,7 +221,7 @@ async def test_reference_sidecar_push_disables_redirects_and_environment_proxy(
     assert seen["client_kwargs"]["trust_env"] is False
     timeout = seen["client_kwargs"]["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.read == upstream._REFERENCE_PUSH_TIMEOUT_S
+    assert timeout.read == upstream_services().core.REFERENCE_PUSH_TIMEOUT_S
     assert seen["post_kwargs"]["headers"]["Content-Type"] == "image/webp"
 
 
@@ -220,10 +246,14 @@ async def test_reference_url_resolution_uses_current_normalize_and_upload_facade
         seen.append(("upload", raw, mime, base_url, api_key, user_id))
         return "https://refs.example/current.webp"
 
-    monkeypatch.setattr(upstream, "_normalize_reference_image", fake_normalize)
-    monkeypatch.setattr(upstream, "_get_or_upload_reference", fake_upload)
+    monkeypatch.setattr(
+        upstream_services().references, "normalize_reference_image", fake_normalize
+    )
+    monkeypatch.setattr(
+        upstream_services().references, "get_or_upload_reference", fake_upload
+    )
 
-    assert await upstream._resolve_reference_image_urls(
+    assert await upstream_services().references.resolve_reference_image_urls(
         [b"original"],
         base_url="https://sidecar.example",
         api_key="sk-current",
@@ -273,22 +303,24 @@ async def test_completion_client_uses_current_validation_sort_and_sse_facades(
         seen["runtime_kwargs"] = kwargs
         yield {"type": "response.completed", "response": {"id": "response-1"}}
 
-    monkeypatch.setattr(upstream, "_validate_responses_body", fake_validate)
-    monkeypatch.setattr(upstream, "_stable_sort_tools", fake_sort)
-    monkeypatch.setattr(upstream, "_runtime_parts", fake_runtime_parts)
     monkeypatch.setattr(
-        upstream,
-        "_runtime_provider_name",
+        upstream_services().core, "validate_responses_body", fake_validate
+    )
+    monkeypatch.setattr(upstream_services().core, "stable_sort_tools", fake_sort)
+    monkeypatch.setattr(upstream_services().core, "runtime_parts", fake_runtime_parts)
+    monkeypatch.setattr(
+        upstream_services().core,
+        "runtime_provider_name",
         fake_runtime_provider_name,
     )
     monkeypatch.setattr(
-        upstream,
+        upstream_services().infrastructure,
         "resolve_provider_proxy_url",
         fake_resolve_proxy,
     )
     monkeypatch.setattr(
-        upstream,
-        "_iter_sse_with_runtime",
+        upstream_services().responses,
+        "iter_sse_with_runtime",
         fake_iter_runtime,
     )
 
@@ -323,7 +355,7 @@ async def test_completion_client_uses_current_validation_sort_and_sse_facades(
         "base": "https://upstream.example/v1",
         "api_key": "sk-runtime",
         "body": body,
-        "interruption_error_code": upstream._TEXT_STREAM_INTERRUPTED_ERROR_CODE,
+        "interruption_error_code": upstream_services().core.TEXT_STREAM_INTERRUPTED_ERROR_CODE,
         "proxy_url": None,
     }
 
@@ -349,9 +381,11 @@ async def test_byok_completion_forwards_validated_target_only_for_direct_path(
         captured.update(kwargs)
         yield {"type": "response.completed", "response": {"id": "response-1"}}
 
-    monkeypatch.setattr(upstream, "_iter_sse_with_runtime", fake_iter_runtime)
     monkeypatch.setattr(
-        upstream,
+        upstream_services().responses, "iter_sse_with_runtime", fake_iter_runtime
+    )
+    monkeypatch.setattr(
+        upstream_services().infrastructure,
         "resolve_provider_proxy_url",
         lambda _proxy: _async_value(None),
     )

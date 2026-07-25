@@ -88,7 +88,11 @@ class LumenApi:
                 )
         except ValueError:
             pass
-        raise ApiError(code="http_error", message=resp.text or resp.reason_phrase, status=resp.status_code)
+        raise ApiError(
+            code="http_error",
+            message=resp.text or resp.reason_phrase,
+            status=resp.status_code,
+        )
 
     async def bind(
         self,
@@ -119,7 +123,9 @@ class LumenApi:
         self._raise_for(resp)
         return resp.json()
 
-    async def create_generation(self, chat_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    async def create_generation(
+        self, chat_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         # 生成是 enqueue，立即返回 generation_ids；本身很快。但 worker 4K 任务上限 1500s，
         # 这里只是创建，timeout 30s 足够。
         body = dict(payload)
@@ -148,7 +154,9 @@ class LumenApi:
         self._raise_for(resp)
         return str(resp.json().get("enhanced") or "").strip()
 
-    async def get_runtime_config(self, avoid: list[str] | None = None) -> dict[str, Any]:
+    async def get_runtime_config(
+        self, avoid: list[str] | None = None
+    ) -> dict[str, Any]:
         """bot bootstrap / failover：拿 bot 配置 + pool 选出来的 proxy。"""
         params: dict[str, str] = {}
         if avoid:
@@ -233,7 +241,9 @@ class LumenApi:
                                     tmp_root, required_bytes=len(chunk)
                                 )
                                 while projected >= next_disk_check:
-                                    next_disk_check += _DOWNLOAD_DISK_CHECK_INTERVAL_BYTES
+                                    next_disk_check += (
+                                        _DOWNLOAD_DISK_CHECK_INTERVAL_BYTES
+                                    )
                             fp.write(chunk)
                             size = projected
             except Exception:

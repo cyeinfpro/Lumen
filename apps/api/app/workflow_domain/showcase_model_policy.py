@@ -231,3 +231,44 @@ def _compact_showcase_user_direction(text: str, style_region: str) -> str:
         direction = direction.replace(token, "")
     direction = re.sub(r"[，,、；;\s]+", "，", direction).strip("，,、；; ")
     return direction[:60]
+
+
+# Public workflow contracts.
+FACE_ARCHETYPES_FEMALE = _FACE_ARCHETYPES_FEMALE
+FACE_ARCHETYPES_MALE = _FACE_ARCHETYPES_MALE
+accessory_age_direction = _accessory_age_direction
+accessory_strength_direction = _accessory_strength_direction
+age_direction = _age_direction
+compact_showcase_user_direction = _compact_showcase_user_direction
+height_requirement = _height_requirement
+infer_age = _infer_age
+infer_candidate_gender = _infer_candidate_gender
+infer_model_height_cm = _infer_model_height_cm
+model_diversity_anchor = _model_diversity_anchor
+style_region_from_text = _style_region_from_text
+
+__all__ = [
+    "FACE_ARCHETYPES_FEMALE",
+    "FACE_ARCHETYPES_MALE",
+    "_FACE_ARCHETYPES_FEMALE",
+    "_FACE_ARCHETYPES_MALE",
+    "_accessory_age_direction",
+    "_accessory_strength_direction",
+    "_age_direction",
+    "_compact_showcase_user_direction",
+    "_height_requirement",
+    "_infer_age",
+    "_infer_candidate_gender",
+    "_infer_model_height_cm",
+    "_model_diversity_anchor",
+    "_style_region_from_text",
+    "accessory_age_direction",
+    "accessory_strength_direction",
+    "age_direction",
+    "compact_showcase_user_direction",
+    "height_requirement",
+    "infer_candidate_gender",
+    "infer_model_height_cm",
+    "model_diversity_anchor",
+    "style_region_from_text",
+]

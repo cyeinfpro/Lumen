@@ -16,16 +16,13 @@ from app.workflow_services import (
     library_items,
     library_lease,
     library_materialization,
-    library_runtime,
     library_storage,
     library_sync,
-    library_sync_operation,
     showcase_context,
     showcase_inputs,
     showcase_orchestration,
     showcase_preflight,
     showcase_prompts,
-    showcase_runtime,
     showcase_scene_policy,
     showcase_shots,
 )
@@ -193,10 +190,6 @@ def test_library_service_exports_are_direct_submodule_aliases() -> None:
             "_complete_library_sync_lease_sync",
             "_fail_library_sync_lease_sync",
         ),
-        library_sync_operation: (
-            "_sync_library_presets_from_github_folder",
-            "_do_sync_library_presets",
-        ),
         library_materialization: (
             "_create_user_image_from_preset",
             "_add_user_library_item",
@@ -206,8 +199,11 @@ def test_library_service_exports_are_direct_submodule_aliases() -> None:
         for name in names:
             assert getattr(library_sync, name) is getattr(module, name)
 
-    assert library_sync.FACADE_RUNTIME is library_runtime.FACADE_RUNTIME
-    assert library_sync._runtime is library_runtime.runtime
+    assert tuple(
+        inspect.signature(
+            library_sync._sync_library_presets_from_github_folder
+        ).parameters
+    ) == ("contents_url", "proxy_url")
     assert (
         library_sync._ModelLibrarySyncLimitExceeded
         is library_github._ModelLibrarySyncLimitExceeded
@@ -251,8 +247,6 @@ def test_showcase_service_exports_are_direct_submodule_aliases() -> None:
         for name in names:
             assert getattr(showcase_preflight, name) is getattr(module, name)
 
-    assert showcase_preflight.FACADE_RUNTIME is showcase_runtime.FACADE_RUNTIME
-    assert showcase_preflight._runtime is showcase_runtime.runtime
     assert (
         showcase_preflight._STATIC_REWRITE_REPLACEMENTS
         is showcase_prompts._STATIC_REWRITE_REPLACEMENTS
@@ -277,7 +271,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
         "utf-8",
     )
     monkeypatch.setattr(
-        library_sync,
+        library_storage,
         "_library_user_index_path",
         lambda _user_id: index_path,
     )
@@ -289,7 +283,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
     saved = json.loads(index_path.read_text("utf-8"))
     assert [item["id"] for item in saved["items"]] == ["user:keep"]
 
-    monkeypatch.setattr(library_sync, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
+    monkeypatch.setattr(library_storage, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
     with pytest.raises(HTTPException) as excinfo:
         library_sync._read_json_file(index_path, {})
     assert excinfo.value.detail["error"]["code"] == "invalid_index"
@@ -317,8 +311,9 @@ async def test_library_sync_service_direct_entry_uses_patched_collaborators(
         assert lease_token == "lease-token"
         return ApparelModelLibrarySyncOut(status="ok")
 
-    monkeypatch.setattr(library_sync, "_claim_library_sync_lease", fake_claim)
-    monkeypatch.setattr(library_sync, "_do_sync_library_presets", fake_sync)
+    dependencies = library_sync.APPAREL_LIBRARY_SYNC_DEPENDENCIES
+    monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
+    monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_sync)
 
     result = await library_sync._sync_library_presets_from_github_folder(
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"

@@ -20,25 +20,24 @@ from lumen_core.providers import parse_provider_bool, parse_proxy_json
 from lumen_core.url_security import PublicHttpTarget, resolve_public_http_target
 
 from .config import settings
-from .provider_runtime import byok_context as _byok_context
+from .provider_runtime.byok_context import (
+    bind_byok_http_target,
+    current_byok_http_target,
+    reset_byok_http_target,
+    validate_byok_http_target,
+)
 from .provider_runtime.contracts import ResolvedProvider
 from .provider_runtime.errors import UpstreamError
 
 
 logger = logging.getLogger(__name__)
-_BYOK_HTTP_TARGET_CONTEXT = _byok_context._BYOK_HTTP_TARGET_CONTEXT
-_http_origin = _byok_context._http_origin
-bind_byok_http_target = _byok_context.bind_byok_http_target
-current_byok_http_target = _byok_context.current_byok_http_target
-reset_byok_http_target = _byok_context.reset_byok_http_target
-validate_byok_http_target = _byok_context.validate_byok_http_target
 
 
 # 由 tasks 模块（generation.py / completion.py / upstream.py）共享的 BYOK provider
 # 名前缀。任何 admin pool 报告（report_image_*, account_limiter.record_*）必须
 # 跳过 BYOK provider，否则会污染共享 provider 池的健康度 / 配额计数。
 _BYOK_PROVIDER_PREFIX = "user:"
-_DEV_ENVS = {"dev", "development", "local", "test"}
+_DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 
 
 def is_byok_provider(provider: Any) -> bool:
@@ -303,3 +302,17 @@ def byok_error_to_generation_code(error_code: str) -> str:
     if error_code == "byok_purpose_mismatch":
         return EC.UPSTREAM_AUTH_ERROR.value
     return EC.UPSTREAM_ERROR.value
+
+
+__all__ = (
+    "bind_byok_http_target",
+    "byok_error_message",
+    "byok_error_to_generation_code",
+    "classify_user_credential_error",
+    "current_byok_http_target",
+    "is_byok_provider",
+    "record_user_credential_runtime_error",
+    "reset_byok_http_target",
+    "resolve_user_credential_runtime",
+    "validate_byok_http_target",
+)

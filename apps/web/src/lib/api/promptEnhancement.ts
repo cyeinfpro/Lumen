@@ -1,10 +1,5 @@
-import {
-  API_BASE,
-  ApiError,
-  ensureCsrfToken,
-  handle401,
-  refreshCsrfToken,
-} from "./http";
+import { ApiError } from "./http";
+import { streamClient } from "./streamClient";
 import type { VideoPromptEnhanceIn } from "../types";
 
 function createSSEDataParser(onData: (data: string) => void): {
@@ -182,37 +177,6 @@ function promptEnhanceStreamErrorMessage(code: string): string {
   }
 }
 
-function unauthorizedError(): ApiError {
-  handle401();
-  return new ApiError({ code: "unauthorized", message: "未登录", status: 401 });
-}
-
-function networkError(err: unknown): ApiError {
-  return new ApiError({
-    code: "network_error",
-    message: err instanceof Error ? err.message : "network error",
-    status: 0,
-  });
-}
-
-async function fetchEnhancement(
-  doFetch: (csrf: string | null) => Promise<Response>,
-  signal?: AbortSignal,
-): Promise<Response> {
-  try {
-    const response = await doFetch(await ensureCsrfToken());
-    if (response.status !== 403) return response;
-    const error = await streamApiErrorFromResponse(response, "enhance_failed");
-    if (error.code !== "csrf_failed") throw error;
-    const fresh = await refreshCsrfToken().catch(() => null);
-    if (!fresh) throw error;
-    return await doFetch(fresh);
-  } catch (err) {
-    if (err instanceof ApiError || signal?.aborted) throw err;
-    throw networkError(err);
-  }
-}
-
 function parseEnhancementEvent(
   payload: string,
   state: { hasText: boolean; streamDone: boolean },
@@ -308,23 +272,7 @@ export async function streamPromptEnhancement(
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const url = `${API_BASE.replace(/\/$/, "")}${path}`;
-  const doFetch = (csrf: string | null) =>
-    fetch(url, {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        ...(csrf ? { "X-CSRF-Token": csrf } : {}),
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-  const response = await fetchEnhancement(doFetch, signal);
-  if (response.status === 401) throw unauthorizedError();
-  if (!response.ok) {
-    throw await streamApiErrorFromResponse(response, "enhance_failed");
-  }
+  const response = await streamClient.postJson(path, body, signal);
   const reader = response.body?.getReader();
   if (!reader) {
     throw new ApiError({
