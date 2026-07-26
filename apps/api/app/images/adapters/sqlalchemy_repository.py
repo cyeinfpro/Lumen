@@ -29,19 +29,25 @@ def _reconcile_candidate_condition(
 ) -> Any:
     """Select only resumable/due rows; healthy old READY rows are not work.
 
-    STAGING/PROCESSING/PUBLISHING can be recovered when stale even if an older
-    writer failed before setting ``reconcile_after``. READY rows are selected
-    only when another subsystem explicitly schedules an integrity repair.
+    STAGING/PROCESSING rows can be recovered once stale. PUBLISHING rows with
+    an explicit future schedule must wait for that schedule; only legacy rows
+    missing ``reconcile_after`` fall back to the stale timeout. READY rows are
+    selected only when another subsystem explicitly schedules an integrity
+    repair.
     """
 
-    stale_incomplete = and_(
+    stale_early_phase = and_(
         status_column.in_(
             [
                 ArtifactStatus.STAGING.value,
                 ArtifactStatus.PROCESSING.value,
-                ArtifactStatus.PUBLISHING.value,
             ]
         ),
+        updated_at_column <= stale_before,
+    )
+    stale_unscheduled_publish = and_(
+        status_column == ArtifactStatus.PUBLISHING.value,
+        reconcile_after_column.is_(None),
         updated_at_column <= stale_before,
     )
     scheduled = and_(
@@ -54,7 +60,7 @@ def _reconcile_candidate_condition(
         reconcile_after_column.is_not(None),
         reconcile_after_column <= due_before,
     )
-    return or_(scheduled, stale_incomplete)
+    return or_(scheduled, stale_early_phase, stale_unscheduled_publish)
 
 
 def _reconcile_priority(status_column: Any) -> Any:

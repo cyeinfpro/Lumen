@@ -33,6 +33,10 @@ echo
 echo "==> python architecture budget"
 uv run python scripts/check_architecture.py
 
+echo
+echo "==> python module runtime state budget"
+uv run python scripts/module_runtime_state_audit.py
+
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
        [ -x "apps/web/node_modules/.bin/tsc" ] &&
