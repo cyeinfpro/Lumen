@@ -16,8 +16,22 @@ class CapacityUnavailable(RuntimeError):
     pass
 
 
+_HISTORICAL_GLOBAL_PEAK_BYTES = 512 * 1024 * 1024
+# The public upload contract allows images close to 8K/64 MP. The resource
+# estimator places a worst-case 8000x8000 RGBA upload at about 1.16 GiB, so the
+# historical 512 MiB default rejected otherwise valid uploads even on an idle
+# deployment. Respect explicit operator values, but lift the implicit default
+# to a one-large-upload-safe budget.
+_DEFAULT_EFFECTIVE_GLOBAL_PEAK_BYTES = 1536 * 1024 * 1024
+
+
 def configured_process_count() -> int:
-    for name in ("WEB_CONCURRENCY", "GUNICORN_WORKERS", "UVICORN_WORKERS"):
+    for name in (
+        "LUMEN_API_WORKERS",
+        "WEB_CONCURRENCY",
+        "GUNICORN_WORKERS",
+        "UVICORN_WORKERS",
+    ):
         raw = os.environ.get(name, "").strip()
         if raw:
             try:
@@ -25,6 +39,16 @@ def configured_process_count() -> int:
             except ValueError:
                 continue
     return 1
+
+
+def _effective_global_peak_bytes(
+    configured: int,
+    *,
+    explicitly_configured: bool,
+) -> int:
+    if explicitly_configured or configured != _HISTORICAL_GLOBAL_PEAK_BYTES:
+        return configured
+    return _DEFAULT_EFFECTIVE_GLOBAL_PEAK_BYTES
 
 
 @dataclass(frozen=True)
@@ -39,7 +63,12 @@ class CapacityLimits:
 
         return cls(
             max_concurrency=settings.image_upload_global_concurrency,
-            max_peak_bytes=settings.image_upload_global_peak_bytes,
+            max_peak_bytes=_effective_global_peak_bytes(
+                settings.image_upload_global_peak_bytes,
+                explicitly_configured=(
+                    "image_upload_global_peak_bytes" in settings.model_fields_set
+                ),
+            ),
             lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
         )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lumen_core.models import Image
@@ -17,6 +17,54 @@ class ArtifactCommitError(RuntimeError):
 
 class ArtifactTransitionConflict(RuntimeError):
     pass
+
+
+def _reconcile_candidate_condition(
+    status_column: Any,
+    reconcile_after_column: Any,
+    updated_at_column: Any,
+    *,
+    due_before: datetime,
+    stale_before: datetime,
+) -> Any:
+    """Select only resumable/due rows; healthy old READY rows are not work.
+
+    STAGING/PROCESSING/PUBLISHING can be recovered when stale even if an older
+    writer failed before setting ``reconcile_after``. READY rows are selected
+    only when another subsystem explicitly schedules an integrity repair.
+    """
+
+    stale_incomplete = and_(
+        status_column.in_(
+            [
+                ArtifactStatus.STAGING.value,
+                ArtifactStatus.PROCESSING.value,
+                ArtifactStatus.PUBLISHING.value,
+            ]
+        ),
+        updated_at_column <= stale_before,
+    )
+    scheduled = and_(
+        status_column.in_(
+            [
+                ArtifactStatus.PUBLISHING.value,
+                ArtifactStatus.READY.value,
+            ]
+        ),
+        reconcile_after_column.is_not(None),
+        reconcile_after_column <= due_before,
+    )
+    return or_(scheduled, stale_incomplete)
+
+
+def _reconcile_priority(status_column: Any) -> Any:
+    return case(
+        (status_column == ArtifactStatus.PUBLISHING.value, 0),
+        (status_column == ArtifactStatus.STAGING.value, 1),
+        (status_column == ArtifactStatus.PROCESSING.value, 2),
+        (status_column == ArtifactStatus.READY.value, 3),
+        else_=4,
+    )
 
 
 class SQLAlchemyImageRepository:
@@ -169,26 +217,25 @@ class SQLAlchemyImageRepository:
         stale_before: datetime,
         limit: int,
     ) -> list[Image]:
+        condition = _reconcile_candidate_condition(
+            Image.artifact_status,
+            Image.reconcile_after,
+            Image.updated_at,
+            due_before=due_before,
+            stale_before=stale_before,
+        )
         async with self.session_factory() as session:
             rows = (
                 await session.execute(
                     select(Image)
-                    .where(
-                        Image.artifact_status.in_(
-                            [
-                                ArtifactStatus.STAGING.value,
-                                ArtifactStatus.PROCESSING.value,
-                                ArtifactStatus.PUBLISHING.value,
-                                ArtifactStatus.READY.value,
-                            ]
-                        ),
-                        (
-                            (Image.reconcile_after.is_not(None))
-                            & (Image.reconcile_after <= due_before)
-                        )
-                        | (Image.updated_at <= stale_before),
+                    .where(condition)
+                    .order_by(
+                        _reconcile_priority(Image.artifact_status),
+                        case((Image.reconcile_after.is_(None), 1), else_=0),
+                        Image.reconcile_after.asc(),
+                        Image.updated_at.asc(),
+                        Image.id.asc(),
                     )
-                    .order_by(Image.updated_at.asc())
                     .limit(limit)
                 )
             ).scalars()

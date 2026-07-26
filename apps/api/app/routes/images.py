@@ -6,6 +6,7 @@ module remains a stable, low-complexity integration surface.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from fastapi import Request, UploadFile
@@ -54,7 +55,6 @@ _open_regular_file_no_symlink = _endpoints._open_regular_file_no_symlink
 _release_variant_generation_lock = _endpoints._release_variant_generation_lock
 _storage_streaming_response = _endpoints._storage_streaming_response
 _upload_allows_large_dimensions = _endpoints._upload_allows_large_dimensions
-_upload_command_service = _endpoints._upload_command_service
 _upload_metadata_finalizer = _endpoints._upload_metadata_finalizer
 _upload_requests_mask_preflight = _endpoints._upload_requests_mask_preflight
 _variant_key_for_image = _endpoints._variant_key_for_image
@@ -62,6 +62,21 @@ _video_reference_token_is_valid = _endpoints._video_reference_token_is_valid
 _wait_for_variant = _endpoints._wait_for_variant
 _write_new_file_atomic = _endpoints._write_new_file_atomic
 sweep_orphan_image_files = _endpoints.sweep_orphan_image_files
+
+# Upload capacity leases are process-wide resources. Constructing the service in
+# every request gave each request an empty local guard and disabled the intended
+# per-process memory/concurrency ceiling. Keep one lazily-created service graph
+# for the lifetime of this API process; Redis still owns the cross-process cap.
+_build_upload_command_service = _endpoints._upload_command_service
+
+
+@lru_cache(maxsize=1)
+def _shared_upload_command_service() -> Any:
+    return _build_upload_command_service()
+
+
+_endpoints._upload_command_service = _shared_upload_command_service
+_upload_command_service = _shared_upload_command_service
 
 get_image_binary = _endpoints.get_image_binary
 get_image_meta = _endpoints.get_image_meta
