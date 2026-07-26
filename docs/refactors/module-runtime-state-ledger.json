@@ -1,0 +1,132 @@
+{
+  "max_total": 24,
+  "modules": [
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/arq_pool.py",
+      "retirement_condition": "The API lifespan owns a typed Arq enqueue client and tests no longer inject module globals.",
+      "symbols": ["_pool_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/billing_cache_state.py",
+      "retirement_condition": "Billing cache ownership moves entirely to FastAPI application state.",
+      "symbols": ["_billing_cache_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/byok_service.py",
+      "retirement_condition": "Runtime settings cache is provided by an application-scoped cache service.",
+      "symbols": ["_byok_settings_cache_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/proxy_pool.py",
+      "retirement_condition": "Proxy pool is constructed and closed by application lifespan composition.",
+      "symbols": ["_proxy_pool_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/redis_client.py",
+      "retirement_condition": "Redis client ownership moves to application state and dependency injection.",
+      "symbols": ["_redis_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/services/admin_model_cache.py",
+      "retirement_condition": "Admin model cache is provided by an application-scoped cache service.",
+      "symbols": ["_admin_model_cache_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/sse_publish.py",
+      "retirement_condition": "SSE timestamp state is owned by an application event publisher instance.",
+      "symbols": ["_sse_publish_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/routes/admin_update.py",
+      "retirement_condition": "Update marker cleanup is owned by the admin update application service.",
+      "symbols": ["_marker_cleanup_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/routes/admin_release.py",
+      "retirement_condition": "Release marker cleanup is owned by the admin release application service.",
+      "symbols": ["_marker_cleanup_runtime"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/routes/poster_styles.py",
+      "retirement_condition": "Poster auto-tag concurrency is owned by an application service.",
+      "symbols": ["_AUTO_TAG_SEMAPHORE_STATE"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/routes/prompts.py",
+      "retirement_condition": "Prompt enhancement runtime is constructed by application composition.",
+      "symbols": ["_prompt_runtime_state"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/workflow_domain/apparel_scene_planner.py",
+      "retirement_condition": "Provider round-robin counters move behind the workflow application runtime.",
+      "symbols": ["_PROVIDER_ROUND_ROBIN"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/provider_pool.py",
+      "retirement_condition": "Worker startup constructs and closes the provider pool runtime explicitly.",
+      "symbols": ["_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/observability.py",
+      "retirement_condition": "Worker startup owns the metrics server runtime.",
+      "symbols": ["_METRICS_SERVER"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/services/billing_cache.py",
+      "retirement_condition": "Worker startup owns billing cache refresh state.",
+      "symbols": ["_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/sse_publish.py",
+      "retirement_condition": "SSE publisher timestamp state is injected through a publisher runtime.",
+      "symbols": ["_TIMESTAMP_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/tasks/auto_title.py",
+      "retirement_condition": "Auto-title cache is owned by a task application runtime.",
+      "symbols": ["_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "worker",
+      "path": "apps/worker/app/tasks/generation_parts/queue.py",
+      "retirement_condition": "Generation queue cooldown state is owned by the generation runtime.",
+      "symbols": ["QUEUE_RUNTIME"]
+    }
+  ],
+  "version": 1
+}
