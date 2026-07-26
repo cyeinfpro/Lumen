@@ -38,7 +38,12 @@ def configured_process_count() -> int:
                 return max(1, int(raw))
             except ValueError:
                 continue
-    return 1
+    # Docker Compose starts two API workers by default even when the variable
+    # is absent from the container environment. Use the deployment default as
+    # the conservative fallback so degraded local capacity never doubles the
+    # intended cluster budget. Bare single-worker deployments can set
+    # LUMEN_API_WORKERS=1 explicitly.
+    return 2
 
 
 def _effective_global_peak_bytes(
