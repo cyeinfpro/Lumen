@@ -223,6 +223,19 @@ def test_lumen_api_workers_controls_capacity_scaling(
     assert configured_process_count() == 4
 
 
+def test_capacity_scaling_uses_compose_worker_default_when_env_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "LUMEN_API_WORKERS",
+        "WEB_CONCURRENCY",
+        "GUNICORN_WORKERS",
+        "UVICORN_WORKERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert configured_process_count() == 2
+
+
 def test_implicit_capacity_default_accepts_one_large_upload() -> None:
     assert _effective_global_peak_bytes(
         512 * 1024 * 1024,
