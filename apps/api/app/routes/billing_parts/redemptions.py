@@ -95,7 +95,6 @@ async def redeem_code(
         billing_core.hash_redemption_code(normalized_code, secret)
         for secret in await b._redemption_secrets(db)
     ]
-    now = datetime.now(timezone.utc)
     matching_codes = (
         (
             await db.execute(
@@ -107,6 +106,11 @@ async def redeem_code(
         .scalars()
         .all()
     )
+    # 审计新-10：`now` 必须在 FOR UPDATE **拿到锁之后**才采样。
+    # FOR UPDATE 会阻塞等待并发事务提交，等待时长不可控；用等待前的时间戳去比
+    # expires_at，等于把「锁等待的这段时间」白送给用户 —— 已过期的码仍会兑换成功。
+    # 行本身在 READ COMMITTED 下会被重新读取（EvalPlanQual），只有时钟需要补采样。
+    now = datetime.now(timezone.utc)
     codes_by_hash = {item.code_hash: item for item in matching_codes}
     code = next((codes_by_hash.get(code_hash) for code_hash in code_hashes), None)
     if code is None:

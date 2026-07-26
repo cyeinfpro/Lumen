@@ -267,6 +267,95 @@ async def test_projects_video_expired_as_failed_leaf_without_output() -> None:
     assert projection.error_code == "deadline_expired"
 
 
+@pytest.mark.asyncio
+async def test_missing_generation_row_converges_to_terminal_failure() -> None:
+    """E-15: 底层行没了就永远不会再变，必须收敛成终态而不是原地转圈。"""
+    projection = await reconcile._project_generation(  # noqa: SLF001
+        _ProjectionSession(None),
+        _task(),
+    )
+
+    assert projection is not None
+    assert projection.status == "failed"
+    assert projection.error_code == "canvas_task_row_missing"
+    # 没有可信的 (task_id, epoch)，不能污染终态回执表。
+    assert projection.task_id is None
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_mismatch_converges_to_terminal_failure() -> None:
+    """E-15: 指纹属于另一次请求，也是永久性的，不能让 execution 卡住。"""
+    generation = VideoGeneration(
+        id="video-gen-0",
+        user_id="user-1",
+        action="generate",
+        model="video-model",
+        prompt="test",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        deadline_at=NOW,
+        idempotency_key="task-idempotency-0",
+        request_fingerprint="x" * 64,
+        est_token_upper=0,
+        est_cost_micro=0,
+        status=VideoGenerationStatus.RUNNING.value,
+        submission_epoch=4,
+    )
+
+    projection = await reconcile._project_video_generation(  # noqa: SLF001
+        _ProjectionSession(generation),
+        _task(kind="video_generation"),
+    )
+
+    assert projection is not None
+    assert projection.status == "failed"
+    assert projection.error_code == "canvas_task_fingerprint_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_orphaned_task_drives_execution_out_of_nonterminal_status() -> None:
+    """E-15 端到端：孤儿 task 不再让 execution 永久停在 running。"""
+    execution = _execution()
+    task = _task(status="running")
+
+    batch = await reconcile._project_execution_tasks(  # noqa: SLF001
+        _ProjectionSession(None),
+        [task],
+        execution,
+        now=NOW,
+    )
+
+    assert [projection.status for projection in batch.projections] == ["failed"]
+    assert batch.changed is True
+    assert task.status == "failed"
+    assert (
+        reconcile._aggregate_execution_status(  # noqa: SLF001
+            [projection.status for projection in batch.projections]
+        )
+        == "failed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_keeps_history_when_row_disappears() -> None:
+    """已经终态的 task 不因底层行被删而被改写。"""
+    execution = _execution()
+    task = _task(status="succeeded")
+    task.output_jsonb = {"type": "image", "image_id": "img-1"}
+
+    batch = await reconcile._project_execution_tasks(  # noqa: SLF001
+        _ProjectionSession(None),
+        [task],
+        execution,
+        now=NOW,
+    )
+
+    assert task.status == "succeeded"
+    assert batch.projections[0].status == "succeeded"
+    assert batch.projections[0].output == {"type": "image", "image_id": "img-1"}
+
+
 @pytest.mark.parametrize(
     ("statuses", "expected"),
     [
@@ -366,9 +455,7 @@ async def test_auto_select_currentness_ignores_layout_only_revisions(
     }
     execution = _execution()
     execution.definition_hash = canvas_node_definition_hash(graph["nodes"][1])
-    execution.config_snapshot_jsonb = {
-        "_canvas": {"auto_select_on_success": True}
-    }
+    execution.config_snapshot_jsonb = {"_canvas": {"auto_select_on_success": True}}
     execution.input_snapshot_jsonb = {
         "prompt": "Render a still",
         "bindings": [

@@ -52,47 +52,51 @@ from ..workflow_domain.showcase_model_policy import (
 from ..workflow_domain.showcase_model_policy import (
     infer_model_height_cm as _infer_model_height_cm,
 )  # noqa: F401
-from ..workflow_services.library_sync import (
-    add_user_library_item as _add_user_library_item,
-)  # noqa: F401
-from ..workflow_services.library_sync import can_sync_library as _can_sync_library  # noqa: F401
-from ..workflow_services.library_sync import (
+from ..workflow_services.library_items import (
+    can_sync_library as _can_sync_library,
+)
+from ..workflow_services.library_items import (
     combined_library_items as _combined_library_items,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
-    create_user_image_from_preset as _create_user_image_from_preset,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import (
     ensure_legacy_user_library_migrated as _ensure_legacy_user_library_migrated,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import (
     filter_library_items as _filter_library_items,
-)  # noqa: F401
-from ..workflow_services.library_sync import find_library_item as _find_library_item  # noqa: F401
-from ..workflow_services.library_sync import github_contents_url as _github_contents_url  # noqa: F401
-from ..workflow_services.library_sync import (
-    hide_preset_in_legacy_user_library_index as _hide_preset_in_legacy_user_library_index,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
-    library_binary_response as _library_binary_response,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import find_library_item as _find_library_item
+from ..workflow_services.library_items import (
+    github_contents_url as _github_contents_url,
+)
+from ..workflow_services.library_items import (
     model_library_item_out as _model_library_item_out,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import (
     model_library_row_to_dict as _model_library_row_to_dict,
-)  # noqa: F401
-from ..workflow_services.library_sync import owned_image as _owned_image  # noqa: F401
-from ..workflow_services.library_sync import (
-    remove_user_library_item_from_legacy_index as _remove_user_library_item_from_legacy_index,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import (
     resolve_model_library_sync_proxy as _resolve_model_library_sync_proxy,
-)  # noqa: F401
+)
+from ..workflow_services.library_items import sync_state_out as _sync_state_out
+from ..workflow_services.library_materialization import (
+    add_user_library_item as _add_user_library_item,
+)
+from ..workflow_services.library_materialization import (
+    create_user_image_from_preset as _create_user_image_from_preset,
+)
+from ..workflow_services.library_materialization import owned_image as _owned_image
+from ..workflow_services.library_storage import (
+    hide_preset_in_legacy_user_library_index as _hide_preset_in_legacy_user_library_index,
+)
+from ..workflow_services.library_storage import (
+    library_binary_response as _library_binary_response,
+)
+from ..workflow_services.library_storage import (
+    remove_user_library_item_from_legacy_index as _remove_user_library_item_from_legacy_index,
+)
 from ..workflow_services.library_sync import (
     sync_library_presets_from_github_folder as _sync_library_presets_from_github_folder,
-)  # noqa: F401
-from ..workflow_services.library_sync import sync_state_out as _sync_state_out  # noqa: F401
+)
 from ..workflow_services.output_sync import (
     sync_workflow_outputs as _sync_workflow_outputs,
 )  # noqa: F401
@@ -103,12 +107,12 @@ from ..workflow_services.serialization import clean_style_tags as _clean_style_t
 from ..workflow_services.serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
 from ..workflow_services.serialization import http as _http  # noqa: F401
 from ..workflow_services.serialization import now as _now  # noqa: F401
-from ..workflow_services.showcase_preflight import candidate_prompt as _candidate_prompt  # noqa: F401
-from ..workflow_services.showcase_preflight import (
+from ..workflow_services.showcase_inputs import candidate_prompt as _candidate_prompt  # noqa: F401
+from ..workflow_services.showcase_inputs import (
     product_analysis_prompt as _product_analysis_prompt,
 )  # noqa: F401
-from ..workflow_services.showcase_preflight import seed_steps as _seed_steps  # noqa: F401
-from ..workflow_services.showcase_preflight import (
+from ..workflow_services.showcase_inputs import seed_steps as _seed_steps  # noqa: F401
+from ..workflow_services.showcase_inputs import (
     validate_owned_images as _validate_owned_images,
 )  # noqa: F401
 from ..workflow_services.workflow_runtime import (
@@ -151,7 +155,7 @@ from .model_library_endpoints import (
 
 entry_router = APIRouter()
 project_router = APIRouter()
-logger = logging.getLogger("app.routes.workflows")
+logger = logging.getLogger("app.routes.workflows.apparel")
 WORKFLOW_TYPE = "apparel_model_showcase"
 
 
@@ -774,22 +778,5 @@ async def select_apparel_model_library_item(
     return out
 
 
-FACADE_EXPORTS = (
-    "create_apparel_model_showcase",
-    "list_apparel_model_library",
-    "sync_apparel_model_library_presets",
-    "get_apparel_model_library_item_binary",
-    "get_apparel_model_library_item_thumb",
-    "create_apparel_model_library_item",
-    "patch_apparel_model_library_item",
-    "_delete_apparel_model_library_item_for_user",
-    "delete_apparel_model_library_item",
-    "batch_delete_apparel_model_library_items",
-    "approve_product_analysis",
-    "create_model_candidates",
-    "select_apparel_model_library_item",
-)
-
-
-# Public compatibility contracts.
+# Public service contract used by the project application.
 delete_apparel_model_library_item_for_user = _delete_apparel_model_library_item_for_user

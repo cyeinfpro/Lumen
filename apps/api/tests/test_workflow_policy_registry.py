@@ -191,6 +191,59 @@ async def test_application_services_own_commit_then_publish_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_application_submit_is_idempotent_without_new_side_effects() -> None:
+    events: list[str] = []
+    repository = _Repository()
+    repository.existing = WorkflowRunSnapshot(
+        run_id="run-existing",
+        user_id="user-1",
+        workflow_kind=WorkflowKind.APPAREL_SHOWCASE,
+        status="running",
+        current_step="prepare",
+    )
+    application = build_workflow_application(
+        policies=[_Policy(WorkflowKind.APPAREL_SHOWCASE)],
+        repository=repository,
+        assets=_Assets(),
+        preview=_Preview(),
+        queue=_Queue(events),
+        transaction_factory=lambda: _Transaction(events),
+    )
+
+    run = await application.submit.execute(_command())
+
+    assert run is repository.existing
+    assert repository.created == 0
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_application_cancel_commits_before_publication() -> None:
+    events: list[str] = []
+    repository = _Repository()
+    repository.existing = WorkflowRunSnapshot(
+        run_id="run-1",
+        user_id="user-1",
+        workflow_kind=WorkflowKind.APPAREL_SHOWCASE,
+        status="running",
+        current_step="prepare",
+    )
+    application = build_workflow_application(
+        policies=[_Policy(WorkflowKind.APPAREL_SHOWCASE)],
+        repository=repository,
+        assets=_Assets(),
+        preview=_Preview(),
+        queue=_Queue(events),
+        transaction_factory=lambda: _Transaction(events),
+    )
+
+    cancelled = await application.cancel.execute(user_id="user-1", run_id="run-1")
+
+    assert cancelled.status == "cancelled"
+    assert events == ["begin", "commit", "end", "cancelled:run-1"]
+
+
+@pytest.mark.asyncio
 async def test_application_validation_is_side_effect_free() -> None:
     events: list[str] = []
     repository = _Repository()

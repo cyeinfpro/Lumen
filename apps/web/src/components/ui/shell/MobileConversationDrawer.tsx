@@ -110,13 +110,30 @@ export function MobileConversationDrawer({
     (s) => s.loadHistoricalMessages,
   );
 
+  // 竞态防护：抽屉是"打开即挂载、关闭即卸载"的组件，异步操作解析时组件可能早已卸载。
+  // - mountedRef：卸载后不再 setState / 弹 toast / 回滚 store，避免对新会话产生副作用
+  // - selectSeqRef：连点多个会话时，只有最后一次 select 有权写回状态，前序请求作废
+  const mountedRef = useRef(true);
+  const selectSeqRef = useRef(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // 卸载即让所有在途 select 过期，防止迟到的失败回滚踩到别处已切换的会话
+      selectSeqRef.current += 1;
+    };
+  }, []);
+
   const list = useListConversationsInfiniteQuery({ limit: 30 });
   const createMut = useCreateConversationMutation({
     onSuccess: (conv) => {
+      // 新建请求在途时抽屉可能已关闭；此时静默落盘即可，不再抢占当前会话
+      if (!mountedRef.current) return;
       setCurrentConv(conv.id);
       onClose();
     },
     onError: (err) => {
+      if (!mountedRef.current) return;
       pushMobileToast(
         err?.message ? `新建失败：${err.message}` : "新建失败，稍后重试",
         "danger",
@@ -199,20 +216,27 @@ export function MobileConversationDrawer({
     async (conv: ConversationSummary) => {
       if (conv.id !== currentConvId) {
         const previousConvId = currentConvId;
+        selectSeqRef.current += 1;
+        const seq = selectSeqRef.current;
         setCurrentConv(conv.id);
         try {
           await loadHistoricalMessages(conv.id);
         } catch (err) {
+          // 只有仍是最新一次 select、且组件未卸载时才回滚 + 提示；
+          // 否则这次失败已被后续选择取代，回滚会把用户拽回旧会话
+          const stale = seq !== selectSeqRef.current || !mountedRef.current;
+          logWarn("mobile_drawer.load_historical_messages_failed", {
+            scope: "mobile-drawer",
+            extra: { convId: conv.id, stale, err: String(err) },
+          });
+          if (stale) return;
           if (useChatStore.getState().currentConvId === conv.id) {
             setCurrentConv(previousConvId);
           }
-          logWarn("mobile_drawer.load_historical_messages_failed", {
-            scope: "mobile-drawer",
-            extra: { convId: conv.id, err: String(err) },
-          });
           pushMobileToast("会话加载失败，请重试", "danger");
           return;
         }
+        if (seq !== selectSeqRef.current || !mountedRef.current) return;
       }
       haptic("light");
       onClose();
@@ -239,6 +263,7 @@ export function MobileConversationDrawer({
         { id: conv.id, archived: !conv.archived },
         {
           onSuccess: () => {
+            if (!mountedRef.current) return;
             pushMobileToast(
               conv.archived ? "已恢复到对话" : "已归档",
               "success",
@@ -254,12 +279,17 @@ export function MobileConversationDrawer({
     (conv: ConversationSummary) => {
       deleteMut.mutate(conv.id, {
         onSuccess: () => {
-          if (currentConvId === conv.id) setCurrentConv(null);
+          // 删除成功后仍需清空当前会话（否则聊天区停在已删会话上），
+          // 但要以 store 实时值判断，闭包里的 currentConvId 可能已过期
+          if (useChatStore.getState().currentConvId === conv.id) {
+            setCurrentConv(null);
+          }
+          if (!mountedRef.current) return;
           pushMobileToast("已删除会话", "success");
         },
       });
     },
-    [deleteMut, currentConvId, setCurrentConv],
+    [deleteMut, setCurrentConv],
   );
 
   const isInitialLoading = isInitialConversationLoad(

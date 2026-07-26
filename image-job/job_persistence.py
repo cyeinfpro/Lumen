@@ -299,6 +299,9 @@ def init_storage(
             "outcome_uncertain",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        # H-19：提交请求的 request_id 必须落库，否则异步 worker 真正执行时
+        # ContextVar 早已不在，两段日志无法关联。
+        _ensure_column(conn, "jobs", "request_id", "TEXT")
         rows = conn.execute(
             """
             SELECT job_id, auth_header
@@ -396,6 +399,7 @@ class JobPersistenceFacade:
         owner_auth_header: str | None = None,
         idempotency_key: str | None = None,
         payload_hash: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         now = self.now_iso()
         owner_auth = owner_auth_header or auth_header
@@ -405,8 +409,8 @@ class JobPersistenceFacade:
                 job_id, auth_hash, upstream_auth_hash, auth_header,
                 idempotency_key, request_hash, request_type, endpoint,
                 payload_json, status, relay_url, retention_days,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+                created_at, updated_at, request_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -422,6 +426,7 @@ class JobPersistenceFacade:
                 payload["retention_days"],
                 now,
                 now,
+                request_id or None,
             ),
         )
 
@@ -892,6 +897,13 @@ class RetentionFacade:
             / created_at.strftime("%d")
             / job_id
         )
+        return self.remove_job_dir(job_dir, temp_root)
+
+    def remove_job_dir(
+        self,
+        job_dir: Path,
+        temp_root: Path,
+    ) -> tuple[int, int, bool]:
         if not job_dir.exists():
             return 0, 0, True
 
@@ -924,6 +936,49 @@ class RetentionFacade:
                 break
             parent = parent.parent
         return removed_files, removed_bytes, True
+
+    def sweep_orphan_job_dirs_sync(
+        self,
+        known_job_ids: set[str],
+        cutoff_ts: float,
+    ) -> tuple[int, int]:
+        """删掉 images/temp 下已经没有 jobs 行对应的产物目录。
+
+        H-17：run_pass 的主循环只顺着 `finished_at IS NOT NULL` 的行删产物，
+        所以「行被删了但 rmtree 当时失败」「DB 被重置/回滚」「任务永远停在
+        queued/running 从未 finished」留下的目录没有任何人负责，磁盘只增不减。
+
+        故意不按文件 mtime 扫（那会误删仍在保留期内、只是内容旧的活任务产物，
+        见 test_retention_pass_uses_each_job_expiry_not_file_mtime），而是先按
+        「jobs 表里还有没有这个 job_id」判定孤儿，再用目录 mtime 早于 cutoff
+        做二次确认，避免删掉刚建目录还没来得及插行的竞态窗口。
+        """
+        temp_root = self.data_dir() / "images" / "temp"
+        if not temp_root.is_dir():
+            return 0, 0
+        removed_files = 0
+        removed_bytes = 0
+        for job_dir in sorted(temp_root.glob("*/*/*/*")):
+            if job_dir.name in known_job_ids or not job_dir.is_dir():
+                continue
+            try:
+                if job_dir.stat().st_mtime >= cutoff_ts:
+                    continue
+            except OSError:
+                continue
+            files, freed, _cleaned = self.remove_job_dir(job_dir, temp_root)
+            removed_files += files
+            removed_bytes += freed
+        return removed_files, removed_bytes
+
+    async def sweep_orphan_job_dirs(self, cutoff_ts: float) -> tuple[int, int]:
+        rows = await self.db_all("SELECT job_id FROM jobs", ())
+        known = {str(self._row_value(row, "job_id")) for row in rows}
+        return await asyncio.to_thread(
+            self.sweep_orphan_job_dirs_sync,
+            known,
+            cutoff_ts,
+        )
 
     async def run_pass(self) -> None:
         now = self.utc_now()
@@ -967,6 +1022,11 @@ class RetentionFacade:
         )
         removed_files += ref_files
         removed_bytes += ref_bytes
+        orphan_files, orphan_bytes = await self.sweep_orphan_job_dirs(
+            cutoff.timestamp()
+        )
+        removed_files += orphan_files
+        removed_bytes += orphan_bytes
         if removed_files:
             self.log.info(
                 "retention sweeper removed %d files (%d bytes)",

@@ -1,5 +1,7 @@
 # Lumen full-stack runtime entrypoint (postgres + redis + api + worker + web + tgbot/migrate/bootstrap).
 # Image tags pulled from GHCR are pinned via LUMEN_IMAGE_TAG (see docs/docker-full-stack-cutover-plan.md §6.4.1).
+# LUMEN_IMAGE_TAG 无默认值：`:-latest` 会让部署不可复现、回滚拿不到确定版本，
+# 且可能与已跑过的 migration 状态错配。未设置时 compose 直接报错退出。
 # tgbot / migrate / bootstrap live behind compose profiles so default `up -d` only starts the core stack.
 
 x-service-hardening: &service-hardening
@@ -97,7 +99,7 @@ services:
 
   api:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     container_name: lumen-api
     labels:
       lumen.color: "blue"
@@ -177,7 +179,7 @@ services:
 
   worker:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-worker:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-worker:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     container_name: lumen-worker
     build: *app-build
     working_dir: /app/apps/worker
@@ -248,7 +250,7 @@ services:
 
   web:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-web:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-web:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     container_name: lumen-web
     build:
       context: ./apps/web
@@ -283,7 +285,7 @@ services:
 
   tgbot:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-tgbot:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-tgbot:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     container_name: lumen-tgbot
     build: *app-build
     working_dir: /app/apps/tgbot
@@ -344,7 +346,7 @@ services:
 
   migrate:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     build: *app-build
     working_dir: /app/apps/api
     command: ["alembic", "upgrade", "head"]
@@ -362,7 +364,7 @@ services:
 
   bootstrap:
     <<: *service-hardening
-    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:?Set LUMEN_IMAGE_TAG in .env to an immutable tag}
     build: *app-build
     working_dir: /app/apps/api
     command:

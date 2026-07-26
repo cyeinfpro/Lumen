@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from .runtime import generation_ports
+from .runtime import (
+    generation_domain_ports,
+    generation_queue_ports,
+    generation_events_ports,
+    generation_provider_ports,
+    generation_lease_ports,
+)
 import asyncio
 import inspect
+import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -31,21 +38,35 @@ end
 return redis.call('SET', KEYS[1], ARGV[2], 'PX', tonumber(ARGV[3]))
 """
 
-FALLBACK_RETRIES = 3
+FALLBACK_RETRIES = 5
+# WATCH 冲突退避：无退避的紧密自旋会让并发 worker 同步重试、互相踩踏，3 次
+# 用完就抛 LOCAL_QUEUE_FULL 把任务拒掉。退避上限刻意压在心跳间隔
+# (_renew_interval() = TTL/3) 之下——4 次退避最坏 0.01+0.02+0.04+0.08 = 0.15s，
+# 不会把一次心跳/释放拖过锁 TTL。
+_FALLBACK_BACKOFF_BASE_S = 0.01
+_FALLBACK_BACKOFF_MAX_S = 0.08
+
+
+async def _backoff_after_watch_conflict(attempt: int) -> None:
+    """第 ``attempt`` 次 WATCH 冲突后的带抖动指数退避。"""
+    delay = min(_FALLBACK_BACKOFF_MAX_S, _FALLBACK_BACKOFF_BASE_S * (2**attempt))
+    await asyncio.sleep(delay * (0.5 + random.random() / 2.0))
 
 
 def _unavailable(message: str) -> Any:
-    return generation_ports().UpstreamError(
+    return generation_provider_ports().UpstreamError(
         message,
-        error_code=generation_ports().EC.LOCAL_QUEUE_FULL.value,
+        error_code=generation_domain_ports().EC.LOCAL_QUEUE_FULL.value,
         status_code=None,
-        payload={"retry_after": generation_ports()._IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S},
+        payload={
+            "retry_after": generation_queue_ports()._IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S
+        },
     )
 
 
 def _ttl_seconds() -> float:
     try:
-        return max(0.001, float(generation_ports()._IMAGE_QUEUE_LOCK_TTL_S))
+        return max(0.001, float(generation_queue_ports()._IMAGE_QUEUE_LOCK_TTL_S))
     except (TypeError, ValueError):
         return 1.0
 
@@ -75,13 +96,15 @@ async def _renew_watch(redis: Any, token: str) -> bool:
             "image queue lock heartbeat requires Redis EVAL or WATCH transaction"
         )
     for attempt in range(FALLBACK_RETRIES):
+        if attempt:
+            await _backoff_after_watch_conflict(attempt - 1)
         pipe: Any | None = None
         try:
             pipe = pipeline(transaction=True)
-            await pipe.watch(generation_ports()._IMAGE_QUEUE_LOCK_KEY)
+            await pipe.watch(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY)
             if (
-                generation_ports()._redis_text(
-                    await pipe.get(generation_ports()._IMAGE_QUEUE_LOCK_KEY)
+                generation_queue_ports()._redis_text(
+                    await pipe.get(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY)
                 )
                 != token
             ):
@@ -89,7 +112,7 @@ async def _renew_watch(redis: Any, token: str) -> bool:
             pipe.multi()
             pexpire = getattr(pipe, "pexpire", None)
             if callable(pexpire):
-                pexpire(generation_ports()._IMAGE_QUEUE_LOCK_KEY, _ttl_ms())
+                pexpire(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY, _ttl_ms())
             else:
                 expire = getattr(pipe, "expire", None)
                 if not callable(expire):
@@ -97,7 +120,7 @@ async def _renew_watch(redis: Any, token: str) -> bool:
                         "image queue lock heartbeat WATCH fallback lacks EXPIRE"
                     )
                 expire(
-                    generation_ports()._IMAGE_QUEUE_LOCK_KEY,
+                    generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
                     max(1, int(_ttl_seconds())),
                 )
             results = await pipe.execute()
@@ -120,19 +143,21 @@ async def _release_watch(redis: Any, token: str) -> bool:
             "image queue lock release requires Redis EVAL or WATCH transaction"
         )
     for attempt in range(FALLBACK_RETRIES):
+        if attempt:
+            await _backoff_after_watch_conflict(attempt - 1)
         pipe: Any | None = None
         try:
             pipe = pipeline(transaction=True)
-            await pipe.watch(generation_ports()._IMAGE_QUEUE_LOCK_KEY)
+            await pipe.watch(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY)
             if (
-                generation_ports()._redis_text(
-                    await pipe.get(generation_ports()._IMAGE_QUEUE_LOCK_KEY)
+                generation_queue_ports()._redis_text(
+                    await pipe.get(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY)
                 )
                 != token
             ):
                 return False
             pipe.multi()
-            pipe.delete(generation_ports()._IMAGE_QUEUE_LOCK_KEY)
+            pipe.delete(generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY)
             results = await pipe.execute()
             if not results or int(results[0] or 0) != 1:
                 raise RuntimeError("image queue lock transaction did not delete owner")
@@ -142,7 +167,7 @@ async def _release_watch(redis: Any, token: str) -> bool:
                 raise _unavailable(
                     "image queue lock release transaction conflicted repeatedly"
                 ) from exc
-        except generation_ports().UpstreamError:
+        except generation_provider_ports().UpstreamError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise _unavailable(
@@ -160,7 +185,7 @@ async def _renew(redis: Any, token: str) -> bool:
         result = await eval_fn(
             RENEW_IMAGE_QUEUE_LOCK_LUA,
             1,
-            generation_ports()._IMAGE_QUEUE_LOCK_KEY,
+            generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
             token,
             _ttl_ms(),
         )
@@ -192,7 +217,7 @@ class ImageQueueLockLease:
         if self._lost.is_set():
             return
         self._lost.set()
-        generation_ports().logger.warning(
+        generation_events_ports().logger.warning(
             "image queue lock lost token=%s reason=%s", self.token, reason
         )
 
@@ -253,7 +278,7 @@ class ImageQueueLockLease:
             DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA,
             2,
             key,
-            generation_ports()._IMAGE_QUEUE_LOCK_KEY,
+            generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
             self.token,
             lost_result=-1,
         )
@@ -264,7 +289,7 @@ class ImageQueueLockLease:
             SET_IMAGE_QUEUE_VALUE_IF_OWNER_LUA,
             2,
             key,
-            generation_ports()._IMAGE_QUEUE_LOCK_KEY,
+            generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
             self.token,
             value,
             max(1, int(round(float(ttl_seconds) * 1000))),
@@ -305,22 +330,22 @@ class ImageQueueLockLease:
             eval_fn = getattr(self.redis, "eval", None)
             released = (
                 await eval_fn(
-                    generation_ports()._RELEASE_LEASE_LUA,
+                    generation_lease_ports()._RELEASE_LEASE_LUA,
                     1,
-                    generation_ports()._IMAGE_QUEUE_LOCK_KEY,
+                    generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
                     self.token,
                 )
                 if callable(eval_fn)
                 else await _release_watch(self.redis, self.token)
             )
             if int(released or 0) != 1:
-                generation_ports().logger.info(
+                generation_events_ports().logger.info(
                     "image queue lock release skipped after owner changed"
                 )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
-            generation_ports().logger.error(
+            generation_events_ports().logger.error(
                 "image queue lock owner-CAS release failed; "
                 "preserving critical-section result and relying on lock TTL",
                 exc_info=True,
@@ -331,14 +356,15 @@ class ImageQueueLockLease:
 async def image_queue_lock(redis: Any) -> AsyncIterator[ImageQueueLockLease]:
     eval_fn = getattr(redis, "eval", None)
     if not callable(eval_fn) and not callable(getattr(redis, "pipeline", None)):
-        generation_ports().logger.error(
+        generation_events_ports().logger.error(
             "image queue lock acquisition refused without atomic release support"
         )
         raise _unavailable("image queue lock requires Redis EVAL or WATCH transaction")
 
-    token = generation_ports().new_uuid7()
+    token = generation_domain_ports().new_uuid7()
     deadline = (
-        asyncio.get_event_loop().time() + generation_ports()._IMAGE_QUEUE_LOCK_WAIT_S
+        asyncio.get_event_loop().time()
+        + generation_queue_ports()._IMAGE_QUEUE_LOCK_WAIT_S
     )
     while True:
         ttl = _ttl_seconds()
@@ -348,19 +374,19 @@ async def image_queue_lock(redis: Any) -> AsyncIterator[ImageQueueLockLease]:
         )
         try:
             got = await redis.set(
-                generation_ports()._IMAGE_QUEUE_LOCK_KEY, token, **kwargs
+                generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY, token, **kwargs
             )
         except Exception as exc:  # noqa: BLE001
-            generation_ports().logger.error(
+            generation_events_ports().logger.error(
                 "image queue lock acquisition failed", exc_info=True
             )
             raise _unavailable("image queue lock acquisition unavailable") from exc
         if got:
             break
         if asyncio.get_event_loop().time() >= deadline:
-            raise generation_ports().UpstreamError(
+            raise generation_provider_ports().UpstreamError(
                 "image queue scheduler busy",
-                error_code=generation_ports().EC.LOCAL_QUEUE_FULL.value,
+                error_code=generation_domain_ports().EC.LOCAL_QUEUE_FULL.value,
                 status_code=None,
             )
         await asyncio.sleep(0.05)

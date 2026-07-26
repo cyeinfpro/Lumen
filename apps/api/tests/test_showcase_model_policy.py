@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.routes import workflows
-from app.routes import _showcase_model_policy as policy
+from app.workflow_domain import showcase_model_policy as policy
 
 
 @pytest.mark.parametrize(
@@ -87,12 +87,12 @@ def test_style_region_and_user_direction_compaction() -> None:
     )
 
 
-def test_workflows_keeps_private_policy_compatibility() -> None:
-    assert workflows._infer_age is policy._infer_age
-    assert workflows._infer_model_height_cm is policy._infer_model_height_cm
-    assert workflows._infer_candidate_gender is policy._infer_candidate_gender
-    assert workflows._model_diversity_anchor is policy._model_diversity_anchor
-    assert (
-        workflows._compact_showcase_user_direction
-        is policy._compact_showcase_user_direction
-    )
+def test_workflows_does_not_reexport_private_model_policy() -> None:
+    for name in (
+        "_infer_age",
+        "_infer_model_height_cm",
+        "_infer_candidate_gender",
+        "_model_diversity_anchor",
+        "_compact_showcase_user_direction",
+    ):
+        assert not hasattr(workflows, name)

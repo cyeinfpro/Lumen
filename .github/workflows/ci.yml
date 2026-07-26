@@ -66,7 +66,20 @@ jobs:
       - name: Install dependencies
         # virtual workspace root → 必须 --all-packages 才会装所有 member（api/worker/tgbot/core）的依赖
         run: uv sync --all-packages
+      # 治理门禁独立成 step（而不是只依赖 scripts/test.sh 内部串联）有两个理由：
+      # 1. fail-fast —— 分层/复杂度违规在几秒内就报错，不用等完整测试套件跑完；
+      # 2. required check 粒度 —— 分支保护可以单独把这两个 step 设为必需，
+      #    "backend" 这一个大 job 绿了不代表门禁真的跑过。
+      # scripts/test.sh 里仍保留同样的调用，保证本地一条命令等价于 CI。
+      - name: Architecture budget gate
+        run: uv run python scripts/check_architecture.py
+      - name: Complexity budget gate
+        run: uv run python scripts/check_complexity.py
+      - name: Module runtime state gate
+        run: uv run python scripts/module_runtime_state_audit.py
       - name: Run backend tests (worker / api / core)
+        # scripts/test.sh 内已串联 ruff / complexity / architecture /
+        # module runtime state 四道门禁，任一失败即 set -e 退出。
         run: bash scripts/test.sh
 
   frontend:

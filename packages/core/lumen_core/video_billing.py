@@ -9,12 +9,13 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_UP
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .billing import pricing_price_micro
+from .pricing import MAX_BILLABLE_TOKENS, MAX_RATE_PER_1K_MICRO
 
 VIDEO_PRICING_SCOPE = "video"
 VIDEO_PRICING_UNIT = "per_mtoken"
@@ -42,11 +43,35 @@ VIDEO_PRICING_VARIANTS = (
 
 
 class VideoBillingError(ValueError):
-    def __init__(self, code: str, message: str, status_code: int = 422) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int = 422,
+        *,
+        actual_micro: int | None = None,
+    ) -> None:
         self.code = code
         self.message = message
         self.status_code = status_code
+        # 当上游成本已经算出、只是超过预估倍数时携带该金额。上层据此仍能全额
+        # 转嫁，而不会与"定价缺失、根本算不出"的情形混为一谈。
+        self.actual_micro = actual_micro
         super().__init__(message)
+
+
+def _guard_video_factor(field: str, value: int, limit: int) -> None:
+    """因子越界直接抛错（审计 F-5）。
+
+    与 pricing 侧同理：封顶会让超出部分由平台吸收，纯转嫁不允许。
+    上界远高于任何真实视频用量，触发即说明上游返回的用量不可信。
+    """
+    if value > limit:
+        raise VideoBillingError(
+            "video_cost_factor_out_of_range",
+            f"video billing factor {field}={value} exceeds limit {limit}",
+            500,
+        )
 
 
 @dataclass(frozen=True)
@@ -58,16 +83,32 @@ class VideoCostEstimate:
 
 
 def round_micro_for_tokens(total_tokens: int, price_per_mtoken_micro: int) -> int:
+    """把 token 数换算成 µRMB，不足 1 micro 的零头一律向上进位。
+
+    视频计费是纯转嫁：上游按实际用量扣了钱，平台就必须原样收回。若这里用
+    ROUND_HALF_UP，小于半 micro 的尾数会被抹掉，那部分成本由平台承担；
+    高频调用下会持续侵蚀收入。ROUND_UP 把舍入方向固定为「归用户」，
+    单笔最多多收 1 µRMB（即 0.000001 元），代价可忽略，但平台永不亏损。
+
+    因子上界在相乘之前校验（审计 F-5）：越界抛错而非封顶，理由同
+    :mod:`lumen_core.pricing` 里的 F-4 —— 封顶等于让平台吞掉超出部分。
+    """
     if total_tokens < 0:
         raise ValueError("total_tokens must not be negative")
     if price_per_mtoken_micro < 0:
         raise ValueError("price_per_mtoken_micro must not be negative")
+    _guard_video_factor("total_tokens", int(total_tokens), MAX_BILLABLE_TOKENS)
+    _guard_video_factor(
+        "price_per_mtoken_micro",
+        int(price_per_mtoken_micro),
+        MAX_RATE_PER_1K_MICRO,
+    )
     value = (
         Decimal(int(total_tokens))
         * Decimal(int(price_per_mtoken_micro))
         / Decimal(1_000_000)
     )
-    return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return int(value.quantize(Decimal("1"), rounding=ROUND_UP))
 
 
 def estimate_key(*, resolution: str, duration_s: int) -> str:
@@ -89,7 +130,21 @@ def _reference_kind(item: Any) -> str | None:
 
 
 def video_resolution_pricing_variant(variant: str, resolution: str | None) -> str:
-    resolution = (resolution or "").strip()
+    """拼出 ``{动作}_{分辨率}`` 形式的计价 variant（定价规则的查表键）。
+
+    这里必须 ``lower()``：``split_video_resolution_pricing_variant`` 反向解析时
+    会把分辨率归一成小写，两边不对称的话 ``1080P`` 拼出的键是 ``t2v_1080P``，
+    而运营录入的定价规则键是 ``t2v_1080p``，查不中就一路回退到不带分辨率的
+    基础 variant——高分辨率通常单价更高，回退等于按低价结算，差额由平台吸收，
+    踩「纯转嫁」红线。归一之后 ``1080P``/``1080p``/`` 1080p `` 收敛成同一个键。
+
+    这里刻意**不**按审计建议做「白名单枚举校验」：``_pricing_fallback_variants``
+    已经无条件把不带分辨率的基础 variant 放进回退链，未知分辨率本来就能优雅
+    降级；反过来，一旦加了白名单，运营为新分辨率（比如 8k）配的规则会因为
+    枚举没同步更新而被直接丢弃，只能按基础价结算——又是平台吸收成本。
+    宁可多出一个查不中的键，也不能丢掉一条已配置的高价规则。
+    """
+    resolution = (resolution or "").strip().lower()
     if not resolution:
         return variant
     return f"{variant}_{resolution}"
@@ -429,11 +484,18 @@ async def settle_video_cost(
         if estimate > 0 and actual_micro > estimate * max(
             1, int(max_estimate_multiplier)
         ):
-            return estimate
+            raise VideoBillingError(
+                "video_cost_exceeds_estimate",
+                f"actual cost {actual_micro} exceeds estimate {estimate} by more than {max_estimate_multiplier}x",
+                500,
+                actual_micro=actual_micro,
+            )
     return actual_micro
 
 
 __all__ = [
+    "MAX_BILLABLE_TOKENS",
+    "MAX_RATE_PER_1K_MICRO",
     "VIDEO_PRICING_SCOPE",
     "VIDEO_PRICING_UNIT",
     "SMART_VIDEO_DURATION_S",

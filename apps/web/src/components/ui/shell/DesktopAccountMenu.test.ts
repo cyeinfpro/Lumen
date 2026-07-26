@@ -932,3 +932,87 @@ test("desktop popover positioning clamps every edge", () => {
     { left: 40, top: 12 },
   );
 });
+
+type AccountMenuHelpers = {
+  walletEntryIsVisible: (input: {
+    enabled: boolean;
+    billingEnabled: boolean | null | undefined;
+  }) => boolean;
+  formatWalletText: (
+    showWallet: boolean,
+    balance: { rmb?: string | null } | null | undefined,
+  ) => string | null;
+  accountMenuItems: (input: { showWallet: boolean; isAdmin: boolean }) => {
+    href: string;
+  }[];
+};
+
+function loadAccountMenuHelpers(): AccountMenuHelpers {
+  const start = source.indexOf("function walletEntryIsVisible");
+  const end = source.indexOf("export function DesktopAccountMenu");
+  ok(start >= 0 && end > start, "missing account menu helper block");
+  const output = ts.transpileModule(
+    `const CircleUserRound = "CircleUserRound";
+const Brain = "Brain";
+const FileText = "FileText";
+const CreditCard = "CreditCard";
+const Shield = "Shield";
+const formatRmb = (value: string) => value;
+${source.slice(start, end)}
+module.exports.walletEntryIsVisible = walletEntryIsVisible;
+module.exports.formatWalletText = formatWalletText;
+module.exports.accountMenuItems = accountMenuItems;`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+  const moduleRecord = { exports: {} as AccountMenuHelpers };
+  runInNewContext(output, {
+    module: moduleRecord,
+    exports: moduleRecord.exports,
+  });
+  return moduleRecord.exports;
+}
+
+test("wallet entry stays visible when the balance query fails, only the amount hides", () => {
+  const helpers = loadAccountMenuHelpers();
+
+  // 新-16：余额查询失败或仍在加载时，入口必须照常可见 ——
+  // 查不到余额恰恰是用户最需要点进钱包页的时刻。
+  ok(helpers.walletEntryIsVisible({ enabled: true, billingEnabled: true }));
+  ok(
+    helpers.walletEntryIsVisible({ enabled: true, billingEnabled: undefined }),
+  );
+  equal(
+    helpers.walletEntryIsVisible({ enabled: true, billingEnabled: false }),
+    false,
+  );
+  equal(
+    helpers.walletEntryIsVisible({ enabled: false, billingEnabled: true }),
+    false,
+  );
+
+  const hrefs = helpers
+    .accountMenuItems({ showWallet: true, isAdmin: false })
+    .map((item) => item.href);
+  ok(hrefs.includes("/me/wallet"));
+  equal(
+    helpers
+      .accountMenuItems({ showWallet: false, isAdmin: false })
+      .some((item) => item.href === "/me/wallet"),
+    false,
+  );
+
+  // 新-15 的口径保持不变：余额读不到就不渲染金额，绝不显示假的 ¥--。
+  equal(helpers.formatWalletText(true, undefined), null);
+  equal(helpers.formatWalletText(true, null), null);
+  equal(helpers.formatWalletText(true, { rmb: null }), null);
+  equal(helpers.formatWalletText(true, { rmb: "12.34" }), "¥12.34");
+  equal(helpers.formatWalletText(false, { rmb: "12.34" }), null);
+
+  // 入口可见性不得再回接余额可用性。
+  doesNotMatch(source, /walletEntryIsVisible\(\{[^}]*hasBalance/);
+});

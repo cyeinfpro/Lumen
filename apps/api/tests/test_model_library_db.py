@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 
-from app.routes import workflows
 from app.workflow_services import (
     library_items,
     library_materialization,
@@ -109,7 +108,7 @@ async def test_add_user_library_item_inserts_one_row_per_call(
     db = _ConcurrentDb()
 
     async def _favorite(image_id: str, title: str) -> dict[str, Any]:
-        return await workflows._add_user_library_item(  # noqa: SLF001
+        return await library_materialization._add_user_library_item(  # noqa: SLF001
             db,
             user_id="user-1",
             source="favorite",
@@ -182,7 +181,7 @@ async def test_legacy_user_library_is_lazily_migrated(
         ]
     )
 
-    migrated = await workflows._ensure_legacy_user_library_migrated(  # noqa: SLF001
+    migrated = await library_items._ensure_legacy_user_library_migrated(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         "user-1",
     )
@@ -236,7 +235,7 @@ async def test_legacy_user_library_skips_items_without_valid_image(
         ]
     )
 
-    migrated = await workflows._ensure_legacy_user_library_migrated(  # noqa: SLF001
+    migrated = await library_items._ensure_legacy_user_library_migrated(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         "user-1",
     )
@@ -272,7 +271,7 @@ def test_delete_user_item_removes_legacy_index_entry(
         lambda _user_id: index_path,
     )
 
-    removed = workflows._remove_user_library_item_from_legacy_index(  # noqa: SLF001
+    removed = library_storage._remove_user_library_item_from_legacy_index(  # noqa: SLF001
         "user-1",
         "user:delete-me",
     )
@@ -302,7 +301,7 @@ def test_hide_preset_updates_legacy_hidden_index(
         lambda _user_id: index_path,
     )
 
-    hidden = workflows._hide_preset_in_legacy_user_library_index(  # noqa: SLF001
+    hidden = library_storage._hide_preset_in_legacy_user_library_index(  # noqa: SLF001
         "user-1",
         "preset:new",
     )
@@ -373,7 +372,7 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
         _empty_upstream,
     )
 
-    out = await workflows._auto_tag_library_item(  # noqa: SLF001
+    out = await model_library_endpoints._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
     )
 
@@ -410,7 +409,7 @@ async def test_auto_tag_writes_when_provider_returns_signal(
         _vision_upstream,
     )
 
-    out = await workflows._auto_tag_library_item(  # noqa: SLF001
+    out = await model_library_endpoints._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
     )
 
@@ -450,7 +449,7 @@ async def test_auto_tag_preserves_user_filled_appearance(
         _vision_upstream,
     )
 
-    await workflows._auto_tag_library_item(  # noqa: SLF001
+    await model_library_endpoints._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
     )
 
@@ -477,7 +476,7 @@ async def test_auto_tag_appends_existing_style_tags(
         _vision_upstream,
     )
 
-    await workflows._auto_tag_library_item(  # noqa: SLF001
+    await model_library_endpoints._auto_tag_library_item(  # noqa: SLF001
         db=db, user_id="user-1", item_id="user:test-1"
     )
 

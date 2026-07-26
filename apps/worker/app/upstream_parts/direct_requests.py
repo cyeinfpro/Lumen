@@ -7,6 +7,7 @@ from ..provider_runtime.upstream_services import upstream_services
 from typing import Any, Awaitable, Callable
 
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
 
 async def _download_result_url_bytes(
@@ -211,10 +212,18 @@ def _direct_image_result_unknown_error(
 
 
 def _is_direct_image_result_unknown(exc: BaseException) -> bool:
+    """True 表示这次失败发生在上游 2xx 之后（上游可能已经计费）。
+
+    命中即禁止自动换 provider / 重试，否则一次用户请求会产生第二笔上游成本。
+
+    码集直接取自 ``IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES``，**不再本地复制一份**：
+    这里原本硬编码了与该常量重复的清单，两处各自演进就会漂移成「计费侧认为上游
+    已扣费所以照结，重试侧却以为可以安全重试」——用户被扣两次。同一个判断只允许
+    有一个事实来源。
+    """
     return (
         isinstance(exc, upstream_services().infrastructure.UpstreamError)
-        and exc.error_code
-        == upstream_services().infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+        and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
     )
 
 

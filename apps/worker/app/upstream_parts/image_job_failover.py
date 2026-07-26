@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
 from .image_execution import ImageExecutionRequest, ImageResult
 from .transport import ImageProgressCallback
@@ -31,6 +32,19 @@ def _image_job_error_class(exc: BaseException) -> str | None:
     return None
 
 
+def _upstream_cost_already_incurred(exc: BaseException) -> bool:
+    """这次失败是否发生在上游 2xx 之后（钱已经花出去了）。
+
+    命中后**任何**形式的重跑都必须停：换 endpoint 是同一家供应商的第二次调用，
+    换 provider 是另一家的第一次调用——两者都会新增一笔上游成本，而这次生成只
+    hold 了一份钱，多出来的部分无处转嫁，只能由平台吸收。
+    """
+    return (
+        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+    )
+
+
 def _should_continue_image_job_failover(
     exc: BaseException,
     *,
@@ -38,6 +52,9 @@ def _should_continue_image_job_failover(
 ) -> bool:
     """Return whether endpoint or provider failover can recover the job."""
     if upstream_services().providers.is_quota_accounting_unavailable(exc):
+        return False
+    # 必须在 `retriable` 之前：成本已经发生这件事不该被「可重试」翻盘。
+    if _upstream_cost_already_incurred(exc):
         return False
     if retriable:
         return True
@@ -49,8 +66,8 @@ def _should_continue_image_job_failover(
             return True
         if exc.status_code is not None and 500 <= exc.status_code < 600:
             return True
+        # NO_IMAGE_RETURNED 已由上面的「上游已产生成本」守卫拦下，不再列在这里。
         if exc.error_code in {
-            upstream_services().infrastructure.EC.NO_IMAGE_RETURNED.value,
             upstream_services().infrastructure.EC.UPSTREAM_TIMEOUT.value,
             upstream_services().infrastructure.EC.TIMEOUT.value,
             upstream_services().infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
@@ -427,7 +444,9 @@ async def _run_image_job_provider(
         if not isinstance(outcome, _ImageJobAttemptFailure):
             return _ImageJobProviderOutcome(result=outcome)
         remaining = len(plan.endpoints) - endpoint_index - 1
-        if remaining > 0:
+        # endpoint 切换此前是无条件的：只要还有下一个 endpoint 就重跑，不看错误
+        # 类型。上游已回 2xx 时这等于在同一家供应商上再买一次，第二笔无处转嫁。
+        if remaining > 0 and not _upstream_cost_already_incurred(outcome.error):
             await _emit_image_job_endpoint_failover(
                 request,
                 outcome,

@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { RealtimeControlEvent } from "./sse/contracts";
 import type { SnapshotAdapter } from "./sse/replayCoordinator";
 import {
@@ -52,13 +59,28 @@ export function useSSE(
   options: UseSSEOptions = {},
 ): { status: SSEStatus; reconnect: () => void } {
   const [status, setStatus] = useState<SSEStatus>(initialStatus);
-  const handlersRef = useRef(handlers);
-  const optionsRef = useRef(options);
   const runtimeRef = useRef<RealtimeRuntime | null>(null);
-  useEffect(() => {
-    handlersRef.current = handlers;
-    optionsRef.current = options;
-  });
+  // 修复闭包陈旧：改用 useEffectEvent 取代「passive effect 里回写 ref」。
+  // ref 要等 passive effect 冲刷才更新，这中间到达的 SSE 事件会命中上一轮渲染的
+  // handlers/options；effect event 在 commit 阶段同步换实现，不存在这个窗口。
+  const dispatchHandler = useEffectEvent(
+    (name: string, data: unknown, id: string) => {
+      handlers[name]?.(data, id);
+    },
+  );
+  const emitOpen = useEffectEvent((event: Event) => options.onOpen?.(event));
+  const emitError = useEffectEvent((event: Event) => options.onError?.(event));
+  const emitControl = useEffectEvent((event: RealtimeControlEvent) =>
+    options.onControl?.(event),
+  );
+  const emitRecoverSnapshot = useEffectEvent<SnapshotAdapter>(
+    (scopes, reason) => {
+      const recover = options.recoverSnapshot;
+      return recover
+        ? recover(scopes, reason)
+        : Promise.reject(new Error("snapshot adapter unavailable"));
+    },
+  );
 
   const channelKey = useMemo(() => [...channels].sort().join(","), [channels]);
   const eventKey = useMemo(
@@ -80,19 +102,13 @@ export function useSSE(
           .filter(Boolean)
           .map((name) => [
             name,
-            (data: unknown, id: string) =>
-              handlersRef.current[name]?.(data, id),
+            (data: unknown, id: string) => dispatchHandler(name, data, id),
           ]),
       ),
-      onOpen: (event) => optionsRef.current.onOpen?.(event),
-      onError: (event) => optionsRef.current.onError?.(event),
-      onControl: (event) => optionsRef.current.onControl?.(event),
-      recoverSnapshot: (scopes, reason) => {
-        const recover = optionsRef.current.recoverSnapshot;
-        return recover
-          ? recover(scopes, reason)
-          : Promise.reject(new Error("snapshot adapter unavailable"));
-      },
+      onOpen: emitOpen,
+      onError: emitError,
+      onControl: emitControl,
+      recoverSnapshot: emitRecoverSnapshot,
       hiddenCloseDelayMs: options.hiddenCloseDelayMs,
       maxRetryCount: options.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT,
       setStatus,

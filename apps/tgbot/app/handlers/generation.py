@@ -234,10 +234,7 @@ async def on_enhance_choice(
     original = str(data.get("original_prompt") or "")
     enhanced = str(data.get("enhanced_prompt") or "")
     params = dict(data.get("params") or DEFAULT_PARAMS)
-    idempotency_key = str(
-        data.get("idempotency_key")
-        or make_idempotency_key("enhance", msg.chat.id, cb.id)
-    )
+    idempotency_key = str(data.get("idempotency_key") or "")
 
     if choice == "cancel":
         await state.clear()
@@ -271,10 +268,29 @@ async def on_enhance_choice(
     else:
         await cb.answer("无效选择，请重新发起。", show_alert=True)
         return
-    if not prompt:
+    if not prompt or not idempotency_key:
         await cb.answer("会话已失效，/new 重开", show_alert=True)
         await state.clear()
         return
+
+    # 双击竞态防线：两次回调并发进来时，只有抢到 SET NX 的那个协程能提交。
+    # 必须在任何网络 IO（edit_reply_markup / state.clear）之前拿锁——那些
+    # await 点都会让出 event loop，让第二个回调追上来。
+    try:
+        acquired = await tracker.acquire_submit_once(idempotency_key)
+    except Exception as exc:  # noqa: BLE001
+        # Redis 不可用：宁可放行也不要卡死用户。服务端 idempotency_key 去重
+        # 仍是第二道防线（key 此时已固化，不再掺 cb.id）。
+        logger.warning(
+            "submit-once lock unavailable key=%s err=%r", idempotency_key, exc
+        )
+        acquired = True
+    if not acquired:
+        await cb.answer("已在提交中，请勿重复点击")
+        return
+
+    # 抢到锁后再清 state：即便第二个回调此刻读到空 state，它也已经被锁挡下。
+    await state.clear()
 
     # 去掉按钮避免重复点击
     try:
@@ -285,7 +301,6 @@ async def on_enhance_choice(
     await _submit_generation(
         msg.chat.id, prompt, params, api, msg.answer, idempotency_key
     )
-    await state.clear()
     await cb.answer("已提交")
 
 

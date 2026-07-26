@@ -9,14 +9,19 @@ package。pytest 同 session 收集两套测试，sys.modules 里 `app.*` 会按
   - pytest_collectstart（处理 collection 阶段的 import）
   - pytest_runtest_setup（处理 test function 体内的 inline import）
 """
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
 import sys
+from types import ModuleType
 
 API_ROOT = str(Path(__file__).resolve().parents[1])
 TESTS_DIR = str(Path(__file__).resolve().parent)
+APP_ORIGIN = "api"
+APP_MARKER = "/apps/api/"
+_APP_CACHE_ATTR = "_lumen_test_app_module_caches"
 
 os.environ.setdefault(
     "BYOK_API_KEY_MASTER_SECRET",
@@ -25,17 +30,48 @@ os.environ.setdefault(
 os.environ.setdefault("APP_ENV", "test")
 
 
+def _app_module_cache() -> dict[str, dict[str, ModuleType]]:
+    cache = getattr(sys, _APP_CACHE_ATTR, None)
+    if cache is None:
+        cache = {}
+        setattr(sys, _APP_CACHE_ATTR, cache)
+    return cache
+
+
+def _loaded_app_modules() -> dict[str, ModuleType]:
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+
+
+def _app_origin(modules: dict[str, ModuleType]) -> str | None:
+    root = modules.get("app")
+    module_file = str(getattr(root, "__file__", "") or "")
+    if "/apps/api/" in module_file:
+        return "api"
+    if "/apps/worker/" in module_file:
+        return "worker"
+    return None
+
+
 def _switch_to_api_app() -> None:
     if not sys.path or sys.path[0] != API_ROOT:
         if API_ROOT in sys.path:
             sys.path.remove(API_ROOT)
         sys.path.insert(0, API_ROOT)
-    loaded = sys.modules.get("app")
-    if loaded is not None:
-        mod_file = getattr(loaded, "__file__", "") or ""
-        if "/apps/api/" not in mod_file:
-            for key in [k for k in sys.modules if k == "app" or k.startswith("app.")]:
-                del sys.modules[key]
+    loaded = _loaded_app_modules()
+    origin = _app_origin(loaded)
+    cache = _app_module_cache()
+    if origin == APP_ORIGIN:
+        cache[APP_ORIGIN] = loaded
+        return
+    if origin is not None:
+        cache[origin] = loaded
+    for name in loaded:
+        sys.modules.pop(name, None)
+    sys.modules.update(cache.get(APP_ORIGIN, {}))
 
 
 def _is_api_test(node) -> bool:
@@ -51,6 +87,16 @@ def pytest_collectstart(collector):
 def pytest_runtest_setup(item):
     if _is_api_test(item):
         _switch_to_api_app()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    del session, exitstatus
+    for name in _loaded_app_modules():
+        sys.modules.pop(name, None)
+    if API_ROOT in sys.path:
+        sys.path.remove(API_ROOT)
+    if hasattr(sys, _APP_CACHE_ATTR):
+        delattr(sys, _APP_CACHE_ATTR)
 
 
 _switch_to_api_app()

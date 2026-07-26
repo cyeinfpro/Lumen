@@ -1120,9 +1120,10 @@ async def test_volcano_newapi_fetch_content_uses_bearer_and_redirects(
     )
     adapter = VolcanoNewApiVideoAdapter(provider)
     requests: list[httpx.Request] = []
+    allow_http_per_hop: list[bool] = []
 
     async def fake_resolve_public_target(raw_url: str, *, allow_http: bool):
-        assert allow_http is True
+        allow_http_per_hop.append(allow_http)
         return SimpleNamespace(url=raw_url)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1162,6 +1163,8 @@ async def test_volcano_newapi_fetch_content_uses_bearer_and_redirects(
         "zz1cc.cc.cd",
         "cdn.example.com",
     ]
+    # 第一跳是 https，之后不再允许明文：302 不能把下载降级成 http。
+    assert allow_http_per_hop == [True, False]
 
 
 @pytest.mark.asyncio

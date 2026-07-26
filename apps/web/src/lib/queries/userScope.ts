@@ -66,6 +66,10 @@ export const userBillingQueryKeys = {
       userId,
       ["billing", "wallet", "transactions", params] as const,
     ),
+  // Prefix over every transaction filter/pagination variant, so a ledger write
+  // can be invalidated without also nuking the unrelated pricing catalogue.
+  walletTransactionsAll: (userId: string | null | undefined) =>
+    userScopedQueryKey(userId, ["billing", "wallet", "transactions"] as const),
   pricing: (userId: string | null | undefined) =>
     userScopedQueryKey(userId, ["billing", "pricing"] as const),
   snapshot: (userId: string | null | undefined) =>

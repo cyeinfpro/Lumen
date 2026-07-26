@@ -21,6 +21,31 @@ from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 from app.provider_runtime.upstream_services import upstream_services
 
 
+class _QuotaMetricsRedis:
+    def __init__(self) -> None:
+        self.zsets: dict[str, dict[str, float]] = {}
+        self.kv: dict[str, str] = {}
+
+    async def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        zset = self.zsets.setdefault(key, {})
+        added = sum(member not in zset for member in mapping)
+        zset.update({member: float(score) for member, score in mapping.items()})
+        return added
+
+    async def zremrangebyscore(self, key: str, mn: float, mx: float) -> int:
+        zset = self.zsets.get(key, {})
+        removed = [member for member, score in zset.items() if mn <= score <= mx]
+        for member in removed:
+            del zset[member]
+        return len(removed)
+
+    async def zcard(self, key: str) -> int:
+        return len(self.zsets.get(key, {}))
+
+    async def get(self, key: str) -> str | None:
+        return self.kv.get(key)
+
+
 def _make_pool(*configs: ProviderConfig) -> ProviderPool:
     """构造 pool 并直接灌入 providers / health，跳过 _maybe_reload 的配置校验。"""
     pool = ProviderPool()
@@ -632,11 +657,8 @@ async def test_flush_image_metrics_reads_quota_from_redis() -> None:
     from app import account_limiter
     from app.observability import account_image_quota_used
 
-    # 用 test_account_limiter 的 FakeRedis
-    from tests.test_account_limiter import FakeRedis  # type: ignore[import-not-found]
-
     pool = _make_pool(_cfg("acc_quota", rate_limit="5/min", daily_quota=80))
-    redis = FakeRedis()
+    redis = _QuotaMetricsRedis()
     pool.attach_redis(redis)
 
     now = time.time()

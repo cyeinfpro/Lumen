@@ -14,7 +14,7 @@ from ..images.adapters.filesystem_store import FileSystemArtifactStore
 from ..images.application.create_variant import CreateVariantService, VariantError
 from ..images.application.deliver import DeliverySpec, deliver_artifact
 from ..services import storage_files
-from ._image_delivery import (
+from ..images.application._file_delivery import (
     etag_matches_if_none_match,
     internal_redirect_enabled,
     iter_open_file_and_close,

@@ -297,8 +297,9 @@ function ReleaseSummary({
         <div className="text-[11px] text-[var(--fg-2)]">
           发布于 {check.release.published_at ?? "unknown"}
         </div>
+        {/* 传 markdown 源码而非 body_html：预览组件内部走 react-markdown，原始 HTML 会被丢弃 */}
         <MarkdownPreview
-          bodyHtml={check.release.body_html ?? ""}
+          body={check.release.body_md ?? ""}
           limitLines={6}
           className="overflow-auto rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-xs leading-6 text-[var(--fg-1)]"
         />

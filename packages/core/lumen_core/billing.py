@@ -8,7 +8,7 @@ import json
 import logging
 import secrets
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Any
 
 from sqlalchemy import select
@@ -43,6 +43,11 @@ DEFAULT_IMAGE_SIZE_THRESHOLDS: Mapping[str, int] = immutable_mapping(
     }
 )
 CROCKFORD_REDEMPTION_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+# users.billing_rate_multiplier 是 Numeric(8, 4)：8 位有效数字、4 位小数，
+# 即整数部分最多 4 位，可表示的最大值是 9999.9999。超出这个范围的值不可能
+# 由该列合法产生（只能来自迁移遗留 / 直连改库 / 反序列化脏数据），一律按
+# 非法输入处理。
+MAX_RATE_MULTIPLIER = Decimal("9999.9999")
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +74,18 @@ def money_dict(amount_micro: int) -> dict[str, Any]:
 
 
 def rmb_to_micro(value: str | int | float | Decimal) -> int:
+    """把「元」字符串换算成整数 µRMB（10^-6 元）。
+
+    µRMB 是账本的最小记账单位，比它更细的位数无处存放，只能取整。以前这里
+    静默丢弃零头：运营在后台把单价填成 ``0.0000004`` 会得到 0 micro（这个
+    模型从此免费），填成 ``1.9999995`` 会被抬到 2.0，两种情况都没有任何痕迹。
+    现在只要 quantize 真的丢了余数就打一条 warning，把「你输入的精度超过了
+    账本能表示的范围」这件事暴露给运维。
+
+    这里刻意只告警不报错：调用点遍布充值 / 调账 / 兑换码 / 定价录入，历史数据
+    里确实存在六位以上小数的输入，直接 422 会把既有流程打断；而单笔误差上界
+    是 0.5 µRMB（5e-7 元），远低于任何一笔真实金额，不构成资金风险。
+    """
     try:
         dec = Decimal(str(value).strip())
     except (InvalidOperation, ValueError) as exc:
@@ -78,15 +95,58 @@ def rmb_to_micro(value: str | int | float | Decimal) -> int:
     if not dec.is_finite():
         raise BillingError("INVALID_AMOUNT", "amount is not a finite decimal", 422)
     try:
-        micro = (dec * Decimal(MICRO_RMB)).quantize(
-            Decimal("1"),
-            rounding=ROUND_HALF_UP,
-        )
+        exact = dec * Decimal(MICRO_RMB)
+        micro = exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
         raise BillingError(
             "INVALID_AMOUNT", "amount is not a valid decimal", 422
         ) from exc
+    if exact != micro:
+        logger.warning(
+            "rmb_to_micro dropped sub-micro precision: raw=%r exact_micro=%s "
+            "stored_micro=%s",
+            value,
+            exact,
+            micro,
+        )
     return int(micro)
+
+
+def parse_rate_multiplier_x10000(raw: Any) -> int:
+    """把 users.billing_rate_multiplier 换算成万分比整数，全程 Decimal。
+
+    该列是 Numeric(8, 4)：asyncpg 回 Decimal，aiosqlite 等驱动可能回 float。
+    早先的实现写成 ``int(float(raw) * 10_000)``，float 无法精确表示 0.0009
+    这类四位小数，乘 10000 后落在 10008.999... 上，再被 int() 截断成 10008，
+    比准确值 10009 少一档。倍率 1.0009 的用户下一笔 100 元订单就少收 0.01 元，
+    差额由平台承担——与「纯转嫁」相悖。改成 Decimal(str(raw)) 后换算精确，
+    不再需要任何取整让步。
+
+    非法值一律退回 1.0（原价转嫁）而不是 0：0 是「这个账号免费」的**显式**配置，
+    只能由运营真的写下 0.0000 才生效；解析失败、NaN、负数、超出列值域的脏数据
+    都属于「不知道该收多少」，此时按原价收才不会让平台白替用户垫上游成本。
+    """
+    if raw is None:
+        return 10_000
+    try:
+        dec = Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return 10_000
+    if not dec.is_finite():
+        return 10_000
+    # 负倍率会算出负费用（倒贴），超上界会算出天价账单，两者都不是合法配置。
+    # 早先的实现把负数夹到 0，等于让一条脏数据把该账号变成永久免费——上游照扣，
+    # 平台全额吸收，正是纯转嫁禁止的方向。改成与其它非法输入一致退回 1.0 并告警。
+    if dec < 0 or dec > MAX_RATE_MULTIPLIER:
+        logger.warning(
+            "billing rate multiplier out of range; falling back to 1.0 (raw=%r)",
+            raw,
+        )
+        return 10_000
+    # 该列只保留 4 位小数，乘 10000 后本就是整数；万一上游写入了更高精度，
+    # 向上取整把零头判给用户，与视频取整方向保持一致。
+    scaled = (dec * Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_UP)
+    return max(0, int(scaled))
 
 
 def parse_bool_setting(raw: str | None, default: bool = False) -> bool:
@@ -666,16 +726,17 @@ async def settle(
         return consumed
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
     before_balance = wallet.balance_micro
+    # Once the upstream cost exists, settlement must record it in full. The
+    # hold gates dispatch while the cost is still avoidable; it is not a cap
+    # that makes the platform absorb a provider-side estimate overrun.
     actual = raw_actual
+    unauthorized_micro = max(0, raw_actual - held)
     balance_delta = held - actual
     next_balance = wallet.balance_micro + balance_delta
-    overdraw_micro = 0
-    if next_balance < 0 and not allow_negative:
-        overdraw_micro = -next_balance
-        next_balance = 0
+    overdraw_micro = max(0, -next_balance) if not allow_negative else 0
     wallet.balance_micro = next_balance
     wallet.hold_micro = max(0, wallet.hold_micro - held)
-    # lifetime_spend_micro tracks gross consumed service cost. Overdraw remains
+    # lifetime_spend_micro tracks gross consumed service cost. Debt remains
     # visible in transaction metadata, but spend analytics must not hide it.
     wallet.lifetime_spend_micro += max(0, actual)
     wallet.version += 1
@@ -692,6 +753,8 @@ async def settle(
             **(meta or {}),
             "held_micro": held,
             "actual_micro": actual,
+            "reported_actual_micro": raw_actual,
+            "unauthorized_micro": unauthorized_micro,
             "hold_delta": -held,
             "overdraw_micro": overdraw_micro,
         },
@@ -747,7 +810,6 @@ async def charge(
     ref_id: str,
     idempotency_key: str,
     allow_negative: bool = False,
-    cap_overdraw: bool = True,
     record_zero: bool = False,
     kind: str = "charge",
     meta: dict[str, Any] | None = None,
@@ -765,16 +827,16 @@ async def charge(
     if existing is not None:
         return existing
     before_balance = wallet.balance_micro
-    if wallet.balance_micro < amount and not allow_negative and not cap_overdraw:
-        raise BillingError("INSUFFICIENT_BALANCE", "insufficient wallet balance", 402)
-    overdraw_micro = 0
-    if wallet.balance_micro < amount and allow_negative:
-        wallet.balance_micro -= amount
-    elif wallet.balance_micro < amount and cap_overdraw:
-        overdraw_micro = amount - wallet.balance_micro
-        wallet.balance_micro = 0
-    else:
-        wallet.balance_micro -= amount
+    # 纯转嫁：charge 走的是「没有预授权、上游已经扣过费」的直扣路径，金额必须
+    # 全额落到用户头上。这里曾有 cap_overdraw 开关：默认 True 时余额不足就把
+    # 余额封顶成 0、差额只写进 meta，那部分成本由平台吸收，等于用户白嫖；
+    # 传 False 时又改成抛 INSUFFICIENT_BALANCE，成本同样落在平台身上（服务已
+    # 经产生，账却没记）。两种分支都违反「上游扣费用户必付」，因此整个开关删除，
+    # 与 settle 对齐：余额照实扣穿，overdraw_micro 只作为欠费标记供追缴。
+    # 是否放行请求由 hold（预授权阶段，成本尚未发生）的 allow_negative 决定。
+    next_balance = wallet.balance_micro - amount
+    overdraw_micro = max(0, -next_balance) if not allow_negative else 0
+    wallet.balance_micro = next_balance
     wallet.lifetime_spend_micro += max(0, amount)
     wallet.version += 1
     return await _insert_tx(

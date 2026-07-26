@@ -68,6 +68,30 @@ const OVERLAY_CYAN = "rgba(64, 224, 208, 0.55)";
 const CURSOR_CYAN_STROKE = "rgba(64, 224, 208, 0.95)";
 const CURSOR_CYAN_FILL = "rgba(64, 224, 208, 0.18)";
 
+// I-4：preview_data_url 只用于 composer 里"已设置 mask"的缩略展示
+// （见 lib/types.ts MaskState 注释），却曾经用 canvas.toDataURL 把全分辨率画布
+// 又同步编码一次 PNG —— toBlob 已经编码过一次了，第二次纯属重复，而且 toDataURL
+// 是同步的：4K 图上是几百毫秒的主线程冻结，产出的 base64（数十 MB）还会被塞进
+// composer store。降采样到长边 512px 再编码，主线程开销与内存都降两个数量级。
+const MASK_PREVIEW_MAX_EDGE = 512;
+
+function renderMaskPreviewDataUrl(
+  source: HTMLCanvasElement,
+  width: number,
+  height: number,
+): string {
+  const longest = Math.max(width, height);
+  if (longest <= MASK_PREVIEW_MAX_EDGE) return source.toDataURL("image/png");
+  const scale = MASK_PREVIEW_MAX_EDGE / longest;
+  const preview = document.createElement("canvas");
+  preview.width = Math.max(1, Math.round(width * scale));
+  preview.height = Math.max(1, Math.round(height * scale));
+  const ctx = preview.getContext("2d");
+  if (!ctx) return source.toDataURL("image/png");
+  ctx.drawImage(source, 0, 0, preview.width, preview.height);
+  return preview.toDataURL("image/png");
+}
+
 export interface MaskExport {
   blob: Blob;
   preview_data_url: string;
@@ -824,7 +848,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         canvas.toBlob((b) => resolve(b), "image/png"),
       );
       if (!blob) return null;
-      const preview_data_url = canvas.toDataURL("image/png");
+      const preview_data_url = renderMaskPreviewDataUrl(canvas, W, H);
 
       return { blob, preview_data_url, width: W, height: H, coverage };
     }, [imgEl, strokes, displayDims.scale]);

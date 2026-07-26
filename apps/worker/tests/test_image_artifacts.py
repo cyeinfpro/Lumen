@@ -177,6 +177,44 @@ def test_webp_variants_preserve_alpha(
         assert reloaded.getchannel("A").getextrema() == (0, 255)
 
 
+@pytest.mark.parametrize("max_side", [256, 1024, 2048])
+@pytest.mark.parametrize(
+    "size",
+    [(1, 1), (17, 3), (255, 256), (256, 256), (257, 1000), (3000, 1700), (9999, 13)],
+)
+def test_scaled_variant_size_matches_pillow_thumbnail(
+    size: tuple[int, int], max_side: int
+) -> None:
+    """缩放改为直接 resize 后，尺寸必须与 Image.thumbnail 逐像素一致。"""
+    reference = PILImage.new("RGB", size)
+    reference.thumbnail((max_side, max_side))
+
+    with image_artifacts._scaled_for_variant(PILImage.new("RGB", size), max_side) as im:
+        assert im.size == reference.size
+
+
+def test_variant_helpers_do_not_mutate_source_image() -> None:
+    """三个变体共享同一张原图，任何一个就地改动都会污染后续变体。"""
+    src = PILImage.new("RGBA", (3000, 1700), (10, 20, 30, 255))
+
+    for factory in (
+        image_artifacts._make_display,
+        image_artifacts._make_preview,
+        image_artifacts._make_thumb,
+    ):
+        factory(src)
+        assert src.size == (3000, 1700)
+        assert src.mode == "RGBA"
+
+
+def test_scaled_variant_skips_copy_when_already_within_bounds() -> None:
+    """已在目标尺寸内时不应再分配副本（省掉全分辨率拷贝的峰值内存）。"""
+    src = PILImage.new("RGB", (64, 64))
+
+    with image_artifacts._scaled_for_variant(src, 256) as im:
+        assert im is src
+
+
 def test_jpeg_thumb_flattens_transparency_onto_white() -> None:
     src = PILImage.new("RGBA", (32, 32), (255, 0, 0, 0))
     for x in range(8, 24):

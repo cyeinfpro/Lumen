@@ -440,10 +440,14 @@ def test_image_job_install_copies_all_python_runtime_modules() -> None:
         "job_persistence.py",
         "payload_helpers.py",
         "request_bodies.py",
-        "runtime_config.py",
         "upstream_runtime.py",
     ):
         assert f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"' in text
+
+    # runtime_config.py 已删除（死代码，配置实际由 image_job/config.py 提供）。
+    # 部署脚本不许再装它，也必须清掉旧版本留在机器上的残件。
+    assert "image-job/runtime_config.py" not in text
+    assert 'as_sudo rm -f "${app_dir}/runtime_config.py"' in text
 
     assert 'cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"' in text
     assert (

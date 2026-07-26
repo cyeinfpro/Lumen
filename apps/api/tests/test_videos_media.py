@@ -2041,6 +2041,23 @@ async def test_reference_media_snapshots_adds_public_url_for_uploaded_video(
     assert "reference_access_token_expires_at" in video.metadata_jsonb
 
 
+def test_reference_token_expiry_cannot_be_widened_by_caller() -> None:
+    from app.services.video.reference_media import (
+        REFERENCE_ACCESS_TOKEN_TTL,
+        reference_token_expiry,
+    )
+
+    # No caller-supplied clock: a future misuse threading a request-derived
+    # timestamp through here would have minted never-expiring reference tokens.
+    assert list(inspect.signature(reference_token_expiry).parameters) == []
+
+    before = datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(reference_token_expiry())
+    after = datetime.now(timezone.utc)
+    assert before + REFERENCE_ACCESS_TOKEN_TTL <= parsed
+    assert parsed <= after + REFERENCE_ACCESS_TOKEN_TTL
+
+
 @pytest.mark.asyncio
 async def test_reference_media_snapshots_refreshes_legacy_video_public_url(
     monkeypatch: pytest.MonkeyPatch,

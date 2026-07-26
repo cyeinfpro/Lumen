@@ -23,8 +23,10 @@ from lumen_core.models import Base, UserWallet, WalletTransaction
 from lumen_core.schemas import (
     AdminBillingBootstrapIn,
     AdminRedemptionCodeCreateIn,
+    AdminSetAccountModeIn,
     AdminWalletAdjustIn,
     RedemptionIn,
+    WalletOut,
 )
 
 
@@ -1304,6 +1306,80 @@ async def test_redeem_code_integrity_error_replays_wallet_tx_race(
 
 
 @pytest.mark.asyncio
+async def test_redeem_code_samples_clock_after_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计新-10：FOR UPDATE 可能阻塞任意久，过期判定必须用拿到锁之后的时钟。"""
+    from app.routes.billing_parts import redemptions as redemptions_route
+
+    normalized = billing_core.normalize_redemption_code("LMN-AAAA-BBBB-CCCC")
+    start = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    clock = {"now": start}
+    code = SimpleNamespace(
+        id="code-1",
+        code_hash=billing_core.hash_redemption_code(normalized, "secret"),
+        revoked_at=None,
+        # 请求进来时还有 30 秒有效期，但排在锁后面等了 60 秒。
+        expires_at=start + timedelta(seconds=30),
+        redeemed_count=0,
+        max_redemptions=1,
+        amount_micro=5_000_000,
+    )
+
+    class _Clock:
+        @staticmethod
+        def now(_tz: Any = None) -> datetime:
+            return clock["now"]
+
+    class Db(_Db):
+        async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+            clock["now"] = start + timedelta(seconds=60)  # 模拟锁等待
+            return _ScalarResult([code])
+
+    class Limiter:
+        async def check(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    async def no_cached(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def secrets(_db: Any) -> list[str]:
+        return ["secret"]
+
+    async def fail_topup(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("expired code must not be redeemed")
+
+    monkeypatch.setattr(redemptions_route, "datetime", _Clock)
+    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", noop)
+    monkeypatch.setattr(billing, "_redemption_out_for_usage", no_cached)
+    monkeypatch.setattr(billing, "_cache_redemption_out", noop)
+    monkeypatch.setattr(billing, "_require_redemption_operational", noop)
+    monkeypatch.setattr(billing, "REDEMPTION_LIMITER", Limiter())
+    monkeypatch.setattr(billing, "get_redis", lambda: object())
+    monkeypatch.setattr(billing, "_redemption_secrets", secrets)
+    monkeypatch.setattr(billing.billing_core, "topup_redeem", fail_topup)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await billing.redeem_code(
+            RedemptionIn(code="LMN-AAAA-BBBB-CCCC"),
+            _request(method="POST", headers=[(b"idempotency-key", b"redeem-1")]),
+            SimpleNamespace(
+                id="user-1",
+                email="user@example.test",
+                account_mode="wallet",
+            ),  # type: ignore[arg-type]
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail["error"]["code"] == "CODE_EXPIRED"
+
+
+@pytest.mark.asyncio
 async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1554,3 +1630,113 @@ async def test_admin_adjust_wallet_rejects_negative_balance_cap(
     assert getattr(excinfo.value, "status_code", None) == 422
     assert excinfo.value.detail["error"]["code"] == "negative_balance_limit_exceeded"
     assert seen_min_balance == [-billing.MAX_ADMIN_NEGATIVE_BALANCE_MICRO]
+
+
+class _AccountModeDb:
+    """只为 set_account_mode 提供 User 行锁查询与提交语义的最小 session。"""
+
+    def __init__(self, target: Any) -> None:
+        self._target = target
+        self.committed = False
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        return _ScalarOneOrNoneResult(self._target)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def refresh(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_set_account_mode_to_byok_rejects_wallet_with_active_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wallet→byok 必须在还有冻结额度时拒绝切换，否则 hold_micro 会被永久锁死。
+
+    切成 byok 后钱包不再有新的 hold/settle 入口，若此刻放行，已冻结的
+    hold_micro 就没有任何路径可以释放。这里用 409 把切换挡在前面，属于
+    「先解冻再切换」的强制顺序，不是事后补救。
+    """
+    target = SimpleNamespace(
+        id="user-1",
+        email="user@example.test",
+        account_mode="wallet",
+        deleted_at=None,
+    )
+    db = _AccountModeDb(target)
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user_id="user-1", balance_micro=5_000, hold_micro=1_200)
+
+    async def fail_adjust(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("blocked mode switch must not touch the balance")
+
+    monkeypatch.setattr(billing.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing.billing_core, "adjust", fail_adjust)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await billing.admin_set_account_mode(
+            "user-1",
+            AdminSetAccountModeIn(mode="byok", on_residual_balance="zero"),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "WALLET_HAS_ACTIVE_HOLDS"
+    assert excinfo.value.detail["error"]["details"]["hold_micro"] == 1_200
+    # 切换被拒后账户仍是 wallet，冻结额度还能照常 settle/release。
+    assert target.account_mode == "wallet"
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_set_account_mode_to_byok_allows_switch_without_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有冻结额度时才放行，残余余额按 on_residual_balance 清零。"""
+    target = SimpleNamespace(
+        id="user-1",
+        email="user@example.test",
+        account_mode="wallet",
+        deleted_at=None,
+    )
+    db = _AccountModeDb(target)
+    adjustments: list[int] = []
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user_id="user-1", balance_micro=5_000, hold_micro=0)
+
+    async def adjust(_db: Any, _user_id: str, amount: int, **_kwargs: Any) -> Any:
+        adjustments.append(amount)
+        return SimpleNamespace(id="tx-1")
+
+    async def wallet_out(*_args: Any, **_kwargs: Any) -> Any:
+        return WalletOut(mode="byok", balance=None, hold=None, frozen=True)
+
+    async def write_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def invalidate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(billing.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing.billing_core, "adjust", adjust)
+    monkeypatch.setattr(billing, "_wallet_out", wallet_out)
+    monkeypatch.setattr(billing, "write_audit", write_audit)
+    monkeypatch.setattr(billing, "_invalidate_balance_cache", invalidate)
+
+    out = await billing.admin_set_account_mode(
+        "user-1",
+        AdminSetAccountModeIn(mode="byok", on_residual_balance="zero"),
+        _request(method="POST"),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.account_mode == "byok"
+    assert adjustments == [-5_000]
+    assert db.committed is True

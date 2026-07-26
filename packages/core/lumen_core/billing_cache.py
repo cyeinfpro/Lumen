@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from .models import (
     UserWallet,
     WalletTransaction,
 )
+
+logger = logging.getLogger(__name__)
 
 # Bound only rate-limit window increments. Balance-cache decrements mirror the
 # ledger amount and should not silently skip legitimate large charges.
@@ -130,6 +133,17 @@ class BillingCacheService:
         return None
 
     async def set_balance(self, user_id: str, balance_micro: int) -> None:
+        """把结算后的新余额写进缓存；写失败必须让旧值失效，不能原样留着。
+
+        调用点都是「账本已经改完，现在同步缓存」。以前这里 set 抛异常就直接
+        吞掉返回，Redis 里留下的是**结算前**的旧余额，而且还带着完整 TTL：
+        用户刚被扣了钱，前端和限额判断却继续按旧的高余额放行，可以一路超额
+        消费到 TTL 自然过期为止（F-18）。
+
+        因此 set 失败后补一次 delete：缓存缺失会让 get_balance 回源数据库拿到
+        真实余额，代价只是一次查询，而留着旧值的代价是超额消费。delete 也失败
+        （Redis 整体不可用）时只能靠 TTL 兜底，这种情况打 error 日志报出来。
+        """
         if self.redis is None:
             return
         try:
@@ -139,6 +153,21 @@ class BillingCacheService:
                 ex=self.balance_ttl_sec,
             )
         except Exception:
+            logger.warning(
+                "billing cache set_balance failed for user_id=%s; "
+                "invalidating stale entry",
+                user_id,
+                exc_info=True,
+            )
+            try:
+                await self.redis.delete(self._balance_key(user_id))
+            except Exception:
+                logger.error(
+                    "billing cache invalidation failed for user_id=%s; "
+                    "stale balance may be served until TTL expiry",
+                    user_id,
+                    exc_info=True,
+                )
             return
 
     async def _apply_window_increment(

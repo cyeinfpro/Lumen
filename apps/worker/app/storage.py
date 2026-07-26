@@ -7,15 +7,32 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
+from prometheus_client import Counter
+
 from lumen_core.constants import GenerationErrorCode as EC
 
+from . import observability
 from .config import settings
+
+logger = logging.getLogger(__name__)
+
+# 临时文件清理失败是「静默吞掉」的（见 put_bytes_result），吞掉本身是对的——
+# 对象已经落盘，不该把成功的写入翻成用户可见的失败。但吞掉之后必须留痕：
+# 泄漏的 .tmp 是随机名，除了这个计数器没有任何地方能发现它在堆积，
+# 长期下去会耗尽 inode。
+storage_tmp_cleanup_failed_total = observability._metric(  # noqa: SLF001
+    Counter,
+    "lumen_worker_storage_tmp_cleanup_failed_total",
+    "Temp files left behind after a storage write, by errno name.",
+    labelnames=("errno",),
+)
 
 _LINK_UNSUPPORTED_ERRNOS = frozenset(
     {
@@ -99,13 +116,7 @@ class LocalStorage:
                     if not created:
                         return StoragePutResult(size=len(data), created=False)
             finally:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:
-                    # The final object has already been linked. A temp cleanup
-                    # failure should not turn a successful durable write into a
-                    # user-visible storage failure; the next temp name is random.
-                    pass
+                self._discard_tmp(tmp, key)
             return StoragePutResult(size=len(data), created=True)
         except OSError as exc:
             if isinstance(exc, StorageDiskFullError):
@@ -113,6 +124,29 @@ class LocalStorage:
             if exc.errno == errno.ENOSPC:
                 raise StorageDiskFullError(key) from exc
             raise
+
+    @staticmethod
+    def _discard_tmp(tmp: Path, key: str) -> None:
+        """Best-effort temp cleanup that stays observable when it fails.
+
+        对象此时要么已经硬链成最终文件、要么这次写入本来就在抛错，两种情况下
+        再让 unlink 的失败上抛都只会把状态搞得更糟，所以继续吞。区别在于现在
+        吞掉会计数 + 打日志：临时文件名是随机的，没有这条线索就没人能发现
+        .tmp 正在堆积，直到 inode 耗尽。
+        """
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            storage_tmp_cleanup_failed_total.labels(
+                errno=errno.errorcode.get(exc.errno or 0, "unknown"),
+            ).inc()
+            logger.warning(
+                "storage temp cleanup failed key=%s tmp=%s errno=%s; "
+                "file leaked until swept",
+                key,
+                tmp.name,
+                exc.errno,
+            )
 
     def _put_bytes_without_link(self, path: Path, data: bytes) -> bool:
         """Fallback for filesystems without hardlinks. Returns True when created."""

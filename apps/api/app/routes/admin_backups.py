@@ -284,12 +284,32 @@ def _discover_scripts_dir() -> Path:
     return Path("/opt/lumen/scripts")
 
 
+_ALLOWED_SCRIPT_NAMES = frozenset({"backup.sh", "restore.sh"})
+
+
+def _resolved_script(name: str) -> Path:
+    """Resolve an allowlisted script under the configured scripts dir.
+
+    ``lumen_scripts_dir`` comes from settings rather than a request, but a
+    misconfigured or symlinked value would otherwise let ``bash`` run whatever
+    sits at that path. Pin the basename to the allowlist and require the
+    resolved file to stay inside the resolved scripts dir.
+    """
+    if name not in _ALLOWED_SCRIPT_NAMES:
+        raise _http("script_not_allowed", f"script {name} is not allowlisted", 500)
+    base = _discover_scripts_dir().resolve()
+    candidate = (base / name).resolve()
+    if candidate.parent != base:
+        raise _http("script_outside_root", f"{name} escapes {base}", 500)
+    return candidate
+
+
 def _backup_script() -> Path:
-    return _discover_scripts_dir() / "backup.sh"
+    return _resolved_script("backup.sh")
 
 
 def _restore_script() -> Path:
-    return _discover_scripts_dir() / "restore.sh"
+    return _resolved_script("restore.sh")
 
 
 async def _run_script(

@@ -41,6 +41,45 @@ def test_explicit_video_url_parser_accepts_video_url_collections() -> None:
     )
 
 
+def test_int_parser_keeps_full_precision_for_large_string_tokens() -> None:
+    """上游把 token 数当字符串回传时不得走 float：低位会被抹掉。
+
+    该值直接进视频结算金额，int(float(...)) 的舍入等于凭空改写上游用量。
+    """
+    raw = "1234567890123456789"
+
+    assert int(float(raw)) == 1234567890123456768  # 旧实现的错值，作为对照
+    assert parsing._int_or_none(raw) == 1234567890123456789
+
+
+def test_int_parser_rejects_non_finite_and_negative_values() -> None:
+    assert parsing._int_or_none("nan") is None
+    assert parsing._int_or_none("inf") is None
+    assert parsing._int_or_none("-1") is None
+    assert parsing._int_or_none(True) is None
+    assert parsing._int_or_none(None) is None
+    assert parsing._int_or_none("not-a-number") is None
+    # 既有形态保持不变：整数、百分号后缀、小数字符串都按截断取整。
+    assert parsing._int_or_none(42) == 42
+    assert parsing._int_or_none(" 75% ") == 75
+    assert parsing._int_or_none("12.9") == 12
+
+
+def test_duration_tokens_round_up_so_platform_never_eats_the_remainder() -> None:
+    """时长换算 token 只能向上取整：抹掉的尾数就是平台替用户垫付的成本。"""
+    # 1_000_000 token/秒，小数第七位起就产生不足一个 token 的尾数。
+    raw = "5.0000001"
+
+    tokens = parsing._duration_usage_total_tokens({"usage": {"duration": raw}})
+
+    assert tokens == 5_000_001  # 旧的 ROUND_HALF_UP 会算成 5_000_000
+    # 整秒时长不受影响，不会凭空多收。
+    assert (
+        parsing._duration_usage_total_tokens({"usage": {"duration": "5"}}) == 5_000_000
+    )
+    assert parsing._duration_usage_total_tokens({"usage": {"duration": 0}}) == 0
+
+
 def test_video_upstream_production_modules_stay_below_file_size_budget() -> None:
     root = Path(__file__).parents[1] / "app"
     paths = [

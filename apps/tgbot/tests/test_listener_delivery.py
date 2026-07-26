@@ -195,10 +195,22 @@ class ActiveNotifiedTracker(NotifiedTracker):
 
 class RecordingTracker:
     def __init__(
-        self, events: list[object], *, batch_remaining: int | None = 0
+        self,
+        events: list[object],
+        *,
+        batch_remaining: int | None = 0,
+        sent: set[str] | None = None,
     ) -> None:
         self.events = events
         self.batch_remaining = batch_remaining
+        self.sent: set[str] = set(sent or ())
+
+    async def sent_images(self, _gen_id: str) -> set[str]:
+        return set(self.sent)
+
+    async def mark_image_sent(self, gen_id: str, image_id: str) -> None:
+        self.sent.add(image_id)
+        self.events.append(("sent_image", gen_id, image_id))
 
     async def begin_delivery(self, gen_id: str) -> bool:
         self.events.append(("begin", gen_id))
@@ -243,18 +255,35 @@ class RecordingBot:
 
 
 class RecordingApi:
-    def __init__(self, events: list[object], tmp_path: Path) -> None:
+    def __init__(
+        self,
+        events: list[object],
+        tmp_path: Path,
+        *,
+        detail: dict[str, object] | None = None,
+        get_error: Exception | None = None,
+        download_errors: set[str] | None = None,
+    ) -> None:
         self.events = events
         self.tmp_path = tmp_path
+        self.detail = detail
+        self.get_error = get_error
+        self.download_errors = set(download_errors or ())
 
-    async def get_generation(self, _chat_id: int, gen_id: str) -> dict[str, str]:
+    async def get_generation(self, _chat_id: int, gen_id: str) -> dict[str, object]:
         self.events.append(("get_generation", gen_id))
+        if self.get_error is not None:
+            raise self.get_error
+        if self.detail is not None:
+            return dict(self.detail)
         return {"edit_url": "", "project_url": ""}
 
     async def download_image_to_file(
         self, _chat_id: int, image_id: str
     ) -> tuple[Path, str, int]:
         self.events.append(("download", image_id))
+        if image_id in self.download_errors:
+            raise listener.ApiError("download_failed", "boom")
         path = self.tmp_path / f"{image_id}.png"
         path.write_bytes(b"png")
         return path, "image/png", path.stat().st_size
@@ -574,6 +603,240 @@ async def test_succeeded_delivery_leaves_no_sent_marker_when_any_document_send_f
     assert ("mark", "gen-1", False) not in events
     assert ("clear", "gen-1") in events
     assert ("finish", "gen-1") not in events
+
+
+def _succeeded_track() -> SimpleNamespace:
+    return SimpleNamespace(
+        chat_id=1,
+        status_message_id=2,
+        prompt="p",
+        batch_id="",
+        is_bonus=False,
+    )
+
+
+def _patch_delivery(monkeypatch: pytest.MonkeyPatch, events: list[object]) -> None:
+    async def fake_send_document_with_backoff(*_args, **kwargs) -> None:
+        events.append(
+            ("send_document", kwargs["filename"], kwargs["caption"] is not None)
+        )
+        if str(kwargs["filename"]).endswith("-2.png") and kwargs.get("_fail"):
+            raise RuntimeError("telegram send failed")
+
+    async def fake_finish(_bot, gen_id: str, _track) -> None:
+        events.append(("finish", gen_id))
+
+    monkeypatch.setattr(
+        listener, "_send_document_with_backoff", fake_send_document_with_backoff
+    )
+    monkeypatch.setattr(listener, "_finish_succeeded_cleanup", fake_finish)
+
+
+@pytest.mark.asyncio
+async def test_succeeded_lookup_failure_is_retryable_not_reported_as_no_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """审计 J-3：查不到图 ≠ 没有图。查询失败必须可重投，不能标终态。"""
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events))
+    _patch_delivery(monkeypatch, events)
+
+    with pytest.raises(RuntimeError, match="terminal delivery failed"):
+        await listener._on_succeeded(
+            RecordingBot(events),
+            RecordingApi(
+                events, tmp_path, get_error=listener.ApiError("upstream", "down")
+            ),
+            "gen-1",
+            _succeeded_track(),
+            {},
+        )
+
+    # 不能把"没有图片返回"当结论发给用户，也不能 mark_notified 把图判死刑
+    assert "edit" not in events
+    assert ("mark", "gen-1", False) not in events
+    assert ("clear", "gen-1") in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_falls_back_to_api_when_event_images_unparsable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """images 里没有 image_id 时退回 API 再问一次，而不是直接宣布没有图。"""
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events))
+    _patch_delivery(monkeypatch, events)
+
+    await listener._on_succeeded(
+        RecordingBot(events),
+        RecordingApi(events, tmp_path, detail={"image_ids": ["img-9"]}),
+        "gen-1",
+        _succeeded_track(),
+        {"images": [{"url": "https://example.invalid/x.png"}]},
+    )
+
+    assert ("download", "img-9") in events
+    assert ("mark", "gen-1", False) in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_reports_no_images_only_when_api_confirms_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events))
+    _patch_delivery(monkeypatch, events)
+
+    await listener._on_succeeded(
+        RecordingBot(events),
+        RecordingApi(events, tmp_path, detail={"image_ids": []}),
+        "gen-1",
+        _succeeded_track(),
+        {},
+    )
+
+    assert "edit" in events
+    assert ("mark", "gen-1", False) in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_partial_send_records_only_delivered_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """审计 J-4：发到一半失败时，只有已送达的图会被记账。"""
+    events: list[object] = []
+    tracker_double = RecordingTracker(events)
+    monkeypatch.setattr(listener, "tracker", tracker_double)
+
+    async def fake_send_document_with_backoff(*_args, **kwargs) -> None:
+        events.append(("send_document", kwargs["filename"]))
+        if str(kwargs["filename"]).endswith("-2.png"):
+            raise RuntimeError("telegram send failed")
+
+    async def fake_finish(_bot, gen_id: str, _track) -> None:
+        events.append(("finish", gen_id))
+
+    monkeypatch.setattr(
+        listener, "_send_document_with_backoff", fake_send_document_with_backoff
+    )
+    monkeypatch.setattr(listener, "_finish_succeeded_cleanup", fake_finish)
+
+    with pytest.raises(RuntimeError, match="terminal delivery failed"):
+        await listener._on_succeeded(
+            RecordingBot(events),
+            RecordingApi(events, tmp_path),
+            "gen-1",
+            _succeeded_track(),
+            {"images": [{"image_id": "img-1"}, {"image_id": "img-2"}]},
+        )
+
+    assert tracker_double.sent == {"img-1"}
+    assert ("sent_image", "gen-1", "img-2") not in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_replay_only_resends_missing_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """审计 J-4：重投不能把已经发出去的图再发一遍（也不能再挂一套按钮）。"""
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events, sent={"img-1"}))
+    _patch_delivery(monkeypatch, events)
+
+    await listener._on_succeeded(
+        RecordingBot(events),
+        RecordingApi(events, tmp_path),
+        "gen-1",
+        _succeeded_track(),
+        {"images": [{"image_id": "img-1"}, {"image_id": "img-2"}]},
+    )
+
+    assert ("download", "img-1") not in events
+    assert ("download", "img-2") in events
+    sends = [event for event in events if event[0] == "send_document"]
+    # 只补发第二张，序号保持整批原始位置，且不再重复挂 caption / 操作键盘
+    assert sends == [("send_document", "gen-1-2.png", False)]
+    assert ("mark", "gen-1", False) in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_replay_after_full_delivery_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events, sent={"img-1"}))
+    _patch_delivery(monkeypatch, events)
+
+    await listener._on_succeeded(
+        RecordingBot(events),
+        RecordingApi(events, tmp_path),
+        "gen-1",
+        _succeeded_track(),
+        {"images": [{"image_id": "img-1"}]},
+    )
+
+    assert not [event for event in events if event[0] == "send_document"]
+    assert ("mark", "gen-1", False) in events
+    assert ("finish", "gen-1") in events
+
+
+@pytest.mark.asyncio
+async def test_succeeded_download_failure_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """部分图下载失败 = 用户少拿一张已付费的图，必须重投补发。"""
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events))
+    _patch_delivery(monkeypatch, events)
+
+    with pytest.raises(RuntimeError, match="terminal delivery failed"):
+        await listener._on_succeeded(
+            RecordingBot(events),
+            RecordingApi(events, tmp_path, download_errors={"img-2"}),
+            "gen-1",
+            _succeeded_track(),
+            {"images": [{"image_id": "img-1"}, {"image_id": "img-2"}]},
+        )
+
+    assert ("mark", "gen-1", False) not in events
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drop_tells_user_the_task_already_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计 J-3：放弃重投前必须说明"已完成、别重新生成"，否则用户会重复付费。"""
+    events: list[object] = []
+    texts: list[str] = []
+
+    class TrackOnlyTracker:
+        async def get(self, _gen_id: str) -> object:
+            return _succeeded_track()
+
+    monkeypatch.setattr(listener, "tracker", TrackOnlyTracker())
+
+    async def fake_replace_status(_bot: object, _track: object, text: str) -> None:
+        texts.append(text)
+
+    monkeypatch.setattr(listener, "_replace_status", fake_replace_status)
+
+    await listener._notify_dispatch_drop(
+        RecordingBot(events), "generation.succeeded", "gen-1"
+    )
+    await listener._notify_dispatch_drop(
+        RecordingBot(events), "generation.failed", "gen-2"
+    )
+
+    assert len(texts) == 1
+    assert "不用重新生成" in texts[0]
+    assert "/tasks" in texts[0]
 
 
 @pytest.mark.asyncio

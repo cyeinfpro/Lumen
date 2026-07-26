@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.models import AuditLog, VideoGeneration, WalletTransaction
+from lumen_core.upstream_billing import (
+    LocalBillingAction,
+    UpstreamCostKnowledge,
+    decide_upstream_billing,
+)
 from lumen_core.video_billing import (
     VideoBillingError,
     settle_video_cost,
@@ -17,6 +23,9 @@ from lumen_core.video_billing import (
 )
 
 from . import billing as worker_billing
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -77,18 +86,39 @@ def _default_video_charge_micro(generation: VideoGeneration, held: int) -> int:
     return max(int(held), int(generation.est_cost_micro or 0))
 
 
-def _has_explicit_no_upstream_cost_receipt(poll_result: Any, reason: str) -> bool:
+def _no_upstream_cost_receipts(poll_result: Any, reason: str) -> tuple[str | None, ...]:
+    """收集「上游未扣费」的本地收据原因，交给 core 决策表判定。
+
+    白名单本身住在 `lumen_core.upstream_billing`，这里只负责把 poll 结果里的
+    原因字段翻出来，避免各调用点各自维护一份白名单副本。
+    """
     raw = _poll_attr(poll_result, "raw")
-    raw_reason = ""
-    if isinstance(raw, dict):
-        raw_reason = str(raw.get("reason") or "").strip()
-    safe_reasons = {
-        "pre_submit_cancel",
-        "pre_submit_expired",
-        "deadline_expired_before_submit",
-        "submit_failed_before_upstream_cost",
-    }
-    return reason in safe_reasons or raw_reason in safe_reasons
+    raw_reason = raw.get("reason") if isinstance(raw, dict) else None
+    return (reason, str(raw_reason) if raw_reason is not None else None)
+
+
+def _usage_total_tokens(poll_result: Any) -> int | None:
+    raw = _poll_attr(poll_result, "usage_total_tokens")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _default_decision_name(*, succeeded: bool, upstream_billable: bool | None) -> str:
+    """SETTLE_DEFAULT 分支的决策名——只影响可观测性，不影响金额。"""
+    if succeeded:
+        return "missing_usage_default_charge"
+    if upstream_billable is False:
+        # 上游声称没扣费但拿不出本地收据：按纯转嫁默认结算，同时用决策名
+        # 把「标志不可信」这件事留在审计里。
+        return "upstream_not_billable_untrusted_default_charge"
+    if upstream_billable is True:
+        return "failure_billable_default_charge"
+    return "unknown_default_charge"
 
 
 async def _usage_charge_micro(
@@ -100,15 +130,39 @@ async def _usage_charge_micro(
     pricing_variant: str,
     billing_model: str,
 ) -> int:
-    return await settle_video_cost(
-        session,
-        model=billing_model,
-        action=generation.action,
-        actual_total_tokens=usage_tokens,
-        resolution=generation.resolution,
-        pricing_variant=pricing_variant,
-        estimated_micro=_default_video_charge_micro(generation, held),
-    )
+    """Return the amount to settle, always passing upstream cost through.
+
+    ``settle_video_cost`` raises ``video_cost_exceeds_estimate`` when the real
+    cost is far above the hold. That is *not* a pricing failure — the cost is
+    known, it is simply large — so we still charge it in full per the
+    pure-pass-through rule, and only raise an operator alert. Falling back to
+    ``max(held, est)`` here would make the platform silently eat the excess,
+    which is exactly what 新-1 is about.
+    """
+    try:
+        return await settle_video_cost(
+            session,
+            model=billing_model,
+            action=generation.action,
+            actual_total_tokens=usage_tokens,
+            resolution=generation.resolution,
+            pricing_variant=pricing_variant,
+            estimated_micro=_default_video_charge_micro(generation, held),
+        )
+    except VideoBillingError as exc:
+        if exc.code != "video_cost_exceeds_estimate" or exc.actual_micro is None:
+            raise
+        logger.error(
+            "video_billing.cost_exceeds_estimate generation_id=%s user_id=%s "
+            "held_micro=%s est_micro=%s actual_micro=%s — charging in full "
+            "(pure pass-through); review upstream usage",
+            generation.id,
+            generation.user_id,
+            held,
+            generation.est_cost_micro,
+            exc.actual_micro,
+        )
+        return int(exc.actual_micro)
 
 
 async def resolve_video_billing(
@@ -124,24 +178,25 @@ async def resolve_video_billing(
         "video_generation",
         generation.id,
     )
-    usage_tokens_raw = _poll_attr(poll_result, "usage_total_tokens")
-    usage_tokens: int | None = None
-    if usage_tokens_raw is not None and not isinstance(usage_tokens_raw, bool):
-        try:
-            parsed = int(usage_tokens_raw)
-            usage_tokens = parsed if parsed >= 0 else None
-        except (TypeError, ValueError, OverflowError):
-            usage_tokens = None
+    usage_tokens = _usage_total_tokens(poll_result)
     upstream_billable = _poll_attr(poll_result, "upstream_billable")
     status = str(_poll_attr(poll_result, "status", "") or "")
+    succeeded = status == "succeeded"
     pricing_variant = _generation_pricing_variant(generation)
     billing_model = _generation_billing_model(generation)
 
-    if (
-        status == "succeeded"
-        and upstream_billable is False
-        and _has_explicit_no_upstream_cost_receipt(poll_result, reason)
-    ):
+    # 决策表在 packages/core：调用点只提供证据（上游标志 + 本地收据 + 是否
+    # 拿到真实用量），动作由表统一裁定。上游已经把任务跑成功了，本身就是
+    # 「上游已扣费」的证据，所以 succeeded 时把缺失的标志补成 True。
+    billable_evidence = upstream_billable
+    if succeeded and billable_evidence is None:
+        billable_evidence = True
+    decided = decide_upstream_billing(
+        upstream_billable=billable_evidence,
+        actual_cost_known=usage_tokens is not None,
+        receipt_reasons=_no_upstream_cost_receipts(poll_result, reason),
+    )
+    if decided.action is LocalBillingAction.RELEASE:
         return await _release_video_hold(
             session,
             generation,
@@ -151,7 +206,7 @@ async def resolve_video_billing(
             pricing_variant=pricing_variant,
         )
 
-    if status == "succeeded" and usage_tokens is not None:
+    if decided.action is LocalBillingAction.SETTLE_ACTUAL and usage_tokens is not None:
         try:
             actual_micro = await _usage_charge_micro(
                 session,
@@ -161,47 +216,22 @@ async def resolve_video_billing(
                 pricing_variant=pricing_variant,
                 billing_model=billing_model,
             )
-            decision = "actual_usage_settle"
+            decision = "actual_usage_settle" if succeeded else "failure_usage_settle"
         except VideoBillingError:
+            # 定价规则缺失 → 算不出真实成本，但上游仍可能已扣费，
+            # 因此退回默认金额结算而不是 release。
             actual_micro = _default_video_charge_micro(generation, held)
-            decision = "pricing_missing_default_charge"
-    elif status == "succeeded":
-        actual_micro = _default_video_charge_micro(generation, held)
-        decision = "missing_usage_default_charge"
-    elif upstream_billable is False and _has_explicit_no_upstream_cost_receipt(
-        poll_result, reason
-    ):
-        return await _release_video_hold(
-            session,
-            generation,
-            reason=reason,
-            decision="upstream_not_billable_release",
-            actual_tokens=usage_tokens,
-            pricing_variant=pricing_variant,
-        )
-    elif usage_tokens is not None:
-        try:
-            actual_micro = await _usage_charge_micro(
-                session,
-                generation,
-                held=held,
-                usage_tokens=usage_tokens,
-                pricing_variant=pricing_variant,
-                billing_model=billing_model,
+            decision = (
+                "pricing_missing_default_charge"
+                if succeeded
+                else "failure_pricing_missing_default_charge"
             )
-            decision = "failure_usage_settle"
-        except VideoBillingError:
-            actual_micro = _default_video_charge_micro(generation, held)
-            decision = "failure_pricing_missing_default_charge"
-    elif upstream_billable is False:
-        actual_micro = _default_video_charge_micro(generation, held)
-        decision = "upstream_not_billable_untrusted_default_charge"
-    elif upstream_billable is True:
-        actual_micro = _default_video_charge_micro(generation, held)
-        decision = "failure_billable_default_charge"
     else:
         actual_micro = _default_video_charge_micro(generation, held)
-        decision = "unknown_default_charge"
+        decision = _default_decision_name(
+            succeeded=succeeded,
+            upstream_billable=upstream_billable,
+        )
 
     tx = await billing_core.settle(
         session,
@@ -218,6 +248,7 @@ async def resolve_video_billing(
             actual_tokens=usage_tokens,
             actual_micro=actual_micro,
             pricing_variant=pricing_variant,
+            knowledge=decided.knowledge,
         ),
     )
     if tx is not None:
@@ -275,6 +306,7 @@ async def _release_video_hold(
             reason=reason,
             actual_tokens=actual_tokens,
             pricing_variant=pricing_variant,
+            knowledge=UpstreamCostKnowledge.PROVEN_ABSENT,
         ),
     )
     if tx is not None:
@@ -318,6 +350,7 @@ def _billing_meta(
     actual_tokens: int | None,
     actual_micro: int | None = None,
     pricing_variant: str | None = None,
+    knowledge: UpstreamCostKnowledge | None = None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "model": generation.model,
@@ -332,6 +365,9 @@ def _billing_meta(
         "billing_decision": decision,
         "reason": reason,
     }
+    if knowledge is not None:
+        # 把决策表的输入（可知性）一并落库，对账时可以回放这次判断。
+        meta["upstream_cost_knowledge"] = str(knowledge)
     if actual_tokens is not None:
         meta["actual_tokens"] = actual_tokens
     if actual_micro is not None:

@@ -10,24 +10,51 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.routes import _apparel_scene_planner as scene_planner
-from app.routes import _showcase_shot_pool as shot_pool
+from app.config import settings
 from app.routes import workflows
-from app.workflow_domain import apparel_scene_planner as scene_planner_impl
+from app.workflow_domain import (
+    apparel_library,
+    apparel_scene_planner as scene_planner,
+    apparel_scene_planner as scene_planner_impl,
+    showcase_model_policy,
+    showcase_shot_pool as shot_pool,
+    showcase_shot_pool_adult,
+    showcase_shot_pool_kids,
+    showcase_template_policy,
+)
+from app.workflow_domain.apparel_library_reference import ReferenceProfile
+from app.workflow_domain.workflow_contracts import PublishBundle
 from app.workflow_services import (
+    library_github,
     library_items,
+    library_materialization,
     model_library_endpoints as model_library,
     output_sync,
     poster_endpoints as poster,
+    project_endpoints as project,
+    serialization,
     showcase_context,
+    showcase_inputs,
+    showcase_orchestration,
     showcase_preflight_steps,
+    showcase_prompts,
+    showcase_scene_policy,
+    showcase_shots,
     workflow_runtime,
 )
-from lumen_core.constants import CompletionStatus, GenerationStatus, MAX_PROMPT_CHARS
+from lumen_core.constants import (
+    CompletionStatus,
+    GenerationStatus,
+    Intent,
+    MAX_PROMPT_CHARS,
+)
 from lumen_core.schemas import (
     AccessoryPreviewCreateIn,
     ApparelModelLibraryBatchDeleteIn,
     ApparelModelLibraryGenerateIn,
+    ApparelModelLibraryJobOut,
+    ApparelModelLibraryJobsOut,
+    ImageOut,
     ModelCandidatesCreateIn,
     PosterMasterApproveIn,
     PosterMastersCreateIn,
@@ -148,7 +175,7 @@ def test_model_library_batch_delete_accepts_export_sized_batches() -> None:
 
 
 def test_github_folder_metadata_uses_directory_and_filename() -> None:
-    item = workflows._metadata_from_github_file(  # noqa: SLF001
+    item = library_github.metadata_from_github_file(  # noqa: SLF001
         {
             "type": "file",
             "name": "adult-asian-minimal-studio-001.png",
@@ -169,7 +196,7 @@ def test_github_folder_metadata_uses_directory_and_filename() -> None:
 
 def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
     for suffix in ("jpg", "webp"):
-        item = workflows._metadata_from_github_file(  # noqa: SLF001
+        item = library_github.metadata_from_github_file(  # noqa: SLF001
             {
                 "type": "file",
                 "name": f"adult-minimal-studio-001.{suffix}",
@@ -191,7 +218,7 @@ def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
 
 
 def test_github_folder_metadata_keeps_fine_grained_appearance() -> None:
-    item = workflows._metadata_from_github_file(  # noqa: SLF001
+    item = library_github.metadata_from_github_file(  # noqa: SLF001
         {
             "type": "file",
             "name": "adult-female-southeast-asian-001.webp",
@@ -212,7 +239,7 @@ def test_github_folder_metadata_keeps_fine_grained_appearance() -> None:
 
 
 def test_github_folder_metadata_rejects_non_github_download_url() -> None:
-    item = workflows._metadata_from_github_file(  # noqa: SLF001
+    item = library_github.metadata_from_github_file(  # noqa: SLF001
         {
             "type": "file",
             "name": "adult-minimal-studio-001.webp",
@@ -229,7 +256,7 @@ def test_github_folder_metadata_rejects_non_github_download_url() -> None:
 
 def test_github_contents_url_validator_rejects_private_or_non_github_urls() -> None:
     with pytest.raises(Exception) as excinfo:
-        workflows._validate_github_contents_url(  # noqa: SLF001
+        library_github.validate_github_contents_url(  # noqa: SLF001
             "http://127.0.0.1:8080/repos/cyeinfpro/Lumen/contents/assets"
         )
 
@@ -243,18 +270,20 @@ def test_github_contents_url_validator_accepts_api_contents_url() -> None:
         "assets/apparel-model-presets?ref=main"
     )
 
-    assert workflows._validate_github_contents_url(url) == url  # noqa: SLF001
+    assert library_github.validate_github_contents_url(url) == url  # noqa: SLF001
 
 
 def test_preset_title_uses_updated_age_labels() -> None:
-    assert workflows._title_from_preset_id("adult-female-001").startswith("熟龄 女性")
-    assert workflows._title_from_preset_id("middle-aged-male-001").startswith(
+    assert apparel_library._title_from_preset_id("adult-female-001").startswith(
+        "熟龄 女性"
+    )
+    assert apparel_library._title_from_preset_id("middle-aged-male-001").startswith(
         "中年 男性"
     )
 
 
 def test_github_folder_metadata_ignores_thumb_files() -> None:
-    item = workflows._metadata_from_github_file(  # noqa: SLF001
+    item = library_github.metadata_from_github_file(  # noqa: SLF001
         {
             "type": "file",
             "name": "adult-female-001.thumb.webp",
@@ -279,10 +308,10 @@ def test_model_library_generated_source_round_trips_and_filters() -> None:
         "created_at": "2026-01-01T00:00:00Z",
     }
 
-    out = workflows._model_library_item_out(raw)  # noqa: SLF001
+    out = library_items.model_library_item_out(raw)  # noqa: SLF001
     assert out.source == "generated"
 
-    filtered = workflows._filter_library_items(  # noqa: SLF001
+    filtered = library_items.filter_library_items(  # noqa: SLF001
         [raw],
         source="generated",
         age_segment="all",
@@ -290,29 +319,35 @@ def test_model_library_generated_source_round_trips_and_filters() -> None:
         q="",
     )
     assert filtered == [raw]
-    assert "generated" in workflows.MODEL_LIBRARY_SOURCES
+    assert "generated" in apparel_library.MODEL_LIBRARY_SOURCES
 
 
 def test_model_library_folder_helpers_support_numbered_age_dirs() -> None:
-    assert workflows._normalize_age_segment("05_adult") == "adult"  # noqa: SLF001
-    assert workflows._normalize_age_segment("04_young_adult") == "young_adult"  # noqa: SLF001
-    assert workflows._model_library_folder_for_age("senior", "male") == "07_senior/male"  # noqa: SLF001
+    assert apparel_library._normalize_age_segment("05_adult") == "adult"  # noqa: SLF001
+    assert apparel_library._normalize_age_segment("04_young_adult") == "young_adult"  # noqa: SLF001
     assert (
-        workflows._model_library_folder_for_age("bad", "female")
+        apparel_library._model_library_folder_for_age("senior", "male")
+        == "07_senior/male"
+    )  # noqa: SLF001
+    assert (
+        apparel_library._model_library_folder_for_age("bad", "female")
         == "00_user_favorites/female"
     )  # noqa: SLF001
-    assert workflows._model_library_folder_for_age("adult", "bad") == "05_adult/female"  # noqa: SLF001
+    assert (
+        apparel_library._model_library_folder_for_age("adult", "bad")
+        == "05_adult/female"
+    )  # noqa: SLF001
 
 
 def test_primary_candidate_image_prefers_contact_sheet_then_candidate_ids() -> None:
     assert (
-        workflows._primary_candidate_image_id(  # noqa: SLF001
+        workflow_runtime._primary_candidate_image_id(  # noqa: SLF001
             SimpleNamespace(contact_sheet_image_id="sheet", model_brief_json={})
         )
         == "sheet"
     )
     assert (
-        workflows._primary_candidate_image_id(  # noqa: SLF001
+        workflow_runtime._primary_candidate_image_id(  # noqa: SLF001
             SimpleNamespace(
                 contact_sheet_image_id=None,
                 model_brief_json={"candidate_image_ids": ["first", "second"]},
@@ -321,7 +356,7 @@ def test_primary_candidate_image_prefers_contact_sheet_then_candidate_ids() -> N
         == "first"
     )
     assert (
-        workflows._primary_candidate_image_id(  # noqa: SLF001
+        workflow_runtime._primary_candidate_image_id(  # noqa: SLF001
             SimpleNamespace(contact_sheet_image_id=None, model_brief_json={})
         )
         is None
@@ -338,7 +373,7 @@ def test_candidate_reference_image_ids_dedupes_all_known_fields() -> None:
         back_image_id="brief-1",
     )
 
-    assert workflows._candidate_reference_image_ids(candidate) == [  # noqa: SLF001
+    assert workflow_runtime._candidate_reference_image_ids(candidate) == [  # noqa: SLF001
         "brief-1",
         "sheet",
         "portrait",
@@ -354,7 +389,7 @@ async def test_workflow_produced_model_image_ids_includes_dual_race_bonus_ids() 
         output_json={"dual_race_bonus_image_ids": ["bonus-img", "winner-img"]},
     )
 
-    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+    produced = await model_library._workflow_produced_model_image_ids(  # noqa: SLF001
         _Db([]),  # type: ignore[arg-type]
         user_id="user-1",
         steps=[step],  # type: ignore[list-item]
@@ -378,7 +413,7 @@ async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_sub
     )
     db = _Db(["bonus-img-from-sql", "winner-img-from-sql"])
 
-    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+    produced = await model_library._workflow_produced_model_image_ids(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         steps=[step],  # type: ignore[list-item]
@@ -416,7 +451,7 @@ async def test_workflow_produced_model_image_ids_skips_sql_when_no_task_ids() ->
     step = SimpleNamespace(image_ids=["only-img"], task_ids=[], output_json={})
     db = _Db(["should-not-appear"])
 
-    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+    produced = await model_library._workflow_produced_model_image_ids(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         steps=[step],  # type: ignore[list-item]
@@ -427,7 +462,7 @@ async def test_workflow_produced_model_image_ids_skips_sql_when_no_task_ids() ->
 
 
 def test_task_error_summary_prefers_messages_and_dedupes() -> None:
-    out = workflows._task_error_summary(  # noqa: SLF001
+    out = output_sync._task_error_summary(  # noqa: SLF001
         [
             SimpleNamespace(
                 error_code="upstream_error", error_message="provider timeout"
@@ -459,7 +494,7 @@ def test_generation_batch_outcome_covers_every_terminal_shape(
     expected: str,
 ) -> None:
     assert (
-        workflows._generation_batch_outcome(  # noqa: SLF001
+        output_sync._generation_batch_outcome(  # noqa: SLF001
             ready_count=ready_count,
             active_count=active_count,
             expected_count=expected_count,
@@ -488,7 +523,7 @@ async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -
     run = SimpleNamespace(id="run-1", user_id="user-1")
     db = _Db([], responses=[[step], [candidate], []])
 
-    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+    out = await workflow_runtime._soft_delete_workflow_generated_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         run=run,  # type: ignore[arg-type]
         deleted_at=datetime.now(timezone.utc),
@@ -517,7 +552,7 @@ async def test_soft_delete_workflow_generated_images_skips_already_deleted_run()
     deleted_at = datetime.now(timezone.utc)
     db = _WorkflowDeleteDb(responses=[[SimpleNamespace(step_key="unused")]])
 
-    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+    out = await workflow_runtime._soft_delete_workflow_generated_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         run=SimpleNamespace(id="run-1", user_id="user-1", deleted_at=deleted_at),  # type: ignore[arg-type]
         deleted_at=deleted_at,
@@ -622,7 +657,7 @@ async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
         lambda *_args, **_kwargs: False,
     )
 
-    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+    out = await workflow_runtime._soft_delete_workflow_generated_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
         deleted_at=datetime.now(timezone.utc),
@@ -676,7 +711,7 @@ async def test_soft_delete_workflow_generated_images_skips_holds_for_byok(
         return True
 
     monkeypatch.setattr(
-        workflows,
+        workflow_runtime,
         "_release_soft_deleted_task_hold",
         release_soft_deleted_task_hold,
     )
@@ -684,9 +719,9 @@ async def test_soft_delete_workflow_generated_images_skips_holds_for_byok(
     async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
-    monkeypatch.setattr(workflows, "_workflow_wallet_exists", wallet_exists)
+    monkeypatch.setattr(workflow_runtime, "_workflow_wallet_exists", wallet_exists)
 
-    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+    out = await workflow_runtime._soft_delete_workflow_generated_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
         deleted_at=datetime.now(timezone.utc),
@@ -730,7 +765,7 @@ async def test_post_commit_workflow_generated_cleanup_runs_after_commit(
     )
 
     await db.commit()
-    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+    await workflow_runtime._post_commit_workflow_generated_cleanup(  # noqa: SLF001
         user_id="user-1",
         cleanup={
             "holds_released": 2,
@@ -775,7 +810,7 @@ async def test_post_commit_workflow_generated_cleanup_keeps_cancel_when_cache_fa
         release_workflow_generation_queue_state,
     )
 
-    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+    await workflow_runtime._post_commit_workflow_generated_cleanup(  # noqa: SLF001
         user_id="user-1",
         cleanup={
             "holds_released": 1,
@@ -809,7 +844,7 @@ async def test_post_commit_workflow_generated_cleanup_invalidates_hold_only_clea
         invalidate_balance_cache,
     )
 
-    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+    await workflow_runtime._post_commit_workflow_generated_cleanup(  # noqa: SLF001
         user_id="user-1",
         cleanup={
             "holds_released": 1,
@@ -870,9 +905,9 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
             "completions_canceled": 0,
         }
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
     monkeypatch.setattr(
-        workflows,
+        project,
         "_soft_delete_workflow_generated_images",
         fake_cleanup,
     )
@@ -903,7 +938,7 @@ async def test_delete_apparel_model_library_job_cleans_generated_outputs(
     run = SimpleNamespace(
         id="run-1",
         user_id="user-1",
-        type=workflows.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+        type=apparel_library.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
         deleted_at=None,
         conversation_id=None,
     )
@@ -1012,23 +1047,23 @@ def test_workflow_cursor_round_trip_and_filter_validation() -> None:
     updated_at = datetime(2026, 7, 11, 8, 30, tzinfo=timezone.utc)
     run = SimpleNamespace(id="run-2", updated_at=updated_at)
 
-    cursor = workflows._encode_workflow_cursor(  # noqa: SLF001
+    cursor = serialization._encode_workflow_cursor(  # noqa: SLF001
         run,
         workflow_type="poster_design",
     )
 
-    assert workflows._decode_workflow_cursor(  # noqa: SLF001
+    assert serialization._decode_workflow_cursor(  # noqa: SLF001
         cursor,
         workflow_type="poster_design",
     ) == (updated_at, "run-2")
     with pytest.raises(HTTPException) as mismatch:
-        workflows._decode_workflow_cursor(  # noqa: SLF001
+        serialization._decode_workflow_cursor(  # noqa: SLF001
             cursor,
             workflow_type="apparel_model_showcase",
         )
     assert mismatch.value.status_code == 422
     with pytest.raises(HTTPException) as malformed:
-        workflows._decode_workflow_cursor(  # noqa: SLF001
+        serialization._decode_workflow_cursor(  # noqa: SLF001
             "not-a-valid-cursor",
             workflow_type="poster_design",
         )
@@ -1077,7 +1112,7 @@ async def test_list_workflows_uses_stable_cursor_lookahead_and_page_boundary() -
     assert [item.id for item in first_page.items] == ["run-3", "run-2"]
     assert [item.output_count for item in first_page.items] == [1, 1]
     assert first_page.next_cursor is not None
-    assert workflows._decode_workflow_cursor(  # noqa: SLF001
+    assert serialization._decode_workflow_cursor(  # noqa: SLF001
         first_page.next_cursor,
         workflow_type="poster_design",
     ) == (updated_at, "run-2")
@@ -1148,8 +1183,8 @@ async def test_get_workflow_is_read_only(
         assert current_run is run
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_build_run_out", fake_build)
     db = _Db([])
 
     out = await workflows.get_workflow(
@@ -1166,7 +1201,7 @@ async def test_get_workflow_is_read_only(
 async def test_reconcile_workflow_is_explicit_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = SimpleNamespace(id="run-1", type=workflows.WORKFLOW_TYPE)
+    run = SimpleNamespace(id="run-1", type=workflow_runtime.WORKFLOW_TYPE)
     sync_calls: list[str] = []
 
     async def fake_get_run(
@@ -1187,9 +1222,9 @@ async def test_reconcile_workflow_is_explicit_mutation(
     async def fake_build(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(project, "_build_run_out", fake_build)
     db = _Db([])
 
     out = await workflows.reconcile_workflow(
@@ -1211,7 +1246,7 @@ async def test_create_poster_masters_associates_brand_attachments(
         id="run-poster",
         user_id="user-1",
         conversation_id="conv-1",
-        type=workflows.POSTER_WORKFLOW_TYPE,
+        type=poster.POSTER_WORKFLOW_TYPE,
         status="needs_review",
         current_step="master_generation",
         quality_mode="premium",
@@ -1292,7 +1327,7 @@ async def test_create_poster_masters_associates_brand_attachments(
 
     assert out is run
     assert len(create_calls) == 1
-    assert create_calls[0]["intent"] == workflows.Intent.IMAGE_TO_IMAGE
+    assert create_calls[0]["intent"] == Intent.IMAGE_TO_IMAGE
     assert create_calls[0]["attachment_ids"] == ["logo-1", "product-1"]
     assert master_step.input_json["reference_image_ids"] == [
         "logo-1",
@@ -1306,7 +1341,7 @@ async def test_approve_poster_master_persists_adjustments_for_next_step(
 ) -> None:
     run = SimpleNamespace(
         id="run-poster",
-        type=workflows.POSTER_WORKFLOW_TYPE,
+        type=poster.POSTER_WORKFLOW_TYPE,
         status="needs_review",
         current_step="master_approval",
         metadata_jsonb={"target_aspects": ["9:16"]},
@@ -1386,7 +1421,7 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
         id="run-poster",
         user_id="user-1",
         conversation_id="conv-1",
-        type=workflows.POSTER_WORKFLOW_TYPE,
+        type=poster.POSTER_WORKFLOW_TYPE,
         status="needs_review",
         current_step="multi_size_generation",
         quality_mode="premium",
@@ -1482,7 +1517,7 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
 
     assert out is run
     assert len(create_calls) == 1
-    assert create_calls[0]["intent"] == workflows.Intent.IMAGE_TO_IMAGE
+    assert create_calls[0]["intent"] == Intent.IMAGE_TO_IMAGE
     assert create_calls[0]["attachment_ids"] == [
         "master-image",
         "logo-1",
@@ -1498,13 +1533,13 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
 
 
 def test_default_github_contents_url_points_to_user_repo_folder() -> None:
-    assert workflows._github_contents_url().startswith(  # noqa: SLF001
+    assert library_items.github_contents_url().startswith(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"
     )
 
 
 def test_model_library_http_client_kwargs_includes_proxy_when_configured() -> None:
-    kwargs = workflows._model_library_http_client_kwargs("socks5h://127.0.0.1:1080")  # noqa: SLF001
+    kwargs = library_items.model_library_http_client_kwargs("socks5h://127.0.0.1:1080")  # noqa: SLF001
 
     assert kwargs["proxy"] == "socks5h://127.0.0.1:1080"
     assert "timeout" in kwargs
@@ -1539,7 +1574,7 @@ async def test_resolve_model_library_sync_proxy_uses_enabled_proxy() -> None:
         ],
     )
 
-    proxy, proxy_url = await workflows._resolve_model_library_sync_proxy(db)  # noqa: SLF001
+    proxy, proxy_url = await library_items.resolve_model_library_sync_proxy(db)  # noqa: SLF001
 
     assert proxy is not None
     assert proxy.name == "s5-us"
@@ -1557,7 +1592,7 @@ async def test_library_job_derives_failed_status_from_failed_generation() -> Non
     )
     step = SimpleNamespace(
         workflow_run_id="run-1",
-        step_key=workflows.MODEL_LIBRARY_GENERATE_STEP_KEY,
+        step_key=apparel_library.MODEL_LIBRARY_GENERATE_STEP_KEY,
         status="running",
         input_json={
             "age_segment": "adult",
@@ -1571,13 +1606,13 @@ async def test_library_job_derives_failed_status_from_failed_generation() -> Non
     )
     failed_generation = SimpleNamespace(
         id="gen-1",
-        status=workflows.GenerationStatus.FAILED.value,
+        status=GenerationStatus.FAILED.value,
         error_code="upstream_error",
         error_message="provider timeout",
     )
     db = _Db([], responses=[[step], [failed_generation]])
 
-    job = await workflows._job_from_library_run(  # noqa: SLF001
+    job = await model_library._job_from_library_run(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         run=run,  # type: ignore[arg-type]
         saved_map={},
@@ -1613,7 +1648,7 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
             "library-1": datetime(2026, 1, 3, tzinfo=timezone.utc),
             "library-2": datetime(2026, 1, 2, tzinfo=timezone.utc),
         }
-        return workflows.ApparelModelLibraryJobOut(  # noqa: SLF001
+        return ApparelModelLibraryJobOut(  # noqa: SLF001
             job_id=run.id,
             origin="library_generate",
             workflow_run_id=run.id,
@@ -1633,7 +1668,7 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
         )
 
     async def fake_project_job(_db, *, run, step, saved_map):
-        return workflows.ApparelModelLibraryJobOut(  # noqa: SLF001
+        return ApparelModelLibraryJobOut(  # noqa: SLF001
             job_id=f"{run.id}:model_candidates",
             origin="project_candidate",
             workflow_run_id=run.id,
@@ -1672,7 +1707,7 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
     expected_db = _Db([], responses=[library_runs, candidate_rows])
     expected_db_second = _Db([], responses=[library_runs, candidate_rows])
 
-    async def run_page(db: _Db, offset: int) -> workflows.ApparelModelLibraryJobsOut:  # noqa: SLF001
+    async def run_page(db: _Db, offset: int) -> ApparelModelLibraryJobsOut:  # noqa: SLF001
         return await workflows.list_apparel_model_library_jobs(  # noqa: SLF001
             user=SimpleNamespace(id="user-1"),
             db=db,  # type: ignore[arg-type]
@@ -1697,7 +1732,7 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
 async def test_create_user_image_from_preset_copies_to_user_private_storage(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(workflows.settings, "storage_root", str(tmp_path))
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
     source_key = "apparel-model-library/presets/adult-female/v1.png"
     source_path = tmp_path / source_key
     source_path.parent.mkdir(parents=True)
@@ -1708,7 +1743,7 @@ async def test_create_user_image_from_preset_copies_to_user_private_storage(
     )
     db = _Db([])
 
-    img = await workflows._create_user_image_from_preset(  # noqa: SLF001
+    img = await library_materialization.create_user_image_from_preset(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         item={
@@ -1732,7 +1767,7 @@ async def test_create_user_image_from_preset_copies_to_user_private_storage(
 async def test_validate_owned_images_accepts_one_to_three_owned_images() -> None:
     db = _Db(["img-1", "img-2"])
 
-    out = await workflows._validate_owned_images(  # noqa: SLF001
+    out = await showcase_inputs._validate_owned_images(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         image_ids=["img-1", "img-2", "img-1"],
@@ -1751,7 +1786,7 @@ async def test_validate_owned_images_rejects_missing_or_foreign_image() -> None:
     db = _Db(["img-1"])
 
     with pytest.raises(Exception) as excinfo:
-        await workflows._validate_owned_images(  # noqa: SLF001
+        await showcase_inputs._validate_owned_images(  # noqa: SLF001
             db,  # type: ignore[arg-type]
             user_id="user-1",
             image_ids=["img-1", "img-foreign"],
@@ -1772,7 +1807,11 @@ async def test_find_library_item_requires_user_item_live_owned_image(
     async def noop_migrate(_db: Any, _user_id: str) -> bool:
         return False
 
-    monkeypatch.setattr(workflows, "_ensure_legacy_user_library_migrated", noop_migrate)
+    monkeypatch.setattr(
+        library_items,
+        "_ensure_legacy_user_library_migrated",
+        noop_migrate,
+    )
     row = SimpleNamespace(
         id="user:item-1",
         source="favorite",
@@ -1793,7 +1832,7 @@ async def test_find_library_item_requires_user_item_live_owned_image(
     )
     db = _Db([row])
 
-    out = await workflows._find_library_item(  # noqa: SLF001
+    out = await library_items.find_library_item(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         item_id="user:item-1",
@@ -1831,7 +1870,7 @@ async def test_find_library_item_falls_back_for_unprefixed_global_item_ids(
         lambda: {"preset_items": [{"id": "legacy-global", "title": "legacy"}]},
     )
 
-    out = await workflows._find_library_item(  # noqa: SLF001
+    out = await library_items.find_library_item(  # noqa: SLF001
         _Db([]),  # type: ignore[arg-type]
         user_id="user-1",
         item_id="legacy-global",
@@ -1844,14 +1883,14 @@ async def test_find_library_item_falls_back_for_unprefixed_global_item_ids(
 async def test_attach_workflow_assets_masks_invalid_image_ids() -> None:
     run = SimpleNamespace(
         id="run-1",
-        type=workflows.WORKFLOW_TYPE,
+        type=workflow_runtime.WORKFLOW_TYPE,
         title="Project",
         metadata_jsonb={},
     )
     db = _Db([])
 
     with pytest.raises(Exception) as excinfo:
-        await workflows._attach_workflow_assets(  # noqa: SLF001
+        await workflow_runtime._attach_workflow_assets(  # noqa: SLF001
             db,  # type: ignore[arg-type]
             run=run,  # type: ignore[arg-type]
             user_id="user-1",
@@ -1872,7 +1911,7 @@ async def test_validate_accessory_preview_image_requires_workflow_generation() -
     approval = SimpleNamespace(image_ids=["img-accessory"])
     db = _Db(["img-accessory"])
 
-    out = await workflows._validate_accessory_preview_image(  # noqa: SLF001
+    out = await showcase_inputs._validate_accessory_preview_image(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         user_id="user-1",
         run_id="run-1",
@@ -1910,7 +1949,7 @@ async def test_validate_accessory_preview_image_rejects_tampered_step_membership
     db = _Db(["img-accessory"])
 
     with pytest.raises(Exception) as excinfo:
-        await workflows._validate_accessory_preview_image(  # noqa: SLF001
+        await showcase_inputs._validate_accessory_preview_image(  # noqa: SLF001
             db,  # type: ignore[arg-type]
             user_id="user-1",
             run_id="run-1",
@@ -1932,7 +1971,7 @@ async def test_validate_accessory_preview_image_rejects_missing_generation_link(
     db = _Db([])
 
     with pytest.raises(Exception) as excinfo:
-        await workflows._validate_accessory_preview_image(  # noqa: SLF001
+        await showcase_inputs._validate_accessory_preview_image(  # noqa: SLF001
             db,  # type: ignore[arg-type]
             user_id="user-1",
             run_id="run-1",
@@ -1947,7 +1986,7 @@ async def test_validate_accessory_preview_image_rejects_missing_generation_link(
 
 
 def test_product_analysis_json_fallback_keeps_reviewable_constraints() -> None:
-    out = workflows._try_parse_json_text("This looks like an ivory blazer.")  # noqa: SLF001
+    out = output_sync._try_parse_json_text("This looks like an ivory blazer.")  # noqa: SLF001
 
     assert out["category"] == "需人工复核"
     assert "This looks like an ivory blazer." in out["key_details"]
@@ -1956,7 +1995,7 @@ def test_product_analysis_json_fallback_keeps_reviewable_constraints() -> None:
 
 
 def test_product_analysis_json_parser_unwraps_content_envelope() -> None:
-    out = workflows._try_parse_json_text(
+    out = output_sync._try_parse_json_text(
         '{"content":{"text":"{\\"category\\":\\"衬衫\\",\\"color\\":\\"蓝色\\",'
         '\\"material\\":\\"棉\\",\\"silhouette\\":\\"宽松\\",'
         '\\"details\\":[\\"翻领\\"],\\"preserve\\":[\\"蓝色\\",\\"翻领\\"],'
@@ -1971,7 +2010,7 @@ def test_product_analysis_json_parser_unwraps_content_envelope() -> None:
 
 
 def test_product_analysis_prompt_requests_styling_recommendations() -> None:
-    prompt = workflows._product_analysis_prompt("8岁童装")  # noqa: SLF001
+    prompt = showcase_inputs._product_analysis_prompt("8岁童装")  # noqa: SLF001
 
     assert "styling_recommendations" in prompt
     assert "background_recommendation" in prompt
@@ -1986,7 +2025,9 @@ def test_product_analysis_prompt_requests_styling_recommendations() -> None:
 
 
 def test_workflow_image_params_use_high_quality_jpeg() -> None:
-    params = workflows._image_params(aspect_ratio="4:5", count=1, render_quality="high")  # noqa: SLF001
+    params = workflow_runtime._image_params(
+        aspect_ratio="4:5", count=1, render_quality="high"
+    )  # noqa: SLF001
 
     assert params.output_format == "jpeg"
     assert params.output_compression == 100
@@ -1994,7 +2035,7 @@ def test_workflow_image_params_use_high_quality_jpeg() -> None:
 
 
 def test_workflow_image_params_default_to_non_fast_high_quality_for_showcase() -> None:
-    params = workflows._image_params(  # noqa: SLF001
+    params = workflow_runtime._image_params(  # noqa: SLF001
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
@@ -2007,7 +2048,7 @@ def test_workflow_image_params_default_to_non_fast_high_quality_for_showcase() -
 
 
 def test_showcase_refs_use_product_images_when_no_accessory_preview() -> None:
-    refs = workflows._showcase_reference_image_ids(  # noqa: SLF001
+    refs = showcase_inputs._showcase_reference_image_ids(  # noqa: SLF001
         product_image_ids=["product-1", "product-2"],
         model_image_id="model-1",
         selected_accessory_image_id=None,
@@ -2017,7 +2058,7 @@ def test_showcase_refs_use_product_images_when_no_accessory_preview() -> None:
 
 
 def test_showcase_refs_use_accessory_preview_instead_of_product_images() -> None:
-    refs = workflows._showcase_reference_image_ids(  # noqa: SLF001
+    refs = showcase_inputs._showcase_reference_image_ids(  # noqa: SLF001
         product_image_ids=["product-1", "product-2"],
         model_image_id="model-1",
         selected_accessory_image_id="accessory-preview-1",
@@ -2029,14 +2070,14 @@ def test_showcase_refs_use_accessory_preview_instead_of_product_images() -> None
 
 def test_showcase_regeneration_target_keeps_existing_outputs() -> None:
     assert (
-        workflows._showcase_target_image_count(  # noqa: SLF001
+        showcase_inputs._showcase_target_image_count(  # noqa: SLF001
             existing_image_ids=["old-1", "old-2", "old-2"],
             output_count=4,
         )
         == 6
     )
     assert (
-        workflows._showcase_expected_image_count(  # noqa: SLF001
+        output_sync._showcase_expected_image_count(  # noqa: SLF001
             showcase_input={"target_image_count": 8, "output_count": 4},
             fallback_task_count=12,
         )
@@ -2147,7 +2188,7 @@ async def test_create_showcase_images_persists_generation_outbox_before_publish(
     async def fake_create_workflow_task(**kwargs: Any) -> tuple[Any, None, list[str]]:
         create_calls.append(kwargs)
         index = len(create_calls)
-        bundle = workflows._PublishBundle(  # noqa: SLF001
+        bundle = PublishBundle(  # noqa: SLF001
             assistant_msg_id=f"msg-{index}",
             message_ids=[f"user-msg-{index}", f"msg-{index}"],
             outbox_payloads=[{"task_id": f"gen-{index}", "kind": "generation"}],
@@ -2169,14 +2210,14 @@ async def test_create_showcase_images_persists_generation_outbox_before_publish(
         publish_calls.append(bundles)
         raise RuntimeError("redis unavailable")
 
-    monkeypatch.setattr(workflows, "_showcase_generation_context", fake_context)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(project, "_showcase_generation_context", fake_context)
+    monkeypatch.setattr(project, "_step", fake_step)
+    monkeypatch.setattr(project, "_build_run_out", fake_build_run_out)
     monkeypatch.setattr(
-        workflows, "_prepare_showcase_preflight_impl", fake_preflight_impl
+        showcase_context, "_prepare_showcase_preflight_impl", fake_preflight_impl
     )
-    monkeypatch.setattr(workflows, "_create_workflow_task", fake_create_workflow_task)
-    monkeypatch.setattr(workflows, "_publish_bundles", fake_publish_bundles)
+    monkeypatch.setattr(project, "_create_workflow_task", fake_create_workflow_task)
+    monkeypatch.setattr(project, "_publish_bundles", fake_publish_bundles)
 
     body = ShowcaseImagesCreateIn(output_count=2, template="urban_commute")
     db = _Db([])
@@ -2275,7 +2316,7 @@ async def test_showcase_generation_context_requires_approved_model_approval(
     )
 
     with pytest.raises(HTTPException) as exc:
-        await workflows._showcase_generation_context(  # noqa: SLF001
+        await showcase_context._showcase_generation_context(  # noqa: SLF001
             db=_Db([]),  # type: ignore[arg-type]
             user=SimpleNamespace(id="user-1"),
             workflow_run_id="run-1",
@@ -2295,7 +2336,7 @@ async def test_create_accessory_previews_reuses_matching_running_request(
         accessory_plan={"enabled": True, "items": ["bag"], "strength": "subtle"},
         style_prompt="clean studio",
     )
-    request_key = workflows._accessory_preview_request_key(  # noqa: SLF001
+    request_key = serialization._accessory_preview_request_key(  # noqa: SLF001
         candidate_id="cand-1",
         accessory_plan=body.accessory_plan.model_dump(),
         style_prompt=body.style_prompt,
@@ -2344,11 +2385,11 @@ async def test_create_accessory_previews_reuses_matching_running_request(
     async def fail_create_task(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("duplicate running accessory preview must not enqueue")
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
-    monkeypatch.setattr(workflows, "_create_workflow_task", fail_create_task)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(project, "_step", fake_step)
+    monkeypatch.setattr(project, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(project, "_create_workflow_task", fail_create_task)
 
     db = _Db([], responses=[[candidate]])
 
@@ -2408,13 +2449,11 @@ async def test_dispatch_showcase_images_is_idempotent_when_tasks_exist(
     async def fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("existing durable tasks must make dispatch idempotent")
 
-    monkeypatch.setattr(workflows, "_showcase_generation_context", fake_context)
-    monkeypatch.setattr(
-        workflows, "_prepare_durable_showcase_preflight", fail_if_called
-    )
+    monkeypatch.setattr(project, "_showcase_generation_context", fake_context)
+    monkeypatch.setattr(project, "_prepare_durable_showcase_preflight", fail_if_called)
 
     db = _Db([])
-    out = await workflows._dispatch_showcase_images_generation(  # noqa: SLF001
+    out = await project._dispatch_showcase_images_generation(  # noqa: SLF001
         db=db,  # type: ignore[arg-type]
         workflow_run_id="run-1",
         body=ShowcaseImagesCreateIn(),
@@ -2462,18 +2501,14 @@ async def test_sync_showcase_completion_advances_to_quality_review() -> None:
         responses=[
             steps,  # _load_steps
             [],  # model candidates
-            [
-                SimpleNamespace(
-                    id="gen-1", status=workflows.GenerationStatus.SUCCEEDED.value
-                )
-            ],
+            [SimpleNamespace(id="gen-1", status=GenerationStatus.SUCCEEDED.value)],
             [],  # dual-race bonus generations
             [SimpleNamespace(id="image-1", owner_generation_id="gen-1")],
             [],  # quality reports
         ],
     )
 
-    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+    await output_sync._sync_workflow_outputs(db, run)  # noqa: SLF001
 
     rendered = str(db.statements[0].compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in rendered
@@ -2523,7 +2558,7 @@ async def test_sync_showcase_regeneration_preserves_existing_images() -> None:
             [
                 SimpleNamespace(
                     id="gen-new",
-                    status=workflows.GenerationStatus.SUCCEEDED.value,
+                    status=GenerationStatus.SUCCEEDED.value,
                 )
             ],
             [],
@@ -2532,7 +2567,7 @@ async def test_sync_showcase_regeneration_preserves_existing_images() -> None:
         ],
     )
 
-    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+    await output_sync._sync_workflow_outputs(db, run)  # noqa: SLF001
 
     assert showcase_step.status == "completed"
     assert showcase_step.image_ids == ["image-old", "image-new"]
@@ -2580,21 +2615,21 @@ async def test_sync_model_candidates_exposes_partial_terminal_batch() -> None:
     generations = [
         _generation_row(
             id="gen-1",
-            status=workflows.GenerationStatus.SUCCEEDED.value,
+            status=GenerationStatus.SUCCEEDED.value,
             parent_generation_id=None,
             is_dual_race_bonus=False,
             now=now,
         ),
         _generation_row(
             id="gen-2",
-            status=workflows.GenerationStatus.SUCCEEDED.value,
+            status=GenerationStatus.SUCCEEDED.value,
             parent_generation_id=None,
             is_dual_race_bonus=False,
             now=now,
         ),
         _generation_row(
             id="gen-3",
-            status=workflows.GenerationStatus.FAILED.value,
+            status=GenerationStatus.FAILED.value,
             parent_generation_id=None,
             is_dual_race_bonus=False,
             now=now,
@@ -2614,7 +2649,7 @@ async def test_sync_model_candidates_exposes_partial_terminal_batch() -> None:
         ],
     )
 
-    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+    await output_sync._sync_workflow_outputs(db, run)  # noqa: SLF001
 
     assert candidate_step.status == "needs_review"
     assert candidate_step.image_ids == ["image-1", "image-2"]
@@ -2691,7 +2726,7 @@ async def test_build_run_out_includes_model_library_reference_images(
 
     async def fake_image_out_map(_db: Any, images: list[Any]) -> dict[str, Any]:
         return {
-            image.id: workflows.ImageOut(
+            image.id: ImageOut(
                 id=image.id,
                 source=image.source,
                 parent_image_id=None,
@@ -2725,7 +2760,7 @@ async def test_build_run_out_includes_model_library_reference_images(
 
     db.refresh = fake_refresh  # type: ignore[attr-defined]
 
-    out = await workflows._build_run_out(db, run)  # noqa: SLF001
+    out = await workflow_runtime._build_run_out(db, run)  # noqa: SLF001
 
     assert [image.id for image in out.product_images] == ["product-1"]
     assert [image.id for image in out.generated_images] == ["lib-img"]
@@ -2767,14 +2802,14 @@ async def test_build_run_out_includes_dual_race_bonus_generations(
     )
     base = _generation_row(
         id="gen-1",
-        status=workflows.GenerationStatus.FAILED.value,
+        status=GenerationStatus.FAILED.value,
         parent_generation_id=None,
         is_dual_race_bonus=False,
         now=now,
     )
     bonus = _generation_row(
         id="bonus-1",
-        status=workflows.GenerationStatus.SUCCEEDED.value,
+        status=GenerationStatus.SUCCEEDED.value,
         parent_generation_id="gen-1",
         is_dual_race_bonus=True,
         now=now,
@@ -2828,7 +2863,7 @@ async def test_build_run_out_includes_dual_race_bonus_generations(
 
     db.refresh = fake_refresh  # type: ignore[attr-defined]
 
-    out = await workflows._build_run_out(db, run)  # noqa: SLF001
+    out = await workflow_runtime._build_run_out(db, run)  # noqa: SLF001
 
     assert [generation.id for generation in out.generations] == ["gen-1", "bonus-1"]
     assert out.generations[1].parent_generation_id == "gen-1"
@@ -2898,7 +2933,7 @@ async def test_sync_showcase_failure_records_generation_error_message() -> None:
             [
                 SimpleNamespace(
                     id="gen-1",
-                    status=workflows.GenerationStatus.FAILED.value,
+                    status=GenerationStatus.FAILED.value,
                     error_code="upstream_error",
                     error_message="provider timeout",
                 )
@@ -2908,7 +2943,7 @@ async def test_sync_showcase_failure_records_generation_error_message() -> None:
         ],
     )
 
-    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+    await output_sync._sync_workflow_outputs(db, run)  # noqa: SLF001
 
     assert showcase_step.status == "failed"
     assert showcase_step.output_json["failed_generation_ids"] == ["gen-1"]
@@ -2946,7 +2981,7 @@ async def test_sync_showcase_canceled_generation_marks_terminal_failure() -> Non
             [
                 SimpleNamespace(
                     id="gen-1",
-                    status=workflows.GenerationStatus.CANCELED.value,
+                    status=GenerationStatus.CANCELED.value,
                     error_code=None,
                     error_message=None,
                 )
@@ -2956,7 +2991,7 @@ async def test_sync_showcase_canceled_generation_marks_terminal_failure() -> Non
         ],
     )
 
-    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+    await output_sync._sync_workflow_outputs(db, run)  # noqa: SLF001
 
     assert showcase_step.status == "failed"
     assert showcase_step.output_json["canceled_generation_ids"] == ["gen-1"]
@@ -3054,10 +3089,10 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
     async def fake_build_run_out(db: Any, current_run: Any) -> Any:
         return current_run
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(project, "_step", fake_step)
+    monkeypatch.setattr(project, "_build_run_out", fake_build_run_out)
     db = _Db([], responses=[[selected, rejected], []])
 
     out = await workflows.reopen_model_selection(
@@ -3091,7 +3126,7 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
 
 
 def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
-    prompt = workflows._candidate_prompt(  # noqa: SLF001
+    prompt = showcase_inputs._candidate_prompt(  # noqa: SLF001
         style_prompt="premium natural model",
         product_analysis={"category": "连衣裙"},
         candidate_index=2,
@@ -3120,7 +3155,7 @@ def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -
 
 
 def test_candidate_image_params_use_lossless_png_reference() -> None:
-    params = workflows._candidate_image_params()  # noqa: SLF001
+    params = workflow_runtime._candidate_image_params()  # noqa: SLF001
 
     assert params.aspect_ratio == "4:5"
     assert params.size_mode == "fixed"
@@ -3135,7 +3170,7 @@ def test_candidate_image_params_use_lossless_png_reference() -> None:
 
 
 def test_age_direction_adapts_child_model_pose_and_expression() -> None:
-    candidate_prompt = workflows._candidate_prompt(  # noqa: SLF001
+    candidate_prompt = showcase_inputs._candidate_prompt(  # noqa: SLF001
         style_prompt="8岁儿童，活泼自然",
         product_analysis={"category": "童装"},
         candidate_index=1,
@@ -3145,7 +3180,7 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
         id="cand-1",
         model_brief_json={"summary": "8岁儿童，活泼自然"},
     )
-    showcase_prompt = workflows._showcase_prompt(  # noqa: SLF001
+    showcase_prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["颜色", "版型"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3169,7 +3204,7 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
         model_brief_json={"summary": "clean cold commute model"},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "must_preserve": ["lapel shape", "button position", "pocket placement"],
             "background_recommendation": "明亮松弛的日常随拍氛围",
@@ -3213,7 +3248,7 @@ def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() 
         model_brief_json={"summary": "8岁儿童，活泼自然", "height_cm": 128},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["颜色", "版型"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3237,7 +3272,7 @@ def test_showcase_prompt_uses_quality_mode_variable() -> None:
         model_brief_json={"summary": "clean ecommerce model", "height_cm": 168},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3257,7 +3292,7 @@ def test_showcase_prompt_respects_explicit_non_european_style_region() -> None:
         model_brief_json={"summary": "亚洲女性，自然电商模特", "height_cm": 168},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": []},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3277,7 +3312,7 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
     )
     default_shot_plan = ShowcaseImagesCreateIn().shot_plan
     prompts = {
-        shot: workflows._showcase_prompt(  # noqa: SLF001
+        shot: showcase_prompts._showcase_prompt(  # noqa: SLF001
             product_analysis={},
             selected_candidate=candidate,  # type: ignore[arg-type]
             accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3321,7 +3356,7 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
         "negative": ["牵引绳不要遮挡胸前"],
     }
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["蓝色格纹", "胸袋", "纽扣"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3330,7 +3365,7 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
         final_quality="high",
         scene_card=scene_card,
     )
-    composed = workflows._showcase_prompt(  # noqa: SLF001
+    composed = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["蓝色格纹", "胸袋", "纽扣"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3347,7 +3382,7 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
         },
         composed_prompt="城市街拍，模特牵狗过马路，衣服主体清楚。",
     )
-    safe = workflows._showcase_prompt(  # noqa: SLF001
+    safe = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["蓝色格纹"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3365,7 +3400,7 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
         allow_pet=False,
         allow_background_people=False,
     )
-    sparse_scene = workflows._showcase_scene_card_direction(  # noqa: SLF001
+    sparse_scene = showcase_scene_policy._showcase_scene_card_direction(  # noqa: SLF001
         {"camera": {"angle": "eye_level"}}
     )
 
@@ -3413,7 +3448,7 @@ def test_showcase_prompt_scene_card_overrides_conflicting_template_scene() -> No
         "negative": ["不要让手遮挡胸前贴布和扣饰"],
     }
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "category": "女童短袖假两件背带连衣裙",
             "must_preserve": [
@@ -3487,7 +3522,7 @@ def test_showcase_prompt_composed_scene_card_appends_conflict_guardrails() -> No
         "negative": ["不要遮挡胸前"],
     }
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["正面刺绣", "背后蝴蝶结", "裙摆彩色线"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3546,7 +3581,7 @@ def test_showcase_prompt_expands_gpt55_scene_details_without_internal_terms() ->
         "negative": ["画面里不要出现镜子或镜面反射"],
     }
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "category": "女童短袖假两件背带连衣裙",
             "must_preserve": [
@@ -3605,7 +3640,7 @@ def test_showcase_prompt_clamps_oversized_garment_lock() -> None:
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
     long_item = "蓝色格纹" * 80
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": [long_item] * 32},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -3633,7 +3668,7 @@ async def test_showcase_preflight_impl_runs_gpt55_merged_director(
         id="cand-1",
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
-    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    shot_picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=2,
@@ -3696,7 +3731,7 @@ async def test_showcase_preflight_impl_runs_gpt55_merged_director(
         "_review_prompt_risk_with_gpt55",
         fake_review,
     )
-    preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
+    preflight = await showcase_orchestration._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹", "胸袋"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -3738,7 +3773,7 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
         id="cand-1",
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
-    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    shot_picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=1,
@@ -3751,7 +3786,7 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
 
     async def fake_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
         seen_provider_orders.append(kwargs.get("provider_order"))
-        return workflows._rules_fallback_scene_planning(  # noqa: SLF001
+        return scene_planner_impl.rules_fallback_planning(
             product_analysis={"category": "衬衫"},
             template="urban_commute",
             scene_environment="outdoor",
@@ -3774,7 +3809,7 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
         fake_plan,
     )
 
-    await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
+    await showcase_orchestration._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -3805,7 +3840,7 @@ async def test_showcase_preflight_impl_reviews_director_brief_without_rewrite(
         id="cand-1",
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
-    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    shot_picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=1,
@@ -3862,7 +3897,7 @@ async def test_showcase_preflight_impl_reviews_director_brief_without_rewrite(
         fake_review,
     )
 
-    preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
+    preflight = await showcase_orchestration._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹", "胸袋"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -3897,7 +3932,7 @@ async def test_showcase_preflight_impl_reports_composer_review_progress(
         id="cand-1",
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
-    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    shot_picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=1,
@@ -3952,9 +3987,13 @@ async def test_showcase_preflight_impl_reports_composer_review_progress(
     ) -> None:
         progress_events.append((phase, detail, current, total))
 
-    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
-    await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
+    monkeypatch.setattr(
+        showcase_preflight_steps, "_plan_scene_cards_with_gpt55", fake_plan
+    )
+    monkeypatch.setattr(
+        showcase_preflight_steps, "_review_prompt_risk_with_gpt55", fake_review
+    )
+    await showcase_orchestration._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -3983,7 +4022,7 @@ async def test_showcase_preflight_impl_reports_composer_review_progress(
 
 
 def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None:
-    guarded = workflows._guarded_shooting_brief(  # noqa: SLF001
+    guarded = showcase_prompts._guarded_shooting_brief(  # noqa: SLF001
         "咖啡店窗边拍摄，模特拿咖啡杯靠近胸前，窗边侧光。",
         rewrite_instruction=("更换场景和构图以避免重复，改为图书馆过道自然整理衣袖。"),
     )
@@ -3995,7 +4034,7 @@ def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None
 
 
 def test_guarded_shooting_brief_preserves_safe_motion_energy() -> None:
-    guarded = workflows._guarded_shooting_brief(  # noqa: SLF001
+    guarded = showcase_prompts._guarded_shooting_brief(  # noqa: SLF001
         "模特向镜头走近，脚步刚落地，衣摆和发丝有自然摆动。",
         rewrite_instruction=(
             "改为稳定的正面或三分之二正面站定展示，只保留轻微落步感；"
@@ -4019,7 +4058,7 @@ async def test_showcase_preflight_impl_uses_director_brief_for_risky_scene(
         id="cand-1",
         model_brief_json={"summary": "clean commute model", "height_cm": 168},
     )
-    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    shot_picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=1,
@@ -4101,7 +4140,7 @@ async def test_showcase_preflight_impl_uses_director_brief_for_risky_scene(
         fake_review,
     )
 
-    preflight = await workflows._prepare_showcase_preflight_impl(  # noqa: SLF001
+    preflight = await showcase_orchestration._prepare_showcase_preflight_impl(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹", "胸袋"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -4189,7 +4228,7 @@ async def test_prompt_risk_review_preserves_safe_dynamic_motion(
 
 
 def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:
-    prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
+    prompt = workflow_runtime._accessory_preview_prompt(  # noqa: SLF001
         accessory_plan={
             "items": ["small earrings", "white sneakers"],
             "strength": "subtle",
@@ -4213,7 +4252,7 @@ def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:
 
 
 def test_accessory_preview_prompt_adapts_child_accessory_styling() -> None:
-    prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
+    prompt = workflow_runtime._accessory_preview_prompt(  # noqa: SLF001
         accessory_plan={"items": ["canvas shoes"], "strength": "strong"},
         style_prompt="8岁儿童，活泼自然",
         age_context="童装",
@@ -4225,7 +4264,7 @@ def test_accessory_preview_prompt_adapts_child_accessory_styling() -> None:
 
 
 def test_accessory_preview_image_params_use_png_reference_quality() -> None:
-    params = workflows._accessory_preview_image_params()  # noqa: SLF001
+    params = workflow_runtime._accessory_preview_image_params()  # noqa: SLF001
 
     assert params.aspect_ratio == "4:5"
     assert params.size_mode == "fixed"
@@ -4245,7 +4284,7 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
         model_brief_json={"summary": "clean commute model"},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "category": "西装外套",
             "color": "深灰色",
@@ -4276,7 +4315,7 @@ def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
         model_brief_json={"summary": "熟龄女性，欧美，自然日常"},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "category": "针织上衣",
             "must_preserve": ["浅灰色", "短款版型"],
@@ -4301,7 +4340,7 @@ def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
         model_brief_json={"summary": "8岁儿童，亚洲，自然童装模特"},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "category": "童装连衣裙",
             "must_preserve": ["蓝色薄纱", "蓬蓬裙摆"],
@@ -4338,7 +4377,7 @@ def test_natural_phone_snapshot_falls_back_to_category_scene() -> None:
         model_brief_json={"summary": "都市轻熟女，自然通勤"},
     )
 
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"category": "针织开衫", "must_preserve": ["米白色"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4368,8 +4407,8 @@ def test_showcase_prompt_scene_environment_indoor_keeps_default_scene() -> None:
         final_quality="high",
     )
     for template in ("daily_snapshot", "natural_phone_snapshot", "social_seed"):
-        default_prompt = workflows._showcase_prompt(template=template, **common)  # noqa: SLF001
-        indoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+        default_prompt = showcase_prompts._showcase_prompt(template=template, **common)  # noqa: SLF001
+        indoor_prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
             template=template, scene_environment="indoor", **common
         )
         assert default_prompt == indoor_prompt
@@ -4395,10 +4434,10 @@ def test_showcase_prompt_scene_environment_outdoor_branches_for_lifestyle_templa
         ("natural_phone_snapshot", "户外随手拍"),
         ("social_seed", "户外种草"),
     ):
-        outdoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+        outdoor_prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
             template=template, scene_environment="outdoor", **common
         )
-        indoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+        indoor_prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
             template=template, scene_environment="indoor", **common
         )
         assert outdoor_keyword in outdoor_prompt
@@ -4421,10 +4460,10 @@ def test_showcase_prompt_scene_environment_ignored_for_other_templates() -> None
         final_quality="high",
     )
     for template in ("white_ecommerce", "premium_studio", "urban_commute", "lifestyle"):
-        indoor = workflows._showcase_prompt(  # noqa: SLF001
+        indoor = showcase_prompts._showcase_prompt(  # noqa: SLF001
             template=template, scene_environment="indoor", **common
         )
-        outdoor = workflows._showcase_prompt(  # noqa: SLF001
+        outdoor = showcase_prompts._showcase_prompt(  # noqa: SLF001
             template=template, scene_environment="outdoor", **common
         )
         assert indoor == outdoor
@@ -4441,7 +4480,7 @@ def test_showcase_pose_direction_per_template() -> None:
         "social_seed": "互动展示",
     }
     for template, keyword in pairs.items():
-        assert keyword in workflows._showcase_pose_direction(template)  # noqa: SLF001
+        assert keyword in showcase_template_policy._showcase_pose_direction(template)  # noqa: SLF001
 
 
 def test_age_soft_constraint_applied_to_pose_direction() -> None:
@@ -4449,7 +4488,7 @@ def test_age_soft_constraint_applied_to_pose_direction() -> None:
         id="cand-1",
         model_brief_json={"summary": "60岁银发女性"},
     )
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["米白色"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4466,7 +4505,7 @@ def test_kids_pool_routes_to_child_band_for_child_segment() -> None:
         id="cand-1",
         model_brief_json={"summary": "8岁儿童，活泼自然"},
     )
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"category": "童装连衣裙", "must_preserve": ["蓝色薄纱"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4487,7 +4526,7 @@ def test_toddler_pool_routes_to_toddler_band() -> None:
         id="cand-1",
         model_brief_json={"summary": "2岁幼儿"},
     )
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"category": "幼童 T 恤", "must_preserve": ["纯棉"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4504,7 +4543,7 @@ def test_toddler_pool_routes_to_toddler_band() -> None:
 
 def test_pick_shot_variants_counts_match_output_count() -> None:
     for n in (1, 2, 4, 8, 16):
-        picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
             template="premium_studio",
             age_segment="young_adult",
             output_count=n,
@@ -4553,9 +4592,9 @@ def test_default_showcase_pools_avoid_high_risk_motion_terms() -> None:
         "坐地",
     )
     pools = {
-        "adult": workflows.ADULT_POOL,
-        "child": workflows.CHILD_POOL,
-        "toddler": workflows.TODDLER_POOL,
+        "adult": showcase_shot_pool_adult.ADULT_POOL,
+        "child": showcase_shot_pool_kids.CHILD_POOL,
+        "toddler": showcase_shot_pool_kids.TODDLER_POOL,
     }
     offenders: list[str] = []
     for pool_name, pool in pools.items():
@@ -4574,9 +4613,9 @@ def test_default_showcase_pools_avoid_high_risk_motion_terms() -> None:
 def test_small_showcase_outputs_keep_product_first_composition() -> None:
     """1-4 张通常是商品展示交付，不应抽到环境主体构图。"""
     for age_segment in ("young_adult", "child", "toddler"):
-        for template in workflows.TEMPLATE_LABELS:
+        for template in showcase_template_policy.TEMPLATE_LABELS:
             for count in (1, 2, 4):
-                picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+                picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
                     template=template,
                     age_segment=age_segment,
                     output_count=count,
@@ -4587,19 +4626,19 @@ def test_small_showcase_outputs_keep_product_first_composition() -> None:
 
 
 def test_pick_shot_variants_is_deterministic_for_same_seed() -> None:
-    a = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    a = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=8,
         seed_key="seed-A",
     )
-    b = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    b = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=8,
         seed_key="seed-A",
     )
-    c = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    c = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
         age_segment="young_adult",
         output_count=8,
@@ -4610,7 +4649,7 @@ def test_pick_shot_variants_is_deterministic_for_same_seed() -> None:
 
 
 def test_pick_shot_variants_prefers_front_views_when_output_4() -> None:
-    picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="lifestyle",
         age_segment="young_adult",
         output_count=4,
@@ -4643,7 +4682,7 @@ def test_natural_light_templates_describe_light_direction_and_contrast(
 
     棚拍类（white/premium）有人造光，本来就工整，不在此约束。
     """
-    direction = workflows._showcase_render_direction(template)  # noqa: SLF001
+    direction = showcase_template_policy._showcase_render_direction(template)  # noqa: SLF001
     direction_keywords = ("方向", "侧光", "侧面", "逆光", "斜上光", "顶光", "侧窗光")
     assert any(kw in direction for kw in direction_keywords), (
         f"{template} render direction lacks light direction cue"
@@ -4671,7 +4710,7 @@ def test_render_direction_includes_skin_texture_for_every_template(
     template: str,
 ) -> None:
     """每个模板都要给"真实皮肤毛孔/细纹"正面约束 + 反对塑料感/磨皮，避免 AI 假感。"""
-    direction = workflows._showcase_render_direction(template)  # noqa: SLF001
+    direction = showcase_template_policy._showcase_render_direction(template)  # noqa: SLF001
     assert "皮肤" in direction
     assert "毛孔" in direction
     assert "塑料感" in direction or "棚拍感" in direction
@@ -4694,7 +4733,7 @@ def test_render_direction_includes_skin_texture_for_every_template(
 
 def test_framing_direction_differs_between_full_body_and_detail() -> None:
     candidate = SimpleNamespace(id="c", model_brief_json={"summary": "都市轻熟女"})
-    full = workflows._showcase_prompt(  # noqa: SLF001
+    full = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["米白"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4702,7 +4741,7 @@ def test_framing_direction_differs_between_full_body_and_detail() -> None:
         shot_type="front_full_body",
         final_quality="high",
     )
-    detail = workflows._showcase_prompt(  # noqa: SLF001
+    detail = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["米白"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4721,11 +4760,11 @@ def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
     candidate = SimpleNamespace(id="c", model_brief_json={"summary": "都市通勤"})
     # premium_studio side_or_back 有 3 条 tone_first 变体，第一条 product 用 default 取
     # 所以这里直接构造一个 tone_first variant 测试
-    tone_variant = workflows.ShotVariant(
+    tone_variant = shot_pool.ShotVariant(
         label="远景剪影，街景延伸为画面主体",
         framing="tone_first",
     )
-    prompt = workflows._showcase_prompt(  # noqa: SLF001
+    prompt = showcase_prompts._showcase_prompt(  # noqa: SLF001
         product_analysis={"must_preserve": ["深灰"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
@@ -4744,7 +4783,7 @@ def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(
     age_segment: str,
 ) -> None:
     """child/toddler 池较小，请求 16 张需循环复用变体且只少量补侧背。"""
-    picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+    picks = showcase_shots._showcase_pick_shot_variants(  # noqa: SLF001
         template="premium_studio",
         age_segment=age_segment,
         output_count=16,
@@ -4764,7 +4803,7 @@ def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(
 def test_revision_prompt_is_short_repair_brief() -> None:
     candidate = SimpleNamespace(id="cand-1")
 
-    prompt = workflows._revision_prompt(  # noqa: SLF001
+    prompt = workflow_runtime._revision_prompt(  # noqa: SLF001
         instruction="衣服颜色更接近商品图",
         product_analysis={"must_preserve": ["米白色", "宽松版型"]},
         selected_candidate=candidate,  # type: ignore[arg-type]
@@ -4780,7 +4819,7 @@ def test_revision_prompt_is_short_repair_brief() -> None:
 def test_quality_summary_merge_preserves_review_task_map() -> None:
     report = SimpleNamespace(overall_score=88, recommendation="approve")
 
-    payload = workflows._merge_quality_summary_payload(  # noqa: SLF001
+    payload = output_sync._merge_quality_summary_payload(  # noqa: SLF001
         {
             "review_tasks": {"image-1": "completion-1"},
             "review_task_count": 1,
@@ -4801,7 +4840,7 @@ def test_quality_summary_merge_preserves_review_task_map() -> None:
 
 
 def test_model_library_run_title_includes_age_gender_and_appearance() -> None:
-    title = workflows._model_library_run_title(  # noqa: SLF001
+    title = model_library._model_library_run_title(  # noqa: SLF001
         age_segment="young_adult",
         gender="female",
         appearance_direction="asian",
@@ -4812,7 +4851,7 @@ def test_model_library_run_title_includes_age_gender_and_appearance() -> None:
 
 
 def test_model_library_run_title_labels_multi_gender() -> None:
-    title = workflows._model_library_run_title(  # noqa: SLF001
+    title = model_library._model_library_run_title(  # noqa: SLF001
         age_segment="young_adult",
         genders=["female", "male"],
         appearance_direction="east_asian",
@@ -4821,7 +4860,7 @@ def test_model_library_run_title_labels_multi_gender() -> None:
 
 
 def test_model_library_run_title_handles_missing_appearance() -> None:
-    title = workflows._model_library_run_title(  # noqa: SLF001
+    title = model_library._model_library_run_title(  # noqa: SLF001
         age_segment="adult",
         gender="male",
         appearance_direction=None,
@@ -4833,7 +4872,7 @@ def test_model_library_run_title_handles_missing_appearance() -> None:
 
 
 def test_model_library_generate_prompt_embeds_age_gender_appearance() -> None:
-    prompt = workflows._model_library_generate_prompt(  # noqa: SLF001
+    prompt = model_library._model_library_generate_prompt(  # noqa: SLF001
         age_segment="young_adult",
         gender="female",
         appearance_direction="asian",
@@ -4853,7 +4892,7 @@ def test_model_library_generate_prompt_embeds_age_gender_appearance() -> None:
 
 
 def test_model_library_generate_prompt_reference_mode_locks_identity() -> None:
-    prompt = workflows._model_library_generate_prompt(  # noqa: SLF001
+    prompt = model_library._model_library_generate_prompt(  # noqa: SLF001
         age_segment="young_adult",
         gender="female",
         appearance_direction="east_asian",
@@ -4901,7 +4940,7 @@ def test_merge_reference_overrides_user_fields_win() -> None:
         style_tags=["用户标签"],
         count=1,
     )
-    extracted = workflows.ReferenceProfile(  # noqa: SLF001
+    extracted = ReferenceProfile(  # noqa: SLF001
         age_segment="young_adult",
         gender="female",
         appearance_direction="east_asian",
@@ -4909,7 +4948,7 @@ def test_merge_reference_overrides_user_fields_win() -> None:
         notes="短发",
     )
 
-    merged = workflows._merge_reference_overrides(body, extracted)  # noqa: SLF001
+    merged = model_library._merge_reference_overrides(body, extracted)  # noqa: SLF001
 
     assert merged.age_segment == "adult"
     assert merged.genders == ["male"]
@@ -4925,16 +4964,16 @@ def test_reference_profile_required_fields_gate() -> None:
         count=1,
     )
     assert (
-        workflows._reference_profile_has_required_text_fields(  # noqa: SLF001
+        model_library._reference_profile_has_required_text_fields(  # noqa: SLF001
             body,
-            workflows.ReferenceProfile(notes="not a person"),
+            ReferenceProfile(notes="not a person"),
         )
         is False
     )
     assert (
-        workflows._reference_profile_has_required_text_fields(  # noqa: SLF001
+        model_library._reference_profile_has_required_text_fields(  # noqa: SLF001
             body,
-            workflows.ReferenceProfile(age_segment="young_adult", gender="female"),
+            ReferenceProfile(age_segment="young_adult", gender="female"),
         )
         is True
     )
@@ -4964,7 +5003,7 @@ async def test_enqueue_model_library_reference_tasks_use_i2i_attachment_and_meta
     )
     step = SimpleNamespace(task_ids=[])
 
-    _bundles, task_ids = await workflows._enqueue_model_library_generate_tasks(  # noqa: SLF001
+    _bundles, task_ids = await model_library._enqueue_model_library_generate_tasks(  # noqa: SLF001
         db=SimpleNamespace(),
         user=SimpleNamespace(id="user-1"),
         conv=SimpleNamespace(id="conv-1"),
@@ -4976,7 +5015,7 @@ async def test_enqueue_model_library_reference_tasks_use_i2i_attachment_and_meta
 
     assert task_ids == ["gen-1"]
     assert step.task_ids == ["gen-1"]
-    assert calls[0]["intent"] == workflows.Intent.IMAGE_TO_IMAGE
+    assert calls[0]["intent"] == Intent.IMAGE_TO_IMAGE
     assert calls[0]["attachment_ids"] == ["img-ref"]
     assert "Use the attached reference image ONLY" in calls[0]["text"]
     meta = calls[0]["workflow_meta"]
@@ -4986,7 +5025,7 @@ async def test_enqueue_model_library_reference_tasks_use_i2i_attachment_and_meta
 
 
 def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
-    anchor = workflows._model_diversity_anchor  # noqa: SLF001
+    anchor = showcase_model_policy._model_diversity_anchor  # noqa: SLF001
 
     # 同 gender 不同 index → 不同 archetype
     a1 = anchor(candidate_index=1, gender="female")
@@ -5012,7 +5051,7 @@ def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
 
 
 def test_model_library_generate_image_params_use_lossless_png_with_fast_off() -> None:
-    params = workflows._model_library_generate_image_params()  # noqa: SLF001
+    params = model_library._model_library_generate_image_params()  # noqa: SLF001
 
     assert params.aspect_ratio == "4:5"
     assert params.count == 1
@@ -5023,7 +5062,7 @@ def test_model_library_generate_image_params_use_lossless_png_with_fast_off() ->
 
 
 def test_infer_candidate_gender_detects_male_signal_and_defaults_to_female() -> None:
-    f = workflows._infer_candidate_gender  # noqa: SLF001
+    f = showcase_model_policy._infer_candidate_gender  # noqa: SLF001
 
     assert f("男装通勤", {"category": "衬衫"}) == "male"
     assert f("menswear smart casual", {"category": "shirt"}) == "male"
@@ -5037,7 +5076,7 @@ def test_infer_candidate_gender_detects_male_signal_and_defaults_to_female() -> 
 
 
 def test_model_library_job_status_combines_step_status_and_count() -> None:
-    f = workflows._model_library_job_status  # noqa: SLF001
+    f = model_library._model_library_job_status  # noqa: SLF001
     # running with no images -> running
     assert f(step_status="running", requested_count=4, finished_count=0) == "running"
     # running with partial -> still running
@@ -5066,7 +5105,7 @@ def test_model_library_run_inputs_normalizes_input_json() -> None:
         },
         task_ids=["t1", "t2", "t3", "t4"],
     )
-    out = workflows._model_library_run_inputs(step)  # noqa: SLF001
+    out = model_library._model_library_run_inputs(step)  # noqa: SLF001
     assert out["age_segment"] == "young_adult"
     assert out["gender"] == "female"
     assert out["appearance_direction"] == "asian"
@@ -5084,13 +5123,13 @@ def test_model_library_run_inputs_accepts_multi_gender_snapshot() -> None:
         },
         task_ids=["t1"] * 8,
     )
-    out = workflows._model_library_run_inputs(step)  # noqa: SLF001
+    out = model_library._model_library_run_inputs(step)  # noqa: SLF001
     assert out["gender"] == "female/male"
     assert out["genders"] == ["female", "male"]
 
 
 def test_job_item_out_uses_image_gender_and_download_filename() -> None:
-    item = workflows._job_item_out(  # noqa: SLF001
+    item = model_library._job_item_out(  # noqa: SLF001
         image_id="image-abcdef123456",
         image_out=SimpleNamespace(
             url="/api/images/image-abcdef123456/binary",
@@ -5111,7 +5150,7 @@ def test_job_item_out_uses_image_gender_and_download_filename() -> None:
 
 
 def test_job_item_out_marks_dual_race_bonus_as_free() -> None:
-    item = workflows._job_item_out(  # noqa: SLF001
+    item = model_library._job_item_out(  # noqa: SLF001
         image_id="bonus-image-1",
         image_out=None,
         saved_item_id=None,
@@ -5133,7 +5172,7 @@ def test_job_item_out_marks_dual_race_bonus_as_free() -> None:
 
 
 def test_normalize_tagged_age_recognizes_aliases() -> None:
-    f = workflows._normalize_tagged_age  # noqa: SLF001
+    f = model_library._normalize_tagged_age  # noqa: SLF001
     assert f("young_adult") == "young_adult"
     assert f("YOUNG") == "young_adult"
     assert f("kids") == "child"
@@ -5142,7 +5181,7 @@ def test_normalize_tagged_age_recognizes_aliases() -> None:
 
 
 def test_normalize_tagged_gender_normalizes_aliases() -> None:
-    f = workflows._normalize_tagged_gender  # noqa: SLF001
+    f = model_library._normalize_tagged_gender  # noqa: SLF001
     assert f("female") == "female"
     assert f("Woman") == "female"
     assert f("M") == "male"

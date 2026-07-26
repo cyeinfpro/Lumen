@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import os
 import secrets
+import threading
+import warnings
 from io import BytesIO
 from pathlib import Path
 from types import MappingProxyType
@@ -14,6 +16,12 @@ from typing import Mapping
 from PIL import Image, UnidentifiedImageError
 
 from ..config import ImageJobSettings
+
+
+# `Image.MAX_IMAGE_PIXELS` 与 `warnings.catch_warnings()` 都是进程级全局状态，
+# 而 _inspect 跑在 asyncio.to_thread 的线程池里，可能并发进入。用锁把
+# 「改全局 → 解码 → 还原」串起来，语义与 image_artifacts.image_metadata 一致。
+_IMAGE_VERIFY_LOCK = threading.RLock()
 
 
 _MIME_EXT: Mapping[str, str] = MappingProxyType(
@@ -49,19 +57,43 @@ class FilesystemArtifactStore:
         return self.settings.refs_dir / f"{token}.{ext}"
 
     def _inspect(self, data: bytes) -> str:
+        # H-15：Pillow 的 DecompressionBombError 既不是 OSError 也不是
+        # ValueError，原来的 except 元组接不住它，一张解压炸弹参考图会以
+        # 未捕获异常的形式冒到 ASGI 层变成 500（而不是干净的 413）；同时不钉住
+        # Image.MAX_IMAGE_PIXELS 的话，判定用的是 Pillow 默认阈值而不是本服务
+        # 配置的 max_image_pixels，配置调大调小都不生效。
+        max_pixels = self.settings.max_image_pixels
         try:
-            with Image.open(BytesIO(data)) as image:
-                width, height = image.size
-                if (
-                    width <= 0
-                    or height <= 0
-                    or width * height > self.settings.max_image_pixels
-                ):
-                    raise ArtifactFailure(413, "reference image exceeds pixel limit")
-                fmt = (image.format or "").lower()
-                image.verify()
+            with _IMAGE_VERIFY_LOCK:
+                previous_max_pixels = Image.MAX_IMAGE_PIXELS
+                Image.MAX_IMAGE_PIXELS = max_pixels
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter(
+                            "error",
+                            Image.DecompressionBombWarning,
+                        )
+                        with Image.open(BytesIO(data)) as image:
+                            width, height = image.size
+                            if width <= 0 or height <= 0 or width * height > max_pixels:
+                                raise ArtifactFailure(
+                                    413,
+                                    "reference image exceeds pixel limit",
+                                )
+                            fmt = (image.format or "").lower()
+                            image.verify()
+                finally:
+                    Image.MAX_IMAGE_PIXELS = previous_max_pixels
         except ArtifactFailure:
             raise
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+        ) as exc:
+            raise ArtifactFailure(
+                413,
+                "reference image exceeds pixel limit",
+            ) from exc
         except (
             EOFError,
             OSError,

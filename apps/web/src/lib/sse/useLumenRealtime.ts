@@ -73,7 +73,10 @@ const MAX_CHANNELS = 62;
 const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
 
 function sortedTaskIds(ids: Iterable<string>): string[] {
-  return [...new Set(ids)].sort();
+  // 修复非法频道名：空串 id 会拼出 `task:` 这种订阅不到任何东西的频道，并挤占
+  // MAX_CHANNELS 名额。completion_id 各处已有真值判断，但 generation_ids 数组元素
+  // 只判了前缀（`"".startsWith("opt-")` 为 false 会漏过），故在汇聚点统一过滤。
+  return [...new Set(ids)].filter((id) => id.length > 0).sort();
 }
 
 function generationTaskIds(

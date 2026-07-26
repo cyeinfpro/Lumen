@@ -11,6 +11,7 @@ import logging
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 
 from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..states import GenFlow
@@ -64,7 +65,15 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         await cb.answer("原任务没有提示词，无法重画。", show_alert=True)
         return
 
-    payload = _payload_from_gen(gen, prompt)
+    # J-1：重画必须带上原任务的参考图。丢掉 input_image_ids 会让 API 把 intent
+    # 从 image_to_image 降级成 text_to_image，出图跟原图毫无关系，而这一次是真
+    # 扣费的 —— 用户只会以为"重画坏了"再点一次，等于替上游多付一次钱。
+    # 与 retry 保持同一套截断规则（API 有参考图数量上限，老 gen 可能超）。
+    payload = _payload_from_gen(
+        gen,
+        prompt,
+        list(gen.get("input_image_ids") or [])[:MAX_MESSAGE_ATTACHMENTS],
+    )
     # 注意：种子里不要拌 cb.id —— Telegram 每次点同一按钮 cb.id 都不同，会
     # 让服务端 idempotency 去重失效（双击/网络重发都建任务）。用稳定 (chat,
     # gen) 作为种子，重复点击就是同一 key。

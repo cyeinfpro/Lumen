@@ -47,11 +47,16 @@ class ImageJobRuntime:
         self.started = True
 
     async def shutdown(self) -> None:
-        if not self.started:
-            return
-        await self.queue.shutdown()
-        await self.upstream.shutdown()
-        self.started = False
+        # H-16：不能因为 started=False 就提前返回。startup() 是分步的，
+        # upstream.startup() 成功之后 queue.startup() 再抛异常（或者 lifespan
+        # 在 startup 中途被取消），started 仍是 False，但 httpx.AsyncClient
+        # 已经建好了——提前返回就把连接池永久泄漏在进程里。queue.shutdown()
+        # 与 upstream.shutdown() 本身都是幂等的，重复调用是安全的。
+        try:
+            await self.queue.shutdown()
+        finally:
+            await self.upstream.shutdown()
+            self.started = False
 
     async def readiness(self) -> tuple[bool, tuple[str, ...]]:
         failures: list[str] = []
@@ -80,6 +85,9 @@ class ImageJobRuntime:
             "image_job_shutdown": int(state.shutdown),
             "image_job_legacy_auth_requests_total": (self.legacy_auth_requests_total),
             **{f"image_job_{key}": value for key, value in self.queue.metrics.items()},
+            # H-19：业务维度指标。jobs_uncertain_total 是纯转嫁下的资金风险量表
+            # ——每 +1 代表一笔「上游可能已扣费但没交付」的待对账工单。
+            **{f"image_job_{key}": value for key, value in self.jobs.outcomes.items()},
         }
         return "".join(f"{name} {value}\n" for name, value in values.items())
 
@@ -104,6 +112,9 @@ def create_runtime(
     queue.bind(
         processor=jobs.process,
         reconcile=jobs.reconcile,
+        # H-17：不传 retention 的话 QueueSupervisor.startup() 会直接跳过保留期
+        # 清扫协程，磁盘和 jobs 表就永远只增不减。
+        retention=jobs.retention.run_pass,
     )
     return ImageJobRuntime(
         settings=resolved,

@@ -58,6 +58,14 @@ async def acquire_summary_lock(
     except Exception as exc:  # noqa: BLE001
         logger.warning("context_summary.pg_lock_failed conv=%s err=%s", conv_id, exc)
         if connection is not None:
+            # pg_try_advisory_lock 可能已经拿到锁（失败发生在取结果 / commit 这一步），
+            # 而 advisory lock 是 session 级的：close() 只把连接还池，锁会跟着这条
+            # 池化连接一直留到 pool_recycle，其它连接从此永远拿不到锁。invalidate()
+            # 丢掉底层 DBAPI 连接 → 后端 session 结束 → 锁一定释放。
+            try:
+                await connection.invalidate()
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 await connection.close()
             except Exception:  # noqa: BLE001

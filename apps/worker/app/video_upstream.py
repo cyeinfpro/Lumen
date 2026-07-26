@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from lumen_core.providers import socks_proxy_url
@@ -289,11 +289,18 @@ async def _download_video_url(
 ) -> DownloadedVideo:
     current_url = video_url
     make_client = client_factory or _video_download_client
+    # 初始结果 URL 允许明文（少数网关就发 http），但一旦某一跳走的是 https，
+    # 后续 redirect 不许掉回 http —— 否则上游只要回一个 302 就能把带鉴权头的
+    # 下载降级成明文，逐跳 SSRF 校验也拦不住这种降级。
+    allow_http = True
     for _redirect in range(max(0, max_redirects) + 1):
         if ensure_active is not None:
             ensure_active()
         try:
-            target = await resolve_public_http_target(current_url, allow_http=True)
+            target = await resolve_public_http_target(
+                current_url,
+                allow_http=allow_http,
+            )
         except ValueError as exc:
             raise VideoUpstreamError(
                 "video result URL must be public HTTP(S)",
@@ -308,6 +315,8 @@ async def _download_video_url(
             ) as response:
                 redirect_url = _video_redirect_url(response)
                 if redirect_url is not None:
+                    if urlsplit(target.url).scheme.lower() == "https":
+                        allow_http = False
                     current_url = redirect_url
                     continue
                 _validate_video_download_response(response)

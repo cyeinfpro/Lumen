@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from app.upstream_parts import direct_images
+from app.upstream_parts import upstream_impl as _upstream_impl  # noqa: F401  组装服务
 
 
 class InjectedUpstreamError(Exception):
@@ -259,3 +260,52 @@ async def test_first_result_facade_chains_through_current_results_facade(
         proxy_url="http://chain-proxy",
     ) == ("patched-first", "patched-prompt")
     assert seen == [(payload, 208, "http://chain-proxy")]
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "direct_image_result_unknown",
+        "image_job_result_unknown",
+        "no_image_returned",
+    ],
+)
+def test_result_unknown_predicate_blocks_provider_fallback(error_code: str) -> None:
+    """上游 2xx 之后的失败不许换 provider 重试，否则一次请求产生两笔上游成本。
+
+    direct 超时、image-job sidecar 的 uncertain 终态、上游回 2xx 却不给图，是同
+    一类事故：钱已经花出去了，是否计费无从确认或已确认发生。三个码都必须命中。
+    """
+    exc = upstream_services().infrastructure.UpstreamError(
+        "upstream result unknown",
+        status_code=200,
+        error_code=error_code,
+    )
+    assert upstream_services().direct.is_direct_image_result_unknown(exc) is True
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [None, "moderation_blocked", "bad_response"],
+)
+def test_ordinary_failures_still_allow_provider_fallback(
+    error_code: str | None,
+) -> None:
+    # 能判定未交付且未扣费的失败保持既有行为：允许换 provider 重试。
+    # no_image_returned 已移出本组：它只在上游 2xx 之后产生，换 provider 会
+    # 再付一笔，见上面 test_result_unknown_predicate_blocks_provider_fallback。
+    exc = upstream_services().infrastructure.UpstreamError(
+        "ordinary failure",
+        error_code=error_code,
+    )
+    assert upstream_services().direct.is_direct_image_result_unknown(exc) is False
+
+
+def test_non_upstream_exception_is_not_treated_as_unknown() -> None:
+    # 谓词只认 UpstreamError，裸异常不得被误判成「上游可能已扣费」。
+    assert (
+        upstream_services().direct.is_direct_image_result_unknown(
+            TimeoutError("plain timeout"),
+        )
+        is False
+    )

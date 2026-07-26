@@ -74,8 +74,8 @@ from ...ratelimit import (
     require_client_ip,
 )
 from ...redis_client import get_redis
-from ...routes._image_delivery import (
-    etag_matches_if_none_match as _etag_matches_if_none_match,  # noqa: F401
+from ._file_delivery import (
+    etag_matches_if_none_match as _etag_matches_if_none_match,
     internal_redirect_enabled as _internal_redirect_enabled,
     iter_open_file_and_close as _iter_delivery_file_and_close,
     open_regular_file_no_symlink as _open_regular_file_no_symlink,

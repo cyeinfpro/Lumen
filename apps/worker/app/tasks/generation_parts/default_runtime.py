@@ -5,7 +5,20 @@ Stateful helpers live in ``generation_parts`` and receive explicit runtime ports
 
 from __future__ import annotations
 
-from .runtime import GenerationPorts, GenerationRuntime, install_generation_ports
+from .runtime import (
+    GenerationPorts,
+    GenerationRuntime,
+    ImagePostprocessRuntime,
+    GenerationDomainPorts,
+    GenerationPersistencePorts,
+    GenerationQueuePorts,
+    GenerationBillingPorts,
+    GenerationEventPorts,
+    GenerationProviderPorts,
+    GenerationLeasePorts,
+    generation_provider_ports,
+    install_generation_ports,
+)
 
 import asyncio
 import binascii
@@ -17,7 +30,6 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -382,14 +394,6 @@ _release_generation_runtime_resources = (
 _IMAGE_POSTPROCESS_MODES = _generation_postprocess._IMAGE_POSTPROCESS_MODES
 
 
-@dataclass(slots=True)
-class ImagePostprocessRuntime:
-    executor: ProcessPoolExecutor | None = None
-
-
-_IMAGE_POSTPROCESS_RUNTIME = ImagePostprocessRuntime()
-
-
 def _make_image_variants_sync(raw_image: bytes) -> _ImageVariantBundle:
     inspection = _inspect_generated_image_sync(raw_image)
     try:
@@ -419,19 +423,19 @@ def _resolve_image_postprocess_workers() -> int:
 
 
 def _get_image_postprocess_executor() -> ProcessPoolExecutor:
-    _IMAGE_POSTPROCESS_RUNTIME.executor = (
-        _generation_postprocess._get_image_postprocess_executor(
-            _IMAGE_POSTPROCESS_RUNTIME.executor,
-            resolve_workers=_resolve_image_postprocess_workers,
-            executor_type=ProcessPoolExecutor,
-        )
+    runtime = generation_provider_ports()._image_postprocess_runtime
+    runtime.executor = _generation_postprocess._get_image_postprocess_executor(
+        runtime.executor,
+        resolve_workers=_resolve_image_postprocess_workers,
+        executor_type=ProcessPoolExecutor,
     )
-    return _IMAGE_POSTPROCESS_RUNTIME.executor
+    return runtime.executor
 
 
 def _reset_image_postprocess_executor() -> None:
-    executor = _IMAGE_POSTPROCESS_RUNTIME.executor
-    _IMAGE_POSTPROCESS_RUNTIME.executor = None
+    runtime = generation_provider_ports()._image_postprocess_runtime
+    executor = runtime.executor
+    runtime.executor = None
     _generation_postprocess._reset_image_postprocess_executor(executor)
 
 
@@ -916,40 +920,79 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:
     await _generation_runner.run_generation(ctx, task_id)
 
 
-def build_generation_runtime() -> GenerationRuntime:
-    ports = GenerationPorts(
-        Conversation=Conversation,
-        DEFAULT_IMAGE_RESPONSES_MODEL=DEFAULT_IMAGE_RESPONSES_MODEL,
-        DEFAULT_IMAGE_RESPONSES_MODEL_FAST=DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+def _build_generation_domain_ports() -> GenerationDomainPorts:
+    return GenerationDomainPorts(
         EC=EC,
-        EV_GEN_ATTACHED=EV_GEN_ATTACHED,
-        EV_GEN_FAILED=EV_GEN_FAILED,
-        EV_GEN_PROGRESS=EV_GEN_PROGRESS,
-        EV_GEN_QUEUED=EV_GEN_QUEUED,
-        EV_GEN_RETRYING=EV_GEN_RETRYING,
-        EV_GEN_STARTED=EV_GEN_STARTED,
-        EV_GEN_SUCCEEDED=EV_GEN_SUCCEEDED,
-        Generation=Generation,
         GenerationAction=GenerationAction,
         GenerationStage=GenerationStage,
         GenerationStatus=GenerationStatus,
-        Image=Image,
         ImageSource=ImageSource,
-        ImageVariant=ImageVariant,
-        Message=Message,
         MessageStatus=MessageStatus,
         RETRY_BACKOFF_SECONDS=RETRY_BACKOFF_SECONDS,
         RetryDecision=RetryDecision,
+        _MAX_ATTEMPTS=_MAX_ATTEMPTS,
+        _RETRY_BACKOFF_MAX_SECONDS=_RETRY_BACKOFF_MAX_SECONDS,
+        _RUNNING_GENERATION_STATUSES=_RUNNING_GENERATION_STATUSES,
+        _RUN_GENERATION_TIMEOUT_S=_RUN_GENERATION_TIMEOUT_S,
+        _StageTimer=_StageTimer,
+        _StaleGenerationAttempt=_StaleGenerationAttempt,
+        _base_retry_backoff_seconds=_base_retry_backoff_seconds,
+        _bounded_next_attempt=_bounded_next_attempt,
+        _retry_delay_seconds=_retry_delay_seconds,
+        _retry_not_before_ttl=_retry_not_before_ttl,
+        is_generation_terminal=is_generation_terminal,
+        new_uuid7=new_uuid7,
+        time=time,
+    )
+
+
+def _build_generation_persistence_ports() -> GenerationPersistencePorts:
+    return GenerationPersistencePorts(
+        Conversation=Conversation,
+        Generation=Generation,
+        Image=Image,
+        ImageVariant=ImageVariant,
+        Message=Message,
         SessionLocal=SessionLocal,
         StorageDiskFullError=StorageDiskFullError,
-        UpstreamError=UpstreamError,
-        _ACQUIRE_LUA=_ACQUIRE_LUA,
+        _clean_model_style_tags=_clean_model_style_tags,
+        _cleanup_storage_on_error=_cleanup_storage_on_error,
+        _decode_upstream_image_b64=_decode_upstream_image_b64,
+        _delete_storage_keys=_delete_storage_keys,
+        _ensure_generation_attempt_current=_ensure_generation_attempt_current,
+        _ensure_generation_conversation_alive=_ensure_generation_conversation_alive,
+        _ensure_generation_updated=_ensure_generation_updated,
+        _finalize_running_generation_cancel=_finalize_running_generation_cancel,
+        _find_existing_generated_image=_find_existing_generated_image,
+        _generation_attempt_update=_generation_attempt_update,
+        _handle_dual_race_bonus_image=_handle_dual_race_bonus_image,
+        _mark_generation_attempt_failed=_mark_generation_attempt_failed,
+        _mark_generation_attempt_retrying=_mark_generation_attempt_retrying,
+        _maybe_embed_model_image_metadata_bytes=_maybe_embed_model_image_metadata_bytes,
+        _maybe_record_model_library_generate_image=_maybe_record_model_library_generate_image,
+        _maybe_record_model_library_candidate_image=_maybe_record_model_library_candidate_image,
+        _maybe_record_poster_style_library_generate_image=_maybe_record_poster_style_library_generate_image,
+        _maybe_record_poster_workflow_image=_maybe_record_poster_workflow_image,
+        _maybe_requeue_stale_generation_attempt=_maybe_requeue_stale_generation_attempt,
+        _model_image_metadata_from_request=_model_image_metadata_from_request,
+        _postprocess_raw_generated_image=_postprocess_raw_generated_image,
+        _settle_existing_generated_image=_settle_existing_generated_image,
+        _sha256=_sha256,
+        _write_generation_files=_write_generation_files,
+        build_model_image_metadata=build_model_image_metadata,
+        model_image_filename=model_image_filename,
+        save_image_with_model_metadata=save_image_with_model_metadata,
+        select=select,
+        storage=storage,
+        update=update,
+    )
+
+
+def _build_generation_queue_ports() -> GenerationQueuePorts:
+    return GenerationQueuePorts(
         _DUAL_RACE_SENTINEL_PREFIX=_DUAL_RACE_SENTINEL_PREFIX,
-        _IMAGE_BACKGROUND_VALUES=_IMAGE_BACKGROUND_VALUES,
         _IMAGE_GENERATION_CONCURRENCY_SETTING=_IMAGE_GENERATION_CONCURRENCY_SETTING,
         _IMAGE_INFLIGHT_PREFIX=_IMAGE_INFLIGHT_PREFIX,
-        _IMAGE_MODERATION_VALUES=_IMAGE_MODERATION_VALUES,
-        _IMAGE_OUTPUT_FORMAT_VALUES=_IMAGE_OUTPUT_FORMAT_VALUES,
         _IMAGE_PROVIDER_UNAVAILABLE_RETRY_S=_IMAGE_PROVIDER_UNAVAILABLE_RETRY_S,
         _IMAGE_QUEUE_ACTIVE_KEY=_IMAGE_QUEUE_ACTIVE_KEY,
         _IMAGE_QUEUE_AVOID_PREFIX=_IMAGE_QUEUE_AVOID_PREFIX,
@@ -970,54 +1013,19 @@ def build_generation_runtime() -> GenerationRuntime:
         _IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S=_IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S,
         _IMAGE_QUEUE_SCAN_LIMIT=_IMAGE_QUEUE_SCAN_LIMIT,
         _IMAGE_QUEUE_TASK_PROVIDER_PREFIX=_IMAGE_QUEUE_TASK_PROVIDER_PREFIX,
-        _IMAGE_RENDER_QUALITY_VALUES=_IMAGE_RENDER_QUALITY_VALUES,
-        _IMAGE_SEMAPHORE_KEY_TTL_S=_IMAGE_SEMAPHORE_KEY_TTL_S,
-        _LEASE_REACQUIRED_SUBSTAGE=_LEASE_REACQUIRED_SUBSTAGE,
-        _LEASE_RENEW_S=_LEASE_RENEW_S,
-        _LEASE_TTL_S=_LEASE_TTL_S,
-        _LeaseLost=_LeaseLost,
-        _MAX_ATTEMPTS=_MAX_ATTEMPTS,
         _PROVIDER_COOLDOWN_LOCAL=_PROVIDER_COOLDOWN_LOCAL,
         _QueuedGenerationCandidate=_QueuedGenerationCandidate,
-        _RELEASE_LEASE_LUA=_RELEASE_LEASE_LUA,
-        _RELEASE_LUA=_RELEASE_LUA,
-        _RENEW_LEASE_LUA=_RENEW_LEASE_LUA,
-        _RESERVE_IMAGE_SLOT_LUA=_RESERVE_IMAGE_SLOT_LUA,
-        _RETRY_BACKOFF_MAX_SECONDS=_RETRY_BACKOFF_MAX_SECONDS,
-        _RUNNING_GENERATION_STATUSES=_RUNNING_GENERATION_STATUSES,
-        _RUN_GENERATION_TIMEOUT_S=_RUN_GENERATION_TIMEOUT_S,
-        _StageTimer=_StageTimer,
-        _StaleGenerationAttempt=_StaleGenerationAttempt,
-        _TaskCancelled=_TaskCancelled,
-        _acquire_lease=_acquire_lease,
         _active_image_provider_names=_active_image_provider_names,
-        _anext_image_with_guards=_anext_image_with_guards,
-        _aspect_ratio_prompt_constraint=_aspect_ratio_prompt_constraint,
-        _await_with_lease_guard=_await_with_lease_guard,
-        _base_retry_backoff_seconds=_base_retry_backoff_seconds,
-        _bounded_next_attempt=_bounded_next_attempt,
-        _cancel_renewer_task=_cancel_renewer_task,
-        _clean_model_style_tags=_clean_model_style_tags,
+        _avoid_provider_for_task=_avoid_provider_for_task,
+        _classify_inflight_lane=_classify_inflight_lane,
         _cleanup_image_queue_active=_cleanup_image_queue_active,
-        _cleanup_storage_on_error=_cleanup_storage_on_error,
         _clear_avoided_providers=_clear_avoided_providers,
         _clear_image_queue_enqueue_dedupe=_clear_image_queue_enqueue_dedupe,
         _coerce_image_queue_capacity=_coerce_image_queue_capacity,
-        _consume_image_iter_close_result=_consume_image_iter_close_result,
-        _decode_upstream_image_b64=_decode_upstream_image_b64,
-        _delete_storage_keys=_delete_storage_keys,
-        _deliver_generation_event=_deliver_generation_event,
-        _deliver_generation_events=_deliver_generation_events,
         _dual_race_sentinel_name=_dual_race_sentinel_name,
         _enqueue_generation_once=_enqueue_generation_once,
-        _ensure_generation_conversation_alive=_ensure_generation_conversation_alive,
-        _ensure_generation_updated=_ensure_generation_updated,
         _fallback_queued_candidate=_fallback_queued_candidate,
-        _find_existing_generated_image=_find_existing_generated_image,
-        _generation_attempt_update=_generation_attempt_update,
-        _generation_trace_id=_generation_trace_id,
         _get_avoided_providers=_get_avoided_providers,
-        _image_endpoint_kind_for_engine=_image_endpoint_kind_for_engine,
         _image_inflight_key=_image_inflight_key,
         _image_provider_active_key=_image_provider_active_key,
         _image_provider_lock_key=_image_provider_lock_key,
@@ -1026,28 +1034,11 @@ def build_generation_runtime() -> GenerationRuntime:
         _image_queue_enqueue_dedupe_key=_image_queue_enqueue_dedupe_key,
         _image_queue_lock=_image_queue_lock,
         _image_queue_not_before_key=_image_queue_not_before_key,
-        _image_request_options=_image_request_options,
-        _image_requested_count=_image_requested_count,
-        _image_requested_params_snapshot=_image_requested_params_snapshot,
         _image_task_provider_key=_image_task_provider_key,
         _inflight_clear=_inflight_clear,
         _inflight_set_fields=_inflight_set_fields,
-        _inpaint_size_from_reference=_inpaint_size_from_reference,
-        _is_cancelled=_is_cancelled,
         _is_dual_race_sentinel=_is_dual_race_sentinel,
         _kick_image_queue=_kick_image_queue,
-        _lease_renewer=_lease_renewer,
-        _load_mask_image=_load_mask_image,
-        _load_reference_images=_load_reference_images,
-        _mark_generation_attempt_failed=_mark_generation_attempt_failed,
-        _maybe_embed_model_image_metadata_bytes=_maybe_embed_model_image_metadata_bytes,
-        _maybe_record_model_library_candidate_image=_maybe_record_model_library_candidate_image,
-        _model_image_metadata_from_request=_model_image_metadata_from_request,
-        _parse_aspect_ratio_value=_parse_aspect_ratio_value,
-        _parse_size_string=_parse_size_string,
-        _postprocess_raw_generated_image=_postprocess_raw_generated_image,
-        _primary_input_image_id_valid=_primary_input_image_id_valid,
-        _prompt_with_aspect_ratio_constraint=_prompt_with_aspect_ratio_constraint,
         _provider_active_count=_provider_active_count,
         _queue_lane_sort_key=_queue_lane_sort_key,
         _queue_lane_weight=_queue_lane_weight,
@@ -1057,70 +1048,163 @@ def build_generation_runtime() -> GenerationRuntime:
         _queued_generation_ids=_queued_generation_ids,
         _ready_queued_generation_ids=_ready_queued_generation_ids,
         _redis_text=_redis_text,
+        _resolve_image_queue_capacity=_resolve_image_queue_capacity,
+        _select_ready_generation_ids_by_lane=_select_ready_generation_ids_by_lane,
+        _weighted_queue_lane_slots=_weighted_queue_lane_slots,
+        generation_queue_metadata=generation_queue_metadata,
+        merge_queue_metadata=merge_queue_metadata,
+        runtime_settings=runtime_settings,
+        settings=settings,
+    )
+
+
+def _build_generation_billing_ports() -> GenerationBillingPorts:
+    return GenerationBillingPorts(
+        byok_error_message=byok_error_message,
+        byok_error_to_generation_code=byok_error_to_generation_code,
+        classify_user_credential_error=classify_user_credential_error,
+        record_user_credential_runtime_error=record_user_credential_runtime_error,
+        resolve_user_credential_runtime=resolve_user_credential_runtime,
+        worker_billing=worker_billing,
+    )
+
+
+def _build_generation_events_ports() -> GenerationEventPorts:
+    return GenerationEventPorts(
+        EV_GEN_ATTACHED=EV_GEN_ATTACHED,
+        EV_GEN_FAILED=EV_GEN_FAILED,
+        EV_GEN_PARTIAL_IMAGE=EV_GEN_PARTIAL_IMAGE,
+        EV_GEN_PROGRESS=EV_GEN_PROGRESS,
+        EV_GEN_QUEUED=EV_GEN_QUEUED,
+        EV_GEN_RETRYING=EV_GEN_RETRYING,
+        EV_GEN_STARTED=EV_GEN_STARTED,
+        EV_GEN_SUCCEEDED=EV_GEN_SUCCEEDED,
+        _deliver_generation_event=_deliver_generation_event,
+        _deliver_generation_events=_deliver_generation_events,
+        _build_generation_diagnostics=_build_generation_diagnostics,
+        _compact_image_payload_meta=_compact_image_payload_meta,
+        _generation_trace_id=_generation_trace_id,
+        _provider_attempt_from_progress=_provider_attempt_from_progress,
+        _request_event_provider_from_attempts=_request_event_provider_from_attempts,
+        _sanitize_provider_progress_payload=_sanitize_provider_progress_payload,
+        _stage_generation_failure_event=_stage_generation_failure_event,
+        _stage_generation_event=_stage_generation_event,
+        _stage_generation_success_event=_stage_generation_success_event,
+        _tracer=_tracer,
+        logger=logger,
+        publish_event=publish_event,
+        safe_outcome=safe_outcome,
+        task_channel=task_channel,
+        task_duration_seconds=task_duration_seconds,
+        upstream_calls_total=upstream_calls_total,
+    )
+
+
+def _build_generation_provider_ports(
+    postprocess_runtime: ImagePostprocessRuntime,
+) -> GenerationProviderPorts:
+    return GenerationProviderPorts(
+        DEFAULT_IMAGE_RESPONSES_MODEL=DEFAULT_IMAGE_RESPONSES_MODEL,
+        DEFAULT_IMAGE_RESPONSES_MODEL_FAST=DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+        PILImage=PILImage,
+        UpstreamError=UpstreamError,
+        binascii=binascii,
+        io=io,
+        _MODERATION_RETRY_CAP=_MODERATION_RETRY_CAP,
+        _IMAGE_BACKGROUND_VALUES=_IMAGE_BACKGROUND_VALUES,
+        _IMAGE_MODERATION_VALUES=_IMAGE_MODERATION_VALUES,
+        _IMAGE_OUTPUT_FORMAT_VALUES=_IMAGE_OUTPUT_FORMAT_VALUES,
+        _IMAGE_RENDER_QUALITY_VALUES=_IMAGE_RENDER_QUALITY_VALUES,
+        _anext_image_with_guards=_anext_image_with_guards,
+        _aspect_ratio_prompt_constraint=_aspect_ratio_prompt_constraint,
+        _await_with_lease_guard=_await_with_lease_guard,
+        _classify_exception=_classify_exception,
+        _consume_image_iter_close_result=_consume_image_iter_close_result,
+        _decide_moderation_retry_upgrade=_decide_moderation_retry_upgrade,
+        _image_effective_params_snapshot=_image_effective_params_snapshot,
+        _image_endpoint_kind_for_engine=_image_endpoint_kind_for_engine,
+        _image_postprocess_runtime=postprocess_runtime,
+        _image_request_options=_image_request_options,
+        _image_requested_count=_image_requested_count,
+        _image_requested_params_snapshot=_image_requested_params_snapshot,
+        _inpaint_size_from_reference=_inpaint_size_from_reference,
+        _load_mask_image=_load_mask_image,
+        _load_reference_images=_load_reference_images,
+        _parse_aspect_ratio_value=_parse_aspect_ratio_value,
+        _parse_size_string=_parse_size_string,
+        _primary_input_image_id_valid=_primary_input_image_id_valid,
+        _prompt_with_aspect_ratio_constraint=_prompt_with_aspect_ratio_constraint,
         _reference_pixel_size=_reference_pixel_size,
-        _release_generation_runtime_resources=_release_generation_runtime_resources,
-        _release_image_queue_slot=_release_image_queue_slot,
-        _release_lease=_release_lease,
         _request_compression=_request_compression,
         _request_option=_request_option,
         _request_render_quality=_request_render_quality,
         _request_responses_model=_request_responses_model,
-        _reserve_image_queue_slot=_reserve_image_queue_slot,
         _resize_mask_to_reference=_resize_mask_to_reference,
         _resolve_image_primary_route=_resolve_image_primary_route,
-        _resolve_image_queue_capacity=_resolve_image_queue_capacity,
-        _retry_not_before_ttl=_retry_not_before_ttl,
+        _safe_generation_error_details=_safe_generation_error_details,
+        _safe_generation_error_summary=_safe_generation_error_summary,
+        _sanitize_generation_upstream_request=_sanitize_generation_upstream_request,
         _sanitize_transparent_qc_payload=_sanitize_transparent_qc_payload,
-        _select_ready_generation_ids_by_lane=_select_ready_generation_ids_by_lane,
-        _settle_existing_generated_image=_settle_existing_generated_image,
-        _sha256=_sha256,
-        _stage_generation_event=_stage_generation_event,
-        _tracer=_tracer,
         _validate_resolved_size=_validate_resolved_size,
-        _weighted_queue_lane_slots=_weighted_queue_lane_slots,
-        _write_generation_files=_write_generation_files,
-        build_model_image_metadata=build_model_image_metadata,
-        byok_error_message=byok_error_message,
-        byok_error_to_generation_code=byok_error_to_generation_code,
-        classify_user_credential_error=classify_user_credential_error,
         edit_image=edit_image,
         generate_image=generate_image,
-        generation_queue_metadata=generation_queue_metadata,
         httpx=httpx,
-        is_generation_terminal=is_generation_terminal,
         is_moderation_block=is_moderation_block,
         is_retriable=is_retriable,
-        logger=logger,
-        merge_queue_metadata=merge_queue_metadata,
-        model_image_filename=model_image_filename,
-        new_uuid7=new_uuid7,
         parse_provider_bool=parse_provider_bool,
         pop_image_quota_context=pop_image_quota_context,
         pop_image_retry_attempt=pop_image_retry_attempt,
         pop_image_trace_id=pop_image_trace_id,
-        publish_event=publish_event,
         push_image_quota_context=push_image_quota_context,
         push_image_retry_attempt=push_image_retry_attempt,
         push_image_trace_id=push_image_trace_id,
-        record_user_credential_runtime_error=record_user_credential_runtime_error,
         resolve_size=resolve_size,
-        resolve_user_credential_runtime=resolve_user_credential_runtime,
-        runtime_settings=runtime_settings,
-        safe_outcome=safe_outcome,
-        save_image_with_model_metadata=save_image_with_model_metadata,
-        select=select,
-        settings=settings,
-        storage=storage,
-        task_channel=task_channel,
-        task_duration_seconds=task_duration_seconds,
-        time=time,
-        update=update,
-        upstream_calls_total=upstream_calls_total,
         validate_explicit_size=validate_explicit_size,
-        worker_billing=worker_billing,
+    )
+
+
+def _build_generation_lease_ports() -> GenerationLeasePorts:
+    return GenerationLeasePorts(
+        _ACQUIRE_LUA=_ACQUIRE_LUA,
+        _IMAGE_SEMAPHORE_KEY_TTL_S=_IMAGE_SEMAPHORE_KEY_TTL_S,
+        _LEASE_REACQUIRED_SUBSTAGE=_LEASE_REACQUIRED_SUBSTAGE,
+        _LEASE_RENEW_S=_LEASE_RENEW_S,
+        _LEASE_TTL_S=_LEASE_TTL_S,
+        _LeaseLost=_LeaseLost,
+        _RELEASE_LEASE_LUA=_RELEASE_LEASE_LUA,
+        _RELEASE_LUA=_RELEASE_LUA,
+        _RENEW_LEASE_LUA=_RENEW_LEASE_LUA,
+        _RESERVE_IMAGE_SLOT_LUA=_RESERVE_IMAGE_SLOT_LUA,
+        _TaskCancelled=_TaskCancelled,
+        _acquire_lease=_acquire_lease,
+        _cancel_renewer_task=_cancel_renewer_task,
+        _is_cancelled=_is_cancelled,
+        _lease_renewer=_lease_renewer,
+        _raise_if_generation_interrupted=_raise_if_generation_interrupted,
+        _release_generation_runtime_resources=_release_generation_runtime_resources,
+        _release_image_queue_slot=_release_image_queue_slot,
+        _release_lease=_release_lease,
+        _reserve_image_queue_slot=_reserve_image_queue_slot,
+    )
+
+
+def build_generation_runtime() -> GenerationRuntime:
+    postprocess_runtime = ImagePostprocessRuntime()
+    ports = GenerationPorts(
+        domain=_build_generation_domain_ports(),
+        persistence=_build_generation_persistence_ports(),
+        queue=_build_generation_queue_ports(),
+        billing=_build_generation_billing_ports(),
+        events=_build_generation_events_ports(),
+        provider=_build_generation_provider_ports(postprocess_runtime),
+        lease=_build_generation_lease_ports(),
     )
     install_generation_ports(ports)
-    return GenerationRuntime(ports=ports, runner=_generation_runner.run_generation)
+    return GenerationRuntime(
+        ports=ports,
+        runner=_generation_runner.run_generation,
+        postprocess_runtime=postprocess_runtime,
+    )
 
 
 DEFAULT_GENERATION_RUNTIME = build_generation_runtime()

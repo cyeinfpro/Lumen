@@ -58,10 +58,15 @@ OMNI_FLASH_ASPECT_RATIOS = ("adaptive", "16:9", "9:16", "1:1")
 logger = logging.getLogger(__name__)
 
 
-def reference_token_expiry(now: datetime | None = None) -> str:
-    return (
-        (now or datetime.now(timezone.utc)) + REFERENCE_ACCESS_TOKEN_TTL
-    ).isoformat()
+def reference_token_expiry() -> str:
+    """Return the reference-token deadline, always anchored to the server clock.
+
+    The `now` override this used to accept had no caller, but it made the 24h
+    TTL a function of caller-supplied input: one future misuse that threaded a
+    request-derived timestamp through would have minted never-expiring tokens.
+    The clock is now read here so the TTL cannot be widened from the outside.
+    """
+    return (datetime.now(timezone.utc) + REFERENCE_ACCESS_TOKEN_TTL).isoformat()
 
 
 def parse_reference_token_expiry(raw: Any) -> datetime | None:

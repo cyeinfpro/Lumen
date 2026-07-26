@@ -758,3 +758,39 @@ test("shared clipboard helper consumes rejected writes for feedback callers", as
     }
   }
 });
+
+test("mask export stops re-encoding the full-resolution canvas for its preview", () => {
+  // 审计 I-4：toBlob 已经把画布编码成 PNG 了，紧接着的 canvas.toDataURL 是第二次
+  // 全分辨率编码，而且是同步的 —— 4K 图上直接冻主线程，产出的 base64 还会进 store。
+  const maskSource = source("src/components/ui/inpaint/MaskBoard.tsx");
+
+  assert.match(maskSource, /const MASK_PREVIEW_MAX_EDGE = \d+/);
+  assert.match(
+    maskSource,
+    /const preview_data_url = renderMaskPreviewDataUrl\(canvas, W, H\)/,
+  );
+  const exportBody = maskSource.slice(maskSource.indexOf("const exportMask"));
+  assert.equal(/canvas\.toDataURL/.test(exportBody), false);
+});
+
+test("canvas range fields commit on pointer cancel as well as pointer up", () => {
+  // 审计 I-5：移动端手指滑出滑轨/被手势接管时只有 pointercancel，没有 pointerup。
+  const fieldsSource = source(
+    "src/components/ui/canvas/CanvasNodeConfigFields.tsx",
+  );
+
+  for (const handler of ["onPointerUp", "onPointerCancel", "onKeyUp", "onBlur"]) {
+    assert.match(fieldsSource, new RegExp(`${handler}=\\{commit\\}`));
+  }
+});
+
+test("model library reference picker resets its input for every rejected file", () => {
+  // 审计 I-7：格式/体积被拒时不重置 input.value，用户再选同一张文件不触发
+  // change 事件，界面完全没反应。
+  const uploaderSource = source(
+    "src/components/ui/projects/library/ModelLibraryReferenceUploader.tsx",
+  );
+
+  assert.match(uploaderSource, /event\.target\.value = "";/);
+  assert.equal(/inputRef\.current\.value = ""/.test(uploaderSource), false);
+});

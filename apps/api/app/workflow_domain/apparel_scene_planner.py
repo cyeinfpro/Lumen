@@ -45,9 +45,7 @@ from .apparel_scene_fallbacks import (
 )
 from .apparel_scene_fallbacks import *  # noqa: F403,F401
 
-# Keep the historical logger name so existing operational filters and tests
-# continue to observe the compatibility facade.
-logger = logging.getLogger("app.routes._apparel_scene_planner")
+logger = logging.getLogger(__name__)
 
 SceneStrategy = Literal["balanced", "natural_series", "editorial_campaign"]
 SceneVariety = Literal["safe", "rich", "wild"]

@@ -28,6 +28,7 @@ from ..contracts import (
     JobFailure,
 )
 from ..domain.identity import CallerIdentity, UpstreamCredential
+from ..observability import current_request_id
 from ..payloads import json_dump, request_hash
 from .auth import credential_hash
 from .result_service import ResultService
@@ -45,6 +46,14 @@ class JobServiceFailure(Exception):
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def row_request_id(row: Any) -> str:
+    """从 job 行里取提交侧的 request_id；老库/假行取不到就退化成空串。"""
+    try:
+        return str(row["request_id"] or "")
+    except (IndexError, KeyError, TypeError):
+        return ""
 
 
 class JobService:
@@ -73,7 +82,36 @@ class JobService:
             error_class_network=lambda: ERROR_CLASS_NETWORK,
             log=LOG,
         )
+        # H-17：RetentionFacade 过去只在测试脚手架里被实例化过，生产链路根本
+        # 没人构造它，`retention_sweep_interval_s` 形同虚设，过期图片和 jobs
+        # 行会无限堆积。这里把它接到真正的 runtime 上。
+        self.retention = job_persistence.RetentionFacade(
+            data_dir=lambda: settings.data_dir,
+            refs_dir=lambda: settings.refs_dir,
+            db_exec_sync=lambda sql, params: repository._execute_sync(sql, params),
+            db_exec=lambda sql, params=(): repository.execute(sql, params),
+            db_all=lambda sql, params=(): repository.all(sql, params),
+            utc_now=lambda: datetime.now(timezone.utc),
+            max_retention_days=lambda: settings.max_retention_days,
+            job_ttl_days=lambda: settings.job_ttl_days,
+            log=LOG,
+        )
         self.results = ResultService(repository, self.persistence)
+        # H-19：/metrics 过去只有队列水位，看不出业务是不是在正常出图。
+        # uncertain 单独计数尤其重要——它直接等价于「上游可能已扣费但没交付」
+        # 的对账工单量，是纯转嫁下必须盯住的资金风险指标。
+        self.outcomes: dict[str, int] = {
+            "jobs_succeeded_total": 0,
+            "jobs_failed_total": 0,
+            "jobs_uncertain_total": 0,
+            "images_delivered_total": 0,
+            "upstream_latency_ms_total": 0,
+        }
+
+    def _record_outcome(self, name: str, elapsed_ms: int, images: int = 0) -> None:
+        self.outcomes[name] += 1
+        self.outcomes["images_delivered_total"] += images
+        self.outcomes["upstream_latency_ms_total"] += elapsed_ms
 
     def parse_payload(self, raw: bytes) -> tuple[Any, dict[str, Any]]:
         limits = request_bodies.JsonShapeLimits(
@@ -209,6 +247,8 @@ class JobService:
             f"{secrets.token_hex(5)}"
         )
 
+        request_id = current_request_id()
+
         async def persist() -> None:
             await self.persistence.insert_job(
                 job_id,
@@ -217,6 +257,7 @@ class JobService:
                 owner_auth_header=caller.authorization,
                 idempotency_key=idempotency_key,
                 payload_hash=payload_hash,
+                request_id=request_id,
             )
 
         try:
@@ -266,6 +307,14 @@ class JobService:
             return
         started = time.monotonic()
         endpoint = str(row["endpoint"])
+        # H-19：worker 是在提交请求结束之后的另一个协程里跑的，ContextVar 已经
+        # 失效，只能从落库的那一列把提交侧的 request_id 捞回来接上日志链。
+        request_id = row_request_id(row)
+        # H-4：只有「请求还没交给上游」的崩溃才敢断言未扣费。一旦进入
+        # upstream.call（以及其后的 mark_succeeded 落库），上游是否已计费就
+        # 不可知，必须落到 uncertain 终态交对账裁决；默认 failed 等价于
+        # 「确定未扣费」，会让上游侧据此退款、由平台吸收上游成本。
+        upstream_dispatched = False
         try:
             fresh = await self.repository.one(
                 "SELECT * FROM jobs WHERE job_id = ?",
@@ -273,38 +322,70 @@ class JobService:
             )
             if fresh is None:
                 return
+            upstream_dispatched = True
             status, images = await self.upstream.call(fresh)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             await self.persistence.mark_succeeded(
                 job_id,
                 upstream_status=status,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
+                elapsed_ms=elapsed_ms,
                 images=images,
                 endpoint_used=endpoint,
+            )
+            self._record_outcome(
+                "jobs_succeeded_total",
+                elapsed_ms,
+                images=len(images),
             )
         except asyncio.CancelledError:
             raise
         except JobFailure as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             await self.persistence.mark_failed(
                 job_id,
                 error=exc.error,
                 upstream_status=exc.upstream_status,
                 upstream_body=exc.upstream_body,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
+                elapsed_ms=elapsed_ms,
                 error_class=exc.error_class,
                 endpoint_used=endpoint,
                 retryable=self.upstream.is_retryable_failure(exc),
                 retry_suppressed=exc.retry_suppressed,
                 outcome_uncertain=exc.outcome_uncertain,
             )
+            self._record_outcome(
+                (
+                    "jobs_uncertain_total"
+                    if exc.outcome_uncertain
+                    else "jobs_failed_total"
+                ),
+                elapsed_ms,
+            )
         except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             await self.persistence.mark_failed(
                 job_id,
                 error=f"image job worker error: {exc.__class__.__name__}: {exc}",
-                elapsed_ms=int((time.monotonic() - started) * 1000),
+                elapsed_ms=elapsed_ms,
                 error_class=ERROR_CLASS_INTERNAL,
                 endpoint_used=endpoint,
+                # 已经派发过上游就压制自动重试：重试可能变成第二次上游扣费。
+                retry_suppressed=upstream_dispatched,
+                outcome_uncertain=upstream_dispatched,
             )
-            LOG.exception("image job %s crashed", job_id)
+            self._record_outcome(
+                (
+                    "jobs_uncertain_total"
+                    if upstream_dispatched
+                    else "jobs_failed_total"
+                ),
+                elapsed_ms,
+            )
+            LOG.exception(
+                "image job %s crashed request_id=%s",
+                job_id,
+                request_id,
+            )
 
     async def reconcile(self) -> None:
         rows = await self.repository.all(

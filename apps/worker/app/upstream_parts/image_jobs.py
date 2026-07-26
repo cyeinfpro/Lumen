@@ -446,6 +446,20 @@ async def _finish_image_job(
         raise upstream_services().image_jobs.image_job_error(
             job, status_code=status_code
         )
+    if status == "uncertain":
+        # sidecar 只有在上游已回 2xx（可能已计费）却交付不出图片时才写 uncertain。
+        # 这里必须与 failed 分开：failed 代表「确定未扣费」可以退款，uncertain
+        # 代表「上游成本可能已发生」，既不能自动重试（会二次扣费），也不能退款
+        # （平台会吸收上游成本）。计费侧凭 error_code 走 upstream_billing 决策表。
+        raise upstream_services().infrastructure.UpstreamError(
+            "image job finished with an unresolved upstream result; "
+            "the upstream request may already have been billed",
+            status_code=status_code,
+            error_code=(
+                upstream_services().infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+            ),
+            payload={**job, "upstream_result_unknown": True},
+        )
     if status != "succeeded":
         raise upstream_services().infrastructure.UpstreamError(
             f"image job returned unknown status: {status!r}",

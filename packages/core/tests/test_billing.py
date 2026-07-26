@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,6 +29,97 @@ def test_rmb_micro_conversion_is_decimal_safe():
 def test_rmb_micro_conversion_rejects_non_finite_values(raw: str):
     with pytest.raises(billing.BillingError):
         billing.rmb_to_micro(raw)
+
+
+def test_rmb_micro_conversion_warns_on_dropped_precision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """低于 µRMB 的位数只能取整，但不能静默取整。
+
+    F-21：运营把单价填成 ``0.0000004`` 会得到 0 micro（这个模型从此免费），
+    填成 ``1.9999995`` 会被抬到 2.0。金额本身误差极小（上界 0.5 µRMB），
+    真正的问题是无声无息 —— 所以保留取整、补一条 warning 把它暴露出来。
+    """
+    with caplog.at_level("WARNING", logger="lumen_core.billing"):
+        assert billing.rmb_to_micro("0.0000004") == 0
+    assert any("dropped sub-micro precision" in r.message for r in caplog.records)
+
+
+def test_rmb_micro_conversion_is_silent_when_exact(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """精度够用时不能刷告警，否则日志噪音会把真问题淹掉。"""
+    with caplog.at_level("WARNING", logger="lumen_core.billing"):
+        assert billing.rmb_to_micro("12.345678") == 12_345_678
+        assert billing.rmb_to_micro("100") == 100_000_000
+    assert not [r for r in caplog.records if "dropped sub-micro" in r.message]
+
+
+def test_rate_multiplier_conversion_avoids_float_truncation() -> None:
+    """倍率换算必须走 Decimal：float 中转会把四位小数少算一档。
+
+    1.0009 用 float 表示是 1.00089999...，``int(float(raw) * 10_000)``
+    截断成 10008，比准确的 10009 少一档；倍率越接近这类边界，
+    平台就越是在替用户垫付那 0.0001 的差价。
+    """
+    assert int(float("1.0009") * 10_000) == 10_008  # 旧实现的错值，作为对照
+    assert billing.parse_rate_multiplier_x10000("1.0009") == 10_009
+    assert billing.parse_rate_multiplier_x10000(Decimal("1.0009")) == 10_009
+    assert billing.parse_rate_multiplier_x10000(1.0009) == 10_009
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 10_000),
+        (1, 10_000),
+        ("1.0000", 10_000),
+        (Decimal("0"), 0),  # 显式 0 = 运营配置的免费账号，保留
+        (Decimal("2.5"), 25_000),
+        (Decimal("0.0001"), 1),
+        (Decimal("9999.9999"), 99_999_999),  # Numeric(8,4) 的上界，合法
+        ("nonsense", 10_000),  # 解析失败退回 1.0，不静默变成 0 折
+        ("NaN", 10_000),
+        ("Infinity", 10_000),
+    ],
+)
+def test_rate_multiplier_conversion_edge_values(raw: Any, expected: int) -> None:
+    assert billing.parse_rate_multiplier_x10000(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        Decimal("-1"),
+        Decimal("-0.0001"),
+        "-2.5",
+        -1.0,
+        Decimal("10000"),  # 超出 Numeric(8,4) 的 9999.9999 上界
+        Decimal("1E+9"),
+    ],
+)
+def test_rate_multiplier_out_of_domain_falls_back_to_full_price(
+    raw: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """越界倍率必须退回 1.0（原价），绝不能夹到 0 变成永久免费。
+
+    F-11：旧实现用 ``max(0, ...)`` 把负倍率夹成 0。一条脏数据（迁移遗留、
+    直连改库）就能让该账号所有生成都算成 0 元 —— 上游照扣，平台全额吸收，
+    正是「纯转嫁」明令禁止的方向。非法输入的正确落点是「按原价收」，
+    与解析失败 / NaN / Infinity 的处理保持一致，并且必须留下告警。
+    """
+    with caplog.at_level("WARNING", logger="lumen_core.billing"):
+        assert billing.parse_rate_multiplier_x10000(raw) == 10_000
+    assert any("rate multiplier out of range" in r.message for r in caplog.records)
+
+
+def test_rate_multiplier_conversion_never_undercharges_over_column_domain() -> None:
+    """遍历 Numeric(8,4) 的四位小数域，换算值必须始终 >= 精确值。"""
+    for step in range(0, 30_000, 137):
+        raw = Decimal(step).scaleb(-4)  # 0.0000 ~ 2.9999，步进覆盖各种尾数
+        exact = raw * Decimal(10_000)
+        assert Decimal(billing.parse_rate_multiplier_x10000(str(raw))) >= exact
 
 
 def test_image_tier_thresholds_pick_largest_lower_bound():
@@ -323,6 +416,79 @@ async def test_billing_cache_window_increment_uses_atomic_lua():
     assert key == "lumen:billing:rl:cred-1"
     assert (amount, limit_5h, limit_1d, limit_7d) == (123, 500, 1000, 2000)
     assert max_amount == MAX_WINDOW_INCREMENT_MICRO
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_set_balance_invalidates_when_write_fails() -> None:
+    """缓存写失败必须删掉旧值，不能把结算前的余额继续供出去。
+
+    F-18：以前 set 抛异常就直接吞掉，Redis 里留着**结算前**的高余额且 TTL
+    完好。用户刚被扣钱，限额判断却继续按旧余额放行，可以一路超额消费到
+    TTL 自然过期。删掉之后 get_balance 会回源数据库拿到真实余额。
+    """
+
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def set(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("redis down")
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            return 1
+
+    redis = Redis()
+    service = BillingCacheService(redis=redis)
+
+    await service.set_balance("user-1", 500)
+
+    assert redis.deleted == ["lumen:billing:balance:user-1"]
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_set_balance_survives_failed_invalidation() -> None:
+    """连 delete 都失败（Redis 整体不可用）时只能靠 TTL 兜底，但不得抛给调用方。
+
+    调用点是「账本已经写完，现在同步缓存」——此时抛异常会把一笔已经成功的
+    结算事务连带回滚掉，比读到陈旧余额严重得多。
+    """
+
+    class Redis:
+        async def set(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("redis down")
+
+        async def delete(self, *_args: Any, **_kwargs: Any) -> int:
+            raise RuntimeError("redis still down")
+
+    service = BillingCacheService(redis=Redis())
+
+    await service.set_balance("user-1", 500)  # 不抛异常即为通过
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_set_balance_does_not_delete_on_success() -> None:
+    """正常写入路径不能顺手删 key，否则缓存永远命不中。"""
+
+    class Redis:
+        def __init__(self) -> None:
+            self.sets: list[tuple[Any, ...]] = []
+            self.deleted: list[str] = []
+
+        async def set(self, key: str, value: Any, **_kwargs: Any) -> None:
+            self.sets.append((key, value))
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            return 1
+
+    redis = Redis()
+    service = BillingCacheService(redis=redis)
+
+    await service.set_balance("user-1", 500)
+
+    assert redis.sets == [("lumen:billing:balance:user-1", 500)]
+    assert redis.deleted == []
 
 
 @pytest.mark.asyncio
@@ -782,7 +948,7 @@ async def test_settle_rejects_negative_actual_amount(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_settle_records_lifetime_spend_as_gross_cost(
+async def test_settle_charges_full_cost_beyond_authorized_hold(
     monkeypatch: pytest.MonkeyPatch,
 ):
     wallet = SimpleNamespace(
@@ -822,11 +988,165 @@ async def test_settle_records_lifetime_spend_as_gross_cost(
         idempotency_key="settle:gen-1",
     )
 
-    assert wallet.balance_micro == 0
+    # The hold gates dispatch before cost exists. Once the provider has charged
+    # 150, the 50 overage must remain user debt instead of platform loss.
+    assert wallet.balance_micro == -30
     assert wallet.hold_micro == 0
     assert wallet.lifetime_spend_micro == 157
-    assert tx.amount_micro == -20
+    assert tx.amount_micro == -50
+    assert tx.meta["actual_micro"] == 150
+    assert tx.meta["reported_actual_micro"] == 150
+    assert tx.meta["unauthorized_micro"] == 50
     assert tx.meta["overdraw_micro"] == 30
+
+
+@pytest.mark.asyncio
+async def test_settle_without_hold_charges_full_cost_as_debt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A missing hold cannot erase a provider cost that already occurred."""
+    wallet = SimpleNamespace(
+        balance_micro=0,
+        hold_micro=0,
+        lifetime_spend_micro=0,
+        version=1,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 0
+
+    async def fake_ref_consumption(*_args: Any) -> None:
+        return None
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="video_generation",
+        ref_id="video-1",
+        actual_micro=900,
+        idempotency_key="settle:video-1",
+        allow_negative=False,
+    )
+
+    assert wallet.balance_micro == -900
+    assert wallet.lifetime_spend_micro == 900
+    assert tx.amount_micro == -900
+    assert tx.meta["actual_micro"] == 900
+    assert tx.meta["reported_actual_micro"] == 900
+    assert tx.meta["unauthorized_micro"] == 900
+    assert tx.meta["overdraw_micro"] == 900
+
+
+@pytest.mark.asyncio
+async def test_settle_existing_negative_wallet_does_not_block_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing debt must not turn every later settlement into a permanent 409."""
+    wallet = SimpleNamespace(
+        balance_micro=-100,
+        hold_micro=50,
+        lifetime_spend_micro=10,
+        version=1,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 50
+
+    async def fake_ref_consumption(*_args: Any) -> None:
+        return None
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-debt",
+        actual_micro=50,
+        idempotency_key="settle:gen-debt",
+        allow_negative=False,
+    )
+
+    assert wallet.balance_micro == -100
+    assert wallet.hold_micro == 0
+    assert wallet.lifetime_spend_micro == 60
+    assert tx.amount_micro == 0
+    assert tx.meta["overdraw_micro"] == 100
+
+
+@pytest.mark.asyncio
+async def test_settle_within_hold_records_no_overdraw(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """结算金额不超过 hold 时余额只增不减，overdraw 必须为 0。"""
+    wallet = SimpleNamespace(
+        balance_micro=50,
+        hold_micro=200,
+        lifetime_spend_micro=0,
+        version=1,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 200
+
+    async def fake_ref_consumption(*_args: Any) -> None:
+        return None
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-2",
+        actual_micro=120,
+        idempotency_key="settle:gen-2",
+    )
+
+    assert wallet.balance_micro == 130
+    assert wallet.hold_micro == 0
+    assert tx.meta["overdraw_micro"] == 0
 
 
 @pytest.mark.asyncio
@@ -899,21 +1219,16 @@ async def test_settle_records_explicit_zero_rate_charge(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("allow_negative", "cap_overdraw", "expected_balance", "expected_overdraw"),
-    [
-        (False, True, 0, 5),
-        (True, True, -5, 0),
-        (True, False, -5, 0),
-    ],
-)
-async def test_charge_insufficient_balance_policy_precedence(
+@pytest.mark.parametrize("allow_negative", [False, True])
+async def test_charge_never_absorbs_cost_regardless_of_allow_negative(
     monkeypatch: pytest.MonkeyPatch,
     allow_negative: bool,
-    cap_overdraw: bool,
-    expected_balance: int,
-    expected_overdraw: int,
 ) -> None:
+    """余额 5 扣 10：无论 allow_negative 取什么值都必须扣满 10、余额落到 -5。
+
+    allow_negative 只影响 overdraw_micro 这个欠费标记，不影响扣款金额本身；
+    平台任何情况下都不吞下缺口（纯转嫁）。
+    """
     wallet = SimpleNamespace(balance_micro=5, lifetime_spend_micro=0, version=0)
 
     async def no_existing(*_args: Any) -> None:
@@ -937,19 +1252,37 @@ async def test_charge_insufficient_balance_policy_precedence(
         ref_id="ref-1",
         idempotency_key="charge-1",
         allow_negative=allow_negative,
-        cap_overdraw=cap_overdraw,
     )
 
-    assert wallet.balance_micro == expected_balance
+    assert wallet.balance_micro == -5
+    assert wallet.lifetime_spend_micro == 10
     assert tx is not None
-    assert tx.meta["overdraw_micro"] == expected_overdraw
+    assert tx.amount_micro == -10
+    assert tx.meta["cost_micro"] == 10
+    assert tx.meta["overdraw_micro"] == (0 if allow_negative else 5)
+
+
+def test_charge_has_no_cap_overdraw_switch() -> None:
+    """cap_overdraw 曾让余额封顶为 0 从而由平台吸收差额，不允许复活。"""
+    params = inspect.signature(billing.charge).parameters
+
+    assert "cap_overdraw" not in params
+    # 只看可执行语句：注释里保留了这些关键词用于说明历史坑位。
+    source = "\n".join(
+        line
+        for line in inspect.getsource(billing.charge).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "wallet.balance_micro = 0" not in source
+    assert "INSUFFICIENT_BALANCE" not in source
 
 
 @pytest.mark.asyncio
-async def test_charge_rejects_insufficient_balance_without_cap_or_negative(
+async def test_charge_with_zero_balance_bills_full_amount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    wallet = SimpleNamespace(balance_micro=5, lifetime_spend_micro=0, version=0)
+    """零余额直扣：上游成本 10_000 必须整笔记账，不得静默清零。"""
+    wallet = SimpleNamespace(balance_micro=0, lifetime_spend_micro=0, version=0)
 
     async def no_existing(*_args: Any) -> None:
         return None
@@ -957,22 +1290,27 @@ async def test_charge_rejects_insufficient_balance_without_cap_or_negative(
     async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
         return wallet
 
+    async def insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
     monkeypatch.setattr(billing, "_existing_tx", no_existing)
     monkeypatch.setattr(billing, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing, "_insert_tx", insert)
 
-    with pytest.raises(billing.BillingError) as exc:
-        await billing.charge(
-            object(),  # type: ignore[arg-type]
-            "user-1",
-            10,
-            ref_type="test",
-            ref_id="ref-1",
-            idempotency_key="charge-1",
-            allow_negative=False,
-            cap_overdraw=False,
-        )
+    tx = await billing.charge(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        10_000,
+        ref_type="prompt_enhance",
+        ref_id="ref-1",
+        idempotency_key="charge-zero-balance",
+    )
 
-    assert exc.value.code == "INSUFFICIENT_BALANCE"
+    assert wallet.balance_micro == -10_000
+    assert wallet.lifetime_spend_micro == 10_000
+    assert tx is not None
+    assert tx.amount_micro == -10_000
+    assert tx.meta["overdraw_micro"] == 10_000
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1416,7 @@ async def test_charge_rejects_negative_amount(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_charge_allow_negative_takes_precedence_over_cap_overdraw(
+async def test_charge_allow_negative_marks_no_overdraw_debt(
     monkeypatch: pytest.MonkeyPatch,
 ):
     wallet = SimpleNamespace(
@@ -1109,7 +1447,6 @@ async def test_charge_allow_negative_takes_precedence_over_cap_overdraw(
         ref_id="gen-1",
         idempotency_key="charge:gen-1",
         allow_negative=True,
-        cap_overdraw=True,
     )
 
     assert wallet.balance_micro == -70
@@ -1149,11 +1486,13 @@ async def test_charge_records_gross_lifetime_spend_for_existing_debt(
         ref_type="generation",
         ref_id="gen-1",
         idempotency_key="charge:gen-1",
-        cap_overdraw=True,
     )
 
-    assert wallet.balance_micro == 0
+    # 已欠 30 再扣 100：余额继续下探到 -130，欠费全部记在用户账上；
+    # 旧实现会把余额抹平成 0，等于平台替用户还了这 130。
+    assert wallet.balance_micro == -130
     assert wallet.lifetime_spend_micro == 150
+    assert tx.amount_micro == -100
     assert tx.meta["overdraw_micro"] == 130
 
 
@@ -1244,3 +1583,56 @@ async def test_ensure_wallet_ignores_non_callable_connection_attribute():
     await billing._ensure_wallet(session, "user-1")  # type: ignore[arg-type]  # noqa: SLF001
 
     assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_wallet_version_column_blocks_lost_updates() -> None:
+    """F-17：version 必须真的进 UPDATE 的 WHERE，而不只是被递增。
+
+    lumen_core.billing 的 6 条写路径当前都先 ``SELECT ... FOR UPDATE``，靠行锁
+    串行化，所以现在不会丢更新 —— 但那是**约定**不是**约束**：任何新写入路径
+    忘了 lock=True，丢失更新就会静默发生在钱包余额上。挂上 version_id_col 之后
+    并发写的后手会撞 StaleDataError 而不是无声覆盖前手的结果。
+
+    这里用 SQLite 起两个独立 session 复现「两边都读到 version=0，各自 +1 回写」：
+    第二个 flush 必须炸。
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.orm.exc import StaleDataError
+
+    from lumen_core.model_base import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, tables=[UserWallet.__table__])
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with maker() as setup:
+            setup.add(UserWallet(user_id="user-1", balance_micro=1_000, version=0))
+            await setup.commit()
+
+        async with maker() as first, maker() as second:
+            wallet_a = await first.get(UserWallet, "user-1")
+            wallet_b = await second.get(UserWallet, "user-1")
+            assert wallet_a is not None and wallet_b is not None
+
+            # 先手：扣 100，version 0 -> 1
+            wallet_a.balance_micro -= 100
+            wallet_a.version += 1
+            await first.commit()
+
+            # 后手拿的还是 version=0 的快照，回写必须被拒
+            wallet_b.balance_micro -= 300
+            wallet_b.version += 1
+            with pytest.raises(StaleDataError):
+                await second.commit()
+
+        async with maker() as check:
+            final = await check.get(UserWallet, "user-1")
+            assert final is not None
+            # 先手的扣款完整保留，后手没有覆盖掉它
+            assert final.balance_micro == 900
+            assert final.version == 1
+    finally:
+        await engine.dispose()

@@ -774,3 +774,108 @@ def test_runtime_instances_do_not_share_queue_state(tmp_path: Path) -> None:
     assert first.queue.queue is not second.queue.queue
     assert first.queue.shutdown_event is not second.queue.shutdown_event
     assert first.queue.queued_ids is not second.queue.queued_ids
+
+
+class _PostDispatchStreamClient:
+    """只负责让 `_call_upstream_once` 走完 `client.stream(...)` 的假客户端。"""
+
+    def __init__(self, status_code: int = 200) -> None:
+        self.response = _StreamResponse(
+            status_code=status_code,
+            headers={"content-type": "application/json"},
+            chunks=[b"{}"],
+        )
+        self.calls = 0
+
+    def stream(self, *_args: Any, **_kwargs: Any) -> _StreamResponse:
+        self.calls += 1
+        return self.response
+
+
+def _post_dispatch_failure(
+    app: Any,
+    *,
+    candidates: list[Any],
+    save_images: Any,
+) -> Any:
+    """跑一次「上游已回 2xx、之后本地才出错」的 `_call_upstream_once`。"""
+    client = _PostDispatchStreamClient()
+    app._http_client = client
+
+    async def fake_extract(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return candidates
+
+    app.extract_response_images = fake_extract
+    app.save_images = save_images
+
+    async def run() -> Any:
+        with pytest.raises(app.JobFailure) as exc:
+            await app._call_upstream_once(
+                _job_row_payload(app),
+                url="https://upstream.test/v1/images/generations",
+                headers={"Authorization": "Bearer sk-test"},
+                body={"prompt": "cat"},
+                endpoint="/v1/images/generations",
+            )
+        return exc.value
+
+    failure = asyncio.run(run())
+    assert client.calls == 1
+    return failure
+
+
+def test_no_candidate_after_2xx_is_outcome_uncertain() -> None:
+    # H-9：上游 200 却没有可保存图片——上游很可能已计费，不能当成确定未扣费。
+    app = load_app_module()
+
+    async def unused_save(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("save_images must not run without candidates")
+
+    failure = _post_dispatch_failure(
+        app,
+        candidates=[],
+        save_images=unused_save,
+    )
+
+    assert failure.error_class == app.ERROR_CLASS_NO_IMAGE
+    assert failure.upstream_status == 200
+    assert failure.outcome_uncertain is True
+    assert failure.retry_requires_idempotency is True
+
+
+def test_save_images_crash_after_2xx_is_outcome_uncertain() -> None:
+    # H-1：上游已交付、本地保存崩了——退款等于平台吸收已经发生的上游成本。
+    app = load_app_module()
+
+    async def failing_save(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise OSError("disk full")
+
+    failure = _post_dispatch_failure(
+        app,
+        candidates=[object()],
+        save_images=failing_save,
+    )
+
+    assert failure.error_class == app.ERROR_CLASS_IMAGE_SAVE
+    assert "保存图片失败" in failure.error
+    assert failure.outcome_uncertain is True
+    assert failure.retry_requires_idempotency is True
+
+
+def test_empty_save_result_after_2xx_is_outcome_uncertain() -> None:
+    # H-1 同链路：保存函数返回空列表同样是「已扣费但无交付物」。
+    app = load_app_module()
+
+    async def empty_save(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    failure = _post_dispatch_failure(
+        app,
+        candidates=[object()],
+        save_images=empty_save,
+    )
+
+    assert failure.error_class == app.ERROR_CLASS_IMAGE_SAVE
+    assert failure.error == "没有保存任何图片"
+    assert failure.outcome_uncertain is True
+    assert failure.retry_requires_idempotency is True

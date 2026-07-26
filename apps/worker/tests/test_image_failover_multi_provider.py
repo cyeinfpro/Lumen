@@ -610,7 +610,7 @@ async def test_failover_not_emitted_on_last_provider_failure(
     assert failover_events[0]["from_provider"] == "acc1"
 
 
-@pytest.mark.parametrize("failure_kind", ["502", "429", "no_image", "timeout"])
+@pytest.mark.parametrize("failure_kind", ["502", "429", "timeout"])
 @pytest.mark.asyncio
 async def test_image_jobs_failover_continues_endpoint_then_provider(
     monkeypatch: pytest.MonkeyPatch,
@@ -672,6 +672,59 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
     else:
         assert ("report_image_failure", "acc1", {}) in pool.calls
     assert pool.calls.count(("report_image_success", "acc2", {})) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_jobs_no_image_does_not_failover_to_second_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``no_image`` 曾和 502/429/timeout 一样参与 failover——那是在替平台烧钱。
+
+    它带的是 ``status_code=200``：acc1 已经完整响应、极可能已经计费。切到 acc2
+    重跑会再产生一笔上游成本，而这次生成只 hold 了一份钱，第二笔无处转嫁。
+    正确做法是就地失败、按 hold 全额结算给用户（纯转嫁），而不是换一家再付一次。
+    """
+    pool = RecordingPool(["acc1", "acc2"])
+
+    async def fake_get_pool() -> RecordingPool:
+        return pool
+
+    attempts: list[tuple[str, str]] = []
+
+    async def fake_run_once(
+        *,
+        endpoint: str,
+        api_key: str,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
+        attempts.append((api_key.removeprefix("sk-"), endpoint))
+        raise _image_job_exc("no_image")
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+    )
+    monkeypatch.setattr(
+        upstream_services().direct, "resolve_image_job_base_url", _resolved_job_base
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    with pytest.raises(upstream.UpstreamError) as excinfo:
+        await upstream_services().image_jobs.image_job_with_failover(
+            action="generate",
+            prompt="test",
+            size="1024x1024",
+            images=None,
+            n=1,
+            quality="high",
+            progress_callback=progress_events.append,
+        )
+
+    assert excinfo.value.error_code == "no_image_returned"
+    # 只碰了 acc1 的第一个 endpoint：既没换 endpoint 也没换 provider。
+    assert attempts == [("acc1", "generations")]
+    assert not [e for e in progress_events if e.get("type") == "provider_failover"]
+    assert not [e for e in progress_events if e.get("type") == "endpoint_failover"]
 
 
 async def _resolved_job_base() -> str:

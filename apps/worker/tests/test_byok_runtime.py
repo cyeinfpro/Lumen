@@ -527,3 +527,99 @@ async def test_is_byok_provider_drives_admin_pool_skip() -> None:
 
     pool.report_image_failure.assert_called_once_with("openai-shared")
     limiter.record_image_call.assert_awaited_once_with(None, "openai-shared")
+
+
+@pytest.mark.asyncio
+async def test_record_user_credential_runtime_error_uses_explicit_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E-6：credential 状态写回必须走显式 session.begin()，不依赖 autobegin。"""
+    events: list[str] = []
+
+    class _Transaction:
+        async def __aenter__(self) -> "_Transaction":
+            events.append("begin")
+            return self
+
+        async def __aexit__(self, exc_type: Any, *_rest: Any) -> None:
+            events.append("rollback" if exc_type is not None else "commit")
+
+    class _Session:
+        def __init__(self) -> None:
+            self.row = SimpleNamespace(
+                status="active",
+                last_failed_at=None,
+                last_error_code=None,
+                rate_limited_until=None,
+            )
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        async def get(self, _model: Any, _id: str) -> Any:
+            events.append("get")
+            return self.row
+
+        async def commit(self) -> None:
+            raise AssertionError("bare commit bypasses the explicit transaction")
+
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    session = _Session()
+    import app.db as worker_db
+
+    monkeypatch.setattr(worker_db, "SessionLocal", lambda: session)
+
+    await byok_runtime.record_user_credential_runtime_error(
+        "cred-1",
+        UpstreamError("bad key", status_code=401, error_code="invalid_api_key"),
+    )
+
+    assert events == ["begin", "get", "commit"]
+    assert session.row.status == "invalid"
+    assert session.row.last_error_code == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_record_user_credential_runtime_error_swallows_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写回失败只 warn，不得把异常抛回主任务覆盖原始 upstream error。"""
+
+    class _Transaction:
+        async def __aenter__(self) -> "_Transaction":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            raise RuntimeError("commit failed")
+
+    class _Session:
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        async def get(self, _model: Any, _id: str) -> Any:
+            return SimpleNamespace(
+                status="active",
+                last_failed_at=None,
+                last_error_code=None,
+                rate_limited_until=None,
+            )
+
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    import app.db as worker_db
+
+    monkeypatch.setattr(worker_db, "SessionLocal", lambda: _Session())
+
+    await byok_runtime.record_user_credential_runtime_error(
+        "cred-2",
+        UpstreamError("bad key", status_code=401, error_code="invalid_api_key"),
+    )

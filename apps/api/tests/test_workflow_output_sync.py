@@ -41,7 +41,7 @@ class _Db:
         raise AssertionError("output synchronization must not commit")
 
 
-def test_route_private_output_sync_exports_remain_compatible() -> None:
+def test_route_does_not_reexport_output_sync_internals() -> None:
     names = (
         "MODEL_CANDIDATE_COUNT",
         "PRODUCT_ANALYSIS_FIELDS",
@@ -65,7 +65,7 @@ def test_route_private_output_sync_exports_remain_compatible() -> None:
     )
 
     for name in names:
-        assert getattr(workflows, name) is getattr(output_sync, name)
+        assert not hasattr(workflows, name)
 
     value_names = (
         "MODEL_CANDIDATE_COUNT",

@@ -919,7 +919,7 @@ wheels = [
 
 [[package]]
 name = "lumen"
-version = "1.2.72"
+version = "1.2.73"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -942,7 +942,7 @@ dev = [
 
 [[package]]
 name = "lumen-api"
-version = "1.2.72"
+version = "1.2.73"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "alembic" },
@@ -1005,7 +1005,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-core"
-version = "1.2.72"
+version = "1.2.73"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
@@ -1034,13 +1034,14 @@ requires-dist = [
 
 [[package]]
 name = "lumen-tgbot"
-version = "1.2.72"
+version = "1.2.73"
 source = { editable = "apps/tgbot" }
 dependencies = [
     { name = "aiogram" },
     { name = "aiohttp-socks" },
     { name = "httpx" },
     { name = "lumen-core" },
+    { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "redis" },
@@ -1052,6 +1053,7 @@ requires-dist = [
     { name = "aiohttp-socks", specifier = ">=0.10,<1.0" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "lumen-core", editable = "packages/core" },
+    { name = "prometheus-client", specifier = ">=0.20,<1.0" },
     { name = "pydantic", specifier = ">=2.7,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.3,<3.0" },
     { name = "redis", specifier = ">=5.0,<7.0" },
@@ -1059,7 +1061,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-worker"
-version = "1.2.72"
+version = "1.2.73"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "arq" },

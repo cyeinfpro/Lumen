@@ -1558,6 +1558,110 @@ def test_save_images_rejects_signature_only_fake_before_writing(
     assert not (tmp_path / "data" / "images").exists()
 
 
+def _tiff_bytes() -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (2, 2), color=(9, 9, 9)).save(buf, format="TIFF")
+    return buf.getvalue()
+
+
+def test_save_images_rejects_undeliverable_format(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    # H-13：TIFF 能过 Pillow 校验，但 image_metadata 会折叠成 "bin"，
+    # 过去会写成 image-1.bin 并挂 public URL 交付给用户。
+    app = load_app_module()
+    monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app.save_images(
+                "job-tiff",
+                "2026-07-11T00:00:00+00:00",
+                1,
+                [app.ImageCandidate(_tiff_bytes(), "image/tiff")],
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_IMAGE_SAVE
+    assert "无法交付" in exc.value.error
+    assert not (tmp_path / "data" / "images").exists()
+
+
+def _upstream_2xx_row() -> dict[str, Any]:
+    return {
+        "job_id": "job-post-dispatch",
+        "created_at": "2026-07-11T00:00:00+00:00",
+        "retention_days": 1,
+    }
+
+
+class _Json2xxResponse:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        _ = chunk_size
+        yield b'{"data":[{"b64_json":"' + base64.b64encode(_png_bytes()) + b'"}]}'
+
+
+def test_save_failure_after_2xx_lands_uncertain_not_refundable(monkeypatch) -> None:
+    # H-9：上游已回 2xx（极可能已扣费），本地交付失败必须落 uncertain。
+    # 落成普通 failed 会被 worker 的决策表当成「确定未扣费」而 release 退款，
+    # 上游成本就由平台吸收了——违反纯转嫁。
+    app = load_app_module()
+
+    class _Client:
+        def stream(self, _method: str, _url: str, **_kwargs: object):
+            return _Json2xxResponse()
+
+    app._http_client = _Client()
+
+    async def failing_save(*_args, **_kwargs):
+        raise app.JobFailure(
+            "上游单图超过大小限制（max 1）",
+            error_class=app.ERROR_CLASS_IMAGE_SAVE,
+        )
+
+    monkeypatch.setattr(app, "save_images", failing_save)
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(
+            app._call_upstream_once(
+                _upstream_2xx_row(),
+                url="http://upstream.test/v1/images/generations",
+                headers={},
+                body={},
+                endpoint="/v1/images/generations",
+            )
+        )
+
+    assert exc.value.error_class == app.ERROR_CLASS_IMAGE_SAVE
+    assert exc.value.outcome_uncertain is True
+    assert exc.value.retry_requires_idempotency is True
+
+
+def test_upstream_declared_error_after_2xx_stays_refundable() -> None:
+    # 对称约束：上游自己宣告的错误是「已知失败」，不是「结果不可知」，
+    # 保持可退款语义，否则用户会为被拒绝的请求付钱。
+    app = load_app_module()
+    facade = app._upstream
+    failure = app.JobFailure(
+        "上游流式错误 moderation_blocked: nope",
+        error_class=app.ERROR_CLASS_VALIDATION,
+    )
+
+    escalated = facade.escalate_post_dispatch_delivery_failure(failure)
+
+    assert escalated.outcome_uncertain is False
+
+
 def test_pillow_decompression_limit_tracks_config(monkeypatch) -> None:
     monkeypatch.setenv("IMAGE_JOB_MAX_IMAGE_PIXELS", "12345")
     app = load_app_module()

@@ -9,6 +9,7 @@ Worker 调上游前用 `await resolve('providers')` 等取最终值；DB 没有�
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -20,9 +21,17 @@ from lumen_core.runtime_settings import SettingSpec, get_spec
 
 from .config import settings as _config_settings
 from .db import SessionLocal
+from .task_runtime import RuntimeSlot
 
+
+logger = logging.getLogger(__name__)
 
 _TTL_S = 5.0
+# _read_db 是在 cache.lock 里跑的：DB 慢查询 / 锁等待会把同进程所有 settings
+# 解析一起堵死（上游调用前几乎每条路径都要 resolve 一次）。PG 侧没有
+# statement_timeout 时这个等待没有上限，所以本地加硬上限，超时按「DB 无值」
+# 处理 —— resolve() 退回 env / config，行为与该 key 未写入 DB 时完全一致。
+_DB_TIMEOUT_S = 5.0
 
 
 # key -> (expires_at, raw_str_or_None)
@@ -32,8 +41,31 @@ class RuntimeSettingsCache:
     db_only_values: dict[str, tuple[float, str | None]] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    async def shutdown(self) -> None:
+        async with self.lock:
+            self.values.clear()
+            self.db_only_values.clear()
 
-_RUNTIME_CACHE = RuntimeSettingsCache()
+
+_RUNTIME_CACHE_SLOT: RuntimeSlot[RuntimeSettingsCache] = RuntimeSlot(
+    "worker-runtime-settings-cache",
+    default_factory=RuntimeSettingsCache,
+)
+
+
+def configure_cache(cache: RuntimeSettingsCache | None = None) -> RuntimeSettingsCache:
+    runtime = cache or _RUNTIME_CACHE_SLOT.current()
+    _RUNTIME_CACHE_SLOT.install_default(runtime)
+    return runtime
+
+
+async def shutdown_cache(cache: RuntimeSettingsCache) -> None:
+    await cache.shutdown()
+    _RUNTIME_CACHE_SLOT.clear_default(cache)
+
+
+def _runtime_cache() -> RuntimeSettingsCache:
+    return _RUNTIME_CACHE_SLOT.current()
 
 
 def _config_fallback(spec: SettingSpec) -> str | None:
@@ -51,12 +83,25 @@ def _config_fallback(spec: SettingSpec) -> str | None:
 
 
 async def _read_db(spec_key: str) -> str | None:
-    async with SessionLocal() as session:
-        row = (
-            await session.execute(
-                select(SystemSetting.value).where(SystemSetting.key == spec_key)
-            )
-        ).scalar_one_or_none()
+    try:
+        async with SessionLocal() as session:
+            row = (
+                await asyncio.wait_for(
+                    session.execute(
+                        select(SystemSetting.value).where(SystemSetting.key == spec_key)
+                    ),
+                    _DB_TIMEOUT_S,
+                )
+            ).scalar_one_or_none()
+    except TimeoutError:
+        # SQLAlchemy 把 CancelledError/TimeoutError 当 exit exception，会 invalidate
+        # 这条连接而不是把半死的连接放回池子，所以这里超时是安全的。
+        logger.warning(
+            "runtime settings DB read timed out key=%s after=%ss",
+            spec_key,
+            _DB_TIMEOUT_S,
+        )
+        return None
     if row is not None and row != "":
         return row
     return None
@@ -68,14 +113,15 @@ async def resolve(spec_key: str) -> str | None:
     if spec is None:
         return None
 
+    cache = _runtime_cache()
     now = time.monotonic()
-    cached = _RUNTIME_CACHE.values.get(spec_key)
+    cached = cache.values.get(spec_key)
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    async with _RUNTIME_CACHE.lock:
+    async with cache.lock:
         # 双重检查
-        cached = _RUNTIME_CACHE.values.get(spec_key)
+        cached = cache.values.get(spec_key)
         if cached is not None and cached[0] > now:
             return cached[1]
 
@@ -85,7 +131,7 @@ async def resolve(spec_key: str) -> str | None:
         else:
             value = _config_fallback(spec)
 
-        _RUNTIME_CACHE.values[spec_key] = (now + _TTL_S, value)
+        cache.values[spec_key] = (now + _TTL_S, value)
         return value
 
 
@@ -93,17 +139,18 @@ async def resolve_db(spec_key: str) -> str | None:
     """Return the raw DB value only, bypassing env/config fallback."""
     if get_spec(spec_key) is None:
         return None
+    cache = _runtime_cache()
     now = time.monotonic()
-    cached = _RUNTIME_CACHE.db_only_values.get(spec_key)
+    cached = cache.db_only_values.get(spec_key)
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    async with _RUNTIME_CACHE.lock:
-        cached = _RUNTIME_CACHE.db_only_values.get(spec_key)
+    async with cache.lock:
+        cached = cache.db_only_values.get(spec_key)
         if cached is not None and cached[0] > now:
             return cached[1]
         value = await _read_db(spec_key)
-        _RUNTIME_CACHE.db_only_values[spec_key] = (now + _TTL_S, value)
+        cache.db_only_values[spec_key] = (now + _TTL_S, value)
         return value
 
 
@@ -119,13 +166,17 @@ async def resolve_int(spec_key: str, default: int) -> int:
 
 def invalidate_cache() -> None:
     """主动清缓存（用于测试）。"""
-    _RUNTIME_CACHE.values.clear()
-    _RUNTIME_CACHE.db_only_values.clear()
+    cache = _runtime_cache()
+    cache.values.clear()
+    cache.db_only_values.clear()
 
 
 __all__ = [
+    "RuntimeSettingsCache",
+    "configure_cache",
     "resolve",
     "resolve_db",
     "resolve_int",
     "invalidate_cache",
+    "shutdown_cache",
 ]

@@ -20,6 +20,31 @@ PRICING_SOURCE_FALLBACK = "fallback"
 PRICING_SOURCE_MISSING = "missing"
 PRICING_SOURCE_SNAPSHOT = "snapshot"
 
+# 计价因子上界（审计 F-4）。Python 的 int 是任意精度，乘法本身不会回绕，
+# 但结果最终要落进 BigInteger 列（上限 2**63-1）。真正的风险不是「算错」，
+# 而是一个畸形的 token 数或单价把金额顶到写不进库，直到 commit 才炸。
+#
+# 这里刻意**只拒绝、不封顶**：封顶意味着超出部分平台自己吞，
+# 与「上游扣费用户必付」直接冲突。越界一律抛错，由人工核对上游用量。
+# 阈值取得远高于任何真实用量（10 亿 token / 每千 token 1000 元），
+# 正常请求碰不到，碰到了必然是脏数据或上游返回被污染。
+MAX_BILLABLE_TOKENS = 1_000_000_000
+MAX_RATE_PER_1K_MICRO = 1_000_000_000
+MAX_MULTIPLIER_X10000 = 1_000_000_000
+
+
+class PricingOverflowError(ValueError):
+    """计价因子越界。带上字段名和实际值，方便直接定位脏数据来源。"""
+
+    def __init__(self, field: str, value: int, limit: int) -> None:
+        super().__init__(
+            f"pricing factor {field}={value} exceeds limit {limit}; "
+            "refusing to compute a cost that cannot be persisted"
+        )
+        self.field = field
+        self.value = value
+        self.limit = limit
+
 
 def _nonnegative(value: Any) -> int:
     try:
@@ -287,16 +312,29 @@ def parse_usage(provider: str, usage: dict[str, Any] | None) -> UsageTokens:
     ).normalized()
 
 
+def _guard_factor(field: str, value: int, limit: int) -> int:
+    if value > limit:
+        raise PricingOverflowError(field, value, limit)
+    return value
+
+
 def _cost(tokens: int, rate_per_1k_micro: int) -> int:
     normalized_tokens = max(0, int(tokens))
     normalized_rate = max(0, int(rate_per_1k_micro))
     if normalized_tokens <= 0 or normalized_rate <= 0:
         return 0
+    # 先校验因子再相乘（F-4）：越界直接拒绝，不做任何封顶。
+    _guard_factor("tokens", normalized_tokens, MAX_BILLABLE_TOKENS)
+    _guard_factor("rate_per_1k_micro", normalized_rate, MAX_RATE_PER_1K_MICRO)
     return max(1, (normalized_tokens * normalized_rate + 500) // 1000)
 
 
 def _apply_multiplier(value: int, multiplier_x10000: int) -> int:
-    return (max(0, int(value)) * max(0, int(multiplier_x10000))) // 10_000
+    normalized_value = max(0, int(value))
+    normalized_multiplier = max(0, int(multiplier_x10000))
+    if normalized_multiplier > 0:
+        _guard_factor("multiplier_x10000", normalized_multiplier, MAX_MULTIPLIER_X10000)
+    return (normalized_value * normalized_multiplier) // 10_000
 
 
 def _usage_for_pricing(
@@ -308,8 +346,7 @@ def _usage_for_pricing(
         return normalized
     cache_creation_total = max(
         normalized.cache_creation_tokens,
-        normalized.cache_creation_5m_tokens
-        + normalized.cache_creation_1h_tokens,
+        normalized.cache_creation_5m_tokens + normalized.cache_creation_1h_tokens,
     )
     return UsageTokens(
         input_tokens=(

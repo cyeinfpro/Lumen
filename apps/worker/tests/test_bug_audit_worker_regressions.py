@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import subprocess
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -13,12 +14,14 @@ from typing import Any
 import pytest
 from redis.exceptions import WatchError
 
-from app import account_limiter, sse_publish, upstream, video_artifacts
+from app import account_limiter, observability, sse_publish, upstream, video_artifacts
+from app import runtime_settings as worker_runtime_settings
 from app.provider_pool import ProviderConfig, ProviderPool
 from app.tasks import (
     memory_extraction,
     storyboard_assembly,
 )
+from app.tasks.context_summary_parts import persistence as context_summary_persistence
 from app.tasks.completion_parts import default_runtime as completion_runtime
 from app.tasks.completion_parts.runtime import (
     CompletionRuntime,
@@ -47,8 +50,9 @@ class _RuntimePortsProxy:
 
     def __getattr__(self, name: str) -> Any:
         ports = object.__getattribute__(self, "_ports")
-        if hasattr(ports, name):
-            return getattr(ports, name)
+        owner = self._find_owner(ports, name)
+        if owner is not None:
+            return getattr(owner, name)
         extras = object.__getattribute__(self, "_extras")
         if name in extras:
             return extras[name]
@@ -56,10 +60,29 @@ class _RuntimePortsProxy:
 
     def __setattr__(self, name: str, value: Any) -> None:
         ports = object.__getattribute__(self, "_ports")
-        if hasattr(ports, name):
-            object.__setattr__(ports, name, value)
+        owner = self._find_owner(ports, name)
+        if owner is not None:
+            object.__setattr__(owner, name, value)
             return
         setattr(object.__getattribute__(self, "_module"), name, value)
+
+    @classmethod
+    def _find_owner(cls, ports: Any, name: str) -> Any | None:
+        if hasattr(ports, name):
+            return ports
+        if not is_dataclass(ports):
+            return None
+        for field in fields(ports):
+            value = getattr(ports, field.name)
+            if (
+                is_dataclass(value)
+                and type(value).__module__.endswith(".runtime")
+                and type(value).__name__.endswith("Ports")
+            ):
+                owner = cls._find_owner(value, name)
+                if owner is not None:
+                    return owner
+        return None
 
 
 completion = _RuntimePortsProxy(
@@ -2342,3 +2365,140 @@ def test_image_queue_reserve_has_atomic_lua_path() -> None:
         "redis.call('GET', lock_key) ~= lock_token"
         in generation._RESERVE_IMAGE_SLOT_LUA
     )
+
+
+def test_db_pool_metrics_sample_pool_state_and_survive_errors() -> None:
+    """连接池 gauge 在 scrape 时现采样；采样炸了也不能把 /metrics 打成 500。"""
+
+    class Pool:
+        def size(self) -> int:
+            return 10
+
+        def checkedin(self) -> int:
+            return 6
+
+        def checkedout(self) -> int:
+            return 4
+
+        def overflow(self) -> int:
+            raise RuntimeError("pool went away")
+
+    observability.bind_db_pool_metrics(SimpleNamespace(pool=Pool()))
+    values = {
+        sample.labels["state"]: sample.value
+        for family in observability.db_pool_connections.collect()
+        for sample in family.samples
+    }
+
+    assert values["size"] == 10
+    assert values["checked_in"] == 6
+    assert values["checked_out"] == 4
+    # 哨兵值：采样失败要能和「池里真的 0 个溢出连接」区分开。
+    assert values["overflow"] == -1
+
+
+def _hanging_session_local(started: asyncio.Event) -> Any:
+    class Session:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, *_args: object, **_kwargs: object) -> Any:
+            started.set()
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+
+    return Session
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_db_read_is_bounded_by_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB 卡住时 _read_db 必须自己超时，否则 cache.lock 会把全进程 resolve 堵死。"""
+    started = asyncio.Event()
+    monkeypatch.setattr(
+        worker_runtime_settings,
+        "SessionLocal",
+        _hanging_session_local(started),
+    )
+    monkeypatch.setattr(worker_runtime_settings, "_DB_TIMEOUT_S", 0.05)
+    worker_runtime_settings.invalidate_cache()
+
+    value = await asyncio.wait_for(
+        worker_runtime_settings._read_db("upstream.global_concurrency"),
+        5.0,
+    )
+
+    assert started.is_set()
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_falls_back_to_env_when_db_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超时按「DB 无值」处理：行为必须和该 key 从未写入 DB 时完全一致。"""
+    started = asyncio.Event()
+    monkeypatch.setattr(
+        worker_runtime_settings,
+        "SessionLocal",
+        _hanging_session_local(started),
+    )
+    monkeypatch.setattr(worker_runtime_settings, "_DB_TIMEOUT_S", 0.05)
+    monkeypatch.setenv("UPSTREAM_GLOBAL_CONCURRENCY", "7")
+    worker_runtime_settings.invalidate_cache()
+
+    try:
+        resolved = await asyncio.wait_for(
+            worker_runtime_settings.resolve_int("upstream.global_concurrency", 4),
+            5.0,
+        )
+    finally:
+        worker_runtime_settings.invalidate_cache()
+
+    assert resolved == 7
+
+
+@pytest.mark.asyncio
+async def test_summary_pg_lock_failure_invalidates_connection() -> None:
+    """advisory lock 是 session 级的：拿锁后失败必须丢弃连接，否则锁永久泄漏。"""
+
+    class Connection:
+        def __init__(self) -> None:
+            self.invalidated = False
+            self.closed = False
+
+        async def execute(self, *_args: object, **_kwargs: object) -> Any:
+            raise RuntimeError("commit boundary blew up after taking the lock")
+
+        async def commit(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            self.invalidated = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+
+    class Engine:
+        async def connect(self) -> Connection:
+            return connection
+
+    lock = await context_summary_persistence.acquire_summary_lock(
+        None,
+        None,
+        "conv-1",
+        engine=Engine(),
+        ttl_s=60,
+        lock_factory=lambda *args, **kwargs: SimpleNamespace(),
+        logger=logging.getLogger("test"),
+    )
+
+    assert lock is None
+    assert connection.invalidated is True
+    assert connection.closed is True

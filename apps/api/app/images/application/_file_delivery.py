@@ -1,4 +1,4 @@
-"""Secure image file delivery helpers."""
+"""Secure image file delivery helpers (moved from routes to break circular dependency)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import BinaryIO, Callable, Iterator
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from ..services import storage_files
+from ...services import storage_files
 
 
 _INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"

@@ -42,13 +42,13 @@ class ImageProgressPublisher:
     async def _raise_if_interrupted(self) -> None:
         state = self.state
         if state.lease_lost.is_set():
-            raise self.ports._LeaseLost("generation lease renewer failed")
-        if await self.ports._is_cancelled(state.redis, state.task_id):
-            raise self.ports._TaskCancelled("cancelled during upstream call")
+            raise self.ports.lease._LeaseLost("generation lease renewer failed")
+        if await self.ports.lease._is_cancelled(state.redis, state.task_id):
+            raise self.ports.lease._TaskCancelled("cancelled during upstream call")
 
     async def _record_image_job(self, event: dict[str, Any]) -> None:
         metadata = self.state.image_job_meta
-        url = self.ports._redis_text(event.get("image_job_url"))
+        url = self.ports.queue._redis_text(event.get("image_job_url"))
         if url:
             metadata["image_job_url"] = url
         for key in ("job_id", "endpoint_used", "expires_at", "format"):
@@ -81,7 +81,7 @@ class ImageProgressPublisher:
 
     async def _publish_endpoint_failover(self, event: dict[str, Any]) -> None:
         self.state.provider_attempt_log.append(
-            self.ports._provider_attempt_from_progress(
+            self.ports.events._provider_attempt_from_progress(
                 event,
                 status="failover",
                 attempt_epoch=self.state.attempt,
@@ -101,7 +101,7 @@ class ImageProgressPublisher:
         )
 
     async def _record_provider_used(self, event: dict[str, Any]) -> None:
-        provider = self.ports._redis_text(
+        provider = self.ports.queue._redis_text(
             event.get("provider") or event.get("actual_provider")
         )
         if not provider:
@@ -110,7 +110,7 @@ class ImageProgressPublisher:
         self.state.provider_used_events.append(metadata)
         self.state.provider_attempt_log.append(
             {
-                **self.ports._provider_attempt_from_progress(
+                **self.ports.events._provider_attempt_from_progress(
                     event,
                     status="used",
                     attempt_epoch=self.state.attempt,
@@ -118,7 +118,7 @@ class ImageProgressPublisher:
                 **metadata,
             }
         )
-        await self.ports._inflight_set_fields(
+        await self.ports.queue._inflight_set_fields(
             self.state.redis,
             self.state.task_id,
             self._provider_inflight_update(metadata),
@@ -131,7 +131,7 @@ class ImageProgressPublisher:
     ) -> dict[str, str]:
         metadata = {"provider": provider}
         for source_key in ("route", "source", "endpoint"):
-            value = self.ports._redis_text(event.get(source_key))
+            value = self.ports.queue._redis_text(event.get(source_key))
             if value:
                 metadata[source_key] = value
         return metadata
@@ -144,7 +144,7 @@ class ImageProgressPublisher:
         route = metadata.get("route") or ""
         endpoint = metadata.get("endpoint") or ""
         if self.state.is_dual_race:
-            lane = self.ports._classify_inflight_lane(route, endpoint)
+            lane = self.ports.queue._classify_inflight_lane(route, endpoint)
             update = {f"{lane}_provider": provider}
             if route:
                 update[f"{lane}_route"] = route
@@ -161,15 +161,15 @@ class ImageProgressPublisher:
     async def _publish_partial_image(self, event: dict[str, Any]) -> None:
         state = self.state
         state.has_partial = True
-        await self.ports.publish_event(
+        await self.ports.events.publish_event(
             state.redis,
             state.user_id,
             state.channel,
-            self.ports.EV_GEN_PARTIAL_IMAGE,
+            self.ports.events.EV_GEN_PARTIAL_IMAGE,
             {
                 **self._event_identity(),
-                "stage": self.ports.GenerationStage.RENDERING.value,
-                "substage": self.ports.GenerationStage.PARTIAL_RECEIVED.value,
+                "stage": self.ports.domain.GenerationStage.RENDERING.value,
+                "substage": self.ports.domain.GenerationStage.PARTIAL_RECEIVED.value,
                 "index": event.get("index"),
                 "count": event.get("count"),
             },
@@ -178,20 +178,20 @@ class ImageProgressPublisher:
     async def _publish_lifecycle_progress(self, event: dict[str, Any]) -> None:
         is_final = event.get("type") in {"final_image", "completed"}
         stage = (
-            self.ports.GenerationStage.FINALIZING.value
+            self.ports.domain.GenerationStage.FINALIZING.value
             if is_final
-            else self.ports.GenerationStage.RENDERING.value
+            else self.ports.domain.GenerationStage.RENDERING.value
         )
         substage = (
-            self.ports.GenerationStage.FINAL_RECEIVED.value
+            self.ports.domain.GenerationStage.FINAL_RECEIVED.value
             if is_final
-            else self.ports.GenerationStage.STREAM_STARTED.value
+            else self.ports.domain.GenerationStage.STREAM_STARTED.value
         )
-        await self.ports.publish_event(
+        await self.ports.events.publish_event(
             self.state.redis,
             self.state.user_id,
             self.state.channel,
-            self.ports.EV_GEN_PROGRESS,
+            self.ports.events.EV_GEN_PROGRESS,
             {
                 **self._event_identity(),
                 "stage": stage,
@@ -202,10 +202,10 @@ class ImageProgressPublisher:
 
     async def _publish_provider_failover(self, event: dict[str, Any]) -> None:
         state = self.state
-        from_provider = self.ports._redis_text(event.get("from_provider"))
-        route = self.ports._redis_text(event.get("route")) or ""
+        from_provider = self.ports.queue._redis_text(event.get("from_provider"))
+        route = self.ports.queue._redis_text(event.get("route")) or ""
         state.provider_attempt_log.append(
-            self.ports._provider_attempt_from_progress(
+            self.ports.events._provider_attempt_from_progress(
                 event,
                 status="failover",
                 attempt_epoch=state.attempt,
@@ -213,7 +213,7 @@ class ImageProgressPublisher:
                 route_default=route or None,
             )
         )
-        await self.ports._inflight_set_fields(
+        await self.ports.queue._inflight_set_fields(
             state.redis,
             state.task_id,
             self._failover_inflight_update(from_provider, route),
@@ -235,7 +235,7 @@ class ImageProgressPublisher:
         route: str,
     ) -> dict[str, str]:
         if self.state.is_dual_race:
-            lane = self.ports._classify_inflight_lane(route, "")
+            lane = self.ports.queue._classify_inflight_lane(route, "")
             update = {f"{lane}_status": "failover"}
             if from_provider:
                 update[f"{lane}_last_failed"] = from_provider
@@ -250,20 +250,20 @@ class ImageProgressPublisher:
         _event: dict[str, Any],
         payload: dict[str, Any],
     ) -> None:
-        await self.ports.publish_event(
+        await self.ports.events.publish_event(
             self.state.redis,
             self.state.user_id,
             self.state.channel,
-            self.ports.EV_GEN_PROGRESS,
-            self.ports._sanitize_provider_progress_payload(
+            self.ports.events.EV_GEN_PROGRESS,
+            self.ports.events._sanitize_provider_progress_payload(
                 {
                     **self._event_identity(),
-                    "stage": self.ports.GenerationStage.RENDERING.value,
-                    "substage": self.ports.GenerationStage.PROVIDER_SELECTED.value,
+                    "stage": self.ports.domain.GenerationStage.RENDERING.value,
+                    "substage": self.ports.domain.GenerationStage.PROVIDER_SELECTED.value,
                     **payload,
                 },
                 expose_provider_diagnostics=(
-                    self.ports.settings.expose_provider_diagnostics
+                    self.ports.queue.settings.expose_provider_diagnostics
                 ),
             ),
         )

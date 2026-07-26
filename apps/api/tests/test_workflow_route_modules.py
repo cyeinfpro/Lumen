@@ -225,12 +225,8 @@ def test_static_route_exports_use_the_real_owner_module(
 ) -> None:
     module_now = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
 
-    assert (
-        workflows._poster_merge_copy_corrections
-        is poster._poster_merge_copy_corrections
-    )
     monkeypatch.setattr(poster, "_now", lambda: module_now)
-    result = workflows._poster_merge_copy_corrections({}, {})  # noqa: SLF001
+    result = poster._poster_merge_copy_corrections({}, {})  # noqa: SLF001
     assert result["confirmed_at"] == module_now.isoformat()
 
     monkeypatch.setattr(

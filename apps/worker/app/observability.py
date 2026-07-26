@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from errno import EADDRINUSE
 from socketserver import ThreadingMixIn
@@ -301,6 +302,54 @@ context_compaction_duration_seconds = _metric(
     buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 60.0, 120.0),
 )
 
+# ---- DB 连接池指标 ----
+# Why: worker 的每一条上游路径都要先拿 DB 连接；池被占满时症状是「任务全都变慢」，
+# 但没有指标就只能靠 PG 侧 pg_stat_activity 猜。用 set_function 在 scrape 时现采样，
+# 不需要额外的 cron，也不会在没人抓 /metrics 时产生任何开销。
+# 刻意不做审计里同时提到的 Redis 连接池指标：redis-py 只在私有属性
+# （_created_connections / _available_connections / _in_use_connections）上暴露池状态，
+# 且 ConnectionPool 与 BlockingConnectionPool 字段并不一致；arq 还会在 worker 里另建
+# 自己的池，导出的数字既脆弱又对不上真实并发，代价大于收益。
+db_pool_connections = _metric(
+    Gauge,
+    "lumen_worker_db_pool_connections",
+    "SQLAlchemy connection pool state. "
+    "States: size / checked_in / checked_out / overflow.",
+    labelnames=("state",),
+)
+
+# (gauge 的 state 标签, SQLAlchemy Pool 上的方法名)；用元组而不是 dict，
+# 模块级可变状态会被 check_architecture 的 runtime-coupling 规则拦下。
+_DB_POOL_ACCESSORS: tuple[tuple[str, str], ...] = (
+    ("size", "size"),
+    ("checked_in", "checkedin"),
+    ("checked_out", "checkedout"),
+    ("overflow", "overflow"),
+)
+
+
+def _db_pool_sampler(engine: Any, accessor: str) -> Callable[[], float]:
+    def sample() -> float:
+        try:
+            pool = engine.pool
+            value = getattr(pool, accessor)()
+        except Exception:  # noqa: BLE001
+            # 指标采样发生在 scrape 线程里：任何异常都会让整个 /metrics 变 500，
+            # 把一个观测项升级成「监控全瞎」。取不到就报 -1（明确的哨兵值）。
+            return -1.0
+        return float(value) if isinstance(value, (int, float)) else -1.0
+
+    return sample
+
+
+def bind_db_pool_metrics(engine: Any) -> None:
+    """把连接池状态挂到 gauge 上（幂等，重复调用只是覆盖同一个采样函数）。"""
+    for state, accessor in _DB_POOL_ACCESSORS:
+        db_pool_connections.labels(state=state).set_function(
+            _db_pool_sampler(engine, accessor)
+        )
+
+
 # Why: 限制 outcome 标签基数，避免 prometheus 时间序列爆炸（恶意/未知值都映射到 "unknown"）
 _ALLOWED_OUTCOMES = frozenset(
     {"succeeded", "retry", "failed", "unknown", "ok", "error"}
@@ -547,4 +596,6 @@ __all__ = [
     "safe_image_outcome",
     "context_compaction_total",
     "context_compaction_duration_seconds",
+    "db_pool_connections",
+    "bind_db_pool_metrics",
 ]

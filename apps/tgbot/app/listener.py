@@ -449,6 +449,31 @@ def _dispatch_attempt_key(user_id: str, entry_id: str) -> str:
     return f"tg:bot:replay:{user_id}:{entry_id}"
 
 
+async def _notify_dispatch_drop(bot: Bot, event: str, gen_id: str) -> None:
+    """放弃重投前，给用户留一句能自救的话。
+
+    J-3/J-4：终态事件连续失败 _DISPATCH_MAX_ATTEMPTS 次后 cursor 会被强推，
+    这条事件永远不会再来。什么都不说的话，用户看到的是一个永远停在
+    「⏳ 正在生成…」的占位消息 —— 大概率以为失败了再点一次生成，而那是要
+    重新扣一遍上游费用的。任务其实已经成功、图能从 /tasks 取回，必须讲清楚。
+    只对 succeeded 说这句话：failed 事件本来就没有图可取。
+    """
+    if event != "generation.succeeded":
+        return
+    try:
+        track = await tracker.get(gen_id)
+        if track is None:
+            return
+        await _replace_status(
+            bot,
+            track,
+            "⚠️ 结果推送失败，但任务本身已经完成，不用重新生成（会重复计费）。\n"
+            f"请用 /tasks 查看并取图（#{gen_id[:8]}）。",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drop notice failed gen=%s err=%r", gen_id, exc)
+
+
 async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> None:
     """常驻 task：发现 user streams，按需起 / 重启 per-user worker。
 
@@ -655,6 +680,9 @@ async def _user_worker(
                             exc,
                         )
                         if gen_id_for_drop:
+                            await _notify_dispatch_drop(
+                                bot, str(envelope.get("event") or ""), gen_id_for_drop
+                            )
                             try:
                                 await tracker.mark_notified(gen_id_for_drop)
                             except Exception as nt_exc:  # noqa: BLE001
@@ -831,6 +859,61 @@ async def _finish_succeeded_cleanup(bot: Bot, gen_id: str, track) -> None:
         asyncio.create_task(_expire_tracker(gen_id, _PARENT_GRACE_AFTER_SUCCESS_SEC))
 
 
+async def _resolve_succeeded_image_ids(
+    api: LumenApi, gen_id: str, track, data: dict[str, Any]
+) -> tuple[list[str], dict[str, Any] | None, bool]:
+    """解析成功事件里的图片，返回 (image_ids, detail, lookup_failed)。
+
+    J-3：原实现把「API 查不到」和「确认没有图」压成了同一条分支 ——
+    get_generation 抛 ApiError 就把 image_ids 置空，然后给用户发
+    「生成完成但没有图片返回」并 mark_notified。这一步不可逆：任务其实成功了
+    （钱已经扣了），推送却被永久标成已送达，图再也不会补发，用户只能重新生成
+    = 再付一次上游的钱。查询失败必须当成可重试错误（lookup_failed=True），
+    只有真的拿到空列表才算「没有图」。
+    """
+    images = data.get("images")
+    if isinstance(images, list) and images:
+        image_ids = [
+            str(img.get("image_id"))
+            for img in images
+            if isinstance(img, dict) and img.get("image_id")
+        ]
+        if image_ids:
+            return image_ids, None, False
+        # 事件里带了 images 却一个 image_id 都解析不出来：结构不认识 ≠ 没有图，
+        # 退回 API 再问一次，别急着下「没有图片」的结论。
+        logger.warning(
+            "succeeded event images unparsable gen=%s raw=%r", gen_id, images
+        )
+    try:
+        detail = await api.get_generation(track.chat_id, gen_id)
+    except ApiError as exc:
+        logger.warning("succeeded fallback get failed gen=%s err=%s", gen_id, exc)
+        return [], None, True
+    image_ids = [
+        str(image_id) for image_id in (detail.get("image_ids") or []) if image_id
+    ]
+    return image_ids, detail, False
+
+
+async def _already_sent_image_ids(gen_id: str) -> set[str]:
+    """已送达图片集合；读失败退化成空集（最坏回到「可能重发」的老行为）。"""
+    try:
+        return await tracker.sent_images(gen_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sent image lookup failed gen=%s err=%r", gen_id, exc)
+        return set()
+
+
+async def _remember_sent_image(gen_id: str, image_id: str) -> None:
+    try:
+        await tracker.mark_image_sent(gen_id, image_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sent image marker failed gen=%s img=%s err=%r", gen_id, image_id, exc
+        )
+
+
 async def _on_succeeded(
     bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]
 ) -> None:
@@ -847,37 +930,36 @@ async def _on_succeeded(
             return
         raise _TerminalDeliveryBusy(f"succeeded delivery lock held gen={gen_id}")
     delivered = False
-    downloads: list[tuple[Path, str, int, str]] = []  # (path, mime, size, filename)
+    # (path, mime, size, filename, image_id)
+    downloads: list[tuple[Path, str, int, str, str]] = []
     heartbeat = asyncio.create_task(
         _chat_action_heartbeat(bot, track.chat_id, ChatAction.UPLOAD_DOCUMENT),
         name=f"tg-upload-heartbeat-{gen_id[:8]}",
     )
     try:
-        images = data.get("images") or []
-        detail: dict[str, Any] | None = None
-        if not isinstance(images, list) or not images:
-            # 偶尔事件里没带 images（如 attached 之前的 race），fallback 查 API
-            try:
-                detail = await api.get_generation(track.chat_id, gen_id)
-                image_ids = detail.get("image_ids") or []
-            except ApiError as exc:
-                logger.warning(
-                    "succeeded fallback get failed gen=%s err=%s", gen_id, exc
-                )
-                image_ids = []
-        else:
-            image_ids = [
-                str(img.get("image_id"))
-                for img in images
-                if isinstance(img, dict) and img.get("image_id")
-            ]
+        # 偶尔事件里没带 images（如 attached 之前的 race），fallback 查 API
+        image_ids, detail, lookup_failed = await _resolve_succeeded_image_ids(
+            api, gen_id, track, data
+        )
+        already_sent = await _already_sent_image_ids(gen_id)
+        pending_ids = [
+            image_id for image_id in image_ids if image_id not in already_sent
+        ]
 
-        if not image_ids:
+        if lookup_failed:
+            # delivered 保持 False → 走下面的 clear_delivery + RuntimeError，
+            # 由 _user_worker 的 attempt 计数重投。不能给用户「没有图片」的结论。
+            logger.warning("succeeded image lookup failed gen=%s; will retry", gen_id)
+        elif not image_ids:
             await _replace_status(
                 bot,
                 track,
                 f"⚠️ 生成完成但没有图片返回。\n\n📝 {_truncate(track.prompt, 200)}",
             )
+            delivered = True
+        elif not pending_ids:
+            # J-4：重投到这里说明这些图上一轮已经全部送达，只是终态标记没落盘。
+            logger.info("succeeded replay: all images already sent gen=%s", gen_id)
             delivered = True
         else:
             if detail is None:
@@ -899,7 +981,7 @@ async def _on_succeeded(
             else:
                 caption = f"✅ 生成完成\n\n📝 {_truncate(track.prompt, 800)}"
 
-            for idx, image_id in enumerate(image_ids):
+            for image_id in pending_ids:
                 try:
                     path, mime, size = await api.download_image_to_file(
                         track.chat_id, image_id
@@ -912,8 +994,12 @@ async def _on_succeeded(
                         exc,
                     )
                     continue
-                filename = f"{gen_id[:8]}-{idx + 1}.{mime_extension(mime)}"
-                downloads.append((path, mime, size, filename))
+                # 序号按整批的原始位置算，重投只补发缺的那几张也不会串号
+                filename = (
+                    f"{gen_id[:8]}-{image_ids.index(image_id) + 1}."
+                    f"{mime_extension(mime)}"
+                )
+                downloads.append((path, mime, size, filename, image_id))
 
             if not downloads:
                 await _replace_status(
@@ -935,9 +1021,16 @@ async def _on_succeeded(
                     )
                 )
                 sent_count = 0
-                for idx, (path, _mime, _size, filename) in enumerate(downloads):
-                    kb = actions_kb if idx == 0 else None
-                    cap = caption if idx == 0 else None
+                # J-4：caption + 操作键盘只挂在整批的第一条消息上。重投时那条
+                # 已经发出去了（already_sent 非空），不能再挂一次，否则用户会
+                # 收到两套「🔁 重画 / ✏️ 迭代」按钮。
+                head_pending = not already_sent
+                for idx, (path, _mime, _size, filename, image_id) in enumerate(
+                    downloads
+                ):
+                    attach_head = head_pending and idx == 0
+                    kb = actions_kb if attach_head else None
+                    cap = caption if attach_head else None
                     try:
                         await _send_document_with_backoff(
                             bot,
@@ -947,13 +1040,18 @@ async def _on_succeeded(
                             caption=cap,
                             reply_markup=kb,
                         )
-                        sent_count += 1
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "send_document failed gen=%s err=%r", gen_id, exc
                         )
                         break
-                delivered = sent_count == len(downloads)
+                    sent_count += 1
+                    # 先记账再继续：后面任何一张失败都会整条事件重投，
+                    # 已经落到用户手里的图不能再发第二遍。
+                    await _remember_sent_image(gen_id, image_id)
+                # 下载失败的图同样算没送到：现在重投不会重复发送，
+                # 补发比「悄悄少给用户一张已付费的图」更合适。
+                delivered = sent_count == len(downloads) == len(pending_ids)
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

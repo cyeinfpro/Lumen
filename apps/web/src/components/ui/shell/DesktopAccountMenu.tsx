@@ -34,16 +34,26 @@ function walletIsEnabled(user: MenuUser | undefined): boolean {
   return user?.account_mode === "wallet";
 }
 
-function walletIsVisible({
+/**
+ * 新-16：钱包**入口**只取决于「这个账号是钱包模式且计费没被关掉」，
+ * 与余额查询成功与否无关。此前把 hasBalance 也算进来，导致 /me/wallet 请求
+ * 失败（离线、5xx、限流）时用户明明有钱却找不到入口 —— 余额查不到恰恰是最需要
+ * 让用户点进去看的时候。billingEnabled 用 `!== false`：pricing 还在加载/失败时
+ * 保持入口可见，不因为一个附属查询把主导航藏起来。
+ */
+function walletEntryIsVisible({
   enabled,
   billingEnabled,
-  hasBalance,
 }: {
   enabled: boolean;
   billingEnabled: boolean | null | undefined;
-  hasBalance: boolean;
 }): boolean {
-  return enabled && billingEnabled !== false && hasBalance;
+  return enabled && billingEnabled !== false;
+}
+
+/** 新-15：balance.rmb 缺失（错误态）不能当作"有余额"，否则会渲染出假的 ¥-- */
+function hasUsableBalance(balance: { rmb?: string | null } | null | undefined) {
+  return balance != null && balance.rmb != null;
 }
 
 function accountPathIsActive(pathname: string): boolean {
@@ -54,9 +64,11 @@ function accountPathIsActive(pathname: string): boolean {
 
 function formatWalletText(
   showWallet: boolean,
-  balance: { rmb: string } | null | undefined,
+  balance: { rmb?: string | null } | null | undefined,
 ): string | null {
-  return showWallet && balance ? `¥${formatRmb(balance.rmb)}` : null;
+  // 金额文案与入口解耦：入口可见 ≠ 余额可读，读不到就不渲染金额（而不是 ¥--）。
+  const rmb = hasUsableBalance(balance) ? balance?.rmb : null;
+  return showWallet && rmb != null ? `¥${formatRmb(rmb)}` : null;
 }
 
 function accountMenuItems({
@@ -122,10 +134,9 @@ export function DesktopAccountMenu() {
   const avatar = label.slice(0, 1).toUpperCase();
   const wallet = walletQuery.data;
   const walletBalance = wallet?.balance;
-  const showWallet = walletIsVisible({
+  const showWallet = walletEntryIsVisible({
     enabled: walletEnabled,
     billingEnabled: pricingQuery.data?.billing_enabled,
-    hasBalance: walletBalance != null,
   });
   const walletText = formatWalletText(showWallet, walletBalance);
   const active = accountPathIsActive(pathname);

@@ -209,6 +209,19 @@ export class RealtimeRuntime {
   }
 
   private dispatch(event: Parameters<typeof transitionConnection>[1]): void {
+    // 修复恢复期重复连接：快照恢复在途时丢弃重连类事件。它们会把状态机推出
+    // recovering，随后到达的 snapshot_success 因状态不匹配被丢弃 —— 既白开一条用
+    // 旧 cursor 的连接，又丢掉恢复得到的新 cursor。恢复完成后自己会重新开流。
+    if (this.recoveryFlight && this.state.kind === "recovering") {
+      if (
+        event.type === "manual_reconnect" ||
+        event.type === "online" ||
+        event.type === "visible" ||
+        event.type === "start"
+      ) {
+        return;
+      }
+    }
     const maxRetryCount = Math.max(
       ...[...this.subscribers].map(
         (subscriber) =>

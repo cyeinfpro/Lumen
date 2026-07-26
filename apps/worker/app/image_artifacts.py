@@ -6,8 +6,9 @@ import base64
 import hashlib
 import io
 import logging
+import math
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -188,11 +189,60 @@ def _compute_blurhash(img: PILImage.Image) -> str | None:
         return None
 
 
+def _round_aspect(number: float, key: Callable[[int], float]) -> int:
+    return max(min(math.floor(number), math.ceil(number), key=key), 1)
+
+
+def _thumbnail_size(size: tuple[int, int], max_side: int) -> tuple[int, int] | None:
+    """Mirror ``Image.thumbnail``'s aspect-preserving target size.
+
+    Returns ``None`` when the image already fits, matching thumbnail's no-op so
+    variant dimensions stay byte-identical to the previous implementation.
+    """
+    width, height = size
+    if max_side >= width and max_side >= height:
+        return None
+    aspect = width / height
+    x, y = max_side, max_side
+    if x / y >= aspect:
+        x = _round_aspect(y * aspect, key=lambda n: abs(aspect - n / y))
+    else:
+        y = _round_aspect(
+            x / aspect, key=lambda n: 0 if n == 0 else abs(aspect - x / n)
+        )
+    return x, y
+
+
+@contextmanager
+def _scaled_for_variant(
+    orig: PILImage.Image, max_side: int
+) -> Iterator[PILImage.Image]:
+    """Yield ``orig`` downscaled to ``max_side`` without a full-size copy.
+
+    ``Image.thumbnail`` resizes in place, so callers used to hand it
+    ``orig.copy()`` — a full-resolution duplicate allocated before a single
+    pixel is discarded. At our 64MP ceiling that copy alone is ~256MB RGBA, and
+    three variants across concurrent tasks is enough to OOM the container
+    *after* upstream已扣费. Resizing straight from the source allocates only the
+    reduced result.
+    """
+    target = _thumbnail_size(orig.size, max_side)
+    if target is None:
+        # 已在尺寸内：无需拷贝。下游 save 路径一律先 convert 出新图，
+        # 不会就地改动 orig，所以直接借出原图是安全的。
+        yield orig
+        return
+    scaled = orig.resize(target, PILImage.Resampling.BICUBIC, reducing_gap=2.0)
+    try:
+        yield scaled
+    finally:
+        scaled.close()
+
+
 def _make_preview(
     orig: PILImage.Image, max_side: int = 1024
 ) -> tuple[bytes, tuple[int, int]]:
-    with orig.copy() as im:
-        im.thumbnail((max_side, max_side))
+    with _scaled_for_variant(orig, max_side) as im:
         buf = io.BytesIO()
         with _webp_image_for_variant(im) as webp:
             webp.save(buf, format="WEBP", quality=82, method=4)
@@ -235,8 +285,7 @@ def _rgb_image_for_flat_variant(
 def _make_display(
     orig: PILImage.Image, max_side: int = 2048
 ) -> tuple[bytes, tuple[int, int]]:
-    with orig.copy() as im:
-        im.thumbnail((max_side, max_side))
+    with _scaled_for_variant(orig, max_side) as im:
         buf = io.BytesIO()
         with _webp_image_for_variant(im) as webp:
             webp.save(buf, format="WEBP", quality=86, method=4)
@@ -246,8 +295,7 @@ def _make_display(
 def _make_thumb(
     orig: PILImage.Image, max_side: int = 256
 ) -> tuple[bytes, tuple[int, int]]:
-    with orig.copy() as im:
-        im.thumbnail((max_side, max_side))
+    with _scaled_for_variant(orig, max_side) as im:
         buf = io.BytesIO()
         with _rgb_image_for_flat_variant(im) as rgb:
             rgb.save(buf, format="JPEG", quality=78, optimize=True)

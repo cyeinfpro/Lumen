@@ -8,6 +8,8 @@ import os
 import faulthandler
 import signal
 import sys
+import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -267,6 +269,77 @@ def _feature_disabled_response(feature: str) -> JSONResponse:
     )
 
 
+# Why: the guard runs on every request to a protected path and *before*
+# authentication or the route-level rate limiter, so an unauthenticated client
+# could previously force one DB session + `system_settings` query per request
+# and drain the connection pool. Cache the resolved flags in-process for a
+# short window instead: long enough to collapse a flood onto a single query,
+# short enough that an admin toggling a flag sees it apply within seconds
+# (each worker process converges independently, so the TTL is the SLA).
+_NAV_FEATURE_CACHE_TTL_SECONDS = 5.0
+
+
+class _NavFeatureFlagCache:
+    """Short-lived, single-flight cache of the guard's feature settings.
+
+    Owned by the middleware instance rather than the module: a second app
+    (tests, an embedded worker) starts from an empty cache instead of
+    inheriting whichever flags another app happened to read, and import-time
+    code has nothing global to reach into. The clock is injectable so the TTL
+    can be exercised without sleeping.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = _NAV_FEATURE_CACHE_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._entries: dict[str, tuple[float, str | None]] = {}
+        self._lock = asyncio.Lock()
+
+    def _cached(self, setting_keys: tuple[str, ...]) -> dict[str, str | None] | None:
+        """Return every requested flag, or None when any entry is missing/stale."""
+        now = self._clock()
+        values: dict[str, str | None] = {}
+        for key in setting_keys:
+            entry = self._entries.get(key)
+            if entry is None or entry[0] <= now:
+                return None
+            values[key] = entry[1]
+        return values
+
+    async def read(self, setting_keys: tuple[str, ...]) -> dict[str, str | None]:
+        """Resolve guard flags, hitting the database at most once per TTL.
+
+        Keys without a registered spec are omitted from the result so the caller
+        keeps its existing "unknown key" branch. Read failures are deliberately
+        not cached: the caller fails closed on the exception, and caching that
+        would keep a recovered database locked out for the rest of the TTL.
+        """
+        known = tuple(key for key in setting_keys if get_spec(key) is not None)
+        cached = self._cached(known)
+        if cached is not None:
+            return cached
+        async with self._lock:
+            # Double-check: a concurrent flood collapses onto the first waiter.
+            cached = self._cached(known)
+            if cached is not None:
+                return cached
+            values: dict[str, str | None] = {}
+            async with SessionLocal() as session:
+                for key in known:
+                    spec = get_spec(key)
+                    if spec is None:  # pragma: no cover - filtered above
+                        continue
+                    values[key] = await get_setting(session, spec)
+            expires_at = self._clock() + self._ttl_seconds
+            for key, value in values.items():
+                self._entries[key] = (expires_at, value)
+            return values
+
+
 class _NavFeatureGuardMiddleware:
     """Block direct API access when the matching server feature is disabled.
 
@@ -275,8 +348,9 @@ class _NavFeatureGuardMiddleware:
     storage failure therefore fails closed for every protected feature.
     """
 
-    def __init__(self, app):  # type: ignore[no-untyped-def]
+    def __init__(self, app, flags: _NavFeatureFlagCache | None = None):  # type: ignore[no-untyped-def]
         self.app = app
+        self.flags = flags if flags is not None else _NavFeatureFlagCache()
 
     async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
         if scope["type"] != "http" or scope.get("method") == "OPTIONS":
@@ -293,21 +367,22 @@ class _NavFeatureGuardMiddleware:
             guard for guard in (matched, canvas_matched) if guard is not None
         )
         try:
-            async with SessionLocal() as session:
-                for feature, setting_key in guards:
-                    spec = get_spec(setting_key)
-                    if spec is None:
-                        if feature == "canvas":
-                            response = _feature_disabled_response(feature)
-                            await response(scope, receive, send)
-                            return
-                        continue
-                    raw = await get_setting(session, spec)
-                    disabled = raw == "0" if feature != "canvas" else raw != "1"
-                    if disabled:
+            values = await self.flags.read(
+                tuple(setting_key for _, setting_key in guards)
+            )
+            for feature, setting_key in guards:
+                if setting_key not in values:
+                    if feature == "canvas":
                         response = _feature_disabled_response(feature)
                         await response(scope, receive, send)
                         return
+                    continue
+                raw = values[setting_key]
+                disabled = raw == "0" if feature != "canvas" else raw != "1"
+                if disabled:
+                    response = _feature_disabled_response(feature)
+                    await response(scope, receive, send)
+                    return
         except Exception:  # noqa: BLE001
             logger.warning("feature guard setting read failed", exc_info=True)
             feature = (

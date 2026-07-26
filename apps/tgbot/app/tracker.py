@@ -10,6 +10,7 @@ Schema：
   ZADD  tg:track:active-users <expires_at> <user_id>
   SET   tg:track:delivering:{gen_id} 1 NX EX 5m  ← crash 后可重试的发送锁
   SET   tg:track:notified:{gen_id} 1 EX 48h      ← Telegram 已确认终态通知
+  SADD  tg:track:sent-images:{gen_id} <image_id>  ← 已成功送达的图，重投时跳过
   SET   tg:batch:{batch_id}:remaining <n> EX 48h
   SADD  tg:batch:{batch_id}:done <gen_id>         ← batch 终态按 gen 去重扣数
 
@@ -36,8 +37,12 @@ _TRACK_TTL_SECONDS = TRACK_RETENTION_SECONDS
 _KEY_PREFIX = TRACK_KEY_PREFIX
 _NOTIFIED_PREFIX = "tg:track:notified:"
 _DELIVERING_PREFIX = "tg:track:delivering:"
+_SENT_IMAGES_PREFIX = "tg:track:sent-images:"
 _BATCH_PREFIX = "tg:batch:"
 _DELIVERY_LOCK_SECONDS = 5 * 60
+_SUBMIT_ONCE_PREFIX = "tg:submit-once:"
+# 覆盖 HTTP 调用超时（api_client 30 s）加一倍余量；过期后允许合法重试（用户已 /new）
+_SUBMIT_ONCE_TTL_SECONDS = 60
 ACTIVE_USER_STREAMS_KEY = "tg:track:active-users"
 ACTIVE_USER_STREAM_TTL_SECONDS = TRACK_RETENTION_SECONDS
 _ACTIVE_USER_STREAMS_KEY_TTL_SECONDS = ACTIVE_USER_STREAM_TTL_SECONDS + 3600
@@ -53,6 +58,10 @@ def _notified_key(gen_id: str) -> str:
 
 def _delivering_key(gen_id: str) -> str:
     return f"{_DELIVERING_PREFIX}{gen_id}"
+
+
+def _sent_images_key(gen_id: str) -> str:
+    return f"{_SENT_IMAGES_PREFIX}{gen_id}"
 
 
 def _batch_key(batch_id: str) -> str:
@@ -216,7 +225,10 @@ class Tracker:
         )
         try:
             await client.delete(
-                _key(gen_id), _notified_key(gen_id), _delivering_key(gen_id)
+                _key(gen_id),
+                _notified_key(gen_id),
+                _delivering_key(gen_id),
+                _sent_images_key(gen_id),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -268,6 +280,24 @@ class Tracker:
             user_id=d.get("user_id") or "",
         )
 
+    async def acquire_submit_once(self, idempotency_key: str) -> bool:
+        """One-shot submit guard for callback handlers.
+
+        Uses Redis SET NX so that even when two coroutines race on the same
+        callback (e.g. double-click on「使用优化版」) only the first caller
+        proceeds to submit.  The lock is intentionally not released — its
+        short TTL is the cleanup mechanism.  After TTL expiry a fresh /new
+        flow will generate a different idempotency_key anyway.
+
+        Returns True iff the caller should proceed with submission.
+        """
+        if not idempotency_key:
+            return False
+        client = self._client()
+        lock_key = f"{_SUBMIT_ONCE_PREFIX}{idempotency_key}"
+        result = await client.set(lock_key, b"1", nx=True, ex=_SUBMIT_ONCE_TTL_SECONDS)
+        return bool(result)
+
     async def begin_delivery(self, gen_id: str) -> bool:
         """Acquire a short delivery lock unless this terminal event was delivered."""
         client = self._client()
@@ -292,6 +322,37 @@ class Tracker:
         client = self._client()
         await client.delete(_delivering_key(gen_id))
 
+    async def mark_image_sent(self, gen_id: str, image_id: str) -> None:
+        """记下某张图已经成功发给 Telegram（J-4）。
+
+        多图任务发到一半失败会整条事件重投，没有这个集合的话前面已经发出去的
+        图会被重复发一遍（每次重试都发，最多 _DISPATCH_MAX_ATTEMPTS 遍）。
+        """
+        if not gen_id or not image_id:
+            return
+        client = self._client()
+        pipe = client.pipeline(transaction=True)
+        pipe.sadd(_sent_images_key(gen_id), image_id)
+        pipe.expire(_sent_images_key(gen_id), _TRACK_TTL_SECONDS)
+        await pipe.execute()
+
+    async def sent_images(self, gen_id: str) -> set[str]:
+        if not gen_id:
+            return set()
+        client = self._client()
+        raw = await cast(
+            Awaitable[set[Any]],
+            client.smembers(_sent_images_key(gen_id)),
+        )
+        return {
+            (
+                v.decode("utf-8", errors="replace")
+                if isinstance(v, (bytes, bytearray))
+                else str(v)
+            )
+            for v in (raw or set())
+        }
+
     async def is_notified(self, gen_id: str) -> bool:
         client = self._client()
         result = await client.exists(_notified_key(gen_id))
@@ -305,7 +366,10 @@ class Tracker:
     async def remove(self, gen_id: str) -> None:
         client = self._client()
         await client.delete(
-            _key(gen_id), _notified_key(gen_id), _delivering_key(gen_id)
+            _key(gen_id),
+            _notified_key(gen_id),
+            _delivering_key(gen_id),
+            _sent_images_key(gen_id),
         )
 
     async def init_batch(self, batch_id: str, count: int) -> None:

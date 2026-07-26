@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-tgbot"
-version = "1.2.72"
+version = "1.2.73"
 description = "Lumen Telegram bot — 菜单驱动生图、任务列表、失败重试"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13,<4.0",
     "aiohttp-socks>=0.10,<1.0",  # aiogram → SOCKS5（RFC 代理走 api.telegram.org）
     "httpx>=0.27,<1.0",
+    "prometheus-client>=0.20,<1.0",  # main.py 直接 import，与 api/worker 一样显式声明
     "pydantic>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
     "redis>=5.0,<7.0",

@@ -45,9 +45,9 @@ FAILURE_MATRIX = (
     FailurePolicy(
         state="lease_expired_exhausted",
         mutate_task=True,
-        release_hold=True,
+        release_hold=False,
         stage_outbox=True,
-        invariant="terminal apply and billing release are idempotent",
+        invariant="terminal apply follows the durable upstream receipt",
     ),
     FailurePolicy(
         state="database_rollback",
@@ -59,9 +59,9 @@ FAILURE_MATRIX = (
     FailurePolicy(
         state="post_commit_delivery_failure",
         mutate_task=True,
-        release_hold=True,
+        release_hold=False,
         stage_outbox=True,
-        invariant="unpublished outbox rows remain the recovery source",
+        invariant="unpublished outbox rows remain the delivery recovery source",
     ),
 )
 

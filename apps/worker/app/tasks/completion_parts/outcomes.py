@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from .runtime import completion_ports
+from .runtime import (
+    completion_tools_ports,
+    completion_persistence_ports,
+    completion_upstream_ports,
+    completion_billing_ports,
+    completion_events_ports,
+    completion_retry_ports,
+)
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,19 +31,21 @@ async def _maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
 
 def _final_text(state: Any) -> str:
     if state.tool_loop_truncated and state.accumulated_text:
-        final_text = completion_ports()._apply_url_citations(
+        final_text = completion_upstream_ports()._apply_url_citations(
             state.accumulated_text,
-            completion_ports()._extract_url_citations(state.completed_response or {}),
+            completion_upstream_ports()._extract_url_citations(
+                state.completed_response or {}
+            ),
         )
     else:
-        final_text = completion_ports()._finalize_completion_text(
+        final_text = completion_upstream_ports()._finalize_completion_text(
             state.accumulated_text,
             state.completed_response,
         )
     if not final_text and state.tool_images:
         return "已生成图片。"
     if not final_text:
-        raise completion_ports().UpstreamError(
+        raise completion_upstream_ports().UpstreamError(
             "upstream returned empty completion",
             error_code=EC.NO_TEXT_RETURNED.value,
             status_code=200,
@@ -48,7 +57,7 @@ async def _persist_success(
     state: Any,
     final_text: str,
 ) -> tuple[tuple[str, str, dict[str, Any]], Any]:
-    await completion_ports()._publish_completion_tool_updates(
+    await completion_tools_ports()._publish_completion_tool_updates(
         redis=state.redis,
         user_id=state.user_id,
         channel=state.channel,
@@ -59,21 +68,21 @@ async def _persist_success(
         tool_tracker=state.tool_tracker,
         updates=state.tool_tracker.finalize_active(ToolStatus.SUCCEEDED.value),
     )
-    async with completion_ports().SessionLocal() as session:
+    async with completion_persistence_ports().SessionLocal() as session:
         completion_for_usage = await session.get(
-            completion_ports().Completion, state.task_id
+            completion_persistence_ports().Completion, state.task_id
         )
         if (
             completion_for_usage is not None
             and completion_for_usage.attempt == state.attempt_epoch
             and completion_for_usage.status
-            in completion_ports()._RUNNING_COMPLETION_STATUSES
+            in completion_retry_ports()._RUNNING_COMPLETION_STATUSES
             and state.tool_images
             and state.usage_totals.image_output_tokens <= 0
             and state.reserved_tool_image_budget_micro > 0
         ):
             state.usage_totals.image_output_tokens = (
-                await completion_ports()._fallback_completion_tool_image_tokens(
+                await completion_billing_ports()._fallback_completion_tool_image_tokens(
                     session,
                     completion_for_usage,
                     budget_micro=state.reserved_tool_image_budget_micro,
@@ -84,13 +93,14 @@ async def _persist_success(
                 state.usage_totals.image_output_tokens,
             )
         result = await session.execute(
-            completion_ports()
-            .update(completion_ports().Completion)
+            completion_persistence_ports()
+            .update(completion_persistence_ports().Completion)
             .where(
-                completion_ports().Completion.id == state.task_id,
-                completion_ports().Completion.attempt == state.attempt_epoch,
-                completion_ports().Completion.status.in_(
-                    completion_ports()._RUNNING_COMPLETION_STATUSES
+                completion_persistence_ports().Completion.id == state.task_id,
+                completion_persistence_ports().Completion.attempt
+                == state.attempt_epoch,
+                completion_persistence_ports().Completion.status.in_(
+                    completion_retry_ports()._RUNNING_COMPLETION_STATUSES
                 ),
             )
             .values(
@@ -103,12 +113,14 @@ async def _persist_success(
                 error_message=None,
             )
         )
-        if completion_ports().affected_rows(result) == 0:
-            raise completion_ports()._CompletionEpochSuperseded(
+        if completion_persistence_ports().affected_rows(result) == 0:
+            raise completion_retry_ports()._CompletionEpochSuperseded(
                 f"completion epoch superseded before success task={state.task_id} "
                 f"attempt_epoch={state.attempt_epoch}"
             )
-        message = await session.get(completion_ports().Message, state.message_id)
+        message = await session.get(
+            completion_persistence_ports().Message, state.message_id
+        )
         if message is not None and message.status != MessageStatus.CANCELED:
             content = dict(message.content or {})
             content["text"] = final_text
@@ -133,37 +145,38 @@ async def _persist_success(
             message.content = content
             message.status = MessageStatus.SUCCEEDED
         completion_for_billing = await session.get(
-            completion_ports().Completion, state.task_id
+            completion_persistence_ports().Completion, state.task_id
         )
         if completion_for_billing is not None:
             upstream_request = dict(completion_for_billing.upstream_request or {})
-            upstream_request = completion_ports()._merge_completion_upstream_metadata(
-                upstream_request,
-                provider_event=state.upstream_provider_event,
-                fast_mode=state.fast_mode,
+            upstream_request = (
+                completion_upstream_ports()._merge_completion_upstream_metadata(
+                    upstream_request,
+                    provider_event=state.upstream_provider_event,
+                    fast_mode=state.fast_mode,
+                )
             )
             completion_for_billing.upstream_request = upstream_request or None
             state.usage_totals.apply_to(completion_for_billing)
-            await completion_ports()._raise_if_completion_cancelled(
+            await completion_retry_ports()._raise_if_completion_cancelled(
                 state.redis,
                 state.task_id,
                 "cancelled before billing settle",
             )
-            await completion_ports().worker_billing.charge_completion(
+            await completion_billing_ports().worker_billing.charge_completion(
                 session,
                 completion_for_billing,
             )
-            await completion_ports()._raise_if_completion_cancelled(
-                state.redis,
-                state.task_id,
-                "cancelled before success commit",
-            )
-        success_delivery = completion_ports()._stage_completion_event(
+            # charge 之后不再检查取消。此处一旦抛 TaskCancelled，session 连同
+            # 刚写入的扣费流水一起回滚，而 Completion 也没能标成 SUCCEEDED；
+            # 随后 _settle_cancelled 会在状态不匹配的前提下二次处理这笔钱。
+            # 取消只允许在 charge 之前生效。
+        success_delivery = completion_events_ports()._stage_completion_event(
             session,
             state.user_id,
             state.channel,
             EV_COMP_SUCCEEDED,
-            completion_ports()._completion_event_payload(
+            completion_events_ports()._completion_event_payload(
                 state.task_id,
                 state.message_id,
                 state.attempt,
@@ -186,9 +199,9 @@ async def _persist_success(
                 ),
             ),
         )
-        memory_delivery = await completion_ports()._completion_tool_images._stage_completion_memory_extract(
+        memory_delivery = await completion_tools_ports()._completion_tool_images._stage_completion_memory_extract(
             session,
-            feature_enabled=completion_ports().memory_extraction is not None,
+            feature_enabled=completion_events_ports().memory_extraction is not None,
             user_id=state.user_id,
             conversation_id=state.conversation_id,
             source_message_id=(
@@ -197,10 +210,12 @@ async def _persist_success(
                 else None
             ),
             assistant_message_id=state.message_id,
-            hooks=completion_ports()._COMPLETION_EVENT_HOOKS,
+            hooks=completion_events_ports()._COMPLETION_EVENT_HOOKS,
         )
         await session.commit()
-        await completion_ports().worker_billing.flush_balance_cache_refreshes(session)
+        await completion_billing_ports().worker_billing.flush_balance_cache_refreshes(
+            session
+        )
 
     return success_delivery, memory_delivery
 
@@ -208,18 +223,22 @@ async def _persist_success(
 async def settle_success(state: Any) -> None:
     final_text = _final_text(state)
     if state.lease_lost.is_set():
-        raise completion_ports()._LeaseLost("lease lost before success commit")
-    await completion_ports()._raise_if_completion_cancelled(
+        raise completion_retry_ports()._LeaseLost("lease lost before success commit")
+    await completion_retry_ports()._raise_if_completion_cancelled(
         state.redis,
         state.task_id,
         "cancelled before success commit",
     )
     success_delivery, memory_delivery = await _persist_success(state, final_text)
-    await completion_ports()._deliver_completion_event(state.redis, success_delivery)
+    await completion_events_ports()._deliver_completion_event(
+        state.redis, success_delivery
+    )
     if memory_delivery is not None:
-        await completion_ports()._deliver_completion_event(state.redis, memory_delivery)
+        await completion_events_ports()._deliver_completion_event(
+            state.redis, memory_delivery
+        )
     state.task_outcome = "succeeded"
-    completion_ports().upstream_calls_total.labels(
+    completion_events_ports().upstream_calls_total.labels(
         kind="completion", outcome="ok"
     ).inc()
     if state.conversation_id:

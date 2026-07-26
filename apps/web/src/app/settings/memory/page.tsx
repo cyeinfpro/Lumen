@@ -9,7 +9,6 @@ import {
   Brain,
   Check,
   Download,
-  Loader2,
   Pause,
   Pin,
   Plus,
@@ -51,6 +50,11 @@ import {
   userMemoryQueryKeys,
   useUserQueryScope,
 } from "@/components/QueryProvider";
+import {
+  EmptyBlock,
+  ErrorBlock,
+  LoadingBlock,
+} from "./memoryStateBlocks";
 import {
   formatTime,
   isEmptyFirstRun,
@@ -348,6 +352,7 @@ export default function MemorySettingsPage() {
               editing={editing}
               search={memorySearch}
               pending={memoriesQ.isPending}
+              error={memoriesQ.error}
               bulkMoving={bulkScopeMut.isPending}
               onRefresh={() => void memoriesQ.refetch()}
               onExport={() => void exportJson()}
@@ -689,6 +694,7 @@ function MemoryLibrarySection({
   editing,
   search,
   pending,
+  error,
   bulkMoving,
   onRefresh,
   onExport,
@@ -709,6 +715,7 @@ function MemoryLibrarySection({
   editing: Record<string, string>;
   search: string;
   pending: boolean;
+  error: unknown;
   bulkMoving: boolean;
   onRefresh: () => void;
   onExport: () => void;
@@ -764,6 +771,8 @@ function MemoryLibrarySection({
         selectedMemoryIds={selectedMemoryIds}
         editing={editing}
         pending={pending}
+        error={error}
+        onRetry={onRefresh}
         onToggleSelected={onToggleSelected}
         onEditValue={onEditValue}
         onSaveEdit={onSaveEdit}
@@ -843,6 +852,8 @@ function MemoryLibraryList({
   selectedMemoryIds,
   editing,
   pending,
+  error,
+  onRetry,
   onToggleSelected,
   onEditValue,
   onSaveEdit,
@@ -856,6 +867,8 @@ function MemoryLibraryList({
   selectedMemoryIds: Set<string>;
   editing: Record<string, string>;
   pending: boolean;
+  error: unknown;
+  onRetry: () => void;
   onToggleSelected: (id: string, checked: boolean) => void;
   onEditValue: (id: string, value: string) => void;
   onSaveEdit: (memory: MemoryItemOut) => void;
@@ -864,6 +877,8 @@ function MemoryLibraryList({
   onDelete: (id: string) => void;
 }) {
   if (pending) return <LoadingBlock />;
+  // 错误分支必须排在空态之前: 失败时 data 为 undefined, 列表天然为空
+  if (error) return <ErrorBlock error={error} onRetry={onRetry} />;
   if (memories.length === 0) {
     return <EmptyBlock text="当前作用域还没有记忆。" />;
   }
@@ -1471,17 +1486,4 @@ function TypeBadge({ type }: { type: MemoryType | string }) {
       {typeLabel(type)}
     </span>
   );
-}
-
-function LoadingBlock() {
-  return (
-    <div className="flex items-center justify-center gap-2 p-8 type-body-sm text-[var(--fg-2)]">
-      <Loader2 className="h-4 w-4 animate-spin" />
-      {copy.state.loading}
-    </div>
-  );
-}
-
-function EmptyBlock({ text }: { text: string }) {
-  return <div className="p-8 text-center type-body-sm text-[var(--fg-2)]">{text}</div>;
 }

@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.billing import parse_rate_multiplier_x10000
 from lumen_core.models import User
 from lumen_core.schemas import ImageParamsIn
 from lumen_core.sizing import ResolvedSize
@@ -73,11 +74,10 @@ class EnhanceUsageCapture:
 
 
 def rate_multiplier_x10000(value: Any) -> int:
+    # 换算走 lumen_core.billing 的 Decimal 实现：float 中转会把 1.0009 这类
+    # 四位小数算成 10008（少一档），差额等于平台替用户垫付。
     raw = getattr(value, "billing_rate_multiplier", value)
-    try:
-        return max(0, int(float(raw if raw is not None else 1) * 10_000))
-    except (TypeError, ValueError):
-        return 10_000
+    return parse_rate_multiplier_x10000(raw)
 
 
 async def user_rate_multiplier_x10000(
