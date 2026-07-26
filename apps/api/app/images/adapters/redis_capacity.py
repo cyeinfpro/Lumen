@@ -17,6 +17,7 @@ from .local_capacity import (
 
 logger = logging.getLogger(__name__)
 
+
 _RESERVE_LUA = """
 local leases = KEYS[1]
 local weights = KEYS[2]
@@ -239,11 +240,17 @@ def build_capacity(redis: Any) -> LayeredCapacity:
             in {"dev", "development", "local", "test"}
             else "fail_closed"
         )
+    # The Redis lease is the cluster-wide budget. Its degraded fallback must be
+    # divided across API workers, while the normal process guard must retain the
+    # full per-process ceiling: dividing both layers made one legal large upload
+    # impossible whenever Uvicorn used more than one worker.
+    degraded_fallback = ScaledLocalCapacity(limits)
+    process_guard = ScaledLocalCapacity(limits, process_count=1)
     return LayeredCapacity(
         ResilientCapacity(
             RedisCapacity(redis, limits),
-            ScaledLocalCapacity(limits),
+            degraded_fallback,
             degraded_policy=policy,
         ),
-        ScaledLocalCapacity(limits),
+        process_guard,
     )

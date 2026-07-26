@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .upstream_clients.url_validation import validate_image_job_control_url
+
 
 _ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
@@ -16,38 +18,20 @@ _DEFAULT_REDIS_URL = f"redis://:{_DEFAULT_REDIS_PASSWORD}@localhost:6379/0"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://lumen:lumen@localhost:5432/lumen"
 _DEV_ENVIRONMENTS = frozenset({"dev", "development", "local", "test"})
-_IMAGE_JOB_PLACEHOLDER_HOSTS = frozenset(
-    {
-        "example.com",
-        "example.net",
-        "example.org",
-    }
-)
 
 
 def validate_image_job_base_url(raw_base: str) -> str:
-    """Validate and normalize an operator-configured image-job URL."""
-    base = (raw_base or "").strip().rstrip("/")
-    parts = urlsplit(base)
-    host = (parts.hostname or "").lower().rstrip(".")
-    if (
-        parts.scheme.lower() not in {"http", "https"}
-        or not host
-        or any(char.isspace() for char in host)
-    ):
-        raise ValueError(
-            "IMAGE_JOB_BASE_URL must be an http or https URL with a hostname"
-        )
-    if parts.username or parts.password:
-        raise ValueError("IMAGE_JOB_BASE_URL must not include credentials")
-    if parts.query or parts.fragment:
-        raise ValueError("IMAGE_JOB_BASE_URL must not include query or fragment")
-    if any(
-        host == placeholder or host.endswith(f".{placeholder}")
-        for placeholder in _IMAGE_JOB_PLACEHOLDER_HOSTS
-    ):
-        raise ValueError("IMAGE_JOB_BASE_URL must not use a placeholder hostname")
-    return base
+    """Apply the same transport policy at startup and at request time.
+
+    Plain HTTP is accepted only for loopback/private/container-network hosts;
+    any public control-plane host must use HTTPS because service and upstream
+    credentials are sent on this channel.
+    """
+
+    return validate_image_job_control_url(
+        raw_base,
+        allow_private_http=True,
+    )
 
 
 def validate_image_job_sidecar_token(raw_token: str) -> str:
@@ -164,11 +148,13 @@ class Settings(BaseSettings):
             self.byok_api_key_master_secret = secret
         elif not is_dev and secret == BYOK_DEV_MASTER_SECRET:
             raise ValueError(
-                "BYOK_API_KEY_MASTER_SECRET must not use the public dev fallback outside development"
+                "BYOK_API_KEY_MASTER_SECRET must not use the public dev "
+                "fallback outside development"
             )
         elif not is_dev and len(secret) < 32:
             raise ValueError(
-                "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters outside development"
+                "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters "
+                "outside development"
             )
         return self
 
