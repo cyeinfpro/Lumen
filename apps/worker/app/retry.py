@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lumen_core.constants import GenerationErrorCode as EC
+from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
 
 # 安全审核类 error_code 子集——单独暴露给调用方做"换号再试"决策；
@@ -190,7 +191,9 @@ def _transient_decision(
         return RetryDecision(True, "retriable network_error")
     if 500 <= http_status < 600:
         return RetryDecision(True, f"retriable http={http_status}")
-    if err_code in (EC.NO_IMAGE_RETURNED.value, EC.TOOL_CHOICE_DOWNGRADE.value):
+    # NO_IMAGE_RETURNED 曾经也在这里判可重试，现已上移到 is_retriable 开头判终态：
+    # 它只在上游 2xx 之后产生，重试等于第二次付费。
+    if err_code == EC.TOOL_CHOICE_DOWNGRADE.value:
         return RetryDecision(True, f"retriable {err_code}")
     return None
 
@@ -234,6 +237,15 @@ def is_retriable(
         error_message: 原始错误消息，便于抓关键词（e.g. "Concurrency limit exceeded"）
     """
     msg = (error_message or "").lower()
+
+    # 0) 上游已经产生成本 → 绝不重试，优先级高于下面所有规则。
+    #
+    # 这些码只在上游 2xx 之后产生（见 IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES）：第一笔
+    # 上游费用已经发生，重试必然叠加第二笔，而 hold 只结算一次，差额由平台吸收。
+    # 必须放在最前面：错误消息里恰好带 "rate limit" 之类的关键词时，下面的分支会
+    # 把它判成可重试；成本已经花出去这件事不该被一个字符串匹配翻盘。
+    if (err_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
+        return RetryDecision(False, f"terminal upstream_cost_incurred={err_code}")
 
     # 上游 reference 下载超时通常会被包装成 invalid_value，但本质是网络/供应链抖动。
     # 命中后应换 provider / endpoint 重试，而不是把用户输入判成终态错误。

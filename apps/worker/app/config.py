@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = _DEFAULT_DATABASE_URL
+    db_pool_size: int = Field(default=32, ge=1)
+    db_max_overflow: int = Field(default=16, ge=0)
+    db_pool_timeout: float = Field(default=10.0, gt=0)
+    db_pool_recycle: int = Field(default=1800, ge=-1)
     redis_url: str = _DEFAULT_REDIS_URL
 
     providers: str = ""

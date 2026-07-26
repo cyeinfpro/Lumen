@@ -942,8 +942,10 @@ install_image_job() {
     as_sudo install -m 0644 "${ROOT}/image-job/job_persistence.py" "${app_dir}/job_persistence.py"
     as_sudo install -m 0644 "${ROOT}/image-job/payload_helpers.py" "${app_dir}/payload_helpers.py"
     as_sudo install -m 0644 "${ROOT}/image-job/request_bodies.py" "${app_dir}/request_bodies.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/runtime_config.py" "${app_dir}/runtime_config.py"
     as_sudo install -m 0644 "${ROOT}/image-job/upstream_runtime.py" "${app_dir}/upstream_runtime.py"
+    # 旧版本装过 runtime_config.py，现已删除（死代码，配置由 image_job/config.py
+    # 提供）。升级时清掉残件，免得留一份没人读的环境变量副本误导排障。
+    as_sudo rm -f "${app_dir}/runtime_config.py"
     as_sudo rm -rf "${app_dir}/image_job"
     as_sudo cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"
     as_sudo find "${app_dir}/image_job" -type d -name __pycache__ -prune -exec rm -rf {} +

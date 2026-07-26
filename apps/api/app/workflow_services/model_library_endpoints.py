@@ -48,19 +48,19 @@ from ..workflow_domain.apparel_library import (
 from ..workflow_domain.showcase_model_policy import (
     model_diversity_anchor as _model_diversity_anchor,
 )  # noqa: F401
-from ..workflow_services.library_sync import (
-    add_user_library_item as _add_user_library_item,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+from ..workflow_services.library_items import (
     ensure_legacy_user_library_migrated as _ensure_legacy_user_library_migrated,
-)  # noqa: F401
-from ..workflow_services.library_sync import image_url as _image_url  # noqa: F401
-from ..workflow_services.library_sync import (
-    model_library_download_filename as _model_library_download_filename,
-)  # noqa: F401
-from ..workflow_services.library_sync import (
+)
+from ..workflow_services.library_items import (
     model_library_item_out as _model_library_item_out,
-)  # noqa: F401
+)
+from ..workflow_services.library_materialization import (
+    add_user_library_item as _add_user_library_item,
+)
+from ..workflow_services.library_materialization import image_url as _image_url
+from ..workflow_services.library_materialization import (
+    model_library_download_filename as _model_library_download_filename,
+)
 from ..workflow_services.output_sync import MODEL_CANDIDATE_COUNT
 from ..workflow_services.output_values import task_error_summary as _task_error_summary  # noqa: F401
 from ..workflow_services.serialization import (
@@ -70,7 +70,7 @@ from ..workflow_services.serialization import clean_style_tags as _clean_style_t
 from ..workflow_services.serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
 from ..workflow_services.serialization import http as _http  # noqa: F401
 from ..workflow_services.serialization import now as _now  # noqa: F401
-from ..workflow_services.showcase_preflight import (
+from ..workflow_services.showcase_inputs import (
     validate_owned_images as _validate_owned_images,
 )  # noqa: F401
 from ..workflow_services.workflow_runtime import (
@@ -110,7 +110,7 @@ from . import model_library_tagging as _tagging_helpers
 from ..workflow_domain.workflow_contracts import PublishBundle as _PublishBundle  # noqa: F401
 
 router = APIRouter()
-logger = logging.getLogger("app.routes.workflows")
+logger = logging.getLogger("app.routes.workflows.model_library")
 WORKFLOW_TYPE = "apparel_model_showcase"
 # ---------------------------------------------------------------------------
 # 模特库独立生成 + 任务中心聚合 + vision 自动打标签
@@ -1376,47 +1376,11 @@ async def auto_tag_apparel_model_library_item(
     return await _auto_tag_library_item(db=db, user_id=user.id, item_id=item_id)
 
 
-FACADE_EXPORTS = (
-    "_MODEL_LIBRARY_TITLE_AGE_LABELS",
-    "_model_library_generate_genders",
-    "_model_library_gender_label",
-    "_model_library_run_title",
-    "_model_library_generate_prompt",
-    "_model_library_generate_image_params",
-    "_model_library_run_inputs",
-    "_saved_image_id_set",
-    "_model_library_job_status",
-    "_gather_job_image_outs",
-    "_model_library_image_meta_by_id",
-    "_job_item_out",
-    "_extract_bonus_ids",
-    "_workflow_produced_model_image_ids",
-    "_job_from_library_run",
-    "_job_from_project_candidate_step",
-    "_enqueue_model_library_generate_tasks",
-    "_model_library_explicit_genders",
-    "_reference_profile_has_required_text_fields",
-    "_merge_reference_overrides",
-    "generate_apparel_model_library_job",
-    "list_apparel_model_library_jobs",
-    "delete_apparel_model_library_job",
-    "clear_apparel_model_library_jobs",
-    "save_apparel_model_library_job_item",
-    "_api_call_tagging_upstream",
-    "_AGE_ALIASES_API",
-    "_normalize_tagged_age",
-    "_normalize_tagged_gender",
-    "_auto_tag_library_item",
-    "_run_auto_tag_in_background",
-    "auto_tag_apparel_model_library_item",
-)
-
-
 # Public workflow contracts.
 run_auto_tag_in_background = _run_auto_tag_in_background
 
 
-# Public compatibility contracts.
+# Public model-library service contracts.
 AGE_ALIASES_API = _AGE_ALIASES_API
 MODEL_LIBRARY_TITLE_AGE_LABELS = _MODEL_LIBRARY_TITLE_AGE_LABELS
 api_call_tagging_upstream = _api_call_tagging_upstream

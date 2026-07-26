@@ -14,7 +14,18 @@
 
 from __future__ import annotations
 
-from .runtime import CompletionPorts, CompletionRuntime, install_completion_ports
+from .runtime import (
+    CompletionPorts,
+    CompletionRuntime,
+    CompletionContextPorts,
+    CompletionToolsPorts,
+    CompletionPersistencePorts,
+    CompletionUpstreamPorts,
+    CompletionBillingPorts,
+    CompletionEventsPorts,
+    CompletionRetryPorts,
+    install_completion_ports,
+)
 from .artifact_codec import (
     compute_blurhash as _generation_compute_blurhash,
     make_display as _make_display,
@@ -1336,22 +1347,109 @@ async def _completion_preflight_failure(
     )
 
 
-def build_completion_runtime() -> CompletionRuntime:
-    ports = CompletionPorts(
-        Completion=Completion,
+def _build_completion_context_ports() -> CompletionContextPorts:
+    return CompletionContextPorts(
         DEFAULT_CHAT_MODEL=DEFAULT_CHAT_MODEL,
-        Message=Message,
-        RETRY_BACKOFF_SECONDS=RETRY_BACKOFF_SECONDS,
-        RetryDecision=RetryDecision,
-        SessionLocal=SessionLocal,
-        UpstreamError=UpstreamError,
-        User=User,
-        _CANCEL_CHECK_EVERY_DELTAS=_CANCEL_CHECK_EVERY_DELTAS,
-        _CANCEL_POLL_INTERVAL_S=_CANCEL_POLL_INTERVAL_S,
-        _COMPLETION_EVENT_HOOKS=_COMPLETION_EVENT_HOOKS,
-        _CompletionEpochSuperseded=_CompletionEpochSuperseded,
+        _inject_user_memory_context=_inject_user_memory_context,
+        _instructions_with_summary_guardrail=_instructions_with_summary_guardrail,
+        _pack_recent_history=_pack_recent_history,
+        _record_completion_context_metadata=_record_completion_context_metadata,
+        runtime_settings=runtime_settings,
+    )
+
+
+def _build_completion_tools_ports() -> CompletionToolsPorts:
+    return CompletionToolsPorts(
         _CompletionToolTracker=_CompletionToolTracker,
         _CompletionUsageAccumulator=_CompletionUsageAccumulator,
+        _chat_tools_from_content=_chat_tools_from_content,
+        _completion_tool_images=_completion_tool_images,
+        _configure_chat_tools=_configure_chat_tools,
+        _estimate_completion_request_input_tokens=_estimate_completion_request_input_tokens,
+        _estimate_completion_tool_output_tokens=_estimate_completion_tool_output_tokens,
+        _extract_image_events_from_response=_extract_image_events_from_response,
+        _extract_response_image_b64=_extract_response_image_b64,
+        _extract_response_revised_prompt=_extract_response_revised_prompt,
+        _publish_completion_tool_progress=_publish_completion_tool_progress,
+        _publish_completion_tool_updates=_publish_completion_tool_updates,
+        _store_and_publish_completion_tool_image=_store_and_publish_completion_tool_image,
+        _summarize_tool_error=_summarize_tool_error,
+        _tool_image_dedupe_key=_tool_image_dedupe_key,
+        _tool_limited_completion_body=_tool_limited_completion_body,
+    )
+
+
+def _build_completion_persistence_ports() -> CompletionPersistencePorts:
+    return CompletionPersistencePorts(
+        Completion=Completion,
+        Message=Message,
+        SessionLocal=SessionLocal,
+        User=User,
+        _acquire_completion_xact_lock=_acquire_completion_xact_lock,
+        _cleanup_completion_runtime=_cleanup_completion_runtime,
+        _flush_completion_text=_flush_completion_text,
+        affected_rows=affected_rows,
+        is_completion_terminal=is_completion_terminal,
+        new_uuid7=new_uuid7,
+        select=select,
+        update=update,
+    )
+
+
+def _build_completion_upstream_ports() -> CompletionUpstreamPorts:
+    return CompletionUpstreamPorts(
+        UpstreamError=UpstreamError,
+        _apply_url_citations=_apply_url_citations,
+        _completion_upstream_provider_event=_completion_upstream_provider_event,
+        _extract_completed_output_text=_extract_completed_output_text,
+        _extract_reasoning_delta=_extract_reasoning_delta,
+        _extract_reasoning_text_from_response=_extract_reasoning_text_from_response,
+        _extract_url_citations=_extract_url_citations,
+        _finalize_completion_text=_finalize_completion_text,
+        _merge_completion_upstream_metadata=_merge_completion_upstream_metadata,
+        _normalize_reasoning_effort_for_upstream=_normalize_reasoning_effort_for_upstream,
+        _raise_for_terminal_response_event=_raise_for_terminal_response_event,
+        _record_completion_upstream_metadata=_record_completion_upstream_metadata,
+        stream_completion=stream_completion,
+    )
+
+
+def _build_completion_billing_ports() -> CompletionBillingPorts:
+    return CompletionBillingPorts(
+        _fallback_completion_tool_image_tokens=_fallback_completion_tool_image_tokens,
+        _settle_cancelled_completion_billing=_settle_cancelled_completion_billing,
+        _settle_failed_completion_billing=_settle_failed_completion_billing,
+        byok_error_message=byok_error_message,
+        byok_error_to_generation_code=byok_error_to_generation_code,
+        classify_user_credential_error=classify_user_credential_error,
+        parse_usage=parse_usage,
+        record_user_credential_runtime_error=record_user_credential_runtime_error,
+        resolve_user_credential_runtime=resolve_user_credential_runtime,
+        worker_billing=worker_billing,
+    )
+
+
+def _build_completion_events_ports() -> CompletionEventsPorts:
+    return CompletionEventsPorts(
+        _COMPLETION_EVENT_HOOKS=_COMPLETION_EVENT_HOOKS,
+        _completion_event_payload=_completion_event_payload,
+        _deliver_completion_event=_deliver_completion_event,
+        _stage_completion_event=_stage_completion_event,
+        _tracer=_tracer,
+        logger=logger,
+        memory_extraction=memory_extraction,
+        publish_event=publish_event,
+        upstream_calls_total=upstream_calls_total,
+    )
+
+
+def _build_completion_retry_ports() -> CompletionRetryPorts:
+    return CompletionRetryPorts(
+        RETRY_BACKOFF_SECONDS=RETRY_BACKOFF_SECONDS,
+        RetryDecision=RetryDecision,
+        _CANCEL_CHECK_EVERY_DELTAS=_CANCEL_CHECK_EVERY_DELTAS,
+        _CANCEL_POLL_INTERVAL_S=_CANCEL_POLL_INTERVAL_S,
+        _CompletionEpochSuperseded=_CompletionEpochSuperseded,
         _LeaseLost=_LeaseLost,
         _MAX_ATTEMPTS=_MAX_ATTEMPTS,
         _MAX_TOOL_INVOCATIONS_DEFAULT=_MAX_TOOL_INVOCATIONS_DEFAULT,
@@ -1360,73 +1458,28 @@ def build_completion_runtime() -> CompletionRuntime:
         _TOOL_IDLE_TIMEOUT_S_DEFAULT=_TOOL_IDLE_TIMEOUT_S_DEFAULT,
         _TaskCancelled=_TaskCancelled,
         _ToolIdleTimeout=_ToolIdleTimeout,
-        _acquire_completion_xact_lock=_acquire_completion_xact_lock,
         _acquire_lease=_acquire_lease,
-        _apply_url_citations=_apply_url_citations,
-        _chat_tools_from_content=_chat_tools_from_content,
         _classify_exception=_classify_exception,
-        _cleanup_completion_runtime=_cleanup_completion_runtime,
-        _completion_event_payload=_completion_event_payload,
         _completion_preflight_failure=_completion_preflight_failure,
-        _completion_tool_images=_completion_tool_images,
-        _completion_upstream_provider_event=_completion_upstream_provider_event,
-        _configure_chat_tools=_configure_chat_tools,
-        _deliver_completion_event=_deliver_completion_event,
-        _estimate_completion_request_input_tokens=_estimate_completion_request_input_tokens,
-        _estimate_completion_tool_output_tokens=_estimate_completion_tool_output_tokens,
-        _extract_completed_output_text=_extract_completed_output_text,
-        _extract_image_events_from_response=_extract_image_events_from_response,
-        _extract_reasoning_delta=_extract_reasoning_delta,
-        _extract_reasoning_text_from_response=_extract_reasoning_text_from_response,
-        _extract_response_image_b64=_extract_response_image_b64,
-        _extract_response_revised_prompt=_extract_response_revised_prompt,
-        _extract_url_citations=_extract_url_citations,
-        _fallback_completion_tool_image_tokens=_fallback_completion_tool_image_tokens,
-        _finalize_completion_text=_finalize_completion_text,
-        _flush_completion_text=_flush_completion_text,
-        _inject_user_memory_context=_inject_user_memory_context,
-        _instructions_with_summary_guardrail=_instructions_with_summary_guardrail,
         _is_cancelled=_is_cancelled,
         _iter_completion_stream_with_abort=_iter_completion_stream_with_abort,
         _lease_renewer=_lease_renewer,
-        _merge_completion_upstream_metadata=_merge_completion_upstream_metadata,
-        _normalize_reasoning_effort_for_upstream=_normalize_reasoning_effort_for_upstream,
-        _pack_recent_history=_pack_recent_history,
-        _publish_completion_tool_progress=_publish_completion_tool_progress,
-        _publish_completion_tool_updates=_publish_completion_tool_updates,
-        _raise_for_terminal_response_event=_raise_for_terminal_response_event,
         _raise_if_completion_cancelled=_raise_if_completion_cancelled,
-        _record_completion_context_metadata=_record_completion_context_metadata,
-        _record_completion_upstream_metadata=_record_completion_upstream_metadata,
-        _settle_cancelled_completion_billing=_settle_cancelled_completion_billing,
-        _settle_failed_completion_billing=_settle_failed_completion_billing,
-        _stage_completion_event=_stage_completion_event,
-        _store_and_publish_completion_tool_image=_store_and_publish_completion_tool_image,
-        _summarize_tool_error=_summarize_tool_error,
-        _tool_image_dedupe_key=_tool_image_dedupe_key,
-        _tool_limited_completion_body=_tool_limited_completion_body,
-        _tracer=_tracer,
         _watch_completion_cancel=_watch_completion_cancel,
-        affected_rows=affected_rows,
-        byok_error_message=byok_error_message,
-        byok_error_to_generation_code=byok_error_to_generation_code,
-        classify_user_credential_error=classify_user_credential_error,
         completion_queue_metadata=completion_queue_metadata,
-        is_completion_terminal=is_completion_terminal,
-        logger=logger,
-        memory_extraction=memory_extraction,
         merge_queue_metadata=merge_queue_metadata,
-        new_uuid7=new_uuid7,
-        parse_usage=parse_usage,
-        publish_event=publish_event,
-        record_user_credential_runtime_error=record_user_credential_runtime_error,
-        resolve_user_credential_runtime=resolve_user_credential_runtime,
-        runtime_settings=runtime_settings,
-        select=select,
-        stream_completion=stream_completion,
-        update=update,
-        upstream_calls_total=upstream_calls_total,
-        worker_billing=worker_billing,
+    )
+
+
+def build_completion_runtime() -> CompletionRuntime:
+    ports = CompletionPorts(
+        context=_build_completion_context_ports(),
+        tools=_build_completion_tools_ports(),
+        persistence=_build_completion_persistence_ports(),
+        upstream=_build_completion_upstream_ports(),
+        billing=_build_completion_billing_ports(),
+        events=_build_completion_events_ports(),
+        retry=_build_completion_retry_ports(),
     )
     install_completion_ports(ports)
     return CompletionRuntime(ports=ports, runner=_run_completion)

@@ -108,6 +108,33 @@ def test_put_bytes_ignores_tmp_cleanup_failure_after_successful_link(
     assert storage.get_bytes("u/user/g/gen/orig.png") == b"first"
 
 
+def test_put_bytes_tmp_cleanup_failure_is_counted_and_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """E-20: 吞掉清理失败是对的，但吞掉之后必须留下可观测线索。"""
+    storage = LocalStorage(tmp_path)
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
+        if self.name.startswith(".orig.png.") and self.name.endswith(".tmp"):
+            raise OSError(errno.EACCES, "cleanup failed")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    counter = storage_mod.storage_tmp_cleanup_failed_total.labels(errno="EACCES")
+    before = counter._value.get()  # noqa: SLF001
+
+    with caplog.at_level("WARNING", logger="app.storage"):
+        result = storage.put_bytes_result("u/user/g/gen/orig.png", b"first")
+
+    assert result.created is True
+    assert storage.get_bytes("u/user/g/gen/orig.png") == b"first"
+    assert counter._value.get() == before + 1  # noqa: SLF001
+    assert any("storage temp cleanup failed" in r.message for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_async_put_get_and_delete_bytes(tmp_path: Path) -> None:
     storage = LocalStorage(tmp_path)

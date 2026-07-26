@@ -87,7 +87,12 @@ function appendPatchValue(
 ): string | undefined {
   if (!incoming) return current;
   const value = current ?? "";
-  return terminal && value.endsWith(incoming) ? current : value + incoming;
+  // 修复终态重复追加：终态文本由服务端权威给出（终态事件 payload 或
+  // refreshCompletionText），此刻才冲刷到的迟到 delta 一律丢弃。原来只挡了「delta 恰好
+  // 是结尾」，delta 是开头或中间片段时照样拼到末尾（"你好世界" + 迟到的 "你好"
+  // → "你好世界你好"）。仅当终态内容为空时才允许补写，避免消息彻底空白。
+  if (terminal) return value ? current : incoming;
+  return value + incoming;
 }
 
 function applyPatchesToMessage(

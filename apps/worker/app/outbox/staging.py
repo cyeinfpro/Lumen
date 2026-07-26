@@ -39,14 +39,21 @@ async def mark_staged_outbox_published(
     *,
     log: logging.Logger = logger,
 ) -> bool:
-    """Idempotently mark an already committed staged event as published."""
+    """Idempotently mark an already committed staged event as published.
+
+    事务边界显式化（E-6）：published_at 与 DLQ resolve 必须同进同出，
+    不能依赖 autobegin 的隐式行为——否则版本升级或配置漂移时可能只提交半边，
+    造成「已投递但 DLQ 仍在」或反之的状态不一致。
+    """
     async with session_factory() as session:
-        row = await session.get(OutboxEvent, event_id)
-        if row is None:
-            log.error("post-commit outbox delivery lost persistence event=%s", event_id)
-            return False
-        if row.published_at is None:
-            row.published_at = datetime.now(timezone.utc)
-        await resolve(session, [event_id])
-        await session.commit()
+        async with session.begin():
+            row = await session.get(OutboxEvent, event_id)
+            if row is None:
+                log.error(
+                    "post-commit outbox delivery lost persistence event=%s", event_id
+                )
+                return False
+            if row.published_at is None:
+                row.published_at = datetime.now(timezone.utc)
+            await resolve(session, [event_id])
     return True

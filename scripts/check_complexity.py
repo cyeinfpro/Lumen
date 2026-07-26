@@ -20,11 +20,13 @@ DEFAULT_PATHS = (
     "apps/worker/app",
     "apps/api/app",
     "packages/core/lumen_core",
+    "image-job/image_job",
 )
 DEFAULT_LINE_PATHS = (
     "apps/worker/app",
     "apps/api/app",
     "packages/core/lumen_core",
+    "image-job/image_job",
     "apps/web/src",
     "scripts/update.sh",
     "scripts/update",

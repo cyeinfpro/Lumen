@@ -14,7 +14,7 @@ from app.routes import workflows
 from app.workflow_services import serialization
 
 
-def test_serialization_helpers_remain_route_compatible() -> None:
+def test_route_does_not_reexport_serialization_helpers() -> None:
     names = (
         "_http",
         "_now",
@@ -31,14 +31,11 @@ def test_serialization_helpers_remain_route_compatible() -> None:
         "_storage_root",
         "_storage_path",
         "_showcase_gpt55_reference_data_url",
+        "_SHOWCASE_GPT55_REFERENCE_MAX_BYTES",
+        "_WORKFLOW_CURSOR_VERSION",
     )
     for name in names:
-        assert getattr(workflows, name) is getattr(serialization, name)
-    assert (
-        workflows._SHOWCASE_GPT55_REFERENCE_MAX_BYTES
-        == serialization._SHOWCASE_GPT55_REFERENCE_MAX_BYTES
-    )
-    assert workflows._WORKFLOW_CURSOR_VERSION == serialization._WORKFLOW_CURSOR_VERSION
+        assert not hasattr(workflows, name)
 
 
 def test_cleaning_helpers_preserve_order_limits_and_truncation() -> None:

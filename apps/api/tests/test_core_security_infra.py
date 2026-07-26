@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 import pytest
 
 import app.arq_pool as arq_pool
@@ -226,6 +225,156 @@ async def test_nav_feature_guard_fails_closed_for_non_canvas_failure(
     assert start["status"] == 404
     assert b"video is disabled" in body
     assert downstream_called is False
+
+
+def _guard_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, str],
+    flags: object | None = None,
+) -> tuple[object, list[int], list[int]]:
+    """Wrap the guard with counting stubs for DB sessions and setting reads."""
+    sessions: list[int] = []
+    reads: list[int] = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            sessions.append(1)
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def get_setting(_session, spec):
+        reads.append(1)
+        return settings.get(spec.key)
+
+    async def app(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    monkeypatch.setattr(main, "SessionLocal", SessionContext)
+    monkeypatch.setattr(main, "get_setting", get_setting)
+    return main._NavFeatureGuardMiddleware(app, flags), sessions, reads
+
+
+async def _call_guard(wrapped, path: str) -> int:
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await wrapped(
+        {"type": "http", "method": "GET", "path": path, "headers": []},
+        receive,
+        send,
+    )
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    return int(start["status"])
+
+
+@pytest.mark.asyncio
+async def test_nav_feature_guard_caches_settings_across_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapped, sessions, reads = _guard_probe(
+        monkeypatch,
+        {"ui.nav.projects_visible": "1", "canvas.enabled": "1"},
+    )
+
+    for _ in range(25):
+        assert await _call_guard(wrapped, "/canvases") == 200
+
+    # Without the cache this was 25 sessions / 50 reads; the flood now collapses
+    # onto a single DB round trip for the whole TTL window.
+    assert len(sessions) == 1
+    assert len(reads) == 2
+
+
+@pytest.mark.asyncio
+async def test_nav_feature_guard_cache_is_scoped_to_the_middleware_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, first_sessions, _first_reads = _guard_probe(
+        monkeypatch,
+        {"ui.nav.video_visible": "1"},
+    )
+    assert await _call_guard(first, "/videos") == 200
+
+    # A second app must resolve its own flags: with a module-level cache this
+    # request would have been answered from the first app's reading.
+    second, second_sessions, _second_reads = _guard_probe(
+        monkeypatch,
+        {"ui.nav.video_visible": "0"},
+    )
+    assert await _call_guard(second, "/videos") == 404
+    assert len(first_sessions) == 1
+    assert len(second_sessions) == 1
+
+
+@pytest.mark.asyncio
+async def test_nav_feature_guard_cache_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = {"ui.nav.video_visible": "1"}
+    # Drive the TTL from a hand-cranked clock instead of sleeping, so the
+    # deadline arithmetic itself is what the test exercises.
+    now = 1_000.0
+    cache = main._NavFeatureFlagCache(ttl_seconds=5.0, clock=lambda: now)
+    wrapped, sessions, _reads = _guard_probe(monkeypatch, settings, cache)
+
+    assert await _call_guard(wrapped, "/videos") == 200
+    now += 4.9
+    assert await _call_guard(wrapped, "/videos") == 200
+    assert len(sessions) == 1
+
+    # An admin flipping the flag must be honoured once the TTL lapses.
+    now += 0.2
+    settings["ui.nav.video_visible"] = "0"
+
+    assert await _call_guard(wrapped, "/videos") == 404
+    assert len(sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_nav_feature_guard_does_not_cache_read_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[int] = []
+    failing = True
+
+    class SessionContext:
+        async def __aenter__(self):
+            sessions.append(1)
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def get_setting(_session, _spec):
+        if failing:
+            raise RuntimeError("settings unavailable")
+        return "1"
+
+    async def app(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    monkeypatch.setattr(main, "SessionLocal", SessionContext)
+    monkeypatch.setattr(main, "get_setting", get_setting)
+    wrapped = main._NavFeatureGuardMiddleware(app)
+
+    assert await _call_guard(wrapped, "/videos") == 404
+    assert await _call_guard(wrapped, "/videos") == 404
+    assert len(sessions) == 2
+
+    failing = False
+    # A recovered database must be visible immediately, not after the TTL.
+    assert await _call_guard(wrapped, "/videos") == 200
 
 
 @pytest.mark.asyncio

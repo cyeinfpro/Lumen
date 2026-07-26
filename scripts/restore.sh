@@ -65,6 +65,19 @@ REDIS_NEEDS_START=0
 PG_TEMP_DB=""
 PG_ROLLBACK_DB=""
 PG_SWAP_IN_PROGRESS=0
+# 1 = 库已经真的换成恢复后的数据（用于判断失败时该不该把 redis 也退回去）
+PG_PROMOTED=0
+REDIS_HOST_DIR=""
+REDIS_BACKUP_DIR=""
+# redis 旧数据备份目录的前缀；名字里再拼 UTC 时间戳（可排序，用于轮转）+ pid。
+REDIS_BACKUP_PREFIX=".lumen-restore-old."
+# 保留几份（含本次）。旧数据是拷贝失败后人工 rollback 的唯一退路，所以一份都
+# 不留不行；但一份就是一整个 redis 数据集，不轮转就是每恢复一次永久多占一份盘。
+REDIS_BACKUP_KEEP="${LUMEN_REDIS_RESTORE_BACKUP_KEEP:-2}"
+case "$REDIS_BACKUP_KEEP" in
+    ''|*[!0-9]*) REDIS_BACKUP_KEEP=2 ;;
+    0) REDIS_BACKUP_KEEP=1 ;;
+esac
 
 log() { printf '[restore %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
@@ -371,6 +384,7 @@ pg_promote_staged_restore() {
             return 1
         fi
         PG_TEMP_DB=""
+        PG_PROMOTED=1
         log "postgres staged database promoted"
         return 0
     fi
@@ -403,6 +417,9 @@ pg_promote_staged_restore() {
 
     PG_TEMP_DB=""
     PG_SWAP_IN_PROGRESS=0
+    # 库已经是恢复后的数据了。下面的 discard 只是清理垃圾库，失败也不代表
+    # 恢复失败 —— 这个标记就是给失败分支用来区分"没换成"和"换成了但没扫干净"。
+    PG_PROMOTED=1
     if ! pg_discard_rollback_after_success; then
         return 1
     fi
@@ -475,6 +492,88 @@ validate_redis_host_dir() {
     printf '%s\n' "$resolved"
 }
 
+prune_redis_restore_backups() {
+    # $1 = 已过 validate_redis_host_dir 的 redis 数据目录
+    # $2 = 保留份数（含即将创建的那一份），所以这里最多留 $2-1 份历史
+    local dir="$1"
+    local keep="${2:-2}"
+    local keep_existing entry pruned=0
+    [ -d "$dir" ] || return 0
+    keep_existing=$(( keep > 0 ? keep - 1 : 0 ))
+    # 目录名带 UTC 时间戳前缀，按名字倒序 == 按时间从新到旧；跳过前
+    # keep_existing 个，剩下的都是过期的。
+    while IFS= read -r entry; do
+        if [ -z "$entry" ]; then
+            continue
+        fi
+        # 只删自己按前缀造出来的目录，且必须落在目标目录下
+        case "$entry" in
+            "$dir/$REDIS_BACKUP_PREFIX"*) ;;
+            *) continue ;;
+        esac
+        if rm -rf -- "$entry"; then
+            pruned=$(( pruned + 1 ))
+        else
+            log "WARN 清理过期 redis 备份失败，请人工删除: $entry"
+        fi
+    done < <(
+        find "$dir" -mindepth 1 -maxdepth 1 -type d \
+            -name "${REDIS_BACKUP_PREFIX}*" 2>/dev/null \
+            | LC_ALL=C sort -r \
+            | tail -n "+$(( keep_existing + 1 ))"
+    )
+    if [ "$pruned" -gt 0 ]; then
+        log "已清理 $pruned 份过期 redis 旧数据备份（保留最近 $keep_existing 份 + 本次）"
+    fi
+    return 0
+}
+
+redis_rollback_from_backup() {
+    # 把 $REDIS_BACKUP_DIR 里的旧数据搬回 $REDIS_HOST_DIR。
+    # 调用方负责保证此刻 redis 容器是停的。全部搬回返回 0，否则返回 1。
+    local rc=0 _f
+    if [ -z "${REDIS_BACKUP_DIR:-}" ] || [ ! -d "$REDIS_BACKUP_DIR" ] \
+            || [ -z "${REDIS_HOST_DIR:-}" ]; then
+        return 1
+    fi
+    for _f in dump.rdb appendonly.aof appendonlydir; do
+        rm -rf "${REDIS_HOST_DIR:?}/$_f" 2>/dev/null || true
+        if [ -e "$REDIS_BACKUP_DIR/$_f" ]; then
+            if ! mv "$REDIS_BACKUP_DIR/$_f" "$REDIS_HOST_DIR/$_f"; then
+                log "WARN 回滚 redis/$_f 失败，请人工检查 $REDIS_BACKUP_DIR"
+                rc=1
+            fi
+        fi
+    done
+    rmdir "$REDIS_BACKUP_DIR" 2>/dev/null || true
+    return "$rc"
+}
+
+redis_rollback_after_pg_failure() {
+    # J-6：恢复顺序是 redis 先切、PG 后切。PG 这一步失败时 PG 还停在原库，
+    # 而 redis 已经是备份时点的数据 —— 两边错配。错配远比"都旧"危险：redis 里
+    # 是备份时点的队列/流/tracker，PG 里却是当前状态，服务一起来就会把早已完成
+    # 并且已经扣过费的任务当成待处理再跑一遍（重复调用上游 = 重复扣费）。
+    # 所以 PG 没换成时，把 redis 也退回原状态，让两边一起收敛回"全旧"。
+    if [ ! -d "${REDIS_BACKUP_DIR:-}" ]; then
+        log "ERROR redis 已是备份时点数据但 PG 仍是原库，且没有可回滚的原数据。"
+        log "      两边错配，启服务前请人工确认 redis / PG 的时点是否一致。"
+        return 1
+    fi
+    log "PG 未切换成功；回滚 redis 到 restore 前状态，避免 redis 与 PG 错配"
+    REDIS_NEEDS_START=1
+    docker stop "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+    if redis_rollback_from_backup; then
+        log "redis 已回滚到 restore 前状态，与 PG 重新一致（两边均为原数据）"
+    else
+        log "ERROR redis 回滚不完整，启服务前请人工检查 $REDIS_BACKUP_DIR"
+    fi
+    if docker start "$REDIS_CONTAINER" >/dev/null 2>&1; then
+        REDIS_NEEDS_START=0
+    fi
+    return 0
+}
+
 trap cleanup EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
@@ -540,7 +639,13 @@ fi
 # 不能直接 rm 旧数据再 cp：cp 失败（磁盘满 / cifs 抽风）会留下"清空但没装回"
 # 的损毁状态，restore 后丢全部 redis 数据。改 mv 旧数据到备份目录 → cp 新数据
 # → 成功才删 backup；任何 cp 失败都把 backup 里的旧数据 mv 回原位。
-REDIS_BACKUP_DIR="$REDIS_HOST_DIR/.lumen-restore-old.$$"
+#
+# J-5：备份目录必须轮转。旧实现用 pid 命名且从不删，每恢复一次就在 redis 数据
+# 盘上永久多留一整份数据集，最终把盘撑爆 —— 而 redis 盘满 = 全站写不进去。
+# 名字改成"时间戳 + pid"以便按时间排序；轮转放在创建之前，这样上一轮中途失败
+# 退出留下的目录也能在这里被回收。
+REDIS_BACKUP_DIR="$REDIS_HOST_DIR/${REDIS_BACKUP_PREFIX}$(date -u +%Y%m%dT%H%M%SZ).$$"
+prune_redis_restore_backups "$REDIS_HOST_DIR" "$REDIS_BACKUP_KEEP"
 mkdir -p "$REDIS_BACKUP_DIR" || { log "ERROR cannot mkdir $REDIS_BACKUP_DIR"; exit 4; }
 for _f in dump.rdb appendonly.aof appendonlydir; do
     if [ -e "$REDIS_HOST_DIR/$_f" ]; then
@@ -563,21 +668,14 @@ fi
 
 if [ "$_redis_cp_ok" = "0" ]; then
     log "ERROR redis 数据拷贝失败，回滚到原状态"
-    for _f in dump.rdb appendonly.aof appendonlydir; do
-        rm -rf "${REDIS_HOST_DIR:?}/$_f" 2>/dev/null || true
-        if [ -e "$REDIS_BACKUP_DIR/$_f" ]; then
-            mv "$REDIS_BACKUP_DIR/$_f" "$REDIS_HOST_DIR/$_f" \
-                || log "WARN 回滚 redis/$_f 失败，请人工检查 $REDIS_BACKUP_DIR"
-        fi
-    done
-    rmdir "$REDIS_BACKUP_DIR" 2>/dev/null || true
+    redis_rollback_from_backup || true
     log "建议：检查磁盘空间 (df -h) / 文件系统挂载状态 / 重跑 restore"
     exit 5
 fi
 
-# 拷贝成功后清理 backup（保留 30 分钟应急人工 rollback；脚本不主动删，
-# 后续 restore 启动时由 mkdir 命名冲突自然不会复用）
-log "redis 数据已恢复，原数据备份在 $REDIS_BACKUP_DIR"
+# 这一份留着给人工应急 rollback；由下一次 restore 开头的 prune 按
+# LUMEN_REDIS_RESTORE_BACKUP_KEEP（默认 2 份）轮转回收，不在这里删。
+log "redis 数据已恢复，原数据备份在 $REDIS_BACKUP_DIR（保留最近 $REDIS_BACKUP_KEEP 份，下次 restore 时自动轮转）"
 
 docker start "$REDIS_CONTAINER" >/dev/null
 REDIS_NEEDS_START=0
@@ -610,6 +708,13 @@ log "redis restored"
 log "promoting staged postgres restore from $PG_TEMP_DB"
 if ! pg_promote_staged_restore; then
     log "ERROR: postgres staged restore promotion failed"
+    # PG_PROMOTED=1 表示库其实已经换成了恢复后的数据（失败出在后续清理垃圾库），
+    # 这时 redis 和 PG 是一致的，不能再动 redis —— 回滚反而制造错配。
+    if [ "$PG_PROMOTED" -ne 1 ]; then
+        redis_rollback_after_pg_failure || true
+    else
+        log "postgres 数据已切换成功（失败发生在收尾清理），redis 保持恢复后状态"
+    fi
     exit 7
 fi
 log "postgres restored"

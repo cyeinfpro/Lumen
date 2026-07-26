@@ -47,6 +47,7 @@ from ..runtime_settings import get_setting
 from ..services.generation_queue import release_generation_queue_state
 from ..services.task_listing import TaskListingRuntime, build_task_list
 from ..sse_publish import publish_sse_event
+from ..task_billing import apply_rate_multiplier_micro, user_rate_multiplier_x10000
 
 
 router = APIRouter()
@@ -151,9 +152,27 @@ async def _billing_allow_negative(db: AsyncSession) -> bool:
     )
 
 
-async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int:
-    if not await _billing_enabled(db):
-        return 0
+async def _generation_rate_multiplier_x10000(
+    db: AsyncSession,
+    gen: Generation,
+) -> int:
+    # 与 worker settle 侧同源（apps/worker/app/billing.py 的
+    # _snapshot_rate_multiplier_x10000 / generation_rate_multiplier_x10000）：
+    # 优先用下单时钉在 upstream_request 上的快照，缺失才回落到用户当前费率。
+    raw = _json_dict(getattr(gen, "upstream_request", None)).get(
+        "billing_rate_multiplier_x10000"
+    )
+    if raw is not None:
+        try:
+            snapshot = int(raw)
+        except (TypeError, ValueError):
+            snapshot = -1
+        if snapshot >= 0:
+            return snapshot
+    return await user_rate_multiplier_x10000(db, gen.user_id)
+
+
+async def _generation_retry_base_micro(db: AsyncSession, gen: Generation) -> int:
     request = _json_dict(getattr(gen, "upstream_request", None))
     image_count = _generation_request_image_count(gen)
     tier = _string_value(request.get("billing_tier"))
@@ -185,6 +204,22 @@ async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int
         ),
     )
     return int(amount or 0)
+
+
+async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int:
+    if not await _billing_enabled(db):
+        return 0
+    base_micro = await _generation_retry_base_micro(db, gen)
+    if base_micro <= 0:
+        return 0
+    # 审计新-12：这里以前直接返回 base（未乘倍率），而 settle 侧是乘过倍率的实际成本。
+    # 倍率 > 1 的用户重试时 hold 少扣，余额预检形同虚设，差额只能由平台垫付 ——
+    # 违反「上游成本纯转嫁」。hold 必须与 settle 用同一口径，宁可多冻结（多余部分
+    # settle 时自然 release），也绝不少冻结。
+    return apply_rate_multiplier_micro(
+        base_micro,
+        await _generation_rate_multiplier_x10000(db, gen),
+    )
 
 
 async def _hold_generation_retry_wallet(

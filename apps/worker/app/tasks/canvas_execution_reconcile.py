@@ -102,6 +102,44 @@ def _fingerprint_matches(task: CanvasExecutionTask, real: Any) -> bool:
     return not expected or not actual or expected == actual
 
 
+def _unconvergeable_projection(
+    task: CanvasExecutionTask,
+    real: Any,
+) -> _TaskProjection:
+    """底层行永远无法再收敛时给出的终态投影。
+
+    只有两种情况会走到这里，两种都**不会随时间变好**：
+    - 行不存在：generation / video_generation 与 CanvasExecutionTask 是同一个
+      事务里落库的（execution_service 里一次 commit），所以「任务行在、生成行
+      不在」只可能是生成行被硬删除或数据被破坏；
+    - 指纹不匹配：两侧的 request_fingerprint 都非空且不同，而这两个字段写入后
+      不再变更，说明这一行属于另一次请求。
+
+    以前这两种情况都 `return None`，被 `_project_execution_tasks` 翻译成
+    「保持原状态」的空投影：execution 永远停在非终态，cron 每 30s 重扫一次，
+    前端节点永远转圈，后续依赖它的节点也一直排不上。收敛成 failed 终态才能
+    让 execution 走完 finished_at / run 聚合 / run event 这条链路。
+
+    ``task_id`` 故意留空：终态回执表是用来给「真实上游任务的终态跃迁」去重的，
+    这里根本没有可信的 (task_id, epoch) 可写，写进去反而会污染回执。
+    """
+    if real is None:
+        missing_id = task.generation_id or task.video_generation_id
+        return _TaskProjection(
+            "failed",
+            error_code="canvas_task_row_missing",
+            error_message=(f"{task.task_kind} row {missing_id} no longer exists"),
+        )
+    return _TaskProjection(
+        "failed",
+        error_code="canvas_task_fingerprint_mismatch",
+        error_message=(
+            f"{task.task_kind} row {getattr(real, 'id', None)} belongs to a "
+            "different request fingerprint"
+        ),
+    )
+
+
 def _image_output(task: CanvasExecutionTask, image: Image) -> dict[str, Any]:
     return {
         "type": "image",
@@ -135,7 +173,7 @@ async def _project_generation(
 ) -> _TaskProjection | None:
     generation = await session.get(Generation, task.generation_id)
     if generation is None or not _fingerprint_matches(task, generation):
-        return None
+        return _unconvergeable_projection(task, generation)
     status = generation.status
     if status == GenerationStatus.QUEUED.value:
         return _TaskProjection(
@@ -205,7 +243,7 @@ async def _project_video_generation(
 ) -> _TaskProjection | None:
     generation = await session.get(VideoGeneration, task.video_generation_id)
     if generation is None or not _fingerprint_matches(task, generation):
-        return None
+        return _unconvergeable_projection(task, generation)
     status = generation.status
     if status == VideoGenerationStatus.QUEUED.value:
         return _TaskProjection(

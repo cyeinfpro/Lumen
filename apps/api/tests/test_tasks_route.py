@@ -95,6 +95,30 @@ async def _billing_allow_negative_false(_db: Any) -> bool:
     return False
 
 
+async def _noop_invalidate(_user_id: str) -> None:
+    return None
+
+
+def _retry_candidate(**overrides: Any) -> SimpleNamespace:
+    values: dict[str, Any] = {
+        "id": "gen-1",
+        "user_id": "user-1",
+        "message_id": "assistant-1",
+        "status": GenerationStatus.CANCELED.value,
+        "progress_stage": GenerationStage.FINALIZING.value,
+        "attempt": 1,
+        "billing_retry_count": 0,
+        "error_code": "cancelled",
+        "error_message": "cancelled by user",
+        "started_at": None,
+        "finished_at": datetime.now(timezone.utc),
+        "size_requested": "2048x2048",
+        "upstream_request": {},
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _task_record(**overrides: Any) -> Any:
     created = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
     values: dict[str, Any] = {
@@ -571,7 +595,9 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
     async def fake_publish_queued(_payload: dict[str, Any], _message_id: str) -> None:
         return None
 
-    async def estimate_image_cost_for_tier(*_args: Any, **kwargs: Any) -> tuple[int, str]:
+    async def estimate_image_cost_for_tier(
+        *_args: Any, **kwargs: Any
+    ) -> tuple[int, str]:
         assert kwargs["tier"] == "2k"
         assert kwargs["n"] == 3
         return 75_000, "2k"
@@ -648,6 +674,112 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
 
 
 @pytest.mark.asyncio
+async def test_retry_generation_hold_applies_snapshot_rate_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计新-12：重试 hold 必须乘下单时的费率快照，否则少冻结的差额由平台垫付。"""
+
+    held: list[dict[str, Any]] = []
+
+    async def fake_publish_queued(_payload: dict[str, Any], _message_id: str) -> None:
+        return None
+
+    async def estimate_image_cost_for_tier(
+        *_args: Any, **_kwargs: Any
+    ) -> tuple[int, str]:
+        return 75_000, "2k"
+
+    async def hold(_db: _Db, _user_id: str, amount_micro: int, **kwargs: Any) -> Any:
+        held.append({"amount_micro": amount_micro, "ref_id": kwargs["ref_id"]})
+        return SimpleNamespace(balance_after=0)
+
+    async def unexpected_user_multiplier(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("snapshot present: must not re-read the user row")
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(tasks, "_publish_queued", fake_publish_queued)
+    monkeypatch.setattr(tasks, "_billing_enabled", _billing_enabled_true)
+    monkeypatch.setattr(tasks, "_billing_allow_negative", _billing_allow_negative_false)
+    monkeypatch.setattr(
+        tasks.billing_core,
+        "estimate_image_cost_for_tier",
+        estimate_image_cost_for_tier,
+    )
+    monkeypatch.setattr(tasks.billing_core, "hold", hold)
+    monkeypatch.setattr(tasks, "invalidate_balance_cache", _noop_invalidate)
+    monkeypatch.setattr(
+        tasks,
+        "user_rate_multiplier_x10000",
+        unexpected_user_multiplier,
+    )
+
+    gen = _retry_candidate(
+        upstream_request={
+            "billing_tier": "2k",
+            "n": 3,
+            "billing_rate_multiplier_x10000": 15_000,
+        }
+    )
+
+    await tasks.retry_generation(
+        "gen-1",
+        _user(),  # type: ignore[arg-type]
+        _Db([_Result(gen)]),  # type: ignore[arg-type]
+    )
+
+    # 75_000 * 15_000 // 10_000 == 112_500，与 worker settle 侧同一口径。
+    assert held == [{"amount_micro": 112_500, "ref_id": "gen-1:retry:1"}]
+
+
+@pytest.mark.asyncio
+async def test_retry_generation_hold_falls_back_to_user_rate_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快照缺失时回落到用户当前费率，与 worker 的 fallback 顺序一致。"""
+
+    held: list[int] = []
+
+    async def fake_publish_queued(_payload: dict[str, Any], _message_id: str) -> None:
+        return None
+
+    async def estimate_image_cost_for_tier(
+        *_args: Any, **_kwargs: Any
+    ) -> tuple[int, str]:
+        return 75_000, "2k"
+
+    async def hold(_db: _Db, _user_id: str, amount_micro: int, **_kwargs: Any) -> Any:
+        held.append(amount_micro)
+        return SimpleNamespace(balance_after=0)
+
+    async def user_multiplier(_db: Any, user_id: str) -> int:
+        assert user_id == "user-1"
+        return 12_000
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(tasks, "_publish_queued", fake_publish_queued)
+    monkeypatch.setattr(tasks, "_billing_enabled", _billing_enabled_true)
+    monkeypatch.setattr(tasks, "_billing_allow_negative", _billing_allow_negative_false)
+    monkeypatch.setattr(
+        tasks.billing_core,
+        "estimate_image_cost_for_tier",
+        estimate_image_cost_for_tier,
+    )
+    monkeypatch.setattr(tasks.billing_core, "hold", hold)
+    monkeypatch.setattr(tasks, "invalidate_balance_cache", _noop_invalidate)
+    monkeypatch.setattr(tasks, "user_rate_multiplier_x10000", user_multiplier)
+
+    gen = _retry_candidate(upstream_request={"billing_tier": "2k", "n": 3})
+
+    await tasks.retry_generation(
+        "gen-1",
+        _user(),  # type: ignore[arg-type]
+        _Db([_Result(gen)]),  # type: ignore[arg-type]
+    )
+
+    assert held == [90_000]
+
+
+@pytest.mark.asyncio
 async def test_retry_generation_fails_if_prior_cancel_signal_cannot_be_cleared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -689,9 +821,7 @@ async def test_retry_generation_fails_if_prior_cancel_signal_cannot_be_cleared(
 async def test_cancel_running_generation_keeps_row_active_until_worker_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    redis = _Redis(
-        {"generation:image_queue:task_provider:gen-1": b"provider-a"}
-    )
+    redis = _Redis({"generation:image_queue:task_provider:gen-1": b"provider-a"})
     monkeypatch.setattr(tasks, "get_redis", lambda: redis)
     gen = SimpleNamespace(
         id="gen-1",
@@ -770,9 +900,7 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
         )
         return "sse-1"
 
-    redis = _Redis(
-        {"generation:image_queue:task_provider:gen-1": b"provider-a"}
-    )
+    redis = _Redis({"generation:image_queue:task_provider:gen-1": b"provider-a"})
 
     async def release_queued_task_hold(
         db: _Db,
@@ -1150,9 +1278,7 @@ async def test_retry_completion_holds_new_retry_billing_ref(
         published.append((payload, message_id))
 
     async def hold(_db: Any, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
-        hold_calls.append(
-            {"user_id": user_id, "amount_micro": amount_micro, **kwargs}
-        )
+        hold_calls.append({"user_id": user_id, "amount_micro": amount_micro, **kwargs})
         return SimpleNamespace(balance_after=80_000, hold_after=20_000)
 
     async def invalidate_balance_cache(user_id: str) -> None:

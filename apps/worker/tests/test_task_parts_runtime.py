@@ -146,6 +146,7 @@ async def test_generation_resource_lease_close_is_idempotent(
         lease_token="owner:token",
         provider_name="provider-a",
         clear_avoided_providers=True,
+        release_resources=release,
     )
 
     assert await resource.close()

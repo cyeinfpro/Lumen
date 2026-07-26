@@ -437,6 +437,23 @@ function removeOptimisticGenerations(
   return changed ? { generations } : {};
 }
 
+function dropOptimisticAliases(optimistic: OptimisticSend): void {
+  // registerResponseAliases maps realId -> optimisticId, so the entries can
+  // only be found by value. Reachable when reconcileSuccessfulSend throws
+  // after registering (e.g. a malformed assistant_message): the rollback then
+  // deletes the optimistic rows while the aliases still redirect real SSE ids
+  // onto them, so later generation events resolve to messages that are gone.
+  const orphaned = new Set(optimistic.generationIds);
+  for (const [realId, alias] of _generationIdAliases) {
+    if (orphaned.has(alias.optimisticId)) _generationIdAliases.delete(realId);
+  }
+  for (const [realId, alias] of _completionMessageAliases) {
+    if (alias.optimisticMessageId === optimistic.assistantId) {
+      _completionMessageAliases.delete(realId);
+    }
+  }
+}
+
 function removeOptimisticSend(
   set: ChatStateSetter,
   optimistic: OptimisticSend,
@@ -446,6 +463,7 @@ function removeOptimisticSend(
   for (const id of optimistic.generationIds) {
     _generationConvIds.delete(id);
   }
+  dropOptimisticAliases(optimistic);
   set((state) => ({
     messages: state.messages.filter(
       (message) =>
@@ -553,6 +571,20 @@ function reconcileSuccessfulSend(
     prepared.isImage ? generationIds : undefined,
     completionId,
   );
+  if (!prepared.isImage && !completionId) {
+    // rememberCompletionMessage no-ops on a missing id, which used to make a
+    // chat send that came back without completion_id look successful while
+    // silently disabling text streaming: later completion.delta events cannot
+    // resolve a message id, so they expire in the pending buffer and the
+    // bubble stays blank. Record the backend contract break at its source.
+    logWarn("chat send returned no completion id", {
+      scope: "chat-send",
+      extra: {
+        messageId: realAssistant.id,
+        traceId: prepared.traceId,
+      },
+    });
+  }
   rememberCompletionMessage(completionId, realAssistant.id);
   _messageConvIds.delete(optimistic.userId);
   _messageConvIds.delete(optimistic.assistantId);

@@ -799,6 +799,38 @@ async def record_image_call(
         raise AccountLimiterUnavailable("quota accounting unavailable") from exc
 
 
+async def _reservation_wall_clock(
+    redis: Any,
+    *,
+    ts_key: str,
+    reservation_member: str,
+    reserved_at: float | None,
+) -> float:
+    """Recover the wall clock second at which the reservation was recorded.
+
+    The daily counter lives under a UTC-day key picked when the reservation was
+    made, so a release must DECR that same day. Deriving the day from "now"
+    instead silently decrements the *next* day's counter whenever a reservation
+    is taken just before UTC midnight and released just after — the original
+    day keeps a phantom unit forever, permanently shrinking that account's
+    quota. The ZSET score is exactly the timestamp ``reserve_quota`` used, so it
+    is authoritative; ``reserved_at`` is only a fallback for clients without
+    ZSCORE.
+    """
+    zscore = getattr(redis, "zscore", None)
+    if callable(zscore):
+        try:
+            score = await zscore(ts_key, reservation_member)
+        except Exception:  # noqa: BLE001
+            score = None
+        if score is not None:
+            try:
+                return _wall_clock_now(float(score))
+            except (TypeError, ValueError):
+                pass
+    return _wall_clock_now(reserved_at)
+
+
 async def release_quota(
     redis: Any,
     account: str,
@@ -809,8 +841,13 @@ async def release_quota(
     """Release a reservation only when no upstream request was started."""
     if redis is None or not reservation_member:
         return False
-    cur_now = _wall_clock_now(reserved_at)
     ts_key = _KEY_TS.format(name=account)
+    cur_now = await _reservation_wall_clock(
+        redis,
+        ts_key=ts_key,
+        reservation_member=reservation_member,
+        reserved_at=reserved_at,
+    )
     day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
     eval_fn = getattr(redis, "eval", None)
     if callable(eval_fn):

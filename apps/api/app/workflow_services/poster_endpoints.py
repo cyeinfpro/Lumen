@@ -53,7 +53,7 @@ from ..workflow_services.serialization import clean_string_list as _clean_string
 from ..workflow_services.serialization import dedupe_nonempty as _dedupe_nonempty  # noqa: F401
 from ..workflow_services.serialization import http as _http  # noqa: F401
 from ..workflow_services.serialization import now as _now  # noqa: F401
-from ..workflow_services.showcase_preflight import (
+from ..workflow_services.showcase_inputs import (
     validate_owned_images as _validate_owned_images,
 )  # noqa: F401
 from ..workflow_services.workflow_runtime import build_run_out as _build_run_out  # noqa: F401
@@ -75,7 +75,7 @@ from .poster_sync import (
 )
 
 router = APIRouter()
-logger = logging.getLogger("app.routes.workflows")
+logger = logging.getLogger("app.routes.workflows.poster")
 # ===========================================================================
 # Poster Design Workflow（2026-05-12 起）
 #
@@ -1340,43 +1340,7 @@ async def inpaint_poster_render(
     )
 
 
-FACADE_EXPORTS = (
-    "POSTER_WORKFLOW_TYPE",
-    "POSTER_WORKFLOW_STEPS",
-    "POSTER_DEFAULT_TARGET_ASPECTS",
-    "POSTER_MASTER_ASPECT",
-    "_poster_image_params",
-    "_poster_master_image_params",
-    "_poster_find_preset_item",
-    "_poster_style_from_preset",
-    "_poster_load_style",
-    "_poster_copy_analysis_prompt",
-    "_poster_style_summary",
-    "_poster_layout_safe_area",
-    "_poster_text_fields_block",
-    "_poster_brand_assets_block",
-    "_poster_brand_attachment_ids",
-    "_poster_master_prompt",
-    "_poster_render_prompt",
-    "_poster_revision_prompt",
-    "_poster_seed_steps",
-    "_create_poster_workflow_task",
-    "_poster_parse_copy_analysis_text",
-    "_poster_merge_copy_corrections",
-    "_sync_poster_workflow_outputs",
-    "create_poster_design_workflow",
-    "approve_copy_analysis",
-    "create_poster_masters",
-    "approve_poster_master",
-    "_poster_selected_master",
-    "create_poster_renders",
-    "revise_poster_render",
-    "_do_poster_inpaint",
-    "inpaint_poster_render",
-)
-
-
-# Public compatibility contracts.
+# Public poster service contracts.
 create_poster_workflow_task = _create_poster_workflow_task
 do_poster_inpaint = _do_poster_inpaint
 poster_brand_assets_block = _poster_brand_assets_block

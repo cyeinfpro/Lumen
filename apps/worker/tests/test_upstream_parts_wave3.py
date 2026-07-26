@@ -13,6 +13,7 @@ from app.upstream_parts import (
     direct_failover,
     image_dispatch,
     image_job_failover,
+    image_jobs,
     image_race,
     provider_selection,
     retry_policy,
@@ -200,3 +201,56 @@ async def test_race_cancel_timeout_is_read_from_late_bound_facade(
 
     assert observed_timeouts == [1.25]
     assert task.cancelled()
+
+
+async def _finish_job_with_status(status: str) -> Exception:
+    """跑 `_finish_image_job` 并把它抛出的错误交回来断言。"""
+    with pytest.raises(upstream.UpstreamError) as excinfo:
+        await image_jobs._finish_image_job(
+            client=None,
+            job={"job_id": "job-1", "status": status, "error": "sidecar said so"},
+            status_code=200,
+            payload={"endpoint": "/v1/images/generations"},
+            base_url="http://sidecar.invalid",
+            proxy_url=None,
+            job_id="job-1",
+            progress_callback=None,
+        )
+    return excinfo.value
+
+
+@pytest.mark.asyncio
+async def test_uncertain_image_job_raises_result_unknown_code() -> None:
+    """sidecar 的 uncertain 终态必须映射到「上游结果不可知」码。
+
+    这个码同时驱动两件事：禁止换 provider 重试（避免二次上游成本），以及让
+    计费侧走 settle 而不是 release（纯转嫁，平台不吸收上游成本）。
+    """
+    exc = await _finish_job_with_status("uncertain")
+
+    assert (
+        exc.error_code
+        == upstream_services().infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert exc.payload["upstream_result_unknown"] is True
+    assert upstream_services().direct.is_direct_image_result_unknown(exc) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_image_job_stays_refundable() -> None:
+    # failed 代表 sidecar 能判定上游未交付且未扣费，行为保持不变（可退款）。
+    exc = await _finish_job_with_status("failed")
+
+    assert (
+        exc.error_code
+        != upstream_services().infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert upstream_services().direct.is_direct_image_result_unknown(exc) is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_image_job_status_is_bad_response() -> None:
+    # 既不是终态也不是 uncertain 的状态仍按协议错误处理。
+    exc = await _finish_job_with_status("weird")
+
+    assert exc.error_code == upstream_services().infrastructure.EC.BAD_RESPONSE.value

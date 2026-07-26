@@ -31,17 +31,16 @@ async def process_transparent_request(
 
     last_qc: TransparentQcReport | None = None
     last_provider: str | None = None
+    last_provider_error: Exception | None = None
 
     for provider in chain:
         result = None
         try:
             result = await provider.remove_background(source, prompt=prompt)
         except Exception as exc:
-            raise TransparentPipelineFailure(
-                f"provider_error:{provider.name}:{exc}",
-                qc=None,
-                provider=provider.name,
-            ) from exc
+            last_provider = provider.name
+            last_provider_error = exc
+            continue
 
         if result is None:
             last_provider = provider.name
@@ -80,8 +79,15 @@ async def process_transparent_request(
         finally:
             result.close()
 
+    message = (
+        "transparent_qc_failed" if last_qc is not None else "background_removal_failed"
+    )
+    if last_qc is None and last_provider_error is not None:
+        message = (
+            f"provider_error:{last_provider}:{last_provider_error.__class__.__name__}"
+        )
     raise TransparentPipelineFailure(
-        "transparent_qc_failed" if last_qc is not None else "background_removal_failed",
+        message,
         qc=last_qc,
         provider=last_provider,
     )

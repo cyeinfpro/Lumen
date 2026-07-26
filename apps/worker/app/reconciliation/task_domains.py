@@ -19,6 +19,7 @@ from lumen_core.constants import (
     user_channel,
 )
 from lumen_core.models import Completion, Generation, Message
+from lumen_core.upstream_billing import has_upstream_response_receipt
 
 from .contracts import LeaseState, ReconcileContext, ReconcileResult
 from .lease import read_lease_state
@@ -52,6 +53,7 @@ class TaskDomainSpec:
     requeued_event: str
     failed_event: str
     release_method: str
+    settle_unknown_method: str
     id_field: str
 
 
@@ -133,11 +135,35 @@ class TaskDomainReconciler:
             },
         )
 
+    async def _settle_timeout_billing(
+        self,
+        context: ReconcileContext,
+        task: Any,
+    ) -> None:
+        # attempt/status only prove that a worker claimed the row. They do not
+        # prove the HTTP request reached the provider. Charge only when the
+        # runner persisted a positive upstream response receipt.
+        if has_upstream_response_receipt(task):
+            method = self.spec.settle_unknown_method
+            kwargs = {"knowledge": "unknown"}
+        else:
+            method = self.spec.release_method
+            kwargs = {}
+        await getattr(context.billing, method)(
+            context.session,
+            task,
+            reason=RECON_TIMEOUT_CODE,
+            **kwargs,
+        )
+
     async def _apply_timeout(
         self,
         context: ReconcileContext,
         task: Any,
     ) -> tuple[str, str, dict[str, Any]]:
+        # Billing is part of the terminal transition. If it fails, leave the
+        # task untouched so the transaction can roll back and retry later.
+        await self._settle_timeout_billing(context, task)
         task.status = self.spec.failed_status
         task.progress_stage = self.spec.finalizing_stage
         task.error_code = RECON_TIMEOUT_CODE
@@ -147,16 +173,6 @@ class TaskDomainReconciler:
         message = await context.session.get(Message, task.message_id)
         if message is not None:
             message.status = MessageStatus.FAILED.value
-        release = getattr(context.billing, self.spec.release_method)
-        try:
-            await release(context.session, task, reason=RECON_TIMEOUT_CODE)
-        except Exception:  # noqa: BLE001
-            context.logger.exception(
-                "reconcile %s failed %s=%s",
-                self.spec.release_method,
-                self.spec.name,
-                task.id,
-            )
         return self._stage_failure_event(context, task)
 
     async def reconcile(self, context: ReconcileContext) -> ReconcileResult:
@@ -183,6 +199,8 @@ class TaskDomainReconciler:
                 task.id,
                 kind=self.name,
                 unknowns=context.lease_unknowns,
+                heartbeat_at=task.updated_at,
+                now=context.now,
             )
             if lease_state is not LeaseState.EXPIRED:
                 reconciliation_rows_total.labels(
@@ -224,6 +242,7 @@ GENERATION_RECONCILER = TaskDomainReconciler(
         requeued_event=EV_GEN_REQUEUED,
         failed_event=EV_GEN_FAILED,
         release_method="release_generation",
+        settle_unknown_method="settle_generation_unknown_upstream",
         id_field="generation",
     )
 )
@@ -244,6 +263,7 @@ COMPLETION_RECONCILER = TaskDomainReconciler(
         requeued_event=EV_COMP_REQUEUED,
         failed_event=EV_COMP_FAILED,
         release_method="release_completion",
+        settle_unknown_method="settle_completion_unknown_upstream",
         id_field="completion",
     )
 )

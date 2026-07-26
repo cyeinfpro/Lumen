@@ -4,6 +4,7 @@ import csv
 import io
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 from fastapi import HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
+from app import task_billing
 from app.routes import billing
 from app.services.billing import errors, pricing_values, redemption_values, usage
 from lumen_core.schemas import AdminRedemptionCodeCreateIn, BillingUsageByKindOut
@@ -361,6 +363,65 @@ def test_price_rows_parse_json_and_simple_yaml_values() -> None:
         {"model": "gpt-a", "input_usd_per_1m": 1.25},
         {"model": "gpt-b", "output_usd_per_1m": 2.5},
     ]
+
+
+def test_price_rows_keep_decimal_precision_for_numeric_literals() -> None:
+    """价格字面量必须落成 Decimal：float 中转会在换算成 micro 前就丢精度。"""
+    json_rows = pricing_values._parse_price_rows(  # noqa: SLF001
+        '[{"model":"gpt-a","input_usd_per_1m":0.1}]'
+    )
+    yaml_rows = pricing_values._parse_price_rows(  # noqa: SLF001
+        """
+        - model: gpt-a
+          input_usd_per_1m: 0.1
+        """
+    )
+
+    for rows in (json_rows, yaml_rows):
+        value = rows[0]["input_usd_per_1m"]
+        assert isinstance(value, Decimal)
+        # float 的 0.1 实际是 0.1000000000000000055511151231257827…，
+        # Decimal 保留书写的原值，换算 micro 时才不会被那串尾数带偏。
+        assert str(value) == "0.1"
+        assert value != Decimal(str(float("0.1") * 3))
+
+    # 非数值字段仍按字符串保留，解析行为不变。
+    assert pricing_values._parse_price_rows(  # noqa: SLF001
+        """
+        - model: gpt-a
+          variant: default
+        """
+    ) == [{"model": "gpt-a", "variant": "default"}]
+
+
+def test_price_rows_defer_non_finite_literals_to_downstream_validation() -> None:
+    """Decimal("nan"/"inf") 能解析但不是有效价格，交由下游做有限性校验。"""
+    rows = pricing_values._parse_price_rows(  # noqa: SLF001
+        """
+        - model: gpt-a
+          input_usd_per_1m: nan
+        """
+    )
+
+    assert not rows[0]["input_usd_per_1m"].is_finite()
+    with pytest.raises(HTTPException) as exc_info:
+        pricing_values._openai_price_micro(  # noqa: SLF001
+            rows[0]["input_usd_per_1m"], 1.0
+        )
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail["error"]["code"] == "invalid_price_file"
+
+
+def test_task_rate_multiplier_delegates_to_decimal_conversion() -> None:
+    """API 侧倍率换算必须与 lumen_core 一致，不得再走 float 中转。"""
+    assert task_billing.rate_multiplier_x10000(None) == 10_000
+    assert task_billing.rate_multiplier_x10000(Decimal("1.0009")) == 10_009
+    # 旧的 int(float(raw) * 10_000) 在这里会算成 10008，少收一档。
+    assert task_billing.rate_multiplier_x10000("1.0009") != 10_008
+    # 也接受直接传 User 行对象，读取 billing_rate_multiplier 列。
+    user = SimpleNamespace(billing_rate_multiplier=Decimal("0.5000"))
+    assert task_billing.rate_multiplier_x10000(user) == 5_000
 
 
 def test_pricing_conversions_and_enabled_value_validation() -> None:

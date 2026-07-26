@@ -38,7 +38,7 @@ export interface EventStreamTransport {
 }
 
 export class BrowserEventSourceTransport implements EventStreamTransport {
-  private sequence = 0;
+  private current: StreamHandle | null = null;
   private readonly factory: EventSourceFactory;
 
   constructor(
@@ -48,11 +48,15 @@ export class BrowserEventSourceTransport implements EventStreamTransport {
   }
 
   open(input: OpenStreamInput, sink: EventStreamSink): StreamHandle {
-    const sequence = ++this.sequence;
+    // 修复 sequence 竞态：旧实现用共享自增计数器判活，「被新连接顶掉」和「自己已关闭」
+    // 两件事混在一个比较里 —— 被顶掉的旧流只是不再回调，底层 EventSource 从没关过，
+    // 既漏浏览器连接又让服务端连接数虚高。改为开新流时先确定性关掉上一条，判活只看
+    // 本 handle 自己的 closed 标志，无跨 handle 比较，也就没有竞态窗口。
+    this.current?.close();
     const source = this.factory(input.url, { withCredentials: true });
     const listeners = new Map<string, (event: MessageEvent) => void>();
     let closed = false;
-    const active = () => !closed && sequence === this.sequence;
+    const active = () => !closed;
 
     source.onopen = (event) => {
       if (active()) sink.onOpen(event);
@@ -69,11 +73,11 @@ export class BrowserEventSourceTransport implements EventStreamTransport {
       source.addEventListener(name, listener);
     }
 
-    return {
+    const handle: StreamHandle = {
       close: () => {
         if (closed) return;
         closed = true;
-        if (sequence === this.sequence) this.sequence += 1;
+        if (this.current === handle) this.current = null;
         source.onopen = null;
         source.onerror = null;
         for (const [name, listener] of listeners) {
@@ -83,5 +87,7 @@ export class BrowserEventSourceTransport implements EventStreamTransport {
         source.close();
       },
     };
+    this.current = handle;
+    return handle;
   }
 }

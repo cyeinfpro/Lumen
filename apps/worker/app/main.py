@@ -16,18 +16,25 @@ from typing import Any
 from arq import func
 from arq.connections import RedisSettings
 from arq.cron import cron
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import BusyLoadingError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
 
 from .config import settings
+from .db import engine
 from .jobs.upstream_probe import probe_upstream
 from .observability import (
+    bind_db_pool_metrics,
     init_otel,
     init_sentry,
     start_metrics_server,
     stop_metrics_server,
 )
 from .provider_pool import probe_providers
+from . import runtime_settings
 from .services import billing_cache
 from .storage import storage
 from .tasks import auto_title as auto_title_tasks
@@ -46,6 +53,45 @@ from .upstream import close_client, validate_effective_image_job_configuration
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0
 
+# RedisSettings.from_dsn 只解析 host/port/db/账号密码，其余全部落在 arq 的库
+# 默认值上：conn_timeout=1s、retry_on_timeout=False、retry_on_error=None、
+# max_connections=None。后果是主从切换或几百毫秒的网络抖动就让命令直接抛错、
+# 在途任务批量失败，而连接池又没有上界（max_jobs=64 + cron 并发足以把
+# Redis 的 maxclients 顶穿）。下面显式接管这几个旋钮。
+_REDIS_CONN_TIMEOUT_S = 10
+_REDIS_CONN_RETRIES = 10
+_REDIS_CONN_RETRY_DELAY_S = 2
+# max_jobs=64 + cron + 事件订阅，128 留一倍余量且远低于默认 maxclients。
+_REDIS_MAX_CONNECTIONS = 128
+_REDIS_COMMAND_RETRIES = 3
+
+
+def build_redis_settings(dsn: str) -> RedisSettings:
+    """DSN 解析出的连接信息 + 显式的重连/连接池策略。
+
+    命令级重试只覆盖 ConnectionError / TimeoutError / BusyLoadingError：
+    arq 不设置 socket_timeout，因此 TimeoutError 只可能来自建连阶段（命令还没
+    发出去）；ConnectionError / BusyLoadingError 则是断连与 Redis 载入 RDB。
+    worker 打到 Redis 的写操作要么是 CAS Lua（锁、slot）、要么按 task_id 定键
+    （ZADD / SET NX / arq enqueue 的 job_id 去重），重放都是幂等的；真正的
+    钱账在 PostgreSQL，不受这里的重试影响。
+
+    刻意不做审计建议的「关键操作前 ping」：ping 与真正的命令之间仍有 TOCTOU
+    窗口，却给每次操作加一个 RTT——命令级重试才是对症的做法。
+    """
+    resolved = RedisSettings.from_dsn(dsn)
+    resolved.conn_timeout = _REDIS_CONN_TIMEOUT_S
+    resolved.conn_retries = _REDIS_CONN_RETRIES
+    resolved.conn_retry_delay = _REDIS_CONN_RETRY_DELAY_S
+    resolved.max_connections = _REDIS_MAX_CONNECTIONS
+    resolved.retry_on_timeout = True
+    resolved.retry_on_error = [RedisConnectionError, BusyLoadingError]
+    resolved.retry = Retry(
+        ExponentialBackoff(cap=1.0, base=0.05),
+        _REDIS_COMMAND_RETRIES,
+    )
+    return resolved
+
 
 async def _cleanup_resource(name: str, cleanup: Callable[[], Any]) -> None:
     try:
@@ -58,15 +104,30 @@ async def _cleanup_resource(name: str, cleanup: Callable[[], Any]) -> None:
         )
 
 
-async def _cleanup_resources() -> None:
+async def _cleanup_resources(ctx: dict[str, Any]) -> None:
     await _cleanup_resource("billing_cache", billing_cache.shutdown)
+    cache = ctx.pop("runtime_settings_cache", None)
+    if isinstance(cache, runtime_settings.RuntimeSettingsCache):
+        await _cleanup_resource(
+            "runtime_settings_cache",
+            lambda: runtime_settings.shutdown_cache(cache),
+        )
+    generation_runtime = ctx.pop("generation_runtime", None)
+    if isinstance(generation_runtime, generation_tasks.GenerationRuntime):
+        await _cleanup_resource("generation_runtime", generation_runtime.shutdown)
     await _cleanup_resource("upstream_client", close_client)
     await _cleanup_resource("metrics_server", stop_metrics_server)
+    # 引擎最后释放：上面的清理动作（billing_cache flush、generation_runtime
+    # 收尾）都可能还要用连接。不 dispose 会在 PG 侧留下 IDLE 连接，
+    # 反复重启后耗尽 max_connections。
+    await _cleanup_resource("db_engine", engine.dispose)
 
 
 async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
     try:
+        ctx["runtime_settings_cache"] = runtime_settings.configure_cache()
+        ctx["generation_runtime"] = generation_tasks.DEFAULT_GENERATION_RUNTIME
         await validate_effective_image_job_configuration()
         storage.ensure_ready()
         init_sentry(
@@ -75,6 +136,8 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             settings.sentry_traces_sample_rate,
         )
         init_otel(settings.otel_service_name, settings.otel_exporter_endpoint)
+        # 必须在 metrics server 起来之前挂好采样函数，否则第一轮 scrape 拿到的是空值。
+        bind_db_pool_metrics(engine)
         start_metrics_server(settings.worker_metrics_port, settings.worker_metrics_host)
         # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
         # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
@@ -83,18 +146,18 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         await billing_cache.configure(ctx.get("redis"))
     except Exception:
         _startup_logger.exception("worker startup failed; cleaning partial resources")
-        await _cleanup_resources()
+        await _cleanup_resources(ctx)
         raise
 
 
 async def _on_shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_shutdown 钩子：独立清理各项进程资源。"""
-    await _cleanup_resources()
+    await _cleanup_resources(ctx)
 
 
 class WorkerSettings:
     # Redis
-    redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    redis_settings = build_redis_settings(settings.redis_url)
 
     # Registered task entry points.
     functions = [

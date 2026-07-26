@@ -92,6 +92,9 @@ class FakeRedis:
         del zset[member]
         return 1
 
+    async def zscore(self, key: str, member: str) -> float | None:
+        return self.zsets.get(key, {}).get(member)
+
     async def expire(self, key: str, seconds: int) -> int:
         self.expirations[key] = int(seconds)
         return 1
@@ -184,6 +187,9 @@ class TransactionalRedis:
         if removed:
             self.versions[key] = self.versions.get(key, 0) + 1
         return len(removed)
+
+    async def zscore(self, key: str, member: str) -> float | None:
+        return self.zsets.get(key, {}).get(member)
 
     def pipeline(self, *, transaction: bool = True) -> TransactionalPipeline:
         assert transaction is True
@@ -611,6 +617,75 @@ async def test_release_quota_removes_unused_reservation_atomically() -> None:
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
     day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
     assert day_key not in redis.kv
+
+
+@pytest.mark.asyncio
+async def test_release_quota_decrements_reservation_day_across_utc_boundary() -> None:
+    """跨 UTC 日切释放必须回退预留当天的计数，而不是次日的。"""
+    redis = FakeRedis()
+    reserved_at = 1_704_067_190.0  # 2023-12-31T23:59:50Z
+    released_at = 1_704_067_210.0  # 2024-01-01T00:00:10Z
+
+    allowed, _, member = await account_limiter.reserve_quota(
+        redis,
+        "acc1",
+        rate_limit="5/min",
+        daily_quota=80,
+        task_id="task-boundary",
+        now=reserved_at,
+    )
+    assert allowed is True
+
+    reserved_day_key = (
+        f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(reserved_at)}"
+    )
+    next_day_key = (
+        f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(released_at)}"
+    )
+    assert reserved_day_key != next_day_key
+    assert redis.kv[reserved_day_key] == "1"
+    # 次日计数器预先有真实用量，若被误 DECR 会掉到 4。
+    redis.kv[next_day_key] = "5"
+
+    released = await account_limiter.release_quota(
+        redis,
+        "acc1",
+        member,
+        reserved_at=released_at,
+    )
+
+    assert released is True
+    assert reserved_day_key not in redis.kv
+    assert redis.kv[next_day_key] == "5"
+
+
+@pytest.mark.asyncio
+async def test_release_quota_without_eval_uses_reservation_day() -> None:
+    """无 EVAL 的事务回退路径同样按预留当天回退计数。"""
+    redis = TransactionalRedis()
+    reserved_at = 1_704_067_190.0  # 2023-12-31T23:59:50Z
+    released_at = 1_704_067_210.0  # 2024-01-01T00:00:10Z
+    ts_key = "lumen:acct:acc1:image:ts"
+    reserved_day_key = (
+        f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(reserved_at)}"
+    )
+    next_day_key = (
+        f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(released_at)}"
+    )
+    redis.zsets[ts_key] = {"task-boundary": reserved_at}
+    redis.kv[reserved_day_key] = "1"
+    redis.kv[next_day_key] = "5"
+
+    released = await account_limiter.release_quota(
+        redis,
+        "acc1",
+        "task-boundary",
+        reserved_at=released_at,
+    )
+
+    assert released is True
+    assert reserved_day_key not in redis.kv
+    assert redis.kv[next_day_key] == "5"
 
 
 @pytest.mark.asyncio

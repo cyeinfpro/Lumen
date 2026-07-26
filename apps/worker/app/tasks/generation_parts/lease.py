@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from .runtime import generation_ports
+from .runtime import (
+    generation_domain_ports,
+    generation_queue_ports,
+    generation_events_ports,
+    generation_provider_ports,
+    generation_lease_ports,
+)
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
@@ -51,7 +57,7 @@ async def is_cancelled(redis: Any, task_id: str) -> bool:
     try:
         value = await redis.get(f"task:{task_id}:cancel")
     except Exception as exc:  # noqa: BLE001
-        generation_ports().logger.warning(
+        generation_events_ports().logger.warning(
             "generation cancel check failed closed task=%s err=%s", task_id, exc
         )
         return True
@@ -62,11 +68,11 @@ async def acquire_lease(redis: Any, task_id: str, worker_token: str) -> None:
     ok = await redis.set(
         f"task:{task_id}:lease",
         worker_token,
-        ex=generation_ports()._LEASE_TTL_S,
+        ex=generation_lease_ports()._LEASE_TTL_S,
         nx=True,
     )
     if not ok:
-        raise generation_ports()._LeaseLost(f"lease already held task={task_id}")
+        raise generation_lease_ports()._LeaseLost(f"lease already held task={task_id}")
 
 
 async def release_lease(redis: Any, task_id: str, worker_token: str) -> None:
@@ -74,18 +80,23 @@ async def release_lease(redis: Any, task_id: str, worker_token: str) -> None:
         eval_fn = getattr(redis, "eval", None)
         if callable(eval_fn):
             await eval_fn(
-                generation_ports()._RELEASE_LEASE_LUA,
+                generation_lease_ports()._RELEASE_LEASE_LUA,
                 1,
                 f"task:{task_id}:lease",
                 worker_token,
             )
             return
-        generation_ports().logger.warning(
+        generation_events_ports().logger.warning(
             "generation lease release skipped without atomic CAS task=%s", task_id
         )
     except Exception:  # noqa: BLE001
-        generation_ports().logger.debug(
-            "generation lease release failed task=%s", task_id, exc_info=True
+        # 释放失败 = 租约会一直挂到 TTL 过期，期间同一 task 无法被重新调度。
+        # 这是需要人看到的运维事件，不能落在生产默认不打印的 debug 级别。
+        generation_events_ports().logger.warning(
+            "generation lease release failed task=%s worker=%s",
+            task_id,
+            worker_token,
+            exc_info=True,
         )
 
 
@@ -102,45 +113,47 @@ async def lease_renewer(
     consecutive_failures = 0
     try:
         while True:
-            await asyncio.sleep(generation_ports()._LEASE_RENEW_S)
+            await asyncio.sleep(generation_lease_ports()._LEASE_RENEW_S)
             try:
                 renewed = await redis.eval(
-                    generation_ports()._RENEW_LEASE_LUA,
+                    generation_lease_ports()._RENEW_LEASE_LUA,
                     1,
                     f"task:{task_id}:lease",
                     worker_token,
-                    generation_ports()._LEASE_TTL_S,
+                    generation_lease_ports()._LEASE_TTL_S,
                 )
                 if int(renewed or 0) == 0:
                     if lease_lost is not None:
                         lease_lost.set()
-                    generation_ports().logger.warning(
+                    generation_events_ports().logger.warning(
                         "generation lease ownership lost task=%s worker=%s",
                         task_id,
                         worker_token,
                     )
                     return
                 for key in extra_lease_keys or []:
-                    await redis.expire(key, generation_ports()._LEASE_TTL_S)
+                    await redis.expire(key, generation_lease_ports()._LEASE_TTL_S)
                 with suppress(Exception):
                     await redis.expire(
-                        generation_ports()._image_inflight_key(task_id),
-                        generation_ports()._LEASE_TTL_S * 4,
+                        generation_queue_ports()._image_inflight_key(task_id),
+                        generation_lease_ports()._LEASE_TTL_S * 4,
                     )
                 if image_provider_name:
-                    new_expiry = time.time() + generation_ports()._LEASE_TTL_S
-                    if generation_ports()._is_dual_race_sentinel(image_provider_name):
+                    new_expiry = time.time() + generation_lease_ports()._LEASE_TTL_S
+                    if generation_queue_ports()._is_dual_race_sentinel(
+                        image_provider_name
+                    ):
                         await redis.zadd(
-                            generation_ports()._IMAGE_QUEUE_ACTIVE_KEY,
+                            generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
                             {image_provider_name: new_expiry},
                         )
                     else:
                         await redis.zadd(
-                            generation_ports()._IMAGE_QUEUE_ACTIVE_KEY,
+                            generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
                             {task_id: new_expiry},
                         )
                         await redis.zadd(
-                            generation_ports()._image_provider_active_key(
+                            generation_queue_ports()._image_provider_active_key(
                                 image_provider_name
                             ),
                             {task_id: new_expiry},
@@ -148,7 +161,7 @@ async def lease_renewer(
                 consecutive_failures = 0
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
-                generation_ports().logger.warning(
+                generation_events_ports().logger.warning(
                     "lease renew failed task=%s err=%s streak=%d",
                     task_id,
                     exc,
@@ -157,7 +170,7 @@ async def lease_renewer(
                 if consecutive_failures >= 3:
                     if lease_lost is not None:
                         lease_lost.set()
-                    generation_ports().logger.error(
+                    generation_events_ports().logger.error(
                         "lease renewer giving up task=%s failures=%d",
                         task_id,
                         consecutive_failures,
@@ -176,7 +189,7 @@ async def cancel_renewer_task(renewer: asyncio.Task[None] | None) -> None:
     except asyncio.CancelledError:
         pass
     except Exception:  # noqa: BLE001
-        generation_ports().logger.debug(
+        generation_events_ports().logger.debug(
             "generation lease renewer cancellation failed", exc_info=True
         )
 
@@ -205,16 +218,16 @@ class RedisSemaphore:
         while True:
             try:
                 got = await self.redis.eval(
-                    generation_ports()._ACQUIRE_LUA,
+                    generation_lease_ports()._ACQUIRE_LUA,
                     1,
                     self.key,
                     self.capacity,
-                    generation_ports()._IMAGE_SEMAPHORE_KEY_TTL_S,
+                    generation_lease_ports()._IMAGE_SEMAPHORE_KEY_TTL_S,
                 )
             except Exception as exc:  # noqa: BLE001
-                raise generation_ports().UpstreamError(
+                raise generation_provider_ports().UpstreamError(
                     "local concurrency semaphore unavailable",
-                    error_code=generation_ports().EC.LOCAL_QUEUE_FULL.value,
+                    error_code=generation_domain_ports().EC.LOCAL_QUEUE_FULL.value,
                     status_code=None,
                 ) from exc
             if int(got or 0) == 1:
@@ -225,13 +238,13 @@ class RedisSemaphore:
                 try:
                     await self.on_wait_start()
                 except Exception:  # noqa: BLE001
-                    generation_ports().logger.debug(
+                    generation_events_ports().logger.debug(
                         "sem on_wait_start callback failed", exc_info=True
                     )
             if asyncio.get_event_loop().time() >= loop_until:
-                raise generation_ports().UpstreamError(
+                raise generation_provider_ports().UpstreamError(
                     "local concurrency wait exhausted",
-                    error_code=generation_ports().EC.LOCAL_QUEUE_FULL.value,
+                    error_code=generation_domain_ports().EC.LOCAL_QUEUE_FULL.value,
                     status_code=None,
                 )
             await asyncio.sleep(0.5)
@@ -240,9 +253,9 @@ class RedisSemaphore:
         if not self._acquired:
             return
         try:
-            await self.redis.eval(generation_ports()._RELEASE_LUA, 1, self.key)
+            await self.redis.eval(generation_lease_ports()._RELEASE_LUA, 1, self.key)
         except Exception as release_exc:  # noqa: BLE001
-            generation_ports().logger.warning(
+            generation_events_ports().logger.warning(
                 "redis sem release failed key=%s err=%s",
                 self.key,
                 release_exc,

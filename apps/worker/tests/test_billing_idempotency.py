@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -1309,6 +1310,73 @@ async def test_completion_window_rate_limit_blocks_before_upstream(
 
 
 @pytest.mark.asyncio
+async def test_dynamic_rate_multiplier_reads_column_without_float_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker 侧倍率换算必须与 API 侧共用 Decimal 实现。
+
+    旧写法 ``int(float(raw) * 10_000)`` 会把 1.0009 算成 10008，
+    比准确值少一档；差额等于平台替用户垫付，与纯转嫁相悖。
+    """
+
+    class _RateSession(worker_billing.AsyncSession):  # type: ignore[misc]
+        def __init__(self, raw: Any) -> None:
+            self._raw = raw
+
+        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(scalar_one_or_none=lambda: self._raw)
+
+    assert int(float("1.0009") * 10_000) == 10_008  # 旧实现的错值，作为对照
+    assert (
+        await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+            _RateSession(Decimal("1.0009")),
+            "user-1",
+        )
+        == 10_009
+    )
+    # 驱动回 float 时同样不能丢档。
+    assert (
+        await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+            _RateSession(1.0009),
+            "user-1",
+        )
+        == 10_009
+    )
+    # 没有用户行时退回 1.0，不是 0 折。
+    assert (
+        await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+            _RateSession(None),
+            "user-1",
+        )
+        == 10_000
+    )
+    # 非 AsyncSession（测试替身）走既有的默认分支。
+    assert (
+        await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            "user-1",
+        )
+        == 10_000
+    )
+    # Worker must inherit the core parser's dirty-data and rounding policy,
+    # not turn a malformed account into a free or under-billed account.
+    for raw, expected in (
+        (Decimal("-1"), 10_000),
+        (Decimal("-0.5"), 10_000),
+        (Decimal("10000"), 10_000),
+        (Decimal("99999999"), 10_000),
+        (Decimal("1.00005"), 10_001),
+    ):
+        assert (
+            await worker_billing._rate_multiplier_x10000(  # noqa: SLF001
+                _RateSession(raw),
+                "user-1",
+            )
+            == expected
+        )
+
+
+@pytest.mark.asyncio
 async def test_completion_rate_multiplier_uses_task_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1543,3 +1611,128 @@ async def test_settle_generation_runs_for_byok_task_with_existing_wallet_hold(
     assert settled[0]["ref_id"] == "gen-1"
     assert settled[0]["actual_micro"] == 150
     assert session.added[0].event_type == "wallet.settle.image"
+
+
+def _patch_unknown_upstream_settle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    held: int,
+    settled: list[dict[str, Any]],
+) -> None:
+    """把 settle_generation_unknown_upstream 的外部依赖钉成可断言的假实现。"""
+
+    async def applies(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def allow_negative_balance() -> bool:
+        return True
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
+        return held
+
+    async def settle(
+        _session: Any,
+        user_id: str,
+        **kwargs: Any,
+    ) -> SimpleNamespace:
+        settled.append({"user_id": user_id, **kwargs})
+        return SimpleNamespace(
+            id="tx-unknown",
+            amount_micro=-kwargs["actual_micro"],
+            balance_after=-kwargs["actual_micro"],
+            hold_after=0,
+            meta={"overdraw_micro": kwargs["actual_micro"]},
+        )
+
+    monkeypatch.setattr(worker_billing, "_wallet_billing_applies", applies)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(
+        worker_billing, "_allow_negative_balance", allow_negative_balance
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "held_amount_for_ref", held_amount)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstream_settles_full_hold_instead_of_releasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯转嫁：上游可能已扣费时按 hold 全额结算，绝不退款。"""
+    session = _Session()
+    generation = SimpleNamespace(id="gen-1", user_id="user-1", model="gpt-image-2")
+    settled: list[dict[str, Any]] = []
+    _patch_unknown_upstream_settle(monkeypatch, held=4200, settled=settled)
+
+    await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
+        session,
+        generation,
+        reason="image_job_result_unknown",
+        knowledge="unknown",
+    )
+
+    assert settled[0]["actual_micro"] == 4200
+    # 与正常结算共用 key，保证同一次生成只可能落一笔消费流水。
+    assert settled[0]["idempotency_key"] == "settle:gen-1"
+    assert settled[0]["meta"]["tier_source"] == "upstream_result_unknown"
+    assert settled[0]["meta"]["upstream_cost_knowledge"] == "unknown"
+    event_types = [row.event_type for row in session.added]
+    assert "wallet.settle.image_result_unknown" in event_types
+    # 余额被扣成负数也照扣：成本转嫁优先于余额保护。
+    assert "wallet.overdrawn" in event_types
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstream_without_hold_only_records_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 没有 hold 可结算时不能凭空扣款，只留待对账记录。
+    session = _Session()
+    generation = SimpleNamespace(id="gen-2", user_id="user-1", model="gpt-image-2")
+    settled: list[dict[str, Any]] = []
+    _patch_unknown_upstream_settle(monkeypatch, held=0, settled=settled)
+
+    await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
+        session,
+        generation,
+        reason="direct_image_result_unknown",
+        knowledge="unknown",
+    )
+
+    assert settled == []
+    assert len(session.added) == 1
+    assert session.added[0].event_type == "billing.unresolved_after_upstream"
+    assert session.added[0].details["scope"] == "image_result_unknown"
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstream_replay_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 已经落过消费流水就只写 replay 审计，不得二次扣款。
+    session = _Session()
+    generation = SimpleNamespace(id="gen-1", user_id="user-1", model="gpt-image-2")
+    settled: list[dict[str, Any]] = []
+    _patch_unknown_upstream_settle(monkeypatch, held=4200, settled=settled)
+
+    async def existing_tx(*_args: Any) -> SimpleNamespace:
+        return _tx("settle", "settle:gen-1")
+
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", existing_tx)
+
+    await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
+        session,
+        generation,
+        reason="image_job_result_unknown",
+        knowledge="unknown",
+    )
+
+    assert settled == []
+    assert len(session.added) == 1
+    assert session.added[0].event_type == "wallet.settle.replay"

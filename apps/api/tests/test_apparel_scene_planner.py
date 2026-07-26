@@ -6,8 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.routes import _apparel_scene_planner as scene_planner
-from app.workflow_domain import apparel_scene_planner as scene_planner_impl
+from app.workflow_domain import apparel_scene_planner as scene_planner
 from lumen_core.providers import ProviderDefinition
 
 
@@ -22,7 +21,7 @@ def fake_provider(name: str) -> ProviderDefinition:
 def test_gpt55_call_timeout_warns_on_unknown_purpose(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("WARNING", logger="app.routes._apparel_scene_planner")
+    caplog.set_level("WARNING", logger="app.workflow_domain.apparel_scene_planner")
 
     assert scene_planner._gpt55_call_timeout_seconds("new_unmapped_purpose") == 75.0
     assert "unknown GPT-5.5 call purpose" in caplog.text
@@ -39,7 +38,7 @@ async def test_call_gpt55_json_skips_attempts_on_401(
         calls.append(kwargs["attempt"]["name"])
         raise scene_planner._UpstreamHTTPError(401, "unauthorized")
 
-    monkeypatch.setattr(scene_planner_impl, "_call_responses_text", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_responses_text", fake_call)
 
     with pytest.raises(RuntimeError):
         await scene_planner._call_gpt55_json(
@@ -69,7 +68,7 @@ async def test_call_gpt55_json_retries_text_only_when_reference_image_rejected(
             )
         return '{"ok": true}'
 
-    monkeypatch.setattr(scene_planner_impl, "_call_responses_text", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_responses_text", fake_call)
 
     result = await scene_planner._call_gpt55_json(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -105,7 +104,7 @@ async def test_call_gpt55_json_continues_attempts_after_text_only_retry_fails(
             raise scene_planner._UpstreamHTTPError(500, "temporary upstream error")
         return '{"ok": true}'
 
-    monkeypatch.setattr(scene_planner_impl, "_call_responses_text", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_responses_text", fake_call)
 
     result = await scene_planner._call_gpt55_json(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -485,7 +484,7 @@ async def test_scene_director_receives_compact_product_context(
     def fail_fallback_pool(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         raise AssertionError("fallback pool should be lazy on GPT success")
 
-    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
     monkeypatch.setattr(
         scene_planner, "fallback_scene_cards_from_pool", fail_fallback_pool
     )
@@ -583,7 +582,7 @@ async def test_scene_director_wild_mode_is_gpt_directed_not_pool_driven(
             "risk_notes": [],
         }
 
-    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
 
     result = await scene_planner.plan_scene_cards_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -639,7 +638,7 @@ async def test_scene_director_retries_invalid_gpt_output_before_rules_fallback(
             "risk_notes": [],
         }
 
-    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
 
     result = await scene_planner.plan_scene_cards_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -688,7 +687,7 @@ async def test_scene_director_falls_back_only_after_retry_exhausted(
         raise RuntimeError("temporary upstream failure")
 
     monkeypatch.setenv("LUMEN_SHOWCASE_GPT_DIRECTOR_RETRIES", "1")
-    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
 
     result = await scene_planner.plan_scene_cards_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -785,7 +784,7 @@ async def test_prompt_composer_expands_only_shooting_brief(
             "regenerate_if": ["动作僵硬"],
         }
 
-    monkeypatch.setattr(scene_planner_impl, "_call_gpt55_json", fake_call)
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
 
     result = await scene_planner.compose_image_prompt_with_gpt55(
         SimpleNamespace(),  # type: ignore[arg-type]

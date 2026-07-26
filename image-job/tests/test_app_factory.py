@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import zlib
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -71,6 +75,18 @@ def test_settings_hide_secrets_and_reject_missing_identity(tmp_path: Path) -> No
     )
     with pytest.raises(RuntimeError, match="IMAGE_JOB_SIDECAR_TOKEN is required"):
         invalid.validate()
+
+
+def test_responses_stream_limit_cannot_be_lower_than_single_image_limit() -> None:
+    settings = ImageJobSettings.from_env(
+        {
+            "IMAGE_JOB_MAX_IMAGE_BYTES": str(80 * 1024 * 1024),
+            "IMAGE_JOB_RESPONSES_STREAM_MAX_BYTES": "1000",
+        }
+    )
+
+    assert settings.max_image_bytes == 80 * 1024 * 1024
+    assert settings.responses_stream_max_bytes == settings.max_image_bytes
 
 
 @pytest.mark.asyncio
@@ -192,3 +208,271 @@ def test_deployment_entrypoint_remains_app_colon_app() -> None:
     service = (root / "deploy/image-job/image-job.service").read_text()
 
     assert "uvicorn app:app --host 127.0.0.1 --port 8091" in service
+
+
+async def _seed_queued_job(runtime, job_id: str) -> None:
+    await runtime.repository.initialize()
+    await runtime.jobs.persistence.insert_job(
+        job_id,
+        {
+            "request_type": "generations",
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+            "retention_days": 1,
+        },
+        "Bearer sk-test",
+    )
+
+
+async def _job_row(runtime, job_id: str):
+    row = await runtime.repository.one(
+        "SELECT * FROM jobs WHERE job_id = ?",
+        (job_id,),
+    )
+    assert row is not None
+    return row
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_after_dispatch_marks_job_uncertain(tmp_path: Path) -> None:
+    # H-4：upstream.call 已经派发之后的非 JobFailure 崩溃，上游是否计费不可知，
+    # 必须落 uncertain（不可退款），而不是 failed（确定未扣费）。
+    runtime = create_runtime(_settings(tmp_path))
+    await _seed_queued_job(runtime, "job-crash-after")
+
+    async def crashing_call(_row):
+        raise RuntimeError("boom after dispatch")
+
+    runtime.jobs.upstream.call = crashing_call
+
+    await runtime.jobs.process("job-crash-after")
+
+    row = await _job_row(runtime, "job-crash-after")
+    assert row["status"] == "uncertain"
+    assert bool(row["outcome_uncertain"]) is True
+    assert bool(row["retry_suppressed"]) is True
+
+
+@pytest.mark.asyncio
+async def test_persistence_crash_after_success_marks_job_uncertain(
+    tmp_path: Path,
+) -> None:
+    # 上游已经成功交付、只是本地落库崩了：上游一定扣过费，同样禁止 failed。
+    runtime = create_runtime(_settings(tmp_path))
+    await _seed_queued_job(runtime, "job-persist-crash")
+
+    async def succeeding_call(_row):
+        return 200, [{"url": "https://images.example.test/a.png"}]
+
+    runtime.jobs.upstream.call = succeeding_call
+
+    class _CrashOnSuccessPersistence:
+        """只让 mark_succeeded 崩溃，其余落库调用照常转发给真实门面。
+
+        JobPersistenceFacade 是 frozen dataclass，不能直接改字段，所以整体替换。
+        """
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        async def mark_succeeded(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("sqlite write failed")
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    runtime.jobs.persistence = _CrashOnSuccessPersistence(runtime.jobs.persistence)
+
+    await runtime.jobs.process("job-persist-crash")
+
+    row = await _job_row(runtime, "job-persist-crash")
+    assert row["status"] == "uncertain"
+    assert bool(row["outcome_uncertain"]) is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_http_client_when_startup_never_finished(
+    tmp_path: Path,
+) -> None:
+    # H-16：upstream.startup() 成功但 queue.startup() 失败（或 lifespan 被取消）
+    # 时 started 仍是 False，早退就把 httpx 连接池永久泄漏在进程里。
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.upstream.startup()
+    client = runtime.upstream.client
+    assert client is not None
+    assert runtime.started is False
+
+    await runtime.shutdown()
+
+    assert runtime.upstream.client is None
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_retention_sweeper_is_bound_and_started(tmp_path: Path) -> None:
+    # H-17：不 bind retention 的话保留期清扫协程根本不会起，磁盘只增不减。
+    runtime = create_runtime(_settings(tmp_path))
+    assert runtime.queue.retention_callback is not None
+
+    await runtime.startup()
+    try:
+        assert "retention" in runtime.queue.background
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_retention_pass_removes_orphan_job_dirs_only(tmp_path: Path) -> None:
+    # H-17：jobs 行已经不存在的产物目录没有任何人负责，必须兜底清掉；
+    # 但仍有行的（哪怕还停在 queued 从未 finished）绝不能误删。
+    runtime = create_runtime(_settings(tmp_path))
+    await _seed_queued_job(runtime, "job-alive")
+
+    temp_root = runtime.settings.data_dir / "images" / "temp"
+    alive_dir = temp_root / "2026" / "07" / "01" / "job-alive"
+    orphan_dir = temp_root / "2026" / "07" / "01" / "job-orphan"
+    for target in (alive_dir, orphan_dir):
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "image-1.png").write_bytes(b"\x89PNG\r\n\x1a\npayload")
+        os.utime(target, (1, 1))
+
+    await runtime.jobs.retention.run_pass()
+
+    assert (alive_dir / "image-1.png").is_file()
+    assert not orphan_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_request_id_is_echoed_persisted_and_generated(tmp_path: Path) -> None:
+    # H-19：跨服务追踪。调用方带来的 request_id 必须原样回显并落库，
+    # 没带的请求也要有一个本地生成的 id。
+    runtime = create_runtime(_settings(tmp_path))
+    app = create_app(runtime=runtime)
+    headers = {
+        "Authorization": f"Bearer {'s' * 32}",
+        "X-Lumen-Upstream-Authorization": "Bearer sk-upstream",
+        "Content-Type": "application/json",
+    }
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            generated = await client.get("/livez")
+            created = await client.post(
+                "/v1/image-jobs",
+                headers={**headers, "X-Request-Id": "req-from-worker"},
+                json={
+                    "endpoint": "/v1/images/generations",
+                    "body": {"prompt": "cat"},
+                },
+            )
+        row = await _job_row(runtime, created.json()["job_id"])
+
+    assert created.status_code == 200
+    assert created.headers["x-request-id"] == "req-from-worker"
+    assert row["request_id"] == "req-from-worker"
+    assert generated.headers["x-request-id"].startswith("ij_")
+
+
+@pytest.mark.asyncio
+async def test_metrics_expose_business_outcomes(tmp_path: Path) -> None:
+    # H-19：uncertain 计数就是「上游可能已扣费但没交付」的待对账工单量。
+    runtime = create_runtime(_settings(tmp_path))
+    await _seed_queued_job(runtime, "job-metrics")
+
+    async def crashing_call(_row):
+        raise RuntimeError("boom after dispatch")
+
+    runtime.jobs.upstream.call = crashing_call
+    await runtime.jobs.process("job-metrics")
+
+    text = await runtime.metrics_text()
+
+    assert "image_job_jobs_uncertain_total 1" in text
+    assert "image_job_jobs_failed_total 0" in text
+    assert "image_job_jobs_succeeded_total 0" in text
+    assert "image_job_images_delivered_total 0" in text
+
+
+def _png_decompression_bomb(width: int, height: int) -> bytes:
+    """只有 57 字节、却自称 width x height 的 PNG。
+
+    Pillow 在 open() 阶段只读 IHDR，就会因为像素数超限抛
+    DecompressionBombError —— 不需要真的构造一张巨图。
+    """
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            len(data).to_bytes(4, "big")
+            + tag
+            + data
+            + zlib.crc32(tag + data).to_bytes(4, "big")
+        )
+
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([1, 0, 0, 0, 0])
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", b"")
+        + chunk(b"IEND", b"")
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_decompression_bomb_returns_413(tmp_path: Path) -> None:
+    # H-15：Pillow 的 DecompressionBombError 直接继承 Exception，不是
+    # OSError/ValueError，原来的 except 元组接不住，会冒到 ASGI 层变成 500。
+    previous_max_pixels = Image.MAX_IMAGE_PIXELS
+    settings = replace(_settings(tmp_path), max_image_pixels=1_000_000)
+    app = create_app(settings=settings)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1/refs",
+                headers={
+                    "Authorization": f"Bearer {'s' * 32}",
+                    "Content-Type": "image/png",
+                },
+                content=_png_decompression_bomb(20000, 20000),
+            )
+
+    assert response.status_code == 413
+    assert "pixel limit" in response.json()["detail"]
+    # 进程级全局阈值必须还原，不能被这次请求永久改掉。
+    assert Image.MAX_IMAGE_PIXELS == previous_max_pixels
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_before_dispatch_stays_failed(tmp_path: Path) -> None:
+    # 对称约束：请求还没交给上游就崩，必须留在 failed 让调用方安心退款。
+    runtime = create_runtime(_settings(tmp_path))
+    await _seed_queued_job(runtime, "job-crash-before")
+
+    async def unreachable_call(_row):
+        raise AssertionError("upstream must not be reached")
+
+    runtime.jobs.upstream.call = unreachable_call
+
+    original_one = runtime.repository.one
+    calls = {"n": 0}
+
+    async def flaky_one(sql: str, params=()):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("db read failed before dispatch")
+        return await original_one(sql, params)
+
+    runtime.jobs.repository = SimpleNamespace(one=flaky_one)
+
+    await runtime.jobs.process("job-crash-before")
+
+    row = await _job_row(runtime, "job-crash-before")
+    assert row["status"] == "failed"
+    assert bool(row["outcome_uncertain"]) is False
+    assert bool(row["retry_suppressed"]) is False

@@ -7,7 +7,6 @@ from typing import Any
 
 IMAGE_JOB_DIR = Path(__file__).resolve().parents[1]
 EXTRACTED_MODULES = (
-    "runtime_config.py",
     "payload_helpers.py",
     "job_persistence.py",
     "image_artifacts.py",

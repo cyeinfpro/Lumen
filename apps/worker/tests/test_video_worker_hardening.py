@@ -152,6 +152,154 @@ async def test_happyhorse_success_preserves_explicit_billable_false() -> None:
     assert result.upstream_billable is False
 
 
+def _poll_client(payload: dict[str, Any]) -> Any:
+    class Client:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _path: str) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+    return Client
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_poll_absolutizes_relative_result_url() -> None:
+    """相对路径必须补成绝对 URL，否则下载直接失败而上游已经出片计费。"""
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope.example.com",
+        api_key="sk-test",
+        models={"happyhorse-1.0:t2v": "happyhorse-1.0-t2v"},
+    )
+    adapter = DashScopeHappyHorseAdapter(provider)
+    adapter._client = _poll_client(  # type: ignore[method-assign]
+        {
+            "output": {
+                "task_status": "SUCCEEDED",
+                "results": [{"url": "/files/video-1.mp4"}],
+                "usage": {"duration": 3},
+            }
+        }
+    )
+
+    result = await adapter.poll("task-1")
+
+    assert result.video_url == "https://dashscope.example.com/files/video-1.mp4"
+
+
+@pytest.mark.asyncio
+async def test_seedance_poll_keeps_absolute_result_url_untouched() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example.com/api/v3",
+        api_key="sk-test",
+        models={"video-ds-2.0:t2v": "video-ds-2.0"},
+    )
+    adapter = video_upstream.VolcanoSeedanceAdapter(provider)
+    adapter._client = _poll_client(  # type: ignore[method-assign]
+        {
+            "status": "succeeded",
+            "content": [{"video_url": "https://tos.example.com/a.mp4"}],
+        }
+    )
+
+    result = await adapter.poll("task-1")
+
+    assert result.video_url == "https://tos.example.com/a.mp4"
+
+
+@pytest.mark.asyncio
+async def test_video_download_refuses_https_to_http_redirect_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """逐跳 SSRF 校验之外还要挡协议降级：302 不能把下载打回明文。"""
+    seen: list[tuple[str, bool]] = []
+
+    async def resolve_target(raw_url: str, *, allow_http: bool) -> SimpleNamespace:
+        seen.append((raw_url, allow_http))
+        if not allow_http and raw_url.startswith("http://"):
+            raise ValueError("base_url must use https")
+        return SimpleNamespace(url=raw_url, resolved_ips=())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": "http://cdn.example.com/plain.mp4"},
+            request=request,
+        )
+
+    def client_factory(_target: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+
+    monkeypatch.setattr(video_upstream, "resolve_public_http_target", resolve_target)
+
+    with pytest.raises(VideoUpstreamError, match="public HTTP"):
+        await video_upstream._download_video_url(  # noqa: SLF001
+            "https://cdn.example.com/result.mp4",
+            max_redirects=3,
+            client_factory=client_factory,
+        )
+
+    assert seen[0] == ("https://cdn.example.com/result.mp4", True)
+    assert seen[1] == ("http://cdn.example.com/plain.mp4", False)
+
+
+@pytest.mark.asyncio
+async def test_video_download_still_allows_plain_http_result_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """初始 URL 本来就是 http 的网关不受降级保护影响。"""
+    seen: list[tuple[str, bool]] = []
+    mp4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+
+    async def resolve_target(raw_url: str, *, allow_http: bool) -> SimpleNamespace:
+        seen.append((raw_url, allow_http))
+        return SimpleNamespace(url=raw_url, resolved_ips=())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("result.mp4"):
+            return httpx.Response(
+                302,
+                headers={"location": "http://cdn.example.com/final.mp4"},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4"},
+            content=mp4,
+            request=request,
+        )
+
+    def client_factory(_target: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+
+    monkeypatch.setattr(video_upstream, "resolve_public_http_target", resolve_target)
+
+    downloaded = await video_upstream._download_video_url(  # noqa: SLF001
+        "http://cdn.example.com/result.mp4",
+        max_redirects=3,
+        client_factory=client_factory,
+    )
+    try:
+        assert downloaded.size_bytes == len(mp4)
+    finally:
+        downloaded.cleanup()
+
+    assert [allow_http for _, allow_http in seen] == [True, True]
+
+
 @pytest.mark.asyncio
 async def test_non_utf8_submit_cache_is_a_miss() -> None:
     class Redis:

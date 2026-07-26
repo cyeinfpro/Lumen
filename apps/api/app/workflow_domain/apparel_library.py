@@ -4,7 +4,8 @@
 纯函数，以及同步状态文件使用的跨进程短锁；index/sync/db 相关 helper 仍留在
 workflows.py，以避免循环 import。
 
-workflows.py 顶部把这里的 symbol 全部 re-export，使 `workflows._xxx` 仍
+Workflow services import these contracts from their owner module instead of
+re-exporting them through the public route.
 可被测试访问。
 """
 

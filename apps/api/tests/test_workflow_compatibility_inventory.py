@@ -6,23 +6,18 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 
 from app.routes import workflows
-from app.workflows.compatibility import (
-    RETIRED_HIDDEN_DEPENDENCIES,
-    WORKFLOW_COMPATIBILITY_EXPORTS,
-)
 
 
-def test_workflow_compatibility_exports_have_explicit_owners() -> None:
-    assert WORKFLOW_COMPATIBILITY_EXPORTS
-    assert len({item.legacy_path for item in WORKFLOW_COMPATIBILITY_EXPORTS}) == len(
-        WORKFLOW_COMPATIBILITY_EXPORTS
+def test_workflow_compatibility_facades_are_retired() -> None:
+    app_root = Path(__file__).parents[1] / "app"
+    retired_paths = (
+        app_root / "workflows" / "compatibility.py",
+        app_root / "workflows" / "legacy_exports.py",
+        app_root / "workflow_domain" / "workflow_policy_exports.py",
+        app_root / "workflow_services" / "showcase_preflight.py",
     )
-    assert all(
-        item.owner_path.startswith("app.") for item in WORKFLOW_COMPATIBILITY_EXPORTS
-    )
-    assert (
-        "app.routes.workflow_routes._facade.RouteFacade" in RETIRED_HIDDEN_DEPENDENCIES
-    )
+    assert all(not path.exists() for path in retired_paths)
+    assert all(not name.startswith("_") for name in workflows.__all__)
 
 
 def test_workflow_http_contract_characterization() -> None:

@@ -402,28 +402,30 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
         "worker_billing.settle_generation(",
         billing_guard,
     )
-    commit_guard = persistence_source.index(
-        '"cancelled before success commit"',
-        settle,
-    )
-    commit = persistence_source.index("await session.commit()", commit_guard)
+    commit = persistence_source.index("await session.commit()", settle)
     assert persistence_guard < attempt_fence < billing_guard
-    assert billing_guard < settle < commit_guard < commit
+    assert billing_guard < settle < commit
+    # 审计 D-2：settle 之后到 commit 之间不允许再有任何中断检查。此处抛异常会把
+    # 钱包流水连同已产出（且已计费）的上游图一起回滚，failure handler 随后走
+    # release 分支，等于平台替用户吸收上游成本。中断只能发生在 settle 之前。
+    assert '"cancelled before success commit"' not in persistence_source[settle:commit]
 
 
 def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
     source = inspect.getsource(lifecycle.settle_existing_generated_image)
 
     cancel_check = source.index(
-        "if await generation_ports()._is_cancelled(redis, task_id):"
+        "if await generation_lease_ports()._is_cancelled(redis, task_id):"
     )
     release = source.index(
-        "await generation_ports().worker_billing.release_generation("
+        "await generation_billing_ports().worker_billing.release_generation("
     )
     success_update = source.index(
-        "status=generation_ports().GenerationStatus.SUCCEEDED.value"
+        "status=generation_domain_ports().GenerationStatus.SUCCEEDED.value"
     )
-    settle = source.index("await generation_ports().worker_billing.settle_generation(")
+    settle = source.index(
+        "await generation_billing_ports().worker_billing.settle_generation("
+    )
 
     assert cancel_check < release < success_update < settle
 

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.routes import _apparel_library_reference as reference
+from app.workflow_domain import apparel_library_reference as reference
 
 
 class _Result:

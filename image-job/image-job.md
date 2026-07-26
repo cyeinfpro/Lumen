@@ -84,7 +84,6 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 /opt/image-job/job_persistence.py
 /opt/image-job/payload_helpers.py
 /opt/image-job/request_bodies.py
-/opt/image-job/runtime_config.py
 /opt/image-job/README.md
 /opt/image-job/image-job.md
 ```

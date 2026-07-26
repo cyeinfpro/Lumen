@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .runtime import generation_ports
+from .runtime import (
+    generation_provider_ports,
+)
 from typing import Any
 
 
@@ -26,8 +28,8 @@ def validate_resolved_size(
     validate_aspect_ratio: bool = True,
     max_ratio_deviation: float = 0.02,
 ) -> tuple[int, int]:
-    width, height = generation_ports()._parse_size_string(size)
-    generation_ports().validate_explicit_size(width, height)
+    width, height = generation_provider_ports()._parse_size_string(size)
+    generation_provider_ports().validate_explicit_size(width, height)
     if validate_aspect_ratio and isinstance(aspect_ratio, str) and ":" in aspect_ratio:
         raw_ratio_width, raw_ratio_height = aspect_ratio.split(":", 1)
         if raw_ratio_width.isdigit() and raw_ratio_height.isdigit():
@@ -60,7 +62,7 @@ def parse_aspect_ratio_value(aspect_ratio: str) -> tuple[int, int] | None:
 
 
 def aspect_ratio_prompt_constraint(aspect_ratio: str) -> str:
-    parsed = generation_ports()._parse_aspect_ratio_value(aspect_ratio)
+    parsed = generation_provider_ports()._parse_aspect_ratio_value(aspect_ratio)
     if parsed is None:
         return ""
     shape_hint = " This means a square canvas." if parsed[0] == parsed[1] else ""
@@ -72,7 +74,9 @@ def aspect_ratio_prompt_constraint(aspect_ratio: str) -> str:
 
 
 def prompt_with_aspect_ratio_constraint(prompt: str, aspect_ratio: str) -> str:
-    constraint = generation_ports()._aspect_ratio_prompt_constraint(aspect_ratio)
+    constraint = generation_provider_ports()._aspect_ratio_prompt_constraint(
+        aspect_ratio
+    )
     if not constraint:
         return prompt
     normalized_prompt = prompt.rstrip()
@@ -117,10 +121,10 @@ def request_render_quality(
     size: str,
 ) -> str:
     _ = size
-    quality = generation_ports()._request_option(
+    quality = generation_provider_ports()._request_option(
         upstream_request,
         "render_quality",
-        generation_ports()._IMAGE_RENDER_QUALITY_VALUES,
+        generation_provider_ports()._IMAGE_RENDER_QUALITY_VALUES,
         "auto",
     )
     if quality in {"low", "medium", "high"}:
@@ -133,15 +137,15 @@ def request_responses_model(upstream_request: dict[str, Any]) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     try:
-        fast = generation_ports().parse_provider_bool(
+        fast = generation_provider_ports().parse_provider_bool(
             upstream_request.get("fast"),
             default=False,
         )
     except ValueError:
         fast = False
     if fast:
-        return generation_ports().DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-    return generation_ports().DEFAULT_IMAGE_RESPONSES_MODEL
+        return generation_provider_ports().DEFAULT_IMAGE_RESPONSES_MODEL_FAST
+    return generation_provider_ports().DEFAULT_IMAGE_RESPONSES_MODEL
 
 
 def image_request_options(
@@ -151,44 +155,50 @@ def image_request_options(
 ) -> dict[str, Any]:
     request = upstream_request if isinstance(upstream_request, dict) else {}
     try:
-        fast_mode = generation_ports().parse_provider_bool(
+        fast_mode = generation_provider_ports().parse_provider_bool(
             request.get("fast"), default=False
         )
     except ValueError:
         fast_mode = False
-    render_quality = generation_ports()._request_render_quality(request, size=size)
-    output_format = generation_ports()._request_option(
+    render_quality = generation_provider_ports()._request_render_quality(
+        request, size=size
+    )
+    output_format = generation_provider_ports()._request_option(
         request,
         "output_format",
-        generation_ports()._IMAGE_OUTPUT_FORMAT_VALUES,
+        generation_provider_ports()._IMAGE_OUTPUT_FORMAT_VALUES,
         "jpeg",
     )
-    background = generation_ports()._request_option(
+    background = generation_provider_ports()._request_option(
         request,
         "background",
-        generation_ports()._IMAGE_BACKGROUND_VALUES,
+        generation_provider_ports()._IMAGE_BACKGROUND_VALUES,
         "auto",
     )
     if background == "transparent":
         output_format = "png"
     options: dict[str, Any] = {
         "fast": fast_mode,
-        "responses_model": generation_ports()._request_responses_model(request),
+        "responses_model": generation_provider_ports()._request_responses_model(
+            request
+        ),
         "render_quality": render_quality,
         "output_format": output_format,
         "background": background,
-        "moderation": generation_ports()._request_option(
+        "moderation": generation_provider_ports()._request_option(
             request,
             "moderation",
-            generation_ports()._IMAGE_MODERATION_VALUES,
+            generation_provider_ports()._IMAGE_MODERATION_VALUES,
             "low",
         ),
     }
     if output_format in {"jpeg", "webp"}:
-        options["output_compression"] = generation_ports()._request_compression(request)
+        options["output_compression"] = (
+            generation_provider_ports()._request_compression(request)
+        )
         if options["output_compression"] is None:
             options["output_compression"] = 100
-    options["n"] = generation_ports()._image_requested_count(request)
+    options["n"] = generation_provider_ports()._image_requested_count(request)
     return options
 
 

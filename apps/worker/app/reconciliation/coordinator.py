@@ -57,18 +57,21 @@ async def run_reconciliation(
             aggregate = ReconcileResult()
             unknowns = LeaseUnknownSummary() if track_lease_unknowns else None
             async with session_factory() as session:
-                context = ReconcileContext(
-                    redis=redis,
-                    session=session,
-                    now=datetime.now(timezone.utc),
-                    billing=billing,
-                    logger=log,
-                    lease_unknowns=unknowns,
-                    stage_event=stage_outbox_event,
-                )
-                for reconciler in reconcilers:
-                    aggregate.merge(await reconciler.reconcile(context))
-                await session.commit()
+                # 事务边界显式化（E-6）：所有 reconciler 的写入必须同进同出，
+                # 不能依赖 autobegin。after_commit 放在 begin 块之外，
+                # 保证它只在事务真正落盘之后才跑（如 balance cache flush）。
+                async with session.begin():
+                    context = ReconcileContext(
+                        redis=redis,
+                        session=session,
+                        now=datetime.now(timezone.utc),
+                        billing=billing,
+                        logger=log,
+                        lease_unknowns=unknowns,
+                        stage_event=stage_outbox_event,
+                    )
+                    for reconciler in reconcilers:
+                        aggregate.merge(await reconciler.reconcile(context))
                 if after_commit is not None:
                     await after_commit(session)
 

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 import sys
 
 import pytest
@@ -137,6 +138,24 @@ class FakeUpdateResult:
         self.rowcount = rowcount
 
 
+class FakeTransaction:
+    """模拟 `async with session.begin()`：正常退出时提交，异常时回滚。"""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> Any:
+        return self.session
+
+    async def __aexit__(self, exc_type: Any, *_rest: Any) -> None:
+        if exc_type is None:
+            await self.session.commit()
+        else:
+            rollback = getattr(self.session, "rollback", None)
+            if rollback is not None:
+                await rollback()
+
+
 class FakeSession:
     def __init__(self, events: list[OutboxEvent]) -> None:
         self.events = events
@@ -150,6 +169,8 @@ class FakeSession:
         return None
 
     def begin(self):
+        # publisher 用例通过 __aexit__ 抛错来模拟「提交失败」，因此这里
+        # 保持返回 self（事务上下文即 session 上下文）。
         return self
 
     async def execute(self, statement):
@@ -210,7 +231,7 @@ class FakeReconSession:
         return None
 
     def begin(self):
-        return self
+        return FakeTransaction(self)
 
     async def execute(self, statement):
         text = str(statement)
@@ -270,6 +291,9 @@ class FakeMemoryReconSession:
 
     async def __aexit__(self, *_args):
         return None
+
+    def begin(self):
+        return FakeTransaction(self)
 
     async def execute(self, statement):
         text = str(statement)
@@ -1469,7 +1493,7 @@ async def test_reconcile_requeues_stale_generation_with_string_status(monkeypatc
     assert redis.enqueued == [("run_generation", "gen-1")]
     assert generation.status == GenerationStatus.QUEUED.value
     assert isinstance(generation.status, str)
-    assert fake_session.select_skip_locked == [True, True]
+    assert fake_session.select_skip_locked == [True, True, True]
     published_outbox_id = published[0]["data"].pop("outbox_id")
     assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [
@@ -1786,6 +1810,15 @@ async def test_reconcile_marks_max_attempt_completion_failed_with_string_status(
     published = _patch_publish_event(monkeypatch)
     redis = FakeRedis()
 
+    async def release_completion(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "release_completion",
+        release_completion,
+    )
+
     touched = await outbox.reconcile_tasks({"redis": redis})
 
     assert touched == 1
@@ -1833,10 +1866,20 @@ async def test_reconcile_marks_max_attempt_generation_failed_and_message_failed(
         status="running",
         progress_stage="rendering",
         attempt=5,
+        upstream_request={"upstream_response_received_at": "2026-07-26T00:00:00+00:00"},
     )
     _patch_recon_session_local(monkeypatch, [generation], [], {"msg-1": message})
     published = _patch_publish_event(monkeypatch)
     redis = FakeRedis()
+
+    async def settle_generation_unknown_upstream(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "settle_generation_unknown_upstream",
+        settle_generation_unknown_upstream,
+    )
 
     touched = await outbox.reconcile_tasks({"redis": redis})
 
@@ -1875,23 +1918,32 @@ async def test_reconcile_flushes_generation_release_balance_cache_after_commit(
         status="running",
         progress_stage="rendering",
         attempt=5,
+        upstream_request={"upstream_response_received_at": "2026-07-26T00:00:00+00:00"},
     )
     fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
     _patch_publish_event(monkeypatch)
     redis = FakeRedis()
     calls: list[tuple[str, int, dict[str, object]]] = []
 
-    async def release_generation(session, gen, *, reason: str) -> None:
+    # running + attempt=5 → 上游已被调用，结果不可知 → 结算而非退款（纯转嫁）。
+    async def settle_generation_unknown_upstream(
+        session, gen, *, reason: str, knowledge: str
+    ) -> None:
         assert gen is generation
         assert reason == "timeout"
+        assert knowledge == "unknown"
         session.info["pending-balance-refresh"] = {"user-1": 960}
-        calls.append(("release", session.commits, dict(session.info)))
+        calls.append(("settle", session.commits, dict(session.info)))
 
     async def flush_balance_cache_refreshes(session) -> None:
         calls.append(("flush", session.commits, dict(session.info)))
         session.info.clear()
 
-    monkeypatch.setattr(outbox.worker_billing, "release_generation", release_generation)
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "settle_generation_unknown_upstream",
+        settle_generation_unknown_upstream,
+    )
     monkeypatch.setattr(
         outbox.worker_billing,
         "flush_balance_cache_refreshes",
@@ -1902,7 +1954,7 @@ async def test_reconcile_flushes_generation_release_balance_cache_after_commit(
 
     assert touched == 1
     assert calls == [
-        ("release", 0, {"pending-balance-refresh": {"user-1": 960}}),
+        ("settle", 0, {"pending-balance-refresh": {"user-1": 960}}),
         ("flush", 1, {"pending-balance-refresh": {"user-1": 960}}),
     ]
     assert fake_session.info == {}
@@ -1919,23 +1971,32 @@ async def test_reconcile_flushes_completion_release_balance_cache_after_commit(
         status="streaming",
         progress_stage="streaming",
         attempt=3,
+        upstream_request={"upstream_response_received_at": "2026-07-26T00:00:00+00:00"},
     )
     fake_session = _patch_recon_session_local(monkeypatch, [], [completion])
     _patch_publish_event(monkeypatch)
     redis = FakeRedis()
     calls: list[tuple[str, int, dict[str, object]]] = []
 
-    async def release_completion(session, comp, *, reason: str) -> None:
+    # streaming + attempt=3 → 上游已被调用，结果不可知 → 结算而非退款（纯转嫁）。
+    async def settle_completion_unknown_upstream(
+        session, comp, *, reason: str, knowledge: str
+    ) -> None:
         assert comp is completion
         assert reason == "timeout"
+        assert knowledge == "unknown"
         session.info["pending-balance-refresh"] = {"user-1": 970}
-        calls.append(("release", session.commits, dict(session.info)))
+        calls.append(("settle", session.commits, dict(session.info)))
 
     async def flush_balance_cache_refreshes(session) -> None:
         calls.append(("flush", session.commits, dict(session.info)))
         session.info.clear()
 
-    monkeypatch.setattr(outbox.worker_billing, "release_completion", release_completion)
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "settle_completion_unknown_upstream",
+        settle_completion_unknown_upstream,
+    )
     monkeypatch.setattr(
         outbox.worker_billing,
         "flush_balance_cache_refreshes",
@@ -1946,7 +2007,7 @@ async def test_reconcile_flushes_completion_release_balance_cache_after_commit(
 
     assert touched == 1
     assert calls == [
-        ("release", 0, {"pending-balance-refresh": {"user-1": 970}}),
+        ("settle", 0, {"pending-balance-refresh": {"user-1": 970}}),
         ("flush", 1, {"pending-balance-refresh": {"user-1": 970}}),
     ]
     assert fake_session.info == {}
@@ -2001,6 +2062,7 @@ async def test_reconcile_terminal_apply_and_release_are_idempotent(
         status="running",
         progress_stage="rendering",
         attempt=5,
+        upstream_request={"upstream_response_received_at": "2026-07-26T00:00:00+00:00"},
     )
     completion = Completion(
         id="comp-idempotent",
@@ -2009,6 +2071,7 @@ async def test_reconcile_terminal_apply_and_release_are_idempotent(
         status="streaming",
         progress_stage="streaming",
         attempt=3,
+        upstream_request={"upstream_response_received_at": "2026-07-26T00:00:00+00:00"},
     )
     session = _patch_recon_session_local(
         monkeypatch,
@@ -2016,28 +2079,29 @@ async def test_reconcile_terminal_apply_and_release_are_idempotent(
         [completion],
     )
     _patch_publish_event(monkeypatch)
-    releases: list[str] = []
+    # running/streaming + attempt>0 → 结算而非退款（纯转嫁）。
+    settles: list[str] = []
 
-    async def release_generation(*_args, **_kwargs) -> None:
-        releases.append("generation")
+    async def settle_generation_unknown_upstream(*_args, **_kwargs) -> None:
+        settles.append("generation")
 
-    async def release_completion(*_args, **_kwargs) -> None:
-        releases.append("completion")
+    async def settle_completion_unknown_upstream(*_args, **_kwargs) -> None:
+        settles.append("completion")
 
     monkeypatch.setattr(
         outbox.worker_billing,
-        "release_generation",
-        release_generation,
+        "settle_generation_unknown_upstream",
+        settle_generation_unknown_upstream,
     )
     monkeypatch.setattr(
         outbox.worker_billing,
-        "release_completion",
-        release_completion,
+        "settle_completion_unknown_upstream",
+        settle_completion_unknown_upstream,
     )
 
     redis = FakeRedis()
     assert await outbox.reconcile_tasks({"redis": redis}) == 2
     assert await outbox.reconcile_tasks({"redis": redis}) == 0
 
-    assert releases == ["generation", "completion"]
+    assert settles == ["generation", "completion"]
     assert [event.kind for event in session.outbox_events] == ["sse", "sse"]

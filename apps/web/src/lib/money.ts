@@ -1,6 +1,11 @@
 export function formatRmb(value?: string | number | null, fractionDigits = 2): string {
-  const amount = Number(value ?? 0);
-  if (!Number.isFinite(amount)) return (0).toFixed(fractionDigits);
+  // null / undefined / NaN / Infinity from the backend must be surfaced as an
+  // explicit error marker so users can distinguish a real zero balance from a
+  // data anomaly.  Silently returning "0.00" violates billing transparency.
+  if (value === null || value === undefined) return "--";
+  if (typeof value === "string" && value.trim() === "") return "--";
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "--";
   return amount.toFixed(fractionDigits);
 }
 
@@ -16,8 +21,10 @@ function formatCompactNumber(value: number): string {
 }
 
 export function formatRmbCompact(value?: string | number | null): string {
-  const amount = Number(value ?? 0);
-  if (!Number.isFinite(amount)) return "0.00";
+  if (value === null || value === undefined) return "--";
+  if (typeof value === "string" && value.trim() === "") return "--";
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "--";
   const sign = amount < 0 ? "-" : "";
   const abs = Math.abs(amount);
   if (abs < 1000) return `${sign}${abs.toFixed(2)}`;

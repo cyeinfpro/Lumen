@@ -95,6 +95,7 @@ async def test_get_removes_dirty_tracker_hashes(raw: dict[bytes, bytes]) -> None
             tracker_mod._key("gen-bad"),
             tracker_mod._notified_key("gen-bad"),
             tracker_mod._delivering_key("gen-bad"),
+            tracker_mod._sent_images_key("gen-bad"),
         )
     ]
 

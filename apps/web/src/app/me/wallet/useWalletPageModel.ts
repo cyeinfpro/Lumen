@@ -50,6 +50,7 @@ export type WalletPageQueryKeys = {
   wallet: QueryKey;
   snapshot: QueryKey;
   transactions: (filter: WalletTransactionFilter) => QueryKey;
+  transactionsAll: QueryKey;
   redemptions: QueryKey;
 };
 
@@ -149,9 +150,22 @@ export function useWalletPageModel({
       setCode("");
       setNotice({ kind: "success", message: amountText });
       toast.success("兑换成功", { description: amountText });
-      await queryClient.invalidateQueries({
-        queryKey: queryKeys.all,
-      });
+      // Invalidate only what a redemption actually changes. `queryKeys.all` is
+      // the whole `billing` prefix, which also covers `billing.pricing` — a
+      // catalogue mounted by the account menu, the mobile top bar and the
+      // composer cost estimator, none of which a redeem code can affect.
+      //
+      // Deliberately NOT doing the audit's suggested optimistic
+      // `setQueryData(balance + amount)`: `redeemCode` returns the redeemed
+      // amount, not the authoritative post-redeem balance, so a concurrent
+      // settle would make the client render a balance the server never had.
+      // Money is only ever displayed from a server response.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.wallet }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.snapshot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.transactionsAll }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.redemptions }),
+      ]);
     },
     onError: (error) => {
       const normalized = mapError(error);

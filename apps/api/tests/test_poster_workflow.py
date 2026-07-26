@@ -23,9 +23,12 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
 
-from app.routes import workflows
 from app.services.poster_styles import workflow_lookup
-from app.workflow_services import poster_endpoints as poster
+from app.workflow_services import (
+    poster_endpoints as poster,
+    project_endpoints as project,
+    workflow_runtime,
+)
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
     PosterDesignWorkflowCreateIn,
@@ -155,7 +158,7 @@ def test_copy_analysis_approve_in_default_corrections() -> None:
 
 
 def test_poster_workflow_steps_match_design_doc() -> None:
-    assert workflows.POSTER_WORKFLOW_STEPS == (
+    assert poster.POSTER_WORKFLOW_STEPS == (
         "copy_input",
         "style_selection",
         "copy_analysis",
@@ -175,9 +178,9 @@ def test_poster_seed_steps_initial_status() -> None:
             "target_aspects": ["1:1", "9:16"],
         },
     )
-    seeded = workflows._poster_seed_steps(run)  # noqa: SLF001
+    seeded = poster._poster_seed_steps(run)  # noqa: SLF001
     by_key = {s.step_key: s for s in seeded}
-    assert set(by_key.keys()) == set(workflows.POSTER_WORKFLOW_STEPS)
+    assert set(by_key.keys()) == set(poster.POSTER_WORKFLOW_STEPS)
     assert by_key["copy_input"].status == "approved"
     assert by_key["style_selection"].status == "approved"
     assert by_key["copy_analysis"].status == "running"
@@ -191,7 +194,7 @@ def test_poster_seed_steps_initial_status() -> None:
 
 def test_poster_parse_copy_analysis_text_handles_valid_and_garbage() -> None:
     valid = '{"main_title":"限时五折","subtitle":"全场夏季新品","selling_points":["满200减50"],"cta":"立即抢购","price":null,"tone":"促销","info_density":"high"}'
-    parsed = workflows._poster_parse_copy_analysis_text(valid)  # noqa: SLF001
+    parsed = poster._poster_parse_copy_analysis_text(valid)  # noqa: SLF001
     assert parsed["main_title"] == "限时五折"
     assert parsed["subtitle"] == "全场夏季新品"
     assert parsed["selling_points"] == ["满200减50"]
@@ -199,11 +202,11 @@ def test_poster_parse_copy_analysis_text_handles_valid_and_garbage() -> None:
     assert parsed["price"] is None
     assert parsed["info_density"] == "high"
     # garbage 也能 graceful 降级
-    bad = workflows._poster_parse_copy_analysis_text("not json")  # noqa: SLF001
+    bad = poster._poster_parse_copy_analysis_text("not json")  # noqa: SLF001
     assert bad["info_density"] == "medium"
     assert bad["main_title"] is None
     # info_density 非法值 → fallback medium
-    bad2 = workflows._poster_parse_copy_analysis_text('{"info_density":"crazy"}')  # noqa: SLF001
+    bad2 = poster._poster_parse_copy_analysis_text('{"info_density":"crazy"}')  # noqa: SLF001
     assert bad2["info_density"] == "medium"
 
 
@@ -215,7 +218,7 @@ def test_poster_merge_copy_corrections_overrides_with_non_null() -> None:
         "info_density": "medium",
     }
     corrections = {"main_title": "user_title", "subtitle": None, "price": "¥99"}
-    merged = workflows._poster_merge_copy_corrections(base, corrections)  # noqa: SLF001
+    merged = poster._poster_merge_copy_corrections(base, corrections)  # noqa: SLF001
     # main_title 用户改了 → 覆盖；subtitle 是 None → 保留 AI 输出；price 新增
     assert merged["main_title"] == "user_title"
     assert merged["subtitle"] == "ai_sub"
@@ -247,13 +250,13 @@ def test_poster_master_prompt_cache_prefix_stable() -> None:
         "price": None,
         "info_density": "high",
     }
-    p1 = workflows._poster_master_prompt(  # noqa: SLF001
+    p1 = poster._poster_master_prompt(  # noqa: SLF001
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         brand_assets={},
         candidate_index=1,
     )
-    p2 = workflows._poster_master_prompt(  # noqa: SLF001
+    p2 = poster._poster_master_prompt(  # noqa: SLF001
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         brand_assets={},
@@ -281,7 +284,7 @@ def test_poster_render_prompt_includes_target_aspect_and_text_fields() -> None:
         "cta": "立即抢购",
         "info_density": "medium",
     }
-    p = workflows._poster_render_prompt(  # noqa: SLF001
+    p = poster._poster_render_prompt(  # noqa: SLF001
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         target_aspect="9:16",
@@ -290,7 +293,7 @@ def test_poster_render_prompt_includes_target_aspect_and_text_fields() -> None:
     assert "限时五折" in p
     assert "立即抢购" in p
     # adjustments 可选段
-    p2 = workflows._poster_render_prompt(  # noqa: SLF001
+    p2 = poster._poster_render_prompt(  # noqa: SLF001
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         target_aspect="9:16",
@@ -301,7 +304,7 @@ def test_poster_render_prompt_includes_target_aspect_and_text_fields() -> None:
 
 def test_poster_revision_prompt_inpaint_unused() -> None:
     """revision prompt 只服务 scope=background/style；inpaint 走 worker invariant 模板。"""
-    p = workflows._poster_revision_prompt(  # noqa: SLF001
+    p = poster._poster_revision_prompt(  # noqa: SLF001
         style_summary={"palette": ["#fff"]},
         copy_analysis={"info_density": "low"},
         target_aspect="1:1",
@@ -310,7 +313,7 @@ def test_poster_revision_prompt_inpaint_unused() -> None:
     )
     assert "去掉左下角元素" in p
     assert "1:1" in p
-    p_style = workflows._poster_revision_prompt(  # noqa: SLF001
+    p_style = poster._poster_revision_prompt(  # noqa: SLF001
         style_summary={"palette": ["#fff"]},
         copy_analysis={"info_density": "low"},
         target_aspect="1:1",
@@ -356,7 +359,7 @@ async def test_sync_promotes_copy_analysis_to_needs_review(
 
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[completion], [], []])
-    await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert copy_step.status == "needs_review"
     assert copy_step.output_json["main_title"] == "hello"
@@ -416,7 +419,7 @@ async def test_sync_marks_master_step_needs_review_when_all_masters_ready(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     # responses 顺序：master 行 + (per master image lookup + per master gens) → 简化为空
     db = _Db(responses=[masters, [], [], []])
-    await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert master_step.status == "needs_review"
     assert approval_step.status == "needs_review"
@@ -479,7 +482,7 @@ async def test_sync_master_generation_ignores_ready_masters_from_previous_batch(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[old_ready, new_pending], generations, [], []])
 
-    await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert master_step.status == "running"
     assert master_step.image_ids == []
@@ -534,7 +537,7 @@ async def test_sync_render_generation_ignores_ready_renders_from_previous_batch(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [old_ready, new_pending], generations, images])
 
-    await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert new_pending.status == "generating"
     assert multi_step.status == "running"
@@ -580,7 +583,7 @@ async def test_sync_render_revision_waits_for_active_revision_image(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [render], generations, images])
 
-    await workflows._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert render.image_id == "img-old"
     assert render.status == "revising"
@@ -661,7 +664,7 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
     monkeypatch.setattr(poster, "_build_run_out", fake_build_run_out)
 
     db = _Db(responses=[[]])
-    out = await workflows.create_poster_masters(
+    out = await poster.create_poster_masters(
         "run-poster",
         PosterMastersCreateIn(candidate_count=1),
         SimpleNamespace(id="user-1"),
@@ -685,7 +688,7 @@ async def test_list_workflows_hides_poster_style_generation_jobs_by_default() ->
     db = _Db(responses=[[]])
     user = SimpleNamespace(id="user-1")
 
-    out = await workflows.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
+    out = await project.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
 
     assert out.items == []
     rendered = str(
@@ -718,7 +721,7 @@ async def test_list_workflows_counts_poster_multi_size_outputs() -> None:
     db = _Db(responses=[[run], [("run-poster", ["img-1", "img-2"])]])
     user = SimpleNamespace(id="user-1")
 
-    out = await workflows.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
+    out = await project.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
 
     assert len(out.items) == 1
     assert out.items[0].output_count == 2
@@ -731,7 +734,7 @@ def test_next_action_for_poster_project_steps() -> None:
         current_step="multi_size_generation",
     )
 
-    assert workflows._next_action_for(run) == "生成/确认多尺寸"  # noqa: SLF001
+    assert workflow_runtime._next_action_for(run) == "生成/确认多尺寸"  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -750,7 +753,7 @@ async def test_attach_workflow_assets_updates_run_step_and_image_metadata() -> N
     image = SimpleNamespace(id="img-1", metadata_jsonb={})
     db = _Db(responses=[[image], [step]])
 
-    records = await workflows._attach_workflow_assets(  # noqa: SLF001
+    records = await workflow_runtime._attach_workflow_assets(  # noqa: SLF001
         db,
         run=run,  # type: ignore[arg-type]
         user_id="user-1",
@@ -833,15 +836,15 @@ async def test_complete_delivery_supports_poster_projects(
     async def fake_build_run_out(db: Any, run_arg: Any) -> Any:
         return SimpleNamespace(status=run_arg.status, current_step=run_arg.current_step)
 
-    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync_poster)
-    monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_attach_workflow_assets", fake_attach_assets)
-    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(project, "_get_run", fake_get_run)
+    monkeypatch.setattr(project, "_sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(project, "_step", fake_step)
+    monkeypatch.setattr(project, "_attach_workflow_assets", fake_attach_assets)
+    monkeypatch.setattr(project, "_build_run_out", fake_build_run_out)
 
     db = _Db()
     user = SimpleNamespace(id="user-1")
-    out = await workflows.complete_delivery("run-poster", user, db)  # type: ignore[arg-type]
+    out = await project.complete_delivery("run-poster", user, db)  # type: ignore[arg-type]
 
     assert out.status == "completed"
     assert out.current_step == "delivery"
@@ -888,7 +891,7 @@ async def test_poster_load_style_reads_json_preset(
     monkeypatch.setattr(workflow_lookup, "find_preset_item", fake_find_preset)
 
     db = _Db()
-    style = await workflows._poster_load_style(  # noqa: SLF001
+    style = await poster._poster_load_style(  # noqa: SLF001
         db, user_id="user-1", style_id="preset:flat_illustration:v1"
     )
 
@@ -913,7 +916,7 @@ async def test_poster_load_style_filters_user_private_rows_by_owner() -> None:
     )
     db = _Db(responses=[[style]])
 
-    loaded = await workflows._poster_load_style(  # noqa: SLF001
+    loaded = await poster._poster_load_style(  # noqa: SLF001
         db, user_id="user-1", style_id="user:style-1"
     )
 
@@ -1001,14 +1004,14 @@ async def test_create_poster_design_workflow_smoke(
     )
     db = _Db()
     user = SimpleNamespace(id="user-1")
-    out = await workflows.create_poster_design_workflow(body, user, db)  # type: ignore[arg-type]
+    out = await poster.create_poster_design_workflow(body, user, db)  # type: ignore[arg-type]
 
     assert out.status == "running"
     assert out.current_step == "copy_analysis"
     # workflow_run 已 add 到 db；至少 1 个 run + 7 个 step
     added_types = [type(row).__name__ for row in db.added]
     assert "WorkflowRun" in added_types
-    assert added_types.count("WorkflowStep") == len(workflows.POSTER_WORKFLOW_STEPS)
+    assert added_types.count("WorkflowStep") == len(poster.POSTER_WORKFLOW_STEPS)
     assert db.committed is True
 
 
@@ -1019,7 +1022,7 @@ async def test_create_poster_design_workflow_rejects_unknown_style(
     from fastapi import HTTPException
 
     async def fake_load_style(db: Any, *, user_id: str, style_id: str) -> Any:
-        raise workflows._http("style_not_found", "poster style not found", 404)  # noqa: SLF001
+        raise poster._http("style_not_found", "poster style not found", 404)  # noqa: SLF001
 
     monkeypatch.setattr(poster, "_poster_load_style", fake_load_style)
 
@@ -1027,5 +1030,5 @@ async def test_create_poster_design_workflow_rejects_unknown_style(
     db = _Db()
     user = SimpleNamespace(id="user-1")
     with pytest.raises(HTTPException) as exc:
-        await workflows.create_poster_design_workflow(body, user, db)  # type: ignore[arg-type]
+        await poster.create_poster_design_workflow(body, user, db)  # type: ignore[arg-type]
     assert exc.value.status_code == 404

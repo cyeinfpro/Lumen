@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.routes import _showcase_template_policy as policy
 from app.routes import workflows
+from app.workflow_domain import showcase_template_policy as policy
 
 
 MOVED_NAMES = (
@@ -111,6 +111,6 @@ def test_showcase_framing_direction_matrix(
     assert expected in direction
 
 
-def test_workflows_reexports_showcase_template_policy_names() -> None:
+def test_workflows_does_not_reexport_showcase_template_policy_names() -> None:
     for name in MOVED_NAMES:
-        assert getattr(workflows, name) is getattr(policy, name)
+        assert not hasattr(workflows, name)

@@ -1,9 +1,23 @@
 from __future__ import annotations
 
-from .runtime import generation_ports
+from .runtime import (
+    generation_ports,
+    generation_domain_ports,
+    generation_persistence_ports,
+    generation_queue_ports,
+    generation_billing_ports,
+    generation_events_ports,
+    generation_provider_ports,
+    generation_lease_ports,
+)
 import asyncio
 from datetime import datetime, timezone
 from typing import Any
+
+from lumen_core.upstream_billing import (
+    mark_upstream_dispatch_started,
+    mark_upstream_response_received,
+)
 
 from . import failure, success
 from .progress import ImageProgressPublisher
@@ -25,11 +39,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:
         await _prepare_upstream_request(state)
         await _dispatch_upstream_request(state)
         await success.finalize_generation_success(state, generation_ports())
-    except generation_ports()._LeaseLost as exc:
+    except generation_lease_ports()._LeaseLost as exc:
         await failure.handle_lease_lost(state, exc, generation_ports())
-    except generation_ports()._StaleGenerationAttempt as exc:
+    except generation_domain_ports()._StaleGenerationAttempt as exc:
         await failure.handle_stale_attempt(state, exc, generation_ports())
-    except generation_ports()._TaskCancelled as exc:
+    except generation_lease_ports()._TaskCancelled as exc:
         await failure.handle_cancel(state, exc, generation_ports())
     except Exception as exc:  # noqa: BLE001
         await failure.handle_generation_exception(
@@ -53,17 +67,17 @@ def _new_run_state(
         task_id=task_id,
         redis=redis,
         worker_id=worker_id,
-        lease_token=f"{worker_id}:{generation_ports().new_uuid7()}",
+        lease_token=f"{worker_id}:{generation_domain_ports().new_uuid7()}",
         task_start=task_start,
-        task_deadline=task_start + generation_ports()._RUN_GENERATION_TIMEOUT_S,
-        channel=generation_ports().task_channel(task_id),
+        task_deadline=task_start + generation_domain_ports()._RUN_GENERATION_TIMEOUT_S,
+        channel=generation_events_ports().task_channel(task_id),
         trace_id=f"gen_{task_id}",
-        stage_timer=generation_ports()._StageTimer(),
+        stage_timer=generation_domain_ports()._StageTimer(),
     )
 
 
 async def _load_initial_generation(state: GenerationRunState) -> bool:
-    async with generation_ports().SessionLocal() as session:
+    async with generation_persistence_ports().SessionLocal() as session:
         generation = await _claim_generation_row(session, state.task_id)
         if generation is None:
             return False
@@ -74,14 +88,14 @@ async def _load_initial_generation(state: GenerationRunState) -> bool:
             return False
         if not await _validate_primary_input(state, session):
             return False
-        existing = await generation_ports()._find_existing_generated_image(
+        existing = await generation_persistence_ports()._find_existing_generated_image(
             session,
             task_id=state.task_id,
             user_id=state.user_id,
         )
         if existing is not None:
             state.task_outcome = (
-                await generation_ports()._settle_existing_generated_image(
+                await generation_persistence_ports()._settle_existing_generated_image(
                     session,
                     redis=state.redis,
                     task_id=state.task_id,
@@ -93,7 +107,7 @@ async def _load_initial_generation(state: GenerationRunState) -> bool:
                 )
             )
             return False
-        state.attempt, may_run = generation_ports()._bounded_next_attempt(
+        state.attempt, may_run = generation_domain_ports()._bounded_next_attempt(
             generation.attempt
         )
         if not may_run:
@@ -105,9 +119,9 @@ async def _load_initial_generation(state: GenerationRunState) -> bool:
 async def _claim_generation_row(session: Any, task_id: str) -> Any | None:
     generation = (
         await session.execute(
-            generation_ports()
-            .select(generation_ports().Generation)
-            .where(generation_ports().Generation.id == task_id)
+            generation_persistence_ports()
+            .select(generation_persistence_ports().Generation)
+            .where(generation_persistence_ports().Generation.id == task_id)
             .with_for_update(skip_locked=True)
         )
     ).scalar_one_or_none()
@@ -115,31 +129,33 @@ async def _claim_generation_row(session: Any, task_id: str) -> Any | None:
         return generation
     existing_id = (
         await session.execute(
-            generation_ports()
-            .select(generation_ports().Generation.id)
-            .where(generation_ports().Generation.id == task_id)
+            generation_persistence_ports()
+            .select(generation_persistence_ports().Generation.id)
+            .where(generation_persistence_ports().Generation.id == task_id)
         )
     ).scalar_one_or_none()
     if existing_id is not None:
-        generation_ports().logger.info(
+        generation_events_ports().logger.info(
             "generation initial claim skipped locked row task_id=%s",
             task_id,
         )
     else:
-        generation_ports().logger.warning("generation not found task_id=%s", task_id)
+        generation_events_ports().logger.warning(
+            "generation not found task_id=%s", task_id
+        )
     return None
 
 
 def _generation_cannot_start(generation: Any) -> bool:
-    if generation_ports().is_generation_terminal(generation.status):
-        generation_ports().logger.info(
+    if generation_domain_ports().is_generation_terminal(generation.status):
+        generation_events_ports().logger.info(
             "generation already terminal task_id=%s status=%s",
             generation.id,
             generation.status,
         )
         return True
-    if generation.status == generation_ports().GenerationStatus.RUNNING.value:
-        generation_ports().logger.info(
+    if generation.status == generation_domain_ports().GenerationStatus.RUNNING.value:
+        generation_events_ports().logger.info(
             "generation already running task_id=%s", generation.id
         )
         return True
@@ -174,15 +190,15 @@ def _load_generation_fields(
         if isinstance(generation.upstream_request, dict)
         else None
     )
-    state.trace_id = generation_ports()._generation_trace_id(
+    state.trace_id = generation_events_ports()._generation_trace_id(
         state.task_id,
         state.gen_upstream_request_snapshot,
     )
     state.stage_timer.set_ms(
         "queue_wait",
-        generation_ports()._queue_wait_ms(state.gen_created_at),
+        generation_queue_ports()._queue_wait_ms(state.gen_created_at),
     )
-    state.image_request_options = generation_ports()._image_request_options(
+    state.image_request_options = generation_provider_ports()._image_request_options(
         generation.upstream_request,
         size=state.size_requested,
     )
@@ -193,13 +209,13 @@ async def _validate_conversation(
     session: Any,
 ) -> bool:
     try:
-        await generation_ports()._ensure_generation_conversation_alive(
+        await generation_persistence_ports()._ensure_generation_conversation_alive(
             session,
             message_id=state.message_id,
             user_id=state.user_id,
         )
         return True
-    except generation_ports()._TaskCancelled as exc:
+    except generation_lease_ports()._TaskCancelled as exc:
         await _cancel_queued_generation(state, session, str(exc))
         return False
 
@@ -210,42 +226,44 @@ async def _cancel_queued_generation(
     message: str,
 ) -> None:
     result = await session.execute(
-        generation_ports()
+        generation_persistence_ports()
         ._generation_attempt_update(
             state.task_id,
             state.generation.attempt,
-            statuses=(generation_ports().GenerationStatus.QUEUED.value,),
+            statuses=(generation_domain_ports().GenerationStatus.QUEUED.value,),
         )
         .values(
-            status=generation_ports().GenerationStatus.CANCELED.value,
-            progress_stage=generation_ports().GenerationStage.FINALIZING,
+            status=generation_domain_ports().GenerationStatus.CANCELED.value,
+            progress_stage=generation_domain_ports().GenerationStage.FINALIZING,
             finished_at=datetime.now(timezone.utc),
-            error_code=generation_ports().EC.CANCELLED.value,
+            error_code=generation_domain_ports().EC.CANCELLED.value,
             error_message=message,
         )
     )
-    generation_ports()._ensure_generation_updated(
+    generation_persistence_ports()._ensure_generation_updated(
         result,
         state.task_id,
         state.generation.attempt,
     )
-    row = await session.get(generation_ports().Message, state.message_id)
+    row = await session.get(generation_persistence_ports().Message, state.message_id)
     if row is not None and row.status not in (
-        generation_ports().MessageStatus.SUCCEEDED,
-        generation_ports().MessageStatus.FAILED,
-        generation_ports().MessageStatus.CANCELED,
+        generation_domain_ports().MessageStatus.SUCCEEDED,
+        generation_domain_ports().MessageStatus.FAILED,
+        generation_domain_ports().MessageStatus.CANCELED,
     ):
-        row.status = generation_ports().MessageStatus.FAILED
-    await generation_ports().worker_billing.release_generation(
+        row.status = generation_domain_ports().MessageStatus.FAILED
+    await generation_billing_ports().worker_billing.release_generation(
         session,
         state.generation,
-        reason=generation_ports().EC.CANCELLED.value,
+        reason=generation_domain_ports().EC.CANCELLED.value,
     )
     await session.commit()
-    await generation_ports().worker_billing.flush_balance_cache_refreshes(session)
+    await generation_billing_ports().worker_billing.flush_balance_cache_refreshes(
+        session
+    )
     await _publish_queued_failure(
         state,
-        generation_ports().EC.CANCELLED.value,
+        generation_domain_ports().EC.CANCELLED.value,
         message,
     )
     state.task_outcome = "failed"
@@ -255,7 +273,7 @@ async def _validate_primary_input(
     state: GenerationRunState,
     session: Any,
 ) -> bool:
-    if generation_ports()._primary_input_image_id_valid(
+    if generation_provider_ports()._primary_input_image_id_valid(
         state.primary_input_image_id,
         state.input_image_ids,
     ):
@@ -263,7 +281,7 @@ async def _validate_primary_input(
     await _fail_queued_generation(
         state,
         session,
-        code=generation_ports().EC.INVALID_PARAM.value,
+        code=generation_domain_ports().EC.INVALID_PARAM.value,
         message="primary_input_image_id must be included in input_image_ids",
         next_attempt=None,
     )
@@ -278,7 +296,7 @@ async def _fail_max_attempts(
         state,
         session,
         code="max_attempts_exceeded",
-        message=f"generation exceeded max attempts ({generation_ports()._MAX_ATTEMPTS})",
+        message=f"generation exceeded max attempts ({generation_domain_ports()._MAX_ATTEMPTS})",
         next_attempt=state.attempt,
     )
     _observe_task_duration(state)
@@ -293,8 +311,8 @@ async def _fail_queued_generation(
     next_attempt: int | None,
 ) -> None:
     values: dict[str, Any] = {
-        "status": generation_ports().GenerationStatus.FAILED.value,
-        "progress_stage": generation_ports().GenerationStage.FINALIZING,
+        "status": generation_domain_ports().GenerationStatus.FAILED.value,
+        "progress_stage": generation_domain_ports().GenerationStage.FINALIZING,
         "finished_at": datetime.now(timezone.utc),
         "error_code": code,
         "error_message": message,
@@ -302,31 +320,38 @@ async def _fail_queued_generation(
     if next_attempt is not None:
         values["attempt"] = next_attempt
     result = await session.execute(
-        generation_ports()
+        generation_persistence_ports()
         ._generation_attempt_update(
             state.task_id,
             state.generation.attempt,
-            statuses=(generation_ports().GenerationStatus.QUEUED.value,),
+            statuses=(generation_domain_ports().GenerationStatus.QUEUED.value,),
         )
         .values(**values)
     )
-    generation_ports()._ensure_generation_updated(
+    generation_persistence_ports()._ensure_generation_updated(
         result,
         state.task_id,
         state.generation.attempt,
     )
-    row = await session.get(generation_ports().Message, state.message_id)
-    if row is not None and row.status != generation_ports().MessageStatus.CANCELED:
-        row.status = generation_ports().MessageStatus.FAILED
-    generation = await session.get(generation_ports().Generation, state.task_id)
+    row = await session.get(generation_persistence_ports().Message, state.message_id)
+    if (
+        row is not None
+        and row.status != generation_domain_ports().MessageStatus.CANCELED
+    ):
+        row.status = generation_domain_ports().MessageStatus.FAILED
+    generation = await session.get(
+        generation_persistence_ports().Generation, state.task_id
+    )
     if generation is not None:
-        await generation_ports().worker_billing.release_generation(
+        await generation_billing_ports().worker_billing.release_generation(
             session,
             generation,
             reason=code,
         )
     await session.commit()
-    await generation_ports().worker_billing.flush_balance_cache_refreshes(session)
+    await generation_billing_ports().worker_billing.flush_balance_cache_refreshes(
+        session
+    )
     await _publish_queued_failure(state, code, message)
     state.task_outcome = "failed"
 
@@ -336,11 +361,11 @@ async def _publish_queued_failure(
     code: str,
     message: str,
 ) -> None:
-    await generation_ports().publish_event(
+    await generation_events_ports().publish_event(
         state.redis,
         state.user_id,
-        generation_ports().task_channel(state.task_id),
-        generation_ports().EV_GEN_FAILED,
+        generation_events_ports().task_channel(state.task_id),
+        generation_events_ports().EV_GEN_FAILED,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
@@ -364,7 +389,9 @@ async def _prepare_provider_reservation(
 
 async def _resolve_route(state: GenerationRunState) -> None:
     try:
-        state.raw_image_route = await generation_ports()._resolve_image_primary_route()
+        state.raw_image_route = (
+            await generation_provider_ports()._resolve_image_primary_route()
+        )
     except Exception:  # noqa: BLE001
         state.raw_image_route = "responses"
     state.image_route = state.raw_image_route
@@ -377,16 +404,16 @@ async def _resolve_user_runtime_provider(
     if not credential_id:
         return True
     try:
-        async with generation_ports().SessionLocal() as session:
+        async with generation_persistence_ports().SessionLocal() as session:
             state.user_runtime_provider = (
-                await generation_ports().resolve_user_credential_runtime(
+                await generation_billing_ports().resolve_user_credential_runtime(
                     session,
                     credential_id,
                 )
             )
         purposes = getattr(state.user_runtime_provider, "purposes", ()) or ()
         if "image" not in purposes:
-            raise generation_ports().UpstreamError(
+            raise generation_provider_ports().UpstreamError(
                 "user API key supplier does not allow image purpose",
                 status_code=403,
                 error_code="byok_purpose_mismatch",
@@ -414,20 +441,23 @@ async def _fail_user_runtime_provider(
     exc: Exception,
 ) -> None:
     byok_error = (
-        generation_ports().classify_user_credential_error(exc)[1] or "invalid_api_key"
+        generation_billing_ports().classify_user_credential_error(exc)[1]
+        or "invalid_api_key"
     )
-    await generation_ports().record_user_credential_runtime_error(credential_id, exc)
-    error_code = generation_ports().byok_error_to_generation_code(byok_error)
-    error_message = generation_ports().byok_error_message(byok_error)
+    await generation_billing_ports().record_user_credential_runtime_error(
+        credential_id, exc
+    )
+    error_code = generation_billing_ports().byok_error_to_generation_code(byok_error)
+    error_message = generation_billing_ports().byok_error_message(byok_error)
     try:
-        async with generation_ports().SessionLocal() as session:
+        async with generation_persistence_ports().SessionLocal() as session:
             await _persist_user_runtime_failure(
                 state,
                 session,
                 error_code,
                 error_message,
             )
-    except generation_ports()._StaleGenerationAttempt:
+    except generation_domain_ports()._StaleGenerationAttempt:
         state.task_outcome = "stale_attempt"
         return
     await _publish_queued_failure(state, error_code, error_message)
@@ -441,50 +471,56 @@ async def _persist_user_runtime_failure(
     error_message: str,
 ) -> None:
     result = await session.execute(
-        generation_ports()
+        generation_persistence_ports()
         ._generation_attempt_update(
             state.task_id,
             state.loaded_attempt,
             statuses=(
-                generation_ports().GenerationStatus.QUEUED.value,
-                generation_ports().GenerationStatus.RUNNING.value,
+                generation_domain_ports().GenerationStatus.QUEUED.value,
+                generation_domain_ports().GenerationStatus.RUNNING.value,
             ),
         )
         .values(
-            status=generation_ports().GenerationStatus.FAILED.value,
-            progress_stage=generation_ports().GenerationStage.FINALIZING,
+            status=generation_domain_ports().GenerationStatus.FAILED.value,
+            progress_stage=generation_domain_ports().GenerationStage.FINALIZING,
             attempt=state.loaded_attempt,
             finished_at=datetime.now(timezone.utc),
             error_code=error_code,
             error_message=error_message,
         )
     )
-    generation_ports()._ensure_generation_updated(
+    generation_persistence_ports()._ensure_generation_updated(
         result,
         state.task_id,
         state.loaded_attempt,
     )
-    message = await session.get(generation_ports().Message, state.message_id)
+    message = await session.get(
+        generation_persistence_ports().Message, state.message_id
+    )
     if (
         message is not None
-        and message.status != generation_ports().MessageStatus.CANCELED
+        and message.status != generation_domain_ports().MessageStatus.CANCELED
     ):
-        message.status = generation_ports().MessageStatus.FAILED
-    generation = await session.get(generation_ports().Generation, state.task_id)
+        message.status = generation_domain_ports().MessageStatus.FAILED
+    generation = await session.get(
+        generation_persistence_ports().Generation, state.task_id
+    )
     if generation is not None:
-        await generation_ports().worker_billing.release_generation(
+        await generation_billing_ports().worker_billing.release_generation(
             session,
             generation,
             reason=error_code,
         )
     await session.commit()
-    await generation_ports().worker_billing.flush_balance_cache_refreshes(session)
+    await generation_billing_ports().worker_billing.flush_balance_cache_refreshes(
+        session
+    )
 
 
 def _apply_route_constraints(state: GenerationRunState) -> None:
     state.requires_mask_provider = (
         bool(state.mask_image_id)
-        and state.action == generation_ports().GenerationAction.EDIT
+        and state.action == generation_domain_ports().GenerationAction.EDIT
     )
     if state.requires_mask_provider and state.raw_image_route in {
         "dual_race",
@@ -507,7 +543,9 @@ def _apply_route_constraints(state: GenerationRunState) -> None:
         if state.requires_mask_provider
         else None
         if state.is_dual_race
-        else generation_ports()._image_endpoint_kind_for_engine(state.image_route)
+        else generation_provider_ports()._image_endpoint_kind_for_engine(
+            state.image_route
+        )
     )
 
 
@@ -518,13 +556,13 @@ async def _attach_provider_pool(state: GenerationRunState) -> None:
         provider_pool = await get_pool()
         provider_pool.attach_redis(state.redis)
     except Exception:  # noqa: BLE001
-        generation_ports().logger.debug(
+        generation_events_ports().logger.debug(
             "provider_pool attach_redis failed", exc_info=True
         )
 
 
 async def _reserve_provider_slot(state: GenerationRunState) -> bool:
-    queue_metadata = generation_ports().generation_queue_metadata(
+    queue_metadata = generation_queue_ports().generation_queue_metadata(
         upstream_request=state.gen_upstream_request_snapshot,
         action=state.action,
         size_requested=state.size_requested,
@@ -535,12 +573,12 @@ async def _reserve_provider_slot(state: GenerationRunState) -> bool:
     if state.reserved_provider is None:
         await _publish_provider_wait(state, provider_delay)
         return False
-    state.reserved_provider_name = generation_ports()._redis_text(
+    state.reserved_provider_name = generation_queue_ports()._redis_text(
         getattr(state.reserved_provider, "name", None)
     )
     state.upstream_provider_label = (
         "dual_race"
-        if generation_ports()._is_dual_race_sentinel(state.reserved_provider_name)
+        if generation_queue_ports()._is_dual_race_sentinel(state.reserved_provider_name)
         else state.reserved_provider_name
     )
     return True
@@ -552,32 +590,35 @@ async def _reserve_provider(
 ) -> int:
     provider_delay = 0
     try:
-        started = generation_ports().time.monotonic()
-        state.reserved_provider = await generation_ports()._reserve_image_queue_slot(
-            state.redis,
-            state.task_id,
-            dual_race=state.is_dual_race,
-            endpoint_kind=state.endpoint_kind,
-            requires_mask=state.requires_mask_provider,
-            provider_override=state.user_runtime_provider,
-            queue_lane=queue_metadata.get("queue_lane"),
-            size_bucket=queue_metadata.get("size_bucket"),
-            cost_class=queue_metadata.get("cost_class"),
+        started = generation_domain_ports().time.monotonic()
+        state.reserved_provider = (
+            await generation_lease_ports()._reserve_image_queue_slot(
+                state.redis,
+                state.task_id,
+                dual_race=state.is_dual_race,
+                endpoint_kind=state.endpoint_kind,
+                requires_mask=state.requires_mask_provider,
+                provider_override=state.user_runtime_provider,
+                queue_lane=queue_metadata.get("queue_lane"),
+                size_bucket=queue_metadata.get("size_bucket"),
+                cost_class=queue_metadata.get("cost_class"),
+            )
         )
         state.stage_timer.add_elapsed("provider_wait", started)
-    except generation_ports().UpstreamError as exc:
+    except generation_provider_ports().UpstreamError as exc:
         error_code = getattr(exc, "error_code", None)
-        if error_code == generation_ports().EC.NO_MASK_CAPABLE_PROVIDER.value:
+        if error_code == generation_domain_ports().EC.NO_MASK_CAPABLE_PROVIDER.value:
             raise
-        if error_code != generation_ports().EC.ALL_ACCOUNTS_FAILED.value:
+        if error_code != generation_domain_ports().EC.ALL_ACCOUNTS_FAILED.value:
             raise
-        provider_delay = generation_ports()._IMAGE_PROVIDER_UNAVAILABLE_RETRY_S
+        provider_delay = generation_queue_ports()._IMAGE_PROVIDER_UNAVAILABLE_RETRY_S
         await state.redis.set(
-            generation_ports()._image_queue_not_before_key(state.task_id),
-            str(generation_ports().time.time() + provider_delay),
-            ex=provider_delay + generation_ports()._IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
+            generation_queue_ports()._image_queue_not_before_key(state.task_id),
+            str(generation_domain_ports().time.time() + provider_delay),
+            ex=provider_delay
+            + generation_queue_ports()._IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
         )
-        await generation_ports()._enqueue_generation_once(
+        await generation_queue_ports()._enqueue_generation_once(
             state.redis,
             state.task_id,
             defer_by=provider_delay,
@@ -589,20 +630,20 @@ async def _publish_provider_wait(
     state: GenerationRunState,
     provider_delay: int,
 ) -> None:
-    await generation_ports()._clear_image_queue_enqueue_dedupe(
+    await generation_queue_ports()._clear_image_queue_enqueue_dedupe(
         state.redis,
         state.task_id,
     )
-    await generation_ports().publish_event(
+    await generation_events_ports().publish_event(
         state.redis,
         state.user_id,
         state.channel,
-        generation_ports().EV_GEN_QUEUED,
+        generation_events_ports().EV_GEN_QUEUED,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
-            "stage": generation_ports().GenerationStage.QUEUED.value,
+            "stage": generation_domain_ports().GenerationStage.QUEUED.value,
             "substage": ("waiting_provider" if provider_delay else "waiting_queue"),
             "reason": (
                 "image_provider_unavailable"
@@ -629,20 +670,20 @@ async def _start_generation_attempt(state: GenerationRunState) -> bool:
 
 async def _acquire_generation_lease(state: GenerationRunState) -> bool:
     try:
-        await generation_ports()._acquire_lease(
+        await generation_lease_ports()._acquire_lease(
             state.redis,
             state.task_id,
             state.lease_token,
         )
         return True
-    except generation_ports()._LeaseLost as exc:
-        generation_ports().logger.info(
+    except generation_lease_ports()._LeaseLost as exc:
+        generation_events_ports().logger.info(
             "generation lease already held task=%s err=%s",
             state.task_id,
             exc,
         )
         state.task_outcome = "lease_held"
-        await generation_ports()._release_image_queue_slot(
+        await generation_lease_ports()._release_image_queue_slot(
             state.redis,
             task_id=state.task_id,
             provider_name=state.reserved_provider_name,
@@ -653,19 +694,21 @@ async def _acquire_generation_lease(state: GenerationRunState) -> bool:
 async def _transition_generation_running(
     state: GenerationRunState,
 ) -> bool:
-    async with generation_ports().SessionLocal() as session:
+    async with generation_persistence_ports().SessionLocal() as session:
         current = (
             await session.execute(
-                generation_ports()
-                .select(generation_ports().Generation)
-                .where(generation_ports().Generation.id == state.task_id)
+                generation_persistence_ports()
+                .select(generation_persistence_ports().Generation)
+                .where(generation_persistence_ports().Generation.id == state.task_id)
                 .with_for_update(skip_locked=True)
             )
         ).scalar_one_or_none()
-        if current is None or generation_ports().is_generation_terminal(current.status):
+        if current is None or generation_domain_ports().is_generation_terminal(
+            current.status
+        ):
             await _release_stale_claim(state)
             return False
-        state.attempt, may_run = generation_ports()._bounded_next_attempt(
+        state.attempt, may_run = generation_domain_ports()._bounded_next_attempt(
             current.attempt
         )
         if not may_run:
@@ -673,18 +716,20 @@ async def _transition_generation_running(
             return False
         running_request = _running_upstream_request(state, current)
         started_at = datetime.now(timezone.utc)
-        state.queue_metadata_payload = generation_ports().generation_queue_metadata(
-            upstream_request=running_request,
-            action=current.action,
-            size_requested=current.size_requested,
-            mask_image_id=current.mask_image_id,
-            created_at=current.created_at,
-            started_at=started_at,
-            finished_at=current.finished_at,
-            upstream_pixels=current.upstream_pixels,
-            now=started_at,
+        state.queue_metadata_payload = (
+            generation_queue_ports().generation_queue_metadata(
+                upstream_request=running_request,
+                action=current.action,
+                size_requested=current.size_requested,
+                mask_image_id=current.mask_image_id,
+                created_at=current.created_at,
+                started_at=started_at,
+                finished_at=current.finished_at,
+                upstream_pixels=current.upstream_pixels,
+                now=started_at,
+            )
         )
-        running_request = generation_ports().merge_queue_metadata(
+        running_request = generation_queue_ports().merge_queue_metadata(
             running_request,
             state.queue_metadata_payload,
         )
@@ -729,17 +774,17 @@ async def _commit_running_transition(
     started_at: datetime,
 ) -> None:
     result = await session.execute(
-        generation_ports()
-        .update(generation_ports().Generation)
+        generation_persistence_ports()
+        .update(generation_persistence_ports().Generation)
         .where(
-            generation_ports().Generation.id == state.task_id,
-            generation_ports().Generation.attempt == current.attempt,
-            generation_ports().Generation.status
-            == generation_ports().GenerationStatus.QUEUED.value,
+            generation_persistence_ports().Generation.id == state.task_id,
+            generation_persistence_ports().Generation.attempt == current.attempt,
+            generation_persistence_ports().Generation.status
+            == generation_domain_ports().GenerationStatus.QUEUED.value,
         )
         .values(
-            status=generation_ports().GenerationStatus.RUNNING.value,
-            progress_stage=generation_ports().GenerationStage.RENDERING,
+            status=generation_domain_ports().GenerationStatus.RUNNING.value,
+            progress_stage=generation_domain_ports().GenerationStage.RENDERING,
             started_at=started_at,
             attempt=state.attempt,
             upstream_request=running_request,
@@ -748,12 +793,12 @@ async def _commit_running_transition(
         )
     )
     try:
-        generation_ports()._ensure_generation_updated(
+        generation_persistence_ports()._ensure_generation_updated(
             result,
             state.task_id,
             current.attempt,
         )
-    except generation_ports()._StaleGenerationAttempt:
+    except generation_domain_ports()._StaleGenerationAttempt:
         await _release_stale_claim(state)
         raise
     await session.commit()
@@ -761,12 +806,12 @@ async def _commit_running_transition(
 
 async def _release_stale_claim(state: GenerationRunState) -> None:
     state.task_outcome = "stale_attempt"
-    await generation_ports()._release_image_queue_slot(
+    await generation_lease_ports()._release_image_queue_slot(
         state.redis,
         task_id=state.task_id,
         provider_name=state.reserved_provider_name,
     )
-    await generation_ports()._release_lease(
+    await generation_lease_ports()._release_lease(
         state.redis,
         state.task_id,
         state.lease_token,
@@ -775,22 +820,22 @@ async def _release_stale_claim(state: GenerationRunState) -> None:
 
 async def _publish_generation_started(state: GenerationRunState) -> None:
     state.renewer = asyncio.create_task(
-        generation_ports()._lease_renewer(
+        generation_lease_ports()._lease_renewer(
             state.redis,
             state.task_id,
             state.lease_token,
             state.lease_lost,
             extra_lease_keys=[
-                generation_ports()._image_task_provider_key(state.task_id)
+                generation_queue_ports()._image_task_provider_key(state.task_id)
             ],
             image_provider_name=state.reserved_provider_name,
         )
     )
-    await generation_ports().publish_event(
+    await generation_events_ports().publish_event(
         state.redis,
         state.user_id,
         state.channel,
-        generation_ports().EV_GEN_STARTED,
+        generation_events_ports().EV_GEN_STARTED,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
@@ -805,21 +850,21 @@ async def _publish_generation_started(state: GenerationRunState) -> None:
     if state.lease_reacquired:
         await _publish_lease_reacquired(state)
     await _initialize_inflight_snapshot(state)
-    await generation_ports()._kick_image_queue(state.redis)
+    await generation_queue_ports()._kick_image_queue(state.redis)
 
 
 async def _publish_lease_reacquired(state: GenerationRunState) -> None:
-    await generation_ports().publish_event(
+    await generation_events_ports().publish_event(
         state.redis,
         state.user_id,
         state.channel,
-        generation_ports().EV_GEN_PROGRESS,
+        generation_events_ports().EV_GEN_PROGRESS,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
-            "stage": generation_ports().GenerationStage.QUEUED.value,
-            "substage": generation_ports()._LEASE_REACQUIRED_SUBSTAGE,
+            "stage": generation_domain_ports().GenerationStage.QUEUED.value,
+            "substage": generation_lease_ports()._LEASE_REACQUIRED_SUBSTAGE,
         },
     )
 
@@ -832,7 +877,7 @@ async def _initialize_inflight_snapshot(state: GenerationRunState) -> None:
     }
     if not state.is_dual_race and state.reserved_provider_name:
         fields["provider"] = state.reserved_provider_name
-    await generation_ports()._inflight_set_fields(
+    await generation_queue_ports()._inflight_set_fields(
         state.redis,
         state.task_id,
         fields,
@@ -841,10 +886,10 @@ async def _initialize_inflight_snapshot(state: GenerationRunState) -> None:
 
 async def _cleanup_failed_setup(state: GenerationRunState) -> None:
     state.task_outcome = "setup_failed"
-    await generation_ports()._cancel_renewer_task(state.renewer)
+    await generation_lease_ports()._cancel_renewer_task(state.renewer)
     state.renewer = None
     cleanup = asyncio.ensure_future(
-        generation_ports()._release_generation_runtime_resources(
+        generation_lease_ports()._release_generation_runtime_resources(
             state.redis,
             task_id=state.task_id,
             lease_token=state.lease_token,
@@ -856,7 +901,7 @@ async def _cleanup_failed_setup(state: GenerationRunState) -> None:
         await asyncio.shield(cleanup)
     except asyncio.CancelledError:
         cleanup.add_done_callback(
-            lambda _task: generation_ports().logger.debug(
+            lambda _task: generation_events_ports().logger.debug(
                 "generation late setup cleanup finished task=%s",
                 state.task_id,
             )
@@ -868,12 +913,12 @@ def _initialize_execution_state(state: GenerationRunState) -> None:
     state.image_iter = None
     state.provider_attempt_log.clear()
     state.upstream_duration_ms = None
-    state.requested_image_count = generation_ports()._image_requested_count(
+    state.requested_image_count = generation_provider_ports()._image_requested_count(
         state.gen_upstream_request_snapshot
     )
     state.batch_extra_pairs.clear()
     state.requested_params_for_diag = (
-        generation_ports()._image_requested_params_snapshot(
+        generation_provider_ports()._image_requested_params_snapshot(
             state.gen_upstream_request_snapshot,
             size=state.size_requested,
             aspect_ratio=state.aspect_ratio,
@@ -885,15 +930,17 @@ def _initialize_execution_state(state: GenerationRunState) -> None:
 
 
 async def _prepare_upstream_request(state: GenerationRunState) -> None:
-    started = generation_ports().time.monotonic()
+    started = generation_domain_ports().time.monotonic()
     state.resolved = _resolve_generation_size(state)
-    state.image_request_options = generation_ports()._image_request_options(
+    state.image_request_options = generation_provider_ports()._image_request_options(
         state.generation.upstream_request,
         size=state.resolved.size,
     )
-    state.prompt_for_upstream = generation_ports()._prompt_with_aspect_ratio_constraint(
-        state.prompt,
-        state.aspect_ratio,
+    state.prompt_for_upstream = (
+        generation_provider_ports()._prompt_with_aspect_ratio_constraint(
+            state.prompt,
+            state.aspect_ratio,
+        )
     )
     await _load_references_and_mask(state)
     _normalize_mask(state)
@@ -912,22 +959,22 @@ def _resolve_generation_size(state: GenerationRunState) -> Any:
         else None
     )
     try:
-        resolved = generation_ports().resolve_size(
+        resolved = generation_provider_ports().resolve_size(
             state.aspect_ratio,
             "fixed",
             fixed_size,
         )
-        generation_ports()._validate_resolved_size(
+        generation_provider_ports()._validate_resolved_size(
             resolved.size,
             state.aspect_ratio,
             validate_aspect_ratio=fixed_size is None,
         )
         return resolved
     except ValueError as exc:
-        raise generation_ports().UpstreamError(
+        raise generation_provider_ports().UpstreamError(
             f"invalid size_requested: {exc}",
             status_code=400,
-            error_code=generation_ports().EC.INVALID_VALUE.value,
+            error_code=generation_domain_ports().EC.INVALID_VALUE.value,
             payload={
                 "size_requested": state.size_requested,
                 "aspect_ratio": state.aspect_ratio,
@@ -936,23 +983,23 @@ def _resolve_generation_size(state: GenerationRunState) -> Any:
 
 
 async def _load_references_and_mask(state: GenerationRunState) -> None:
-    async with generation_ports().SessionLocal() as session:
-        state.references = await generation_ports()._load_reference_images(
+    async with generation_persistence_ports().SessionLocal() as session:
+        state.references = await generation_provider_ports()._load_reference_images(
             session,
             state.input_image_ids,
         )
         mask = None
         if (
             state.mask_image_id
-            and state.action == generation_ports().GenerationAction.EDIT
+            and state.action == generation_domain_ports().GenerationAction.EDIT
         ):
-            mask = await generation_ports()._load_mask_image(
+            mask = await generation_provider_ports()._load_mask_image(
                 session,
                 state.mask_image_id,
             )
     state.ref_for_body = (
         state.references
-        if state.action == generation_ports().GenerationAction.EDIT
+        if state.action == generation_domain_ports().GenerationAction.EDIT
         else []
     )
     state.mask_bytes = mask
@@ -963,29 +1010,29 @@ def _normalize_mask(state: GenerationRunState) -> None:
     if state.mask_bytes is None or not state.ref_for_body:
         return
     reference_bytes = state.ref_for_body[0][1]
-    state.mask_bytes = generation_ports()._resize_mask_to_reference(
+    state.mask_bytes = generation_provider_ports()._resize_mask_to_reference(
         state.mask_bytes,
         reference_bytes,
     )
-    reference_size = generation_ports()._reference_pixel_size(reference_bytes)
+    reference_size = generation_provider_ports()._reference_pixel_size(reference_bytes)
     if reference_size is not None:
-        state.inpaint_size_override = generation_ports()._inpaint_size_from_reference(
-            *reference_size
+        state.inpaint_size_override = (
+            generation_provider_ports()._inpaint_size_from_reference(*reference_size)
         )
 
 
 async def _publish_stream_started(state: GenerationRunState) -> None:
-    await generation_ports().publish_event(
+    await generation_events_ports().publish_event(
         state.redis,
         state.user_id,
         state.channel,
-        generation_ports().EV_GEN_PROGRESS,
+        generation_events_ports().EV_GEN_PROGRESS,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
-            "stage": generation_ports().GenerationStage.RENDERING.value,
-            "substage": generation_ports().GenerationStage.STREAM_STARTED.value,
+            "stage": generation_domain_ports().GenerationStage.RENDERING.value,
+            "substage": generation_domain_ports().GenerationStage.STREAM_STARTED.value,
         },
     )
 
@@ -993,18 +1040,19 @@ async def _publish_stream_started(state: GenerationRunState) -> None:
 async def _dispatch_upstream_request(state: GenerationRunState) -> None:
     async with asyncio.timeout_at(state.task_deadline):
         await _raise_if_pre_upstream_interrupted(state)
-        with generation_ports()._tracer.start_as_current_span(
+        await _record_generation_upstream_marker(state, response_received=False)
+        with generation_events_ports()._tracer.start_as_current_span(
             "upstream.generate_image"
         ) as span:
             _annotate_upstream_span(state, span)
             try:
                 await _call_upstream(state)
-                generation_ports().upstream_calls_total.labels(
+                generation_events_ports().upstream_calls_total.labels(
                     kind="generation",
                     outcome="ok",
                 ).inc()
             except Exception:
-                generation_ports().upstream_calls_total.labels(
+                generation_events_ports().upstream_calls_total.labels(
                     kind="generation",
                     outcome="error",
                 ).inc()
@@ -1015,9 +1063,11 @@ async def _raise_if_pre_upstream_interrupted(
     state: GenerationRunState,
 ) -> None:
     if state.lease_lost.is_set():
-        raise generation_ports()._LeaseLost("generation lease renewer failed")
-    if await generation_ports()._is_cancelled(state.redis, state.task_id):
-        raise generation_ports()._TaskCancelled("cancelled before upstream request")
+        raise generation_lease_ports()._LeaseLost("generation lease renewer failed")
+    if await generation_lease_ports()._is_cancelled(state.redis, state.task_id):
+        raise generation_lease_ports()._TaskCancelled(
+            "cancelled before upstream request"
+        )
 
 
 def _annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
@@ -1043,38 +1093,79 @@ def _annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
 
 
 async def _call_upstream(state: GenerationRunState) -> None:
-    retry_token = generation_ports().push_image_retry_attempt(state.attempt)
-    trace_token = generation_ports().push_image_trace_id(state.trace_id)
-    quota_token = generation_ports().push_image_quota_context(
+    retry_token = generation_provider_ports().push_image_retry_attempt(state.attempt)
+    trace_token = generation_provider_ports().push_image_trace_id(state.trace_id)
+    quota_token = generation_provider_ports().push_image_quota_context(
         state.task_id,
         state.attempt,
     )
-    started = generation_ports().time.monotonic()
+    started = generation_domain_ports().time.monotonic()
     try:
         state.image_iter = _build_image_iterator(state)
-        first_pair = await generation_ports()._anext_image_with_guards(
+        first_pair = await generation_provider_ports()._anext_image_with_guards(
             state.image_iter,
             state.lease_lost,
             redis=state.redis,
             task_id=state.task_id,
         )
     finally:
-        generation_ports().pop_image_quota_context(quota_token)
-        generation_ports().pop_image_trace_id(trace_token)
-        generation_ports().pop_image_retry_attempt(retry_token)
+        generation_provider_ports().pop_image_quota_context(quota_token)
+        generation_provider_ports().pop_image_trace_id(trace_token)
+        generation_provider_ports().pop_image_retry_attempt(retry_token)
     if first_pair is None:
-        raise generation_ports().UpstreamError(
+        raise generation_provider_ports().UpstreamError(
             "upstream image generator yielded no result",
-            error_code=generation_ports().EC.NO_IMAGE_RETURNED.value,
+            error_code=generation_domain_ports().EC.NO_IMAGE_RETURNED.value,
             status_code=200,
         )
+    await _record_generation_upstream_marker(state, response_received=True)
     state.b64_result, state.revised_prompt = first_pair
     state.upstream_duration_ms = int(
-        max(0.0, generation_ports().time.monotonic() - started) * 1000
+        max(0.0, generation_domain_ports().time.monotonic() - started) * 1000
     )
     state.stage_timer.set_ms("render", state.upstream_duration_ms)
     _record_winner_provider(state)
     await _consume_batch_extra_pairs(state)
+
+
+async def _record_generation_upstream_marker(
+    state: GenerationRunState,
+    *,
+    response_received: bool,
+) -> None:
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    async with generation_persistence_ports().SessionLocal() as session:
+        current = (
+            await session.execute(
+                generation_persistence_ports()
+                .select(generation_persistence_ports().Generation)
+                .where(
+                    generation_persistence_ports().Generation.id == state.task_id,
+                    generation_persistence_ports().Generation.attempt == state.attempt,
+                    generation_persistence_ports().Generation.status.in_(
+                        generation_domain_ports()._RUNNING_GENERATION_STATUSES
+                    ),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            raise generation_domain_ports()._StaleGenerationAttempt(
+                f"generation marker stale task={state.task_id} attempt={state.attempt}"
+            )
+        marker = (
+            mark_upstream_response_received
+            if response_received
+            else mark_upstream_dispatch_started
+        )
+        request = marker(
+            current,
+            at=recorded_at,
+            attempt=state.attempt,
+        )
+        current.upstream_request = request
+        await session.commit()
+        state.gen_upstream_request_snapshot = dict(request)
 
 
 def _build_image_iterator(state: GenerationRunState) -> Any:
@@ -1093,15 +1184,17 @@ def _build_image_iterator(state: GenerationRunState) -> Any:
         "provider_override": provider_override,
         "user_id": state.user_id,
     }
-    if state.action != generation_ports().GenerationAction.EDIT:
-        return generation_ports().generate_image(size=state.resolved.size, **common)
+    if state.action != generation_domain_ports().GenerationAction.EDIT:
+        return generation_provider_ports().generate_image(
+            size=state.resolved.size, **common
+        )
     if not state.ref_for_body:
-        raise generation_ports().UpstreamError(
+        raise generation_provider_ports().UpstreamError(
             "edit action requires at least one reference image",
-            error_code=generation_ports().EC.INVALID_REQUEST_ERROR.value,
+            error_code=generation_domain_ports().EC.INVALID_REQUEST_ERROR.value,
             status_code=400,
         )
-    return generation_ports().edit_image(
+    return generation_provider_ports().edit_image(
         size=state.inpaint_size_override or state.resolved.size,
         images=[raw for _sha, raw in state.ref_for_body],
         mask=state.mask_bytes,
@@ -1140,20 +1233,20 @@ async def _next_batch_extra_pair(
     batch_index: int,
 ) -> tuple[str, str | None] | None:
     try:
-        pair = await generation_ports()._anext_image_with_guards(
+        pair = await generation_provider_ports()._anext_image_with_guards(
             state.image_iter,
             state.lease_lost,
             redis=state.redis,
             task_id=state.task_id,
         )
     except (
-        generation_ports()._LeaseLost,
-        generation_ports()._TaskCancelled,
+        generation_lease_ports()._LeaseLost,
+        generation_lease_ports()._TaskCancelled,
         asyncio.CancelledError,
     ):
         raise
     except Exception as exc:  # noqa: BLE001
-        generation_ports().logger.warning(
+        generation_events_ports().logger.warning(
             "image2 n extra iter failed task=%s index=%s err=%r",
             state.task_id,
             batch_index,
@@ -1161,7 +1254,7 @@ async def _next_batch_extra_pair(
         )
         return None
     if pair is None:
-        generation_ports().logger.warning(
+        generation_events_ports().logger.warning(
             "image2 n returned fewer images task=%s requested=%s actual=%s",
             state.task_id,
             state.requested_image_count,
@@ -1172,7 +1265,7 @@ async def _next_batch_extra_pair(
 
 async def _cleanup_generation_run(state: GenerationRunState) -> None:
     if state.renewer is not None:
-        await generation_ports()._cancel_renewer_task(state.renewer)
+        await generation_lease_ports()._cancel_renewer_task(state.renewer)
     cleanup = asyncio.ensure_future(_critical_release_cleanup(state))
     cancelled = False
     try:
@@ -1180,7 +1273,7 @@ async def _cleanup_generation_run(state: GenerationRunState) -> None:
     except asyncio.CancelledError:
         cancelled = True
         cleanup.add_done_callback(
-            lambda _task: generation_ports().logger.debug(
+            lambda _task: generation_events_ports().logger.debug(
                 "generation late critical cleanup finished task=%s",
                 state.task_id,
             )
@@ -1191,7 +1284,7 @@ async def _cleanup_generation_run(state: GenerationRunState) -> None:
 
 
 async def _critical_release_cleanup(state: GenerationRunState) -> None:
-    await generation_ports()._consume_image_iter_close_result(
+    await generation_provider_ports()._consume_image_iter_close_result(
         state.image_iter,
         task_id=state.task_id,
     )
@@ -1209,9 +1302,9 @@ async def _critical_release_cleanup(state: GenerationRunState) -> None:
 def _observe_task_duration(state: GenerationRunState) -> None:
     try:
         duration = asyncio.get_event_loop().time() - state.task_start
-        generation_ports().task_duration_seconds.labels(
+        generation_events_ports().task_duration_seconds.labels(
             kind="generation",
-            outcome=generation_ports().safe_outcome(state.task_outcome),
+            outcome=generation_events_ports().safe_outcome(state.task_outcome),
         ).observe(duration)
     except Exception:  # noqa: BLE001
         pass

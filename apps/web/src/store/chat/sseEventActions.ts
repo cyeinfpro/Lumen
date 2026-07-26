@@ -517,7 +517,15 @@ function refreshTerminalCompletion(
 
 function handleCompletionLifecycle(context: SseEventContext): void {
   const { messageId, completionId } = completionTarget(context);
-  if (!messageId && !completionId) return;
+  if (!messageId && !completionId) {
+    // 修复静默丢事件：两个 id 都没有的 completion 事件无法归属到任何消息，只能丢弃，
+    // 但之前是无声丢弃。这属于后端 payload 契约异常，留一条日志才能定位。
+    logWarn("completion event without message or completion id", {
+      scope: "chat-sse",
+      extra: { event: context.eventName },
+    });
+    return;
+  }
   rememberCompletionMessage(completionId, messageId);
   if (context.eventName === "completion.thinking_delta") {
     const delta =

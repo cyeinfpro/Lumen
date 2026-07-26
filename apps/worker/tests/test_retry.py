@@ -3,9 +3,25 @@ from __future__ import annotations
 from app.retry import is_moderation_block, is_retriable
 
 
-def test_no_image_returned_is_retriable_even_with_http_200() -> None:
+def test_no_image_returned_is_terminal_because_upstream_already_charged() -> None:
+    """上游回了 2xx 却没给图：钱已经花出去了，重试 = 再花一笔。
+
+    这条用例此前断言的是相反行为（``..._is_retriable_even_with_http_200``）——
+    当时只看成功率，没算成本：hold 只结算一次，第二次上游调用的费用无处转嫁，
+    只能由平台吸收。判终态后用户照付第一笔（纯转嫁），但不会被重复扣费。
+    """
     decision = is_retriable("no_image_returned", 200)
-    assert decision.retriable is True
+    assert decision.retriable is False
+
+
+def test_no_image_returned_stays_terminal_despite_rate_limit_wording() -> None:
+    """成本已发生这件事不该被错误消息里的关键词翻盘。
+
+    守卫放在 is_retriable 最前面就是为了这个：上游把 "rate limit" 之类的字样
+    塞进消息时，下面的关键词分支会判可重试。
+    """
+    decision = is_retriable("no_image_returned", 200, error_message="Rate limit hit")
+    assert decision.retriable is False
 
 
 def test_tool_choice_downgrade_is_retriable_even_with_http_200() -> None:
@@ -51,15 +67,16 @@ def test_wrapped_safety_error_message_is_terminal() -> None:
         "fallback_lanes_failed",
         200,
         error_message=(
-            "all image lanes failed: moderation_blocked; "
-            "safety_violations=[sexual]"
+            "all image lanes failed: moderation_blocked; safety_violations=[sexual]"
         ),
     )
     assert decision.retriable is False
 
 
 def test_invalid_size_message_is_terminal() -> None:
-    decision = is_retriable("upstream_error", 502, error_message="invalid size: 9999x9999")
+    decision = is_retriable(
+        "upstream_error", 502, error_message="invalid size: 9999x9999"
+    )
     assert decision.retriable is False
 
 
@@ -73,7 +90,9 @@ def test_http_400_rate_limit_wording_without_code_is_terminal() -> None:
 
 
 def test_http_400_with_explicit_rate_limit_code_is_retriable() -> None:
-    decision = is_retriable("rate_limit_error", 400, error_message="rate limit exceeded")
+    decision = is_retriable(
+        "rate_limit_error", 400, error_message="rate limit exceeded"
+    )
     assert decision.retriable is True
 
 
@@ -93,7 +112,9 @@ def test_direct_image_request_failed_is_retriable() -> None:
     assert "retriable" in decision.reason
 
 
-def test_reference_download_timeout_is_retriable_even_if_wrapped_invalid_value() -> None:
+def test_reference_download_timeout_is_retriable_even_if_wrapped_invalid_value() -> (
+    None
+):
     decision = is_retriable(
         "invalid_value",
         400,
@@ -119,17 +140,21 @@ def test_is_moderation_block_by_error_code() -> None:
 
 
 def test_is_moderation_block_by_message_keywords() -> None:
-    assert is_moderation_block(
-        "all_providers_failed",
-        "request blocked by upstream safety policy",
-    ) is True
-    assert is_moderation_block(
-        None, "moderation_blocked: prompt rejected"
-    ) is True
-    assert is_moderation_block(
-        "fallback_lanes_failed",
-        "all image lanes failed: safety_violations=[sexual]",
-    ) is True
+    assert (
+        is_moderation_block(
+            "all_providers_failed",
+            "request blocked by upstream safety policy",
+        )
+        is True
+    )
+    assert is_moderation_block(None, "moderation_blocked: prompt rejected") is True
+    assert (
+        is_moderation_block(
+            "fallback_lanes_failed",
+            "all image lanes failed: safety_violations=[sexual]",
+        )
+        is True
+    )
 
 
 def test_is_moderation_block_negative() -> None:

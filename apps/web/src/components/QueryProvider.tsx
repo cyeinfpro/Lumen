@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { MotionConfig } from "framer-motion";
 
+import { toast } from "@/components/ui/primitives";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { makeQueryClient } from "@/lib/queryClient";
 import { clearPreviousUserQueryCache } from "@/lib/queries/userScope";
@@ -13,7 +14,8 @@ import { useChatStore } from "@/store/useChatStore";
 export * from "@/lib/queries/userScope";
 
 export function QueryProvider({ children }: { children: React.ReactNode }) {
-  const [client] = useState(() => makeQueryClient());
+  // 在 UI 层把 toast 注入给 lib 层的 mutation 错误兜底（lib 不能反向依赖 components）。
+  const [client] = useState(() => makeQueryClient((message) => toast.error(message)));
   const showDevtools = useMediaQuery("(min-width: 1024px)");
   const userId = useChatStore((state) => state.currentUserId);
   const previousUserIdRef = useRef<string | null>(userId);

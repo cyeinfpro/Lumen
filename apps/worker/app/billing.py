@@ -114,6 +114,24 @@ def _generation_billing_retry_count(generation: Generation) -> int:
     return billing_core.generation_billing_retry_count(generation)
 
 
+def _generation_settle_provider(generation: Generation) -> str | None:
+    """结算流水里记下实际产生这笔上游成本的供应商。
+
+    取值优先级：diagnostics["actual_provider"] > diagnostics["provider"]。
+    整段刻意写成不会抛异常的形态：这只是一个对账标签，而它所在的调用点是
+    settle。为了取不到一个标签就让结算崩掉，换来的是 hold 永久悬空——代价比
+    少一行 provider 大得多，所以拿不到就返回 None。
+    """
+    diagnostics = getattr(generation, "diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return None
+    for key in ("actual_provider", "provider"):
+        value = diagnostics.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:64]
+    return None
+
+
 def _completion_billing_ref_id(completion: Completion) -> str:
     return billing_core.completion_billing_ref_id(completion)
 
@@ -163,10 +181,7 @@ async def _rate_multiplier_x10000(session: AsyncSession, user_id: str) -> int:
             select(User.billing_rate_multiplier).where(User.id == user_id)
         )
     ).scalar_one_or_none()
-    try:
-        return max(0, int(float(raw if raw is not None else 1) * 10_000))
-    except (TypeError, ValueError):
-        return 10_000
+    return billing_core.parse_rate_multiplier_x10000(raw)
 
 
 def _snapshot_rate_multiplier_x10000(task: Generation | Completion) -> int | None:
@@ -563,6 +578,7 @@ async def settle_generation(
             "model": generation.model,
             "retry_count": _generation_billing_retry_count(generation),
             "rate_multiplier_x10000": rate_multiplier,
+            "provider": _generation_settle_provider(generation),
         },
     )
     if tx is not None:
@@ -673,6 +689,173 @@ async def release_generation(
                 },
             )
         )
+
+
+async def _settle_unknown_upstream_hold(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    ref_type: str,
+    ref_id: str,
+    no_hold_scope: str,
+    no_hold_extra: dict,
+    settle_meta: dict,
+    settle_event: str,
+    settle_audit_extra: dict,
+    overdraw_extra: dict,
+    reason: str,
+    knowledge: str,
+) -> None:
+    """共用骨架：上游结果不可知时按 hold 全额结算（纯转嫁）。
+
+    纯转嫁原则：只要上游可能已扣费，平台绝不吸收损失——hold 全额转 settled，
+    不封顶、不退差。公开函数负责组装各自参数，本函数执行通用流程。
+    """
+    if not await _wallet_billing_applies(
+        session, user_id=user_id, ref_type=ref_type, ref_id=ref_id
+    ):
+        return
+    if not await _billing_enabled():
+        return
+    idempotency_key = f"settle:{ref_id}"
+    existing = await _existing_wallet_tx(session, user_id, idempotency_key)
+    if existing is not None:
+        _add_replay_audit(
+            session, user_id=user_id, tx=existing, replay_source="precheck"
+        )
+        return
+    held = await held_amount_for_ref(session, user_id, ref_type, ref_id)
+    if held <= 0:
+        # hold 已不存在（可能被提前 release 过），无法结算；留待对账。
+        session.add(
+            _audit(
+                event_type="billing.unresolved_after_upstream",
+                user_id=user_id,
+                details={
+                    "scope": no_hold_scope,
+                    "reason": reason,
+                    "knowledge": knowledge,
+                    **no_hold_extra,
+                },
+            )
+        )
+        return
+    tx = await billing_core.settle(
+        session,
+        user_id,
+        ref_type=ref_type,
+        ref_id=ref_id,
+        actual_micro=held,  # 按 hold 全额结算，不封顶、不退差——纯转嫁
+        idempotency_key=idempotency_key,
+        allow_negative=await _allow_negative_balance(),
+        meta={
+            **settle_meta,
+            "tier_source": "upstream_result_unknown",
+            "upstream_cost_knowledge": knowledge,
+        },
+    )
+    if tx is not None:
+        _record_balance_cache_refresh(
+            session, user_id=user_id, balance_after=tx.balance_after
+        )
+        session.add(
+            _audit(
+                event_type=settle_event,
+                user_id=user_id,
+                details={
+                    "amount_micro": tx.amount_micro,
+                    "balance_after": tx.balance_after,
+                    "hold_after": tx.hold_after,
+                    "reason": reason,
+                    "knowledge": knowledge,
+                    **settle_audit_extra,
+                },
+            )
+        )
+        if int((tx.meta or {}).get("overdraw_micro") or 0) > 0:
+            wallet_overdrawn_total.labels(kind="settle").inc()
+            session.add(
+                _audit(
+                    event_type="wallet.overdrawn",
+                    user_id=user_id,
+                    details={
+                        "ref_type": ref_type,
+                        "ref_id": ref_id,
+                        "tx_id": tx.id,
+                        **overdraw_extra,
+                    },
+                )
+            )
+
+
+async def settle_generation_unknown_upstream(
+    session: AsyncSession,
+    generation: Generation,
+    *,
+    reason: str,
+    knowledge: str,
+) -> None:
+    """上游是否已扣费不可知时，按 hold 全额结算（纯转嫁的默认动作）。
+
+    纯转嫁原则：上游已被调用但结果不可知（超时、网络异常等），平台绝不
+    吸收上游成本——hold 全额转 settled，不做任何封顶或退款。
+    与 settle_generation 共用同一个 idempotency_key，保证同一次生成只落一笔消费流水。
+    """
+    billing_ref_id = _generation_billing_ref_id(generation)
+    await _settle_unknown_upstream_hold(
+        session,
+        generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+        no_hold_scope="image_result_unknown",
+        no_hold_extra={"generation_id": generation.id},
+        settle_meta={
+            "generation_id": generation.id,
+            "model": generation.model,
+            "retry_count": _generation_billing_retry_count(generation),
+            "provider": _generation_settle_provider(generation),
+        },
+        settle_event="wallet.settle.image_result_unknown",
+        settle_audit_extra={"generation_id": generation.id},
+        overdraw_extra={"generation_id": generation.id},
+        reason=reason,
+        knowledge=knowledge,
+    )
+
+
+async def settle_completion_unknown_upstream(
+    session: AsyncSession,
+    completion: Completion,
+    *,
+    reason: str,
+    knowledge: str,
+) -> None:
+    """上游是否已扣费不可知时，按 hold 全额结算（纯转嫁的默认动作）。
+
+    与 settle_generation_unknown_upstream 同构，区别在于走到这里的 completion
+    用量统计不可信，按残缺用量算钱会低于实际，差额平台垫——纯转嫁要杜绝的。
+    与 charge_completion 共用同一个 idempotency_key，保证同一次 completion 只落一笔消费流水。
+    """
+    billing_ref_id = _completion_billing_ref_id(completion)
+    await _settle_unknown_upstream_hold(
+        session,
+        completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+        no_hold_scope="completion_result_unknown",
+        no_hold_extra={"completion_id": completion.id},
+        settle_meta={
+            "completion_id": completion.id,
+            "model": completion.model,
+            "billing_retry_count": _completion_billing_retry_count(completion),
+            "provider": getattr(completion, "upstream_supplier_id", None),
+        },
+        settle_event="wallet.settle.completion_result_unknown",
+        settle_audit_extra={"completion_id": completion.id},
+        overdraw_extra={"completion_id": completion.id},
+        reason=reason,
+        knowledge=knowledge,
+    )
 
 
 async def _completion_cost_breakdown(

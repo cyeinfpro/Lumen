@@ -202,7 +202,14 @@ async def _claim_assembly(
             status=assembly.status,
         )
         if not claimed:
+            # 抢锁失败在返回值上和「前置条件不满足」都是 None，调用方分不开（E-7）。
+            # 真正的 DB 错误会以异常冒泡，这条日志专门用来标记「锁被别人拿走了」。
             await session.rollback()
+            logger.warning(
+                "storyboard assembly claim lost run=%s step=%s",
+                run_id,
+                assembly.id,
+            )
             return None
         try:
             await session.commit()
@@ -246,7 +253,13 @@ async def _renew_assembly_lease(claim: _AssemblyClaim) -> bool:
             .values(output_json=output)
         )
         if affected_rows(result) != 1:
+            # 续租失败等于 attempt 已被别人接管；无日志的话调用方只看到 False（E-7）。
             await session.rollback()
+            logger.warning(
+                "storyboard assembly lease renew lost run=%s step=%s",
+                claim.run_id,
+                claim.step_id,
+            )
             return False
         try:
             await session.commit()
@@ -369,7 +382,15 @@ async def _fail_assembly(
             .values(status="failed", output_json=output)
         )
         if affected_rows(result) != 1:
+            # 失败状态没写进去（attempt 已被接管）。不记日志的话这次失败原因会
+            # 彻底丢失，排查时只能看到一个卡在 compositing 的 step（E-7）。
             await session.rollback()
+            logger.warning(
+                "storyboard assembly fail update lost run=%s step=%s code=%s",
+                claim.run_id,
+                claim.step_id,
+                code,
+            )
             return False
         try:
             await session.commit()
@@ -414,7 +435,15 @@ async def _complete_assembly(claim: _AssemblyClaim, video: Video) -> bool:
             .values(status="done", output_json=output)
         )
         if affected_rows(result) != 1:
+            # 四处里最要紧的一处：视频已经合成好了，但 step 没能标 done。
+            # 静默 return False 会让这段成片凭空消失在日志外（E-7）。
             await session.rollback()
+            logger.warning(
+                "storyboard assembly complete update lost run=%s step=%s video=%s",
+                claim.run_id,
+                claim.step_id,
+                video.id,
+            )
             return False
         try:
             await session.commit()

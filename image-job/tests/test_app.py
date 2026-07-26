@@ -339,6 +339,52 @@ def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None
     assert "Content-Type" not in call["headers"]  # type: ignore[operator]
 
 
+class _BufferedSseResponse:
+    """已经读完 body 的 SSE 响应（走 extract_response_images 缓冲路径）。"""
+
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, text: str) -> None:
+        self.content = text.encode("utf-8")
+
+
+def test_buffered_sse_partial_only_is_uncertain_not_delivered() -> None:
+    # H-5：body 被截断时缓冲路径过去会把 `.partial_image` 预览帧当成品交付。
+    app = load_app_module()
+    partial_b64 = _tiny_png_b64()
+    resp = _BufferedSseResponse(
+        'data: {"type":"response.image_generation_call.partial_image",'
+        '"partial_image_b64":"' + partial_b64 + '"}\n\n'
+    )
+
+    with pytest.raises(app.JobFailure) as exc:
+        asyncio.run(app.extract_response_images(resp, SimpleNamespace()))
+
+    assert exc.value.error_class == app.ERROR_CLASS_NETWORK
+    assert exc.value.retryable is True
+    # 纯转嫁：上游已 2xx 且已开始出图，禁止落成可退款的 failed。
+    assert exc.value.outcome_uncertain is True
+    assert exc.value.retry_requires_idempotency is True
+    assert exc.value.upstream_body == {"partial_image_events": 1}
+
+
+def test_buffered_sse_drops_partials_but_keeps_final_image() -> None:
+    app = load_app_module()
+    image_b64 = _tiny_png_b64()
+    resp = _BufferedSseResponse(
+        'data: {"type":"response.image_generation_call.partial_image",'
+        '"partial_image_b64":"' + image_b64 + '"}\n\n'
+        'data: {"type":"response.output_item.done","item":'
+        '{"type":"image_generation_call","result":"' + image_b64 + '"}}\n\n'
+    )
+
+    images = asyncio.run(app.extract_response_images(resp, SimpleNamespace()))
+
+    assert len(images) == 1
+    assert images[0].data.startswith(b"\x89PNG")
+
+
 def _tiny_gif_bytes() -> bytes:
     buf = BytesIO()
     Image.new("RGB", (2, 2), color=(0, 0, 0)).save(buf, format="GIF")

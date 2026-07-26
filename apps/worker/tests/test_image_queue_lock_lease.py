@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -24,7 +25,7 @@ def _sync_generation_ports(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
-from app.tasks.generation_parts import queue, queue_claim
+from app.tasks.generation_parts import queue, queue_claim, queue_lock
 
 
 class _TimingRedis:
@@ -892,3 +893,137 @@ async def test_watch_only_lock_fails_closed_before_queue_reservation(
     assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
     assert redis.reservation_writes == 0
     assert redis.store == {}
+
+
+class _ConflictingPipeline:
+    """WATCH 事务：前 ``conflicts`` 次 execute 抛 WatchError，之后成功。"""
+
+    def __init__(self, redis: _ConflictingWatchRedis) -> None:
+        self.redis = redis
+        self.commands: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def watch(self, _key: str) -> None:
+        return None
+
+    async def get(self, key: str) -> str | None:
+        return self.redis.store.get(key)
+
+    def multi(self) -> None:
+        return None
+
+    def pexpire(self, key: str, ttl_ms: int) -> None:
+        self.commands.append(("pexpire", (key, ttl_ms)))
+
+    def delete(self, key: str) -> None:
+        self.commands.append(("delete", (key,)))
+
+    async def execute(self) -> list[int]:
+        self.redis.executes += 1
+        if self.redis.executes <= self.redis.conflicts:
+            raise WatchError("owner changed")
+        return [1 for _command in self.commands]
+
+    async def reset(self) -> None:
+        self.redis.resets += 1
+
+
+class _ConflictingWatchRedis:
+    eval = None
+
+    def __init__(self, conflicts: int) -> None:
+        self.conflicts = conflicts
+        self.executes = 0
+        self.resets = 0
+        self.store: dict[str, str] = {}
+
+    def pipeline(self, *, transaction: bool = True) -> _ConflictingPipeline:
+        assert transaction is True
+        return _ConflictingPipeline(self)
+
+
+@pytest.mark.asyncio
+async def test_watch_fallback_survives_four_consecutive_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计 D-15：重试上限 3 在高并发下太容易耗尽并把任务拒成 LOCAL_QUEUE_FULL。"""
+    redis = _ConflictingWatchRedis(conflicts=4)
+    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(queue_lock.asyncio, "sleep", record_sleep)
+
+    assert await queue_lock._renew_watch(redis, "token-1") is True
+    assert redis.executes == 5
+    assert redis.resets == 5
+    # 每次冲突之后都退避，且退避是递增的（指数 + 抖动，抖动区间不重叠）。
+    assert len(delays) == 4
+    assert all(delay > 0 for delay in delays)
+    assert delays == sorted(delays)
+    assert sum(delays) < queue_lock._renew_interval()
+
+
+@pytest.mark.asyncio
+async def test_watch_fallback_release_backs_off_between_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _ConflictingWatchRedis(conflicts=4)
+    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(queue_lock.asyncio, "sleep", record_sleep)
+
+    assert await queue_lock._release_watch(redis, "token-1") is True
+    assert redis.executes == 5
+    assert len(delays) == 4
+
+
+@pytest.mark.asyncio
+async def test_watch_fallback_still_fails_closed_when_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _ConflictingWatchRedis(conflicts=99)
+    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+
+    async def record_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(queue_lock.asyncio, "sleep", record_sleep)
+
+    with pytest.raises(generation.UpstreamError) as exc_info:
+        await queue_lock._renew_watch(redis, "token-1")
+
+    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert redis.executes == queue_lock.FALLBACK_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_generation_release_lease_failure_is_logged_at_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """审计 D-14：释放失败只打 debug，生产默认不打印，租约泄漏无从排查。"""
+
+    class ExplodingRedis:
+        async def eval(self, *_args: Any) -> int:
+            raise RuntimeError("redis down")
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="app.tasks.generation_parts.default_runtime",
+    ):
+        await generation._release_lease(ExplodingRedis(), "gen-9", "worker-1:token-1")
+
+    records = [
+        record
+        for record in caplog.records
+        if "generation lease release failed" in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "gen-9" in records[0].getMessage()
+    assert "worker-1:token-1" in records[0].getMessage()

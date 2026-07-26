@@ -58,6 +58,7 @@ DEFAULT_PACKAGES = (
     PackageSpec("api", ROOT / "apps/api/app", "app"),
     PackageSpec("worker", ROOT / "apps/worker/app", "app"),
     PackageSpec("tgbot", ROOT / "apps/tgbot/app", "app"),
+    PackageSpec("image-job", ROOT / "image-job/image_job", "image_job"),
 )
 
 
@@ -176,6 +177,62 @@ def strongly_connected_components(
     return sorted(components)
 
 
+# 分层规则：(package, rule 名, 下层包前缀, 上层包前缀)。
+#
+# 口径必须覆盖**每一个**下层目录，漏一个就等于给它开了后门 —— 本文件之前只列了
+# api 的 services/canvas_services/workflow_services，于是 `app.images.application`
+# 反向 import `app.routes._image_delivery` 这类违规完全不在检测视野里（审计新-2/新-18）。
+# 新增下层目录时同步加进来；每条规则当前均为 0 违规，任何新增都会直接失败。
+LAYER_RULES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "api",
+        "api-lower-to-routes",
+        (
+            "app.services",
+            "app.canvas_services",
+            "app.workflow_services",
+            "app.workflow_domain",
+            "app.workflows",
+            "app.images",
+        ),
+        ("app.routes",),
+    ),
+    (
+        "worker",
+        "worker-lower-to-tasks",
+        (
+            "app.services",
+            "app.background_removal",
+            "app.upstream_parts",
+            "app.video_upstream_parts",
+            "app.upstream_clients",
+            "app.provider_runtime",
+            "app.reconciliation",
+            "app.outbox",
+            "app.locks",
+            "app.jobs",
+            "app.task_runtime",
+        ),
+        ("app.tasks",),
+    ),
+    (
+        "image-job",
+        "image-job-lower-to-http",
+        (
+            "image_job.domain",
+            "image_job.application",
+            "image_job.ports",
+            "image_job.adapters",
+        ),
+        (
+            "image_job.api",
+            "image_job.route_handlers",
+            "image_job.app_factory",
+        ),
+    ),
+)
+
+
 def boundary_rule(
     spec_name: str,
     source_module: str,
@@ -187,26 +244,13 @@ def boundary_rule(
         target_module == "app" or target_module.startswith("app.")
     ):
         return "core-to-application"
-    if spec_name == "api":
-        lower_prefixes = (
-            "app.services",
-            "app.canvas_services",
-            "app.workflow_services",
-        )
+    for package, rule, lower_prefixes, upper_prefixes in LAYER_RULES:
+        if package != spec_name:
+            continue
         if source_module.startswith(lower_prefixes) and target_module.startswith(
-            "app.routes"
+            upper_prefixes
         ):
-            return "api-lower-to-routes"
-    if spec_name == "worker":
-        lower_prefixes = (
-            "app.services",
-            "app.background_removal",
-            "app.upstream_parts",
-        )
-        if source_module.startswith(lower_prefixes) and target_module.startswith(
-            "app.tasks"
-        ):
-            return "worker-lower-to-tasks"
+            return rule
     return None
 
 

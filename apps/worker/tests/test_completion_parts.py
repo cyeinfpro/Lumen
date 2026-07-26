@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import inspect
 from pathlib import Path
@@ -204,6 +205,57 @@ async def test_stream_facade_uses_late_bound_cancel_probe(
 
     assert calls == [(redis, "comp-late-bound")]
     assert cancel_requested.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stream_interruption_on_lease_loss_closes_upstream() -> None:
+    class BlockingStream:
+        closed = False
+
+        async def __anext__(self) -> dict[str, object]:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    upstream = BlockingStream()
+    lease_lost = asyncio.Event()
+    lease_lost.set()
+
+    with pytest.raises(stream.LeaseLost, match="lease lost during stream"):
+        await stream.next_completion_stream_event(
+            upstream,
+            cancel_requested=asyncio.Event(),
+            lease_lost=lease_lost,
+        )
+
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_active_tool_idle_timeout_closes_upstream() -> None:
+    class BlockingStream:
+        closed = False
+
+        async def __anext__(self) -> dict[str, object]:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    upstream = BlockingStream()
+
+    with pytest.raises(stream.ToolIdleTimeout, match="tool call idle timeout"):
+        await stream.next_completion_stream_event(
+            upstream,
+            cancel_requested=asyncio.Event(),
+            lease_lost=asyncio.Event(),
+            idle_timeout_s=0.001,
+        )
+
+    assert upstream.closed is True
 
 
 def test_completion_leaf_modules_do_not_reverse_import_facade() -> None:

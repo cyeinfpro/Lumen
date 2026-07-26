@@ -255,29 +255,28 @@ async def record_user_credential_runtime_error(
     from .db import SessionLocal
 
     async with SessionLocal() as session:
-        credential = await session.get(UserApiCredential, credential_id)
-        if credential is None:
-            return
-        now = datetime.now(timezone.utc)
-        credential.last_failed_at = now
-        credential.last_error_code = error_code
-        if error_code == "invalid_api_key":
-            credential.status = "invalid"
-        elif error_code == "key_rate_limited":
-            credential.rate_limited_until = now + timedelta(minutes=5)
         try:
-            await session.commit()
+            # 事务边界显式化（E-6）：credential 状态的几个字段是一个原子单元，
+            # 不再依赖 autobegin 的隐式行为。
+            async with session.begin():
+                credential = await session.get(UserApiCredential, credential_id)
+                if credential is None:
+                    return
+                now = datetime.now(timezone.utc)
+                credential.last_failed_at = now
+                credential.last_error_code = error_code
+                if error_code == "invalid_api_key":
+                    credential.status = "invalid"
+                elif error_code == "key_rate_limited":
+                    credential.rate_limited_until = now + timedelta(minutes=5)
         except Exception as commit_exc:  # noqa: BLE001
-            # commit 失败不能让主任务异常链丢失原始 upstream error，仅 warn + rollback。
+            # 写回失败不能让主任务异常链丢失原始 upstream error，仅 warn；
+            # session.begin() 退出时已经完成 rollback。
             logger.warning(
                 "byok credential %s record commit failed: %s",
                 credential_id,
                 commit_exc,
             )
-            try:
-                await session.rollback()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def byok_error_message(error_code: str) -> str:

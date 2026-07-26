@@ -83,6 +83,29 @@ class UpstreamFacade:
             }
         )
 
+    def escalate_post_dispatch_delivery_failure(self, exc: Any) -> Any:
+        """上游已回 2xx 之后的「本地交付失败」必须落 outcome_uncertain。
+
+        H-9：2xx 意味着上游极可能已经计费。保存失败、体积/像素/候选数超限、
+        格式不受支持、Pillow 校验不过——这些都是**我们**交付不出图片，不是上游
+        宣告失败，我们无法证明上游没扣费。若按普通 failed 终态返回，调用方
+        （worker 侧的 upstream_billing 决策表）会把它当成「确定未扣费」而
+        release 退款，上游成本就由平台吸收了，违反纯转嫁铁律。落 uncertain
+        交对账才是对称的。语义对齐 lumen_core.upstream_billing 的
+        UNKNOWN → SETTLE 那一行；image-job 不是 uv workspace 成员、不能 import
+        lumen_core，故在本地复刻。
+
+        上游自己宣告的错误（流式 error/response.failed 事件、4xx）不在此列：
+        那是「已知失败」，与「结果不可知」是两回事，维持原有可退款语义。
+        """
+        if exc.error_class in {
+            self.error_class_image_save(),
+            self.error_class_no_image(),
+        }:
+            exc.retry_requires_idempotency = True
+            exc.outcome_uncertain = True
+        return exc
+
     def mark_post_dispatch_failure(self, exc: Any) -> Any:
         if self.is_retryable_job_failure(exc) and (
             exc.retry_requires_idempotency
@@ -90,7 +113,7 @@ class UpstreamFacade:
         ):
             exc.retry_requires_idempotency = True
             exc.outcome_uncertain = True
-        return exc
+        return self.escalate_post_dispatch_delivery_failure(exc)
 
     def retry_budget_for_failure(self, exc: Any, *, endpoint: str) -> int:
         if exc.error_class == self.error_class_network():
@@ -234,10 +257,16 @@ class UpstreamFacade:
                 endpoint=endpoint,
             )
 
+        # 以下三处失败都发生在 `client.stream(...)` 正常退出之后，也就是上游已经
+        # 回了 2xx——上游是否已经计费我们无从确认。按纯转嫁原则必须落到
+        # outcome_uncertain（终态 uncertain），绝不能当成「确定未扣费」的 failed，
+        # 否则调用方会据此退款、由平台吸收上游成本。
         if not candidates:
             raise self.job_failure(
                 "上游没有返回可保存的图片",
                 upstream_status=status_code,
+                retry_requires_idempotency=True,
+                outcome_uncertain=True,
                 error_class=self.error_class_no_image(),
             )
         try:
@@ -247,18 +276,25 @@ class UpstreamFacade:
                 row["retention_days"],
                 candidates,
             )
-        except self.job_failure_type:
-            raise
+        except self.job_failure_type as exc:
+            # save_images 自己抛的 JobFailure（体积/像素/候选数/格式/Pillow 校验）
+            # 同样发生在上游 2xx 之后，必须一并升级成 uncertain，否则这条
+            # passthrough 就是纯转嫁的漏洞。
+            raise self.escalate_post_dispatch_delivery_failure(exc)
         except Exception as exc:
             raise self.job_failure(
                 f"保存图片失败: {exc.__class__.__name__}: {exc}",
                 upstream_status=status_code,
+                retry_requires_idempotency=True,
+                outcome_uncertain=True,
                 error_class=self.error_class_image_save(),
             ) from exc
         if not images:
             raise self.job_failure(
                 "没有保存任何图片",
                 upstream_status=status_code,
+                retry_requires_idempotency=True,
+                outcome_uncertain=True,
                 error_class=self.error_class_image_save(),
             )
         return status_code, images

@@ -531,19 +531,6 @@ class ImageCandidateFacade:
         return "\n".join(parts) if parts else None
 
     @staticmethod
-    def contains_result_key(value: Any) -> bool:
-        stack = [value]
-        while stack:
-            current = stack.pop()
-            if isinstance(current, dict):
-                if "result" in current:
-                    return True
-                stack.extend(current.values())
-            elif isinstance(current, list):
-                stack.extend(current)
-        return False
-
-    @staticmethod
     def first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
         for event in events:
             if not isinstance(event, dict):
@@ -640,16 +627,17 @@ class ImageCandidateFacade:
                 upstream_body=self.body_preview(response.content),
                 error_class=self.classify_stream_error(stream_error),
             )
-        has_terminal = any(
-            isinstance(event, dict)
-            and not self.is_responses_partial_event(event)
-            and self.contains_result_key(event)
-            for event in events
-        )
         cache: dict[str, Any] = {}
         candidates: list[Any] = []
+        partial_events = 0
         for event in events:
-            if has_terminal and self.is_responses_partial_event(event):
+            # `*.partial_image` 是渐进预览帧（低清中间态），永远不是交付物。
+            # 真流式路径（extract_responses_stream_images）一直无条件丢弃它们；
+            # 缓冲路径此前只在「同时看到终止事件」时才丢弃，于是一个被截断的
+            # SSE body（没有终止事件）会把预览帧当成成品交付给用户。两条路径
+            # 必须一致：先无条件丢弃，再判断有没有真结果。
+            if self.is_responses_partial_event(event):
+                partial_events += 1
                 continue
             candidates.extend(
                 await self.extract_candidates_fn(
@@ -658,6 +646,21 @@ class ImageCandidateFacade:
                     cache=cache,
                     budget=budget,
                 )
+            )
+        if not candidates and partial_events:
+            raise self.job_failure(
+                "上游流式响应只返回了预览帧就结束了",
+                upstream_status=response.status_code,
+                upstream_body={"partial_image_events": partial_events},
+                retryable=True,
+                retry_requires_idempotency=True,
+                # 纯转嫁：上游已经回了 2xx 并且开始出图，极可能已经计费。这里
+                # 不能落成普通 failed（调用方会据此 release 退款，由平台吸收
+                # 上游成本），必须落 outcome_uncertain 交对账裁决。语义对齐
+                # lumen_core.upstream_billing 的 UNKNOWN → SETTLE 那一行；
+                # image-job 不是 workspace 成员、不能 import 它，故本地实现。
+                outcome_uncertain=True,
+                error_class=self.error_class_network(),
             )
         return candidates
 

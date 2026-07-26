@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from ..outbox.delivery import EventPublisher, deliver_staged_outbox_events
+from .bonus_billing import BONUS_BILLING_RECONCILER
 from .cleanup import cleanup_terminal_sentinels
 from .coordinator import run_reconciliation
 from .memory import MEMORY_RECONCILER
@@ -53,7 +54,11 @@ async def reconcile_tasks(
         lock_ttl_s=RECON_LOCK_TTL_S,
         session_factory=session_factory,
         billing=billing,
-        reconcilers=(GENERATION_RECONCILER, COMPLETION_RECONCILER),
+        reconcilers=(
+            GENERATION_RECONCILER,
+            COMPLETION_RECONCILER,
+            BONUS_BILLING_RECONCILER,
+        ),
         deliver_pending=deliver_pending,
         log=log,
         before_reconcile=cleanup,

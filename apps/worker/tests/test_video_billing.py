@@ -120,6 +120,115 @@ async def test_resolve_video_billing_settles_success_with_actual_usage(
 
 
 @pytest.mark.asyncio
+async def test_resolve_video_billing_charges_full_cost_when_exceeding_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成本远超预估时必须全额转嫁——平台绝不吸收上游成本（新-1）。"""
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def held_amount_for_ref(_session, user_id, ref_type, ref_id) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return True
+
+    async def settle_cost(_session, **_kwargs) -> int:
+        raise video_billing.VideoBillingError(
+            "video_cost_exceeds_estimate",
+            "actual cost 40000 exceeds estimate 1000 by more than 3x",
+            500,
+            actual_micro=40_000,
+        )
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-40_000, balance_after=0, hold_after=0)
+
+    monkeypatch.setattr(
+        video_billing.worker_billing, "billing_enabled", billing_enabled
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing, "held_amount_for_ref", held_amount_for_ref
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={"status": "succeeded", "usage_total_tokens": 42_000},
+        reason="succeeded",
+    )
+
+    # 关键断言：收全额 40_000，而不是退回 max(held, est)=1_000。
+    assert resolution.actual_micro == 40_000
+    assert resolution.decision == "actual_usage_settle"
+    assert calls[0][1]["actual_micro"] == 40_000
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_falls_back_when_pricing_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """定价缺失（成本无从得知）仍走默认兜底，与超额是两种语义。"""
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def held_amount_for_ref(_session, user_id, ref_type, ref_id) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle_cost(_session, **_kwargs) -> int:
+        raise video_billing.VideoBillingError(
+            "video_pricing_missing",
+            "missing enabled video pricing rule",
+            503,
+        )
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=0, hold_after=0)
+
+    monkeypatch.setattr(
+        video_billing.worker_billing, "billing_enabled", billing_enabled
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing, "held_amount_for_ref", held_amount_for_ref
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={"status": "succeeded", "usage_total_tokens": 42_000},
+        reason="succeeded",
+    )
+
+    assert resolution.decision == "pricing_missing_default_charge"
+    assert resolution.actual_micro == 1_000
+
+
+@pytest.mark.asyncio
 async def test_resolve_video_billing_uses_reference_video_pricing_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -656,3 +765,198 @@ async def test_resolve_video_billing_charges_failed_usage_without_billable(
     assert resolution.actual_tokens == 42_000
     assert resolution.released is False
     assert calls[0][1]["meta"]["actual_tokens"] == 42_000
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_succeeded_with_release_receipt_still_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上游已经跑成功，即使带着 pre_submit 收据也不许 release（决策表 PROVEN_PRESENT）。"""
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=9_000, hold_after=0)
+
+    async def fail_release(*_args, **_kwargs):
+        raise AssertionError("upstream already produced a result; release is forbidden")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(video_billing.billing_core, "release", fail_release)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={
+            "status": "succeeded",
+            "upstream_billable": True,
+            "raw": {"reason": "pre_submit_cancel"},
+        },
+        reason="pre_submit_cancel",
+    )
+
+    assert resolution.released is False
+    assert resolution.decision == "missing_usage_default_charge"
+    assert resolution.actual_micro == 1_000
+    assert calls[0][1]["meta"]["upstream_cost_knowledge"] == "proven_present"
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_unknown_submit_settles_not_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E-2：submit 结果不可知（billable=None）必须默认结算。"""
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_500
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_500, balance_after=0, hold_after=0)
+
+    async def fail_release(*_args, **_kwargs):
+        raise AssertionError("unknown upstream cost must never release")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(video_billing.billing_core, "release", fail_release)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={
+            "status": "failed",
+            "upstream_billable": None,
+            "raw": {"reason": "submit_unknown_timeout"},
+        },
+        reason="submit_unknown_timeout",
+    )
+
+    assert resolution.released is False
+    assert resolution.decision == "unknown_default_charge"
+    assert resolution.actual_micro == 1_500
+    assert calls[0][1]["meta"]["upstream_cost_knowledge"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_billable_false_without_receipt_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E-1：上游声称未计费但拿不出本地收据 → 不可信，仍然结算。"""
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 800
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=0, hold_after=0)
+
+    async def fail_release(*_args, **_kwargs):
+        raise AssertionError("untrusted billable=False must not release")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(video_billing.billing_core, "release", fail_release)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={
+            "status": "failed",
+            "upstream_billable": False,
+            "raw": {"reason": "poll_reported_failure"},
+        },
+        reason="poll_reported_failure",
+    )
+
+    assert resolution.released is False
+    assert resolution.decision == "upstream_not_billable_untrusted_default_charge"
+    # hold=800 < est=1000，默认金额取较大者，绝不少收。
+    assert resolution.actual_micro == 1_000
+    assert calls[0][1]["meta"]["upstream_cost_knowledge"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_release_records_proven_absent_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def release(_session, user_id: str, **kwargs):
+        calls.append(("release", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+
+    async def fail_settle(*_args, **_kwargs):
+        raise AssertionError("proven-absent upstream cost must release, not settle")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "release", release)
+    monkeypatch.setattr(video_billing.billing_core, "settle", fail_settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _generation(),
+        poll_result={
+            "status": "failed",
+            "upstream_billable": False,
+            "raw": {"reason": "submit_failed_before_upstream_cost"},
+        },
+        reason="submit_failed",
+    )
+
+    assert resolution.released is True
+    assert resolution.decision == "upstream_not_billable_release"
+    assert calls[0][1]["meta"]["upstream_cost_knowledge"] == "proven_absent"

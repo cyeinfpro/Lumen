@@ -1420,56 +1420,11 @@ def _list_item_from_run(
     )
 
 
-FACADE_EXPORTS = (
-    "_primary_candidate_image_id",
-    "_infer_age_segment_from_workflow",
-    "_metadata_model_profile_from_prompt",
-    "_infer_age_segment_from_text",
-    "_get_owned_conversation",
-    "_get_or_create_workflow_conversation",
-    "_get_run",
-    "_load_steps",
-    "_step",
-    "_workflow_steps_and_candidates",
-    "_workflow_direct_task_ids",
-    "_workflow_direct_image_ids",
-    "_candidate_reference_image_ids",
-    "_workflow_generation_rows_from_task_ids",
-    "_release_soft_deleted_task_hold",
-    "_workflow_wallet_exists",
-    "_cleanup_string_list",
-    "_empty_workflow_generated_cleanup",
-    "_release_workflow_generation_queue_state",
-    "_post_commit_workflow_generated_cleanup",
-    "_cancel_workflow_generation_rows",
-    "_soft_delete_workflow_generated_images",
-    "_revision_prompt",
-    "_accessory_preview_prompt",
-    "_accessory_plan_from_product_analysis",
-    "_coerce_accessory_plan_payload",
-    "_create_workflow_task",
-    "_publish_bundles",
-    "_fixed_size_for_quality",
-    "_image_params",
-    "_candidate_image_params",
-    "_accessory_preview_image_params",
-    "_merge_product_corrections",
-    "_next_action_for",
-    "_workflow_asset_key",
-    "_workflow_asset_records",
-    "_merge_workflow_asset_metadata",
-    "_merge_image_workflow_asset_metadata",
-    "_attach_workflow_assets",
-    "_image_out_map",
-    "_image_to_out",
-    "_build_run_out",
-    "_list_item_from_run",
-)
-__all__ = [*FACADE_EXPORTS, "_PublishBundle"]
-
-
 # Public workflow contracts.
 accessory_plan_from_product_analysis = _accessory_plan_from_product_analysis
+accessory_preview_image_params = _accessory_preview_image_params
+accessory_preview_prompt = _accessory_preview_prompt
+attach_workflow_assets = _attach_workflow_assets
 build_run_out = _build_run_out
 candidate_image_params = _candidate_image_params
 coerce_accessory_plan_payload = _coerce_accessory_plan_payload
@@ -1480,11 +1435,14 @@ get_run = _get_run
 image_out_map = _image_out_map
 image_params = _image_params
 infer_age_segment_from_workflow = _infer_age_segment_from_workflow
+list_item_from_run = _list_item_from_run
 load_steps = _load_steps
 merge_product_corrections = _merge_product_corrections
 metadata_model_profile_from_prompt = _metadata_model_profile_from_prompt
 post_commit_workflow_generated_cleanup = _post_commit_workflow_generated_cleanup
+primary_candidate_image_id = _primary_candidate_image_id
 publish_bundles = _publish_bundles
+revision_prompt = _revision_prompt
 selected_candidate = _selected_candidate
 soft_delete_workflow_generated_images = _soft_delete_workflow_generated_images
 step = _step

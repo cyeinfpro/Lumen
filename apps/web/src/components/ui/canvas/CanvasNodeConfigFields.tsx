@@ -144,6 +144,9 @@ function RangeFieldControl({
         value={draft}
         onChange={(event) => setDraft(Number(event.currentTarget.value))}
         onPointerUp={commit}
+        // I-5：移动端手指滑出滑轨 / 被浏览器手势接管时只有 pointercancel，
+        // 没有 pointerup —— 不补这一路，拖到一半的值会显示成已改但从未提交。
+        onPointerCancel={commit}
         onKeyUp={commit}
         onBlur={commit}
         className="h-11 w-full cursor-pointer accent-[var(--accent)]"

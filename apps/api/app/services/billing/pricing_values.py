@@ -20,7 +20,9 @@ def _parse_price_rows(content: str) -> list[dict[str, Any]]:
     if not text:
         return []
     try:
-        parsed = json.loads(text)
+        # parse_float=Decimal：价格字面量直接进 Decimal，不经过 float 中转。
+        # 走 float 会让 0.0000005 这类单价在换算成 micro 前就已经丢精度。
+        parsed = json.loads(text, parse_float=Decimal)
         if isinstance(parsed, dict) and isinstance(parsed.get("models"), list):
             parsed = parsed["models"]
         if isinstance(parsed, list):
@@ -45,9 +47,11 @@ def _parse_price_rows(content: str) -> list[dict[str, Any]]:
             continue
         key, value = line.split(":", 1)
         value = value.strip().strip("'\"")
+        # 同上：数值字面量落成 Decimal 而非 float，保留书写的全部有效位。
+        # Decimal("nan"/"inf") 能解析成功但不是有效价格，交给下游做有限性校验。
         try:
-            parsed_value: Any = float(value)
-        except ValueError:
+            parsed_value: Any = Decimal(value)
+        except InvalidOperation:
             parsed_value = value
         current[key.strip()] = parsed_value
     if current:

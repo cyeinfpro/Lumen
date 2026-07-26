@@ -67,7 +67,6 @@ export function ModelLibraryReferenceUploader({
     } finally {
       setUploading(false);
       onBusyChange?.(false);
-      if (inputRef.current) inputRef.current.value = "";
     }
   };
 
@@ -79,7 +78,15 @@ export function ModelLibraryReferenceUploader({
         accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
         className="hidden"
         disabled={disabled || uploading}
-        onChange={(event) => void pickFile(event.target.files?.[0] ?? null)}
+        onChange={(event) => {
+          const file = event.target.files?.[0] ?? null;
+          // I-7：先取出 File 再立刻清空 input.value。File 已是独立对象，
+          // 清空只影响"能否再次选中同一个文件"——格式/体积校验被拒或上传失败后，
+          // 用户十有八九会再选同一张，之前只在 upload 分支的 finally 里清，
+          // 早退分支不清 => 再选同一文件不触发 change，界面完全没反应。
+          event.target.value = "";
+          void pickFile(file);
+        }}
       />
       <div
         className={cn(

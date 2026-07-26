@@ -9,12 +9,15 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.routes import workflows
+from app.config import settings
+from app.workflow_domain import apparel_library
 from app.workflow_services import (
     apparel_endpoints as apparel,
     library_github,
+    library_lease,
     library_storage,
     library_sync,
+    serialization,
 )
 from lumen_core.schemas import ApparelModelLibrarySyncOut
 
@@ -24,10 +27,10 @@ def _claim_sync_lease_worker(
     start: Any,
     results: Any,
 ) -> None:
-    workflows.settings.storage_root = storage_root
+    settings.storage_root = storage_root
     if not start.wait(timeout=5):
         raise RuntimeError("sync lease worker start timed out")
-    token, _state = workflows._claim_library_sync_lease_sync()  # noqa: SLF001
+    token, _state = library_lease.claim_library_sync_lease_sync()
     results.put(token)
 
 
@@ -49,7 +52,7 @@ def test_model_library_json_read_is_size_bounded(
     index_path.write_bytes(b'{"large":true}')
 
     with pytest.raises(HTTPException) as excinfo:
-        workflows._read_json_file(index_path, {})  # noqa: SLF001
+        library_storage.read_json_file(index_path, {})  # noqa: SLF001
 
     assert excinfo.value.status_code == 500
     assert excinfo.value.detail["error"]["code"] == "invalid_index"
@@ -88,7 +91,7 @@ def test_cross_process_sync_lease_allows_only_one_claim(tmp_path: Path) -> None:
 async def test_sync_releases_process_lock_before_external_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = workflows._default_sync_state()  # noqa: SLF001
+    state = library_storage.default_sync_state()  # noqa: SLF001
 
     async def fake_claim() -> tuple[str, dict[str, Any]]:
         return "lease-token", state
@@ -104,14 +107,14 @@ async def test_sync_releases_process_lock_before_external_io(
         assert claimed_state is state
         assert proxy_url is None
         assert lease_token == "lease-token"
-        assert workflows._SYNC_LOCK.locked() is False  # noqa: SLF001
+        assert apparel_library.SYNC_LOCK.locked() is False  # noqa: SLF001
         return ApparelModelLibrarySyncOut(status="ok")
 
     dependencies = library_sync.APPAREL_LIBRARY_SYNC_DEPENDENCIES
     monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
     monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_do_sync)
 
-    out = await workflows._sync_library_presets_from_github_folder(  # noqa: SLF001
+    out = await library_sync.sync_library_presets_from_github_folder(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
         "assets/apparel-model-presets?ref=main"
     )
@@ -138,10 +141,10 @@ async def test_github_walk_rejects_unbounded_file_listing(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(
-            workflows._ModelLibrarySyncLimitExceeded,  # noqa: SLF001
+            library_github.ModelLibrarySyncLimitExceeded,  # noqa: SLF001
             match="file limit",
         ):
-            await workflows._walk_github_contents(  # noqa: SLF001
+            await library_github.walk_github_contents(  # noqa: SLF001
                 client,
                 "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
                 "assets/apparel-model-presets?ref=main",
@@ -166,10 +169,10 @@ async def test_github_walk_rejects_excessive_directory_depth(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(
-            workflows._ModelLibrarySyncLimitExceeded,  # noqa: SLF001
+            library_github.ModelLibrarySyncLimitExceeded,  # noqa: SLF001
             match="depth limit",
         ):
-            await workflows._walk_github_contents(  # noqa: SLF001
+            await library_github.walk_github_contents(  # noqa: SLF001
                 client,
                 "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
                 "assets/apparel-model-presets?ref=main",
@@ -196,10 +199,10 @@ async def test_github_walk_rejects_excessive_directory_fanout(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(
-            workflows._ModelLibrarySyncLimitExceeded,  # noqa: SLF001
+            library_github.ModelLibrarySyncLimitExceeded,  # noqa: SLF001
             match="directory limit",
         ):
-            await workflows._walk_github_contents(  # noqa: SLF001
+            await library_github.walk_github_contents(  # noqa: SLF001
                 client,
                 "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
                 "assets/apparel-model-presets?ref=main",
@@ -217,10 +220,10 @@ async def test_fetch_bytes_stops_chunked_response_at_limit() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(
-            workflows._ModelLibrarySyncLimitExceeded,  # noqa: SLF001
+            library_github.ModelLibrarySyncLimitExceeded,  # noqa: SLF001
             match="exceeds 4 bytes",
         ):
-            await workflows._fetch_bytes(  # noqa: SLF001
+            await library_github.fetch_bytes(  # noqa: SLF001
                 client,
                 "https://raw.githubusercontent.com/cyeinfpro/Lumen/main/model.webp",
                 max_bytes=4,
@@ -232,7 +235,7 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(workflows.settings, "storage_root", str(tmp_path))
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
     image_bytes = b"bounded-image"
     thumb_bytes = b"bounded-thumb"
     raw_requests: list[str] = []
@@ -248,7 +251,7 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert workflows._SYNC_LOCK.locked() is False  # noqa: SLF001
+        assert apparel_library.SYNC_LOCK.locked() is False  # noqa: SLF001
         if request.url.host == "api.github.com":
             return httpx.Response(
                 200,
@@ -283,29 +286,31 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
         return httpx.Response(200, request=request, content=body)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(workflows.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
-    out = await workflows._sync_library_presets_from_github_folder(  # noqa: SLF001
+    out = await library_sync.sync_library_presets_from_github_folder(  # noqa: SLF001
         contents_url
     )
 
     assert out.status == "ok"
     assert out.added == 1
     assert len(raw_requests) == 2
-    index = workflows._load_global_library_index()  # noqa: SLF001
+    index = library_storage.load_global_library_index()  # noqa: SLF001
     assert len(index["preset_items"]) == 1
     item = index["preset_items"][0]
     assert item["github_sha"] == "github-image-sha"
     assert item["github_thumb_sha"] == "github-thumb-sha"
     assert (
-        workflows._storage_path(item["image_storage_key"]).read_bytes() == image_bytes
+        serialization.storage_path(item["image_storage_key"]).read_bytes()
+        == image_bytes
     )  # noqa: SLF001
     assert (
-        workflows._storage_path(item["thumb_storage_key"]).read_bytes() == thumb_bytes
+        serialization.storage_path(item["thumb_storage_key"]).read_bytes()
+        == thumb_bytes
     )  # noqa: SLF001
-    state = workflows._read_json_file(  # noqa: SLF001
-        workflows._library_sync_state_path(),  # noqa: SLF001
-        workflows._default_sync_state(),  # noqa: SLF001
+    state = library_storage.read_json_file(  # noqa: SLF001
+        library_storage.library_sync_state_path(),  # noqa: SLF001
+        library_storage.default_sync_state(),  # noqa: SLF001
     )
     assert state["sync_lease"] is None
     assert state["last_success_at"] is not None
@@ -344,7 +349,7 @@ async def test_sync_route_closes_db_transaction_before_network(
         fake_sync,
     )
 
-    out = await workflows.sync_apparel_model_library_presets(
+    out = await apparel.sync_apparel_model_library_presets(
         SimpleNamespace(role="admin"),
         db,  # type: ignore[arg-type]
     )

@@ -186,7 +186,8 @@ async def test_broken_process_pool_resets_cached_executor(
         )
 
     executor = BrokenExecutor()
-    monkeypatch.setattr(generation._IMAGE_POSTPROCESS_RUNTIME, "executor", executor)
+    runtime = generation.DEFAULT_GENERATION_RUNTIME.postprocess_runtime
+    monkeypatch.setattr(runtime, "executor", executor)
     monkeypatch.setattr(generation, "_make_image_variants_pil_only_sync", fake_pil_only)
 
     variants, mode = await generation._postprocess_image_variants(
@@ -196,7 +197,7 @@ async def test_broken_process_pool_resets_cached_executor(
 
     assert mode == "thread"
     assert variants.engine == "pil"
-    assert generation._IMAGE_POSTPROCESS_RUNTIME.executor is None
+    assert runtime.executor is None
     assert shutdown_calls == [{"wait": False, "cancel_futures": True}]
 
 
@@ -208,7 +209,8 @@ def test_cached_postprocess_executor_does_not_resolve_workers(
     def fail_worker_resolution() -> int:
         raise AssertionError("cached executor must not resolve workers again")
 
-    monkeypatch.setattr(generation._IMAGE_POSTPROCESS_RUNTIME, "executor", executor)
+    runtime = generation.DEFAULT_GENERATION_RUNTIME.postprocess_runtime
+    monkeypatch.setattr(runtime, "executor", executor)
     monkeypatch.setattr(
         generation,
         "_resolve_image_postprocess_workers",

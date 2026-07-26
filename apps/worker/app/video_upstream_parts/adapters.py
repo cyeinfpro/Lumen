@@ -140,7 +140,10 @@ class VolcanoSeedanceAdapter:
         return PollResult(
             status=status,
             progress=progress,
-            video_url=_video_url(raw),
+            # PollResult.video_url 的契约是「可直接下载的绝对 URL」。网关回相对
+            # 路径时不 absolutize 会让 download 直接抛错，而上游此时已经出片并
+            # 计费（纯转嫁下用户照付），所以每个 adapter 都要过 _absolute_url。
+            video_url=_absolute_url(_video_url(raw), self._client_base_url()),
             failure_class=_failure_class(raw),
             usage_total_tokens=_usage_total_tokens(raw),
             upstream_billable=_billable(raw),
@@ -992,7 +995,9 @@ class DashScopeHappyHorseAdapter:
         return PollResult(
             status=status,
             progress=progress,
-            video_url=_video_url(raw),
+            # 同 VolcanoSeedanceAdapter.poll：相对路径必须补齐成绝对 URL。
+            # 该 adapter 没有 _client_base_url()，client 也是直接用 provider.base_url。
+            video_url=_absolute_url(_video_url(raw), self.provider.base_url),
             failure_class=_failure_class(raw),
             usage_total_tokens=usage_tokens,
             upstream_billable=upstream_billable

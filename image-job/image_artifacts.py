@@ -20,6 +20,11 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 
+# 允许作为交付物写盘 / 挂 public URL 的图片格式。image_metadata() 会把任何
+# Pillow 不认识的格式归一成 "bin"，那种东西不能当成生成结果交给用户。
+DELIVERABLE_IMAGE_FORMATS: frozenset[str] = frozenset({"png", "jpeg", "webp", "gif"})
+
+
 @dataclass(frozen=True)
 class ImageArtifactFacade:
     data_dir: Callable[[], Path]
@@ -195,6 +200,21 @@ class ImageArtifactFacade:
                 candidate.data,
                 candidate.mime_type,
             )
+            if fmt not in DELIVERABLE_IMAGE_FORMATS:
+                # H-13：image_metadata 把一切 Pillow 不认识的格式折叠成 "bin"，
+                # 于是过去会落成 `image-1.bin` 并挂上 public URL —— 浏览器无法
+                # 渲染，客户端只能下载到一坨二进制。save_input_image /
+                # candidate_filename 早就拒绝 "bin" 了，交付路径必须对齐。
+                #
+                # 偏离审计建议：审计写的是「统一重编码为 PNG」。这里不做重编码，
+                # 因为那是有损（丢 EXIF/动图帧/色彩配置）且内存放大的操作
+                # （MAX_IMAGE_PIXELS 级别的图解码成 RGB 要几百 MB，还乘上并发），
+                # 用白名单直接拒收更便宜也更安全。
+                raise self.job_failure(
+                    f"上游返回了无法交付的图片格式 {fmt or 'unknown'}"
+                    f"（仅 {'/'.join(sorted(DELIVERABLE_IMAGE_FORMATS))}）",
+                    error_class=self.error_class_image_save(),
+                )
             index = len(plan) + 1
             filename = f"image-{index}.{fmt}"
             plan.append(

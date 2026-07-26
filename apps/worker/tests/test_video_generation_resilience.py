@@ -12,6 +12,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from lumen_core.models import OutboxEvent
+from lumen_core.upstream_billing import (
+    LocalBillingAction,
+    UpstreamCostKnowledge,
+    decide_upstream_billing,
+)
 
 from app import video_artifacts
 from app.tasks.video_generation_parts.default_runtime import (
@@ -20,10 +25,14 @@ from app.tasks.video_generation_parts.default_runtime import (
     _MAX_PROVIDER_POLL_DURATION_S,
     _POLL_INTERVAL_S,
     _is_retryable_video_exception,
+    _submit_failure_billable_hint,
     _submit_outcome_unknown,
     _submit_retry_delay_s,
     _video_exception_code,
     _video_exception_message,
+)
+from app.tasks.video_generation_parts.errors import (
+    submit_delivery_proven_absent as _submit_delivery_proven_absent,
 )
 from app.tasks.video_generation_parts import default_runtime as video_generation
 from app.tasks.video_generation_parts.contracts import StoredVideo
@@ -257,6 +266,78 @@ def test_submit_outcome_unknown_excludes_explicit_capacity_rejections() -> None:
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectTimeout("connect timed out"),
+        httpx.PoolTimeout("no free connection"),
+        httpx.ConnectError("dns failure"),
+        httpx.ProxyError("proxy refused CONNECT"),
+        httpx.UnsupportedProtocol("gopher://"),
+        httpx.LocalProtocolError("bad request line"),
+    ],
+)
+def test_undelivered_submit_failures_are_not_result_unknown(exc: Exception) -> None:
+    """E-8: 连接/代理/连接池阶段失败 = 请求没送达，不是「结果不可知」。
+
+    归进 unknown 会把任务钉死在 SUBMIT_UNKNOWN：既不重试，对账时还按上限
+    结算——对一笔上游根本没收到的请求收钱。
+    """
+    assert _submit_delivery_proven_absent(exc) is True
+    assert _submit_outcome_unknown(exc) is False
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ReadTimeout("response never arrived"),
+        httpx.WriteTimeout("body half-written"),
+        httpx.ReadError("connection reset while reading"),
+        httpx.WriteError("connection reset while writing"),
+        httpx.RemoteProtocolError("server disconnected"),
+        asyncio.TimeoutError(),
+    ],
+)
+def test_delivered_or_ambiguous_submit_failures_stay_unknown(exc: Exception) -> None:
+    """请求已经（至少部分）发出去了 → 上游可能已扣费 → 必须走结算。"""
+    assert _submit_delivery_proven_absent(exc) is False
+    assert _submit_outcome_unknown(exc) is True
+
+
+def test_undelivered_submit_failure_resolves_to_release() -> None:
+    """E-8 计费闭环：可证明未送达 → 决策表判 RELEASE，不能按上限扣用户的钱。"""
+    hint = _submit_failure_billable_hint(httpx.ConnectError("dns failure"))
+
+    assert hint is False
+    decision = decide_upstream_billing(
+        upstream_billable=hint,
+        actual_cost_known=False,
+        # fail_before_submit 在 hint 为 False 时传的就是这个 reason。
+        receipt_reasons=("submit_failed_before_upstream_cost",),
+    )
+    assert decision.knowledge is UpstreamCostKnowledge.PROVEN_ABSENT
+    assert decision.action is LocalBillingAction.RELEASE
+
+
+def test_delivered_submit_failure_resolves_to_settle() -> None:
+    """纯转嫁另一侧：结果不可知时 hint 保持 None → 结算而不是释放。"""
+    hint = _submit_failure_billable_hint(httpx.ReadTimeout("no response"))
+
+    assert hint is None
+    decision = decide_upstream_billing(
+        upstream_billable=hint,
+        actual_cost_known=False,
+        receipt_reasons=("submit_failed_ambiguous_upstream_cost",),
+    )
+    assert decision.knowledge is UpstreamCostKnowledge.UNKNOWN
+    assert decision.action is LocalBillingAction.SETTLE_DEFAULT
+
+
+def test_undelivered_submit_failure_stays_retryable() -> None:
+    """没送达就没有第二笔上游成本，重试是安全且必要的。"""
+    assert _is_retryable_video_exception(httpx.ConnectError("dns failure")) is True
 
 
 def test_video_submit_uses_persisted_provider_idempotency_key() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_UP, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -47,8 +47,17 @@ def _int_or_none(value: Any) -> int | None:
         if value.endswith("%"):
             value = value[:-1].strip()
     try:
-        parsed = int(float(value)) if isinstance(value, str) else int(value)
-    except (TypeError, ValueError, OverflowError):
+        # 字符串走 Decimal 而非 float：上游可能把 token 数当字符串回传，
+        # int(float("1234567890123456789")) 会丢掉低位（→ ...768），
+        # 而该值会直接进入视频结算金额。Decimal 逐位精确，无精度损失。
+        if isinstance(value, str):
+            decoded = Decimal(value)
+            if not decoded.is_finite():
+                return None
+            parsed = int(decoded)
+        else:
+            parsed = int(value)
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
         return None
     return parsed if parsed >= 0 else None
 
@@ -387,8 +396,11 @@ def _duration_usage_total_tokens(payload: dict[str, Any]) -> int | None:
         return None
     if not duration.is_finite() or duration < 0:
         return None
+    # 纯转嫁：时长换算 token 是视频计费的第一跳，不足一个 token 的尾数也是上游
+    # 已经产生的用量。ROUND_HALF_UP 会把尾数抹掉，那部分成本落在平台头上，
+    # 因此统一向上取整，与 video_billing.round_micro_for_tokens 保持同向。
     tokens = (duration * Decimal(VIDEO_BILLING_TOKENS_PER_SECOND)).quantize(
-        Decimal("1"), rounding=ROUND_HALF_UP
+        Decimal("1"), rounding=ROUND_UP
     )
     return int(tokens)
 

@@ -101,6 +101,11 @@ function parseStoryboardStage(value: string | null): StoryboardStage | null {
     : null;
 }
 
+// 审计 I-1：分镜页全部 mutation 必须显式 onError，且提示要带具体动作名。
+// makeQueryClient 的全局兜底只能给出泛化文案，用户无法判断是哪一步失败；
+// 生成 / 提交 / 合成属于计费动作，静默失败会让用户以为没执行而重复点击 → 二次扣费。
+// 显式 onError 会覆盖全局兜底（React Query 对 defaultOptions.mutations 做浅合并），
+// 因此不会出现双重 toast；重试由 mutations.retry = 0 统一关闭，不做静默重试。
 function notifyStoryboardError(action: string) {
   return (error: Error) => {
     toast.error(`${action}失败`, {
@@ -906,7 +911,9 @@ function StoryboardSettingsFields({
 }
 
 function IdeaStage({ run }: { run: StoryboardRun }) {
-  const patch = usePatchStoryboardMutation(run.id);
+  const patch = usePatchStoryboardMutation(run.id, {
+    onError: notifyStoryboardError("保存想法"),
+  });
   const [title, setTitle] = useState(run.title);
   const [idea, setIdea] = useState(run.idea);
   const [style, setStyle] = useState(run.style);
@@ -922,7 +929,9 @@ function IdeaStage({ run }: { run: StoryboardRun }) {
 }
 
 function ScriptStage({ run }: { run: StoryboardRun }) {
-  const patch = usePatchStoryboardMutation(run.id);
+  const patch = usePatchStoryboardMutation(run.id, {
+    onError: notifyStoryboardError("保存脚本"),
+  });
   const [script, setScript] = useState(run.script);
   const scriptChanged = script !== run.script;
   return (
@@ -950,7 +959,9 @@ function ScriptStage({ run }: { run: StoryboardRun }) {
 }
 
 function AssetsStage({ run }: { run: StoryboardRun }) {
-  const create = useCreateStoryboardAssetMutation(run.id);
+  const create = useCreateStoryboardAssetMutation(run.id, {
+    onError: notifyStoryboardError("新增设定"),
+  });
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"character" | "scene" | "prop">("character");
   const [description, setDescription] = useState("");
@@ -996,9 +1007,16 @@ function AssetsStage({ run }: { run: StoryboardRun }) {
 }
 
 function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset }) {
-  const generate = useGenerateStoryboardAssetMutation(run.id, asset.id);
-  const approve = useApproveStoryboardAssetMutation(run.id, asset.id);
-  const remove = useDeleteStoryboardAssetMutation(run.id, asset.id);
+  // 生成设定图会实际调用上游出图（计费动作），失败必须显式告知。
+  const generate = useGenerateStoryboardAssetMutation(run.id, asset.id, {
+    onError: notifyStoryboardError("生成设定图"),
+  });
+  const approve = useApproveStoryboardAssetMutation(run.id, asset.id, {
+    onError: notifyStoryboardError("批准设定图"),
+  });
+  const remove = useDeleteStoryboardAssetMutation(run.id, asset.id, {
+    onError: notifyStoryboardError("删除设定"),
+  });
   return (
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
       <div className="flex items-start justify-between gap-3">
@@ -1028,8 +1046,12 @@ function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset 
 }
 
 function ShotsStage({ run }: { run: StoryboardRun }) {
-  const rebuild = useRebuildStoryboardShotsMutation(run.id);
-  const create = useCreateStoryboardShotMutation(run.id);
+  const rebuild = useRebuildStoryboardShotsMutation(run.id, {
+    onError: notifyStoryboardError("从脚本拆分分镜"),
+  });
+  const create = useCreateStoryboardShotMutation(run.id, {
+    onError: notifyStoryboardError("添加镜头"),
+  });
   return (
     <StageShell title="分镜" actionLabel="从脚本拆分" loading={rebuild.isPending} onAction={() => rebuild.mutate({ replace: true })}>
       <div className="grid gap-3">
@@ -1062,10 +1084,18 @@ function ShotsStage({ run }: { run: StoryboardRun }) {
 }
 
 function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot }) {
-  const patch = usePatchStoryboardShotMutation(run.id, shot.id);
-  const approve = useApproveStoryboardShotMutation(run.id, shot.id);
-  const up = useMoveStoryboardShotMutation(run.id, shot.id);
-  const remove = useDeleteStoryboardShotMutation(run.id, shot.id);
+  const patch = usePatchStoryboardShotMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("保存镜头"),
+  });
+  const approve = useApproveStoryboardShotMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("批准镜头"),
+  });
+  const up = useMoveStoryboardShotMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("调整镜头顺序"),
+  });
+  const remove = useDeleteStoryboardShotMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("删除镜头"),
+  });
   const [title, setTitle] = useState(shot.title);
   const [visual, setVisual] = useState(shot.visual);
   const [narration, setNarration] = useState(shot.narration);
@@ -1123,7 +1153,10 @@ function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot })
 }
 
 function KeyframesStage({ run }: { run: StoryboardRun }) {
-  const generateAll = useGenerateAllStoryboardKeyframesMutation(run.id);
+  // 批量生成关键帧一次可能派发多张图（计费动作），失败必须显式告知。
+  const generateAll = useGenerateAllStoryboardKeyframesMutation(run.id, {
+    onError: notifyStoryboardError("批量生成关键帧"),
+  });
   return (
     <StageShell title="分镜图" actionLabel="批量生成未完成关键帧" loading={generateAll.isPending} onAction={() => generateAll.mutate()}>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -1136,8 +1169,13 @@ function KeyframesStage({ run }: { run: StoryboardRun }) {
 }
 
 function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot }) {
-  const generate = useGenerateStoryboardKeyframeMutation(run.id, shot.id);
-  const approve = useApproveStoryboardKeyframeMutation(run.id, shot.id);
+  // 生成关键帧属于计费动作。
+  const generate = useGenerateStoryboardKeyframeMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("生成关键帧"),
+  });
+  const approve = useApproveStoryboardKeyframeMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("批准关键帧"),
+  });
   return (
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3">
       {shot.keyframe_stale ? (
@@ -1165,7 +1203,10 @@ function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot 
 }
 
 function VideosStage({ run }: { run: StoryboardRun }) {
-  const submitAll = useSubmitAllStoryboardShotsMutation(run.id);
+  // 全部提交会逐段派发图生视频（计费动作），失败必须显式告知。
+  const submitAll = useSubmitAllStoryboardShotsMutation(run.id, {
+    onError: notifyStoryboardError("全部提交视频"),
+  });
   return (
     <StageShell title="视频" actionLabel="全部提交" loading={submitAll.isPending} onAction={() => submitAll.mutate()}>
       <div className="grid gap-2">
@@ -1178,7 +1219,10 @@ function VideosStage({ run }: { run: StoryboardRun }) {
 }
 
 function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot }) {
-  const submit = useSubmitStoryboardShotMutation(run.id, shot.id);
+  // 提交视频段属于计费动作。
+  const submit = useSubmitStoryboardShotMutation(run.id, shot.id, {
+    onError: notifyStoryboardError("提交视频段"),
+  });
   const pct = shot.video_progress_pct ?? (shot.status === "done" ? 100 : 0);
   const canSubmitVideo =
     shot.status === "keyframe_approved" &&
@@ -1220,7 +1264,10 @@ function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot
 }
 
 function AssemblyStage({ run }: { run: StoryboardRun }) {
-  const assemble = useAssembleStoryboardMutation(run.id);
+  // 合成成片属于计费动作。
+  const assemble = useAssembleStoryboardMutation(run.id, {
+    onError: notifyStoryboardError("合成成片"),
+  });
   const ready = run.shots.length > 0 && run.shots.every((shot) => shot.status === "done");
   return (
     <StageShell title="成片" actionLabel="合成成片" loading={assemble.isPending} disabled={!ready} onAction={() => assemble.mutate()}>

@@ -40,6 +40,9 @@ export default function WalletPage() {
         limit: 30,
         pagination: "infinite",
       }),
+    transactionsAll: userBillingQueryKeys.walletTransactionsAll(
+      userScope.userId,
+    ),
     redemptions: userBillingQueryKeys.redemptions(userScope.userId, {
       limit: 20,
       pagination: "infinite",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
@@ -11,6 +12,31 @@ from .metrics import reconciliation_lease_state_total
 
 logger = logging.getLogger(__name__)
 LEASE_UNKNOWN_LOG_SAMPLE = 3
+
+# 与 worker 侧 lease TTL(60s) 对齐，留一倍余量吸收续期抖动。
+LEASE_FRESHNESS_WINDOW = timedelta(seconds=120)
+
+
+class LeaseKeyMissingWhileFresh(RuntimeError):
+    """Lease key vanished while the task row still looks actively updated."""
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__(f"lease key missing for recently updated task={task_id}")
+
+
+def _within_lease_window(
+    heartbeat_at: datetime | None,
+    now: datetime | None,
+) -> bool:
+    """Whether the task row was written recently enough to imply a live worker."""
+    if heartbeat_at is None:
+        return False
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current - heartbeat_at < LEASE_FRESHNESS_WINDOW
 
 
 class LeaseUnknownSummary:
@@ -44,8 +70,17 @@ async def read_lease_state(
     *,
     kind: str | None = None,
     unknowns: LeaseUnknownSummary | None = None,
+    heartbeat_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> LeaseState:
-    """Read a lease without converting Redis failure into expiry."""
+    """Read a lease without converting Redis failure into expiry.
+
+    A missing key normally means the lease expired, but Redis may also drop it
+    under memory pressure. ``heartbeat_at`` (the task's last DB write) guards
+    that case: while the row was touched within one lease TTL the worker is
+    still alive, so report UNKNOWN and fail closed rather than time the task
+    out and release a hold the upstream has already charged for.
+    """
     try:
         value = await redis.get(f"task:{task_id}:lease")
     except Exception as exc:  # noqa: BLE001
@@ -57,7 +92,18 @@ async def read_lease_state(
         if kind is not None and unknowns is not None:
             unknowns.record(kind=kind, task_id=task_id, error=exc)
         return LeaseState.UNKNOWN
-    state = LeaseState.EXPIRED if value is None else LeaseState.ACTIVE
+    if value is not None:
+        state = LeaseState.ACTIVE
+    elif _within_lease_window(heartbeat_at, now):
+        state = LeaseState.UNKNOWN
+        if kind is not None and unknowns is not None:
+            unknowns.record(
+                kind=kind,
+                task_id=task_id,
+                error=LeaseKeyMissingWhileFresh(task_id),
+            )
+    else:
+        state = LeaseState.EXPIRED
     if kind is not None:
         reconciliation_lease_state_total.labels(
             domain=kind,

@@ -89,6 +89,7 @@ test("ConfirmDialog blocks backdrop and modal close while confirming", () => {
     {
       react: {
         useCallback: (callback) => callback,
+        useEffect: (callback) => callback(),
         useId: () => "dialog-id",
         useRef: (value) => ({ current: value }),
       },
@@ -139,6 +140,7 @@ test("ConfirmDialog still closes normally when it is idle", () => {
     {
       react: {
         useCallback: (callback) => callback,
+        useEffect: (callback) => callback(),
         useId: () => "dialog-id",
         useRef: (value) => ({ current: value }),
       },
@@ -168,6 +170,56 @@ test("ConfirmDialog still closes normally when it is idle", () => {
   modalOptions.onClose();
 
   assert.deepEqual(calls, [["open", false], ["cancel"]]);
+});
+
+test("ConfirmDialog runs onConfirm once when the button is double-clicked", async () => {
+  // 审计 I-2：调用方可能不传 confirming（甚至硬编码 false），确认动作多是
+  // 删除/提交/生成，重复触发就是重复执行 + 重复扣费。
+  let confirmCalls = 0;
+  const { ConfirmDialog } = loadModule(
+    "src/components/ui/primitives/ConfirmDialog.tsx",
+    {
+      react: {
+        useCallback: (callback) => callback,
+        useEffect: (callback) => callback(),
+        useId: () => "dialog-id",
+        useRef: (value) => ({ current: value }),
+      },
+      "framer-motion": {
+        AnimatePresence: "AnimatePresence",
+        motion: motionMock(),
+      },
+      "@/hooks/useBodyScrollLock": { useBodyScrollLock() {} },
+      "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
+      "./Button": { Button: "Button" },
+      "./mobile/useModalLayer": {
+        useModalLayer: () => () => {},
+      },
+    },
+  );
+
+  const tree = ConfirmDialog({
+    open: true,
+    // 调用方没有任何 pending 反馈：防重复必须由组件自己兜住
+    confirming: false,
+    title: "Delete",
+    onConfirm() {
+      confirmCalls += 1;
+    },
+    onOpenChange() {},
+  });
+  const confirmButton = findElement(
+    tree,
+    (node) => node.type === "Button" && node.props?.loading !== undefined,
+  );
+
+  await Promise.all([
+    confirmButton.props.onClick(),
+    confirmButton.props.onClick(),
+  ]);
+  await confirmButton.props.onClick();
+
+  assert.equal(confirmCalls, 1);
 });
 
 test("Tooltip links its trigger without discarding existing descriptions", () => {

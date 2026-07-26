@@ -21,14 +21,13 @@ from app.workflow_services import (
     showcase_context,
     showcase_inputs,
     showcase_orchestration,
-    showcase_preflight,
     showcase_prompts,
     showcase_scene_policy,
     showcase_shots,
 )
 
 
-def test_library_service_facade_exports_remain_compatible() -> None:
+def test_route_does_not_reexport_library_service_internals() -> None:
     bound_names = (
         "_write_json_atomic",
         "_fsync_dir",
@@ -101,21 +100,12 @@ def test_library_service_facade_exports_remain_compatible() -> None:
         "_add_user_library_item",
     )
     for name in bound_names:
-        facade = getattr(workflows, name)
-        service = getattr(library_sync, name)
-        assert inspect.unwrap(facade) is service
-        assert inspect.signature(facade) == inspect.signature(service)
-
-    assert (
-        workflows._ModelLibrarySyncLimitExceeded
-        is library_sync._ModelLibrarySyncLimitExceeded
-    )
-    assert (
-        workflows._ModelLibrarySyncLeaseLost is library_sync._ModelLibrarySyncLeaseLost
-    )
+        assert not hasattr(workflows, name)
+    assert not hasattr(workflows, "_ModelLibrarySyncLimitExceeded")
+    assert not hasattr(workflows, "_ModelLibrarySyncLeaseLost")
 
 
-def test_showcase_service_facade_exports_remain_compatible() -> None:
+def test_route_does_not_reexport_showcase_service_internals() -> None:
     bound_names = (
         "_showcase_prompt_brief",
         "_showcase_reference_image_ids",
@@ -154,17 +144,13 @@ def test_showcase_service_facade_exports_remain_compatible() -> None:
         "_showcase_generation_context",
     )
     for name in bound_names:
-        facade = getattr(workflows, name)
-        service = getattr(showcase_preflight, name)
-        assert inspect.unwrap(facade) is service
-        assert inspect.signature(facade) == inspect.signature(service)
-
-    assert workflows.ShotVariant is showcase_preflight.ShotVariant
-    assert workflows.CHILD_POOL is showcase_preflight.CHILD_POOL
-    assert workflows.TODDLER_POOL is showcase_preflight.TODDLER_POOL
+        assert not hasattr(workflows, name)
+    assert not hasattr(workflows, "ShotVariant")
+    assert not hasattr(workflows, "CHILD_POOL")
+    assert not hasattr(workflows, "TODDLER_POOL")
 
 
-def test_library_service_exports_are_direct_submodule_aliases() -> None:
+def test_library_service_owners_are_leaf_modules() -> None:
     module_exports = {
         library_storage: (
             "_write_json_atomic",
@@ -197,24 +183,20 @@ def test_library_service_exports_are_direct_submodule_aliases() -> None:
     }
     for module, names in module_exports.items():
         for name in names:
-            assert getattr(library_sync, name) is getattr(module, name)
+            assert inspect.unwrap(getattr(module, name)).__module__ == module.__name__
 
     assert tuple(
         inspect.signature(
-            library_sync._sync_library_presets_from_github_folder
+            library_sync.sync_library_presets_from_github_folder
         ).parameters
     ) == ("contents_url", "proxy_url")
-    assert (
-        library_sync._ModelLibrarySyncLimitExceeded
-        is library_github._ModelLibrarySyncLimitExceeded
+    assert library_github.ModelLibrarySyncLimitExceeded.__module__ == (
+        library_github.__name__
     )
-    assert (
-        library_sync._ModelLibrarySyncLeaseLost
-        is library_lease._ModelLibrarySyncLeaseLost
-    )
+    assert library_lease.ModelLibrarySyncLeaseLost.__module__ == library_lease.__name__
 
 
-def test_showcase_service_exports_are_direct_submodule_aliases() -> None:
+def test_showcase_service_owners_are_leaf_modules() -> None:
     module_exports = {
         showcase_inputs: (
             "_showcase_reference_image_ids",
@@ -245,12 +227,7 @@ def test_showcase_service_exports_are_direct_submodule_aliases() -> None:
     }
     for module, names in module_exports.items():
         for name in names:
-            assert getattr(showcase_preflight, name) is getattr(module, name)
-
-    assert (
-        showcase_preflight._STATIC_REWRITE_REPLACEMENTS
-        is showcase_prompts._STATIC_REWRITE_REPLACEMENTS
-    )
+            assert inspect.unwrap(getattr(module, name)).__module__ == module.__name__
 
 
 def test_library_service_direct_runtime_honors_module_monkeypatch(
@@ -276,7 +253,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
         lambda _user_id: index_path,
     )
 
-    assert library_sync._remove_user_library_item_from_legacy_index(
+    assert library_storage.remove_user_library_item_from_legacy_index(
         "user-1",
         "user:remove",
     )
@@ -285,7 +262,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
 
     monkeypatch.setattr(library_storage, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
     with pytest.raises(HTTPException) as excinfo:
-        library_sync._read_json_file(index_path, {})
+        library_storage.read_json_file(index_path, {})
     assert excinfo.value.detail["error"]["code"] == "invalid_index"
 
 
@@ -293,7 +270,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
 async def test_library_sync_service_direct_entry_uses_patched_collaborators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = library_sync._default_sync_state()
+    state = library_storage.default_sync_state()
 
     async def fake_claim() -> tuple[str, dict[str, Any]]:
         return "lease-token", state
@@ -315,7 +292,7 @@ async def test_library_sync_service_direct_entry_uses_patched_collaborators(
     monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
     monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_sync)
 
-    result = await library_sync._sync_library_presets_from_github_folder(
+    result = await library_sync.sync_library_presets_from_github_folder(
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
         "assets/apparel-model-presets?ref=main"
     )
@@ -329,14 +306,14 @@ async def test_showcase_preflight_service_runs_directly() -> None:
         id="candidate-1",
         model_brief_json={"summary": "自然通勤模特", "height_cm": 168},
     )
-    shot_picks = showcase_preflight._showcase_pick_shot_variants(
+    shot_picks = showcase_shots._showcase_pick_shot_variants(
         template="urban_commute",
         age_segment="young_adult",
         output_count=1,
         seed_key="direct-service",
     )
 
-    result = await showcase_preflight._prepare_showcase_preflight_impl(
+    result = await showcase_orchestration._prepare_showcase_preflight_impl(
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色", "胸袋"]},
         selected_candidate=candidate,  # type: ignore[arg-type]

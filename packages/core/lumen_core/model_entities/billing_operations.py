@@ -63,6 +63,23 @@ class UserWallet(Base, TimestampMixin):
         server_default="1.0000",
     )
 
+    # 乐观并发控制：让 version 真正参与 UPDATE 的 WHERE 条件。
+    #
+    # 之前这个字段只是被 lumen_core.billing 的 6 条写路径（hold/settle/release/
+    # charge/adjust/topup_redeem）各自 `wallet.version += 1` 地递增，却从没进过
+    # WHERE，纯属摆设。那 6 条路径目前都先 `SELECT ... FOR UPDATE` 拿行锁，靠
+    # 行锁串行化，所以现在不会丢更新；但这是**约定**而非**约束**——任何新写入
+    # 路径忘了加 lock=True，丢失更新就会静默发生在钱包余额上。
+    #
+    # 挂上 version_id_col 后，SQLAlchemy 在每条 UPDATE 上自动追加
+    # `WHERE version = <读取时的值>` 并校验影响行数，不匹配就抛 StaleDataError。
+    # 用 version_id_generator=False 是因为递增已经由上述写路径自己做了，交给
+    # SQLAlchemy 自动生成会和现有代码打架（版本号一次跳 2）。
+    __mapper_args__ = {
+        "version_id_col": version,
+        "version_id_generator": False,
+    }
+
 
 class WalletTransaction(Base):
     __tablename__ = "wallet_transactions"
