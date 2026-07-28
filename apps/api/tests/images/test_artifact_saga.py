@@ -84,6 +84,9 @@ class _Lease:
     async def renew(self) -> bool:
         return not self.released
 
+    async def resize(self, _bytes_required: int) -> bool:
+        return not self.released
+
     async def release(self) -> None:
         self.released = True
 
@@ -305,6 +308,41 @@ async def test_artifact_store_persists_metadata_and_identity_deletes_staged_file
         ),
     )
     assert result.deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_artifact_stage_uses_one_blocking_writer_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_calls = 0
+    original_run = filesystem_store_module._StageFileWriter._run_sync
+
+    def counted_run(writer: Any) -> None:
+        nonlocal run_calls
+        run_calls += 1
+        original_run(writer)
+
+    monkeypatch.setattr(
+        filesystem_store_module._StageFileWriter,
+        "_run_sync",
+        counted_run,
+    )
+    chunks = [bytes([index % 251]) * 64 * 1024 for index in range(32)]
+
+    async def source():
+        for chunk in chunks:
+            yield chunk
+
+    store = FileSystemArtifactStore(tmp_path)
+    staged = await store.stage(
+        ticket=UploadTicket("ticket-writer"),
+        source=source(),
+        max_bytes=sum(map(len, chunks)),
+    )
+
+    assert run_calls == 1
+    assert Path(staged.path).read_bytes() == b"".join(chunks)
 
 
 @pytest.mark.asyncio
@@ -663,6 +701,9 @@ async def test_processing_lease_loss_cancels_work_before_publish(
             if self.renewals:
                 return self.renewals.pop(0)
             return True
+
+        async def resize(self, _bytes_required: int) -> bool:
+            return not self.released
 
         async def release(self) -> None:
             self.released = True

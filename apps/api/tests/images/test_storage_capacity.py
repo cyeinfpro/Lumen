@@ -28,6 +28,25 @@ class _Redis:
         self.expiries: dict[str, int] = {}
 
     async def eval(self, script: str, _keys: int, *args: str) -> Any:
+        if "HGET" in script:
+            lease_id = args[2]
+            if lease_id not in self.weights:
+                return [-1, 0, int(args[4])]
+            requested = int(args[3])
+            available = int(args[4])
+            reserved_without_current = sum(
+                value
+                for current_id, value in self.weights.items()
+                if current_id != lease_id
+            )
+            if (
+                requested > available
+                or reserved_without_current + requested > available
+            ):
+                return [0, sum(self.weights.values()), available]
+            self.weights[lease_id] = requested
+            self.expiries[lease_id] = self.now_ms + int(args[5])
+            return [1, reserved_without_current + requested, available]
         if "ZRANGEBYSCORE" in script:
             expired = [
                 lease_id
@@ -87,6 +106,31 @@ async def test_redis_storage_capacity_reserves_shared_bytes_and_reclaims_expiry(
 
 
 @pytest.mark.asyncio
+async def test_redis_storage_capacity_resizes_one_owned_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        storage_capacity_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1_000),
+    )
+    redis = _Redis()
+    limits = StorageCapacityLimits(minimum_free_bytes=100, lease_ttl_seconds=10)
+    capacity = RedisStorageCapacity(redis, tmp_path, limits)
+
+    lease = await capacity.reserve(600)
+    assert await lease.resize(800) is True
+    with pytest.raises(StorageCapacityExceeded):
+        await capacity.reserve(101)
+    assert await lease.resize(400) is True
+    other = await capacity.reserve(500)
+
+    await other.release()
+    await lease.release()
+
+
+@pytest.mark.asyncio
 async def test_file_storage_capacity_is_persistent_across_process_instances(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -112,6 +156,30 @@ async def test_file_storage_capacity_is_persistent_across_process_instances(
     await lease.release()
     state = (tmp_path / ".lumen-capacity" / "storage-leases.json").read_text()
     assert '"leases":{}' in state
+
+
+@pytest.mark.asyncio
+async def test_file_storage_capacity_resizes_one_owned_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        storage_capacity_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1_000),
+    )
+    limits = StorageCapacityLimits(minimum_free_bytes=100, lease_ttl_seconds=10)
+    capacity = FileStorageCapacity(tmp_path, limits)
+
+    lease = await capacity.reserve(600)
+    assert await lease.resize(800) is True
+    with pytest.raises(StorageCapacityExceeded):
+        await capacity.reserve(101)
+    assert await lease.resize(400) is True
+    other = await capacity.reserve(500)
+
+    await other.release()
+    await lease.release()
 
 
 @pytest.mark.asyncio
@@ -155,8 +223,13 @@ async def test_scaled_local_policy_uses_one_file_ledger_without_backend_switch(
 class _Lease:
     def __init__(self) -> None:
         self.release_calls = 0
+        self.resize_calls: list[int] = []
 
     async def renew(self) -> bool:
+        return True
+
+    async def resize(self, bytes_required: int) -> bool:
+        self.resize_calls.append(bytes_required)
         return True
 
     async def release(self) -> None:
@@ -230,7 +303,7 @@ async def test_upload_reserves_storage_before_execution_and_releases_after_commi
 
     assert result == "ok"
     assert service.executed is True
-    assert capacity.reservations == [500]
+    assert capacity.reservations == [1_048_676]
     assert capacity.lease.release_calls == 1
 
 
@@ -268,3 +341,63 @@ async def test_upload_fails_before_read_when_storage_cannot_be_reserved() -> Non
     assert exc_info.value.code == "storage_insufficient_space"
     assert exc_info.value.status_code == 507
     assert service.executed is False
+
+
+class _ProcessingCapacity:
+    def __init__(self) -> None:
+        self.lease = _Lease()
+
+    async def reserve(self, _estimate: Any) -> _Lease:
+        return self.lease
+
+
+class _ResizeUploadService(UploadCommandService):
+    def __init__(self, storage_capacity: _StorageCapacity) -> None:
+        self.processing_capacity = _ProcessingCapacity()
+        super().__init__(
+            artifacts=object(),  # type: ignore[arg-type]
+            capacity=self.processing_capacity,  # type: ignore[arg-type]
+            storage_capacity=storage_capacity,
+            repository=object(),  # type: ignore[arg-type]
+            processing_executor=object(),  # type: ignore[arg-type]
+            storage_lease_ttl_seconds=30,
+        )
+        self.processing_reservation: int | None = None
+
+    async def _stage_and_inspect(self, state: Any, **_kwargs: Any) -> Any:
+        state.staged = SimpleNamespace(
+            path="/tmp/staged",
+            identity=SimpleNamespace(size_bytes=40),
+        )
+        return SimpleNamespace(
+            estimate=SimpleNamespace(output_reserve_bytes=120),
+        )
+
+    async def _process_and_persist(self, _state: Any, **kwargs: Any) -> Any:
+        self.processing_reservation = kwargs["storage_reservation_bytes"]
+        return object(), object(), object()
+
+    async def _publish_and_mark_ready(self, _state: Any, **_kwargs: Any) -> str:
+        return "ok"
+
+    async def _cleanup_state(self, _state: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_upload_resizes_storage_lease_after_inspection() -> None:
+    storage = _StorageCapacity()
+    service = _ResizeUploadService(storage)
+
+    result = await service.execute(
+        user_id="user-1",
+        upload_file=object(),
+        filename="image.png",
+        policy=_policy(),
+    )
+
+    assert result == "ok"
+    assert storage.reservations == [1_048_676]
+    assert storage.lease.resize_calls == [160]
+    assert service.processing_reservation == 160
+    assert storage.lease.release_calls == 1
