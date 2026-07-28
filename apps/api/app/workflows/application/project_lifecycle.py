@@ -12,16 +12,8 @@ from ..ports.project_lifecycle import (
     ProjectLifecycleRepository,
     ProjectOutputPort,
     ProjectRunRecord,
+    ProjectRunView,
 )
-from .errors import WorkflowRequestError
-
-
-def _invalid_title() -> WorkflowRequestError:
-    return WorkflowRequestError(
-        status_code=422,
-        code="invalid_title",
-        message="title cannot be empty",
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,47 +23,20 @@ class ProjectLifecycle:
     assets: ProjectAssetPort
     now: Callable[[], datetime]
 
-    async def get(self, *, user_id: str, run_id: str) -> object:
+    async def get(self, *, user_id: str, run_id: str) -> ProjectRunView:
         run = await self.repository.get_owned_run(
             user_id=user_id,
             run_id=run_id,
         )
         return await self.outputs.build_run_out(run)
 
-    async def reconcile(self, *, user_id: str, run_id: str) -> object:
+    async def reconcile(self, *, user_id: str, run_id: str) -> ProjectRunView:
         run = await self.repository.get_owned_run(
             user_id=user_id,
             run_id=run_id,
             for_update=True,
         )
         await self._sync_outputs(run)
-        result = await self.outputs.build_run_out(run)
-        await self.repository.commit()
-        return result
-
-    async def patch_title(
-        self,
-        *,
-        user_id: str,
-        run_id: str,
-        title: str | None,
-    ) -> object:
-        run = await self.repository.get_owned_run(
-            user_id=user_id,
-            run_id=run_id,
-            for_update=True,
-        )
-        if title is not None:
-            normalized_title = title.strip()
-            if not normalized_title:
-                raise _invalid_title()
-            run.title = normalized_title
-            if run.conversation_id:
-                await self.repository.rename_active_conversation(
-                    conversation_id=run.conversation_id,
-                    user_id=user_id,
-                    title=normalized_title,
-                )
         result = await self.outputs.build_run_out(run)
         await self.repository.commit()
         return result
@@ -118,7 +83,7 @@ class ProjectLifecycle:
         asset_type: str,
         source_step_key: str | None,
         label: str | None,
-    ) -> object:
+    ) -> ProjectRunView:
         run = await self.repository.get_owned_run(
             user_id=user_id,
             run_id=run_id,

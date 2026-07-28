@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
+
+from ..domain.json_types import JsonValue
 
 
 class ProjectRunRecord(Protocol):
@@ -14,6 +16,10 @@ class ProjectRunRecord(Protocol):
     conversation_id: str | None
     current_step: str
     deleted_at: datetime | None
+
+
+class ProjectRunView(Protocol):
+    id: str
 
 
 class ProjectLifecycleRepository(Protocol):
@@ -49,7 +55,7 @@ class ProjectOutputPort(Protocol):
 
     async def sync_poster_outputs(self, run: ProjectRunRecord) -> None: ...
 
-    async def build_run_out(self, run: ProjectRunRecord) -> object: ...
+    async def build_run_out(self, run: ProjectRunRecord) -> ProjectRunView: ...
 
     async def soft_delete_generated_images(
         self,
@@ -58,13 +64,13 @@ class ProjectOutputPort(Protocol):
         deleted_at: datetime,
         cancel_message: str,
         account_mode: str,
-    ) -> object: ...
+    ) -> Mapping[str, JsonValue]: ...
 
     async def post_commit_generated_cleanup(
         self,
         *,
         user_id: str,
-        cleanup: object,
+        cleanup: Mapping[str, JsonValue],
     ) -> None: ...
 
 
@@ -86,4 +92,5 @@ __all__ = [
     "ProjectLifecycleRepository",
     "ProjectOutputPort",
     "ProjectRunRecord",
+    "ProjectRunView",
 ]

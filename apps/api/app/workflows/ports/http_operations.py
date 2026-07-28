@@ -18,15 +18,6 @@ class ProjectWorkflowOperations(Protocol):
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object: ...
 
-    async def patch_workflow(
-        self,
-        *,
-        workflow_run_id: str,
-        body: object,
-        user: object,
-        db: object,
-    ) -> object: ...
-
     async def delete_workflow(
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object: ...

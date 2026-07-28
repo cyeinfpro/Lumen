@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from sqlalchemy import delete, select
@@ -37,7 +37,6 @@ from lumen_core.schemas import (
     ModelCandidateSaveToLibraryIn,
     ShowcaseImagesCreateIn,
     WorkflowRunOut,
-    WorkflowRunPatchIn,
 )
 
 from ....deps import CurrentUser
@@ -58,12 +57,14 @@ from ...application.project_candidate_rules import (
     saved_library_item_ids,
 )
 from ...application.project_lifecycle import ProjectLifecycle
+from ...application.upsert_project import UpsertWorkflowProject
 from ...application.runtime_state import WorkflowRuntimeState
 from ...application.showcase_prompts import showcase_prompt as _showcase_prompt
 from ...application.values import dedupe_nonempty as _dedupe_nonempty
 from ...application.errors import WorkflowRequestError
 from ...domain.workflow_contracts import PublishBundle as _PublishBundle
 from ...ports.project_lifecycle import ProjectRunRecord
+from ...domain.json_types import JsonValue
 from ..apparel_scene_planner import scene_fingerprint as _scene_fingerprint
 from ..library_items import model_library_item_out as _model_library_item_out
 from ..library_materialization import add_user_library_item as _add_user_library_item
@@ -191,7 +192,7 @@ class _SQLAlchemyProjectLifecycleAdapter:
     async def sync_poster_outputs(self, run: ProjectRunRecord) -> None:
         await _sync_poster_workflow_outputs(self.db, cast(WorkflowRun, run))
 
-    async def build_run_out(self, run: ProjectRunRecord) -> object:
+    async def build_run_out(self, run: ProjectRunRecord) -> WorkflowRunOut:
         return await _build_run_out(self.db, cast(WorkflowRun, run))
 
     async def soft_delete_generated_images(
@@ -201,20 +202,23 @@ class _SQLAlchemyProjectLifecycleAdapter:
         deleted_at: datetime,
         cancel_message: str,
         account_mode: str,
-    ) -> object:
-        return await _soft_delete_workflow_generated_images(
-            self.db,
-            run=cast(WorkflowRun, run),
-            deleted_at=deleted_at,
-            cancel_message=cancel_message,
-            account_mode=account_mode,
+    ) -> Mapping[str, JsonValue]:
+        return cast(
+            Mapping[str, JsonValue],
+            await _soft_delete_workflow_generated_images(
+                self.db,
+                run=cast(WorkflowRun, run),
+                deleted_at=deleted_at,
+                cancel_message=cancel_message,
+                account_mode=account_mode,
+            ),
         )
 
     async def post_commit_generated_cleanup(
         self,
         *,
         user_id: str,
-        cleanup: object,
+        cleanup: Mapping[str, JsonValue],
     ) -> None:
         await _post_commit_workflow_generated_cleanup(
             user_id=user_id,
@@ -255,6 +259,11 @@ def _project_lifecycle(db: AsyncSession) -> ProjectLifecycle:
     )
 
 
+def build_upsert_workflow_project(db: AsyncSession) -> UpsertWorkflowProject:
+    adapter = _SQLAlchemyProjectLifecycleAdapter(db)
+    return UpsertWorkflowProject(repository=adapter, outputs=adapter)
+
+
 async def get_workflow(
     workflow_run_id: str,
     user: CurrentUser,
@@ -279,22 +288,6 @@ async def reconcile_workflow(
         await _project_lifecycle(db).reconcile(
             user_id=user.id,
             run_id=workflow_run_id,
-        ),
-    )
-
-
-async def patch_workflow(
-    workflow_run_id: str,
-    body: WorkflowRunPatchIn,
-    user: CurrentUser,
-    db: AsyncSession,
-) -> WorkflowRunOut:
-    return cast(
-        WorkflowRunOut,
-        await _project_lifecycle(db).patch_title(
-            user_id=user.id,
-            run_id=workflow_run_id,
-            title=body.title,
         ),
     )
 
